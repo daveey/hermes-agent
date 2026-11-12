@@ -121,7 +121,7 @@ def check_delegate_requirements() -> bool:
     return True
 
 
-def _open_child_session_db(parent_agent) -> Any:
+def _open_child_session_db(parent_agent, model_provenance=None) -> Any:
     """DEDICATED SessionDB handle for the child, or None: the parent's handle can be closed by its own lifecycle while
     a background child still flushes (transcript silently dropped). It MUST open the same db FILE as the parent's
     handle (non-launch profiles), else lineage / session_search break; released by the child's close() via
@@ -143,7 +143,7 @@ def _open_child_session_db(parent_agent) -> Any:
         if not isinstance(parent_session_db, RuntimeSessionStore):
             raise WorkerPersistenceError('worker_child_registration_required')
         from agent.runtime_session_child import reserve_child_store
-        return reserve_child_store(parent_session_db)
+        return reserve_child_store(parent_session_db, model_provenance=model_provenance)
     if parent_session_db is None:
         return None
     with _quiet("subagent: failed to open dedicated SessionDB; child persistence disabled", exc_info=True):
@@ -229,6 +229,7 @@ def _build_child_agent(
     # effort that beats delegation.reasoning_effort, and the profile home the child runs as.
     override_reasoning_effort: Any = None,
     profile_home: Optional[Path] = None,
+    model_source: Optional[str] = None,  # recording only; selected before route resolution loses caller pins
     override_service_tier: Optional[str] = None,  # a route's checked speed tier (tools/delegate_tool_tuning.py)
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
@@ -288,7 +289,13 @@ def _build_child_agent(
             request_overrides = ({} if rt["provider"] == "auto" or override_provider  # [daveey] auto: no parent overrides
                                  else dict(getattr(parent_agent, "request_overrides", {}) or {}))
         parent_sid = getattr(parent_agent, "session_id", None)
-        child_session_db = _open_child_session_db(parent_agent)
+        provenance = {
+            "model_source": model_source or ("delegation_default" if routing_cfg and (
+                routing_cfg.get("model") or routing_cfg.get("provider")) else
+                "caller_pin" if model or override_provider else "parent_inherit"),
+            "requested_model": rt["model"],
+        }
+        child_session_db = _open_child_session_db(parent_agent, model_provenance=provenance)
         # Children run provider-less. Under compression.checkpoint_required the child arms the same gate
         # (read inside the delegated profile scope, as the child reads it) and would die at its first
         # compaction, so it inherits the provider, scoped as a fork. Cost: one initialize() per spawn.
@@ -332,6 +339,7 @@ def _build_child_agent(
     _apply_child_cache_ttl(child)
     if child_session_db is not None:
         child._owns_session_db = True  # released by the child's close(), never by the parent
+    child._session_init_model_config.update(provenance)
     _reserve_child_transcript(child)
     # Ownership transfer for the dedicated handle: the child's close() must release it (nothing else holds a
     # reference), and no parent teardown can close it out from under a background child (#81267).
@@ -557,6 +565,10 @@ def _build_children(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
                 model=route.creds["model"], max_iterations=max_iterations, task_count=len(task_list),
+                model_source=("caller_pin" if route.profile_home is None and any(
+                    isinstance(t.get(k), str) and t[k].strip() for k in ("model", "provider")) else
+                    "delegation_default" if route.routing_cfg.get("model") or route.routing_cfg.get("provider")
+                    else "parent_inherit"),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **_route_overrides(route),
             )
         except ValueError as exc:

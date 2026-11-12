@@ -303,7 +303,10 @@ class SubagentLifecycleService:
             task_index=0, goal=request.goal, context=request.context,
             toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
             model=request.model or creds["model"], max_iterations=DEFAULT_MAX_ITERATIONS,
-            task_count=1, parent_agent=parent, role=request.role, **_credential_overrides(creds, routing_cfg),
+            task_count=1, parent_agent=parent, role=request.role,
+            model_source=("caller_pin" if request.model or request.provider else
+                          "delegation_default" if routing_cfg.get("model") or routing_cfg.get("provider")
+                          else "parent_inherit"), **_credential_overrides(creds, routing_cfg),
         )
         subagent_id = str(getattr(child, "_subagent_id", "") or "")
         if not subagent_id:

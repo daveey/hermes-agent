@@ -35,6 +35,8 @@ def test_delegated_class_reaches_native_wire(routing_home, streaming_route, nati
                                    model=creds["model"], max_iterations=2, task_count=1,
                                    parent_agent=parent, **_credential_overrides(creds, cfg))
         assert child.model_routing["requested_class"] == "deep"
+        assert child._session_init_model_config["requested_model"] == "class:deep"
+        assert child._session_init_model_config["model_routing"] == child.model_routing
         assert child.session_id != parent.session_id
         assert child._credential_pool.current().auth_type == "oauth"
         assert child._fallback_chain == []

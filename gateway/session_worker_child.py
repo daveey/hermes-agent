@@ -45,7 +45,13 @@ def reserve_child_execution(db, conn, session_id, payload, *, epoch, execution_i
     from hermes_state_runtime import _secret_digest
     from hermes_state_worker_lifecycle import insert_session_row_in_transaction
     secret = payload.get('secret') if isinstance(payload, dict) else None
-    if set(payload) != {'secret'} or not isinstance(secret, str) or not 16 <= len(secret) <= 256:
+    if set(payload) - {'secret', 'model_provenance'} or not isinstance(secret, str) or not 16 <= len(secret) <= 256:
+        raise RuntimeStoreError('invalid_params')
+    provenance = payload.get('model_provenance', {})
+    if not isinstance(provenance, dict) or (provenance and (
+            set(provenance) != {'model_source', 'requested_model'} or
+            provenance['model_source'] not in ('caller_pin', 'delegation_default', 'parent_inherit') or
+            not isinstance(provenance['requested_model'], str))):
         raise RuntimeStoreError('invalid_params')
     max_children, max_depth = limits
     prefix = execution_id + CHILD_SEPARATOR
@@ -60,7 +66,7 @@ def reserve_child_execution(db, conn, session_id, payload, *, epoch, execution_i
         return {'refused': refused}
     parent = conn.execute('SELECT profile_name FROM sessions WHERE id=?', (session_id,)).fetchone()
     child_sid, child_eid = new_session_id(), prefix + secrets.token_hex(8)
-    insert_session_row_in_transaction(db, conn, child_sid, 'subagent', model_config={'_delegate_from': session_id},
+    insert_session_row_in_transaction(db, conn, child_sid, 'subagent', model_config={'_delegate_from': session_id, **provenance},
                                       parent_session_id=session_id, profile_name=parent['profile_name'])
     scope = dict(identity, session_id=child_sid, execution_id=child_eid, generation=0, secret=secret)
     claim = admission_fingerprint(canonical_target=child_sid, payload=scope | {'principal': principal})

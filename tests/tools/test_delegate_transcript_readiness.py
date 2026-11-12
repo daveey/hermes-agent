@@ -97,8 +97,10 @@ async def test_published_children_open_before_any_child_starts(
             assert row is not None
             assert row["source"] == "subagent"
             assert row["parent_session_id"] == parent_ref.session_id
-            # Only the lineage marker: the rest of the constructor config lands on the first turn.
-            assert json.loads(row["model_config"]) == {"_delegate_from": parent_ref.session_id}
+            # Lineage and model provenance are available while queued; other constructor facts wait.
+            assert json.loads(row["model_config"]) == {
+                "_delegate_from": parent_ref.session_id, "model_source": "parent_inherit",
+                "requested_model": "synthetic-model"}
             assert not child._session_db_created
             reply = await connection.dispatch(
                 {
