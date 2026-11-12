@@ -2304,7 +2304,7 @@ def release_stale_claims(
     host_prefix = _host_prefix()
     from hermes_cli.kanban_suspend_ledger import awake_seconds  # [daveey]
     stale = conn.execute(
-        "SELECT t.id, t.claim_lock, t.worker_pid, t.worker_started_at, t.claim_expires, "
+        "SELECT t.id, t.current_run_id, t.claim_lock, t.worker_pid, t.worker_started_at, t.claim_expires, "
         "       t.last_heartbeat_at, t.assignee, r.started_at AS run_started_at "
         "FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.claim_expires IS NOT NULL "
@@ -2312,7 +2312,7 @@ def release_stale_claims(
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, reclaim_error, terminate_modern_bindings
     for row in stale:
-        if owner_reclaim_blocked(conn, row["id"], for_termination=True):
+        if owner_reclaim_blocked(conn, row["id"], for_termination=True, selected=row):
             continue
         host_local = _claim_is_local(row["claim_lock"], host_prefix)
         hb = _to_epoch(row["last_heartbeat_at"])
@@ -2329,7 +2329,7 @@ def release_stale_claims(
         live = host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at) and not heartbeat_stale
         lease_lost = _sync.lease_lost(conn, row["id"], now, _resolve_claim_ttl_seconds() if live else None)  # [daveey] asks the Board
         if (_stale_claim_kept(conn, row, now, live=live and not lease_lost, host_local=host_local, started_at=started_at)
-                or not terminate_modern_bindings(conn, row["id"], signal_fn)):
+                or terminate_modern_bindings(conn, row, signal_fn) is not None):
             continue
         termination = _terminate_reclaimed_worker(
             row["worker_pid"], row["claim_lock"], signal_fn=signal_fn, started_at=started_at,

@@ -550,29 +550,21 @@ def _poll_worker_exit(pid: int, started_at: Optional[int] = None) -> bool:
     return False
 
 
-def _sigkill(kill, pid: int) -> bool:
-    """Best-effort SIGKILL; True when the signal was delivered."""
-    try:
-        # signal.SIGKILL doesn't exist on Windows; SIGTERM maps to TerminateProcess.
-        kill(int(pid), getattr(signal, "SIGKILL", signal.SIGTERM))
-        return True
-    except (ProcessLookupError, OSError):
-        return False
-
-
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
     *,
     signal_fn=None,
     started_at=None,
+    before_signal=None,
 ) -> dict[str, Any]:
     """Best-effort host-local worker termination for reclaim paths. ``started_at`` is the spawn-time
     fingerprint: when the live process no longer matches it, the PID was recycled and nothing is
     signalled — the worker is gone, which is what the reclaim wanted (``terminated`` = True). An
     UNVERIFIED spawn (fingerprint capture failed) that is still live is never signalled either, but
     it is reported as surviving (``signal_refused``) so the reclaim holds the claim instead of
-    spawning a duplicate beside it."""
+    spawning a duplicate beside it. ``before_signal`` adds a strict modern identity fence at each
+    signal boundary; callers without it retain legacy drift-tolerant identity policy."""
     info: dict[str, Any] = {
         "prev_pid": int(pid) if pid else None,
         "host_local": False,
@@ -599,6 +591,9 @@ def _terminate_reclaimed_worker(
         info["pid_recycled"] = True
         return info
 
+    if before_signal is not None and not before_signal():
+        info['signal_refused'] = True
+        return info
     info["termination_attempted"] = True
     try:
         kill(int(pid), signal.SIGTERM)
@@ -612,7 +607,11 @@ def _terminate_reclaimed_worker(
         info["terminated"] = True
         return info
     if _worker_alive(pid, started_at):
-        if not _sigkill(kill, pid):
+        if before_signal is not None and not before_signal():
+            info['signal_refused'] = True
+            return info
+        from hermes_cli.kanban_db_worker_termination import sigkill
+        if not sigkill(kill, pid):
             return info
         info["sigkill"] = True
     info["terminated"] = not _worker_alive(pid, started_at)
@@ -746,7 +745,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     host_prefix = _kb._host_prefix()
 
     rows = conn.execute(
-        "SELECT t.id, t.worker_pid, t.worker_started_at, "
+        "SELECT t.id, t.current_run_id, t.worker_pid, t.worker_started_at, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
         "       t.max_runtime_seconds, t.claim_lock "
         "FROM tasks t "
@@ -757,7 +756,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, terminate_modern_bindings
     for row in rows:
-        if owner_reclaim_blocked(conn, row["id"], for_termination=True):
+        if owner_reclaim_blocked(conn, row["id"], for_termination=True, selected=row):
             continue
         lock = row["claim_lock"] or ""
         if not _kb._claim_is_local(lock, host_prefix):
@@ -767,7 +766,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # [daveey] Awake time only: a host suspend (``kanban_suspend_ledger``) is not runtime.
         elapsed = _awake_seconds(conn, _kb._to_epoch(row["active_started_at"]) or now, now)  # unreadable: never kill
         limit = int(row["max_runtime_seconds"])
-        if elapsed < limit:
+        if elapsed < limit or terminate_modern_bindings(conn, row, signal_fn) is not None:
             continue
 
         pid = int(row["worker_pid"])
@@ -788,10 +787,9 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
             # Short polling wait — no time.sleep on the write txn.
             _poll_worker_exit(pid, started_at)
             if _worker_alive(pid, started_at):
-                killed = _sigkill(kill, pid)
+                from hermes_cli.kanban_db_worker_termination import sigkill
+                killed = sigkill(kill, pid)
 
-        if not terminate_modern_bindings(conn, tid, signal_fn):
-            continue
         error = f"elapsed {int(elapsed)}s > limit {limit}s"
         with _kb.write_txn(conn):
             # Again under the write lock, after the kill wait: an interpreter that bound
@@ -871,7 +869,7 @@ def detect_stale_running(
         "WHERE t.status = 'running'" + _kb._sync.held_elsewhere_sql(conn, "t")
     ).fetchall()
 
-    from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, terminate_modern_bindings
+    from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill
     for row in rows:
         if owner_reclaim_blocked(conn, row["id"]):
             continue

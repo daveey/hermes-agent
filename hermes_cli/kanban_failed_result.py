@@ -51,7 +51,16 @@ def process_gone(pid, birth) -> bool:
     return False
 
 
-def termination_targets(conn, task_id):
+def expiry_identity_matches(conn, selected) -> bool:
+    """An expiry decision belongs only to the selected run, claim and outer incarnation."""
+    row = conn.execute('SELECT status, current_run_id, claim_lock, worker_pid, worker_started_at '
+                       'FROM tasks WHERE id=?', (selected['id'],)).fetchone()
+    return row is not None and row['status'] == 'running' and all(
+        row[key] == selected[key]
+        for key in ('current_run_id', 'claim_lock', 'worker_pid', 'worker_started_at'))
+
+
+def termination_targets(conn, task_id, *, selected=None):
     """Plan expiry termination for a modern-result run, or ``None`` to hold.
 
     Witnesses are the outer worker plus EVERY historical ``worker_bound`` incarnation of the
@@ -61,9 +70,11 @@ def termination_targets(conn, task_id):
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_dispatch as dispatch
-    row = conn.execute('SELECT current_run_id, claim_lock, worker_pid, worker_started_at '
-                       'FROM tasks WHERE id=?', (task_id,)).fetchone()
-    if row is None or not kb._claim_is_local(row['claim_lock'] or '', kb._host_prefix()):
+    row = selected if selected is not None else conn.execute(
+        'SELECT current_run_id, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id=?',
+        (task_id,)).fetchone()
+    if (row is None or (selected is not None and not expiry_identity_matches(conn, selected))
+            or not kb._claim_is_local(row['claim_lock'] or '', kb._host_prefix())):
         return None
     witnesses = [(row['worker_pid'], row['worker_started_at'], True)]
     for event in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
