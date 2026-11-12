@@ -100,7 +100,10 @@ class TestMaintainPackHealth:
         for i in range(n):
             (repo / f"p{i}.txt").write_text(f"{i}\n")
             _git(repo, "add", "-A")
-            _git(repo, "commit", "-qm", f"c{i}")
+            # Every commit runs `git maintenance run --auto` (gc --auto before git 2.29). Newer git
+            # (2.55 on CI) or a runner's gitconfig can make it repack the packs made so far, often
+            # detached, so it raced the count: CI once saw made=2 of 12. Keep the fixture's packs.
+            _git(repo, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "commit", "-qm", f"c{i}")
             sha = _git(repo, "rev-parse", "HEAD^{commit}").stdout.strip()
             # One pack per commit object: pipe the sha into pack-objects.
             subprocess.run(
