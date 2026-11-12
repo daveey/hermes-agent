@@ -148,6 +148,41 @@ def test_restore_caps_without_explicit_policy_rollback_and_keeps_cas(conn):
     assert helpers.priorities(conn, ids) == [123, 10000, 50000]
 
 
+@pytest.mark.parametrize("undo", [False, True])
+@pytest.mark.parametrize("allow_legacy_rollback", [False, True])
+def test_mixed_new_and_clamped_old_refuses_atomically(conn, undo, allow_legacy_rollback):
+    from hermes_cli import kanban_priority_executor as executor
+    ids, attachment, digest = setup_plan(conn)
+    # One owned row is normalized; the other holds its clamp-equivalent old value.
+    conn.execute("UPDATE tasks SET priority=450 WHERE id=?", (ids[0],))
+    conn.execute("UPDATE tasks SET priority=1000 WHERE id=?", (ids[2],))
+    conn.commit()
+    before = helpers.priorities(conn, ids)
+    events = [tuple(r) for r in conn.execute("SELECT * FROM task_events")]
+    outbox = [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")]
+    with pytest.raises(ValueError, match="priorities changed"):
+        executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME,
+                                undo=undo, allow_legacy_rollback=allow_legacy_rollback)
+    assert helpers.priorities(conn, ids) == before == [450, 10000, 1000]
+    assert [tuple(r) for r in conn.execute("SELECT * FROM task_events")] == events
+    assert [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")] == outbox
+
+
+def test_legacy_flag_after_capped_restore_is_noop(conn):
+    from hermes_cli import kanban_priority_executor as executor
+    ids, attachment, digest = setup_plan(conn)
+    executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)
+    executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME, undo=True)
+    events = [tuple(r) for r in conn.execute("SELECT * FROM task_events")]
+    outbox = [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")]
+    result = executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME,
+                                     undo=True, allow_legacy_rollback=True)
+    assert result["changed"] == 0
+    assert helpers.priorities(conn, ids) == [1000, 10000, 1000]
+    assert [tuple(r) for r in conn.execute("SELECT * FROM task_events")] == events
+    assert [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")] == outbox
+
+
 def test_unknown_live_origin_refuses_normalization(conn):
     from hermes_cli import kanban_priority_executor as executor
     ids, attachment, digest = setup_plan(conn)

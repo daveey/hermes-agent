@@ -425,7 +425,7 @@ _SPECS = [
         _arg("--exception", action="append", default=[], help="Reserved exception ID, low to high"),
         _arg("--attachment-id", type=int, help="Locally owned manifest attachment"),
         _arg("--digest", help="Exact attached manifest SHA256"),
-        _arg("--allow-legacy-rollback", action="store_true", help="Acknowledge above-cap restore"),
+        _arg("--allow-legacy-rollback", action="store_true", help="Restore exact above-cap originals; no effect after a capped restore (already restored)"),
         _arg("--drain", action="store_true",
              help="Execute queued requests as this board's non-worker supervisor executor"),
         _arg("--task", help="Only requests filed by this task id"),
