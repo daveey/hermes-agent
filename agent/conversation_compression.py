@@ -32,6 +32,9 @@ from agent.auxiliary_client import AuxiliaryExplicitCancellation
 from agent.context_compressor_summary import _accepts_keyword_argument
 from agent.context_engine import automatic_compaction_status_message, sanitize_memory_context
 from agent.conversation_compression_codex import _compress_context_via_codex_app_server
+from agent.conversation_compression_wait import (  # re-exported: the host loop calls (and tests patch) them here
+    _COMMIT_OVERRUN_WAIT_SLICE_SECONDS, YIELDED, _await_in_flight_commit, _await_worker_within_budget,
+)
 from agent.conversation_compression_deadline import (
     DEFAULT_CONTEXT_TIMEOUT_SECONDS,
     DEFAULT_CONTEXT_TOTAL_CEILING_SECONDS,
@@ -701,9 +704,6 @@ STALL_INTERRUPTED_FAILURE_CLASS = "stall_interrupted"
 _compress_timeout_executor = None
 _compress_timeout_executor_lock = threading.Lock()
 
-# Overrun waits proceed in bounded slices so each window logs (escalating); clamped to ceiling for tiny values.
-_COMMIT_OVERRUN_WAIT_SLICE_SECONDS = 30.0
-
 # A worker exiting within the grace proves no provider call is in flight, so its lease may be released even
 # on the total-ceiling path; one that doesn't exit is orphaned behind the poison fence and keeps its lease.
 # Bounded grace given to a fence-cancelled compression worker to actually exit before the host moves on
@@ -1063,79 +1063,6 @@ def _run_pinned_compression_retry(
     return result_msgs, result_prompt
 
 
-def _await_worker_within_budget(
-    future: Any, fence: CompressionCommitFence, *, idle: float, ceiling: float, wait_started: float
-) -> tuple[bool, Any]:
-    """Poll ``future`` under the idle budget + ceiling; ``(True, result)`` when it settled."""
-    while True:
-        # The fence deadline moves: prompt reading on llama-server pushes it back.
-        remaining_ceiling = (fence.deadline_monotonic or wait_started + ceiling) - time.monotonic()
-        if remaining_ceiling <= 0:
-            return False, None
-        # Charge idle budget from LAST PROGRESS, not slice start, or silence could approach 2x the budget.
-        since_progress = fence.seconds_since_progress()
-        wait_slice = min(max(idle - since_progress, 0.005), remaining_ceiling)
-        try:
-            return True, future.result(timeout=wait_slice)
-        except concurrent.futures.TimeoutError:
-            # Aliases builtin TimeoutError (3.11+): also fires when the WORKER died with one (#63892).
-            # A settled future never unsettles — re-waiting spun ~2k iter/s; take the stall path now.
-            if future.done():
-                exc = future.exception()
-                if exc is None:
-                    return True, future.result()
-                logger.info("Context compression worker exited with %r — taking the stall path", exc)
-                return False, None
-            waited = time.monotonic() - wait_started
-            since_progress = fence.seconds_since_progress()
-            if not fence.deadline_exceeded and since_progress < idle:
-                logger.info(
-                    "Context compression still streaming after %.0fs (last progress %.1fs ago) — extending wait (ceiling %.0fs)",
-                    waited, since_progress, ceiling,
-                )
-                continue
-            return False, None
-
-
-def _await_in_flight_commit(
-    future: Any, *, ceiling: float, wait_started: float, on_commit_overrun: Optional[Callable[[float, float], None]]
-) -> Any:
-    """begin_commit won the race: the SessionDB mutation cannot be fence-cancelled, so wait
-    in bounded slices, logging (escalating) + surfacing once via ``on_commit_overrun``
-    WHILE the commit hangs. Never silently hung or abandoned.
-    """
-    overrun_surfaced = False
-    overrun_reports = 0
-    while True:
-        waited = time.monotonic() - wait_started
-        remaining = ceiling - waited
-        if remaining <= 0:
-            # Bounded increments so each overrun window is visible in logs rather than one silent unbounded block.
-            remaining = min(_COMMIT_OVERRUN_WAIT_SLICE_SECONDS, max(ceiling, 0.05))
-            overrun_reports += 1
-            log = logger.warning if overrun_reports <= 2 else logger.error
-            log(
-                "Context compression SessionDB commit still running "
-                "%.1fs past the total ceiling (waited %.1fs, ceiling %.1fs); commit cannot be abandoned mid-flight — "
-                "continuing to wait (check SessionDB health if this persists)", waited - ceiling, waited,
-                ceiling,
-            )
-            if not overrun_surfaced and on_commit_overrun is not None:
-                overrun_surfaced = True
-                with _swallow('compress_context commit-overrun callback failed', exc_info=True):
-                    on_commit_overrun(waited, ceiling)
-        try:
-            return future.result(timeout=remaining)
-        except concurrent.futures.TimeoutError:
-            # Aliases builtin TimeoutError (3.11+): also fires when the commit worker died with one (#63892).
-            # A settled future never unsettles — this ceiling-less loop spun forever; re-raise the worker's error.
-            if future.done():
-                return future.result()
-            # Commit-phase progress is informative only — the commit must complete; loop
-            # and re-report with the updated overrun window.
-            continue
-
-
 def _cancel_or_join_worker(fence: CompressionCommitFence) -> bool:
     """Cancel pre-commit; ``False`` when an admitted commit owns the fence (caller waits)."""
     while True:
@@ -1173,6 +1100,30 @@ def _release_cancelled_worker(
     fence.release_cancelled_compression_lock()
 
 
+def _yield_worker(
+    future: Any, fence: CompressionCommitFence, messages: list, fallback_prompt: Callable[[], str], *,
+    ceiling: float, wait_started: float, on_commit_overrun: Optional[Callable[[float, float], None]],
+) -> tuple[list, str]:
+    """A ``yield_check`` stop (t_01a1d0aa52ee1404): cancel the healthy worker before its commit and hand the
+    unchanged transcript back, so the turn reaches its step boundary now. Not a stall: no fallback ladder, no
+    timeout cooldown. An admitted commit owns the fence and completes (its result is returned)."""
+    future.cancel()
+    # The worker is streaming, not hung: keep its lease until it exits (bounded join) so the resumed turn's next
+    # attempt never overlaps it.
+    fence.retain_compression_lock_until_worker_done()
+    if not _cancel_or_join_worker(fence):
+        return _await_in_flight_commit(
+            future, ceiling=max(ceiling, (fence.deadline_monotonic or 0.0) - wait_started),
+            wait_started=wait_started, on_commit_overrun=on_commit_overrun,
+        )
+    _release_cancelled_worker(future, fence, total_exhausted=True, ceiling=ceiling)
+    logger.info(
+        "Context compression yielded to a Hermes update pause after %.0fs; continuing without compression",
+        time.monotonic() - wait_started,
+    )
+    return messages, fallback_prompt()
+
+
 def run_compress_context_with_progress_timeout(
     *, worker: Callable[[CompressionCommitFence], tuple[list, str]], messages: list,
     system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
@@ -1184,6 +1135,7 @@ def run_compress_context_with_progress_timeout(
     fallback_worker: Optional[Callable[[CompressionCommitFence], tuple[list, str]]] = None,
     request_exceeds_window: bool = False,
     precommit_deadline_monotonic: Optional[float] = None,
+    yield_check: Optional[Callable[[], bool]] = None,
 ) -> tuple[list, str]:
     """Run ``worker(fence)`` under a sync progress-aware (idle + ceiling) timeout.
     Budgets bound the PRE-commit phase only: an admitted commit always completes (overrun logged, surfaced
@@ -1193,7 +1145,10 @@ def run_compress_context_with_progress_timeout(
     window, so "continue without compression" is not an option — a stall escalates to the deterministic
     fallback summary on the FIRST timeout instead of waiting for a prior stall in the session (#114594).
     ``precommit_deadline_monotonic``: an absolute deadline inherited from an earlier attempt (the stall
-    retry passes the primary's), clamping this attempt's ceiling so the attempts share one budget."""
+    retry passes the primary's), clamping this attempt's ceiling so the attempts share one budget.
+    ``yield_check``: polled while waiting; True (a core-update pause, t_01a1d0aa52ee1404) cancels the worker
+    before its commit and returns ``(messages, system_prompt_fallback)`` at once, with no stall fallback and no
+    on_timeout (a yield is not a stall). An already-admitted commit still completes and is returned."""
     if idle_timeout_seconds <= 0:
         raise ValueError(
             "run_compress_context_with_progress_timeout requires "
@@ -1315,9 +1270,16 @@ def run_compress_context_with_progress_timeout(
         return messages, _resolve_fallback_prompt()
 
     try:
+        # yield_check only when set: the helper's keyword contract stays as callers (and test doubles) know it.
         settled, result = _await_worker_within_budget(
-            future, fence, idle=idle, ceiling=ceiling, wait_started=wait_started
+            future, fence, idle=idle, ceiling=ceiling, wait_started=wait_started,
+            **({"yield_check": yield_check} if yield_check is not None else {}),
         )
+        if not settled and result is YIELDED:
+            yielded = _yield_worker(future, fence, messages, _resolve_fallback_prompt, ceiling=ceiling,
+                                    wait_started=wait_started, on_commit_overrun=on_commit_overrun)
+            handled_exit = True
+            return yielded
         if settled:
             handled_exit = True
             # The deadline is visible to the worker as well as the host. A cooperative summary call can

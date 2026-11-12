@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from agent.interrupt_control import _REASON_UPDATE_PAUSE, interrupt_issuer
 
@@ -26,6 +27,8 @@ CANCEL_TOOL_REASON = _REASON_UPDATE_PAUSE
 _ISSUER = CANCEL_TOOL_REASON.replace(" ", "_")
 _IN_FLIGHT = "_update_pause_in_flight"
 _CANCEL = "_update_pause_cancel"
+# The in-flight id of a context compression host wait (never a provider tool_call_id).
+COMPRESSION_CALL_ID = "context-compression"
 
 
 def _slots(agent: Any) -> dict:
@@ -79,6 +82,26 @@ def committed(agent: Any, call_id: str, result: Any) -> tuple[Any, bool]:
         # needed" over it would hide a still-running job from the resumed turn and invite a duplicate run.
         return (result, True) if _continues_in_background(result) else (record["text"], True)
     return result, False
+
+
+@contextmanager
+def compression_in_flight(agent: Any) -> Iterator[None]:
+    """[daveey] t_01a1d0aa52ee1404: a context compression host wait is in flight like a tool call. The watcher's
+    cancel then reaches it after the same grace, and ``compression_yield_requested`` tells the host wait to stop
+    the summary before its commit. Without this, a long summary (302 s on the hub) held the turn's admission
+    reservation unpublished until it ended, because the pause lands only at a step boundary."""
+    started(agent, COMPRESSION_CALL_ID)
+    try:
+        yield
+    finally:
+        finished(agent, COMPRESSION_CALL_ID)
+
+
+def compression_yield_requested(agent: Any) -> bool:
+    """The update's cancel covered the running compression and is still the pending interrupt (no Stop since)."""
+    record = _slots(agent).get(_CANCEL)
+    return bool(record) and COMPRESSION_CALL_ID in record["calls"] \
+        and bool(getattr(agent, "_interrupt_requested", False)) and interrupt_issuer(agent) == _ISSUER
 
 
 def _continues_in_background(result: Any) -> bool:
