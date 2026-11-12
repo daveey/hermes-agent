@@ -49,8 +49,10 @@ def live(kanban_home):
         conn.close()
 
 
-@pytest.mark.parametrize("cards", [3, 40])
-def test_divergence_repair_reads_the_replica_per_pass_not_per_card(live, kanban_home, monkeypatch, cards):
+@pytest.mark.parametrize("cards, chunk, reads", [(3, 500, 2), (40, 500, 2), (7, 3, 4)])
+def test_divergence_repair_reads_the_replica_per_pass_not_per_card(live, kanban_home, monkeypatch, cards, chunk, reads):
+    from hermes_cli import kanban_sync_divergence
+    monkeypatch.setattr(kanban_sync_divergence, "_CHUNK", chunk)  # the last card sits in a later, partial chunk
     svc = FakeService()
     sync.set_mode(live, "primary")
     ids = [kb.create_task(live, title=f"card {i}", assignee="worker") for i in range(cards)]
@@ -75,7 +77,7 @@ def test_divergence_repair_reads_the_replica_per_pass_not_per_card(live, kanban_
     ksc.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
     ksc.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
     assert seen, "the repair scan did not run after a local write"
-    assert len(seen[0]) <= 2, f"{len(seen[0])} replica reads for {cards} settled cards: {seen[0][:6]}"
+    assert len(seen[0]) <= reads, f"{len(seen[0])} replica reads for {cards} settled cards: {seen[0][:6]}"
     assert svc.board(BOARD)["rows"]["tasks"][ids[-1]]["title"] == "gap edit", "the uncaptured edit was not healed"
 
 

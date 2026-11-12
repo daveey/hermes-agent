@@ -33,16 +33,16 @@ def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gate
             if r["id"] not in held and seen.get(r["id"]) == r["sync_version"]]
     # One replica read per chunk and one omissions read per pass, not one of each per settled card: the scan
     # visits every synced card each round (13% of hub gateway CPU at 4,948 cards, 2026-11-12). [daveey]
-    replica: dict[str, sqlite3.Row] = {}
-    for i in range(0, len(rows), _CHUNK):
-        ids = [r["id"] for r in rows[i:i + _CHUNK]]
-        replica.update((r["id"], r) for r in shadow.execute(
-            f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids))
     omissions: dict[str, set[str]] = {}
     for uid, field in live.execute(
             "SELECT row_uid, field FROM kanban_sync_omissions WHERE table_name='tasks' AND state!='delivered'"):
         omissions.setdefault(uid, set()).add(field)
-    for row in rows:
+    replica: dict[str, sqlite3.Row] = {}
+    for index, row in enumerate(rows):
+        if index % _CHUNK == 0:
+            ids = [r["id"] for r in rows[index:index + _CHUNK]]
+            replica = {r["id"]: r for r in shadow.execute(
+                f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids)}
         tid = row["id"]
         theirs = replica[tid]
         mine, remote = _row_fields(live, "tasks", row), _row_fields(shadow, "tasks", theirs)
