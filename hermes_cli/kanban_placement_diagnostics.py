@@ -28,6 +28,9 @@ def portability(args: dict, cfg=None) -> tuple[str | None, str | None]:
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
     if refusal := coordination.check(full, c.raw, skills=args.get("skills"), requires=reqs):
         return refusal, None
+    from hermes_cli import kanban_mandatory_pin as mandatory
+    if (pin := mandatory.requirements(args)) and not coordination.attested(coordination.destinations(c.raw), pin):
+        return mandatory.REASON, None  # an old-core pool member would not refuse a pin it cannot serve
     marker_full = coordination.access_text(coordination.marker_text(full), c.raw, requires=reqs)
     extra = c.raw.get("extra_home_markers")
     exemptible = (p.HUB_CLI_COMMAND, r"\btoken-broker\b", r"\bssh\b", r"\bon the hub\b", r"\bthe hub's\b",

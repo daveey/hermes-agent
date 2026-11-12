@@ -154,7 +154,8 @@ def clear_refused_pin(conn, task_id, model, provider, allowed, *, author=REFUSED
     with kb.write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET model_override = NULL, provider_override = NULL "
-            "WHERE id = ? AND model_override IS ? AND provider_override IS ? AND status != 'archived'",
+            "WHERE id = ? AND model_override IS ? AND provider_override IS ? AND status != 'archived' "
+            "AND COALESCE(model_pin_mandatory, 0) = 0",  # a mandatory pin is never dropped for the default
             (task_id, model, provider))
         if cur.rowcount != 1:
             return False

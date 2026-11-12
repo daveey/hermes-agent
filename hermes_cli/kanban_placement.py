@@ -208,6 +208,9 @@ UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "proje
                      # target's own queue (11-11: placement="hub", runs_on=[machine:worker-1]). The labels work
                      # from the creating board (Board lease), so such a card stays here; with a pin it is refused.
                      "runs_on", "pin_mandatory")  # courier cannot preserve mandatory model pins either
+# Of those, the ones the pool route carries anyway: Board row fields a worker's pickup copies. A mandatory model
+# pin rides model_pin_mandatory; kanban_mandatory_pin gates it on the destination's attestation. [daveey]
+POOL_CARRIED_OPTIONS = ("pin_mandatory",)
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
@@ -529,7 +532,8 @@ def structural_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     # Explicit tool defaults are equivalent to omission, as on the CLI path.
     # A blocked initial status still needs origin-side human-request handling.
     if any(args.get(k) not in (None, "", [], False)
-           for k in UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
+           for k in UNCARRIED_OPTIONS
+           if k not in POOL_CARRIED_OPTIONS and not (k == "initial_status" and args.get(k) == "running")):
         return "uncarried option"
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)

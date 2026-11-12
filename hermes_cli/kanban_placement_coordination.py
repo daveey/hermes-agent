@@ -241,8 +241,12 @@ def claim_refusal(card, me):
             return "invalid worker access requirements"
     if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
         return "invalid worker access requirements"
-    return check(text, {}, target=me, skills=_loads(card.get("skills"), []),
-                 requires=requires)
+    if refusal := check(text, {}, target=me, skills=_loads(card.get("skills"), []), requires=requires):
+        return refusal
+    from hermes_cli import kanban_mandatory_pin as mandatory
+    if (pin := mandatory.requirements(card)) and not attested([me], pin):
+        return mandatory.REASON  # this machine's core is not attested to refuse a pin it cannot serve
+    return None
 
 
 def _free_slot(entry):
@@ -259,13 +263,15 @@ def stranded(card, cfg, created_reason):
     needs and has a free slot, and the card is otherwise portable (its full ``portable_reason`` judged against just
     those members is None, so a home marker the early refusal hid still counts), the wait is the stale creation
     verdict, not capacity. Read-only and advisory."""
-    if created_reason != REASON or card.get("placement_policy") or not isinstance(cfg, dict):
+    from hermes_cli.kanban_mandatory_pin import REASON as PIN_REASON
+    if created_reason not in (REASON, PIN_REASON) or card.get("placement_policy") or not isinstance(cfg, dict):
         return []
     from hermes_cli import kanban_capability_registry as reg
     from hermes_cli.kanban_placement import portable_reason
     from hermes_cli.kanban_runs_on_capabilities import _loads
     args = {k: card.get(k) for k in ("title", "body", "assignee", "workspace_kind", "workspace_path", "tenant",
-                                     "project_id", "max_retries")}
+                                     "project_id", "max_retries", "model_override", "provider_override",
+                                     "model_pin_mandatory")}
     args.update(skills=_loads(card.get("skills"), []), requires=_loads(card.get("requires"), []),
                 runs_on=_loads(card.get("runs_on"), None))
     if not isinstance(args["requires"], list):
@@ -296,7 +302,9 @@ def required_labels(args, cfg=None):
     required, refusal = requirements(text)
     if refusal:
         return None
-    return required | skill_requirements(args.get("skills")) | access_requirements(args.get("requires"))
+    from hermes_cli.kanban_mandatory_pin import requirements as pin_requirements
+    return (required | skill_requirements(args.get("skills")) | access_requirements(args.get("requires"))
+            | pin_requirements(args))
 
 
 def legacy_refusal(args, cfg=None):

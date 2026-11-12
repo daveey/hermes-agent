@@ -1,0 +1,222 @@
+"""A mandatory model pin rides the pool: enrolled, claimed by a worker that runs exactly it, refused elsewhere. [daveey]
+
+t_01a1cefa6145100f (an Opus exact-head review, ``pin_mandatory=1``) stayed on the hub with ``uncarried option``:
+pool portability reused the courier's uncarried list, though the pin is three Board row fields a pickup copies.
+Here: create enrolls such a card for the worker queue only when every pool member attests
+``capability:mandatory-model-pin`` (an old-core pool keeps it home), the worker that claims it records the pinned
+model in its ``run_route``, a worker that cannot serve the pin leaves it on the Board, and no repair ever swaps
+the pin for the profile default. The courier still cannot carry it.
+"""
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_mandatory_pin as mp
+from hermes_cli import kanban_placement as kp
+from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+from tests.hermes_cli.test_kanban_worker_node import BOARD, HUB, MACHINES, WORKER, Gateway
+
+POOL = "pool:worker"
+CFG = {"worker_queue": {HUB: POOL}}
+PIN = {"model": "claude-opus-5-5", "provider": "anthropic", "pin_mandatory": True}
+REVIEW = {"title": "Independent exact-head review: PR 1 @abc", "assignee": "default", "requires": []}
+
+
+def _attest(monkeypatch, *, carries=True):
+    """worker-1 is the pool; with ``carries`` its core attests the mandatory-pin refusal."""
+    labels = ["linux", POOL] + ([mp.LABEL] if carries else [])
+    monkeypatch.setitem(MACHINES[WORKER], "labels", labels)
+    monkeypatch.setitem(MACHINES[WORKER], "last_seen", time.time() * 1000)  # a fresh attestation
+
+
+@pytest.fixture
+def svc():
+    return FakeService(lease_runs=True, machines=MACHINES)
+
+
+@pytest.fixture
+def gws(tmp_path, monkeypatch, svc):
+    monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
+    monkeypatch.setattr(kp, "config", lambda: CFG)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    sync.consume_dispatcher_wake()
+    hub = Gateway(tmp_path, HUB, svc, monkeypatch, pickup=False)
+    worker = Gateway(tmp_path, WORKER, svc, monkeypatch, pickup="true")
+    yield hub, worker
+    for g in (hub, worker):
+        g.conn.close()
+    sync.set_lease_client(None)
+    wn.set_registry_fetch(None)
+
+
+def _create(hub, **extra):
+    from tools import kanban_tools
+    hub.enter()
+    monkey_self = "hermes_cli.kanban_capability_registry.self_gateway"
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(monkey_self, lambda: HUB)
+        out = json.loads(kanban_tools._handle_create({**REVIEW, **extra}))
+    assert out.get("ok"), out
+    return out
+
+
+def _runs_on(conn, tid):
+    raw = conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+    return json.loads(raw) if raw else None
+
+
+def _route(conn, tid):
+    rows = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'run_route' ORDER BY id",
+                        (tid,)).fetchall()
+    return [json.loads(p) for (p,) in rows]
+
+
+# --- create ----------------------------------------------------------------------------------------------------
+
+def test_a_mandatory_pin_card_is_enrolled_for_the_attested_pool(gws, monkeypatch):
+    hub, _ = gws
+    _attest(monkeypatch)
+    args = {**REVIEW, **PIN}
+    hub.enter()
+    with monkeypatch.context() as m:
+        m.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+        assert kp.portable_reason(args, CFG) is None
+    out = _create(hub, **PIN)
+    assert sorted(_runs_on(hub.conn, out["task_id"])) == sorted([POOL, mp.LABEL]), out
+    row = hub.conn.execute("SELECT model_override, provider_override, model_pin_mandatory FROM tasks WHERE id = ?",
+                           (out["task_id"],)).fetchone()
+    assert tuple(row) == ("claude-opus-5-5", "anthropic", 1)
+
+
+def test_an_old_core_pool_keeps_the_mandatory_pin_card_home(gws, monkeypatch):
+    hub, _ = gws
+    _attest(monkeypatch, carries=False)  # worker-1 runs a core that would not refuse a pin it cannot serve
+    hub.enter()
+    with monkeypatch.context() as m:
+        m.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+        assert kp.portable_reason({**REVIEW, **PIN}, CFG) == mp.REASON
+    out = _create(hub, **PIN)
+    assert _runs_on(hub.conn, out["task_id"]) is None, out
+    # Without the mark the same pin is ordinary portable work, attestation or not.
+    out = _create(hub, title="Summarise the failing CI jobs", model="claude-opus-5-5", provider="anthropic")
+    assert _runs_on(hub.conn, out["task_id"]) == [POOL], out
+
+
+# --- claim -----------------------------------------------------------------------------------------------------
+
+def test_a_worker_that_serves_the_pin_claims_it_and_runs_exactly_that_model(gws, svc, monkeypatch):
+    hub, worker = gws
+    _attest(monkeypatch)
+    tid = _create(hub, **PIN)["task_id"]
+    assert sorted(_runs_on(hub.conn, tid)) == sorted([POOL, mp.LABEL])  # queued for the pool, not a default-placement copy
+    hub.round()
+    worker.round()
+    worker.tick()
+    assert svc.board(BOARD)["leases"][tid]["holder"] == WORKER
+    [route] = _route(worker.conn, tid)
+    assert (route["model"], route["provider"]) == ("claude-opus-5-5", "anthropic"), route
+    assert kb.get_task(worker.conn, tid).model_pin_mandatory == 1
+
+
+def test_a_worker_that_cannot_serve_the_pin_refuses_the_claim(gws, svc, monkeypatch):
+    hub, worker = gws
+    _attest(monkeypatch)
+    cfg = worker.home / "config.yaml"
+    cfg.write_text(cfg.read_text() + "providers:\n  anthropic:\n    enabled: false\n")
+    tid = _create(hub, **PIN)["task_id"]
+    assert sorted(_runs_on(hub.conn, tid)) == sorted([POOL, mp.LABEL])  # queued for the pool, not a default-placement copy
+    hub.round()
+    worker.round()
+    worker.tick()
+    assert tid not in svc.board(BOARD)["leases"]
+    assert kb.get_task(worker.conn, tid) is None  # left on the Board for a machine that serves it
+    reason = mp.refusal({"id": tid, "assignee": "default", "model_override": "claude-opus-5-5",
+                         "provider_override": "anthropic", "model_pin_mandatory": 1}, me=WORKER)
+    assert reason and "provider disabled" in reason
+
+
+@pytest.mark.parametrize("card,want", [
+    ({"model_override": "claude-opus-5-5", "provider_override": "openai-codex", "model_pin_mandatory": 1},
+     "model_provider_mismatch"),
+    ({"model_override": "claude-opus-5-5", "provider_override": "openai-codex"}, None),  # not mandatory
+    ({"model_override": "claude-opus-5-5", "provider_override": "anthropic", "model_pin_mandatory": 1}, None),
+    ({"model_override": "claude-opus-5-5", "model_pin_mandatory": 1, "assignee": "nobody"}, "no profile"),
+])
+def test_refusal_names_why_the_exact_pin_cannot_run_here(tmp_path, monkeypatch, card, want):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("model:\n  provider: anthropic\n")
+    got = mp.refusal({"id": "t", "assignee": "default", **card})
+    assert (got is None) if want is None else (want in got), got
+
+
+def test_a_mark_without_a_model_pins_nothing():
+    # A Board row can carry model_pin_mandatory after `set-model` cleared the model (kanban_db keeps the mark
+    # NULL then, but a wire row is not trusted): nothing to serve, so no label demand and no refusal.
+    card = {"id": "t", "assignee": "default", "model_override": None, "model_pin_mandatory": 1}
+    assert mp.pin_of(card) is None and mp.requirements(card) == set() and mp.refusal(card) is None
+    assert mp.requirements({"title": "x", "pin_mandatory": True, "model": "  "}) == set()
+
+
+def test_a_class_pin_is_refused_where_class_routing_is_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    card = {"id": "t", "assignee": "default", "model_override": "class:deep", "model_pin_mandatory": 1}
+    (tmp_path / "config.yaml").write_text("model:\n  provider: anthropic\n")
+    assert "class unroutable (routing_disabled)" in mp.refusal(card)
+    (tmp_path / "config.yaml").write_text("model:\n  provider: anthropic\nmodel_routing:\n  enabled: true\n")
+    assert "routing_disabled" not in (mp.refusal(card) or "")
+
+
+def test_a_home_card_waiting_on_the_attestation_is_named_stranded_once_the_pool_attests(monkeypatch):
+    from hermes_cli import kanban_placement_coordination as coord
+    entry = {"state": "active", "pickup": "all", "last_seen": time.time() * 1000, "labels": [],
+             "max_card_runs": 2, "metrics": {"active_card_runs": 0}}
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": {"worker": entry}})
+    monkeypatch.setattr(kp.reg, "self_gateway", lambda: HUB)
+    cfg = {"worker_pools": {HUB: ["worker"]}, "assignees": ["default"]}
+    card = {"title": "Review PR 1", "body": "", "assignee": "default", "workspace_kind": "scratch",
+            "requires": "[]", "model_override": "claude-opus-5-5", "model_pin_mandatory": 1}
+    assert coord.stranded(card, cfg, mp.REASON) == []
+    entry["labels"] = [mp.LABEL]
+    assert coord.stranded(card, cfg, mp.REASON) == ["worker"]
+
+
+def test_a_claim_on_an_unattested_destination_is_refused(monkeypatch):
+    from hermes_cli import kanban_placement_coordination as coord
+    machines = {"w": {"state": "active", "pickup": "true", "last_seen": time.time() * 1000,
+                      "labels": [POOL]}}
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": machines})
+    card = {"title": "review", "placement_policy": "worker-first-v1", "model_override": "claude-opus-5-5",
+            "model_pin_mandatory": 1}
+    assert coord.claim_refusal(card, "w") == mp.REASON
+    machines["w"]["labels"].append(mp.LABEL)
+    assert coord.claim_refusal(card, "w") is None
+
+
+# --- no fallback -----------------------------------------------------------------------------------------------
+
+def test_a_refused_mandatory_pin_is_never_cleared_to_the_profile_default(tmp_path):
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_model_assignment import clear_refused_pin
+    conn = kbc.connect(tmp_path / "kanban.db")
+    keep = kb.create_task(conn, title="keep", assignee="default", model_override="claude-opus-5-5",
+                          provider_override="anthropic", pin_mandatory=True)
+    drop = kb.create_task(conn, title="drop", assignee="default", model_override="claude-opus-5-5",
+                          provider_override="anthropic")
+    assert not clear_refused_pin(conn, keep, "claude-opus-5-5", "anthropic", [])
+    assert kb.get_task(conn, keep).model_override == "claude-opus-5-5"
+    assert clear_refused_pin(conn, drop, "claude-opus-5-5", "anthropic", [])  # a plain pin may still be dropped
+    assert kb.get_task(conn, drop).model_override is None
+    conn.close()
+
+
+def test_the_courier_still_cannot_carry_a_mandatory_pin():
+    used = kp._uncarried({**REVIEW, **PIN}, kp._Cfg({}), True)
+    assert used == ["pin_mandatory"]
