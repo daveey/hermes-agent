@@ -131,7 +131,8 @@ def _run_pull(cmd: list[str]) -> None:
             # The relay owns its interpreter (workers use /usr/bin/python3 for boto3).
             # PM's backend PYTHONPATH mixes its cryptography with distro OpenSSL and
             # fails at GEN_EMAIL. Preserve relay/AWS/home settings, not Python imports.
-            env = os.environ.copy()
+            from tools.environments.local import build_subprocess_env
+            env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
             env.pop("PYTHONPATH", None)
             env.pop("PYTHONHOME", None)
             proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
