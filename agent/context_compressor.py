@@ -44,6 +44,7 @@ from agent.context_compressor_tail import (
     elide_keeping_skill_safety_rule, with_skill_safety_rule, without_skill_safety_rule, tail_cut_progress_floor,
 )
 from agent.context_compressor_telemetry import CompressionTelemetryMixin
+from agent.context_compressor_turns import turn_ended_after
 from agent.error_classifier import ClassifiedError, FailoverReason, classify_api_error
 from agent.micro_compaction import MicroCompactionMixin
 from agent.prompt_builder import STEER_DISPLAY_KIND
@@ -4717,6 +4718,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         no pending ``tool_calls``.  A trailing ``tool`` result or an assistant
         message that still has ``tool_calls`` outstanding means the run was
         interrupted mid-task and the instruction is still owed an answer.
+        A request whose turn already ended (``turn_ended_after``: a completed
+        reply, then a notice-started turn) is never in flight, wherever the
+        transcript ends.
 
         Handoff carriers and synthetic scaffolding rows are excluded via the
         same filter pair as ``_find_last_user_message_idx``, so an idle session
@@ -4726,16 +4730,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         from agent.conversation_compression import _is_real_user_message
 
         last_user_idx = -1
-        # Find the newest user message that carries at least one image part. We anchor on image-bearing user
-        # messages (not all user messages) so a plain text follow-up after a big-image turn still strips the
-        # old image — matching the problem kilocode#9434 set out to solve.
-        # Newest tool message carrying an image. Tool-result images (``vision_analyze``,
-        # screenshot-returning tools) accumulate on their own timeline and the user anchor never protects
-        # the stale ones: a session whose only image-bearing user message is the FIRST one leaves ``anchor
-        # <= 0`` and strips nothing at all, so twenty tool results keep multi-MB of base64 in every request
-        # body until the provider answers 413 -- and the 413 handler's recovery compaction lands right back
-        # here and frees nothing, which is the wedge in #89938. Keep the newest tool image, since that is
-        # the one the model is reasoning about, and drop every older one wherever it sits.
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
             # _is_real_user_message also rejects metadata-flagged scaffolding
@@ -4749,7 +4743,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # carrier; it is the only copy left, so it is still the task.
                 last_user_idx = i
                 break
-        if last_user_idx < 0:
+        if last_user_idx < 0 or turn_ended_after(messages, last_user_idx):
             return None
 
         for msg in reversed(messages[last_user_idx + 1:]):
