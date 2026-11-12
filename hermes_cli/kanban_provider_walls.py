@@ -192,6 +192,23 @@ def live_quota_wall(provider: str, model: str) -> Optional[float]:
     return float(unavailable.resets_at) if unavailable is not None else None
 
 
+def live_quota_room(provider: str, model: str) -> bool:
+    """True only when this gateway's OAuth pool has a live entry that can serve ``model`` right now.
+
+    Positive evidence, unlike ``live_quota_wall() is None``: an empty, unreadable or auth-benched pool
+    is no room. Pools are per gateway, so another worker's wall can be this one's room. [daveey]"""
+    provider = _norm(provider)
+    if not provider or provider == "auto" or not model or model.startswith("class:"):
+        return False
+    try:
+        from agent.credential_pool import load_pool
+        from agent.model_routing_unavailable import quota_room
+        return bool(quota_room(load_pool(provider, allowed_auth_types={"oauth"}), model))
+    except Exception as exc:  # never break dispatch over a pool read
+        logger.debug("kanban walls: live quota room check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
+        return False
+
+
 def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None, prefix: Optional[str] = None) -> int:
     """``rate_limited`` runs in the last hour claimed by this host (claim ``prefix``, default this host's).
 

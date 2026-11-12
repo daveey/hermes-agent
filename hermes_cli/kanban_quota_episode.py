@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 MAX_BACKOFF_SECONDS = 7200
+# A wall this gateway recorded holds as recorded for this long; after it, only while this pool agrees.
+LOCAL_WALL_TRUST_SECONDS = 30 * 60
 
 
 def episode(conn, task_id, *, run_id=None):
@@ -169,6 +171,60 @@ def alternate_route(conn, task, walls, base, now):
     return (routes[0]['model'], routes[0]['provider']) if routes else None
 
 
+def _wall_origin(conn, task_id, wall):
+    """``(recorded_at, local)`` for one stored wall: when it was recorded and whether this gateway ran it.
+
+    Run ids in a synced payload are the recording gateway's; the event row's ``run_id`` is this replica's,
+    and that run's ``claimed`` lock names the host (``kanban_host_identity``). No lock reads as local."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_host_identity import is_local_claim
+    row = conn.execute(
+        "SELECT run_id, created_at FROM task_events WHERE task_id=? AND kind='quota_episode' AND json_valid(payload) "
+        "AND json_extract(payload, '$.run_id') IS ? AND json_extract(payload, '$.episode_id') IS ? "
+        "ORDER BY id DESC LIMIT 1", (task_id, wall.get('run_id'), wall.get('episode_id'))).fetchone()
+    if row is not None:
+        run_id, recorded = row[0], kb._to_epoch(row[1])
+    else:  # computed from this replica's own runs, not yet stored
+        run_id = wall.get('run_id')
+        ended = conn.execute("SELECT ended_at FROM task_runs WHERE task_id=? AND id=?", (task_id, run_id)).fetchone()
+        recorded = kb._to_epoch(ended[0]) if ended else None
+    locks = [kb._json_dict(raw).get('lock') for (raw,) in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='claimed'", (task_id, run_id))]
+    locks = [lock for lock in locks if isinstance(lock, str) and lock]
+    return recorded, (not locks or any(is_local_claim(lock) for lock in locks))
+
+
+def _wall_models(task, wall, provider):
+    """Concrete models this gateway would run *provider* on for the walled route (a class's routes), or []."""
+    from agent.model_routing import is_class_selector
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    model = wall.get('model')
+    if not isinstance(model, str) or not model:
+        return []
+    if not is_class_selector(model):
+        return [model]
+    policy = (_assignee_config(task.assignee) or {}).get('model_routing') or {}
+    routes = (policy.get('routes') or {}).get(model.removeprefix('class:')) or []
+    return [r['model'] for r in routes if isinstance(r, dict) and str(r.get('provider') or '').strip().lower() == provider
+            and isinstance(r.get('model'), str) and r['model']]
+
+
+def _served_here(conn, task, wall, now):
+    """True when this gateway's own pool can serve every provider of a wall it did not just see itself.
+
+    A wall another gateway recorded (pools are per gateway), or this gateway's own once older than
+    ``LOCAL_WALL_TRUST_SECONDS``, holds only while this pool agrees. A wall this gateway just saw holds
+    as recorded; an unknown provider or model, or a pool with no live entry, is never room."""
+    from hermes_cli.kanban_provider_walls import live_quota_room
+    names = _providers(wall)
+    if not names:
+        return False
+    recorded, local = _wall_origin(conn, task.id, wall)
+    if local and (recorded is None or now - recorded < LOCAL_WALL_TRUST_SECONDS):
+        return False
+    return all(any(live_quota_room(p, m) for m in _wall_models(task, wall, p)) for p in names)
+
+
 def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     """Return (guard reason, alternate route); never writes or allocates quota."""
     from hermes_cli.kanban_model_tier import resolve_model_tier
@@ -178,6 +234,16 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
         return None, None
     outstanding = _outstanding(conn, task.id, state, now)
     if not outstanding:
+        return None, None
+    try:
+        outstanding = [wall for wall in outstanding if not _served_here(conn, task, wall, now)]
+    except sqlite3.Error:
+        raise
+    except Exception:
+        logger.warning('kanban quota: local pool check failed for %s; keeping its walls', task.id, exc_info=True)
+    if not outstanding:
+        # Every wall was another gateway's (or a stale one of ours) and this pool has room now: admit.
+        # If the run hits the wall here, its own new episode holds it on this gateway.
         return None, None
     state = max(outstanding, key=lambda s: s['until'])
     held = 'subscription_quota_reset' if state['hinted'] else 'rate_limit_cooldown'

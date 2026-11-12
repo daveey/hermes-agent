@@ -14,14 +14,14 @@ class SubscriptionQuotaUnavailable(ModelRoutingError):
         super().__init__(message)
 
 
-def quota_unavailable(pool, model):
-    """Only a known cooldown is quota evidence; empty/dead OAuth pools are not."""
+def _quota_scan(pool, model):
+    """``(room, waits)`` for *model*: room when a live OAuth entry can serve it now, else its quota resets."""
     from agent.credential_pool import STATUS_DEAD, _exhausted_until
     from agent.credential_pool_model_cooldowns import MODEL_ENTITLEMENT_BENCH_SECONDS, model_cooldown_until
     import time
 
     if pool is None:
-        return None
+        return False, []
     now = time.time()
     entries = [entry for entry in pool.entries() if entry.auth_type == "oauth" and entry.last_status != STATUS_DEAD]
     waits = []
@@ -34,11 +34,24 @@ def quota_unavailable(pool, model):
             continue  # entitlement benches do not reopen on a quota reset
         reset = max(account or 0, model_reset or 0)
         if reset <= now:
-            return None  # not an exhausted pool
+            return True, []  # not an exhausted pool
         waits.append(reset)
-    if waits:
+    return False, waits
+
+
+def quota_unavailable(pool, model):
+    """Only a known cooldown is quota evidence; empty/dead OAuth pools are not."""
+    room, waits = _quota_scan(pool, model)
+    if waits and not room:
         return SubscriptionQuotaUnavailable(pool.provider, model, min(waits))
     return None
+
+
+def quota_room(pool, model):
+    """True only on positive evidence: a live OAuth entry with no quota or bench cooldown on *model* now.
+
+    The converse of :func:`quota_unavailable` is not room: an empty, dead or auth-benched pool is neither."""
+    return _quota_scan(pool, model)[0]
 
 
 def _finite_positive(value):
