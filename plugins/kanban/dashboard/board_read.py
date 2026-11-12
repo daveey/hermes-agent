@@ -41,6 +41,11 @@ def _raw(rows) -> tuple:
 _NO_EVENTS = (0, None)  # _event_marks of a task without events
 
 
+def _wake_states(conn: sqlite3.Connection, row_ids: list) -> dict:
+    from hermes_cli import kanban_wake_check as kwc  # lazy, as before the incremental split
+    return kwc.load_states(conn, row_ids)
+
+
 def _event_marks(conn: sqlite3.Connection, row_ids: list) -> dict[str, tuple]:
     """``{task_id: (event count, max event id)}``: an insert or delete moves it. Events are otherwise
     immutable: the only in-place UPDATEs (run_id on completion) commit with a task row change and
@@ -79,8 +84,7 @@ def diagnostic_inputs(conn: sqlite3.Connection, task_ids: Optional[list[str]] = 
     events_by_task = _rows_by_task(conn, "task_events", row_ids)
     runs_by_task = _rows_by_task(conn, "task_runs", row_ids)
     graph_by_task = kanban_db.task_graph_contexts(conn, row_ids)
-    from hermes_cli import kanban_wake_check as kwc
-    wake_by_task = kwc.load_states(conn, row_ids)
+    wake_by_task = _wake_states(conn, row_ids)
     return tuple(rows), events_by_task, runs_by_task, graph_by_task, wake_by_task
 
 
@@ -170,8 +174,7 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
         else:  # vanished between reads: no events held, so never vouch for a mark
             events[tid] = ()
             memo[tid] = (tuple(r), _raw(runs[tid]), None, ())
-    from hermes_cli import kanban_wake_check as kwc
-    inputs = (tuple(diag_rows), events, runs, kanban_db.task_graph_contexts(conn, ids), kwc.load_states(conn, ids))
+    inputs = (tuple(diag_rows), events, runs, kanban_db.task_graph_contexts(conn, ids), _wake_states(conn, ids))
     return inputs, memo
 
 
