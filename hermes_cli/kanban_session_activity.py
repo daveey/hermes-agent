@@ -893,11 +893,15 @@ def _links_fingerprint() -> tuple:
     return tuple(signature)
 
 
-def remote_links_and_origin_rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def remote_links_and_origin_rows(stale_ok: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """[daveey] ``(_remote_links(), origin rows)`` from one cached projection: the origin rows are the ledger
     ``project()`` rows behind the cards, released rows included (the cards omit those). Plugins that need released
-    rows (chat-closeout) take them here instead of projecting the ledger again on every pass."""
-    return _links_entry(False, with_rows=True)
+    rows (chat-closeout) take them here instead of projecting the ledger again on every pass.
+
+    The default stays strict (read-your-writes) for closeout-style callers. Display routes that are documented as
+    stale-only (user-steps session-cards) pass ``stale_ok=True``: a warm entry, rows included, returns before any
+    fingerprint or ``_links_lock`` work and refreshes in the background; a cold scope still projects synchronously."""
+    return _links_entry(stale_ok, with_rows=True)
 
 
 def _remote_links(stale_ok: bool = False) -> list[dict[str, Any]]:

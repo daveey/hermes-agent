@@ -110,3 +110,68 @@ def test_warm_stale_returns_while_fingerprint_is_held(monkeypatch):
         reader.join(5)
         wait_until(lambda: not activity._links_refresher.busy, what='refresh cleanup')
         activity._reset_cache_for_tests()
+
+
+def _warm_rows_projection(monkeypatch):
+    activity._reset_cache_for_tests()
+    monkeypatch.setattr(activity, '_origin_scope', lambda: ('A',))
+    monkeypatch.setattr(activity, '_links_fingerprint', lambda: ('first',))
+
+    def project():
+        activity._origin_rows_sink.rows.append({'origin': 'released'})
+        return [{'id': 'A'}]
+
+    monkeypatch.setattr(activity, '_project_remote_links', project)
+    expected = activity.remote_links_and_origin_rows()
+    assert expected == ([{'id': 'A'}], [{'origin': 'released'}])
+    entered, release = threading.Event(), threading.Event()
+
+    def fingerprint():
+        entered.set()
+        assert release.wait(5)
+        return ('next',)
+
+    monkeypatch.setattr(activity, '_links_fingerprint', fingerprint)
+    return expected, entered, release
+
+
+def _read_rows_in_thread(**kwargs):
+    results, returned = [], threading.Event()
+
+    def read():
+        results.append(activity.remote_links_and_origin_rows(**kwargs))
+        returned.set()
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    return reader, results, returned
+
+
+def test_history_rows_stale_read_returns_while_fingerprint_is_held(monkeypatch):
+    """user-steps session-cards reads history rows with stale_ok=True: a warm entry (rows included) must
+    return before fingerprint/lock work, like the plain linked-card stale read."""
+    expected, entered, release = _warm_rows_projection(monkeypatch)
+    reader, results, returned = _read_rows_in_thread(stale_ok=True)
+    try:
+        assert entered.wait(2), 'stale read did not start a background refresh'
+        assert returned.wait(2), 'warm stale history read waited for fingerprint'
+        assert results == [expected]
+    finally:
+        release.set()
+        reader.join(5)
+        wait_until(lambda: not activity._links_refresher.busy, what='refresh cleanup')
+        activity._reset_cache_for_tests()
+
+
+def test_history_rows_default_stays_strict(monkeypatch):
+    """chat-closeout needs read-your-writes: the default call still waits on the fingerprint."""
+    _, entered, release = _warm_rows_projection(monkeypatch)
+    reader, results, returned = _read_rows_in_thread()
+    try:
+        assert entered.wait(2)
+        assert not returned.wait(0.3), 'strict history read returned before the fingerprint'
+    finally:
+        release.set()
+        reader.join(5)
+        activity._reset_cache_for_tests()
+    assert returned.is_set() and len(results) == 1
