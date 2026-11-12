@@ -531,3 +531,64 @@ def test_two_wakes_for_one_card_fold_in_either_order_keeping_every_notice_once(c
     assert sorted(card["notices"]) == sorted(["🔄 t_x → ready", "✔ t_x done", "⏸ blocked"])
     [again] = _merge([card], [dict(second)])  # a third wake re-folding the same card adds nothing twice
     assert again["text"] == card["text"]
+
+
+# Review of PR #1465 at 9268465a67: the core-drain hold can outlast DEFER_MAX_S.
+
+def _kanban_notices(db):
+    return [m.get("content") for m in db.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"]
+
+
+def test_a_core_drain_hold_longer_than_the_defer_window_still_starts_one_turn(board, tmp_path, monkeypatch):
+    """While the core-drain hold is on, the wake leg rewinds every batch, but the tui row's DEFER_MAX_S window kept
+    running from the event: a hold over it let the tui row show its notice turn, and the wake started a second turn
+    once the hold lifted."""
+    from gateway import kanban_wake_sibling, session_notifier_drain
+    held = [True]
+    monkeypatch.setattr(session_notifier_drain, "held", lambda: held[0])
+    monkeypatch.setenv("HERMES_KANBAN_UNLOADED_WAKE", "0")
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session(CHAT, "desktop")
+    db.append_message(CHAT, "user", "start the cards")
+
+    @contextlib.contextmanager
+    def opener(chat_id):
+        yield (db, chat_id) if db.get_session(chat_id) else (None, None)
+
+    runner, adapter = board
+    tid = _card()
+    _event(tid, "completed")
+    _wake_leg(runner)  # held: rewound, the local row stays unacked
+    assert adapter.turns == []
+    monkeypatch.setattr(kanban_wake_sibling, "DEFER_MAX_S", -1.0)  # the hold has outlasted the window
+    texts = _notice_leg()
+    ku.sweep_once(set(), now=time.time() + 3600, session_db=opener)
+    assert texts == [] and _kanban_notices(db) == []  # both tui consumers leave it to the held wake
+    held[0] = False
+    _wake_leg(runner)
+    texts += _notice_leg()
+    ku.sweep_once(set(), now=time.time() + 3600, session_db=opener)
+    texts += _kanban_notices(db)
+    assert len(adapter.turns) + len(texts) == 1, (adapter.turns, texts)
+    [turn] = adapter.turns
+    assert turn.count(NOTICE["completed"].format(tid=tid)) == 1
+    last, subs = _cursors(tid)
+    assert subs["local"] == (last, None) and subs["tui"] == (last, None)
+
+
+def test_a_wake_that_cannot_land_after_a_long_hold_still_leaves_the_tui_notice(board, monkeypatch):
+    """The hold only pauses the window: once it lifts, a wake that cannot land leaves the notice to the tui row."""
+    from gateway import kanban_wake_sibling, session_notifier_drain
+    held = [True]
+    monkeypatch.setattr(session_notifier_drain, "held", lambda: held[0])
+    runner, _ = board
+    runner.adapters = {}
+    tid = _card()
+    _event(tid, "completed")
+    monkeypatch.setattr(kanban_wake_sibling, "DEFER_MAX_S", -1.0)
+    _wake_leg(runner)
+    assert _notice_leg() == []  # held: still the wake's
+    held[0] = False
+    _wake_leg(runner)  # no LOCAL adapter: the wake never lands
+    texts = _notice_leg()
+    assert len(texts) == 1 and NOTICE["completed"].format(tid=tid) in texts[0]
