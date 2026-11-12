@@ -588,3 +588,105 @@ def test_refused_scripts_verbatim_are_not_refused(tmp_path, monkeypatch, script,
     monkeypatch.setenv("HOME", str(home))  # the scripts' `~/` paths point into tmp_path
     command = f"bash {_FIXTURES / script} 1.2.3.4 t_x f.txt"
     assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+
+
+# Independent review: prove execution with a fake hermes, never a real gateway.
+def _assert_bash_marker(tmp_path, command):
+    import os
+    import subprocess
+
+    marker = tmp_path / "marker"
+    hermes = tmp_path / "hermes"
+    hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
+    hermes.chmod(0o755)
+    result = subprocess.run(
+        ["/bin/bash"], input=command, text=True, capture_output=True, timeout=10, check=False,
+        env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "MARKER": str(marker),
+             "BASH_ENV": "", "ENV": ""}, cwd=tmp_path,
+    )
+    assert marker.read_text() == "called", result.stderr
+
+
+@pytest.mark.parametrize("depth", [0, 1])
+@pytest.mark.parametrize("mutation", ["CMD=transform;", "CMD=transform &&", "read CMD <<<transform;"])
+def test_same_line_binding_mutation_keeps_transformed_body_visible(tmp_path, depth, mutation):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    transform = tmp_path / "transform"
+    transform.write_text('#!/bin/sh\nsed s/python3/bash/ | bash\n')
+    transform.chmod(0o755)
+    command = ("CMD='bash -s'\n" + mutation + " $CMD <<'R'\npython3 - <<'PY'\n"
+               "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
+    if depth:
+        command = "bash -s <<'OUTER'\n" + command + "OUTER\n"
+    _assert_bash_marker(tmp_path, command)
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+    assert guard(command, cwd=str(tmp_path)) is True
+
+
+@pytest.mark.parametrize("shape", ["assignment", "env", "export", "export-heredoc", "remote", "in-body"])
+def test_shell_startup_environment_cannot_authorize_nested_masking(tmp_path, shape):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    startup = tmp_path / "startup"
+    # Clear BASH_ENV for the replacement shell: only the target shell's stdin is rewritten.
+    startup.write_text("unset BASH_ENV\nexec 0< <(sed s/python3/bash/)\n")
+    body = "python3 - <<'PY'\nbash -c 'hermes gateway \"restart\"'\nPY\n"
+    ssh = tmp_path / "ssh"
+    # Local SSH transport control; no network access.
+    ssh.write_text('#!/bin/sh\nshift\nexec /bin/sh -c "$*"\n')
+    ssh.chmod(0o755)
+    opener = {
+        "env": f"env BASH_ENV={startup} bash -s",
+        "export": f"export BASH_ENV={startup}\nbash -s",
+        "export-heredoc": f"source /dev/stdin <<'INIT'\nexport BASH_ENV={startup}\nINIT\nbash -s",
+        "remote": f"ssh h 'BASH_ENV={startup} bash -s'",
+    }.get(shape, f"BASH_ENV={startup} bash -s")
+    command = opener + " <<'R'\n" + body + "R\n"
+    if shape == "in-body":
+        command = "bash -s <<'OUTER'\n" + command + "OUTER\n"
+    _assert_bash_marker(tmp_path, command)
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+    assert guard(command, cwd=str(tmp_path)) is True
+
+
+@pytest.mark.parametrize("name", ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH", "BASH_FUNC_python3%%"])
+@pytest.mark.parametrize("wrapper", ["", "env ", "sudo "])
+def test_reserved_environment_assignments_are_not_transparent(name, wrapper):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    command = wrapper + name + "=/untrusted bash -s <<'R'\npython3 - <<'PY'\nx\nPY\nR\n"
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("prefix", [
+    "eval 'python3() { command bash; }'; export -f python3",
+    "eval 'python3() { command bash; }'; declare -fx python3",
+    "export PATH=EVIL:$PATH",
+])
+def test_outer_prefix_must_preserve_nested_interpreter_identity(tmp_path, prefix):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    python = evil / "python3"
+    python.write_text('#!/bin/sh\nexec /bin/bash "$@"\n')
+    python.chmod(0o755)
+    command = (prefix.replace("EVIL", str(evil)) + "\nbash -s <<'R'\npython3 - <<'PY'\n"
+               "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
+    _assert_bash_marker(tmp_path, command)
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+    assert guard(command, cwd=str(tmp_path)) is True
+
+
+@pytest.mark.parametrize("prefix", ["time -p", "time --", "time -p --", "coproc worker", "! time -p", "if time -p"])
+def test_keyword_operands_before_parens_still_execute_scripts(tmp_path, prefix):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    big = tmp_path / "big.sh"
+    big.write_text("# padding\n" * 130000 + 'hermes gateway "restart"\n')
+    command = f"{prefix} ( bash {big} )"
+    command += "; then :; fi" if prefix.startswith("if ") else "; wait"
+    _assert_bash_marker(tmp_path, command)
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe is True and "scan cap" in refusal

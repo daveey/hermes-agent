@@ -122,7 +122,20 @@ def _peeled_command(words: list[str]) -> tuple[int, str] | None:
     # The strict walk must land exactly where the lifecycle guard's own peeling lands.
     if peeled is None or peeled >= len(words) or peeled != _peel_transparent_prefixes(words, index):
         return None
+    # Startup hooks, option imports, command lookup and exported functions can
+    # replace the apparent consumer or rewrite the shell's source stream. Check
+    # every prefix word, including assignments introduced by env/sudo.
+    if any(_reserved_assignment(word) for word in words[:peeled]):
+        return None
     return peeled, words[peeled].rsplit("/", 1)[-1]
+
+
+def _reserved_assignment(word: str) -> bool:
+    """Environment words that invalidate interpreter/stream provenance."""
+    name, separator, _value = word.partition("=")
+    return bool(separator) and (name in {
+        "PATH", "IFS", "ENV", "CDPATH", "GLOBIGNORE", "SHELLOPTS", "PS4",
+    } or name.startswith("BASH"))
 
 
 def _is_stdin_shell(words: list[str]) -> bool:
@@ -181,7 +194,7 @@ def _literal_assignment(unit: str) -> tuple[str, str] | None:
             or any(char in match[2] for char in "$`\\\n;|&<>(){}~*?[]")):
         return None
     name = match[1]
-    if name in {"PATH", "IFS", "ENV", "CDPATH", "GLOBIGNORE", "SHELLOPTS", "PS4"} or name.startswith("BASH"):
+    if _reserved_assignment(unit):
         return None
     try:
         words = shlex.split(match[2])
@@ -241,6 +254,10 @@ def _owner_feeds_shell(command: str, command_start: int, owner_start: int, specs
         return False
     first = next((i for i, word in enumerate(words) if not _ASSIGNMENT_WORD_RE.match(word)), None)
     if first is not None and _PURE_EXPANSION_RE.match(words[first]):
+        # The binding proof ends at command_start, not owner_start. A same-line
+        # list prefix can change that binding (including via read/eval/functions).
+        if command[command_start:owner_start].strip():
+            return False
         value = _variable_value(command, words[first].strip("${}"), command_start)
         if not value:
             return False
@@ -549,8 +566,10 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
         if unknown_operator:
             return command
         if not specs:
-            if _depth:
-                stdin.observe_unit(command[command_start:command_end])
+            # At depth zero this state gates only recursive masking: direct
+            # data consumers retain their existing handling. Unknown commands
+            # can export functions or alter PATH/startup hooks for a later shell.
+            stdin.observe_unit(command[command_start:command_end])
             if command_end >= len(command):
                 break
             command_start = command_end + 1
@@ -565,7 +584,8 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
         consumer = None
         if all(quoted) and not post_heredoc_list_operator:
             consumer = _owner_runs_inert_consumer(command, command_start, command_end, owner_start)
-        if _depth and not stdin.before_heredoc(command, command_start, owner_start):
+        prefix_intact = stdin.before_heredoc(command, command_start, owner_start)
+        if _depth and not prefix_intact:
             # Once a previous command could steal stdin, no later source lines can
             # be interpreted as the shell's untouched program.
             return _apply_replacements(command, replacements)
@@ -576,7 +596,7 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
             function_masks += consumer == "function"
             replacements += [(start, end, "\n" * command.count("\n", start, end), consumer)
                              for start, _terminator, end in bodies]
-        elif nested and _depth < _MAX_NESTED_HEREDOC_DEPTH and all(quoted) and _owner_feeds_shell(
+        elif nested and prefix_intact and _depth < _MAX_NESTED_HEREDOC_DEPTH and all(quoted) and _owner_feeds_shell(
                 command, command_start, owner_start, specs):
             # An unquoted outer body expands locally first (`$(…)` runs here), and any owner but a
             # verbatim stdin shell may rewrite the body: only then are nested heredocs judged.
@@ -586,7 +606,9 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
                 masked = strip_inert_heredoc_bodies(inner, nested=True, _depth=_depth + 1)
                 if masked != inner:
                     replacements.append((start, terminator, masked, "nested"))
-        if _depth and not consumer:
+        # A preceding non-consumer heredoc can execute state changes too (for
+        # example source /dev/stdin with an export in its body), at any depth.
+        if not consumer:
             stdin.intact = False
         command_start = body_cursor
     result = _apply_replacements(command, replacements)

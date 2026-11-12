@@ -733,13 +733,31 @@ _SUBSHELL_OPENING_WORDS = frozenset({
 })
 
 
-def _opens_call_arguments(previous: str) -> bool:
-    """Whether a bare ``(`` after the word *previous* is interpreter call syntax, not a subshell.
+def _opens_call_arguments(segment: list[str]) -> bool:
+    """Whether ``(`` follows an interpreter call, not a shell command prefix.
 
-    In the shell a subshell ``(`` only starts a command, so ``word (`` is a syntax error there;
-    it is how interpreter code tokenized as shell looks (``expanduser("~/x")``, ``Path('/d')``).
-    ``$(``, ``<(``, ``>(`` and ``x=(`` keep today's executed treatment."""
-    return previous not in _SUBSHELL_OPENING_WORDS and not previous.endswith(("$", "<", ">", "="))
+    Keywords are recognized in command position, including operands such as
+    ``time -p`` and ``coproc name``. Merely inspecting the adjacent word mistakes
+    these executable subshells for inert interpreter arguments. Conversely an
+    ordinary command's argument named ``time`` is not a shell keyword.
+    """
+    index = 0
+    while index < len(segment):
+        word = segment[index]
+        if word not in _SUBSHELL_OPENING_WORDS:
+            break
+        index += 1
+        if word == "time":
+            if index < len(segment) and segment[index] == "-p":
+                index += 1
+            if index < len(segment) and segment[index] == "--":
+                index += 1
+        elif word == "coproc" and index < len(segment):
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", segment[index]):
+                index += 1
+    if index == len(segment):
+        return False
+    return not segment[-1].endswith(("$", "<", ">", "="))
 
 
 def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
@@ -750,7 +768,7 @@ def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str],
         call_argument = False
         for token in tokens:
             if token and set(token) <= _CONTROL_CHARS:
-                next_is_call = token == "(" and bool(segment) and _opens_call_arguments(segment[-1])
+                next_is_call = token == "(" and bool(segment) and _opens_call_arguments(segment)
                 if segment:
                     yield segment, call_argument
                     segment = []
