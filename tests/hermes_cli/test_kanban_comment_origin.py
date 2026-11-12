@@ -316,12 +316,15 @@ def test_feed_does_not_overwrite_a_local_origin(synced_home) -> None:
     from hermes_cli import kanban_sync_client as client
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="t", assignee="worker")
-        cid = kb.add_comment(conn, tid, "hub:gw:macbook", "relay", origin_gateway="macbook")
+        # A plain author re-derives to nothing, so only an overwrite could change the origin.
+        cid = kb.add_comment(conn, tid, "default", "relay", origin_gateway="macbook")
         cuid = conn.execute("SELECT uid FROM task_comments WHERE id = ?", (cid,)).fetchone()[0]
+        # Pushed and acknowledged: no pending outbox row, so the feed copy reaches the UPDATE path.
+        conn.execute("DELETE FROM kanban_sync_outbox WHERE row_uid = ?", (cuid,))
         client.ensure_identity(conn, "default", "worker-3")
         sync.set_mode(conn, "primary")
         change = sync.RemoteChange(1, "task_comments", cuid, "upsert",
-                                   _synced_comment(tid, "hub:gw:macbook"), 2, "", "hub")
+                                   _synced_comment(tid, "default"), 2, "", "hub")
         sync.apply_remote_changes(conn, [change], new_cursor=1, observers=False)
         got = conn.execute("SELECT origin_gateway FROM task_comments WHERE id = ?", (cid,)).fetchone()[0]
     assert got == "macbook"
