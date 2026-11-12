@@ -723,4 +723,7 @@ def _skip_reason(conn: sqlite3.Connection, card: sqlite3.Row, own: str, machines
     refusal = claim_refusal(dict(card), me=own)
     if refusal is not None:
         return "capability_missing", str(refusal)
+    from hermes_cli.kanban_workspace_source import pickup_skip  # inert unless kanban.workspace_source is enabled
+    if (source_skip := pickup_skip(conn, card, own)) is not None:
+        return "capability_missing", source_skip
     return None

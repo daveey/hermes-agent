@@ -40,7 +40,8 @@
       "block_recurrences",
       "completion_contract",
       "runs_on",
-      "placement_policy"
+      "placement_policy",
+      "source_receipt"
     ],
     "task_links": [
       "parent_id",

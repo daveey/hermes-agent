@@ -97,7 +97,10 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
 }
 # Set by the service, never by a gateway: applied from the feed, never captured.
 # ``ready_since``: when the card last became ready (ms), for the Board's ``home_grace`` placement rule.
-SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"created_on", "ready_since"})}
+# ``workspace_source``/``workspace_custody``: Board-written only (``publish_source``, custody hooks); a push is refused.
+SERVER_COLUMNS: dict[str, frozenset[str]] = {
+    "tasks": frozenset({"created_on", "ready_since", "workspace_source", "workspace_custody"})}
+JSON_SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"workspace_source", "workspace_custody"})}
 # Old columns an ADD-first rename migration keeps (``kanban_db_connect._RENAMED_TASK_COLUMNS``: the new column is
 # added and filled from the old one, which stays). Every board older than the rename holds them; only
 # ``Task.from_row``'s pre-migration fallbacks read them, and they never travel. Known, so the schema-ahead guard
@@ -248,6 +251,9 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "ready_since", "ready_since INTEGER"),
     # Placement (RFC "Placement"): JSON list of labels the claiming machine must all carry; NULL = default.
     ("tasks", "runs_on", "runs_on TEXT"),
+    # workspace_source v1: the Board's manifest and custody (JSON), pulled read-only, never captured or pushed.
+    ("tasks", "workspace_source", "workspace_source TEXT"),
+    ("tasks", "workspace_custody", "workspace_custody TEXT"),
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
     # 1 once repair_ms_timestamps ran on this file (the one-time repair of rows applied before the guard).
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
@@ -729,6 +735,8 @@ class Lease:
     holder: Optional[str] = None
     reason: Optional[str] = None
     version: Optional[int] = None
+    # workspace_source v1: the grant response row's manifest/custody (``None``: an old Board sent no snapshot keys).
+    source_snapshot: Optional[Any] = None
 
 
 class LeaseClient(Protocol):
@@ -803,6 +811,20 @@ def pop_claim_deferral(task_id: str) -> Optional[str]:
     return _CLAIM_DEFERRALS.pop(task_id, None)
 
 
+def _source_skip(conn: sqlite3.Connection, row: sqlite3.Row) -> Optional[str]:
+    """A source card this host already refused at its current manifest revision (host scope, v3 §6b skip memo)."""
+    from hermes_cli import kanban_workspace_source as kws
+    snap = kws.replica_snapshot(row)
+    if snap is None or snap.manifest_value is None:
+        return None
+    try:
+        revision = kws.parse_manifest(snap.manifest_value).manifest_revision
+    except kws.ManifestInvalid:
+        return None
+    code = kws.skipped(conn, row["id"], revision)
+    return f"workspace_source_refused_here:{code}" if code else None
+
+
 def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str = "ready") -> ClaimGate:
     """Lease seam before a claim CAS. Only ``primary`` boards ask the service;
     without a grant the card stays ``ready`` (no offline claims: every card is
@@ -810,7 +832,7 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     from hermes_cli.kanban_worker_placement import execution_refusal
     from hermes_cli.kanban_sync_diagnostics import record_claim
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is not None and (reason := execution_refusal(conn, row)):
+    if row is not None and (reason := execution_refusal(conn, row) or _source_skip(conn, row)):
         _CLAIM_DEFERRALS[task_id] = reason
         return ClaimGate(expires, deferred=True)
     if board_mode(conn) != "primary":
@@ -862,6 +884,8 @@ def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate
     conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ?, "
                  "lease_version = COALESCE(?, lease_version) WHERE id = ?",
                  (gate._ids[1], lease.expires_ms, lease.version, task_id))
+    from hermes_cli.kanban_workspace_source import stash_grant_snapshot
+    stash_grant_snapshot(task_id, lease.source_snapshot)  # the resolver decides from the grant, not the replica
     gate.consumed = True
     return lease.run_uid
 
@@ -1261,6 +1285,9 @@ def _local_fields(conn: sqlite3.Connection, table: str, fields: Mapping[str, Any
         value = _from_wire(fields[wire])
         if column in SECONDS_COLUMNS.get(table, ()):
             value = to_seconds(value)
+        if column in JSON_SERVER_COLUMNS.get(table, ()):
+            from hermes_cli.kanban_workspace_source import json_column
+            value = json_column(value)
         if table == "tasks" and column == "priority" and value is not None:
             from hermes_cli.kanban_priority import bounded
             value = bounded(value)

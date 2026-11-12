@@ -20,6 +20,7 @@ LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choi
 
 from hermes_cli.config_env_registry import EnvVarRegistry as _EnvVarRegistry
 from hermes_cli.config_defaults_routing import routing_defaults
+from hermes_cli.kanban_workspace_source_config import DEFAULTS as _WORKSPACE_SOURCE_DEFAULTS
 
 
 DEFAULT_CONFIG = {
@@ -1960,15 +1961,14 @@ DEFAULT_CONFIG = {
         # Max triage tasks decomposed per tick (bounds the aux-LLM burst); excess defers to next tick.
         "auto_decompose_per_tick": 3,
         "auto_decompose_min_age_seconds": 120,  # sweep skips younger triage cards; 0 = immediate
-        # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
-        # ready on the next tick; a still-running local worker is terminated first. 0 = off.
+        # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to ready on the next
+        # tick; a still-running local worker is terminated first. 0 = off. ``workspace_source``: see its config module.
         "dispatch_stale_timeout_seconds": 14400,
-        # Soft deadline for cards with max_runtime_seconds: at this fraction of the cap the worker
-        # gets an OUT-OF-BAND steer to checkpoint with kanban_continue (re-queued as a fresh run,
-        # not a failure) before the hard kill at 100%. 0 = off (hard kill only).
+        "workspace_source": dict(_WORKSPACE_SOURCE_DEFAULTS),
+        # Soft deadline for max_runtime_seconds cards: at this fraction of the cap the worker gets an OUT-OF-BAND steer
+        # to checkpoint with kanban_continue (a fresh run, not a failure) before the hard kill at 100%. 0 = off.
         "soft_deadline_fraction": 0.85,
-        # Bound on back-to-back kanban_continue runs without a completion; past it the worker
-        # must complete or block.
+        # Bound on back-to-back kanban_continue runs without a completion; past it the worker must complete or block.
         "max_continuations": 12,
         # Shared external blockers (kanban_block/kanban_continue blocker_id): while one is open,
         # the dispatcher spawns at most one card behind it per this many seconds (one probe at a

@@ -1,0 +1,340 @@
+"""workspace_source v1 core PR-1 (t_01a1d0ec4ab93f32): manifest schema, grant snapshot threading, R4b routing,
+R4c fence + compat, pull-only columns, config, S9 protocol refusal, pickup skip and the claim-side skip memo."""
+
+from __future__ import annotations
+
+import json
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import kanban_workspace_source as kws
+from tests.hermes_cli import kanban_sync_support as support
+
+C1 = "a" * 40
+
+
+def manifest(**over) -> dict:
+    m = {"version": 1, "repository": {"id": 42, "full_name": "acme/widget", "url": "https://github.com/acme/widget"},
+         "branch": "refs/heads/wt/t_1", "commit": C1, "base_commit": None, "published_at": 1,
+         "manifest_revision": 1, "published_by": {"run_uid": "r1", "machine": "hub"}, "source_kind": "task_worktree",
+         "artifacts": []}
+    m.update(over)
+    return m
+
+
+def custody(**over) -> dict:
+    c = {"source_holder": "hub", "state": "published", "manifest_revision": 1, "attached_run_uid": None,
+         "reason": None, "updated_at": 1}
+    c.update(over)
+    return c
+
+
+def enabled(**over) -> kws.Settings:
+    base = dict(enabled=True, requested=True, clones={}, publish_on_park=True, push_timeout_s=30,
+                preflight_timeout_s=60, materialize_timeout_s=None)
+    base.update(over)
+    return kws.Settings(**base)
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    return support.kanban_home(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def conn(kanban_home):
+    yield from support.synced_conn(kanban_home)
+
+
+# --- manifest (v2 §1, v4 §0) ----------------------------------------------------------------------------------------
+
+def test_manifest_v1_parses():
+    m = kws.parse_manifest(json.dumps(manifest()))
+    assert (m.repository_id, m.short_branch, m.commit, m.manifest_revision) == (42, "wt/t_1", C1, 1)
+
+
+@pytest.mark.parametrize("bad", [
+    {"version": 2}, {"extra": 1}, {"artifacts": [{"attachment_uid": "u", "filename": "f", "sha256": "0" * 64}]},
+    {"commit": "HEAD"}, {"branch": "wt/t_1"}, {"branch": "refs/heads/../x"}, {"repository": {"id": 1}},
+    {"repository": {"id": 42, "full_name": "acme/widget", "url": "https://gitlab.com/acme/widget"}},
+    {"manifest_revision": 0}, {"published_by": {"run_uid": "r1"}}, {"source_kind": "dir"},
+    {"base_commit": "xyz"}, {"version": True},
+])
+def test_manifest_strict_schema_refuses(bad):
+    with pytest.raises(kws.ManifestInvalid):
+        kws.parse_manifest(manifest(**bad))
+
+
+def test_manifest_size_cap():
+    with pytest.raises(kws.ManifestInvalid, match="max"):
+        kws.parse_manifest(json.dumps(manifest()) + " " * kws.MANIFEST_MAX_BYTES)
+
+
+# --- settings (S9) -----------------------------------------------------------------------------------------------
+
+def test_enabled_refused_until_protocol_complete(caplog):
+    kws._WARNED.clear()
+    with caplog.at_level(logging.WARNING):
+        s = kws.settings({"kanban": {"workspace_source": {"enabled": True, "clones": {"acme/widget": "/x"}}}})
+    assert s.requested and not s.enabled
+    assert "SOURCE_PROTOCOL_COMPLETE" in caplog.text
+    assert kws.SOURCE_PROTOCOL_COMPLETE is False
+
+
+def test_config_defaults_and_derived_timeouts():
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["kanban"]["workspace_source"] == {
+        "enabled": False, "clones": {}, "publish_on_park": True, "push_timeout_s": 30,
+        "preflight_timeout_s": None, "materialize_timeout_s": None}
+    s = kws.settings({"kanban": {"workspace_source": {"push_timeout_s": 10}}})
+    assert (s.enabled, s.preflight_timeout_s, s.materialize_bound(900)) == (False, 40, 270)
+
+
+# --- grant snapshot (v3 §6, v4.1 §B S2) -------------------------------------------------------------------------
+
+def test_snapshot_keys_absent_is_old_board():
+    assert kws.snapshot_from_row({"title": "x"}) is None
+    assert kws.snapshot_from_row(None) is None
+
+
+def test_snapshot_present_null_is_no_custody():
+    snap = kws.snapshot_from_row({"workspace_source": None, "workspace_custody": None})
+    assert snap is not None and not snap.has_source
+
+
+def test_grant_snapshot_threads_from_lease_response(conn):
+    """``HubLeaseClient._lease`` reads the grant response row; ``stage_claim`` hands it to the dispatcher."""
+    hub = SimpleNamespace(leases=lambda board_id, body: {
+        "status": "applied", "lease": {"run_uid": body["run_uid"], "expires": 10**13, "holder": "gw"}, "version": 3,
+        "row": {"workspace_source": manifest(), "workspace_custody": custody()}})
+    lease = ksc.HubLeaseClient(hub).acquire(board_id="b", task_uid="t_x", run_uid="r9", gateway_id="gw", ttl_s=60)
+    assert lease.granted and lease.source_snapshot.has_source
+    assert lease.source_snapshot.manifest().commit == C1
+    tid = kb.create_task(conn, title="snap", assignee="worker")
+    gate = sync.ClaimGate(10**10, lease=lease, ids=("b", "gw", tid))
+    with kbc.write_txn(conn):
+        sync.stage_claim(conn, tid, gate)
+    assert kws.pop_grant_snapshot(tid) is lease.source_snapshot
+    old = ksc.HubLeaseClient(SimpleNamespace(leases=lambda b, body: {
+        "status": "applied", "lease": {"run_uid": body["run_uid"], "expires": 1}})).acquire(
+        board_id="b", task_uid="t_x", run_uid="r9", gateway_id="gw", ttl_s=60)
+    assert old.source_snapshot is None
+
+
+# --- pull-only columns (v3 §11.2) ---------------------------------------------------------------------------------
+
+def _with_source(conn, tid, src=None, cust=None):
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET applying = 1")
+        conn.execute("UPDATE tasks SET workspace_source = ?, workspace_custody = ? WHERE id = ?",
+                     (None if src is None else json.dumps(src), None if cust is None else json.dumps(cust), tid))
+        conn.execute("UPDATE kanban_sync_state SET applying = 0")
+
+
+def test_pull_only_columns_applied_never_captured(conn):
+    cols_now = set(sync.table_columns(conn, "tasks"))
+    assert {"workspace_source", "workspace_custody"} <= cols_now
+    assert not {"workspace_source", "workspace_custody"} & set(sync.captured_columns(conn, "tasks"))
+    assert not {"workspace_source", "workspace_custody"} & sync.SYNCED_COLUMNS["tasks"]
+    assert not sync.undeclared_columns(conn).get("tasks")
+    tid = kb.create_task(conn, title="pulled", assignee="worker")
+    cols = sync._local_fields(conn, "tasks", {"workspace_source": manifest(), "workspace_custody": custody(),
+                                              "title": "pulled"}, tid)
+    assert json.loads(cols["workspace_source"]) == manifest() and json.loads(cols["workspace_custody"]) == custody()
+    with kbc.write_txn(conn):
+        conn.execute("DELETE FROM kanban_sync_outbox")
+    _with_source(conn, tid, manifest(), custody())
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET priority = 2 WHERE id = ?", (tid,))
+    ops = [json.loads(r[0]) for r in conn.execute("SELECT fields FROM kanban_sync_outbox WHERE row_uid = ?", (tid,))]
+    assert ops and not any({"workspace_source", "workspace_custody"} & set(op) for op in ops)
+
+
+def test_row_fields_pin_accepts_virtual_receipt():
+    """The Board row-contract pin (``kanban_board_row_fields.json``) carries the hub PR's ``source_receipt``."""
+    from pathlib import Path
+    pin = json.loads(Path(sync.__file__).with_name("kanban_board_row_fields.json").read_text(encoding="utf-8"))
+    for table, fields in sync.VIRTUAL_WIRE_FIELDS.items():
+        assert set(fields) <= set(pin["row_fields"][table])
+    assert not {"workspace_source", "workspace_custody"} & set(pin["row_fields"]["tasks"])  # never row-writable
+
+
+# --- R4c fence + compat ---------------------------------------------------------------------------------------------
+
+def test_edit_kind_refused_on_custody_card(conn):
+    from hermes_cli import kanban_db_workspace as kbw
+    tid = kb.create_task(conn, title="fenced", assignee="worker")
+    kbw.set_branch_name(conn, tid, "wt/a")  # no source yet: allowed
+    kind = conn.execute("SELECT workspace_kind FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+    _with_source(conn, tid, cust=custody(state="retained"))
+    with pytest.raises(kws.SourceFenced, match="source_fenced"):
+        kbw._set_task_column(conn, tid, "workspace_kind", "dir")
+    with pytest.raises(kws.SourceFenced):
+        kbw.set_branch_name(conn, tid, "wt/b")
+    kbw.set_branch_name(conn, tid, "wt/a")  # unchanged value: not a flip
+    kbw.set_workspace_path(conn, tid, "/tmp/elsewhere")  # not fenced
+    assert tuple(conn.execute("SELECT workspace_kind, branch_name FROM tasks WHERE id = ?", (tid,)).fetchone()) == (
+        kind, "wt/a")
+
+
+@pytest.mark.parametrize("field", ["workspace_kind", "branch_name"])
+def test_fenced_field_refusal_strips_and_resends_without_omission(conn, field):
+    """Q3/R4c: ``not writable on tasks: <field>`` for a fenced column drops it, resends the rest, no omission."""
+    from hermes_cli import kanban_sync_compat as compat
+    tid = kb.create_task(conn, title="flip", assignee="worker")
+    with kbc.write_txn(conn):
+        conn.execute("DELETE FROM kanban_sync_outbox")
+        conn.execute(f"UPDATE tasks SET {field} = 'dir', priority = 5 WHERE id = ?", (tid,))
+    row = dict(conn.execute("SELECT * FROM kanban_sync_outbox WHERE row_uid = ? AND op = 'upsert'", (tid,)).fetchone())
+    wire = ksc.translate(ksc._full_row_if_unseen(conn, row), "hlc")
+    with kbc.write_txn(conn):
+        out = compat.enqueue_retry(conn, row, wire, {"reason": "forbidden_field",
+                                                     "detail": f"not writable on tasks: {field}"})
+    assert out == compat.VIRTUAL_DROPPED
+    assert conn.execute("SELECT COUNT(*) FROM kanban_sync_omissions").fetchone()[0] == 0
+    resent = [json.loads(r[0]) for r in conn.execute(
+        "SELECT fields FROM kanban_sync_outbox WHERE row_uid = ? AND op_id != ?", (tid, row["op_id"]))]
+    assert resent and all(field not in f for f in resent) and any(f.get("priority") == 5 for f in resent)
+
+
+# --- R4b routing ----------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["scratch", "dir", "worktree"])
+def test_custody_card_routes_to_source_resolver_regardless_of_kind(conn, monkeypatch, kind):
+    from hermes_cli import kanban_db_workspace as kbw
+    from hermes_cli import kanban_source_dispatch as ksd
+    from hermes_cli import kanban_source_resolver as ksr
+
+    def legacy(*_a, **_k):
+        raise AssertionError("legacy resolver reached for a source card")
+    for name in ("resolve_worktree_for_dispatch", "resolve_workspace", "_ensure_git_worktree"):
+        monkeypatch.setattr(kbw, name, legacy)
+    seen = {}
+
+    def fake(conn_, task, snapshot, **kw):
+        seen.update(task=task.id, snapshot=snapshot)
+        return ksr.ResolvedSource(path="/src/wt", branch="wt/t_1", commit=C1, manifest_revision=1, mode="materialized")
+    monkeypatch.setattr(ksr, "resolve_source_workspace", fake)
+    claimed = SimpleNamespace(id="t_route", workspace_kind=kind, claim_expires=None, current_run_id=None)
+    snap = kws.snapshot_from_row({"workspace_source": manifest(), "workspace_custody": custody()})
+    kws.stash_grant_snapshot("t_route", snap)
+    workspace, branch, source = ksd.resolve(conn, claimed, board=None, kbw=kbw)
+    assert (str(workspace), branch, source.mode, seen["snapshot"]) == ("/src/wt", "wt/t_1", "materialized", snap)
+
+
+def test_no_source_snapshot_takes_legacy_path(conn, monkeypatch):
+    from hermes_cli import kanban_db_workspace as kbw
+    from hermes_cli import kanban_source_dispatch as ksd
+    monkeypatch.setattr(kbw, "resolve_workspace", lambda task, board=None: "/legacy")
+    claimed = SimpleNamespace(id="t_plain", workspace_kind="scratch")
+    kws.stash_grant_snapshot("t_plain", kws.snapshot_from_row({"workspace_source": None, "workspace_custody": None}))
+    assert ksd.resolve(conn, claimed, board=None, kbw=kbw) == ("/legacy", None, None)
+
+
+def test_kind_flip_does_not_readmit_creator(conn, monkeypatch):
+    """A card retained on another host whose local ``workspace_kind`` was flipped to ``dir`` still routes on the
+    grant snapshot, so the creator never falls back to its legacy ``dir``/worktree path."""
+    from hermes_cli import kanban_db_workspace as kbw
+    from hermes_cli import kanban_source_dispatch as ksd
+    monkeypatch.setattr(kbw, "resolve_workspace", lambda *a, **k: pytest.fail("legacy dir path reached"))
+    monkeypatch.setattr(kws, "settings", lambda config=None: enabled())
+    claimed = SimpleNamespace(id="t_flip", workspace_kind="dir", claim_expires=None, workspace_path=None)
+    kws.stash_grant_snapshot("t_flip", kws.snapshot_from_row(
+        {"workspace_source": manifest(), "workspace_custody": custody(source_holder="worker-2", state="retained")}))
+    with pytest.raises(kws.WorkspaceSourceRefusal) as err:
+        ksd.resolve(conn, claimed, board=None, kbw=kbw)
+    assert (err.value.code, err.value.scope) == ("custody_not_portable", "host")
+
+
+def test_dispatch_routes_before_kind_branch():
+    """``_dispatch_lane_task`` hands every claimed card to the source seam; no ``workspace_kind`` read precedes it."""
+    import inspect
+    from hermes_cli import kanban_db_dispatch as d
+    src = inspect.getsource(d._dispatch_lane_task)
+    route = src.index("_source_dispatch.resolve(")
+    assert "workspace_kind" not in src[:route]
+    assert "resolve_worktree_for_dispatch" not in src and "_kbw.resolve_workspace(" not in src
+
+
+# --- pickup skip + skip memo ----------------------------------------------------------------------------------------
+
+def _card(**cols):
+    return {"id": "t_pick", "workspace_source": None, "workspace_custody": None, **cols}
+
+
+def test_pickup_skip_disabled_is_inert(conn):
+    card = _card(workspace_source=json.dumps(manifest()), workspace_custody=json.dumps(custody(state="retained")))
+    assert kws.pickup_skip(conn, card, "worker-2", cfg=kws.settings({})) is None
+
+
+@pytest.mark.parametrize("cols,proven,expect", [
+    ({}, set(), None),  # plain card
+    ({"workspace_custody": json.dumps(custody(state="retained"))}, {42}, "manifest_invalid"),
+    ({"workspace_source": json.dumps(manifest()), "workspace_custody": json.dumps(custody(state="retained"))}, {42},
+     "custody retained"),
+    ({"workspace_source": json.dumps(manifest(version=2)), "workspace_custody": json.dumps(custody())}, {42},
+     "manifest_invalid"),
+    ({"workspace_source": json.dumps(manifest()), "workspace_custody": json.dumps(custody())}, set(), "no proven clone"),
+    ({"workspace_source": json.dumps(manifest()), "workspace_custody": json.dumps(custody())}, {42}, None),
+    ({"workspace_source": json.dumps(manifest()),
+      "workspace_custody": json.dumps(custody(source_holder="worker-2", state="retained"))}, set(), None),  # holder
+])
+def test_pickup_skip(conn, cols, proven, expect):
+    out = kws.pickup_skip(conn, _card(**cols), "worker-2", cfg=enabled(), proven_ids=proven)
+    assert (out is None) if expect is None else (out is not None and expect in out)
+
+
+def test_worker_node_pickup_skips_unportable_source_card(conn, monkeypatch):
+    """The pickup queue leaves a source card it cannot materialize on the Board (inert while disabled)."""
+    from hermes_cli import kanban_worker_node as kwn
+    import hermes_cli.kanban_runs_on_capabilities as caps
+    monkeypatch.setattr(kwn, "eligible", lambda card, own, machines: None)
+    monkeypatch.setattr(caps, "claim_refusal", lambda card, me=None: None)
+    card = {"id": "t_board", "status": "ready", "runs_on": '["linux"]', "assignee": None,
+            "workspace_source": json.dumps(manifest()), "workspace_custody": json.dumps(custody())}
+    args = dict(mode="auto", review_enabled=True, profile_exists=None)
+    assert kwn._skip_reason(conn, card, "worker-2", {}, **args) is None  # disabled: nothing changes
+    monkeypatch.setattr(kws, "settings", lambda config=None: enabled())
+    monkeypatch.setattr("hermes_cli.kanban_source_clones.proven_repo_ids", lambda cfg=None: set())
+    reason, detail = kwn._skip_reason(conn, card, "worker-2", {}, **args)
+    assert reason == "capability_missing" and "no proven clone of acme/widget" in detail
+
+
+def test_sync_round_attests_sources(monkeypatch):
+    """``sync_all_once`` runs the (rate-limited, inert-when-disabled) attestation hook every round."""
+    from hermes_cli import kanban_source_clones as kcl
+    calls = []
+    monkeypatch.setattr(kcl, "attest_if_due", lambda hub: calls.append(hub))
+    monkeypatch.setattr(ksc, "publish_pickup_if_changed", lambda hub: False)
+    hub = SimpleNamespace(ident=None)
+    ksc.sync_all_once(hub, boards=[])
+    assert calls == [hub]
+
+
+def test_host_refusal_memo_skips_revision_until_republish(conn):
+    tid = kb.create_task(conn, title="memo", assignee="worker")
+    _with_source(conn, tid, src=manifest(manifest_revision=3), cust=custody(manifest_revision=3))
+    with kbc.write_txn(conn):
+        kws.remember_skip(conn, tid, 3, "materialize_timeout")
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+    assert sync._source_skip(conn, row) == "workspace_source_refused_here:materialize_timeout"
+    assert "materialize_timeout" in kws.pickup_skip(conn, dict(row), "worker-2", cfg=enabled(), proven_ids={42})
+    _with_source(conn, tid, src=manifest(manifest_revision=4), cust=custody(manifest_revision=4))
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+    assert sync._source_skip(conn, row) is None
+
+
+def test_refusal_codes_scoped():
+    assert kws.WorkspaceSourceRefusal("materialize_timeout").scope == "host"  # Q3
+    for code in ("remote_drift", "remote_branch_missing", "manifest_invalid", "custody_source_missing"):
+        assert kws.WorkspaceSourceRefusal(code).scope == "card"
+    with pytest.raises(ValueError):
+        kws.WorkspaceSourceRefusal("made_up")
+    from hermes_cli.kanban_db_workspace import WorktreeWorkspaceConfigError
+    assert not issubclass(kws.WorkspaceSourceRefusal, WorktreeWorkspaceConfigError)

@@ -1093,6 +1093,8 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     ident = load_identity() if hub is None else hub.ident
     hub = hub or Hub(ident)
     publish_pickup_if_changed(hub)
+    from hermes_cli.kanban_source_clones import attest_if_due
+    attest_if_due(hub)  # workspace_source clone attestation; inert unless enabled
     results = []
     for slug, path in board_paths() if boards is None else boards:
         mark = sync_timing.board_start(slug, results)
@@ -1974,9 +1976,10 @@ class HubLeaseClient:
             raise sync.LeaseUnavailable(str(exc)) from exc
         lease = res.get("lease") or {}
         granted = res.get("status") == "applied" and lease.get("run_uid") == run_uid
+        from hermes_cli.kanban_workspace_source import snapshot_from_row
         return sync.Lease(granted=granted, run_uid=run_uid, expires_ms=lease.get("expires"),
                           holder=lease.get("holder"), reason=None if granted else res.get("reason"),
-                          version=res.get("version"))
+                          version=res.get("version"), source_snapshot=snapshot_from_row(res.get("row")))
 
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
                 lane: str = "ready") -> sync.Lease:

@@ -1970,13 +1970,11 @@ def _dispatch_lane_task(
         if deferral is not None:  # the lane decides whether this refusal permits later candidates
             result.claim_deferred.append((task_id, deferral))
         return False
-    try:
-        resolved_branch_name = None
-        if claimed.workspace_kind == "worktree":
-            workspace, resolved_branch_name = _kbw.resolve_worktree_for_dispatch(conn, claimed, board=board)
-        else:
-            workspace = _kbw.resolve_workspace(claimed, board=board)
+    try:  # R4b: a grant snapshot with custody or a manifest routes to the source resolver before any kind branch
+        workspace, resolved_branch_name, source = _source_dispatch.resolve(conn, claimed, board=board, kbw=_kbw)
     except Exception as exc:
+        if _source_dispatch.refused(conn, claimed, exc, result):
+            return False
         # A misconfigured worktree (no repo to anchor it, relative path, board
         # without default_workdir) fails identically on every retry: block on the
         # first occurrence (sticky) with the reason instead of spending the
@@ -1991,9 +1989,9 @@ def _dispatch_lane_task(
             result.auto_blocked.append(claimed.id)
         return False
     _kbw.set_workspace_path(conn, claimed.id, str(workspace))
-    if claimed.workspace_kind == "worktree":
+    if claimed.workspace_kind == "worktree" and source is None:  # a source card's branch is the manifest's (fenced)
         _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
-    _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+    _kbw._maybe_emit_scratch_tip(conn, claimed.id, "worktree" if source is not None else claimed.workspace_kind)
     if lane == "review":
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
@@ -2910,3 +2908,4 @@ def run_daemon(
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
 from hermes_cli import kanban_db_workspace as _kbw
+from hermes_cli import kanban_source_dispatch as _source_dispatch

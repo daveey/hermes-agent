@@ -684,6 +684,35 @@ that home may claim — anything else lands in the dispatcher's
 `skipped_nonspawnable` bucket instead of spawning, and no longer counts as
 spawnable work for the gateway's wake-up probe.
 
+### Portable worktree sources (`kanban.workspace_source`, preview)
+
+A synced board can move a branch-backed card between machines: the Board keeps a
+manifest (`repository`, `branch`, exact `commit`) and custody (`source_holder`,
+`state`), and a machine that picks the card up materializes that exact branch
+and commit in a dedicated registered clone. This release ships the client half
+**inert**: setting `enabled: true` logs a warning and is ignored until the
+publish protocol lands.
+
+```yaml
+kanban:
+  workspace_source:
+    enabled: false            # ignored (warns) until the protocol is complete
+    clones:                   # GitHub "owner/name" -> absolute path of a dedicated clone
+      acme/widget: /home/me/code/_src/widget
+    publish_on_park: true     # push the task branch when a run parks or ends
+    push_timeout_s: 30
+    preflight_timeout_s: null    # null = push_timeout_s + 30
+    materialize_timeout_s: null  # null = claim ttl / 3 - 30 s
+```
+
+A clone is proven before it is used or attested to the Board: its root, a
+GitHub `origin` with no `pushurl` or `url.*` rewrite, a reachable remote, and a
+GitHub repository id (cached 6 h per home) that matches the manifest. A host
+that cannot materialize a card (wrong or dirty clone, occupied path, timeout)
+releases it without a failure and skips that manifest revision; a source that
+moved or vanished blocks the card for a person. On such cards
+`workspace_kind` and `branch_name` cannot be changed (`source_fenced`).
+
 ### Idempotent create (for automation / webhooks)
 
 ```bash

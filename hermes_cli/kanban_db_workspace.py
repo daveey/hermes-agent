@@ -1065,7 +1065,9 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
 
 
 def _set_task_column(conn: sqlite3.Connection, task_id: str, column: str, value: str) -> None:
+    from hermes_cli.kanban_workspace_source import fence
     with _kb.write_txn(conn):
+        fence(conn, task_id, column, value)  # R4c: kind/branch are fenced on a card with a workspace source
         conn.execute(f"UPDATE tasks SET {column} = ? WHERE id = ?", (value, task_id))
 
 
