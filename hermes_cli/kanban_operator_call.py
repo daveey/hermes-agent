@@ -1,0 +1,710 @@
+"""Scoped Board-operator call: a worker asks for ONE op on ONE named foreign card. [daveey]
+
+A gateway's live ``kanban.db`` holds only its own cards, so ``kanban_comment`` / ``kanban_move`` / ``kanban_unblock``
+on a card another gateway created refuse ``foreign_card``. This module is the supported path, one
+``kanban_supervisor_request`` op (``{"op": "operator", "action": "comment"|"move"|"unblock", "task_id": ...}``):
+
+1. Request side (the caller's gateway, its non-worker supervisor drain): re-checks scope, appends
+   ``operator_call_requested`` on the caller's OWN card (the Board carries it to every replica) and parks the request
+   in phase ``awaiting_home``.
+2. Home side (every gateway's dispatcher tick, :func:`apply_incoming`): reads new request events from its replica
+   (id watermark), keeps those naming a card this gateway created, proves the caller (the run was live, the Board
+   lease holder and the event's Board ``origin_gateway`` are the caller's gateway), applies the op through the
+   ordinary functions on its live file and appends ``operator_call_result`` on the target card.
+3. Request side again (:func:`poll`): finds that result in the replica, finishes the request and wakes the caller.
+
+Only comment, move and unblock exist. complete / archive / link / unlink / block / edit of a foreign card stay with
+its owner and are refused; so is any second op or a card the op does not name. No Board admin key is read here.
+Every call, accepted or refused, is logged in ``operator_calls`` on the gateway that saw it.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import socket
+import sqlite3
+import time
+import uuid
+from contextlib import contextmanager
+from typing import Any, Iterator, Optional
+
+_log = logging.getLogger(__name__)
+
+OP = "operator"
+ACTIONS = ("comment", "move", "unblock")
+OWNER_ONLY = ("complete", "archive", "link", "unlink", "block", "edit", "assign", "delete", "reclaim")
+DEFERRED = ("label_publish",)
+REQUEST_KIND = "operator_call_requested"
+RESULT_KIND = "operator_call_result"
+REFUSED_KIND = "operator_call_refused"
+COMMENT_MARK = "operator_call_commented"
+PHASE = "awaiting_home"
+DEADLINE_S = 24 * 3600
+MAX_TEXT = 8000
+MAX_REASON = 2000
+MAX_IN_FLIGHT = 3
+MAX_PER_DAY = 20
+MAX_PER_TICK = 5
+SCAN_BATCH = 500
+SKEW_S = 120
+AUTHOR = "kanban-operator-call"
+_FIELDS = {"comment": {"text"}, "move": {"runs_on", "reason"}, "unblock": {"reason"}}
+_MARK: dict = {}  # (live db path, board) -> replica event id scanned up to, this process
+_PERSISTED: dict = {}
+
+_SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS operator_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_uid TEXT NOT NULL,
+        side TEXT NOT NULL,
+        board TEXT,
+        action TEXT,
+        target_task_id TEXT,
+        caller_gateway TEXT,
+        caller_task_id TEXT,
+        caller_run_id INTEGER,
+        caller_run_uid TEXT,
+        caller_profile TEXT,
+        caller_host TEXT,
+        executor_gateway TEXT,
+        args_digest TEXT,
+        request_event_uid TEXT,
+        outcome TEXT NOT NULL,
+        detail TEXT,
+        supervisor_request_id INTEGER,
+        created_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        UNIQUE(request_uid, side))""",
+    "CREATE INDEX IF NOT EXISTS idx_operator_calls_caller ON operator_calls(caller_task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_operator_calls_target ON operator_calls(target_task_id, created_at)",
+    "CREATE TABLE IF NOT EXISTS operator_call_scan (board TEXT PRIMARY KEY, last_id INTEGER NOT NULL, "
+    "replica_ino INTEGER)",
+)
+
+
+def _err(code: str, message: str):
+    from hermes_cli.kanban_supervisor_requests import SupervisorRequestError
+    return SupervisorRequestError(code, message)
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    for stmt in _SCHEMA:
+        conn.execute(stmt)
+
+
+def _has_log(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_calls'").fetchone() is not None
+
+
+# --- validation ----------------------------------------------------------------------------------
+
+def is_operator(raw_ops: Any) -> bool:
+    return isinstance(raw_ops, list) and any(isinstance(o, dict) and str(o.get("op") or "").strip() == OP
+                                             for o in raw_ops)
+
+
+def normalize_op(i: int, op: dict) -> dict:
+    action = str(op.get("action") or "").strip()
+    if action in OWNER_ONLY:
+        raise _err("operator_action_refused", f"op {i}: {action} of another gateway's card stays with its owner; "
+                   f"the operator call only does {', '.join(ACTIONS)}")
+    if action in DEFERRED:
+        raise _err("operator_action_refused", f"op {i}: {action} is not available through the operator call yet")
+    if action not in ACTIONS:
+        raise _err("operator_action_refused", f"op {i}: action must be one of {', '.join(ACTIONS)}")
+    task_id = str(op.get("task_id") or "").strip()
+    if not task_id:
+        raise _err("invalid_ops", f"op {i}: task_id (the one foreign card) is required")
+    extra = set(op) - {"op", "action", "task_id"} - _FIELDS[action]
+    if extra:
+        raise _err("invalid_ops", f"op {i}: {action} takes only task_id and {', '.join(sorted(_FIELDS[action]))}; "
+                   f"unexpected {', '.join(sorted(extra))} (one call names one card)")
+    out: dict[str, Any] = {"op": OP, "action": action, "task_id": task_id}
+    if action == "comment":
+        text = str(op.get("text") or "").strip()
+        if not text:
+            raise _err("invalid_ops", f"op {i}: comment text is required")
+        if len(text) > MAX_TEXT:
+            raise _err("invalid_ops", f"op {i}: comment text is over {MAX_TEXT} characters")
+        out["text"] = text
+    else:
+        reason = str(op.get("reason") or "").strip()
+        if not reason:
+            raise _err("invalid_ops", f"op {i}: reason is required for {action}")
+        out["reason"] = reason[:MAX_REASON]
+    if action == "move":
+        from hermes_cli import kanban_worker_node as wn
+        try:
+            labels = wn.normalize_runs_on(op.get("runs_on"))
+        except ValueError as exc:
+            raise _err("invalid_ops", f"op {i}: {exc}") from None
+        out["runs_on"] = list(labels or [])
+    return out
+
+
+def label(op: dict) -> str:
+    return f"operator {op.get('action')} {op.get('task_id')}"
+
+
+def _digest(op: dict) -> str:
+    body = {k: v for k, v in op.items() if k not in ("op",)}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
+
+
+# --- seams (tests replace these) -----------------------------------------------------------------
+
+def _own_gateway(conn: sqlite3.Connection) -> Optional[str]:
+    from hermes_cli import kanban_capability_routing as kcr
+    return kcr._own_gateway(conn)
+
+
+def _db_path(conn: sqlite3.Connection) -> Optional[str]:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return row[2] if row and row[2] else None
+
+
+@contextmanager
+def _replica(conn: sqlite3.Connection) -> Iterator[Optional[sqlite3.Connection]]:
+    from hermes_cli import kanban_foreign_card as kfc
+    with kfc.open_replica(_db_path(conn)) as rep:
+        yield rep
+
+
+def _board_slug(conn: sqlite3.Connection) -> str:
+    from hermes_cli import kanban_db_sync as sync
+    path = _db_path(conn)
+    return sync.board_slug_for_path(path) if path else "default"
+
+
+def _evidence(board: str, event_uid: str) -> dict:
+    """The Board's own copy of the request event (raises when the Board is unreachable)."""
+    from hermes_cli import kanban_sync_client as ksc
+    return ksc.Hub(ksc.load_identity()).row_evidence(board, "task_events", event_uid)
+
+
+def _outbox_rows(conn: sqlite3.Connection) -> Optional[int]:
+    try:
+        return conn.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE table_name = 'task_events'").fetchone()[0]
+    except sqlite3.OperationalError:
+        return None
+
+
+def _synced(conn: sqlite3.Connection) -> bool:
+    from hermes_cli import kanban_db_sync as sync
+    try:
+        return bool(sync.sync_state(conn))
+    except Exception:  # health: allow BLE001 -- an unreadable sync state is an unsynced board
+        return False
+
+
+# --- log -----------------------------------------------------------------------------------------
+
+def log(conn: sqlite3.Connection, *, request_uid: str, side: str, outcome: str, op: Optional[dict] = None,
+        caller: Optional[dict] = None, detail: Optional[str] = None, board: Optional[str] = None,
+        executor_gateway: Optional[str] = None, request_event_uid: Optional[str] = None,
+        supervisor_request_id: Optional[int] = None, finished: bool = False) -> None:
+    """Insert or update the ``(request_uid, side)`` log row inside the caller's txn."""
+    ensure_schema(conn)
+    op, caller, now = op or {}, caller or {}, int(time.time())
+    conn.execute(
+        "INSERT INTO operator_calls (request_uid, side, board, action, target_task_id, caller_gateway, "
+        "caller_task_id, caller_run_id, caller_run_uid, caller_profile, caller_host, executor_gateway, args_digest, "
+        "request_event_uid, outcome, detail, supervisor_request_id, created_at, finished_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_uid, side) DO UPDATE SET "
+        "outcome=excluded.outcome, detail=COALESCE(excluded.detail, detail), "
+        "request_event_uid=COALESCE(excluded.request_event_uid, request_event_uid), "
+        "executor_gateway=COALESCE(excluded.executor_gateway, executor_gateway), finished_at=excluded.finished_at",
+        (request_uid, side, board, op.get("action"), op.get("task_id"), caller.get("gateway"),
+         caller.get("task_id"), caller.get("run_id"), caller.get("run_uid"), caller.get("profile"),
+         caller.get("host"), executor_gateway, _digest(op) if op else None, request_event_uid, outcome,
+         (detail or None) and str(detail)[:500], supervisor_request_id, now, now if finished else None))
+
+
+def _caller_here(conn: sqlite3.Connection, task: Optional[str], run: Optional[int]) -> dict:
+    run_uid = None
+    if task:
+        try:
+            row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (run,)).fetchone()
+            run_uid = row[0] if row else None
+        except sqlite3.OperationalError:
+            run_uid = None
+    return {"gateway": _own_gateway(conn), "task_id": task, "run_id": run, "run_uid": run_uid,
+            "profile": os.environ.get("HERMES_PROFILE") or "default", "host": socket.gethostname()}
+
+
+def log_submit_refusal(conn: sqlite3.Connection, *, env_task: Optional[str], env_run: Optional[str], raw_ops: Any,
+                       code: str, message: str) -> None:
+    """Record a refused operator call (its own txn, committed before the caller raises)."""
+    from hermes_cli import kanban_db as kb
+    try:
+        run = int(env_run) if env_run else None
+    except ValueError:
+        run = None
+    op = next((o for o in raw_ops if isinstance(o, dict) and o.get("op") == OP), {}) if isinstance(raw_ops, list) else {}
+    op = {"action": str(op.get("action") or "")[:40], "task_id": str(op.get("task_id") or "")[:64]}
+    try:
+        with kb.write_txn(conn):
+            caller = _caller_here(conn, env_task, run)
+            log(conn, request_uid=uuid.uuid4().hex, side="request", outcome="refused", op=op, caller=caller,
+                detail=f"{code}: {message}", board=_board_slug(conn), finished=True)
+            if env_task and kb.get_task(conn, env_task) is not None:
+                kb._append_event(conn, env_task, REFUSED_KIND, {**op, "code": code, "detail": message[:500]})
+    except Exception:  # health: allow BLE001 -- the refusal itself still reaches the caller
+        _log.warning("kanban: could not log a refused operator call", exc_info=True)
+
+
+# --- request side --------------------------------------------------------------------------------
+
+def _target_row(rep: Optional[sqlite3.Connection], task_id: str) -> Optional[sqlite3.Row]:
+    if rep is None:
+        return None
+    try:
+        return rep.execute("SELECT id, status, created_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _rate_refusal(conn: sqlite3.Connection, requester: str) -> Optional[str]:
+    if not _has_log(conn):
+        return None
+    now = int(time.time())
+    open_n = conn.execute("SELECT COUNT(*) FROM operator_calls WHERE side='request' AND caller_task_id=? "
+                          "AND outcome='forwarded'", (requester,)).fetchone()[0]
+    if open_n >= MAX_IN_FLIGHT:
+        return f"{requester} already has {open_n} operator calls in flight (max {MAX_IN_FLIGHT}); wait for them"
+    day_n = conn.execute("SELECT COUNT(*) FROM operator_calls WHERE side='request' AND caller_task_id=? "
+                         "AND outcome != 'refused' AND created_at > ?", (requester, now - 86400)).fetchone()[0]
+    if day_n >= MAX_PER_DAY:
+        return f"{requester} made {day_n} operator calls in 24 h (max {MAX_PER_DAY})"
+    return None
+
+
+def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
+    from hermes_cli import kanban_capability_routing as kcr
+    from hermes_cli import kanban_db as kb
+    target = op["task_id"]
+    verdict = {**op}
+
+    def refuse(code: str, why: str) -> dict:
+        verdict.update(verdict="refused", code=code, reason=why)
+        return verdict
+
+    if target == requester:
+        return refuse("own_card", f"{target} is this worker's own card; use the ordinary kanban tools")
+    if kb.get_task(conn, target) is not None and kcr.card_home(conn, target) is None:
+        return refuse("not_foreign", f"{target} lives on this gateway; use kanban_comment / kanban_move / "
+                                     "kanban_unblock directly")
+    if not _synced(conn) or not _own_gateway(conn):
+        return refuse("not_synced", "this board does not sync to the Board, so no other gateway can be asked")
+    with _replica(conn) as rep:
+        row = _target_row(rep, target)
+        if row is None:
+            return refuse("unknown_task", f"no card {target} in this gateway's Board replica")
+        status, home = row["status"], row["created_on"]
+        human = None
+        if op["action"] == "unblock" and rep is not None:
+            human = rep.execute("SELECT human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
+    if not home:
+        return refuse("no_home", f"{target} has no created_on; no gateway owns it")
+    if home == _own_gateway(conn):
+        return refuse("not_foreign", f"{target} was created on this gateway")
+    if status in ("done", "archived"):
+        return refuse("terminal", f"{target} is {status}")
+    if op["action"] == "move" and status == "running":
+        return refuse("running", f"{target} is running; only its own run may move it (kanban_move)")
+    if op["action"] == "unblock":
+        if status != "blocked":
+            return refuse("not_blocked", f"{target} is {status}, not blocked")
+        refusal = _human_gate(human[0] if human else None, human[1] if human else None, target)
+        if refusal:
+            return refuse("human_gate", refusal)
+    rate = _rate_refusal(conn, requester)
+    if rate:
+        return refuse("rate_limited", rate)
+    verdict.update(verdict="supervisor", home=home)
+    return verdict
+
+
+def _human_gate(human_request: Any, block_kind: Optional[str], target: str) -> Optional[str]:
+    from hermes_cli.kanban_continuation import HUMAN_BLOCK_KINDS
+    if human_request or block_kind in HUMAN_BLOCK_KINDS:
+        return (f"{target} waits on a human ({block_kind or 'human_request'}); only the human's own unblock "
+                "releases it")
+    return None
+
+
+def start(conn: sqlite3.Connection, req: dict, executor: str) -> str:
+    """Request-side execution: forward the call to the target's home and wait in phase ``awaiting_home``."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_supervisor_requests import _finish, requester_refusal
+    requester, op = req["requester_task_id"], req["ops"][0]
+    gone = requester_refusal(conn, requester)
+    verdict = preflight_op(conn, requester, op) if not gone else {"verdict": "refused", "reason": gone}
+    uid = uuid.uuid4().hex
+    caller = _caller_here(conn, requester, req.get("requester_run_id"))
+    board = _board_slug(conn)
+    if verdict["verdict"] != "supervisor":
+        with kb.write_txn(conn):
+            log(conn, request_uid=uid, side="request", outcome="refused", op=op, caller=caller, board=board,
+                detail=verdict.get("reason"), supervisor_request_id=req["id"], finished=True)
+        _finish(conn, req, executor, "rejected", results=[{**op, "outcome": "not_applied",
+                                                           "detail": verdict.get("reason")}],
+                error=verdict.get("reason"))
+        return "rejected"
+    payload = {"request_uid": uid, "board": board, "action": op["action"], "target_task_id": op["task_id"],
+               "args": {k: v for k, v in op.items() if k not in ("op", "action", "task_id")},
+               "caller": caller, "requested_at": int(time.time()), "supervisor_request_id": req["id"],
+               "home": verdict.get("home")}
+    with kb.write_txn(conn):
+        before = _outbox_rows(conn)
+        kb._append_event(conn, requester, REQUEST_KIND, payload)
+        if before is None or (_outbox_rows(conn) or 0) <= before:
+            conn.execute("DELETE FROM task_events WHERE id = (SELECT MAX(id) FROM task_events WHERE task_id = ? "
+                         "AND kind = ?)", (requester, REQUEST_KIND))
+            log(conn, request_uid=uid, side="request", outcome="refused", op=op, caller=caller, board=board,
+                detail="not_synced: the request event would not reach the Board", supervisor_request_id=req["id"],
+                finished=True)
+            failed = True
+        else:
+            ev = conn.execute("SELECT uid FROM task_events WHERE id = (SELECT MAX(id) FROM task_events WHERE "
+                              "task_id = ? AND kind = ?)", (requester, REQUEST_KIND)).fetchone()
+            log(conn, request_uid=uid, side="request", outcome="forwarded", op=op, caller=caller, board=board,
+                request_event_uid=ev[0] if ev else None, supervisor_request_id=req["id"])
+            failed = False
+    if failed:
+        _finish(conn, req, executor, "rejected", results=[{**op, "outcome": "not_applied", "detail": "not_synced"}],
+                error="not_synced: this board cannot carry the request to the card's home")
+        return "rejected"
+    state = {"phase": PHASE, "request_uid": uid, "home": verdict.get("home"),
+             "deadline": int(time.time()) + DEADLINE_S}
+    with kb.write_txn(conn):
+        cur = conn.execute("UPDATE supervisor_requests SET result_json=? WHERE id=? AND status='accepted' "
+                           "AND executor=?", (json.dumps(state), req["id"], executor))
+    return PHASE if cur.rowcount == 1 else "lost_lease"
+
+
+def awaiting(conn: sqlite3.Connection) -> list:
+    return conn.execute(
+        "SELECT id, executor, lease_expires FROM supervisor_requests WHERE status='accepted' AND result_json IS NOT "
+        "NULL AND json_valid(result_json) AND json_extract(result_json, '$.phase')=? ORDER BY id", (PHASE,)).fetchall()
+
+
+def _result_for(conn: sqlite3.Connection, target: str, uid: str) -> Optional[dict]:
+    def scan(c):
+        if c is None:
+            return None
+        for (raw,) in c.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id DESC",
+                                (target, RESULT_KIND)).fetchall():
+            try:
+                p = json.loads(raw or "{}")
+            except ValueError:
+                continue
+            if p.get("request_uid") == uid:
+                return p
+        return None
+    found = scan(conn)  # a pickup copy of the target on this gateway gets the event from the feed
+    if found is None:
+        with _replica(conn) as rep:
+            found = scan(rep)
+    return found
+
+
+_STATUS = {"applied": "done", "already_applied": "done", "refused": "rejected", "failed": "failed"}
+
+
+def poll(conn: sqlite3.Connection, executor: str, *, now: Optional[int] = None) -> list[tuple[int, str]]:
+    """Finish forwarded calls whose home answered (or that ran out of time). No delivery attempts spent."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_notify_reconcile_exec as nrx
+    from hermes_cli.kanban_supervisor_requests import _executor_dead, _finish
+    now = int(time.time()) if now is None else now
+    processed = []
+    for rid, holder, lease in awaiting(conn):
+        if holder != executor and lease and int(lease) > now and not _executor_dead(holder):
+            continue
+        req = nrx._take(conn, int(rid), holder, executor, now)
+        if req is None:
+            continue
+        state, op = req["result"], req["ops"][0]
+        res = _result_for(conn, op["task_id"], state["request_uid"])
+        if res is None and now < int(state.get("deadline") or 0):
+            continue
+        if res is None:
+            status, outcome, detail = "failed", "failed", (f"{state.get('home') or 'the home gateway'} did not "
+                                                           f"answer within {DEADLINE_S // 3600} h")
+        else:
+            outcome, detail = str(res.get("outcome") or "failed"), res.get("detail")
+            status = _STATUS.get(outcome, "failed")
+        results = [{**op, "outcome": outcome, **({"detail": detail} if detail else {}),
+                    "home": res.get("executor_gateway") if res else state.get("home")}]
+        with kb.write_txn(conn):
+            log(conn, request_uid=state["request_uid"], side="request",
+                outcome={"done": "done", "rejected": "rejected"}.get(status, "failed"), detail=detail, finished=True)
+        if kb.get_task(conn, req["requester_task_id"]) is None:
+            # A worker node evicted its copy of the caller card: the result stays on the target card.
+            with kb.write_txn(conn):
+                conn.execute("UPDATE supervisor_requests SET status=?, result_json=?, error=?, finished_at=?, "
+                             "lease_expires=NULL, requester_woken=1 WHERE id=? AND status='accepted' AND executor=?",
+                             (status, json.dumps(results), "requester_gone" if status == "done" else detail, now,
+                              req["id"], executor))
+            processed.append((int(rid), status))
+            continue
+        if _finish(conn, req, executor, status, results=results, error=None if status == "done" else detail):
+            processed.append((int(rid), status))
+        else:
+            processed.append((int(rid), "lost_lease"))
+    return processed
+
+
+# --- home side -----------------------------------------------------------------------------------
+
+def _is_home(conn: sqlite3.Connection, own: str, target: str) -> bool:
+    from hermes_cli import kanban_capability_routing as kcr
+    try:
+        row = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (target,)).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return bool(row and row[0] and row[0] == own and kcr.card_home(conn, target) is None)
+
+
+def _caller_refusal(rep: sqlite3.Connection, board: str, event: dict, payload: dict) -> tuple[Optional[str], bool]:
+    """``(refusal, retry)``: None when the caller is proven; ``retry`` when the Board could not be read."""
+    caller = payload.get("caller") or {}
+    gw, task, run_uid = caller.get("gateway"), caller.get("task_id"), caller.get("run_uid")
+    at = payload.get("requested_at")
+    if not gw or not task or not run_uid or not isinstance(at, (int, float)):
+        return "caller_unproven: the request names no caller gateway, card, run uid and time", False
+    if event["task_id"] != task:
+        return "caller_unproven: the request event is not on the caller's card", False
+    run = rep.execute("SELECT started_at, ended_at FROM task_runs WHERE task_id = ? AND uid = ?",
+                      (task, run_uid)).fetchone()
+    if run is None or not run[0] or int(run[0]) > at + SKEW_S or (run[1] and int(run[1]) < at - SKEW_S):
+        return f"caller_unproven: run {run_uid} of {task} was not live when the call was made", False
+    claimed = False
+    for (raw,) in rep.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'claimed'", (task,)):
+        try:
+            p = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        if p.get("run_uid") == run_uid and p.get("holder") == gw:
+            claimed = True
+            break
+    if not claimed:
+        return f"caller_unproven: the Board never leased run {run_uid} of {task} to {gw}", False
+    if not event.get("uid"):
+        return "caller_unproven: the request event has no Board uid", False
+    try:
+        ev = _evidence(board, event["uid"])
+    except Exception as exc:  # health: allow BLE001 -- unreachable Board: retry next tick
+        _log.info("kanban: operator call evidence for %s unavailable (%s); retrying", event["uid"], exc)
+        return None, True
+    row = ev.get("row") if isinstance(ev, dict) else None
+    if not isinstance(row, dict) or row.get("origin_gateway") != gw or row.get("task_id") not in (None, task):
+        return f"caller_unproven: the Board says the request event came from {(row or {}).get('origin_gateway')}", False
+    created = row.get("created_at")
+    when = int(created) if isinstance(created, (int, float)) else int(at)
+    if when > 10 ** 11:  # Board timestamps are milliseconds
+        when //= 1000
+    if time.time() - when > DEADLINE_S:
+        return "stale_request: the call is older than 24 h", False
+    return None, False
+
+
+def _marker(conn: sqlite3.Connection, target: str, kind: str, uid: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? AND json_valid(payload) AND "
+        "json_extract(payload, '$.operator_request_uid') = ? LIMIT 1", (target, kind, uid)).fetchone() is not None
+
+
+def _agent_block(conn: sqlite3.Connection, target: str) -> Optional[str]:
+    """None when the current block is an agent's (a hold David placed by hand is his to release)."""
+    row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
+    if row is None:
+        return f"no such task {target}"
+    if row[0] != "blocked":
+        return f"{target} is {row[0]}, not blocked"
+    gate = _human_gate(row[1], row[2], target)
+    if gate:
+        return gate
+    ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                      "ORDER BY id DESC LIMIT 1", (target,)).fetchone()
+    try:
+        payload = json.loads(ev[0] or "{}") if ev else {}
+    except ValueError:
+        payload = {}
+    if str(payload.get("actor") or "").strip() == "user":  # kanban_cli_actor: a human shell's block
+        return f"{target} was blocked by hand (a human hold); only its owner or a human releases it"
+    return None
+
+
+def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Optional[str]]:
+    """Apply one proven call on the home's live file: ``(outcome, detail)``."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_move as km
+    uid, target, action = payload["request_uid"], payload["target_task_id"], payload.get("action")
+    caller, args = payload.get("caller") or {}, payload.get("args") or {}
+    author = f"{caller.get('gateway')}/{caller.get('task_id')}"
+    extra = {"operator_request_uid": uid, "operator_caller": {k: caller.get(k) for k in
+                                                               ("gateway", "task_id", "run_id", "run_uid")}}
+    task = kb.get_task(conn, target)
+    if task is None:
+        return "refused", f"no such task {target}"
+    if task.status in ("done", "archived"):
+        return "refused", f"{target} is {task.status}"
+    if action == "comment":
+        if _marker(conn, target, COMMENT_MARK, uid):
+            return "already_applied", None
+        text = str(args.get("text") or "").strip()[:MAX_TEXT]
+        if not text:
+            return "refused", "empty comment"
+        with kb.write_txn(conn):
+            cid = kb.add_comment(conn, target, author, text, origin_gateway=caller.get("gateway"), writer_kind="agent")
+            kb._append_event(conn, target, COMMENT_MARK, {**extra, "comment_id": cid})
+        return "applied", f"comment {cid}"
+    if action == "unblock":
+        if _marker(conn, target, "unblocked", uid):
+            return "already_applied", None
+        refusal = _agent_block(conn, target)
+        if refusal:
+            return "refused", refusal
+        reason = str(args.get("reason") or "").strip()
+        ok = kb.unblock_task(conn, target, comment=(author, f"Unblocked through an operator call: {reason}"),
+                             event_extra=extra, precondition=lambda c: _agent_block(c, target))
+        return ("applied", None) if ok else ("refused", f"cannot unblock {target} (state changed)")
+    if action == "move":
+        if _marker(conn, target, km.MOVED_EVENT, uid):
+            return "already_applied", None
+        out = km.move_queued(conn, target, runs_on=args.get("runs_on") or [], reason=str(args.get("reason") or ""),
+                             event_extra=extra)
+        if out.get("ok"):
+            return "applied", f"runs_on={out.get('runs_on')}"
+        return "refused", f"{out.get('reason_code')}: {out.get('error')}"
+    return "refused", f"operator_action_refused: {action}"
+
+
+def _replica_id(rep: sqlite3.Connection) -> int:
+    """The replica file's inode: a retention rebuild unlinks and recreates it, restarting its event ids."""
+    path = _db_path(rep)
+    try:
+        return os.stat(path).st_ino if path else 0
+    except OSError:
+        return 0
+
+
+def _scan_start(conn: sqlite3.Connection, board: str, rep: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT last_id, replica_ino FROM operator_call_scan WHERE board = ?", (board,)).fetchone()
+    ino = _replica_id(rep)
+    mem = _MARK.get((_db_path(conn), board))
+    candidates = [int(row[0])] if row and int(row[1] or 0) == ino else []
+    if mem and mem[1] == ino:
+        candidates.append(mem[0])
+    last = max(candidates, default=0)
+    top = rep.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
+    return 0 if last > int(top or 0) else last  # a rebuilt replica restarts its ids: rescan (the log dedupes)
+
+
+def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Home side, each dispatcher tick: execute calls naming this gateway's own cards. Returns (uid, outcome)."""
+    from hermes_cli import kanban_db as kb
+    own = _own_gateway(conn)
+    if not own:
+        return []
+    board = _board_slug(conn)
+    done: list[tuple[str, str]] = []
+    with _replica(conn) as rep:
+        if rep is None:
+            return []
+        if not _has_log(conn) or not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_call_scan'").fetchone():
+            with kb.write_txn(conn):
+                ensure_schema(conn)
+        last = _scan_start(conn, board, rep)
+        rows = rep.execute("SELECT id, uid, task_id, payload FROM task_events WHERE id > ? AND kind = ? "
+                           "ORDER BY id LIMIT ?", (last, REQUEST_KIND, SCAN_BATCH)).fetchall()
+        hi = rep.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0] if len(rows) < SCAN_BATCH \
+            else rows[-1][0]
+        handled = 0
+        for eid, euid, etask, raw in rows:
+            try:
+                payload = json.loads(raw or "{}")
+            except ValueError:
+                continue
+            uid, target = payload.get("request_uid"), payload.get("target_task_id")
+            if not uid or not target or not _is_home(conn, own, target):
+                continue
+            if conn.execute("SELECT 1 FROM operator_calls WHERE request_uid = ? AND side = 'execute'",
+                            (uid,)).fetchone():
+                continue
+            if handled >= MAX_PER_TICK:
+                hi = eid - 1
+                break
+            handled += 1
+            event = {"id": eid, "uid": euid, "task_id": etask}
+            refusal, retry = _caller_refusal(rep, board, event, payload)
+            if retry:
+                hi = eid - 1
+                break
+            outcome, _detail = _execute_one(conn, payload, own, refusal)
+            done.append((uid, outcome))
+        stored = conn.execute("SELECT last_id, replica_ino FROM operator_call_scan WHERE board = ?",
+                              (board,)).fetchone()
+        new = max(int(hi), last)
+        key, ino = (_db_path(conn), board), _replica_id(rep)
+        _MARK[key] = (new, ino)
+        # The watermark lives in memory between ticks; it is persisted when a call was handled or every 10 min,
+        # so an idle board costs no write per tick (a restart rescans at most that window; the log dedupes).
+        if stored is None or ((int(stored[0]), int(stored[1] or 0)) != (new, ino)
+                              and (done or time.time() - _PERSISTED.get(key, 0) > 600)):
+            with kb.write_txn(conn):
+                conn.execute("INSERT INTO operator_call_scan (board, last_id, replica_ino) VALUES (?, ?, ?) "
+                             "ON CONFLICT(board) DO UPDATE SET last_id = excluded.last_id, "
+                             "replica_ino = excluded.replica_ino", (board, new, ino))
+            _PERSISTED[key] = time.time()
+    return done
+
+
+def _execute_one(conn: sqlite3.Connection, payload: dict, own: str, refusal: Optional[str]) -> tuple[str, str]:
+    from hermes_cli import kanban_db as kb
+    uid, target = payload["request_uid"], payload["target_task_id"]
+    action = payload.get("action")
+    op = {"action": action, "task_id": target, **(payload.get("args") or {})}
+    if refusal is None and action not in ACTIONS:
+        refusal = f"operator_action_refused: {action} stays with the card's owner"
+    if refusal is None:
+        try:
+            outcome, detail = _apply(conn, payload, own)
+        except Exception as exc:  # health: allow BLE001 -- recorded as a failed call, never silent
+            _log.exception("kanban: operator call %s on %s failed", uid, target)
+            outcome, detail = "failed", f"{type(exc).__name__}: {exc}"[:500]
+    else:
+        outcome, detail = "refused", refusal
+    with kb.write_txn(conn):
+        log(conn, request_uid=uid, side="execute", outcome=outcome, op=op, caller=payload.get("caller"),
+            detail=detail, board=payload.get("board"), executor_gateway=own,
+            supervisor_request_id=payload.get("supervisor_request_id"), finished=True)
+        kb._append_event(conn, target, RESULT_KIND, {
+            "request_uid": uid, "action": action, "outcome": outcome, "detail": detail, "executor_gateway": own,
+            "caller": {k: (payload.get("caller") or {}).get(k) for k in ("gateway", "task_id", "run_id")}})
+    _log.info("kanban: operator call %s %s on %s from %s: %s", uid, action, target,
+              (payload.get("caller") or {}).get("gateway"), outcome)
+    return outcome, detail or ""
+
+
+def list_calls(conn: sqlite3.Connection, *, task: Optional[str] = None, uid: Optional[str] = None,
+               limit: int = 50) -> list[dict]:
+    if not _has_log(conn):
+        return []
+    sql, params = "SELECT * FROM operator_calls WHERE 1=1", []
+    if task:
+        sql += " AND (caller_task_id = ? OR target_task_id = ?)"
+        params += [task, task]
+    if uid:
+        sql += " AND request_uid = ?"
+        params.append(uid)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(int(limit))
+    cur = conn.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]

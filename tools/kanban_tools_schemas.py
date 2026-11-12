@@ -1034,24 +1034,36 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "task's creator tree: created by a card this task created (up to 3 hops) whose creator(s) are all "
         "done or archived, so no live card owns it. Cards this task created directly are refused (use "
         "kanban_archive), as are claimed/running/done cards and anything outside the tree; a request "
-        "carries only archive ops."
+        "carries only archive ops. "
+        "Op operator {action, task_id, ...} is the scoped Board-operator call for ONE card ANOTHER gateway "
+        "created (the ones kanban_comment/kanban_move/kanban_unblock refuse as foreign_card): action "
+        "comment {text}, move {runs_on, reason} (not while it runs) or unblock {reason} (an agent's block "
+        "only, never one waiting on a human). That card's home gateway executes it; complete/archive/link/"
+        "unlink of a foreign card are refused (its owner's), one op per request, every call logged."
     ),
     {
         "ops": {
             "type": "array",
             "description": "Edge edits applied in order, reconcile_notify ops, resume ops, retry_limit ops, "
-                           "or archive ops (max 20).",
+                           "archive ops (max 20), or exactly one operator op.",
             "items": {
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume", "retry_limit",
-                                                         "archive"]},
+                                                         "archive", "operator"]},
+                    "action": {"type": "string", "enum": ["comment", "move", "unblock"],
+                               "description": "operator: what to do on the foreign card."},
+                    "text": {"type": "string", "description": "operator comment: the comment body."},
+                    "runs_on": {"type": "array", "items": {"type": "string"},
+                                "description": "operator move: the new machine labels."},
+                    "reason": {"type": "string", "description": "operator move/unblock: why (required)."},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},
                     "task_id": {"type": "string", "description": "reconcile_notify: the subscribed task; "
                                                                  "resume: the card to requeue; "
                                                                  "retry_limit: the card to edit; "
-                                                                 "archive: the card to cancel."},
+                                                                 "archive: the card to cancel; "
+                                                                 "operator: the one foreign card."},
                     "max_retries": {"type": "integer", "description": "retry_limit: the new breaker, 1-10."},
                     "chat_id": {"type": "string", "description": "reconcile_notify: the tui row's chat (session id)."},
                     "thread_id": {"type": "string", "description": "reconcile_notify: the row's thread, if any."},

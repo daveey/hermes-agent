@@ -35,7 +35,12 @@ class ForeignCardError(Exception):
 
 def message(task_id: str, owner: Optional[str]) -> str:
     return (f"{task_id} was created on {owner or 'another gateway'} and lives there; this gateway has only a "
-            "replica copy. Its owner or the Board must write it." + comment_route(task_id, owner))
+            "replica copy. Its owner or the Board must write it." + comment_route(task_id, owner) + OPERATOR_ROUTE)
+
+
+# The worker-callable path for one comment, move or unblock on another gateway's card (kanban_operator_call).
+OPERATOR_ROUTE = (" A worker can comment on, move or unblock it with kanban_supervisor_request(ops=[{op: 'operator', "
+                  "action, task_id, ...}]); its home gateway applies it.")
 
 
 # Gateway names a hub-owned card's ``created_on`` carries (the hub's own name and its alias).
