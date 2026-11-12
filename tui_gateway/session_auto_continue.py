@@ -554,6 +554,31 @@ def _persist_queued_user_row(session: dict, envelope: dict, display_kind: str | 
             envelope["_queued_display_kind"] = display_kind
 
 
+def _adopt_queued_user_row_in_place(session: dict, early: dict) -> dict | None:
+    """The accept-time row, unmarked, as the dispatching turn's durable dict — or None (the caller re-places
+    it at the end) when it is no longer the session's last active row or the store is unavailable."""
+    from hermes_state_common import QUEUED_PROMPT_METADATA_KEY
+    from hermes_state_message_content import adopt_queued_user_row_in_place
+    with _session_db(session) as db:
+        if db is None:
+            return None
+        try:
+            key = _submit_row_owner_key(early, session)
+            live_id = db.resolve_active_row_id(key, early["_row_id"])
+            if not adopt_queued_user_row_in_place(db, key, live_id):
+                return None
+        except Exception:
+            logger.debug("queued-prompt in-place row adoption failed; re-placing it", exc_info=True)
+            return None
+    adopted = {**early, "_row_id": live_id}
+    meta = {k: v for k, v in (early.get("display_metadata") or {}).items() if k != QUEUED_PROMPT_METADATA_KEY}
+    if meta:
+        adopted["display_metadata"] = meta
+    else:
+        adopted.pop("display_metadata", None)
+    return adopted
+
+
 def _replace_queued_user_row_for_turn(session: dict, queued: dict, is_dispatching: bool = False) -> dict | None:
     """Re-place a queued prompt's accept-time row at the transcript END before dispatching its turn.
 
@@ -568,6 +593,12 @@ def _replace_queued_user_row_for_turn(session: dict, queued: dict, is_dispatchin
     early = queued.get("_submit_user_row")
     if not (isinstance(early, dict) and isinstance(early.get("_row_id"), int)):
         return None  # no accept-time row (write failed / pre-feature envelope): the turn persists as before
+    # Nothing landed after the accept row (an idle submit queued behind the core-update hold, or a busy one
+    # whose turn wrote no rows since): the turn's rows follow it, so the DISPATCHING envelope adopts that
+    # row in place. Re-appending here left two user rows for one submit (t_01a1ceb141b10c7c).
+    if is_dispatching and (adopted := _adopt_queued_user_row_in_place(session, early)) is not None:
+        queued["_submit_user_row"] = adopted
+        return adopted
     # Append the replacement FIRST: if that write fails nothing is deactivated, the accept-time row
     # stays active (the message stays visible) and the turn's crash persist persists it as before.
     # The DISPATCHING envelope's replacement carries no marker (its turn adopts the row immediately);
