@@ -2570,21 +2570,7 @@ def _absolute_hermes_path(path: str) -> str:
     return expanded if os.path.isabs(expanded) else os.path.abspath(expanded)
 
 
-def _looks_like_path(value: str) -> bool:
-    """Return true when a command override is an explicit path, not a name."""
-    expanded = os.path.expanduser(value)
-    return (
-        expanded.startswith("~")
-        or os.path.isabs(expanded)
-        or bool(os.path.dirname(expanded))
-        or "\\" in expanded
-        or bool(re.match(r"^[A-Za-z]:", expanded))
-    )
-
-
-def _is_windows_batch_shim(path: str) -> bool:
-    """Return true for Windows shell/batch shims that should not be argv[0]."""
-    return path.lower().endswith((".cmd", ".bat"))
+from hermes_cli.kanban_dispatch_paths import _looks_like_path, _is_windows_batch_shim
 
 
 def _path_search_names(command: str) -> list[str]:
