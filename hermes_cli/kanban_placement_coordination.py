@@ -6,6 +6,7 @@ The pickup gate checks the actual destination again, including after a pool chan
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
@@ -178,8 +179,20 @@ def claim_refusal(card, me):
     from hermes_cli.kanban_placement import without_evidence, without_placement_note
     text = f"{card.get('title') or ''}\n{without_evidence(without_placement_note(card.get('body') or ''))}"
     from hermes_cli.kanban_runs_on_capabilities import _loads
+    # Wire rows can bypass creator validation. Never turn corrupt contracts into
+    # empty requirements, or let one malformed card crash the dispatch loop.
+    requires = card.get("requires")
+    if requires is None or requires == "":
+        requires = []  # Legacy rows have no declaration.
+    elif isinstance(requires, str):
+        try:
+            requires = json.loads(requires)
+        except ValueError:
+            return "invalid worker access requirements"
+    if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
+        return "invalid worker access requirements"
     return check(text, {}, target=me, skills=_loads(card.get("skills"), []),
-                 requires=_loads(card.get("requires"), []))
+                 requires=requires)
 
 
 def legacy_refusal(args):
