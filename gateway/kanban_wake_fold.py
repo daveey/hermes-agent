@@ -116,9 +116,17 @@ def waiting_wake(authority, owner, route):
     tail = queued[-1] if queued else None
     if tail is None or tail['principal_id'] != 'automation:' + route or _producer(tail['request_id']) != PRODUCER:
         return None
-    if _descriptor(tail['payload']).get('display_kind'):
+    descriptor = _descriptor(tail['payload'])
+    if descriptor.get('display_kind') and not _remote_batch(descriptor):
         return None
     return tail
+
+
+def _remote_batch(descriptor):
+    """A wake carrying remote cards' notices (``gateway.kanban_remote_owner``): a ``kanban_notice`` card
+    with its custody keys and its cards, which folds like any Kanban wake (review t_01a1d013e0411032)."""
+    return (descriptor.get('display_kind') == 'kanban_notice' and bool(descriptor.get('kanban_event_keys'))
+            and bool(descriptor.get('kanban_cards')))
 
 
 def _legacy_cards(text):
@@ -309,6 +317,14 @@ def fold_into(event, waiting, identity):
     event.metadata['automation_identities'] = sorted({
         *(descriptor.get('identities') or [waiting['request_id']]),
         *(event.metadata.get('automation_identities') or [identity])})
+    # [daveey] Remote notices' custody keys ride the batch: their ledger claims are acked when a row carries
+    # them, and that row must be a kanban_notice (``kanban_notice_keys_delivered``), whichever side folded.
+    keys = list(dict.fromkeys([*(descriptor.get('kanban_event_keys') or []),
+                               *(event.metadata.get('kanban_event_keys') or [])]))
+    if keys:
+        from gateway.session_automation import _DISPLAY_TEXT_LIMIT
+        shown = event.text if len(event.text) <= _DISPLAY_TEXT_LIMIT else event.text[:_DISPLAY_TEXT_LIMIT - 1] + '…'
+        event.metadata.update({'kanban_event_keys': keys, 'display_kind': 'kanban_notice', 'display_text': shown})
     # The batch mutes only when every wake in it did.
     if descriptor.get('notification_category', 'result') == 'result':
         event.metadata.pop('notification_category', None)

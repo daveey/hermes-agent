@@ -145,6 +145,25 @@ def _adopt_pending(item: dict, pending: set, ids: frozenset, tip: str) -> Option
     return None
 
 
+def _drop_written(item: dict, has: Any) -> Optional[dict]:
+    """``item`` minus members whose row is already in the chat's lineage (written by any path, under any
+    ledger key): those are acked, never admitted again. A partly written group releases the rest for the
+    next pass, which offers them on their own."""
+    from tui_gateway import kanban_remote_notices as krn
+    from tui_gateway.kanban_remote_late import release_undelivered
+    written = [child for child in _children(item) if has(child["event_key"], "")]
+    if not written:
+        return item
+    for child in written:
+        krn.ack(child)
+        logger.info("remote Kanban notice %s for chat %s is already in the transcript; acked, not admitted",
+                    child["ref"], child["session"])
+    rest = [child for child in _children(item) if child not in written]
+    if rest:
+        release_undelivered(rest, None)
+    return None
+
+
 def _collect(runner: Any, authority: Any, lives: list) -> list[tuple]:
     """``[(live, ids, tip, items)]``: claimed notices of busy owned chats, in arrival order. Worker thread."""
     from gateway.kanban_tui_owner import _gateway_holds_work
@@ -169,8 +188,12 @@ def _collect(runner: Any, authority: Any, lives: list) -> list[tuple]:
 
         items = []
         try:
-            # One claim per notice under the chat id, as the sweep claims it under the link's session.
-            items = krn.collect(chat, profile, lineage=tuple(sorted(ids - {chat})), transcript_has=has)
+            # Each notice is claimed under its link's own session (``per_link``), the ledger key the sweep
+            # claims it under: on a chat compressed before the card was linked, a claim under the root id
+            # was invisible to the sweep's and the notice landed twice (review t_01a1d013e0411032).
+            items = krn.collect(chat, profile, lineage=tuple(sorted(ids - {chat})), transcript_has=has,
+                                per_link=True)
+            items = [kept for item in items if (kept := _drop_written(item, has)) is not None]
             items = [kept for item in items if (kept := _adopt_pending(item, pending, ids, tip)) is not None]
         except Exception:  # health: allow BLE001 -- claims taken before the error go back, so none waits for an exit
             logger.warning("remote kanban owner: collecting chat %s failed; releasing its claims", chat, exc_info=True)
@@ -182,11 +205,20 @@ def _collect(runner: Any, authority: Any, lives: list) -> list[tuple]:
     return out
 
 
+_CARD_TEXT_LIMIT = 32000  # kanban_wake_fold._MAX_CARD_TEXT
+
+
 def _metadata(item: dict) -> dict:
+    """The admission's card. ``kanban_cards`` makes it a Kanban wake that folds with the local wakes
+    waiting at the FIFO tail (``kanban_wake_fold``), so a burst of notices during one turn is one turn;
+    a late group is one opaque card (no task id: never merged with another card's event)."""
     text = item["text"]
     shown = text if len(text) <= _DISPLAY_LIMIT else text[:_DISPLAY_LIMIT - 1] + "…"
     keys = [child["event_key"] for child in _children(item)]
-    return {"display_kind": "kanban_notice", "display_text": shown, "kanban_event_keys": keys}
+    task_id = "" if item.get("children") else str(item.get("ref") or "").rsplit("/", 1)[-1]
+    card = {"task_id": task_id, "board": "", "kinds": [], "text": text[:_CARD_TEXT_LIMIT]}
+    return {"display_kind": "kanban_notice", "display_text": shown, "kanban_event_keys": keys,
+            "kanban_cards": [card]}
 
 
 async def _admit(runner: Any, adapter: Any, live: Any, ids: frozenset, tip: str, item: dict) -> bool:
@@ -195,7 +227,10 @@ async def _admit(runner: Any, adapter: Any, live: Any, ids: frozenset, tip: str,
     from tui_gateway import kanban_remote_notices as krn
     chat = live.source.chat_id
     try:
-        admitted = await admit_route_wake(runner, adapter, live.source, item["text"], PRODUCER, _metadata(item))
+        metadata = _metadata(item)
+        # The turn text is the card's text, so a later fold splits it back into exactly this card.
+        admitted = await admit_route_wake(runner, adapter, live.source, metadata["kanban_cards"][0]["text"],
+                                          PRODUCER, metadata)
     except Exception as exc:  # health: allow BLE001 -- delivery boundary: any refusal releases the claim (logged) so no notice is lost
         logger.warning("remote Kanban notice %s for chat %s refused by the local FIFO (%s); released for retry",
                        item["ref"], chat, exc, exc_info=not isinstance(exc, RuntimeStoreError))

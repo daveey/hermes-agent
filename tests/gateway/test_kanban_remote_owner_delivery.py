@@ -38,6 +38,9 @@ from hermes_state import SessionDB
 from hermes_state_runtime import RuntimeStoreError
 from tui_gateway import kanban_remote_notices as krn
 from tui_gateway import kanban_unloaded as ku
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from tests.gateway.test_kanban_wake_fold import _local_chat, _wake
 
 CHAT = "20261026_235722_bef6c6"
 GW_HOLDER = f"pid={os.getpid()}:turn={CHAT}:x:platform=local"
@@ -70,6 +73,7 @@ class _Fifo:
         self.refuse = None
         self.ran = []
         self.seq = 0
+        self.row_session = CHAT  # where the turn writes its rows: the lineage tip
 
     def _write(self, sql, args=()):
         with contextlib.closing(sqlite3.connect(_state_path(), timeout=5)) as conn:
@@ -119,7 +123,7 @@ class _Fifo:
         metadata = {**automation_display_metadata(descriptor), **restore(descriptor)}
         event = MessageEvent(text=payload["text"], internal=True, metadata=metadata)
         if write_row:
-            self.db.append_message(CHAT, "user", payload["text"], display_kind=display_kind_for_event(event),
+            self.db.append_message(self.row_session, "user", payload["text"], display_kind=display_kind_for_event(event),
                                    display_metadata=persisted_user_metadata_for_event(event) or None)
         self.ran.append(payload["text"])
         return payload["text"]
@@ -471,3 +475,181 @@ def test_kanban_notice_card_keys_are_validated_and_ride_the_user_row():
                 {"display_kind": "process_complete", "display_text": "x", "kanban_event_keys": keys}):
         with pytest.raises(RuntimeStoreError, match="invalid_params"):
             card_metadata(bad)
+
+
+TIP = f"{CHAT}_c1"
+
+
+def _lineage_rows(key):
+    with contextlib.closing(sqlite3.connect(_state_path())) as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT m.id FROM messages m, json_each(json_extract(m.display_metadata, '$.kanban_event_keys')) j "
+            "WHERE m.session_id IN (?, ?) AND m.display_kind = 'kanban_notice' AND json_valid(m.display_metadata) "
+            "AND j.value = ?", (CHAT, TIP, key))]
+
+
+@pytest.mark.parametrize("first", ["sweep", "gateway"])
+def test_link_on_a_compressed_tip_is_delivered_once_whichever_path_goes_first(env, first):
+    """Review t_01a1d013e0411032: the chat was compressed before the card was linked, so the link names the
+    tip while the gateway owns the chat under its root id. Both paths must claim under the same ledger key."""
+    hub, runner, authority, fifo, db = env
+    db.end_session(CHAT, "compression")
+    db.create_session(TIP, "desktop", parent_session_id=CHAT)
+    authority.sessions[CHAT] = _Live(CHAT)
+    fifo.row_session = TIP
+    _publish(hub, [_done("t_01a1cfabf44499dd", chat=TIP)])
+    started = []
+
+    def wake(tip, text, metadata):
+        started.append(tip)
+        db.append_message(tip, "user", text, display_kind="kanban_notice", display_metadata=metadata)
+        return "started"
+
+    def sweep():
+        krn.sweep_remote_notices(gateway="macbook", live_ids=set(),
+                                 waker=ku._RemoteWaker(wake, lambda job: (job(), "dispatched")[1], 0.0))
+
+    if first == "sweep":
+        sweep()  # idle: the sweep wakes the chat, the turn writes the row
+        assert started == [TIP]
+        _busy(db, fifo)
+        assert _tick(runner) == []  # busy now: the gateway never admits it a second time
+        assert fifo.queued() == []
+    else:
+        _busy(db, fifo)
+        assert len(_tick(runner)) == 1
+        fifo.boundary()  # the row lands at the next turn boundary
+        _idle(db, fifo)
+        sweep()  # idle again before the gateway's next pass: the sweep never wakes it a second time
+        assert started == []
+        _tick(runner)
+    sweep()
+    _tick(runner)
+    assert len(_lineage_rows(_key("t_01a1cfabf44499dd"))) == 1
+    with contextlib.closing(sqlite3.connect(krn.ledger_path())) as conn:
+        states = conn.execute("SELECT session, delivered FROM notices WHERE ref=?",
+                              ("worker-2/default/default/t_01a1cfabf44499dd",)).fetchall()
+    assert states == [(TIP, krn.DELIVERED)]  # one claim, under the link's session, settled
+    assert kro._admitted == {}
+
+
+def _late(tid, event_id):
+    card = _done(tid, event_id)
+    at = time.time() - krn.FRESH_S - 3600
+    card["completed_at"] = at
+    card["completion_notice"]["created_at"] = at
+    return card
+
+
+def test_a_successor_adopts_the_held_member_of_a_late_group_and_releases_the_rest(env):
+    """A predecessor admitted late notice A and died; late notice B arrived since. The successor's first pass
+    claims both as one group: A is adopted (its FIFO item still holds it), B goes back unclaimed, not left
+    in flight under the successor's pid with nothing tracking it."""
+    hub, runner, authority, fifo, db = env
+    authority.sessions[CHAT] = _Live(CHAT)
+    _publish(hub, [])  # the replica's first observation is a baseline; arrivals after it are new
+    _busy(db, fifo)
+    _publish(hub, [_late("t_01a1cf4eda4b1ad4", 336647)])
+    assert len(_tick(runner)) == 1
+    _restart(_dead_pid())
+    _publish(hub, [_late("t_01a1cfd7578b3af4", 466999)])
+    assert _tick(runner) == []
+    assert _ledger("t_01a1cf4eda4b1ad4")["holder_pid"] == os.getpid()  # adopted, still in flight
+    assert _ledger("t_01a1cfd7578b3af4") is None  # released for the next pass
+    assert [entry["claim"]["ref"] for entry in kro._admitted.values()] == ["worker-2/default/default/t_01a1cf4eda4b1ad4"]
+    assert len(_tick(runner)) == 1  # B is offered on its own and admitted
+    assert len(fifo.queued()) == 2
+    fifo.boundary()
+    fifo.boundary()
+    _tick(runner)
+    assert len(_rows(_key("t_01a1cf4eda4b1ad4", 336647))) == 1
+    assert len(_rows(_key("t_01a1cfd7578b3af4", 466999))) == 1
+    assert _ledger("t_01a1cf4eda4b1ad4")["delivered"] == krn.DELIVERED
+    assert _ledger("t_01a1cfd7578b3af4")["delivered"] == krn.DELIVERED
+    assert kro._admitted == {}
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    """A real local Kanban board (``test_kanban_wake_fold``'s fixture)."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "board.db"))
+
+    def task(title):
+        with contextlib.closing(kbc.connect()) as conn:
+            return kb.create_task(conn, title=title, assignee="worker")
+    return task
+
+
+def _remote_item(tid, event_id):
+    return {"text": f"✔ Remote Kanban card {tid} on worker-2 completed.\nResult: {tid} verdict",
+            "ref": f"worker-2/default/default/{tid}", "state": "done", "session": CHAT,
+            "event_key": _key(tid, event_id)}
+
+
+@pytest.mark.asyncio
+async def test_local_and_remote_notices_queued_during_one_turn_run_as_one_turn(tmp_path, monkeypatch, board):
+    """Orchestrator acceptance (06:24 PST): local A, remote R1, local B, remote R2 admitted during one busy
+    turn run as ONE wake turn carrying all four, and that turn's row carries both remote keys once."""
+    from gateway.session_contract import SessionRef
+    from hermes_state_runtime import list_session_admissions
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        runner = authority.runner
+        a, b = board("local A"), board("local B")
+        r1, r2 = _remote_item("t_remote_r1", 1001), _remote_item("t_remote_r2", 1002)
+
+        async def remote(item):
+            md = kro._metadata(item)
+            assert await session_automation.admit_route_wake(runner, adapter, source, md["kanban_cards"][0]["text"],
+                                                             "kanban-wake", md)
+
+        await _wake(adapter, source, a, "completed")
+        await remote(r1)
+        await _wake(adapter, source, b, "completed")
+        await remote(r2)
+        rows = [row for row in queued() if row["principal_id"].startswith("automation:")]
+        assert len(rows) == 1, [row["payload"]["text"][:80] for row in rows]
+        text = rows[0]["payload"]["text"]
+        assert text.startswith("[IMPORTANT: 4 Kanban task updates arrived while this session was busy.")
+        for needle in (f"[kanban] Task {a} completed.", f"[kanban] Task {b} completed.", "card t_remote_r1 ",
+                       "card t_remote_r2 "):
+            assert text.count(needle) == 1, needle
+        from tui_gateway.kanban_remote_fifo import pending_keys
+        sid = rows[0]["target_session_id"]
+        assert pending_keys(authority.db, {sid}) == {r1["event_key"], r2["event_key"]}  # custody: still held
+
+        # The turn: restored from the stored row as the drain does; its user row carries both keys.
+        event = session_automation.restore_local_automation(authority, SessionRef(authority.profile_id, sid), rows[0])
+        assert event.metadata["kanban_event_keys"] == [r1["event_key"], r2["event_key"]]
+        authority.db.append_message(sid, "user", event.text, display_kind=display_kind_for_event(event),
+                                    display_metadata=persisted_user_metadata_for_event(event) or None)
+        for key in (r1["event_key"], r2["event_key"]):
+            assert krn.notice_in_transcript(authority.db, sid, key, "")
+        delivered = [m for m in authority.db.get_messages(sid) if m.get("display_kind") == "kanban_notice"]
+        assert len(delivered) == 1
+        cancelled = [row for row in list_session_admissions(authority.db, session_id=sid)
+                     if row["status"] != "queued" and row["principal_id"].startswith("automation:")]
+        assert all("kanban_event_keys" not in json.dumps(row["payload"]) for row in cancelled)
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_local_wake_folds_into_a_remote_notice_waiting_at_the_tail(tmp_path, monkeypatch, board):
+    """A remote row at the FIFO tail no longer stops the next local wake from folding (local behaviour of
+    ``kanban_wake_fold`` before this change)."""
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        md = kro._metadata(_remote_item("t_remote_r1", 1001))
+        assert await session_automation.admit_route_wake(authority.runner, adapter, source,
+                                                         md["kanban_cards"][0]["text"], "kanban-wake", md)
+        a = board("local A")
+        await _wake(adapter, source, a, "completed")
+        rows = [row for row in queued() if row["principal_id"].startswith("automation:")]
+        assert len(rows) == 1
+        descriptor = rows[0]["payload"]["local_automation_v1"]
+        assert descriptor["display_kind"] == "kanban_notice"
+        assert descriptor["kanban_event_keys"] == [_key("t_remote_r1", 1001)]
+        assert f"[kanban] Task {a} completed." in rows[0]["payload"]["text"]
+    finally:
+        authority.db.close()

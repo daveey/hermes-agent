@@ -258,6 +258,7 @@ def _fold_queued(admission_id, session_id, replaced, skip=()):
         payload['text'] = _FOLDED_TEXT
         _descriptor(payload).pop('identities', None)
         _descriptor(payload).pop('kanban_cards', None)
+        _descriptor(payload).pop('kanban_event_keys', None)  # [daveey] the batch carries them now
         conn.execute('UPDATE session_admissions SET payload_json=? WHERE admission_id=?',
                      (json.dumps(payload, separators=(',', ':'), ensure_ascii=False), admission_id))
     return guard
