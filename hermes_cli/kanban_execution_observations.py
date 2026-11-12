@@ -199,7 +199,8 @@ def add_cards(rows, *, now=None):
         gateway = profile = None
     for row in rows:
         try:
-            if row.get("_execution_error"):
+            if row.get("_execution_error") and not isinstance(row.get("_execution_done"), dict):
+                # An independent, readable delivery receipt survives an open-card source failure.
                 raise RuntimeError("execution source unavailable")
             observation = card(row, gateway=gateway, profile=profile, now=now)
         except ADAPTER_ERRORS:
@@ -210,6 +211,7 @@ def add_cards(rows, *, now=None):
         row.pop("_execution_source", None)
         row.pop("_execution_done", None)
         row.pop("_execution_error", None)
+        row.pop("_execution_scope", None)
     return rows
 
 
@@ -225,6 +227,9 @@ def failed_card(row, *, gateway=None, profile=None, now=None):
     from hermes_cli.kanban_execution_source import unknown_raw
     source = row.get("_execution_source")
     source = source if isinstance(source, dict) else {}
+    scope = row.get("_execution_scope")
+    if isinstance(scope, dict):  # the reader's board-root owner scope, never the active profile (C9)
+        source = {**scope, **{k: v for k, v in source.items() if v is not None}}
     if row.get("remote"):
         source = {"gateway": row.get("gateway"), "profile": row.get("owner_profile", row.get("profile")),
                   "board": row.get("board")}

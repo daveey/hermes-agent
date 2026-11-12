@@ -1571,8 +1571,16 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         from hermes_cli.kanban_execution_source import assemble
         from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
         gateway, profile = card_scope(path)
+        for info in found.values():  # board-root owner scope, kept for the failure path too (C9)
+            info["_execution_scope"] = {"gateway": gateway, "profile": profile, "board": _board_slug(path)}
         try:
             _require_local_execution_authority(conn)
+            authority = True
+        except ADAPTER_ERRORS:
+            authority = False  # a pulled mirror attests neither open nor delivered cards
+        try:
+            if not authority:
+                raise RuntimeError("local execution authority unavailable")
             sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
                                observed_at=read_at)
             for tid, source in sources.items():
@@ -1582,8 +1590,9 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
             _log.debug("kanban execution source failed for %s", path, exc_info=True)
             for info in found.values():
                 info["_execution_error"] = True
-        _receipts.attach_done(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
-                              observed_at=read_at)
+        if authority:  # receipts are independent of the open-card read, but not of owner authority
+            _receipts.attach_done(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
+                                  observed_at=read_at)
         _add_card_details(conn, found)
         try:
             for tid, info in _local_wait_info(conn, found).items():

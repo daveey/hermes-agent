@@ -108,11 +108,12 @@ def attach_done(conn, found, *, board, gateway, profile, observed_at):
     """Task-list entry: set ``_execution_done`` on listed done cards whose delivery is established.
 
     A failed read marks only those done cards ``_execution_error`` (explicit unknown); open cards and asks
-    are untouched. Rows already failed by the open-card read are left to that failure.
+    are untouched. A receipt is independent of the open-card read, so it is still read for rows that
+    read failed; only a failed receipt read leaves them unknown.
     """
     from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
 
-    ids = [tid for tid, row in found.items() if row.get("status") == "done" and not row.get("_execution_error")]
+    ids = [tid for tid, row in found.items() if row.get("status") == "done"]
     if not ids:
         return
     try:
