@@ -168,7 +168,7 @@ def request_roll(run: Callable = subprocess.run) -> bool:
     """Ask the roller unit for a warm roll without waiting for it (``hermes update``'s dashboard refresh)."""
     try:
         return run(["systemctl", "--user", "restart", "--no-block", ROLLER_UNIT], capture_output=True,
-                   text=True, timeout=15).returncode == 0
+                   text=True, encoding="utf-8", errors="replace", timeout=15).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 

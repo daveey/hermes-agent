@@ -108,6 +108,12 @@ def test_loopback_dashboard_still_accepts_the_session_header(gated):
 _EXEMPT = {
     ("hermes_cli/web_server.py", "_dashboard_selftest_once"):
         "in-process ASGI self-test; its loop skips gated binds",
+    ("hermes_cli/always_on_rollover.py", "_http_get"):
+        "roller -> its own loopback-only always-on backend (serve --isolated on 127.0.0.1, never gated); "
+        "the path is a parameter because warmup replays Desktop's own GETs",
+    ("hermes_cli/always_on_rollover.py", "_http_post"):
+        "roller -> its own loopback-only always-on backend (never gated); the path is a parameter "
+        "(only /api/health/retirement, already a session-token route)",
 }
 _API_PATH = re.compile(r"/api/[A-Za-z0-9_\-/{}.]*")
 
