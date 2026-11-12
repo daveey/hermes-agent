@@ -69,3 +69,36 @@ def test_requires_edit_refuses_combined_flags(kanban_home):
     tid = helpers._new(requires=["host_repo"])
     assert helpers._main(["edit", tid, "--requires", "terminal", "--title", "replacement"]) == 2
     assert helpers._edited_events(tid) == []
+
+
+def test_requires_edit_unknown_card(kanban_home, capsys):
+    assert helpers._main(["edit", "t_missing", "--requires", "terminal"]) == 1
+    assert "unknown id" in capsys.readouterr().err
+
+
+def test_requires_edit_force_is_not_an_escape(kanban_home):
+    tid = helpers._new(requires=["host_repo"])
+    assert helpers._main(["edit", tid, "--requires", "terminal", "--force"]) == 2
+    assert helpers._edited_events(tid) == []
+
+
+def test_requires_edit_retains_skill_requirements(kanban_home, monkeypatch):
+    from hermes_cli import kanban_capabilities as capabilities
+    tid = helpers._new(requires=["host_repo"])
+    monkeypatch.setattr(capabilities, "skill_requirements", lambda skills, profile: ["host_repo"])
+    assert helpers._main(["edit", tid, "--requires", "terminal"]) == 0
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).requires == ["terminal", "host_repo"]
+
+
+@pytest.mark.parametrize("field", ["claim_lock", "lease_holder"])
+def test_requires_edit_rejects_ready_card_with_custodian(kanban_home, field):
+    tid = helpers._new(requires=["host_repo"])
+    with kbc.connect() as conn:
+        # Unsynced fixtures lack the server lease mirror; install just that column.
+        if field == "lease_holder":
+            conn.execute("ALTER TABLE tasks ADD COLUMN lease_holder TEXT")
+        conn.execute(f"UPDATE tasks SET {field}='custodian' WHERE id=?", (tid,))
+        conn.commit()
+    assert helpers._main(["edit", tid, "--requires", "terminal"]) == 2
+    assert helpers._edited_events(tid) == []
