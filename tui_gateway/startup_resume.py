@@ -27,6 +27,7 @@ from tui_gateway.turn_marker import (
     UPDATE_HOLD_QUEUE_REASON,
     _load,
     _marker_path,
+    clear_turn_marker,
     freshness_since,
     marker_writer_state,
     read_turn_marker,
@@ -118,6 +119,12 @@ def pending_resumes(home: Path, cfg: dict | None, *, now: float | None = None,
     return out
 
 
+def _session_deleted(err: Any) -> bool:
+    """``session.resume``'s typed refusal for a session whose deletion fence the selected store holds."""
+    data = err.get("data") if isinstance(err, dict) else None
+    return isinstance(data, dict) and data.get("reason") == "session_deleted"
+
+
 def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, cfg: dict | None,
                                 *, paused_only: bool = False) -> list[dict]:
     """Call ``resume(rid, params)`` (the ``session.resume`` handler) for each pending marker; returns outcomes."""
@@ -137,6 +144,15 @@ def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, 
             continue
         err = env.get("error") if isinstance(env, dict) else None
         res = env.get("result") if isinstance(env, dict) else None
+        if _session_deleted(err):
+            # [daveey] A deleted chat is terminal, not an interrupted draft (desktop-03cd4d73b3): retire its
+            # marker in its own profile home so later boot sweeps don't resume it again. Only the store's
+            # typed ``session_deleted`` refusal proves deletion; a plain 4007 or a store error keeps the marker.
+            clear_turn_marker(row["home"], row["session_key"])
+            logger.info("startup resume %s (profile=%s): skipped, session was deleted; turn marker retired",
+                        row["session_key"], row["profile"] or "default")
+            results.append({**row, "ok": True, "scheduled": False, "deleted": True})
+            continue
         scheduled = bool(isinstance(res, dict) and res.get("auto_continue"))
         logger.info("startup resume %s (profile=%s): %s", row["session_key"], row["profile"] or "default",
                     "auto-continue scheduled" if scheduled else (err or "resumed, no continuation scheduled"))
