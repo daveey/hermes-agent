@@ -120,7 +120,7 @@ def test_failed_intent_insert_rolls_back_task_and_events(board):
 def _strip_late_options(conn):
     row = conn.execute("SELECT request_id,intent_json FROM origin_creation_intents").fetchone()
     env = json.loads(row["intent_json"])
-    for k in ("chat_origin", "placement_policy"):
+    for k in ("chat_origin", "placement_policy", "admission_class", "admission_frees"):
         env["options"].pop(k, None)
     conn.execute("UPDATE origin_creation_intents SET intent_json=? WHERE request_id=?",
                  (json.dumps(env, sort_keys=True, separators=(",", ":")), row["request_id"]))
@@ -177,3 +177,23 @@ def test_key_held_only_by_an_archived_card_is_reused(board):
         tid = kb.create_task(conn, title="Build", idempotency_key=KEY, origin_intent=intent())
         assert tid != old
         assert kb.get_task(conn, tid).idempotency_key == KEY
+
+
+def test_retry_with_capacity_class_after_pre_admission_intent_conflicts(board):
+    with kbc.connect_closing() as conn:
+        kb.create_task(conn, title="Build", origin_intent=intent())
+        _strip_late_options(conn)
+        with pytest.raises(OriginError) as err:
+            kb.create_task(conn, title="Build", origin_intent=intent(), admission_class="capacity",
+                           admission_frees="frees: worker slots")
+        assert err.value.code == "origin_creation_conflict"
+
+
+def test_courier_create_keeps_capacity_class_and_retry_matches(board):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Build", origin_intent=intent(), admission_class="capacity",
+                             admission_frees="frees: worker slots")
+        task = kb.get_task(conn, tid)
+        assert (task.admission_class, task.admission_frees) == ("capacity", "frees: worker slots")
+        assert kb.create_task(conn, title="Build", origin_intent=intent(), admission_class="capacity",
+                              admission_frees="frees: worker slots") == tid

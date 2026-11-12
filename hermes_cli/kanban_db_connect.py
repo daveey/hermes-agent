@@ -1078,6 +1078,10 @@ _LATER_TASK_COLUMNS = (
     ("goal_max_turns", "goal_max_turns INTEGER"),
     ("completion_contract", "completion_contract TEXT"),
     ("placement_policy", "placement_policy TEXT"),
+    ("admission_class", "admission_class TEXT NOT NULL DEFAULT 'normal'"),
+    ("admission_frees", "admission_frees TEXT"),
+    # Local-only: a picked-up foreign card's origin, read from the replica at pickup (its chat links stay out).
+    ("admission_origin", "admission_origin TEXT"),
     ("session_id", "session_id TEXT"),
     # Typed operational reason; neither NULL nor capability implies a human ask.
     ("block_kind", "block_kind TEXT"),
@@ -1107,6 +1111,9 @@ _NOTIFY_SUB_COLUMNS = (
 )
 
 _TASK_RUN_COLUMNS = (
+    ("admission_pool", "admission_pool TEXT"),
+    ("admission_origin", "admission_origin TEXT"),
+    ("admission_class", "admission_class TEXT"),
     # Spawn-time start fingerprint of the run's worker_pid (PID-reuse guard for the
     # terminal-worker reaper; NULL = legacy row, never signalled).
     ("worker_started_at", "worker_started_at INTEGER"),

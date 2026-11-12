@@ -258,6 +258,7 @@ def _fold_queued(admission_id, session_id, replaced, skip=()):
         payload['text'] = _FOLDED_TEXT
         _descriptor(payload).pop('identities', None)
         _descriptor(payload).pop('kanban_cards', None)
+        _descriptor(payload).pop('kanban_event_keys', None)  # [daveey] the batch carries them now
         conn.execute('UPDATE session_admissions SET payload_json=? WHERE admission_id=?',
                      (json.dumps(payload, separators=(',', ':'), ensure_ascii=False), admission_id))
     return guard
@@ -430,7 +431,7 @@ def automation_display_metadata(metadata):
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
     'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick',
-    'completion_wakes_parent', 'completion_resumes_parent', 'kanban_cards'})
+    'completion_wakes_parent', 'completion_resumes_parent', 'kanban_cards', 'kanban_event_keys'})
 
 
 def admission_display(payload):
@@ -613,6 +614,8 @@ def restore_local_automation(authority, ref, row):
             'gateway_session_id': entry.session_id})
     event.metadata.update(automation_notification_metadata(descriptor))
     event.metadata.update(automation_display_metadata(descriptor))
+    from gateway.kanban_wake_fold import event_keys_metadata  # the remote notice row's custody keys
+    event.metadata.update(event_keys_metadata(descriptor))
     if descriptor.get('turn_author') is not None:
         event.metadata['turn_author'] = deepcopy(descriptor['turn_author'])
     if descriptor.get('heartbeat'):
@@ -654,7 +657,7 @@ async def admit_automation(authority, adapter, event, identity, replaces=None, f
         then=admitted, ordered=True, after=partial(authority._schedule_admitted, ref))
 
 
-_ROUTE_WAKE_PRODUCERS = frozenset({'kanban-wake', 'loop-tick'})
+_ROUTE_WAKE_PRODUCERS = frozenset({'kanban-wake', 'background-wake', 'loop-tick'})
 
 
 def route_owner_lock(runner, session_id):

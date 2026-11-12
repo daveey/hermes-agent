@@ -15,7 +15,13 @@ from tests.agent.test_step_boundary_pause import _final_response, _make_agent, _
 
 
 @pytest.mark.asyncio
-async def test_local_admission_real_agent_parks_and_resumes_without_tool_replay(tmp_path, monkeypatch):
+@pytest.mark.parametrize('extra', [
+    {},
+    # [daveey] A `chat -q` / `-z` turn (the hub's `oneshot` reviewer chats): parked like any local turn, and
+    # its continuation stays finite (unattended) on the same admission its redialling viewer awaits.
+    {'finite': True, 'unattended': True},
+], ids=['interactive', 'finite'])
+async def test_local_admission_real_agent_parks_and_resumes_without_tool_replay(tmp_path, monkeypatch, extra):
     from gateway.config import GatewayConfig
     from gateway.run import GatewayRunner
     from gateway.run_turn_runner import TurnRunner
@@ -71,7 +77,7 @@ async def test_local_admission_real_agent_parks_and_resumes_without_tool_replay(
     monkeypatch.setattr('model_tools.handle_function_call', tool)
     try:
         receipt = await authority.submit(connection.actor, Submission(
-            'composed-original', ref, {'text': 'do some tool work'}, 'queue'))
+            'composed-original', ref, {'text': 'do some tool work', **extra}, 'queue'))
         await async_wait_until(started.is_set, timeout=15)
         admission_fence.set_hold(home)
         admission_fence.request_pause(home, expires_at=time.time() + 60)
@@ -250,3 +256,151 @@ async def test_native_automation_real_agent_retains_quiet_traits_across_pause(tm
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         authority.db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('restart', [False, True], ids=['same-owner', 'restarted-owner'])
+async def test_finite_local_turn_inside_a_long_tool_call_is_cancelled_parked_and_continued(tmp_path, monkeypatch,
+                                                                                           restart):
+    """[daveey] A `oneshot` reviewer chat waits minutes inside one tool call (a test run): it never reaches the
+    completed-tool boundary on its own, so its pause could not land within the instant update's cap. After
+    ``MID_TOOL_GRACE_S`` the gateway hook cancels the call (the Desktop rule), the result is the stamped
+    interrupted-by-update text, the turn parks and then continues on the same admission."""
+    import re
+    from gateway.config import GatewayConfig
+    from gateway.run import GatewayRunner
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_controls import AuthorityConnection
+    from gateway.session_contract import Submission
+    from gateway.session_local import create_local_session
+    from hermes_cli import admission_fence
+    from hermes_constants import get_process_hermes_home
+    from hermes_state_runtime import get_session_admission
+    from hermes_state_update_pause import get_session_checkpoint
+    from tests.waiting import async_wait_until
+    from tools.interrupt import is_interrupted
+    from tui_gateway import update_pause as up
+
+    monkeypatch.setattr(up, 'MID_TOOL_GRACE_S', 0.3)
+    monkeypatch.setattr(up, 'MID_TOOL_POLL_S', 0.05)
+    home = get_process_hermes_home()
+    runner = GatewayRunner(GatewayConfig())
+    authority = await initialize_session_authority(runner, profile_id='default', instance_id='composed-mid-tool')
+    owners = [authority]
+    connection = AuthorityConnection(authority, object(), {'user_id': 'owner'})
+    ref = create_local_session(authority, connection.actor, {
+        'request_id': 'composed-mid-tool', 'source': 'tui', 'cwd': str(tmp_path),
+        'model': 'test/model', 'toolsets': []})
+    await authority.attach(connection.actor, ref, history=False)
+    physical = authority.physical_target(ref)
+    started = threading.Event()
+    calls, provider_inputs, turns = [], [], []
+    agent = _make_agent([])
+    del agent._execute_tool_calls
+    agent.session_id, agent._session_db = physical, authority.db
+    agent._save_trajectory = lambda *a, **k: None
+    agent._cleanup_task_resources = lambda *a, **k: None
+
+    def provider(**kwargs):
+        provider_inputs.append(copy.deepcopy(kwargs['messages']))
+        return _tool_response(1) if len(provider_inputs) == 1 else _final_response()
+
+    agent.client.chat.completions.create.side_effect = provider
+
+    def tool(name, args, *a, **k):  # like a foreground test run: only an interrupt ends it early
+        calls.append(name)
+        started.set()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if is_interrupted():
+                return 'partial'
+            time.sleep(0.02)
+        return 'finished on its own'
+
+    def allocate(turn, *a, **k):
+        turns.append(turn._ctx.persist_user_display_kind)
+        turn._ctx.agent_holder[0] = agent
+        return agent, len(turns) > 1
+
+    monkeypatch.setattr(TurnRunner, '_resolve_turn_agent', allocate)
+    monkeypatch.setattr(runner, '_resolve_session_agent_runtime', lambda **k: ('test/model', {}))
+    monkeypatch.setattr('model_tools.handle_function_call', tool)
+    try:
+        receipt = await authority.submit(connection.actor, Submission(
+            'composed-mid-tool', ref, {'text': 'run the tests', 'finite': True, 'unattended': True}, 'queue'))
+        await async_wait_until(started.is_set, timeout=15)
+        admission_fence.set_hold(home)
+        # The real checkpoint handler refuses while the turn runs and ACKs once it parked.
+        import json
+        import os
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from gateway import update_checkpoint
+        (home / 'core-update').mkdir(parents=True, exist_ok=True)
+        (home / 'core-update/intent').write_text(json.dumps({
+            'pid': os.getpid(), 'kind': 'unfenced', 'checkpoint': True, 'created_at': time.time(),
+            'expires_at': time.time() + 120, 'nonce': 'episode-chat'}))
+        runner.request_restart = Mock(return_value=True)
+        monkeypatch.setattr(update_checkpoint, 'preserve_cron_slots', Mock())
+
+        def checkpoint():
+            return update_checkpoint.checkpoint_for_update(
+                runner, SimpleNamespace(call_soon_threadsafe=lambda callback: callback()), {'nonce': 'episode-chat'})
+
+        assert runner._active_work_count() >= 1
+        assert (await asyncio.to_thread(checkpoint))['pausing'] is False  # live, not yet parked
+        runner.request_restart.assert_not_called()
+        admission_fence.request_pause(home, expires_at=time.time() + 60)
+        await async_wait_until(lambda: bool(authority.update_parked), timeout=10)
+        assert runner._active_work_count() == 0
+        ack = await asyncio.to_thread(checkpoint)
+        assert ack['pausing'] is True and ack['checkpoint'] is True
+        runner.request_restart.assert_called_once()
+        assert get_session_checkpoint(authority.db, session_id=ref.session_id)['admission_id'] == receipt.admission_id
+        assert get_session_admission(authority.db, admission_id=receipt.admission_id)['status'] == 'started'
+        tool_rows = [m for m in authority.db.get_messages(physical) if m['role'] == 'tool']
+        assert len(tool_rows) == 1 and re.search(
+            r'\[interrupted by Hermes update at [0-9T:Z-]+: re-run if still needed\]', tool_rows[0]['content'])
+        assert 'partial' not in tool_rows[0]['content']
+        assert len(provider_inputs) == 1 and calls == ['web_search']
+
+        owner = authority
+        if restart:
+            # The update stops this owner (its parked waiter dies with it) and boots the new code on the same
+            # store: boot recovery must find the started checkpoint and continue the same admission.
+            old_tasks = [live.task for live in authority.sessions.values() if live.task]
+            for task in old_tasks:
+                task.cancel()
+            await asyncio.gather(*old_tasks, return_exceptions=True)
+            admission_fence.clear_hold(home)
+            admission_fence.clear_pause_request(home)
+            runner = GatewayRunner(GatewayConfig())  # the restarted process: a new runner on the same store
+            monkeypatch.setattr(runner, '_resolve_session_agent_runtime', lambda **k: ('test/model', {}))
+            owners.append(owner := await initialize_session_authority(
+                runner, profile_id='default', instance_id='composed-mid-tool-next'))
+            from gateway.session_authorities import owner_scope
+            from gateway.session_local_recovery import recover_local_sessions
+            with owner_scope(owner):  # the boot's recovery (``recover_gateway_native_sessions``)
+                recover_local_sessions(owner, schedule=True)
+            await async_wait_until(lambda: get_session_admission(
+                owner.db, admission_id=receipt.admission_id)['status'] == 'terminal', timeout=15)
+        else:
+            admission_fence.clear_hold(home)
+            admission_fence.clear_pause_request(home)
+            await asyncio.wait_for(owner.sessions[ref.session_id].task, 15)
+        after = get_session_admission(owner.db, admission_id=receipt.admission_id)
+        assert after['status'] == 'terminal' and after['outcome'] == 'completed'
+        assert turns == [None, 'auto_continue'] and calls == ['web_search'] and len(provider_inputs) == 2
+        assert get_session_checkpoint(owner.db, session_id=ref.session_id) is None
+    finally:
+        admission_fence.clear_hold(home)
+        admission_fence.clear_pause_request(home)
+        tasks = [live.task for each in owners for live in each.sessions.values() if live.task]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await connection.close()
+        for each in owners:
+            each.db.close()

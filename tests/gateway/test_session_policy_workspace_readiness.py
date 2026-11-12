@@ -76,7 +76,7 @@ def test_managed_turn_in_removed_workspace_settles_failed_and_never_parks_the_qu
     from http.server import ThreadingHTTPServer
     from pathlib import Path
 
-    from tests.gateway.fixtures.local_recovery_probe import Model, child_env, daemon, rpc, websocket
+    from tests.gateway.fixtures.local_recovery_probe import Model, child_env, daemon, rpc, settled_receipt, websocket
     from tests.waiting import async_wait_until
 
     root = Path(__file__).resolve().parents[2]
@@ -111,8 +111,7 @@ def test_managed_turn_in_removed_workspace_settles_failed_and_never_parks_the_qu
             await async_wait_until(lambda: (admission('gone') or ('',))[0] in ('terminal', 'unknown'),
                                    timeout=60, what='refused turn settled')
             assert admission('gone') == ('terminal', 'failed')
-            receipt = await rpc(ws, 'prompt.receipt', session_id=sid, admission_id=sent['result']['admission_id'],
-                                include_result=True)
+            receipt = await settled_receipt(ws, sid, sent['result']['admission_id'])
             result = receipt['result']['result']
             assert result['failure_reason'] == 'workspace_unavailable' and result['api_calls'] == 0, result
             assert str(folder) in result['final_response']

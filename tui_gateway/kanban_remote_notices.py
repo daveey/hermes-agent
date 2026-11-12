@@ -549,13 +549,16 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
 def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, ledger: Optional[Path] = None,
             now: Optional[float] = None, lineage: tuple[str, ...] = (),
             skip: Optional[Callable[[str], bool]] = None,
-            transcript_has: Optional[Callable[[str, str], bool]] = None) -> list[dict]:
+            transcript_has: Optional[Callable[[str, str], bool]] = None, per_link: bool = False) -> list[dict]:
     """Claim and return ``[{text, session, ref, state, event_key}]`` for this session's newly terminal remote cards.
 
     The ledger row stays in flight (holder pid + start) until :func:`ack`. ``lineage`` adds earlier ids of the
     same chat (a compaction fork keeps the link on the old id). ``skip(task_id)`` is true for remote cards a
     local placeholder already reports. ``transcript_has(notice_key, task_id)`` lets a dead holder's claim be
-    acked instead of re-offered, and re-offers a legacy ``delivered=1`` row once. Never raises.
+    acked instead of re-offered, and re-offers a legacy ``delivered=1`` row once. ``per_link`` claims each
+    notice under its link's own session, the ledger key the Desktop sweep (``_deliver_link``) claims it
+    under, so the two see each other's claim on a chat compressed before the card was linked
+    (``gateway.kanban_remote_owner``; review t_01a1d013e0411032). Never raises.
     """
     from hermes_cli.kanban_placement import is_placeholder_session
     if is_placeholder_session(session_key):
@@ -596,18 +599,19 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 if not fresh and (card["gw"], card["key"], state) not in fresh_times:
                     continue  # partial sync: don't permanently settle a not-yet-observed arrival
                 reason = "stale"
+                sid = card.get("sid") or session_key
+                claim_session = sid if per_link else session_key
                 if fresh and skip is not None and conn.execute(
                         "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
-                        (session_key, ref, state)).fetchone() is None and skip(str(task["id"])):
+                        (claim_session, ref, state)).fetchone() is None and skip(str(task["id"])):
                     fresh, reason = False, "placeholder"  # recorded silently: the placeholder's notice covers it
-                sid = card.get("sid") or session_key
                 key = _shared_key(card["gw"], card["key"], task, profile, sid)
                 swept_key = (str(path), profile, sid, _notice_id(card["gw"], card["key"], task, profile, sid))
-                verdict = _claim_notice(conn, session=session_key, ref=ref, state=state, now=now, fresh=fresh,
+                verdict = _claim_notice(conn, session=claim_session, ref=ref, state=state, now=now, fresh=fresh,
                                         notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has,
                                         swept_key=swept_key, settle_reason=reason)
                 if verdict == "offer":
-                    out.append(_notice_item(card, session_key, me, profile, now))
+                    out.append(_notice_item(card, claim_session, me, profile, now))
                     offered.add((ref, state))
         finally:
             conn.close()
@@ -1079,6 +1083,12 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                 return
             if settled((sid, tip), ref, state):
                 _remember_delivered(memo_key)
+                return
+            from tui_gateway.kanban_remote_fifo import gateway_holds, lineage_ids
+            if gateway_holds(db, lineage_ids(db, sid, tip), event_key):
+                # [daveey] The gateway runs this chat's turns and admits the notice to its FIFO
+                # (gateway.kanban_remote_owner); a claim here would only race it (t_01a1cff0541bf30c).
+                logger.debug("remote Kanban notice %s for chat %s left to the gateway's FIFO", ref, sid)
                 return
             if waker is None:
                 row_id = db.append_kanban_notice(tip, text, metadata)

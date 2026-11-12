@@ -122,7 +122,7 @@ def _sync_persisted_markers(target_messages, source_messages) -> None:
 
 def _run_under_progress_timeout(
     agent, run, messages, system_message, *, active_fence, registration, fence_registration_lock,
-    idle_timeout, total_ceiling, approx_tokens=None,
+    idle_timeout, total_ceiling, approx_tokens=None, trigger=None,
 ):
     """Run ``run(fence, target_messages=snapshot)`` on the pool under the progress-aware timeout.
     The pooled worker must NEVER share the caller's live transcript — a late engine after a host timeout could
@@ -175,15 +175,27 @@ def _run_under_progress_timeout(
                 agent._active_compression_commit_fence = retry_fence
         return retry_fence
 
-    return run_compress_context_with_progress_timeout(
-        worker=_snapshot_worker, messages=messages,
-        system_prompt_fallback=lambda: _timeout_fallback_prompt(agent, system_message),
-        idle_timeout_seconds=idle_timeout, total_ceiling_seconds=total_ceiling, on_timeout=_on_timeout,
-        on_timeout_cause=_on_timeout_cause,
-        on_commit_overrun=lambda waited, ceiling: _warn_commit_overrun(agent, waited, ceiling), fence=active_fence,
-        telemetry_agent=agent, new_fence=_publish_new_fence, fallback_worker=_same_turn_fallback_worker,
-        request_exceeds_window=request_exceeds_model_window(agent, approx_tokens) is True,
-    )
+    def _wait(yield_check=None):
+        return run_compress_context_with_progress_timeout(
+            worker=_snapshot_worker, messages=messages,
+            system_prompt_fallback=lambda: _timeout_fallback_prompt(agent, system_message),
+            idle_timeout_seconds=idle_timeout, total_ceiling_seconds=total_ceiling, on_timeout=_on_timeout,
+            on_timeout_cause=_on_timeout_cause,
+            on_commit_overrun=lambda waited, ceiling: _warn_commit_overrun(agent, waited, ceiling), fence=active_fence,
+            telemetry_agent=agent, new_fence=_publish_new_fence, fallback_worker=_same_turn_fallback_worker,
+            request_exceeds_window=request_exceeds_model_window(agent, approx_tokens) is True,
+            yield_check=yield_check,
+        )
+
+    from agent import update_pause_cancel
+    if not update_pause_cancel.compression_can_yield(
+        trigger, messages, api_call_count=getattr(agent, "_api_call_count", 0),
+    ):
+        return _wait()
+    # A core-update pause's cancel covers this wait like a running tool call (t_01a1d0aa52ee1404), only where
+    # the yield's unchanged transcript reaches a step boundary the pause lands on.
+    with update_pause_cancel.compression_in_flight(agent):
+        return _wait(lambda: update_pause_cancel.compression_yield_requested(agent))
 
 
 def _mirror_result_onto_live_lists(agent, result, messages, *, direct_path: bool) -> None:
@@ -306,6 +318,7 @@ class CompressionFacadeMixin:
                     active_fence=active_fence, registration=registration,
                     fence_registration_lock=fence_registration_lock,
                     idle_timeout=idle_timeout, total_ceiling=total_ceiling, approx_tokens=approx_tokens,
+                    trigger=trigger,
                 )
             _mirror_result_onto_live_lists(self, result, messages, direct_path=direct_path)
             _rebind_caller_session_context(self)

@@ -104,12 +104,13 @@ def _resolve_session_cwd(session_key: str | None) -> str:
             return recorded
     except Exception:
         pass
-    try:
-        from agent.runtime_cwd import resolve_agent_cwd
+    from agent.runtime_cwd import resolve_agent_cwd_strict
 
-        return str(resolve_agent_cwd())
-    except Exception:
-        return os.getcwd()
+    resolved = resolve_agent_cwd_strict()
+    if resolved is None:
+        # A deleted launch dir must not retarget /init at $HOME's AGENTS.md (see docstring).
+        raise FileNotFoundError("the working directory was deleted; cd into the project and rerun /init")
+    return str(resolved)
 
 
 def build_init_prompt_for_cwd(cwd: str | None = None, extra: str = "",

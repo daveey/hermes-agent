@@ -107,6 +107,44 @@ def _not_pinned_sql(alias: str = "s") -> str:
     return f"COALESCE({alias}.pinned, 0) = 0 AND {alias}.id NOT IN ({_PINNED_TAIL_SQL})"
 
 
+# One hop up a ``subagent`` row's own compression lineage: its parent is a compressed ``subagent`` segment it
+# continues (not a delegate child of that segment, whose ``_delegate_from`` names it).
+_SUBAGENT_SEGMENT_PARENT_SQL = ("SELECT p.id FROM sessions c JOIN sessions p ON p.id = c.parent_session_id"
+                                f" WHERE c.id = ? AND p.source = 'subagent' AND {_CONTINUATION_EDGE_SQL}")
+_LINEAGE_WALK_CAP = 1000
+
+# The delegator is ended only when its whole compression lineage is: walk forward along continuation edges and
+# look for an open row. A delegator that compressed mid-run (an async parent, or a subagent segment B whose
+# delegate G outlives it while B2 runs) still owns its child through its open continuation tip. ``UNION`` dedups
+# ids, so a corrupt cycle terminates.
+_DELEGATOR_ENDED_SQL = ("WITH RECURSIVE fwd(id) AS ("
+                        " SELECT ?"
+                        " UNION"
+                        " SELECT c.id FROM fwd JOIN sessions p ON p.id = fwd.id JOIN sessions c ON c.parent_session_id = p.id"
+                        f" WHERE {_CONTINUATION_EDGE_SQL}"
+                        ") SELECT 1 FROM sessions d WHERE d.id = ? AND d.ended_at IS NOT NULL AND NOT EXISTS ("
+                        " SELECT 1 FROM fwd JOIN sessions s ON s.id = fwd.id WHERE s.ended_at IS NULL)")
+
+
+def _delegating_parent_on(conn, session_id: str) -> Optional[str]:
+    """The row that delegated *session_id*: the ``parent_session_id`` of the first segment of its compression
+    lineage. A compressed child's continuation names its previous segment as parent, not the delegator."""
+    current, seen = session_id, {session_id}
+    for _ in range(_LINEAGE_WALK_CAP):
+        row = conn.execute(_SUBAGENT_SEGMENT_PARENT_SQL, (current,)).fetchone()
+        if row is None or row[0] in seen:
+            break
+        current = row[0]
+        seen.add(current)
+    row = conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
+    return row[0] if row is not None else None
+
+
+def _delegator_ended_on(conn, session_id: str) -> bool:
+    delegator = _delegating_parent_on(conn, session_id)
+    return bool(delegator) and conn.execute(_DELEGATOR_ENDED_SQL, (delegator, delegator)).fetchone() is not None
+
+
 class SessionMaintenanceMixin:
     """Retention pruning, stale-session archiving and VACUUM policy for SessionDB."""
 
@@ -213,6 +251,48 @@ class SessionMaintenanceMixin:
                 f"UPDATE sessions SET ended_at = ?, end_reason = 'startup_orphan_reap'"
                 f" WHERE id IN ({_placeholders(victims)}) AND ended_at IS NULL{scope_sql}",
                 (time.time(), *victims, *scope_params))
+            return victims
+        return self._execute_write(_do) or []
+
+    def end_subagents_of_ended_parents(
+        self, *, max_idle_seconds: float, exclude_ids: tuple[str, ...] = (),
+        end_reason: str = "parent_ended_reap", exclude_pinned: bool = False,
+    ) -> list[str]:
+        """[daveey] Close open ``subagent`` rows whose delegating parent row is already ended and that have been
+        idle (by ``started_at`` AND canonical last activity) at least ``max_idle_seconds``. A delegate child's real
+        owner is the process that ran its parent's turn, so ``sweep_orphaned_sessions``' heartbeat guess (any live
+        backend started before the row could own it) kept such rows open for as long as some backend outlived them,
+        which on a host whose backends restart many times a day is indefinitely. A parent that has ended (reaped or
+        closed) has no turn left to own the child; one rotated by compression counts as ended only once its open
+        continuation tip has ended too (``_DELEGATOR_ENDED_SQL``). A compressed child's continuation has
+        its own compressed segment as ``parent_session_id``, so the delegating parent is found by walking past those
+        segments (``_delegating_parent_on``): an open delegator keeps its child's continuation. ``end_reason``
+        differs from ``startup_orphan_reap`` so the reap's killed-subagent notice is not re-sent hours late to a chat
+        that already received the delegation's own result. Write guards, ``exclude_ids`` and ``exclude_pinned``
+        spare rows as in the orphan sweep."""
+        if max_idle_seconds <= 0:
+            return []
+        cutoff = time.time() - max_idle_seconds
+        pin_scope = f" AND {_not_pinned_sql('sessions')}" if exclude_pinned else ""
+        # Prefilter: the immediate parent is ended (the delegator, or a compressed segment of the child itself).
+        scope_sql = (f" AND source = 'subagent'{pin_scope} AND started_at < ?"
+                     f" AND {_sql_session_last_active('sessions')} < ?"
+                     " AND parent_session_id IS NOT NULL AND EXISTS (SELECT 1 FROM sessions p WHERE"
+                     " p.id = sessions.parent_session_id AND p.ended_at IS NOT NULL)")
+        scope_params = (cutoff, cutoff)
+
+        def _do(conn):
+            rows = conn.execute(f"SELECT id FROM sessions WHERE ended_at IS NULL{scope_sql}", scope_params).fetchall()
+            excluded = {str(x) for x in exclude_ids if x}
+            victims = [sid for sid in (str(row["id"]) for row in rows)
+                       if sid not in excluded and _delegator_ended_on(conn, sid)
+                       and not self._write_guards_reject(conn, sid)]
+            if not victims:
+                return []
+            conn.execute(
+                f"UPDATE sessions SET ended_at = ?, end_reason = ?"
+                f" WHERE id IN ({_placeholders(victims)}) AND ended_at IS NULL{scope_sql}",
+                (time.time(), end_reason, *victims, *scope_params))
             return victims
         return self._execute_write(_do) or []
 

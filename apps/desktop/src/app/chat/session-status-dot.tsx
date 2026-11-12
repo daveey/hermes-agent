@@ -1,11 +1,14 @@
 import { useStore } from '@nanostores/react'
 
 import { type Translations, useI18n } from '@/i18n'
+import { unreadDotOutcomeLabel, unreadDotOutcomeStripe } from '@/lib/session-outcome'
+import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
 import { cn } from '@/lib/utils'
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
 import type { SessionDotState } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
+import type { SessionOutcome } from '@/types/session-outcome'
 
 // A pure lookup table: each state maps to its className, aria-label, and title.
 // No priority resolution here — $sessionDotStateById already picked one.
@@ -92,6 +95,25 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
  *  of its own (it inherits the project's), so callers supply one. */
 export const sessionDotClassName = (state: SessionDotState): string => DOT_VARIANTS[state].className
 
+/** [daveey] The variant a session's dot paints. Unread is emerald only for a chat that is actually done: a stored
+ *  outcome that is waiting / running / unresolved / decision / muted repaints the unread dot in that outcome's stripe
+ *  colour (still filled, so it still reads as new), because users read emerald as done. Every other state ignores
+ *  the outcome: the live-turn states already outrank it, and idle keeps the project colour. */
+export const sessionDotVariant = (state: SessionDotState, outcome?: null | SessionOutcome): DotVariant => {
+  const stripe = state === 'unread' ? unreadDotOutcomeStripe(outcome) : null
+
+  if (!stripe || !outcome) {
+    return DOT_VARIANTS[state]
+  }
+
+  return {
+    ariaLabel: r => unreadDotOutcomeLabel(outcome, r),
+    className: cn(DOT_BASE, 'bg-(--session-status-color)', sessionStatusStripeColor(stripe)),
+    role: 'status',
+    title: r => unreadDotOutcomeLabel(outcome, r)
+  }
+}
+
 export interface SessionStatusDotProps {
   /** The STORED session id — the key every live-state atom (working /
    *  attention / stalled / unread / background) is keyed by, on BOTH surfaces:
@@ -135,7 +157,7 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   // status changes, but a given dot only repaints when ITS OWN state flips.
   const dotState = useSessionDotState(storedSessionId, session)
 
-  const variant = DOT_VARIANTS[dotState]
+  const variant = sessionDotVariant(dotState, session?.outcome)
 
   return (
     <span className={cn('flex items-center gap-0.5', className)}>

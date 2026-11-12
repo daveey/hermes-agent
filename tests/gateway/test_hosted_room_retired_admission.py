@@ -57,8 +57,8 @@ def test_a_deferred_turn_s_queued_input_is_refused_and_the_next_turn_runs(hosted
     claimed = []
     original = session_authority.SessionAuthority._claim_next
 
-    async def claim(self, ref, live):
-        result = await original(self, ref, live)
+    async def claim(self, ref, live, attempted=None):
+        result = await original(self, ref, live, attempted)
         claimed.append(result[1]['payload']['text'] if result and result[1] else None)
         raise asyncio.CancelledError  # stop at the first real claim: the head it reached is the proof
     monkeypatch.setattr(session_authority.SessionAuthority, '_claim_next', claim)

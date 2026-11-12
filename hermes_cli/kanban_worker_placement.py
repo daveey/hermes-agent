@@ -59,14 +59,16 @@ def queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None):
     """``runs_on: [<pool label>, *coordination labels]`` for a portable card of a ``worker_queue`` gateway, or None.
 
     One queue instead of a machine pin: no worker is chosen at creation, so a held or full worker never strands the
-    card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``, courier
-    creation, non-portable work, or when no active, unheld machine carries the label. [daveey]
+    card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``,
+    non-portable work, or when no active, unheld machine carries the label. Courier and origin-bound creates queue
+    too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). [daveey]
     """
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
 
+    del origin_intent  # kept for callers; it does not change execution routing
     label = placement._Cfg(cfg).queue_label(gateway)
-    if not label or pin not in ("", "auto") or args.get("runs_on") is not None or origin_intent is not None:
+    if not label or pin not in ("", "auto") or args.get("runs_on") is not None:
         return None
     if placement.portable_reason(args, cfg):
         return None

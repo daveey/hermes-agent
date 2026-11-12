@@ -9,13 +9,14 @@ import json
 import os
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from hermes_constants import get_default_hermes_root, get_hermes_home
 from hermes_cli import admission_fence
 from gateway.cron_pause import preserve_cron_slots
 from gateway.status import _pid_exists
-from gateway.session_runtime_workers import cron_turn_count, kanban_managed_count
+from gateway.session_runtime_workers import cron_chat_count, cron_turn_count, kanban_managed_count
 from gateway.run_shutdown_restart_wait import CORE_UPDATE_KANBAN_WAIT_S, CORE_UPDATE_KANBAN_STOP_LEASH_S
 
 CHECKPOINT_PAUSE = True
@@ -67,11 +68,36 @@ def checkpoint_inventory():
             "reservation_ids": sorted(known_cron_reservations())}
 
 
+def checkpoint_work(runner, *, cron_cut: bool) -> dict:
+    """The checkpoint's own arithmetic: ``preservable`` iff every unit of the work total is a confirmed
+    Kanban card or (when cron is cut) a cron run or its agent turn. The ``active-work`` verb publishes
+    the same dict, so an updater census decides with this predicate instead of guessing from unit kinds:
+    a ``managed`` unit there also covers unmapped turns, side agents and managed turns that are not
+    cards, none of which a checkpoint preserves (hermes-hub 2026-11-12 18:11Z).
+    ``unlisted`` excludes the union of preserved work and named chat/API/deferred buckets:
+    a cut cron's mapped agent turn belongs to both, so add that intersection back once."""
+    cron = runner._active_cron_job_count() + cron_turn_count(runner) if cron_cut else 0
+    managed = kanban_managed_count(runner)
+    total = runner._active_work_count()
+    named = sum(_named_work_counts(runner))
+    overlap = cron_chat_count(runner) if cron_cut else 0
+    return {"active": total, "preservable_managed": managed, "cron": cron,
+            "unlisted": max(0, total - managed - cron - named + overlap),
+            "preservable": total == managed + cron}
+
+
+def _named_work_counts(runner):
+    """Chat/API/deferred buckets; absent probes are supported by older runner adapters."""
+    return [getattr(runner, name, lambda: 0)() for name in
+            ("_running_agent_count", "_active_api_run_count", "_active_deferred_agent_worker_count")]
+
+
 def _unpreservable_work(runner, managed: int, cron: int) -> str:
     """Name the work a checkpoint cannot carry, by kind (and session for chat turns), for the refusal
     reason the updater prints. Best effort: the count check itself already decided."""
     parts = []
-    with_keys = getattr(runner, "_running_agents", None)
+    named = 0
+    with_keys = getattr(runner, "_running_agents", None)  # a live SessionFieldView on GatewayRunner, not a dict
     probes = (("chat turn", getattr(runner, "_running_agent_count", None)),
               ("API-server run", getattr(runner, "_active_api_run_count", None)),
               ("deferred agent worker", getattr(runner, "_active_deferred_agent_worker_count", None)))
@@ -83,14 +109,20 @@ def _unpreservable_work(runner, managed: int, cron: int) -> str:
             count = 0
         if count <= 0:
             continue
+        named += count
         text = f"{count} {label}{'s' if count != 1 else ''}"
-        if label == "chat turn" and isinstance(with_keys, dict) and with_keys:
+        if label == "chat turn" and isinstance(with_keys, Mapping) and with_keys:
             text += " (" + ", ".join(sorted(str(k) for k in with_keys)[:4]) + ")"
         parts.append(text)
     try:
         total = int(runner._active_work_count())
     except Exception:  # health: allow BLE001 -- see above
         total = -1
+    # Cut cron turns in the chat bucket were already subtracted in ``cron``.
+    overlap = min(cron, cron_chat_count(runner))
+    if (other := total - managed - cron - named + overlap) > 0:
+        parts.append(f"{other} other unit{'s' if other != 1 else ''} (an unmapped turn, a side agent or "
+                     "a managed turn that is not a Kanban card)")
     summary = "; ".join(parts) or "work the gateway cannot classify"
     return (f"unpreservable work: {summary} (active={total}, preservable managed={managed}, cron={cron}); "
             "retry once it finishes")
@@ -143,15 +175,13 @@ def checkpoint_for_update(runner, loop, params):
                 why[0] = f"{len(unknown)} admission reservation(s) not published by a cut cron run"
                 return
             from gateway.run_active_work_verb import _delegation_units
-            # A cut cron run includes its agent turn on this owner (``cron_turn_count``).
-            cron = (runner._active_cron_job_count() + cron_turn_count(runner)
-                    if intent.get("cron_cut") is True else 0)
             if delegations := _delegation_units(time.time()):
                 why[0] = f"{len(delegations)} live async delegation(s) the checkpoint cannot preserve"
                 return
-            managed = kanban_managed_count(runner)
-            if runner._active_work_count() != managed + cron:
-                why[0] = _unpreservable_work(runner, managed, cron)
+            # A cut cron run includes its agent turn on this owner (``cron_turn_count``).
+            work = checkpoint_work(runner, cron_cut=intent.get("cron_cut") is True)
+            if not work["preservable"]:
+                why[0] = _unpreservable_work(runner, work["preservable_managed"], work["cron"])
                 return
             preserve_cron_slots(runner.config)
             # Atomically claim permission versus the handler's timeout. Never hold

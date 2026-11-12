@@ -1,4 +1,5 @@
 """Recovery and renewal retain independent routing and diagnostic ownership."""
+import itertools
 import json
 
 from hermes_cli import kanban_db_sync as sync
@@ -12,8 +13,12 @@ conn = fixtures.conn
 setup = fixtures.setup
 
 
-def test_legacy_rows_do_not_advance_policy_cursor(setup):
+def test_legacy_rows_do_not_advance_policy_cursor(setup, monkeypatch):
     db, hub = setup
+    # Synced ids order by their millisecond prefix only; ids minted in the same
+    # millisecond order by random bits, so mint them in creation order here.
+    minted = itertools.count(1)
+    monkeypatch.setattr(sync, "new_task_id", lambda _conn: f"t_{next(minted):016x}")
     policy = [reserve.acknowledged(db) for _ in range(wp.MAX_RESERVES_PER_TICK + 1)]
     legacy = [fixtures.make(db) for _ in range(wp.MAX_RESERVES_PER_TICK)]
     assert min(legacy) > max(policy)

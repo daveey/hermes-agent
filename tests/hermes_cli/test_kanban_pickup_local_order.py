@@ -74,3 +74,35 @@ def test_pickup_ranking_preserves_review_lane_and_eligibility(gws, monkeypatch):
             assert picked == [expected]
     finally:
         replica.close()
+
+
+def test_pickup_pool_budget_imports_only_marked_cards_when_regular_full(gws):
+    """A hub at regular 7/7 with idle priority slots copies only capacity/urgent foreign cards: a normal card
+    could not start, so it records ``budget_exhausted`` instead of being imported."""
+    from hermes_cli.kanban_admission_pools import PoolBudget
+
+    home, executor = gws
+    home.enter()
+    normal = kb.create_task(home.conn, title="foreign normal", assignee="default", priority=1000,
+                            runs_on=[f"machine:{support.WORKER}"])
+    marked = kb.create_task(home.conn, title="foreign capacity", assignee="default", priority=0,
+                            runs_on=[f"machine:{support.WORKER}"], admission_class="capacity",
+                            admission_frees="frees: worker slots")
+    home.round()
+    executor.round()
+    executor.enter()
+    replica = wn.open_replica(executor.conn)
+    assert replica is not None
+    try:
+        picked, skips = wn._evaluate(executor.conn, replica, support.WORKER, mode="all", limit=PoolBudget(0, 3),
+                                     profile_exists=None, full_detail="regular pool full")
+        assert picked == [marked]
+        assert skips[normal] == ("budget_exhausted", "regular pool full")
+        picked, _ = wn._evaluate(executor.conn, replica, support.WORKER, mode="all", limit=1,
+                                 profile_exists=None, full_detail="full")
+        assert picked == [normal]
+    finally:
+        replica.close()
+    assert wn.pickup(executor.conn, budget=PoolBudget(0, 0, 3)) == []  # no free slot in any pool
+    assert wn.pickup(executor.conn, budget=PoolBudget(0, 3)) == [marked]
+    assert kb.get_task(executor.conn, normal) is None

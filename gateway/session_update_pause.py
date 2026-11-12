@@ -104,6 +104,9 @@ async def resume_checkpoint(authority, ref, live, first):
         authority._stamp_claim(ref, live, row)
         from gateway.session_runtime_workers import persist_work_count
         persist_work_count(authority)
+        # [daveey] The gateway twin of the Desktop sweep's line: hub checks grep it per session.
+        logging.getLogger(__name__).info('Update pause: auto-continue scheduled for gateway session=%s '
+                                         'admission=%s', ref.session_id, row.get('admission_id'))
         return row
 
     try:

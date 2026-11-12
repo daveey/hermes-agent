@@ -45,6 +45,16 @@ async def _stop_exec_tree(proc) -> None:
         await asyncio.wait_for(proc.wait(), timeout=5)
 
 
+async def _stop_pending_exec_tree(spawn) -> None:
+    """Retain spawn ownership until its handle is available, then stop the tree."""
+    try:
+        proc = await spawn
+    except OSError:
+        # A failed spawn has no process to stop; preserve the caller's cancellation.
+        return
+    await _stop_exec_tree(proc)
+
+
 def _carry_replied_voice_answer(event, rewritten, new_text: str) -> None:
     """``dataclasses.replace`` drops the adapter's private typed-answer attribute, and without it a
     clarify reads the replied-to voice note's speech as the answer. Carry it: the plugin's rewritten
@@ -199,13 +209,21 @@ class GatewayInboundHooksMixin:
         proc = None
         try:
             from tools.environments.local import build_subprocess_env
-            proc = await asyncio.create_subprocess_shell(
+            # The shell can run before asyncio finishes connecting its pipes. Keep
+            # ownership of the spawn across cancellation so its children cannot escape.
+            spawn = asyncio.create_task(asyncio.create_subprocess_shell(
                 exec_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 env=build_subprocess_env(), cwd=cwd,
                 # Its own process group, so cleanup can reach what the shell started (POSIX;
                 # Windows ignores it and _stop_exec_tree walks the tree with taskkill /T).
                 start_new_session=True,  # detached-spawn: ok — awaited; the timeout/cancel path kills its group
-            )
+            ))
+            try:
+                proc = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                # Cleanup owns the spawn even if shutdown cancels this caller again.
+                await asyncio.shield(_stop_pending_exec_tree(spawn))
+                raise
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_EXEC_QUICK_COMMAND_TIMEOUT)
             output = (stdout or stderr).decode().strip()
             if output:

@@ -142,11 +142,15 @@ class GatewayRestartWaitMixin:
             agent = state.turn.agent
             if agent is None:
                 continue
-            unit: dict = {"kind": "chat", "session": key, "pid": os.getpid()}
+            unit: dict = {"kind": "chat", "session": key, "pid": os.getpid(), "update_pausable": False}
             if state.turn.started_ts:
                 unit["elapsed_s"] = round(now - state.turn.started_ts, 1)
             if agent is not _AGENT_PENDING_SENTINEL:
                 unit["model"] = getattr(agent, "model", None)
+                # [daveey] A turn under the core-update pause hook parks on a durable checkpoint when an update
+                # requests a pause, then auto-continues: the updater pauses it instead of waiting for a gap.
+                from gateway.session_update_pause_hook import update_pausable
+                unit["update_pausable"] = update_pausable(agent)
                 summary_fn = getattr(agent, "get_activity_summary", None)
                 if callable(summary_fn):
                     with suppress(Exception):

@@ -212,10 +212,11 @@ UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "proje
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
                    "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage",
-                   "distinct_from", "distinct_reason")
+                   "distinct_from", "distinct_reason", "admission_class", "admission_frees")
 IDENTITY_OPTIONS = ("idempotency_key", "distinct_from", "distinct_reason")
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
-LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", *IDENTITY_OPTIONS)
+LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", *IDENTITY_OPTIONS,
+                    "admission_class", "admission_frees")
 HELP_CACHE_SECONDS = 600
 # Profile tools (``requires`` entries) a target can satisfy when it does not publish its profiles'
 # tools: what the hub's default profile has. host_repo never travels: it means a checkout on THIS host.
@@ -712,7 +713,8 @@ def carried_options(args: dict) -> dict:
             vals = [str(x) for x in ([v] if isinstance(v, str) else v) if str(x).strip()]
             if vals:
                 out[k] = vals
-        elif k == "completion_contract" and str(v).strip() == "local-only":
+        elif (k == "completion_contract" and str(v).strip() == "local-only") or (
+                k == "admission_class" and str(v).strip() == "normal"):
             continue
         else:
             out[k] = str(v)
@@ -725,7 +727,8 @@ def _uncarried(args: dict, c: _Cfg, carries: Optional[bool]) -> list[str]:
     used = [k for k in UNCARRIED_OPTIONS if args.get(k) not in (None, "", False, [])]
     if args.get("runs_on") is not None and "runs_on" not in used:
         used.append("runs_on")  # an explicit [] ("any machine") is a placement too: never dropped
-    legacy = [k for k in LEGACY_UNCARRIED if args.get(k) not in (None, "", False, [])]
+    legacy = [k for k in LEGACY_UNCARRIED if args.get(k) not in (None, "", False, [])
+              and not (k == "admission_class" and args.get(k) == "normal")]  # the default class carries as absent
     if (args.get("completion_contract") or "local-only") != "local-only":
         legacy.append("completion_contract")
     if used or not legacy:

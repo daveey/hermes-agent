@@ -23,9 +23,9 @@ def run(conn, args) -> int:
         if not args.writer:
             raise ValueError('explicit --writer required')
         action = args.priority_operation
-        if action == 'migrate':
+        if action in ('migrate', 'origins'):
             from hermes_cli import kanban_priority_runner as runner
-            code, result = runner.run(conn, args)
+            code, result = (runner.run if action == 'migrate' else runner.check_host_map)(conn, args)
             print(json.dumps(result, sort_keys=True))
             return code
         handlers = {
@@ -63,7 +63,24 @@ def _manifest_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
 
 
-def _prepare_stage(conn, args) -> dict:
+def _capture(conn, args) -> dict:
+    """Read-only canonical capture for this enrolled primary writer; writes nothing."""
+    refusal = _non_worker_refusal()
+    if refusal:
+        raise PermissionError(refusal)
+    from hermes_cli import kanban_sync_client as sync
+    identity = sync.load_identity()
+    state = sync_state(conn) or {}
+    if identity.gateway != args.writer or state.get('gateway_id') != args.writer:
+        raise ValueError('configured gateway differs from explicit writer')
+    if state.get('mode') != 'primary' or not state.get('board_id'):
+        raise ValueError('prepare requires an enrolled primary board')
+    return prepare.capture(sync.Hub(identity), board_id=state['board_id'], exceptions=args.exception)
+
+
+def _prepare_stage(conn, args, *, manifest: dict | None = None) -> dict:
+    """Stage a --manifest input, or prepare from ``manifest`` already captured by the
+    caller (migrate checks host-map coverage on it first), else a fresh capture."""
     refusal = _non_worker_refusal()
     if refusal:
         raise PermissionError(refusal)
@@ -71,6 +88,8 @@ def _prepare_stage(conn, args) -> dict:
         raise ValueError('--task and a fresh --backup path required')
     data = None
     if args.priority_operation == 'stage':
+        if manifest is not None:
+            raise ValueError('stage reads only its --manifest input')
         if not args.manifest or args.exception:
             raise ValueError('stage requires --manifest and no --exception overrides')
         data = _manifest_bytes(args.manifest)
@@ -78,14 +97,8 @@ def _prepare_stage(conn, args) -> dict:
     else:
         if args.manifest:
             raise ValueError('prepare reads canonical Board, not --manifest')
-        from hermes_cli import kanban_sync_client as sync
-        identity = sync.load_identity()
-        state = sync_state(conn) or {}
-        if identity.gateway != args.writer or state.get('gateway_id') != args.writer:
-            raise ValueError('configured gateway differs from explicit writer')
-        if state.get('mode') != 'primary' or not state.get('board_id'):
-            raise ValueError('prepare requires an enrolled primary board')
-        manifest = prepare.capture(sync.Hub(identity), board_id=state['board_id'], exceptions=args.exception)
+        if manifest is None:
+            manifest = _capture(conn, args)
     return prepare.stage(conn, manifest, path=Path(args.backup), task_id=args.task,
                          writer=args.writer, original_bytes=data)
 

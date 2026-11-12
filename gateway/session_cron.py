@@ -230,7 +230,7 @@ async def operation(authority, name, params, actor=None):
         if row['status'] == 'started':
             # The claim commits before execute() registers its event; latching the
             # cancellation on the admission here means that window cannot lose it.
-            _cancellations(authority).setdefault(row['admission_id'], threading.Event()).set()
+            latch_stop(authority, _cancellations(authority).setdefault(row['admission_id'], threading.Event()))
         return {'ok': True}
     result, flags = None, {}
     if row['status'] == 'terminal':
@@ -258,17 +258,49 @@ def _cancellations(authority):
     return cancellations
 
 
-def _restart_cut(authority, stop, execution_id):
-    """[daveey] Whether this owner's own restart stopped the run: it is draining for a stop or an
-    update and has either begun interrupting remaining work (tools killed, agents interrupted) or
-    the run was torn down by something other than an operator's cancel (the shutdown cleared the
-    fire claim, so the firer forwarded a "lost ownership" cancel)."""
-    from cron.cancellation import cancel_requested
+def _owner_draining(authority):
     runner = getattr(authority, 'runner', None)
-    if not getattr(runner, '_draining', False):
-        return False
+    return bool(getattr(runner, '_draining', False) or getattr(runner, '_interrupting_remaining_work', False))
+
+
+def latch_stop(authority, cancel):
+    """[daveey] Set a run's cancel latch, recording on it whether this owner's own drain/restart is
+    what stopped it. The fact is latched at stop time because the run thread reads it up to a poll
+    later, after the shutdown's last phase has reset ``runner._draining`` (cron-7c04faf754: the
+    run then reported "cron fire ownership was lost" and was booked failed). The first stop wins:
+    a latch already set by another stop (a real takeover's forwarded cancel) keeps its meaning.
+
+    This is permanent for the run, even if the restart-wait drain is aborted and the owner keeps
+    serving. A real lost-claim cancel forwarded during that drain is indistinguishable from a
+    shutdown cancel: prefer the safe-side single restart-cut rerun over booking a failure."""
+    if not cancel.is_set() and _owner_draining(authority):
+        cancel.owner_shutdown = True
+    cancel.set()
+
+
+def _latched_owner_shutdown(cancel, execution_id):
+    """Whether *cancel* was set by this owner's drain/restart; an operator's cancel marker wins."""
+    from cron.cancellation import cancel_requested
+    return (cancel is not None and cancel.is_set() and bool(getattr(cancel, 'owner_shutdown', False))
+            and not cancel_requested(execution_id))
+
+
+def _restart_cut(authority, stop, execution_id, cancel=None):
+    """[daveey] Whether this owner's own restart stopped the run: the latch says its drain stopped
+    it (``latch_stop``), or it is still draining for a stop or an update and has either begun
+    interrupting remaining work (tools killed, agents interrupted) or the run was torn down by
+    something other than an operator's cancel (the shutdown cleared the fire claim, so the firer
+    forwarded a "lost ownership" cancel)."""
+    from cron.cancellation import cancel_requested
+    if _latched_owner_shutdown(cancel, execution_id):
+        return True
+    runner = getattr(authority, 'runner', None)
+    # Sticky for this process, read first: a run interrupted by the stop can unwind after stop()
+    # finished and reset ``_draining`` (the run outlives the executor quiesce).
     if getattr(runner, '_interrupting_remaining_work', False):
         return True
+    if not getattr(runner, '_draining', False):
+        return False
     return bool(stop is not None and stop.is_set() and not cancel_requested(execution_id))
 
 
@@ -329,22 +361,37 @@ async def execute(authority, ref, row, policy):
             # The forwarded ``cron.cancel`` carries no reason, so the operator's marker is read here
             # first: a stopped agent run reports "cancelled on request", not a lost fire claim. When
             # the firer is this process and its shutdown interrupted the fire, the forwarded cancel
-            # reports that shutdown, not lost ownership (cron-7c04faf754).
+            # reports that shutdown, not lost ownership (cron-7c04faf754). So does a stop while this
+            # owner drains for a restart with no operator marker: ``stop_authority_work`` latches the
+            # run's cancel without a reason and without the scheduler's interrupted mark, but with
+            # ``owner_shutdown`` recorded at stop time (``latch_stop``), since the drain flag is reset
+            # before the run's next poll. An external (restart-safe) firer's interrupted mark lives
+            # in its own process, so only the latch can tell this owner's run about the shutdown.
             job_id = job['id']
+            from cron.cancellation import cancel_requested
+
+            def _stopped_by_own_shutdown():
+                if fire_interrupted_by_shutdown(job_id) or _latched_owner_shutdown(cancel, execution_id):
+                    return True
+                if cancel_requested(execution_id):
+                    return False
+                # The interrupt latch outlives stop()'s ``_draining`` reset (see _restart_cut).
+                return _owner_draining(authority)
+
             stop = _CombinedCancelEvent(
                 CancelRequest(execution_id),
-                ShutdownAwareCancel(cancel, lambda: fire_interrupted_by_shutdown(job_id)))
+                ShutdownAwareCancel(cancel, _stopped_by_own_shutdown))
             try:
                 result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
                                                  extra_prompt=data['extra_prompt'], cancel_event=stop)
             except Exception as exc:
-                if not _restart_cut(authority, stop, execution_id):
+                if not _restart_cut(authority, stop, execution_id, cancel):
                     raise
                 result = (False, '', '', f'{type(exc).__name__}: {exc}')
         # run_job stamps run-side verdicts on ITS job copy (quota hold, unreachable model); the
         # firing scheduler's bookkeeping reads them off its own dict, so they ride the result.
         flags = {key: job[key] for key in RUN_JOB_FLAGS if key in job}
-        if not result[0] and _restart_cut(authority, stop, execution_id):
+        if not result[0] and _restart_cut(authority, stop, execution_id, cancel):
             # [daveey] This owner's restart stopped the run (killed its tools, interrupted its agent,
             # or cleared its claim): whatever it returned is not the job's verdict. The firer books
             # an interruption and reruns it once (cron/restart_cut.py), never a failure.

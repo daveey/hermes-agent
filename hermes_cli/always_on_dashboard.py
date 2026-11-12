@@ -154,8 +154,34 @@ def _root_hermes_home() -> Path:
     return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")).expanduser()
 
 
+def _rollover():
+    """[daveey] The Linux blue/green handoff (``always_on_rollover``), imported lazily: it imports this module."""
+    try:
+        from hermes_cli import always_on_rollover
+    except ImportError:  # standalone copy next to always_on_rollover.py
+        import always_on_rollover  # type: ignore[no-redef]
+    return always_on_rollover
+
+
+def _uses_rollover() -> bool:
+    return sys.platform.startswith("linux")
+
+
+def cmd_proxy(args: argparse.Namespace) -> int:
+    return _rollover().cmd_proxy(args)
+
+
+def cmd_backend(args: argparse.Namespace) -> int:
+    return _rollover().cmd_backend(args)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    """Supervisor entry point: wait out an update, stage the token, publish the record, exec serve."""
+    """Supervisor entry point. Linux (systemd): the warm roller (``always_on_rollover``), which keeps the
+    stable port behind a proxy and hands it to a warmed backend. macOS (launchd): wait out an update,
+    stage the token, publish the record, exec serve."""
+    if _uses_rollover():
+        args.hermes = os.path.abspath(args.hermes or sys.argv[0])
+        return _rollover().cmd_roll(args)
     from hermes_cli.update_lock import MARKER_NAME
 
     hermes = os.path.abspath(args.hermes or sys.argv[0])
@@ -254,12 +280,13 @@ def cmd_install(args: argparse.Namespace) -> int:
         _run(["launchctl", "bootstrap", domain, str(plist)])
         print(f"installed {plist} (launchd {domain}/{LAUNCHD_LABEL}, port {args.port})")
     elif sys.platform.startswith("linux"):
-        unit = _systemd_unit_path(home)
-        unit.parent.mkdir(parents=True, exist_ok=True)
-        unit.write_text(render_systemd_unit(hermes=hermes, port=args.port, log_path=_log_path()), encoding="utf-8")
-        _run(["systemctl", "--user", "daemon-reload"])
-        _run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT])
-        print(f"installed {unit} (systemd --user {SYSTEMD_UNIT}, port {args.port})")
+        roll = _rollover()
+        unit_dir = _systemd_unit_path(home).parent
+        roll.install_units(roll.render_units(exec_prefix=[hermes, "always-on-dashboard"], hermes=hermes,
+                                             port=args.port, log_path=_log_path(), path_env=_service_path(hermes)),
+                           unit_dir)
+        print(f"installed {unit_dir}/{{{roll.PROXY_UNIT},{roll.BACKEND_TEMPLATE},{SYSTEMD_UNIT}}}"
+              f" (systemd --user, port {args.port})")
     else:
         print("always-on dashboard supervision is macOS (launchd) and Linux (systemd) only", file=sys.stderr)
         return 2
@@ -272,8 +299,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], check=False)  # windows-footgun: ok — launchd path is macOS only
         _launchd_plist_path(home).unlink(missing_ok=True)
     elif sys.platform.startswith("linux"):
-        _run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], check=False)
-        _systemd_unit_path(home).unlink(missing_ok=True)
+        roll = _rollover()
+        roll.stop_all()
+        for name in (SYSTEMD_UNIT, roll.PROXY_UNIT, roll.BACKEND_TEMPLATE):
+            (_systemd_unit_path(home).parent / name).unlink(missing_ok=True)
         _run(["systemctl", "--user", "daemon-reload"], check=False)
     (state_dir() / "record.json").unlink(missing_ok=True)
     print("always-on dashboard uninstalled (token kept; delete ~/.hermes/desktop-ssh/always-on to rotate it)")
@@ -312,10 +341,12 @@ def build_always_on_dashboard_parser(subparsers) -> None:
         ("install", cmd_install, "Write and load the launchd agent / systemd user unit"),
         ("uninstall", cmd_uninstall, "Stop and remove the supervisor unit"),
         ("status", cmd_status, "Print the running backend's record"),
-        ("run", cmd_run, "Supervisor entry point (execs `hermes serve`)"),
+        ("run", cmd_run, "Supervisor entry point (Linux: the warm roller; macOS: execs `hermes serve`)"),
+        ("proxy", cmd_proxy, "Linux: the stable loopback port, spliced to the active warm backend"),
+        ("backend", cmd_backend, "Linux: one blue/green backend unit (execs `hermes serve`)"),
     ):
         action = sub.add_parser(name, help=help_text)
-        if name in ("install", "run"):
+        if name in ("install", "run", "proxy", "backend"):
             action.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Loopback port (default {DEFAULT_PORT})")
             action.add_argument("--hermes", default="", help="Absolute path of the hermes entry point to exec")
         action.set_defaults(func=func)

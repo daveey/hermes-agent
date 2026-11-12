@@ -80,3 +80,60 @@ def test_start_is_noop_when_disabled(monkeypatch):
     from hermes_cli import config
     monkeypatch.setattr(config, "load_config", lambda: {"desktop": {"auto_continue": {"resume_on_startup": False}}})
     assert sr.start_startup_resume_sweep() is None
+
+
+# ── Deleted chats (desktop-03cd4d73b3) ─────────────────────────────────────────────────────────────
+# A chat deleted after its writer exited kept its interrupted-turn marker, so every boot sweep in the
+# freshness window resumed it again. A ``session_deleted`` refusal is terminal: the sweep retires that
+# marker (in the marker's own profile home) and logs an informational skip. Any other failure (an
+# unreadable store, a plain 4007 for a merely absent row) keeps the marker for the next sweep.
+
+DELETED = {"error": {"code": 4007, "message": "session not found", "data": {"reason": "session_deleted"}}}
+
+
+def _markers(home):
+    p = home / "desktop" / "interrupted_turns.json"
+    return set(json.loads(p.read_text())) if p.exists() else set()
+
+
+def test_deleted_session_marker_is_retired_and_not_resumed_again(tmp_path, caplog):
+    _write(tmp_path, {"gone": _entry(age=10), "kept": _entry(age=20)})
+    calls = []
+
+    def resume(rid, params):
+        calls.append(params["session_id"])
+        return DELETED if params["session_id"] == "gone" else {"result": {"auto_continue": {"attempt": 1}}}
+
+    caplog.set_level("INFO")
+    out = sr.resume_interrupted_sessions(resume, tmp_path, CFG)
+
+    by_key = {r["session_key"]: r for r in out}
+    assert by_key["gone"].get("deleted") is True
+    assert "gone" not in _markers(tmp_path), "a deleted chat's marker is retired"
+    assert "kept" in _markers(tmp_path)
+    assert not [r for r in caplog.records if r.levelno >= 30]
+    assert any("deleted" in r.getMessage() and "gone" in r.getMessage() for r in caplog.records)
+
+    calls.clear()
+    sr.resume_interrupted_sessions(resume, tmp_path, CFG)
+    assert "gone" not in calls, "no repeated recovery of a deleted chat"
+
+
+def test_deleted_session_marker_retired_in_its_named_profile_home(tmp_path):
+    _write(tmp_path, {"gone": _entry(age=10)})  # same key in the launch home is NOT deleted
+    work = tmp_path / "profiles" / "work"
+    _write(work, {"gone": _entry(age=5)})
+
+    def resume(rid, params):
+        return DELETED if params.get("profile") == "work" else {"error": {"code": 5000, "message": "db unavailable"}}
+
+    sr.resume_interrupted_sessions(resume, tmp_path, CFG)
+    assert "gone" not in _markers(work)
+    assert "gone" in _markers(tmp_path), "an unreadable store is not proof of deletion"
+
+
+def test_plain_not_found_is_not_proof_of_deletion(tmp_path):
+    _write(tmp_path, {"absent": _entry(age=10)})
+    sr.resume_interrupted_sessions(lambda rid, p: {"error": {"code": 4007, "message": "session not found"}},
+                                   tmp_path, CFG)
+    assert "absent" in _markers(tmp_path)

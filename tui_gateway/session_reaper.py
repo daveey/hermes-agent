@@ -463,6 +463,19 @@ def _sweep_orphaned_session_rows() -> list[str]:
     swept = db.sweep_orphaned_sessions(
         max_idle_seconds=_SESSION_TTL_S, sources=_ORPHAN_SWEEP_SOURCES,
         exclude_ids=tuple(sorted(live_ids)), exclude_pinned=True)
+    # [daveey] A delegate child whose parent row has ended has no turn left to own it, whatever live backend's
+    # heartbeat predates it; end it without the heartbeat guess (and without the killed-subagent notice).
+    try:
+        children = db.end_subagents_of_ended_parents(
+            max_idle_seconds=_SESSION_TTL_S, exclude_ids=tuple(sorted(live_ids)), exclude_pinned=True)
+    except Exception:
+        logger.debug("ended-parent subagent sweep failed", exc_info=True)
+        children = []
+    if children:
+        logger.info("Closed %d subagent row(s) whose parent session had ended (parent_ended_reap): %s",
+                    len(children), ", ".join(children))
+        from hermes_state_outcome import refresh_outcomes_quietly
+        refresh_outcomes_quietly(children, "reap", db=db)
     if swept:
         logger.info(
             "Closed %d orphaned session row(s) from a previous gateway process (startup_orphan_reap): %s",

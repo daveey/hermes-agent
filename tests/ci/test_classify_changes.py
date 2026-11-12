@@ -50,12 +50,16 @@ DEFAULT = {
     "remote_backends": True,
     "catalog": True,
     "hermes_state": True,
+    # Exact paths only: a generic CI-config change does not hold the mini for it.
+    "native_memory": False,
 }
+# An empty (failed) diff may hide the native memory paths, so it runs that lane too.
+EMPTY_DIFF = {**DEFAULT, "native_memory": True}
 
 SLOW_LANES = {"docker", "nix", "e2e", "e2e_upgrade", "e2e_desktop_core", "e2e_desktop_update"}
 
 
-def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, bootstrap=False, desktop_updater=False, rust=False, docker_meta=False, python_prod=None, nix=False, docker=None, e2e=False, e2e_upgrade=False, e2e_desktop_core=False, e2e_desktop_update=False, remote_backends=False, catalog=False, hermes_state=False) -> dict[str, bool]:
+def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, bootstrap=False, desktop_updater=False, rust=False, docker_meta=False, python_prod=None, nix=False, docker=None, e2e=False, e2e_upgrade=False, e2e_desktop_core=False, e2e_desktop_update=False, remote_backends=False, catalog=False, hermes_state=False, native_memory=False) -> dict[str, bool]:
     # python_prod tracks python except for tests-only diffs; default it to
     # python so the majority of cases don't need to spell it out.
     #
@@ -86,6 +90,7 @@ def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_
         "remote_backends": remote_backends,
         "catalog": catalog,
         "hermes_state": hermes_state,
+        "native_memory": native_memory,
     }
 
 
@@ -476,8 +481,18 @@ CASES = {
     # Workflows call just recipes, so the recipes are CI config too.
     "justfile change → all": (["justfile"], DEFAULT),
     "recipe python wrapper → all": (["scripts/hermes-python"], DEFAULT),
-    "empty diff → all": ([], DEFAULT),
-    "blank lines → all": (["", "  "], DEFAULT),
+    "empty diff → all": ([], EMPTY_DIFF),
+    "blank lines → all": (["", "  "], EMPTY_DIFF),
+    # The Darwin reader's no-fork tests skip on Linux; only the mini lane runs them.
+    "darwin memory caller → native_memory": (
+        ["hermes_cli/machine_metrics.py"], _lanes(python=True, scan=True, native_memory=True),
+    ),
+    "native memory workflow → native_memory only of the mac lanes": (
+        [".github/workflows/native-memory-macos.yml"], DEFAULT | {"native_memory": True},
+    ),
+    "neighbouring memory module → no native_memory": (
+        ["hermes_cli/machine_memory.py"], _lanes(python=True, scan=True),
+    ),
 }
 
 
@@ -648,6 +663,8 @@ _REAL_UPDATE_LANES = (
     ("ci.yaml", "remote-backends", "remote-backends.yml", "remote_backends"),
     # Catalog-only PRs skip the suite, so their catalog tests must gate the merge.
     ("ci.yaml", "catalog-tests", "catalog-tests.yml", "catalog"),
+    # The Darwin memory reader's macOS-only tests skip on every Linux lane.
+    ("ci.yaml", "native-memory-macos", "native-memory-macos.yml", "native_memory"),
 )
 
 

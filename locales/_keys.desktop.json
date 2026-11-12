@@ -4960,6 +4960,7 @@
     "sidebar.row.unarchive",
     "sidebar.row.unpin",
     "sidebar.row.unreadFailed",
+    "sidebar.row.unreadNotDone",
     "sidebar.row.untitledChat",
     "sidebar.row.untitledPlaceholder",
     "sidebar.row.waitingForAnswer",

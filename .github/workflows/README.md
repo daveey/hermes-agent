@@ -228,6 +228,7 @@ of every suite that reads it.
 | Rust tests | `rust-tests.yml` | `rust` | no Rust change |
 | Catalog tests | `catalog-tests.yml` | `catalog` | no catalog data change |
 | Remote terminal backends | `remote-backends.yml` | `remote_backends` | no backend change |
+| Native memory (macOS) | `native-memory-macos.yml` (self-hosted mini) | `native_memory`: a same-repo PR touching one of the Darwin memory reader's six paths (`NATIVE_MEMORY_PATHS`), an empty diff, dispatch, release. The gate requires it when selected; a fork PR fails the gate on the skip | any other PR (incl. other `.github/` changes); a main push (the workflow's own push trigger runs main) |
 | Bootstrap installer | `bootstrap-installer.yml` | `bootstrap` | no installer change |
 | Desktop E2E | `e2e-desktop.yml` | **never** (`if: false`, deferred as flaky) | always |
 | Desktop core E2E | `e2e-desktop-core.yml` | `e2e_desktop_core` (release or dispatch) | PRs and pushes |

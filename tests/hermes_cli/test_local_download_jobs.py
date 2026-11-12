@@ -47,7 +47,8 @@ def client(tmp_path, monkeypatch):
 
 
 def poll(client, job_id, until=("done", "error", "paused")):
-    deadline = time.monotonic() + 15
+    # Generous: returns as soon as the job settles, so only a hung job waits it out.
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         response = client.get(f"/api/local-models/jobs/{job_id}")
         assert response.status_code == 200, response.text
@@ -63,6 +64,11 @@ def test_browsed_download_can_pause_and_resume_pm_transfer(client, monkeypatch, 
 
     payload = bytes(range(256)) * (32 * 1024)
     RangeHandler.payloads["/test.gguf"] = payload
+    # The server withholds the payload's last piece until the pause is in, so
+    # the job is still mid-transfer when it is paused. Without this, a throttled
+    # runner let the range workers finish all of it before the downloader's
+    # coalescing progress coordinator first ran: no partial tick ever arrived.
+    RangeHandler.hold_from, RangeHandler.hold = len(payload) - 1, threading.Event()
     monkeypatch.setattr(lm, "_hf_url", lambda repo, path: url(dl_server, "/test.gguf"))
     flowing, release = threading.Event(), threading.Event()
     real_download = lm.Download
@@ -74,17 +80,18 @@ def test_browsed_download_can_pause_and_resume_pm_transfer(client, monkeypatch, 
                     progress(done, total, ranges)
                 if 0 < done < total and not flowing.is_set():
                     flowing.set()
-                    assert release.wait(15)
+                    assert release.wait(60)
             return super().run(progress=tick)
 
     monkeypatch.setattr(lm, "Download", ObservedDownload)
     response = client.post("/api/local-models/download-browsed", json={"repo": "a/b", "paths": ["test.gguf"]})
     job_id = response.json()["job_id"]
     try:
-        assert flowing.wait(5), "browsed download bypassed PM's downloader"
+        assert flowing.wait(60), "browsed download bypassed PM's downloader"
         assert client.post("/api/local-models/download/pause", json={"job_id": job_id}).json()["paused"]
     finally:
         release.set()
+        RangeHandler.hold.set()
     job = poll(client, job_id)
     assert job["status"] == "paused", job
     assert job["can_resume"] and not job["can_pause"]

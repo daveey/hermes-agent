@@ -74,9 +74,11 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
     # Options added after intents were first stored: omit them while at their default (None) so an
     # intent stored before the option existed still matches on retry; a real value stays in the
     # envelope and a differing one remains a conflict.
-    for _late in ("chat_origin", "placement_policy"):
+    for _late in ("chat_origin", "placement_policy", "admission_frees"):
         if options.get(_late) is None:
             options.pop(_late, None)
+    if options.get("admission_class") == "normal":
+        options.pop("admission_class")
     options["parents"] = list(options["parents"])
     if options["skills"] is not None:
         options["skills"] = list(options["skills"])

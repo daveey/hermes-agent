@@ -7,8 +7,9 @@ name: CI
 #
 # Sub-workflows are triggered via ``workflow_call`` and keep their own job
 # definitions, matrices, and concurrency settings. They no longer have
-# ``push:`` / ``pull_request:`` triggers of their own, except hermes-state-macos:
-# it keeps standalone main validation, masked out of this workflow on main pushes.
+# ``push:`` / ``pull_request:`` triggers of their own, except hermes-state-macos
+# and native-memory-macos: each keeps standalone main validation (its own
+# ``push:`` trigger), masked out of this workflow on main pushes.
 #
 # SECURITY: this workflow runs PR-controlled actions, workflows, and code.
 # Do not add ``secrets: inherit`` or GitHub App credentials here. Trusted
@@ -111,6 +112,7 @@ jobs:
       e2e_desktop_core: ${{ steps.gate-lanes.outputs.e2e_desktop_core }}
       e2e_desktop_update: ${{ steps.gate-lanes.outputs.e2e_desktop_update }}
       hermes_state: ${{ steps.gate-lanes.outputs.hermes_state }}
+      native_memory: ${{ steps.gate-lanes.outputs.native_memory }}
       event_name: ${{ github.event_name }}
       python_changed: ${{ steps.python-plan.outputs.changed }}
       python_slices: ${{ steps.python-plan.outputs.slices }}
@@ -129,10 +131,12 @@ jobs:
         # Overwrite the classifier outputs with 'true' when inputs.release. The E2E
         # lanes are forced off unless this is a release run or a manual dispatch
         # (whose empty diff already turns every lane on): never on a pull request
-        # or a push to main, whatever the diff or labels say. The macOS state lane
-        # is off on a main push (hermes-state-macos.yml's own push trigger runs main, so
-        # a main push never runs the suite twice on the one mini runner) and on for
-        # a dispatch or a release.
+        # or a push to main, whatever the diff or labels say. The macOS state and
+        # native memory lanes are off on a main push (hermes-state-macos.yml runs
+        # main from its own path-filtered push trigger and 4-hourly schedule, and
+        # native-memory-macos.yml from its own push trigger, so a main push never
+        # runs a suite twice on the one mini runner) and on for a dispatch or a
+        # release.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
@@ -149,7 +153,7 @@ jobs:
               for lane, value in values.items():
                   if lane.startswith('e2e') and not e2e_allowed:
                       value = 'false'
-                  elif (lane == 'hermes_state' and os.environ['EVENT_NAME'] == 'push'
+                  elif (lane in ('hermes_state', 'native_memory') and os.environ['EVENT_NAME'] == 'push'
                         and os.environ['TEST_REF'] == 'refs/heads/main' and not release):
                       value = 'false'
                   elif release and value in ('true', 'false'):
@@ -311,10 +315,26 @@ jobs:
     # dependency manifests (and every dispatch / release). A fork PR never runs
     # on the mini: the job skips, and macos-state-required below then fails the
     # selected lane, so a fork change to that surface cannot merge on a skip.
-    # Main pushes skip here (detect turns the lane off); the workflow's own push
-    # trigger runs main.
+    # Main pushes skip here (detect turns the lane off); the workflow's own
+    # path-filtered push trigger and 4-hourly schedule run main.
     if: needs.detect.outputs.hermes_state == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/hermes-state-macos.yml
+    with:
+      commit: ${{ inputs.commit }}
+
+  native-memory-macos:
+    name: Native memory (macOS)
+    needs: detect
+    # The Darwin memory reader's ABI and no-fork tests on the self-hosted macOS
+    # mini. They are platforms("macos") and skip on every Linux lane, so a PR
+    # that touches one of the reader's six paths (classify_changes.py
+    # NATIVE_MEMORY_PATHS) cannot land until they pass here: all-checks-pass
+    # requires this job whenever detect selects native_memory. A fork PR never
+    # runs on the mini: the job skips, and the gate then fails the selected
+    # lane. Main pushes skip here (detect turns the lane off); the workflow's
+    # own push trigger runs main.
+    if: needs.detect.outputs.native_memory == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    uses: ./.github/workflows/native-memory-macos.yml
     with:
       commit: ${{ inputs.commit }}
 
@@ -438,6 +458,7 @@ jobs:
       - rust-tests
       - remote-backends
       - hermes-state-macos
+      - native-memory-macos
       - catalog-tests
       - bootstrap-installer
       - e2e-desktop

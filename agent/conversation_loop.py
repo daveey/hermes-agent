@@ -1841,6 +1841,7 @@ def run_conversation(
 
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
     agent._turn_user_intervened = False
+    agent._api_call_count = 0  # [daveey] a replayed prelude has no model-call boundary in this turn
     vars(agent).pop("_step_boundary_paused", None)  # [daveey] per-turn core-update pause verdict
     update_pause_cancel_reset(agent)  # [daveey] and its mid-tool cancel (agent/update_pause_cancel.py)
     # Per-provider-response context accounting starts empty every turn (agent/context_usage.py).

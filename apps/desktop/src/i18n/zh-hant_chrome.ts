@@ -218,6 +218,7 @@ export const zhHantChrome = {
       needsInput: '需要您的輸入',
       waitingForAnswer: '等待您的回答',
       finishedUnread: '已完成 — 未讀',
+      unreadNotDone: (outcome: string) => `未讀 — ${outcome}`,
       backgroundRunning: '背景任務執行中',
       draftSession: '草稿 — 尚未傳送',
       handoffOrigin: platform => `從 ${platform} 轉接`,

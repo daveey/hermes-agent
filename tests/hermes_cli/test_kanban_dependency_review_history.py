@@ -106,13 +106,29 @@ def test_historical_parent_lifecycle_activity_invalidates_exemption(board, monke
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("event", ["archived", "worker_result"])
+@pytest.mark.parametrize("event", ["archived", "worker_result", "wake_episode_evidence"])
 def test_historical_parent_bookkeeping_does_not_rearm_hold(board, monkeypatch, legacy, event):
     task, historical = mixed_park(board, monkeypatch, legacy=legacy)
     with kb.write_txn(board):
         if event == "archived":
             board.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (historical,))
         kb._append_event(board, historical, event, {})
+    monkeypatch.setattr(prs, "pr_state", lambda url: "MERGED" if url == OLD_PR else "OPEN")
+    assert dispatch.check_respawn_guard(board, task) is None
+
+
+def test_comment_on_finished_historical_parent_does_not_rearm_hold(board, monkeypatch):
+    # A verifier's comment on a long-done parent appends `commented` and, from outside the
+    # wake corridor, a `wake_episode_evidence` snapshot. Neither reopens the parent. The
+    # snapshot is appended when this DB has not carried the parent's exit reset itself
+    # (it completed on another gateway and arrived by sync): drop the local exit row.
+    task, historical = mixed_park(board, monkeypatch)
+    with kb.write_txn(board):
+        board.execute("DELETE FROM task_wake_episode_exit WHERE task_id = ?", (historical,))
+    kb.add_comment(board, historical, "worker-1/t_verifier", "independent verification")
+    kinds = {r[0] for r in board.execute(
+        "SELECT kind FROM task_events WHERE task_id = ? AND created_at >= ?", (historical, int(time.time())))}
+    assert "wake_episode_evidence" in kinds
     monkeypatch.setattr(prs, "pr_state", lambda url: "MERGED" if url == OLD_PR else "OPEN")
     assert dispatch.check_respawn_guard(board, task) is None
 

@@ -766,6 +766,9 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                 continue
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
+            from gateway.kanban_wake_sibling import tui_defer
+            if tui_defer(conn, sub):
+                continue  # the chat's waking local row still owes this event's turn; it settles this row [daveey]
             # durable: the claim stays IN FLIGHT (owned by this process) until the notice is in the transcript
             # (_kb_ack_durable acks it); a process that dies first hands it back. [daveey]
             _old, _new, events = _kbn.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS,
@@ -773,17 +776,25 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                                                                    durable=claims is not None, **sub_ident)
             if not events:
                 continue
+            from gateway.kanban_wake_sibling import wake_owes_after
+            if wake_owes_after(conn, sub, _old):
+                # A covered event landed between tui_defer and the claim: hand it back to the wake. [daveey]
+                with contextlib.suppress(Exception):
+                    _kbn.rewind_notify_cursor(conn, claimed_cursor=_new, old_cursor=_old, **sub_ident)
+                continue
             claim = None
             if claims is not None:  # so a refused turn can hand the range back (_kb_rewind_refused) [daveey]
                 claim = {"board": slug, **sub_ident, "old": _old, "new": _new, "texts": [],
                          "claimed_mono": time.monotonic()}
                 claims.append(claim)
             task = _kb.get_task(conn, sub["task_id"])
+            from gateway.kanban_wake_sibling import tui_formatter
             from gateway.kanban_watchers_notifier import coalesce_superseded_blocks, diagnostic_event
             from gateway.warning_notifications import DiagnosticText
             sub_texts = []
+            fmt = tui_formatter(conn, sub, _format_kanban_event_text)  # a waking local row's turn carries some [daveey]
             for ev in coalesce_superseded_blocks(events):  # a block superseded by a drop in this batch renders once
-                text = _format_kanban_event_text(sub, task, ev, slug)
+                text = fmt(sub, task, ev, slug)
                 if text:
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)
                     from hermes_cli.kanban_failure_notice import event_key

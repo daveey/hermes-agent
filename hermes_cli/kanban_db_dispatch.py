@@ -41,7 +41,9 @@ from hermes_cli import kanban_owner_death as _owner_death, kanban_parent_unclaim
 from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [daveey]
 from hermes_cli.kanban_failure_accounting import _record_task_failure
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
-from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
+from hermes_cli.kanban_db_dispatch_queries import skip_reap
+from hermes_cli.kanban_admission_pools import (host_remaining, lane_rows, pickup_budget, pool_admits,
+                                               pool_take)
 from hermes_cli.kanban_db_dispatch_clock import record_clock_hold as _record_clock_hold
 from hermes_cli.kanban_db_dispatch_rerun import reopened_after
 
@@ -249,6 +251,7 @@ class DispatchResult:
     """``"max_in_progress=6/6"`` / ``"max_spawn=3/3"`` when the host or board concurrency cap was full this
     tick, so no worker could start. A ready queue held only by a full cap is correctly idle, not stuck:
     the "dispatcher stuck" warning names it instead of blaming profile health. [daveey]"""
+    admission_budget: Any = None  # opted-in hub: this tick's PoolBudget (kanban_admission_pools)
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -1095,11 +1098,7 @@ def close_dangling_runs(conn: sqlite3.Connection, *, min_age_seconds: int = DANG
     return closed
 
 
-def _error_fingerprint(error_text: str) -> str:
-    """Normalize an error message (strip PIDs, timestamps) so same-root-cause errors group."""
-    fp = re.sub(r'\bpid \d+\b', 'pid N', error_text[:80])
-    fp = re.sub(r'\b\d{10,}\b', '<TS>', fp)
-    return fp.lower().strip()
+from hermes_cli.kanban_db_values import error_fingerprint as _error_fingerprint  # re-export (crash accounting)
 
 
 # ~96% of "clean exit without a terminal tool call" tasks complete on a later
@@ -2150,11 +2149,10 @@ def _tick_spawn_budget(
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
-        total_running = running_count + count_running_tasks_other_boards(board)
-        if total_running >= max_in_progress:
-            result.at_capacity = f"max_in_progress={total_running}/{max_in_progress}"
+        remaining = host_remaining(max_in_progress, running_count, board, result)
+        if remaining <= 0:
+            result.at_capacity = f"max_in_progress={max_in_progress - remaining}/{max_in_progress}"
             return False, None
-        remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
             spawn_budget = remaining
     if spawn_quota is not None:  # this board's share of the host slots, ranked across boards (kanban_board_share)
@@ -2307,7 +2305,7 @@ def _dispatch_once_locked(
             sweep_stale_triage(conn, default_assignee=_resolve_default_assignee(default_assignee))
         except Exception:
             _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
-    _kb._sync.worker_pickup(conn, spawn_budget, dry_run, _profile_exists_fn)  # worker node (RFC "Placement")
+    _kb._sync.worker_pickup(conn, pickup_budget(result, spawn_budget), dry_run, _profile_exists_fn)  # worker node
     # Cards this machine cannot lease (runs_on for another machine, ...) are never candidates: before 10-28 a
     # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
     # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
@@ -2366,6 +2364,8 @@ def _dispatch_once_locked(
                 return
             row = ready_rows[next_ready]
             next_ready += 1
+            if not pool_admits(result, row):  # normal row, regular pool spent: no lease, no locked census
+                continue
             row_assignee = row["assignee"]
             if not row_assignee:
                 # Honour kanban.default_assignee so an unassigned task doesn't
@@ -2378,7 +2378,7 @@ def _dispatch_once_locked(
                 row_assignee = default_assignee
                 result.auto_assigned_default.append(row["id"])
             if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
-                spawned += 1
+                spawned += pool_take(result, row)
             elif (row["id"], "capacity") in result.claim_deferred:
                 next_ready = len(ready_rows)  # also fence the post-review resume in this tick
 
@@ -2394,8 +2394,8 @@ def _dispatch_once_locked(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
-        if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
-            spawned += 1
+        if pool_admits(result, row) and _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
+            spawned += pool_take(result, row)
         elif (row["id"], "capacity") in result.claim_deferred:
             break  # preserve priority within the review lane too
     # The review reservation is only a hold: a slot no review took (its claim deferred, guarded, capped) goes

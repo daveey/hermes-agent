@@ -41,22 +41,36 @@ def _result_paths():
         except FileNotFoundError:
             continue  # Another producer pruned it.
     retained.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+    visible = [path for _, path in retained[:MAX_RETAINED_RESULTS]]
     for _, path in retained[MAX_RETAINED_RESULTS:]:
-        path.unlink(missing_ok=True)
-    return [path for _, path in retained[:MAX_RETAINED_RESULTS]]
+        if _owed(path):  # retained custody must also remain retrievable [daveey]
+            visible.append(path)
+        else:
+            path.unlink(missing_ok=True)
+    return visible
 
 
-def save_completed_result(session) -> None:
-    """Retain *session*'s completion receipt under this profile's logs. A hosted agent's process
-    has none on this host: its command and output are the tenant's, kept in the live registry only."""
+def _owed(path) -> bool:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and isinstance(record.get("delivery_obligation"), dict)
+
+
+def save_completed_result(session, obligation: dict | None = None) -> None:
+    """``obligation``: the completion is still owed to a gateway watcher (``process_registry_obligations``);
+    it rides this same atomic write, so it is durable before the checkpoint entry goes. [daveey]"""
     if session.sandbox_key:
-        return
+        return  # Hosted command/output belong to the tenant, never this host's logs.
     from agent.redact import redact_sensitive_text, redact_terminal_output
     from tools.process_registry import MAX_OUTPUT_CHARS
 
     with session._lock:
         record = {key: getattr(session, key) for key in _RESULT_FIELDS}
         record["output"] = session.output_buffer[-MAX_OUTPUT_CHARS:]
+    if obligation:
+        record["delivery_obligation"] = obligation
     # Live-output opt-out must not persist raw credentials in durable receipts.
     record["output"] = redact_terminal_output(record["output"], record["command"], force=True)
     record["command"] = redact_sensitive_text(record["command"], code_file=True, force=True)

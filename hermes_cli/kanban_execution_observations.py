@@ -137,6 +137,11 @@ def card(row, *, gateway=None, profile=None, now=None):
             value.update(state="unknown", unknown_reason="source_unavailable")
         return project(value, now=now, source_class="sidebar")
     remote = bool(row.get("remote"))
+    if remote and isinstance(row.get("_replica_run"), dict):
+        from hermes_cli.kanban_replica_execution import raw as replica_raw
+        value = replica_raw(row)
+        if value is not None:
+            return project(value, now=now, source_class="sidebar")
     gateway = row.get("gateway") if remote else gateway
     profile = row.get("owner_profile", row.get("profile")) if remote else profile
     identity = {"kind": "card", "work_id": row.get("id")}
@@ -212,6 +217,7 @@ def add_cards(rows, *, now=None):
         row.pop("_execution_done", None)
         row.pop("_execution_error", None)
         row.pop("_execution_scope", None)
+        row.pop("_replica_run", None)
     return rows
 
 

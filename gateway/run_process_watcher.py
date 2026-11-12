@@ -40,6 +40,9 @@ class GatewayProcessWatcherMixin:
         last_output_len = 0
         completion_attempts = 0
         retry_interval = interval
+        # [daveey] Why the owed completion (process_registry_obligations) is settled when this loop ends;
+        # None keeps the receipt's obligation for the next gateway start (refused, or the session vanished).
+        settled_by = None
         while True:
             await asyncio.sleep(retry_interval)
             session = process_registry.get(session_id)
@@ -52,6 +55,7 @@ class GatewayProcessWatcherMixin:
             if not surface:
                 # Recheck live ownership next tick: handoff retains notification intent.
                 if session.exited:
+                    settled_by = "not surfaced"
                     break
                 continue
             if silent:
@@ -69,12 +73,14 @@ class GatewayProcessWatcherMixin:
                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
                     synth_text = format_process_notification(completion_evt)
                     if not synth_text:
+                        settled_by = "no notice text"
                         break
                     # Captured before injection: afterwards the key is busy either way (the injected
                     # turn itself installs the guard).
                     turn_busy = await self._launching_turn_active(platform_name, watcher)
                     delivered = await self._enqueue_process_completion_notification(synth_text, completion_evt)
                     if delivered is not False:
+                        settled_by = "admitted" if delivered else "already admitted or suppressed"
                         # The agent normally reports the result itself, so the chat gets no separate
                         # receipt. While the launching turn is still running the injection only queues a
                         # follow-up, and the chat would stay mute for as long as that turn lasts
@@ -106,6 +112,7 @@ class GatewayProcessWatcherMixin:
                                          exc_info=True)
                             committed = False
                         if committed:
+                            settled_by = "admitted (lost acknowledgement)"
                             break  # The last refusal was a lost ACK: the turn is committed.
                     logger.warning(
                         "Process watcher: completion for %s was refused %d times; falling back to the "
@@ -118,6 +125,7 @@ class GatewayProcessWatcherMixin:
                         "Process watcher: completion for %s already consumed "
                         "via wait/log — skipping raw notification (#65379)", session_id,
                     )
+                    settled_by = "consumed via wait/log"
                     break
                 if notify_mode in {"concise", "all", "result"} or (
                     notify_mode == "error" and session.exit_code not in {0, None}
@@ -135,6 +143,9 @@ class GatewayProcessWatcherMixin:
                 await self._send_watcher_message(
                     platform_name, chat_id, thread_id, self._format_process_running_message(session), watcher,
                 )
+        if settled_by is not None:
+            # In the owning profile's scope (bound by _run_process_watcher): its receipt holds the obligation.
+            await asyncio.to_thread(process_registry.settle_completion, session_id, settled_by)
         logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)
 
     # Former name of the poll loop (fork tests and callers).

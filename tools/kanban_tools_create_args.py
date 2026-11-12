@@ -7,7 +7,19 @@ from __future__ import annotations
 from typing import Any, Optional
 
 # Fields read back from a freshly created card into the kanban_create result.
-CREATED_FIELDS = ("status", "workspace_kind", "workspace_path", "project_id", "human_request")
+CREATED_FIELDS = ("status", "workspace_kind", "workspace_path", "project_id", "human_request",
+                  "admission_class", "admission_frees")
+
+
+def validate_admission(args: dict) -> None:
+    """Reject invalid metadata before a remote create can have side effects."""
+    from hermes_cli.kanban_admission_class import AdmissionMetadataError, validate
+    from tools.kanban_tools import _check
+
+    try:
+        validate(args.get("admission_class", "normal"), args.get("admission_frees"))
+    except AdmissionMetadataError as exc:
+        _check(False, str(exc), rejection="invalid_args")
 
 
 def max_retries_arg(args: dict) -> Optional[int]:

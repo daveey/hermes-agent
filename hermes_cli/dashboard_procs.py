@@ -800,6 +800,11 @@ def _kill_stale_dashboard_processes(
         # client's fixed SSH port-forward. Same ownership records as the reaper.
         exclude |= _lock_owned_serve_pids()
     pids = _dash._find_stale_dashboard_pids(exclude_pids=exclude or None, scope_home=scope_home)
+    # [daveey] An always-on blue/green backend is replaced warm by its roller; killing it and restarting
+    # its unit is the cold restart that unit topology exists to avoid.
+    from hermes_cli.always_on_rollover import route_update_pids
+
+    pids = route_update_pids(pids, restart_managed=restart_managed)
     if not pids:
         return _empty_result()
     # Snapshot systemd unit/cgroup and argv BEFORE killing (the cgroup dies with the process).

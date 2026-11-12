@@ -62,6 +62,8 @@ def _prior_landing(conn, request_id):
     out = {"where": "local", "why": "courier replay", **({"hub_admission": audit} if audit else {})}
     if options.get("placement_policy") == POLICY:
         out.update(placement_policy=POLICY, why=WAITING, requires=options.get("requires"))
+    elif options.get("runs_on"):
+        out.update(runs_on=list(options["runs_on"]), requires=options.get("requires"))  # a queued deny
     return out if audit or out.get("placement_policy") else {}
 
 
@@ -69,8 +71,9 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None
     """A courier create landing on the hub: ``None`` (not hub-bound) or the admission placement.
 
     Runs in the receiving ``kanban_create`` before its write transaction, before the card can be
-    claimed. Admitted: ``{"hub_admission": audit}`` (stays here). Denied: worker-first enrollment
-    with ``requires`` + ``hub:write``; ``where="refuse"`` when it cannot go to the pool. A request
+    claimed. Admitted: ``{"hub_admission": audit}`` (stays here). Denied: :func:`pool_route` with
+    ``requires`` + ``hub:write`` (the worker queue, else worker-first enrollment), as a local deny;
+    ``where="refuse"`` when it cannot go to the pool. A request
     already applied reuses its stored placement and makes no model call.
     """
     from hermes_cli import kanban_placement as kp
@@ -98,12 +101,15 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None
     audit = {**asdict(verdict), "entry": "courier"}
     if verdict.admit:
         return {"hub_admission": audit}
-    if pinned or gateway not in (cfg.get("worker_pools") or {}):
-        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
     requires = args.get("requires") or []
     requires = [requires] if isinstance(requires, str) else list(requires)
-    # Courier creation never takes the worker queue (queue_decision's own rule): worker-first.
-    return pool_route(args, cfg, gateway, audit, list(dict.fromkeys([*requires, "hub:write"])), queue=False)
+    if pinned:
+        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
+    # The worker queue exactly as for a local deny (t_01a1d0571c2f07d6); worker-first only without a live label.
+    out = pool_route(args, cfg, gateway, audit, list(dict.fromkeys([*requires, "hub:write"])))
+    if out.get("runs_on") is None and gateway not in (cfg.get("worker_pools") or {}):
+        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
+    return out
 
 
 def gate_move(conn, task_id, runs_on, *, cfg=None):
@@ -437,10 +443,11 @@ def _decision_shortcut(args, decision, gateway, cfg, *, labels, machine_hub, pin
 
 def _refusal(args, verdict, audit, cfg, *, on_hub, machine_hub, pin, labels):
     """A denied explicit hub card; a hub-origin stay-here refusal carries alternatives that work on the hub."""
-    from hermes_cli.kanban_placement import structural_reason
+    from hermes_cli.kanban_placement import _Cfg, structural_reason
     out = {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
     if on_hub and not machine_hub and not is_hub(pin, cfg):
-        out["remedy"] = hub_stay_remedy(structural_reason({**args, "runs_on": None}, cfg), labels)
+        out["remedy"] = hub_stay_remedy(structural_reason({**args, "runs_on": None}, cfg), labels,
+                                        assignee=args.get("assignee"), pool_profiles=_Cfg(cfg).assignees())
     return out
 
 
@@ -484,10 +491,25 @@ def decision_card_route(args, decision, gateway, cfg, *, queue=True, machine_ok=
     return out
 
 
-def hub_stay_remedy(structural, labels):
-    """Refusal text for a hub-origin card the judge denied: alternatives that work here, never ``placement='local'``."""
+ASSIGNEE_KEEP = "assignee not allowlisted"
+
+
+def hub_stay_remedy(structural, labels, *, assignee=None, pool_profiles=()):
+    """Refusal text for a hub-origin card the judge denied: alternatives that work here, never ``placement='local'``.
+
+    A profile the pool does not run names that profile and the pool route: a hub chat filed Mac-only
+    tailnet work as ``mac-ops`` and, told only "assignee not allowlisted", kept the hub-only profile
+    (sweep slug profile-not-in-pool, t_01a1d09e42e2c4fd). [daveey]
+    """
     if labels is not None:
         first = "drop runs_on (or name labels a pool worker carries) so the card joins the worker pool"
+    elif structural == ASSIGNEE_KEEP:
+        pool = sorted(pool_profiles) or ["default"]
+        pick = "default" if "default" in pool else pool[0]
+        first = (f"assignee {assignee!r} is a profile no pool worker runs (pool profiles: {', '.join(pool)}); "
+                 f"re-create it with assignee={pick!r}, no placement, and runs_on=['capability:<label>'] for the "
+                 "access the work needs (capability:tailnet-exec for commands on a Mac, capability:hub-write "
+                 "for hub-admin changes, capability:hub-read for hub logs and DBs)")
     elif structural:
         first = (f"remove what keeps it on this host ({structural}) and omit placement so the card joins the "
                  "worker pool")

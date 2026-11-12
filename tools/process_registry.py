@@ -41,6 +41,7 @@ from tools.process_registry_output_log import ProcessOutputLogMixin, open_output
 from tools.process_registry_survivable import ProcessForegroundHoldMixin, enabled as survivable_enabled
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
+from tools.process_registry_obligations import ProcessObligationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import env_poller_loop, log_delta_command
 from tools.process_registry_wsl import _is_wsl_launcher_command
@@ -687,7 +688,7 @@ _WSL_CHAIN_NOTE = (
 )
 
 
-class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin, ProcessOutputLogMixin, ProcessOwnershipMixin, ProcessEnvScopeMixin, ProcessForegroundHoldMixin):
+class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin, ProcessOutputLogMixin, ProcessOwnershipMixin, ProcessEnvScopeMixin, ProcessForegroundHoldMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
@@ -1518,9 +1519,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
             if was_running:
                 session._finish_claimed = True
                 session.exited_at = time.time()
-                # Keep the session tracked until its result is durable. A finite
-                # parent must not observe completion and exit during this write.
-                save_completed_result(session)
+                # Keep the session tracked until its result (and owed notice) is durable; a finite parent waits.
+                save_completed_result(session, self._completion_obligation(session))
                 if session.notify_on_complete:
                     from tools.process_registry_awaiting import claim_completion_event
                     claim_completion_event(session)
@@ -2002,7 +2002,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
             **self._status_head(session), "output": "\n".join(selected),
             "total_lines": total_lines, "showing": f"{len(selected)} lines"}
         if exited and observed_completion_output and not finalizing:
-            self._completion_consumed.add(session_id)
+            self._consume_completion(session_id)
         return result
 
     def wait(self, session_id: str, timeout: int | None = None) -> dict:
@@ -2036,7 +2036,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
             self._reconcile_local_exit(session)  # orphaned-pipe reader guard
             result = None
             if session.exited and not self._reader_finalizing(session):
-                self._completion_consumed.add(session_id)
+                self._consume_completion(session_id)
                 result = self._exit_snapshot(session, "exited")
             elif _is_interrupted():
                 result = {
@@ -2112,7 +2112,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
             # Only suppress the autonomous turn after its output is present in
             # the explicit kill result, matching wait/log consumption.
             if consume_output and not finalizing:
-                self._completion_consumed.add(session_id)
+                self._consume_completion(session_id)
             return result
         try:
             early = self._signal_kill(session, session_id, consume_output)
@@ -2169,7 +2169,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
             self._log_lifecycle_kill(session, source)
             # A reader can persist a plain exit during the SIGKILL wait; rewrite the receipt.
             if not self._move_to_finished(session):
-                save_completed_result(session)
+                self._rewrite_killed_receipt(session, consume_output)
             self._write_checkpoint()
             return {
                 "status": "killed", "session_id": session.id, "completion_reason": session.completion_reason,
@@ -2215,7 +2215,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 with session._lock:
                     output = _completion_output(session)
                 if consume_output:
-                    self._completion_consumed.add(session_id)
+                    self._consume_completion(session_id)
                 # No waitable handle, so this is not a collected exit. Close the
                 # entry without queueing a completion, and do not signal a PID
                 # whose start time does not match.

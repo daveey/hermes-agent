@@ -267,3 +267,30 @@ def test_revoked_requeue_carries_no_quota_reset_of_the_benched_siblings(home, mo
     assert turn_exit_code(result, kanban_worker=True) == kb.KANBAN_RATE_LIMIT_EXIT_CODE
     assert "failure_resets_at" not in result
     assert _receipt_deadline(result, monkeypatch) is None
+
+
+def test_one_re_mint_revoking_every_account_re_pulls_and_continues_the_turn(home, tmp_path, monkeypatch):
+    """15:30Z shape (worker-4 run 10089): the hub's re-mint revoked EVERY pushed row at once and the
+    request beat the worker's pull. The 401 runs the pull, adopts the pushed rows and the turn goes
+    on; before the fix the cascade benched every row and the worker exited 78 (gave_up)."""
+    import shlex
+    import sys
+    _write_pool(home, [_pushed("acct-A", "tok-A-old", 0), _pushed("acct-B", "tok-B-old", 1)])
+    agent = _agent_on("acct-A")
+    pull = tmp_path / "pull.py"
+    pull.write_text(
+        "import json, sys\n"
+        "p = sys.argv[1]; doc = json.load(open(p))\n"
+        "for r in doc['credential_pool']['anthropic']:\n"
+        "    r['access_token'] = r['access_token'].replace('-old', '-new')\n"
+        "    [r.pop(k, None) for k in ('last_status', 'last_status_at', 'last_error_code', 'last_error_reason')]\n"
+        "json.dump(doc, open(p, 'w'))\n")
+    from agent import credential_relay_repull as rr
+    monkeypatch.setattr(rr, "_settings", lambda: {
+        "pull_command": shlex.join([sys.executable, str(pull), str(home / 'auth.json')]), "repull_wait_s": 10})
+
+    assert _recover_from_revoked(agent) is True
+    assert agent._credential_pool_entry_id == "acct-A"
+    assert agent._anthropic_api_key == "tok-A-new"
+    assert {e.id: e.access_token for e in agent._credential_pool.entries()} == {
+        "acct-A": "tok-A-new", "acct-B": "tok-B-new"}

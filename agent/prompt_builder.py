@@ -1050,7 +1050,7 @@ def _local_host_hints() -> list[str]:
     host_lines = [f"Host: {host}", f"User home directory: {os.path.expanduser('~')}"]
     try:
         host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
-    except OSError:
+    except OSError:  # unreadable cwd; a deleted one already falls back inside resolve_agent_cwd
         pass
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
@@ -1979,7 +1979,8 @@ def build_context_files_prompt(
 
     if safe_worker_enabled() or not host_feature_enabled("context_files"):
         return ""  # hosted: the project's files are in the agent's sandbox, this host's are not its
-    cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
+    from agent.runtime_cwd import process_cwd_or_fallback
+    cwd_path = Path(cwd if cwd is not None else process_cwd_or_fallback()).resolve()
     global_paths = global_context_file_paths(home_override)
     if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
         logger.warning(

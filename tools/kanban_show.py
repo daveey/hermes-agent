@@ -1,5 +1,11 @@
 """Read-only card detail assembly for the Kanban tool facade."""
 import json
+from typing import Any
+
+
+def fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
+    """``{name: getattr(obj, name)}``; every value None when ``obj`` is None."""
+    return {n: getattr(obj, n) if obj is not None else None for n in names}
 
 
 def show(args: dict) -> str:

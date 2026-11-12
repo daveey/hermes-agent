@@ -14,6 +14,10 @@ Session-outcome contract, "Fan-out" and "Stale notices":
   chat's stored outcome (trigger ``card_change``). The first pass of a process only seeds its cursor; the other
   refresh points (turn end, notice write, reap) cover what changed while no backend ran. Every step is
   idempotent, so two backends running the pass at once write the same result.
+- Remote links have no local events. Each pass also snapshots the shared remote-card projection by chat and
+  (owner-qualified key, status). The first successful read seeds it; additions, removals and status changes
+  refresh the affected chats once each. A failed read preserves the previous snapshot. This refresh does not
+  synthesize notices or change their stale metadata; normal remote notice delivery owns those rows.
 """
 
 from __future__ import annotations
@@ -40,10 +44,13 @@ MAX_EVENTS_PER_PASS = 2000
 _BLOCKED_LINE = re.compile(r"Kanban (t_[0-9A-Za-z_]+) blocked")
 _TASK_ID = re.compile(r"Kanban (t_[0-9A-Za-z_]+)")
 _cursors: dict[str, int] = {}
+_remote_snapshot: Optional[dict[str, frozenset[tuple[str, str]]]] = None
 
 
 def _reset_for_tests() -> None:
+    global _remote_snapshot
     _cursors.clear()
+    _remote_snapshot = None
 
 
 def chat_skip_reason(db: Any, chat_id: str) -> Optional[str]:
@@ -188,6 +195,47 @@ def _fan_out_change(conn: sqlite3.Connection, _kb: Any, session_db: Callable, sl
     return out
 
 
+def _remote_change_pass(session_db: Callable) -> list[dict]:
+    """Observe the same remote projection as outcomes; failed reads never mean cards finished."""
+    from hermes_cli import kanban_session_activity as activity
+    from hermes_state_outcome import refresh_outcomes_quietly
+    global _remote_snapshot
+    current: dict[str, set[tuple[str, str]]] = {}
+    for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=True):
+        status = card.get("status")
+        if status not in activity.LISTED_STATUSES and not (status == "unknown" and card.get("unfinished")):
+            continue
+        for chat in {card.get("session"), card.get("origin_session")} - {None, ""}:
+            current.setdefault(chat, set()).add((card["key"], status))
+    snapshot = {chat: frozenset(cards) for chat, cards in current.items()}
+    previous = _remote_snapshot
+    if previous is None:
+        _remote_snapshot = snapshot
+        return []
+    out = []
+    for chat in sorted(previous.keys() | snapshot.keys()):
+        if previous.get(chat) == snapshot.get(chat):
+            continue
+        try:
+            with session_db(chat) as (db, tip):
+                if db is None:
+                    continue
+                skipped = chat_skip_reason(db, chat)
+                if skipped is None and not refresh_outcomes_quietly([tip], "card_change", db=db):
+                    continue
+        except Exception:  # health: allow BLE001 -- retain failed chat invalidations and continue other chats
+            logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
+            continue
+        # Acknowledge only a successful refresh or an intentionally skipped chat.
+        if chat in snapshot:
+            previous[chat] = snapshot[chat]
+        else:
+            previous.pop(chat, None)
+        out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
+                    "status": None, "skipped": skipped, "source": "remote"})
+    return out
+
+
 def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[Iterable[str]] = None) -> list[dict]:
     """Refresh every chat linked to a card whose status moved since the last pass (see module doc). Never
     raises; returns ``[{board, task_id, chat_id, session_id, status, skipped}]``."""
@@ -204,4 +252,8 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
                     done += _fan_out_change(conn, _kb, session_db, slug, tid)
         except Exception:
             logger.warning("card-change outcome pass failed on board %s", slug, exc_info=True)
+    try:
+        done += _remote_change_pass(session_db)
+    except Exception:  # health: allow BLE001 -- isolate the replica source and report failed reads
+        logger.warning("remote card-change outcome pass failed", exc_info=True)
     return done

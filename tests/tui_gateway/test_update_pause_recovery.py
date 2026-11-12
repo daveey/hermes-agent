@@ -494,6 +494,40 @@ def test_replacement_outlook_that_never_retires_continues_within_the_hand_off_bo
     assert up.HANDOFF_WAIT_S <= clock.now <= up.WATCH_POLL_S + up.HANDOFF_WAIT_S + up.WATCH_POLL_S
 
 
+def test_always_on_successor_still_warming_keeps_the_turn_for_it_past_the_hand_off_bound(recovery, skewed,
+                                                                                         monkeypatch):
+    # Review B1 of #1611 (t_01a1d09123dbb9c4): an always-on blue/green backend's successor boots and warms
+    # before the old backend can retire (live: ~60-150 s), so HANDOFF_WAIT_S used to continue the paused turn
+    # here on stale code. While the superseded watchdog reports the successor on its way, the turn waits.
+    from hermes_cli import web_server_skew_exit
+    monkeypatch.setattr(web_server_skew_exit, "successor_pending", lambda: True)
+    clock = _VirtualClock()
+    _watch(monkeypatch, recovery, clock, max_s=up.SUCCESSOR_WARMING_GRACE_S - up.WATCH_POLL_S)
+    assert clock.now > up.HANDOFF_WAIT_S + up.WATCH_POLL_S
+    assert recovery.calls == [] and not recovery.done.is_set()
+
+
+def test_always_on_successor_that_never_switches_in_is_bounded(recovery, skewed, monkeypatch):
+    from hermes_cli import web_server_skew_exit
+    monkeypatch.setattr(web_server_skew_exit, "successor_pending", lambda: True)
+    clock = _VirtualClock()
+    _watch(monkeypatch, recovery, clock)
+    assert_continued(recovery)
+    assert up.SUCCESSOR_WARMING_GRACE_S <= clock.now <= up.SUCCESSOR_WARMING_GRACE_S + 2 * up.WATCH_POLL_S
+
+
+def test_always_on_successor_does_not_hold_a_busy_backend(recovery, skewed, monkeypatch):
+    # Other work keeps the old backend busy, so it cannot retire even once the successor serves: as before,
+    # the turn continues here after NO_REPLACEMENT_S.
+    from hermes_cli import web_server_skew_exit
+    monkeypatch.setattr(web_server_skew_exit, "successor_pending", lambda: True)
+    skewed.idle = False
+    clock = _VirtualClock()
+    _watch(monkeypatch, recovery, clock)
+    assert_continued(recovery)
+    assert clock.now <= up.WATCH_POLL_S + up.NO_REPLACEMENT_S + up.WATCH_POLL_S
+
+
 def test_fluctuating_outlook_counts_from_the_move_not_from_the_last_flip(recovery, skewed, monkeypatch):
     # The outlook flips between coming and blocked every poll: the bound still counts from the move.
     def flip(now):

@@ -89,7 +89,7 @@ async def test_the_reply_returns_while_a_slow_refresh_is_still_running(tmp_path,
                          created_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1))
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
 
-    def slow_refresh(sid, trigger, *, db=None):
+    def slow_refresh(sid, trigger, *, db=None, concluding_turn=None):
         started.set()
         release.wait(10)
         finished.set()

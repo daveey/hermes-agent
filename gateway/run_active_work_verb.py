@@ -4,6 +4,15 @@
 async delegations, so a CLI asking "may I stop this gateway?" could not see a background subagent
 that ``stop()`` interrupts (``tools.async_delegation.interrupt_all``). The verb answers from the
 running process instead: the same units the drain report publishes plus every live delegation.
+
+``active_work`` units carry ``update_pausable`` on every unit, not only chat: true only for a chat
+turn whose agent runs under the gateway's core-update pause hook
+(``session_update_pause_hook.update_pausable``), i.e. a pause request parks it at a step boundary with a
+durable checkpoint. Every other unit (api, managed, cron, delegation) only finishes or is cut.
+
+An unscoped answer also carries ``checkpoint`` (``update_checkpoint.checkpoint_work`` with cron cut): whether the
+instant-update checkpoint would preserve this work, by its own count check. Unit kinds alone cannot say so: a
+``managed`` unit also stands for an unmapped turn, a side agent or a managed turn that is not a Kanban card.
 """
 
 from __future__ import annotations
@@ -48,6 +57,18 @@ def _profile_units(runner, profile: str, units: list[dict[str, Any]]) -> list[di
             + [{"kind": "side_agent", "pid": pid}] * sides)
 
 
+def _checkpoint_field(runner) -> dict[str, Any]:
+    """``{"checkpoint": ...}``: the instant-update checkpoint's own verdict on this work with cron cut
+    (``update_checkpoint.checkpoint_work``), so an updater census agrees with the refusal it would get
+    instead of inferring preservability from unit kinds. Empty when it cannot be read: a consumer then
+    keeps its kind-based census and the checkpoint stays the atomic gate."""
+    try:
+        from gateway.update_checkpoint import checkpoint_work
+        return {"checkpoint": checkpoint_work(runner, cron_cut=True)}
+    except Exception:  # health: allow BLE001 -- an unreadable verdict is omitted, never reported as preservable
+        return {}
+
+
 def active_work_verb(runner, loop) -> Callable[[], dict[str, Any]]:
     """Handler for the control socket: runs on its executor thread, reads the runner on the loop."""
 
@@ -64,12 +85,15 @@ def active_work_verb(runner, loop) -> Callable[[], dict[str, Any]]:
                 units = list(runner._describe_active_work()) + _delegation_units(time.time())
                 if scoped:
                     units = _profile_units(runner, profile, units)
+                # Only a chat turn under the update-pause hook parks; every other unit says so explicitly.
+                units = [{**unit, "update_pausable": unit.get("update_pausable") is True} for unit in units]
+                if scoped:
                     box.append({"active_agents": len(units), "active_work": units, "profile": profile,
                                 "parked_work": [u for u in runner._describe_parked_work()
                                                 if u.get("profile") == profile]})
                 else:
                     box.append({"active_agents": runner._active_work_count(), "active_work": units,
-                                "parked_work": runner._describe_parked_work()})
+                                "parked_work": runner._describe_parked_work(), **_checkpoint_field(runner)})
             finally:
                 done.set()
 

@@ -2,37 +2,52 @@ name: Native memory (macOS)
 
 # The generic OS lane is disabled in this fork. These ABI and no-fork
 # regressions must execute on Darwin before a memory-reader change lands.
+#
+# ci.yaml calls this (job native-memory-macos) for a same-repository PR whose
+# diff touches one of the paths below (classify_changes.py NATIVE_MEMORY_PATHS,
+# kept equal to this list by tests/ci/test_native_memory_gate.py) and for every
+# dispatch / release. "All required checks pass (v2)" then requires its success,
+# so the PR cannot land with this lane pending, skipped or red. There is no
+# pull_request trigger here: a second, unrequired copy of the job would only
+# hold the one mini runner. Main pushes run here directly; CI masks its
+# duplicate call only on main pushes.
 on:
-  pull_request:
-    paths: &memory-paths
+  push:
+    branches: [main]
+    paths:
       - 'hermes_cli/machine_memory_darwin.py'
       - 'hermes_cli/machine_metrics.py'
       - 'tests/hermes_cli/test_machine_memory_darwin.py'
       - 'tests/hermes_cli/test_machine_memory_nofork.py'
       - '.github/workflows/native-memory-macos.yml'
       - 'tests/ci/test_native_memory_workflow.py'
-  push:
-    branches: [main]
-    paths: *memory-paths
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      commit:
+        description: Commit to test. Empty keeps the triggering commit (the PR head on a pull request).
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: native-memory-${{ github.event.pull_request.number || github.ref }}
+  # Collapse queued standalone pushes, but never supersede a required caller.
+  group: ${{ github.workflow == 'Native memory (macOS)' && github.event_name == 'push' && format('native-memory-push-{0}', github.ref) || format('native-memory-{0}-{1}-{2}', github.run_id, github.run_attempt, inputs.commit || github.sha) }}
   cancel-in-progress: false
 
 jobs:
   native-memory:
     name: Native memory ABI and no-fork tests
+    # Defense in depth for other callers: fork PR code never reaches the mini.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, hermes-state]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.commit || github.event.pull_request.head.sha || github.sha }}
       - name: Exercise native memory APIs
         shell: bash
         run: |

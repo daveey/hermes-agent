@@ -149,6 +149,9 @@ def build_trace_jsonl(messages: list[dict[str, Any]], *, session_id: str, model:
     parent: Optional[str] = None
     base_ts = _now_iso()
     git_branch = _git_branch(cwd)
+    if not cwd:
+        from agent.runtime_cwd import process_cwd
+        cwd = process_cwd()  # "" when the process cwd was deleted
     for msg in messages:
         role = msg.get("role")
         if role == "system":
@@ -156,7 +159,7 @@ def build_trace_jsonl(messages: list[dict[str, Any]], *, session_id: str, model:
         turn_uuid = str(uuid.uuid4())
         line_type, render = _ROLE_RENDERERS.get(role, ("user", _user_message))
         entry = {  # key order is the wire order
-            "parentUuid": parent, "isSidechain": False, "userType": "external", "cwd": cwd or os.getcwd(),
+            "parentUuid": parent, "isSidechain": False, "userType": "external", "cwd": cwd,
             "sessionId": session_id, "version": _HERMES_VERSION, "gitBranch": git_branch, "uuid": turn_uuid,
             "timestamp": base_ts, "type": line_type, "message": render(msg, model, redact),
         }

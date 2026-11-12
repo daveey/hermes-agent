@@ -252,10 +252,20 @@ def merge_receipts(home: Path | str, session_key: str, jobs: list, merge, *, cre
     return bool(session_key) and _update(home, session_key, mutate, "journal jobs")
 
 
-def clear_turn_marker(home: Path | str, session_key: str) -> None:
-    """Remove the marker once its turn concluded (any outcome the client saw)."""
+def clear_turn_marker(home: Path | str, session_key: str, *, concluding_turn: frozenset | None = None) -> None:
+    """Remove a concluded marker. A late backstop must name its owner; compare and delete under the same lock."""
+    def mutate(entries):
+        if session_key not in entries:
+            return None
+        if concluding_turn is not None:
+            from hermes_state_outcome import turn_identity
+            identity = turn_identity(marker=entries[session_key])
+            if not identity or not identity <= concluding_turn:
+                return None
+        return {k: v for k, v in entries.items() if k != session_key}
+
     if session_key:
-        _update(home, session_key, lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None, "clear")
+        _update(home, session_key, mutate, "clear")
 
 
 def mark_turn_tool_started(home: Path | str, session_key: str) -> bool:

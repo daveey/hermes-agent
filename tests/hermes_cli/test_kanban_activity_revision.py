@@ -195,7 +195,7 @@ def test_shadow_key_ignores_pull_stamps_and_unread_tables(home):
         before = ksa._board_content_key(path, rev.SHADOW_TABLES)
         assert rev.is_revision(before)
         sync.mark_pulled(conn)
-        with kbc.write_txn(conn):  # a replicated event of a hub card: the replica's readers never read events
+        with kbc.write_txn(conn):  # a replicated heartbeat: read uncached by read_runs, never through this key
             conn.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES ('t_hub', 'heartbeat', 1)")
         assert ksa._board_content_key(path, rev.SHADOW_TABLES) == before
         with kbc.write_txn(conn):

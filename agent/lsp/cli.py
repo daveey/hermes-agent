@@ -73,7 +73,8 @@ def _status_for(server_id: str) -> str:
     from agent.lsp.servers import SERVERS, ServerContext
     custom = next((s for s in _all_servers() if s.server_id == server_id and s not in SERVERS), None)
     if custom is not None:  # no install recipe: installed iff the configured command resolves
-        cwd = os.getcwd()
+        from agent.runtime_cwd import process_cwd_or_fallback
+        cwd = process_cwd_or_fallback()
         return "installed" if custom.build_spawn(cwd, ServerContext(cwd, install_strategy="manual")) else "manual-only"
     return detect_status(_recipe_pkg_for(server_id))
 

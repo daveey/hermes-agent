@@ -764,6 +764,11 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "Dispatcher tiebreaker. Higher = picked sooner "
                 "when multiple ready tasks share an assignee."
         )),
+        "admission_class": {
+            "type": "string", "enum": ["normal", "capacity", "urgent"],
+            "description": "Hub admission class; default normal. Capacity requires admission_frees.",
+        },
+        "admission_frees": _prop("string", "One-line frees: claim naming capacity this work restores."),
         "workspace_kind": {
             "type": "string",
             "enum": ["scratch", "dir", "worktree"],

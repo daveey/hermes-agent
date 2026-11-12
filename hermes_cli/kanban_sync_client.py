@@ -1484,6 +1484,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     from hermes_cli.machine_cpu_sampler import AdvisorySampler
     sampler = AdvisorySampler()
     metrics.cpu_take_fn = sampler.take
+    metrics.cpu_wait_fn = getattr(sampler, "wait_fresh", None)  # the sender's bounded wait; never on this thread
     sampler.start()
     # While the CPU gate is on, reports go out on their own anchored thread, each send bounded to 2 s. [daveey]
     from hermes_cli.machine_metrics_sender import MetricsSender, board_post

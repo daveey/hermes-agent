@@ -12,7 +12,7 @@ async def test_refused_checkpoint_fences_exact_head_not_follower(tmp_path, monke
     follower = admit_session_input(db, epoch=owner.epoch, principal_id='human', session_id='s',
                                    request_id='later', payload={'text': 'later'})
     monkeypatch.setattr(owner, '_schedule', lambda ref: None)
-    async def refuse(ref, live):
+    async def refuse(ref, live, attempted=None):
         raise RuntimeStoreError(reason)
     monkeypatch.setattr(owner, '_claim_next', refuse)
     with db:
@@ -31,7 +31,7 @@ async def test_refusal_cannot_fence_uncheckpointed_running_turn(tmp_path, monkey
     db, owner, head = parked_fixture(tmp_path, monkeypatch)
     with db:
         db._execute_write(lambda conn: delete_session_checkpoint(conn, head['admission_id']))
-        async def refuse(ref, live):
+        async def refuse(ref, live, attempted=None):
             raise RuntimeStoreError('permission_denied')
         monkeypatch.setattr(owner, '_claim_next', refuse)
         await owner._claim_with_retry(REF, owner.sessions['s'])

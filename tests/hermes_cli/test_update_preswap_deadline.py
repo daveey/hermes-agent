@@ -407,3 +407,34 @@ def test_recovery_is_announced_as_its_own_phase(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert resumed and "stuck" in verdict
     assert "Recovery (a separate phase" in out
+
+
+def test_a_refused_pause_announces_no_restart(monkeypatch, capsys):
+    """hermes-hub 2026-11-12 18:11Z: the only gateway refused the checkpoint, left the set
+    (``mark_stop_refused``) and was never stopped, yet update.log said "restarting the stopped gateways"."""
+    from hermes_cli import update_pause_record as record
+    from hermes_cli import update_cmd_windows as windows
+    monkeypatch.delenv(pause.STOP_BUSY_ENV, raising=False)
+    unit = {"kind": "systemd", "scope": "user", "unit": "hermes-gateway", "pid": 5, "home": "/h"}
+    monkeypatch.setattr(pause, "_discover_systemd", lambda: [unit])
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_left_running", lambda u, j: (u, j, []))
+    monkeypatch.setattr(pause, "_discover_bare", lambda pids: ([], []))
+    from gateway import status
+    monkeypatch.setattr(status, "get_process_start_time", lambda pid: 1)
+    monkeypatch.setattr(record, "identity", lambda pid=None: {"ct": "ct:1"})
+    for name in ("record_pause", "mark_stop_requested", "mark_stop_sent", "sync", "write"):
+        monkeypatch.setattr(record, name, lambda *a, **k: None)
+
+    def refuse(entry):
+        entry["refusal_reason"] = "gateway refused the update checkpoint: unpreservable work: 1 chat turn"
+        return False
+    monkeypatch.setattr(pause, "_ask_to_drain", refuse)  # the real _stop_gateways + mark_stop_refused run
+    resumed = []
+    monkeypatch.setattr(windows, "_resume_windows_gateways_after_update", lambda t: resumed.append(dict(t)))
+    verdict = pause._pause(pause._empty_token())
+    out = capsys.readouterr().out
+    assert "busy or cannot acknowledge an idle pause" in verdict
+    assert "restarting" not in out and "Recovery (a separate phase" not in out
+    assert "No gateway was stopped" in out
+    assert resumed and not resumed[0]["posix_units"]  # the settle still runs, with nothing owed

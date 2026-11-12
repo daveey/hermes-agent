@@ -307,6 +307,48 @@ def test_park_keeps_a_pushed_card_on_the_pool_and_pins_only_unpushed_state(w2, t
     assert [k for k, _ in _placement_events(conn, tid)] == ["pool_pinned", "pool_unpinned"]
 
 
+def test_park_keeps_work_pushed_by_url_on_the_pool_even_after_the_remote_branch_moved(w2, tmp_path, monkeypatch):
+    """11-12: t_01a1d0a1eaa00371 pushed its fix with ``git push https://...git HEAD:wt/...`` (a URL, so origin/*
+    stayed at the old tip) and a server-side update-branch then moved the branch past it. The park called that
+    "unpushed commits", pinned the card to machine:worker-2, and it sat ready while worker-2 was on a Board hold."""
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="pool card pushed by url", assignee="default", runs_on=[POOL])
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "url-push")
+    remote = str(tmp_path / "url-push-remote.git")
+    _git(tree, "fetch", "-q", "origin")  # origin/wt/x tracks the pushed tip
+    _commit(tree, "b.txt")
+    _git(tree, "push", "-q", remote, "HEAD:refs/heads/wt/x")  # by URL: origin/wt/x stays behind HEAD
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", "-b", "wt/x", remote, str(other))
+    _commit(other, "merge-from-base.txt")  # GitHub's update-branch: the remote branch moves past HEAD
+    _git(other, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
+
+    _run(w2, monkeypatch, tid)
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+        f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review; fix pushed from {tree}")}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == [POOL] and _placement_events(conn, tid) == []
+
+    # A commit no remote branch holds still pins, even with a stale tracking ref around.
+    _run(w2, monkeypatch, tid)
+    _commit(tree, "c.txt")
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+        f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review; c.txt only in {tree}")}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == ["machine:worker-2"]
+    assert _placement_events(conn, tid)[-1][1]["unpushed_state"] == f"unpushed commits in {tree.resolve()}"
+
+
+def test_a_head_that_is_a_remote_branch_tip_counts_as_pushed(tmp_path):
+    from hermes_cli import kanban_move_pool as kmp
+    tree = _pushed_clone(tmp_path, tmp_path / "tip")
+    _commit(tree, "b.txt")
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+    _git(tree, "push", "-q", str(tmp_path / "tip-remote.git"), "HEAD:refs/heads/wt/new")  # new branch, by URL
+    assert kmp.tree_state([str(tree)]) is None
+
+
 def test_park_pins_a_dirty_tree_found_by_its_owner_marker(w2, tmp_path, monkeypatch):
     from tools import kanban_tools as kt
     conn = w2.conn
@@ -398,3 +440,148 @@ def test_direct_create_task_keeps_pool_enrollment_when_it_cannot_queue(hub, monk
     sync.set_mode(hub.conn, "off")  # runs_on is a Board placement field: off a primary, enroll instead
     tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
     assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"
+
+
+# --- courier and origin-bound creates (t_01a1d0571c2f07d6) ------------------------------------------------------
+# 11-12 12:40Z-15:16Z: after every gateway flipped to the queue, 7 of 8 new worker-first cards on the hub were
+# routed (courier) creates the hub admission judge denied, and the 8th was origin-bound: both entries still took
+# worker-first, which reserves one worker and writes runs_on [machine:worker-N].
+
+def _intent(request_id):
+    return {"request_id": request_id, "owner": {"gateway": HUB, "profile": "default", "board": "default"},
+            "origin": {"gateway": "macbook", "profile": "default", "session": "s_mac"}}
+
+
+def _created(conn, tid):
+    return next(json.loads(p) for (p,) in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created'", (tid,)))
+
+
+@pytest.fixture
+def judge(monkeypatch):
+    from tests.hermes_cli.hub_judge_support import FakeJudge
+    from hermes_cli import kanban_hub_admission as admission
+    fake = FakeJudge()
+    monkeypatch.setattr(admission, "admit", fake)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_WORKER_TASK", raising=False)
+    return fake
+
+
+@pytest.mark.parametrize("pools", [False, True])
+def test_courier_create_denied_by_hub_admission_joins_the_pool_queue(hub, judge, monkeypatch, pools):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, **({"worker_pools": {HUB: ["worker-1"]}} if pools else {})})
+    machines = [{**m, "labels": [*m["labels"], "capability:hub-write"]} if m["name"] == "worker-2" else m
+                for m in _machines(held=("worker-1",)).values()]
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": machines})  # worker-2 is a hub-write worker
+    judge.admit_next = False
+    args = {"title": "Read ~/.hermes/logs/agent.log on the hub", "requires": [], "assignee": "default"}
+    out = json.loads(kt._handle_create(dict(args), origin_intent=_intent(f"request-courier-{pools}")))
+    tid = out.get("task_id")
+    assert tid and len(judge.calls) == 1, out
+    assert sorted(_runs_on(hub.conn, tid) or []) == ["capability:hub-write", POOL], out  # never machine:worker-N
+    task = kb.get_task(hub.conn, tid)
+    assert task.placement_policy is None and "hub:write" in (task.requires or [])
+    created = _created(hub.conn, tid)
+    assert created["placement_policy"] is None and created["hub_admission"]["entry"] == "courier", created
+    # A re-applied request (lost reply) rebuilds the identical envelope: same card, no judge call, no conflict.
+    again = json.loads(kt._handle_create(dict(args), origin_intent=_intent(f"request-courier-{pools}")))
+    assert again.get("task_id") == tid and again.get("code") != "origin_creation_conflict", again
+    assert len(judge.calls) == 1
+
+
+def test_courier_create_keeps_worker_first_only_without_a_live_queue_label(hub, judge, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1"]}})
+    _registry(held=("worker-1", "worker-2"))  # no unheld machine carries the label
+    judge.admit_next = False
+    out = json.loads(kt._handle_create({"title": "Read ~/.hermes/logs/agent.log on the hub", "requires": [],
+                                        "assignee": "default"}, origin_intent=_intent("request-courier-held")))
+    assert _runs_on(hub.conn, out["task_id"]) is None, out
+    assert kb.get_task(hub.conn, out["task_id"]).placement_policy == "worker-first-v1"
+
+
+def test_courier_create_refuses_with_neither_a_live_queue_label_nor_a_worker_pool(hub, judge, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: dict(CFG))  # no worker_pools entry for the hub
+    _registry(held=("worker-1", "worker-2"))  # and no unheld machine carries the queue label
+    judge.admit_next = False
+    out = json.loads(kt._handle_create({"title": "Read ~/.hermes/logs/agent.log on the hub", "requires": [],
+                                        "assignee": "default"}, origin_intent=_intent("request-courier-nowhere")))
+    assert out.get("code") == "placement_unavailable" and not out.get("created"), out
+
+
+def test_courier_explicit_machine_pin_still_wins(hub, judge, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1"]}})
+    _registry()
+    judge.admit_next = False
+    out = json.loads(kt._handle_create({"title": "summarise CI", "requires": [], "assignee": "default",
+                                        "runs_on": ["machine:worker-2"]}, origin_intent=_intent("request-pinned")))
+    assert _runs_on(hub.conn, out["task_id"]) == ["machine:worker-2"], out
+    assert judge.calls == [] and kb.get_task(hub.conn, out["task_id"]).placement_policy is None
+
+
+@pytest.mark.parametrize("extra", [{"runs_on": [f"machine:{HUB}"]}, {"workspace_kind": "dir", "workspace_path": "/srv/x"}])
+def test_courier_create_pinned_to_the_hub_is_refused_when_denied(hub, judge, monkeypatch, extra):
+    # A denied hub pin (or a host workspace) cannot move to the queue: the creator re-places it; no card is made.
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1"]}})
+    _registry()
+    judge.admit_next = False
+    before = hub.conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+    out = json.loads(kt._handle_create({"title": "Read ~/.hermes/logs/agent.log on the hub", "requires": [],
+                                        "assignee": "default", **extra},
+                                       origin_intent=_intent(f"request-pinned-deny-{sorted(extra)[0]}")))
+    assert out.get("code") == "placement_unavailable" and not out.get("created"), out
+    assert len(judge.calls) == 1
+    assert hub.conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == before
+
+
+@pytest.fixture
+def origin_ok(monkeypatch):
+    from hermes_cli import kanban_origin
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: (HUB, {HUB, "macbook"}))
+    monkeypatch.setattr(kanban_origin, "bind", lambda conn, tid, origin, board=None: {"origin": origin.ref})
+
+
+@pytest.mark.parametrize("pools", [False, True])
+def test_origin_bound_tool_create_joins_the_pool_queue(hub, origin_ok, monkeypatch, pools):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, **({"worker_pools": {HUB: ["worker-1"]}} if pools else {})})
+    _registry(held=("worker-1",))
+    out = json.loads(kt._handle_create({"title": "summarise the failing CI jobs", "assignee": "default",
+                                        "requires": [], "origin_session": "macbook:abc123"}))
+    assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) == [POOL], out
+    assert kb.get_task(hub.conn, out["task_id"]).placement_policy is None
+    assert _created(hub.conn, out["task_id"])["placement_policy"] is None
+
+
+def test_origin_bound_explicit_pins_still_win(hub, origin_ok, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1"]}})
+    _registry()
+    base = {"title": "summarise the failing CI jobs", "assignee": "default", "requires": [],
+            "origin_session": "macbook:abc123"}
+    out = json.loads(kt._handle_create({**base, "runs_on": ["machine:worker-2"]}))
+    assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) == ["machine:worker-2"], out
+    out = json.loads(kt._handle_create({**base, "placement": "local", "title": "summarise CI here"}))
+    assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) is None, out
+    assert kb.get_task(hub.conn, out["task_id"]).placement_policy is None
+
+
+def test_queue_decision_does_not_exclude_courier_creation():
+    from hermes_cli import kanban_worker_placement as wp
+    out = wp.queue_decision({"title": "summarise CI"}, CFG, HUB, "auto", {"request_id": "r"}, lambda _label: True)
+    assert out is not None and out["runs_on"] == [POOL], out
+
+
+def test_a_callers_runs_on_beats_a_queued_landing(monkeypatch):
+    from tools import kanban_tools_placement as ktp
+    queued = {"where": "local", "runs_on": [POOL]}
+    monkeypatch.setattr(ktp, "_origin_enrollment", lambda *a, **kw: queued)
+    monkeypatch.setattr(ktp, "_courier_landing", lambda conn, args, intent, marker, runs_on, **kw: marker)
+    assert ktp._landing_placement(None, {}, object(), None, None, ["machine:worker-2"], title="t") == (
+        queued, ["machine:worker-2"])
+    assert ktp._landing_placement(None, {}, object(), None, None, None, title="t") == (queued, [POOL])

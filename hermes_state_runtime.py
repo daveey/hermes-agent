@@ -231,7 +231,7 @@ def list_session_admissions(db, *, session_id: str, pending_only: bool = True) -
 _ANY_HEAD = object()
 
 
-def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_ANY_HEAD) -> dict | bool | None:
+def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_ANY_HEAD, _eligible=None) -> dict | bool | None:
     """Claim the FIFO head. ``_guard(conn)`` (owner admission gate) raises to refuse inside the
     write transaction, so a drain that began while this waited on the writer still wins.
     ``head`` is the admission id the caller's preclaim checks validated (None: it saw nothing
@@ -251,7 +251,8 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
             raise RuntimeStoreError('unknown_execution')
         if blocked or workers:
             return None
-        row = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' ORDER BY seq LIMIT 1", (session_id,)).fetchone()
+        candidates = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' ORDER BY seq", (session_id,))
+        row = next((candidate for candidate in candidates if _eligible is None or _eligible(_row(candidate))), None)
         if head is not _ANY_HEAD and (row['admission_id'] if row is not None else None) != head:
             return False
         if row is None:

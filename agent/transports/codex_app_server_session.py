@@ -219,7 +219,10 @@ class CodexAppServerSession:
         developer_instructions: Optional[str] = None, resume_thread_id: Optional[str] = None,
         history_seed: Optional[str] = None,
     ) -> None:
-        self._cwd = cwd or os.getcwd()
+        if not cwd:
+            from agent.runtime_cwd import process_cwd_or_fallback
+            cwd = process_cwd_or_fallback()
+        self._cwd = cwd
         self._codex_bin = codex_bin
         self._codex_home = codex_home
         # A codex thread id persisted by an earlier process for this Hermes session: the first

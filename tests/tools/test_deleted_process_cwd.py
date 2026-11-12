@@ -102,8 +102,6 @@ _REPO = Path(__file__).resolve().parents[2]
 # Sites where a bare os.getcwd() is the deliberate primitive behind the safe helpers.
 _ALLOWED = {
     ("agent/runtime_cwd.py", "process_cwd"),
-    # Documented upstream to propagate the OSError (prompt/context callers); not a tool path.
-    ("agent/runtime_cwd.py", "resolve_agent_cwd"),
 }
 _CATCHES = {"OSError", "FileNotFoundError", "Exception", "BaseException", "EnvironmentError"}
 
@@ -147,11 +145,13 @@ def _bare_getcwd_sites(path: Path):
             yield node.lineno, enclosing_function(node)
 
 
-def test_no_bare_os_getcwd_in_tools():
-    """Every tools/ cwd consumer goes through agent.runtime_cwd.process_cwd() (or the terminal
-    tool's _safe_getcwd built on it) or guards os.getcwd() with an OSError handler."""
+def test_no_bare_os_getcwd_in_tools_or_agent():
+    """Every tools/ and agent/ cwd consumer goes through agent.runtime_cwd.process_cwd() /
+    process_cwd_or_fallback() (or the terminal tool's _safe_getcwd built on it) or guards
+    os.getcwd() with an OSError handler. agent/ covers the turn path: the compaction rebuild of
+    the system prompt crashed a Kanban worker whose workspace had been removed and recreated."""
     offenders = []
-    for path in sorted([*(_REPO / "tools").rglob("*.py"), _REPO / "agent" / "runtime_cwd.py"]):
+    for path in sorted([*(_REPO / "tools").rglob("*.py"), *(_REPO / "agent").rglob("*.py")]):
         rel = path.relative_to(_REPO).as_posix()
         for lineno, func in _bare_getcwd_sites(path):
             if (rel, func) not in _ALLOWED:

@@ -551,9 +551,22 @@ def _valid_checkpoint_ack(ack: dict, entry: dict, nonce: str) -> bool:
     """A checkpoint ACK is believed only when it is from the gateway we asked (pid), for this
     episode (required nonce echo), names the checkpoint, and states a sane bounded drain."""
     drain = ack.get("drain_timeout")
-    return (ack.get("checkpoint") is True and type(ack.get("pid")) is int and ack["pid"] == entry.get("pid")
+    return (ack.get("checkpoint") is True and type(ack.get("pid")) is int and _is_entry_gateway(ack["pid"], entry)
             and ack.get("nonce") == nonce
             and isinstance(drain, (int, float)) and not isinstance(drain, bool) and 0 < drain)
+
+
+def _is_entry_gateway(pid: int, entry: dict) -> bool:
+    """*pid* is the gateway behind *entry*: its own PID, or (a unit whose ``ExecStart`` is a non-exec
+    wrapper, e.g. a worker node's ``hermes-gateway-broker``) a ``gateway run`` process below it. Such a
+    unit's MainPID is the wrapper, while the gateway answers with its own PID; requiring equality refused
+    every accepted checkpoint as "unbelievable" after the gateway had already drained its Kanban workers
+    (hermes-worker-5 2026-11-12 15:15-15:18Z: four instant applies, four restarts on the old code)."""
+    if pid == entry.get("pid"):
+        return True
+    from hermes_cli.gateway_service_members import gateway_descendant_pids
+    owner = entry.get("pid")
+    return type(owner) is int and pid in gateway_descendant_pids(owner)
 
 
 def _ask_to_drain(entry: dict) -> bool | None:
@@ -1026,8 +1039,13 @@ def _pause(token: dict) -> str | None:
     except BaseException as exc:  # health: allow BLE001 -- interruption must settle before cmd_update releases its fence
         from hermes_cli.update_cmd_windows import _resume_windows_gateways_after_update
         print(f"  ↷ Update deferred: {exc or type(exc).__name__}; the checkout was not changed")
-        print("  ↻ Recovery (a separate phase after the stop deadline, not bounded by it): "
-              f"restarting {_describe(token) or 'the stopped gateways'} on the old code...")
+        # A gateway that refused the pause left the set (``mark_stop_refused``): it was never stopped and owes
+        # no restart. Say so instead of announcing a restart of nothing (hermes-hub 2026-11-12 18:11Z).
+        if token.get("posix_units") or token.get("unmapped") or token.get("profiles"):
+            print("  ↻ Recovery (a separate phase after the stop deadline, not bounded by it): "
+                  f"restarting {_describe(token) or 'the stopped gateways'} on the old code...")
+        else:
+            print("  ↻ No gateway was stopped (each refused or was never asked); nothing to restart")
         try:
             _resume_windows_gateways_after_update(token)
         except Exception as again:  # health: allow BLE001 -- still owed: completion restarts them after the deps

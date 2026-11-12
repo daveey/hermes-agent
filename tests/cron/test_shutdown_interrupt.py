@@ -806,6 +806,120 @@ class TestOwnerSideShutdownCancel:
         assert captured["shutdown"] is False
 
 
+class TestOwnerStopWhileDraining:
+    """cron-7c04faf754 recurrence: the owner gateway's own restart drain stops an agent cron run
+    through ``stop_authority_work`` (a reasonless set of the run's cancel latch) while no scheduler
+    ``mark_running_jobs_interrupted`` flag exists. That stop is this gateway's shutdown, so it must log
+    one WARNING ``stopped by gateway shutdown`` (no ``Job '...' failed:`` ERROR) and still book the
+    run as a restart cut. An operator Stop during the drain and a takeover without a drain keep their
+    wording."""
+
+    def _run(self, monkeypatch, caplog, *, draining, operator_cancel=False, drain_ends_before_poll=False):
+        import asyncio
+        import json
+        import logging
+        from types import SimpleNamespace
+
+        import cron.scheduler as sched
+        from cron.cancellation import (CronShutdownInterrupted, cancel_is_shutdown, cancel_reason,
+                                       request_cancel)
+        from gateway import session_cron
+        from gateway.session_contract import SessionRef
+        from gateway.session_runtime_workers import stop_authority_work
+        from hermes_state_registry import acquire, release
+
+        captured = {}
+        holder = {}
+
+        def fake_run_job(job, *, cancel_event=None, **_kw):
+            # The drain timed out and stopped the profile's work mid-run (session_runtime_workers).
+            if operator_cancel:
+                request_cancel(job["execution_id"])
+            stop_authority_work(holder["authority"])
+            if drain_ends_before_poll:
+                # _stop_persist_exit_state resets the drain flag before the run's next 5 s poll.
+                holder["authority"].runner._draining = False
+            assert cancel_event is not None and cancel_event.is_set()
+            captured["reason"] = reason = cancel_reason(cancel_event)
+            captured["shutdown"] = cancel_is_shutdown(cancel_event)
+            # run_job's own stop + failure-log path (_abort_if_fire_claim_lost, run_job's except).
+            error = CronShutdownInterrupted if cancel_is_shutdown(cancel_event) else RuntimeError
+            exc = error(f"Cron job 'drain-job' was stopped: {reason}")
+            if not sched._log_shutdown_stop("drain-job", str(exc), exc):
+                try:
+                    raise exc
+                except RuntimeError:
+                    sched.logger.exception("Job '%s' failed: %s", "drain-job", str(exc))
+            return False, "doc", "", str(exc)
+
+        caplog.set_level(logging.DEBUG, logger="cron.scheduler")
+        monkeypatch.setattr(sched, "run_job", fake_run_job)
+        monkeypatch.setattr("gateway.run_runtime.stop_authority_turns", lambda *a, **k: None)
+        db = acquire(sched._get_hermes_home() / "state.db")
+        ref = SessionRef("test-profile", "cron-owner-drain")
+        db.create_session(ref.session_id, source="cron")
+        authority = holder["authority"] = SimpleNamespace(
+            db=db, sessions={ref.session_id: SimpleNamespace(
+                source=SimpleNamespace(user_id="cron-owner"))}, pending_results={},
+            runner=SimpleNamespace(_draining=draining, _interrupting_remaining_work=False))
+        row = {"admission_id": "adm", "request_id": "req-drain", "principal_id": "cron-owner",
+               "payload": {"text": ""}}
+        policy = SimpleNamespace(request_json=json.dumps({
+            "cron_job": {"id": "drain-job", "prompt": "x"}, "extra_prompt": None,
+            "request_id": "req-drain"}))
+        try:
+            with pytest.raises(RuntimeError):
+                asyncio.run(session_cron.execute(authority, ref, row, policy))
+        finally:
+            release(db)
+        captured["flags"] = authority.pending_results["adm"]["result"]["cron_job_flags"]
+        captured["records"] = [(r.levelno, r.getMessage(), r.exc_info is not None)
+                               for r in caplog.records if r.name == "cron.scheduler"]
+        return captured
+
+    def test_drain_stop_logs_shutdown_warning_not_failed_error(self, monkeypatch, caplog):
+        import logging
+
+        from cron.restart_cut import RESTART_CUT_FLAG
+
+        got = self._run(monkeypatch, caplog, draining=True)
+        assert "shutdown" in got["reason"].lower(), got["reason"]
+        assert got["shutdown"] is True
+        assert [(lvl, tb) for lvl, _msg, tb in got["records"]] == [(logging.WARNING, False)]
+        assert "stopped by gateway shutdown" in got["records"][0][1]
+        assert not any("failed:" in msg for _lvl, msg, _tb in got["records"])
+        assert got["flags"].get(RESTART_CUT_FLAG) is True
+
+    def test_drain_stop_read_after_drain_flag_reset_is_still_a_shutdown(self, monkeypatch, caplog):
+        """Live hub 2026-11-12: the stop landed while draining, but the run read its latch only after
+        ``_stop_persist_exit_state`` reset ``_draining``; the shutdown fact is latched at stop time."""
+        import logging
+
+        from cron.restart_cut import RESTART_CUT_FLAG
+
+        got = self._run(monkeypatch, caplog, draining=True, drain_ends_before_poll=True)
+        assert got["shutdown"] is True, got["reason"]
+        assert [(lvl, tb) for lvl, _msg, tb in got["records"]] == [(logging.WARNING, False)]
+        assert "stopped by gateway shutdown" in got["records"][0][1]
+        assert not any("failed:" in msg for _lvl, msg, _tb in got["records"])
+        assert got["flags"].get(RESTART_CUT_FLAG) is True
+
+    def test_operator_cancel_during_drain_keeps_cancelled_on_request(self, monkeypatch, caplog):
+        got = self._run(monkeypatch, caplog, draining=True, operator_cancel=True)
+        assert got["shutdown"] is False
+        assert "shutdown" not in got["reason"].lower()
+        assert got["reason"] != "cron fire ownership was lost"
+
+    def test_takeover_without_drain_keeps_lost_ownership_error(self, monkeypatch, caplog):
+        import logging
+
+        got = self._run(monkeypatch, caplog, draining=False)
+        assert got["reason"] == "cron fire ownership was lost"
+        assert got["shutdown"] is False
+        assert any(lvl == logging.ERROR and "failed:" in msg and tb
+                   for lvl, msg, tb in got["records"])
+
+
 class TestShutdownStopLogging:
     def test_watchdog_raises_shutdown_interrupt_for_a_shutdown_latch(self):
         import cron.scheduler as sched

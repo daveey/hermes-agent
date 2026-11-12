@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
+from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, settled_receipt, websocket
 from tests.waiting import async_wait_until
 
 
@@ -272,7 +272,7 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
             assert 'MANAGED_TOOL_DONE' in json.dumps(history), restored
             # The committed receipt keeps the worker's spend (what `-z --usage-file` reads).
             [(admission,)] = query('SELECT admission_id FROM session_admissions WHERE request_id=?', ('managed-input',))
-            receipt = (await rpc(ws, 'prompt.receipt', session_id=sid, admission_id=admission, include_result=True))['result']
+            receipt = (await settled_receipt(ws, sid, admission))['result']
             assert receipt['usage']['total_tokens'] == 15 * len(peer.requests), receipt
             assert receipt['result']['model'] == 'managed-model' and receipt['result']['api_calls'] == len(peer.requests), receipt
             replay = await rpc(ws, 'session.events.since', session_id=sid,

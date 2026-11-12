@@ -3,6 +3,7 @@ import asyncio
 from contextlib import suppress
 import logging
 import sys
+from typing import Any, Awaitable, Callable
 import uuid
 
 from hermes_cli.gateway_client import GatewayClientError
@@ -11,6 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 _PREVIEW_CHARS = 80
+# [daveey] ``_redial``: a core update restarts the hub gateway in ~90-110 s; a finite run waits this long
+# per hang-up for the replacement owner, polling every REDIAL_RETRY_S, at most REDIAL_LIMIT hang-ups. So a
+# one-shot whose gateway never comes back exits (turn outcome unknown) only after this window, not at once:
+# its turn may still be running on the next owner, and a stderr notice says what it waits for.
+REDIAL_WINDOW_S = 600.0
+REDIAL_RETRY_S = 2.0
+REDIAL_LIMIT = 5
 
 
 def _pending_preview(text):
@@ -123,6 +131,14 @@ class GatewayChatView:
         self._composer = None
         # `/undo` puts the removed message back in the composer for the next prompt.
         self.prefill = ""
+        # A finite run's redial after its owner hung up (``_redial``): ``reconnect()`` opens a fresh
+        # connection (set by ``run_gateway_chat``); None never redials.
+        self.reconnect: Callable[[], Awaitable[Any]] | None = None
+        self.redials = 0
+        # [daveey] A finite run's bounded pre-admission wait (``gateway_update_wait.UpdateWait``), shared with
+        # its attach: a submit a draining owner refused goes to the next owner (``_submit_finite``).
+        self.update_wait: Any = None
+        self._renderer: asyncio.Task | None = None
 
     def unknown_admissions(self):
         return [row["admission_id"] for row in self.pending if row["status"] == "unknown"]
@@ -200,6 +216,85 @@ class GatewayChatView:
             for admission in dict.fromkeys([*self.streams, *self.mine]):  # the running turn first: one FIFO
                 await self._recover(admission, sid)
             self.changed.set()  # after its own turn settled: a control it lists may end a one-shot's wait
+
+    async def _redial(self):
+        """[daveey] A finite run whose owner hung up dials the replacement and re-attaches as after a replay
+        gap. A core update restarts the gateway under a running ``chat -q`` / ``-z``: the owner parks its turn
+        on a durable checkpoint and the next owner continues the same admission, so the view waits for that
+        admission's live completion, its settled receipt, or (an owner that could not park it) its unknown
+        outcome, instead of exiting on a turn that is still running. Only a hang-up (``DISCONNECTED``) of
+        a view that can dial (``reconnect``) redials, at most ``REDIAL_LIMIT`` times, each within
+        ``REDIAL_WINDOW_S`` of the hang-up; anything else keeps the old exit."""
+        from hermes_cli.gateway_client import DISCONNECTED
+        if (self.reconnect is None or self.redials >= REDIAL_LIMIT
+                or not isinstance(self.failure, GatewayClientError) or str(self.failure) != DISCONNECTED):
+            return False
+        from websockets.exceptions import InvalidHandshake
+        self.redials += 1
+        if self.emitter is None:  # stderr, even for a quiet one-shot: its 10-minute silence needs a reason
+            print(f"Gateway connection lost; waiting up to {REDIAL_WINDOW_S / 60:.0f} min for the restarted "
+                  "gateway to continue this turn.", file=sys.stderr, flush=True)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + REDIAL_WINDOW_S
+        while True:
+            try:
+                client = await self.reconnect()
+                break
+            # Restarting, not ready yet: refused, timed out, or a half-started owner rejecting the WebSocket
+            # handshake (``connect_gateway`` passes websockets' ``InvalidHandshake``/``InvalidStatus`` through).
+            except (GatewayClientError, OSError, TimeoutError, InvalidHandshake) as exc:
+                if loop.time() >= deadline:
+                    logger.debug("gateway redial gave up: %s", exc)
+                    return False
+                await asyncio.sleep(REDIAL_RETRY_S)
+        await self._swap_client(client)
+        await self._reattach()
+        return self.failure is None
+
+    async def _swap_client(self, client):
+        """Render from *client* (a fresh connection to the restarted owner) instead of the old one."""
+        renderer = self._renderer
+        if renderer is not None:
+            renderer.cancel()
+            with suppress(asyncio.CancelledError):
+                await renderer
+        self.client, self.failure = client, None
+        self.failed.clear()
+        self._renderer = asyncio.create_task(self.render())
+
+    async def _submit_finite(self, query):
+        """[daveey] The one-shot's submit. An owner draining for a core update refuses it (``runtime_draining``,
+        ``runtime_retired``) with nothing admitted, so the prompt goes to the restarted owner instead: dial it,
+        re-attach the session and submit again, within the run's ``update_wait`` window. Any other refusal, or
+        a view without a dialer or wait, raises as before."""
+        from hermes_cli.gateway_client import GatewayRPCError
+        wait = self.update_wait
+        input_id = uuid.uuid4().hex
+        while True:
+            try:
+                return await self.submit(query, input_id=input_id)
+            except GatewayRPCError as exc:
+                if wait is None or self.reconnect is None:
+                    raise
+                await wait.retry(exc)
+            while True:
+                client = await wait.dial(self.reconnect)
+                try:
+                    snapshot = await client.rpc("session.resume", session_id=self.session_id)
+                    break
+                except GatewayRPCError as exc:
+                    await wait.retry(exc)
+            await self._swap_client(client)
+            self.generation = snapshot.get("execution_generation", self.generation)
+            self.pending = snapshot.get("pending", self.pending)
+            self.prompts = {p["prompt_id"]: p for p in snapshot.get("prompts", [])}
+
+    async def _redial_or_raise(self):
+        """The one-shot wait's failure: redialled (``_redial``), or raised as before."""
+        failure = self.failure
+        assert failure is not None  # called only once the wait saw a failure
+        if not await self._redial():
+            raise self.failure or failure
 
     async def _recover(self, admission, sid):
         """Queued: it lost nothing. Running: cut until its live completion. Unknown: its completion was the
@@ -340,11 +435,11 @@ class GatewayChatView:
     def _settled(self, admission, payload):
         self.prompts.pop(payload["prompt_id"], None)
 
-    async def submit(self, text):
+    async def submit(self, text, *, input_id=None):
         self.mutations.retire(self.session_id)
         sid, gaps = self.session_id, self.gaps
         receipt = await self.client.rpc("prompt.submit", session_id=self.session_id,
-                                        input_id=uuid.uuid4().hex, text=text,
+                                        input_id=input_id or uuid.uuid4().hex, text=text,
                                         **({"finite": True} if self.finite else {}),
                                         **({"unattended": True} if self.finite and self.unattended else {}))
         if (receipt or {}).get("voice_stopped") is True:
@@ -544,9 +639,10 @@ class GatewayChatView:
             return self._detach(f"Your message was not sent. To continue, run `hermes sessions discard "
                                 f"{self.session_id} --yes`, or resume this session in an interactive chat "
                                 "and /discard the paused turn there; then send it again.")
-        renderer = asyncio.create_task(self.render())
+        renderer = self._renderer = asyncio.create_task(self.render())
         try:
-            receipt = await self.submit(query) if query else None
+            submit = self._submit_finite if oneshot else self.submit
+            receipt = await submit(query) if query else None
             if oneshot:
                 admission = _oneshot_admission(receipt)
                 if admission is None:
@@ -560,7 +656,8 @@ class GatewayChatView:
                 while admission not in self.completions:
                     self.changed.clear()
                     if self.failure:
-                        raise self.failure
+                        await self._redial_or_raise()
+                        continue
                     blocked = self._finite_block(admission)
                     if blocked:
                         return self._detach(blocked)
@@ -627,6 +724,7 @@ class GatewayChatView:
                         print(f"Error: {exc}", file=sys.stderr)
                 raise self.failure
         finally:
+            renderer = self._renderer
             renderer.cancel()
             with suppress(asyncio.CancelledError):
                 await renderer

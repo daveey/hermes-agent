@@ -1,0 +1,211 @@
+# Hub admission v2
+
+Status: approved design, implementation in progress. This document describes the
+full contract, not a claim that the current branch implements it all.
+
+Implemented so far: DB create/readback metadata and transactional postimage
+validation on edit; CLI create/edit `--class` and `--frees`; create tool schema,
+pre-placement validation, persistence/readback and remote option encoding.
+Admission metadata edits may be combined with ordinary title/body/priority edits,
+but not operator fields or completion-contract edits (separate transactions).
+Local run pool/class/origin receipts now survive task class and chat-release edits.
+The whole-host census uses a consistent read snapshot per board and enforces the
+capacity-origin cap in final admission. Opt-in pre-lease/final CPU gates select the
+separate priority pool. The dispatcher budget can reach the extra pool at regular
+saturation, preserving the shared critical/elevated memory guard. Opted-in hubs
+order marked candidates first within each lane, retaining effective priority
+within each group. The dispatcher budget is per pool (`PoolBudget`): a normal
+row only fits a regular slot, so once this tick's regular slots are spent no
+normal row is attempted (no CPU advisory, Board claim gate or locked census),
+marked rows charge a priority slot first, and foreign pickup gets the same pool
+budget capped to the tick's total. At regular 7/7 the tick reports
+`at_capacity = "regular pool max_in_progress=7/7 (priority n/3 is marked-only)"`
+and a normal card's queue note says `regular pool full (7/7)`. Composed ready/review dispatcher tests now reach real final
+claims at 70% CPU with seven regular runs, including an opposite normal lane,
+critical/elevated memory and a hard per-board `max_spawn` ceiling. Workers retain
+plain priority. These isolated tests do not establish live acceptance.
+
+The companion Board branch implements admission metadata migration/postimage
+validation, operator policy and authenticated runtime telemetry, and a shared
+two-pool grant evaluator for direct claims and worker-first overflow/review.
+Board-owned immutable lease receipts are distinct from core's local run receipts.
+Core now reports the policy and both pool counts from one root configuration
+snapshot and one census, rechecks configuration after CPU sampling, and removes
+the entire new tuple on an old Board's atomic 400 compatibility retry.
+
+Phase 2 is implemented on the same branch: `hermes_cli/kanban_admission_score.py`
+(`rank`), score-ordered lanes on opted-in hubs (marked-first partition kept), the
+queue-note score summary, `hermes kanban queue [--explain ID] [--json]` and the
+capacity effect report `hermes kanban queue --report [--days N]`.
+
+Still pending: delivery (exact-head review, CI, Board deploy before core
+activation), read-only old/new replay over real boards, natural hub install and
+live activation. Do not enable before the Board side is deployed. `priority_slots`
+is opt-in (absent = 0); the enabled-hub target is 3.
+
+## Policy and rollout
+
+Ship phase 1 (separate pools) first, then phase 2 (scoring, explanation and effect
+reporting). The final slot amendment supersedes the original reserved-slot design:
+
+- `kanban.max_in_progress` remains the regular pool, configured as 7 on the hub.
+- `kanban.admission.priority_slots` is a separate pool, default 3 on an enabled hub.
+- Only `capacity` and `urgent` cards may enter the priority pool. Numeric priority
+  never grants eligibility. Marked cards prefer priority, then regular capacity.
+- An idle priority slot never falls through to normal work. An eighth normal card
+  waits even when all three priority slots are idle.
+- Priority claims require CPU busy strictly below
+  `kanban.admission.priority_cpu_busy_below_pct` (default 85). Regular claims retain
+  the installation-root `cpu_busy_below_pct` policy (50 on the hub).
+- Activation is hub-only, tied to the existing installation-root CPU admission
+  policy; workers with that policy off retain existing behavior. Invalid root
+  settings fail closed; a profile override cannot increase host capacity.
+- Critical memory pressure admits none. Elevated pressure allows at most one new
+  run per dispatcher tick across both pools, not one per pool. Existing drain,
+  update, turn-waiter, lease expiry and lock-budget fences remain intact.
+
+No full-pool default changes apply to workers. A higher CPU ceiling does not
+change placement or allow portable work to ignore worker-first routing.
+
+## Metadata
+
+Tasks gain synced fields:
+
+| Field | Contract |
+| --- | --- |
+| `admission_class` | `normal` (default), `capacity`, or `urgent` |
+| `admission_frees` | Capacity requires a nonempty single-line `frees: ...` claim |
+
+Expose these through `kanban_create`, CLI create/edit (`--class`, `--frees`),
+normal task readback and detector producers. Validate at the shared database
+boundary, not only argparse/tool schemas. Editing class or frees validates the
+resulting pair within the same write transaction. Existing cards migrate to
+normal; no title-based automatic upgrades.
+
+Runs gain a local, immutable admission receipt: selected pool (`regular` or
+`priority`), claim-time class and origin key. Keep it separate from mutable
+completion metadata. NULL legacy receipts count as regular. Class edits must not
+move an active run between pools or erase its capacity-origin charge.
+
+Capacity-origin limit: at most two active capacity runs per originating chat
+across all host execution boards. Prefer the original creator chat tuple
+(gateway, profile, session), not a shepherd or a current worker session. Without
+one, fall back to (creating gateway, created_by), with missing identity sharing a
+conservative unknown bucket. Urgent runs do not count against the capacity-only
+origin limit, but still consume one of the two pools.
+
+## Authorities and integration
+
+The installation-root `admission.lock` is the whole-host execution authority.
+Inside its existing bounded transaction:
+
+1. Read current task class and origin.
+2. Count immutable run receipts across execution boards, deduplicating file
+   identities and excluding remote-held replicas.
+3. Exclude only the exact proven unused Board-grant echo, using the existing
+   task/run UID, holder and claim-lock proof.
+4. Select an eligible pool and enforce origin concurrency.
+5. Sample CPU independently under the lock; recount before commit and refuse
+   expired leases or an exceeded lock hold budget.
+6. Persist the selected receipt with the claimed run and event before releasing
+   the lock. Claimed evidence includes both pool occupancies and CPU ceiling.
+
+The dispatcher budget and pre-lease advisory must use the same pool policy so
+neither an early seven-slot cap nor the 50% advisory prevents eligible priority
+work from reaching final admission. Advisory snapshots never grant authority.
+
+The Board service is a separate integration boundary. Operator-owned machine
+`hub_admission` is `{version:1, priority_slots:3,
+regular_cpu_busy_below_pct:50, priority_cpu_busy_below_pct:85}`; `max_card_runs`
+remains the regular cap. The opted-in policy supersedes the overflow CPU threshold
+for both pools. Legacy machines retain the old scalar/overflow behavior.
+An opted-in machine refuses all new grants unless fresh runtime telemetry names
+exactly the same policy and a consistent pool census. Each pool is floored by its
+retained Board leases, with other tasks' tentative reservations counted and the
+candidate's own reservation excluded. Old leases without receipts count regular;
+unknown receipt values refuse. Claim-time class and origin do not change on renewal,
+replay or task edits. All opted-in grant paths consume the existing single-use CPU
+sample receipt, including direct pins and review with overflow disabled. This is
+deliberately conservative: approximately one Board grant per fresh CPU sample.
+A Board lease is a reservation, not proof an interpreter started.
+Board Durable Objects serialize per board, not across boards; they do not replace
+the local host lock. Preserve existing total-cap behavior for unenabled machines.
+Task metadata must round-trip through Board migrations/field allowlists; local
+run receipts must not be overwritten by a later feed or placeholder adoption.
+
+Deployment order: compatible Board schema/policy first, compatible core next,
+then enable and verify hub configuration. No unsupported live SQL backfill and no
+forced updater restart. Keep legacy reads conservative during the transition.
+
+## Phase 2: deterministic score
+
+For eligible hub-local ready/review candidates:
+
+```
+score = min(effective_priority, 1000)
+      + 500 * class_rank
+      + 25 * min(unique_open_descendants, 20)
+      + 25 * min(floor(ready_minutes / 10), 60)
+      - 100 * consecutive_failures
+```
+
+`class_rank` is normal=0, capacity=1, urgent=2. Defaults live under
+`kanban.admission.weights` (`class`, `unblock`, `age`, `failure`). Validate finite,
+nonnegative numeric weights. Effective priority retains existing transitive
+priority donation. Descendants are unique, cycle-safe and stop at terminal nodes.
+Aging uses the current ready/review interval, not creation age or prior run wait;
+its maximum contribution is 1500 after ten hours. Ties use readiness timestamp,
+then task ID. Scoring is read-only and never rewrites stored priorities.
+
+Score selects order only; it cannot bypass placement, either pool cap, CPU,
+memory, origin cap or update holds. Workers keep plain dispatch order. On the
+opted-in hub, lanes are ranked by score and then stably partitioned marked-first,
+so the class weight orders within a group and never undoes the pool partition.
+An unreadable replica or invalid weights falls back to priority order (logged).
+`rank(conn, rows, *, now_ms=None, weights=None)` is the shared contract for the
+foreign-pickup stage: one call is one read-only snapshot over the full replica
+(local rows and a local child's edge set override it), nothing is cached.
+
+`queue_note` appends `score T (priority P + class C + unblock U + age A - failures F)`
+on an opted-in hub. `hermes kanban queue --explain ID` prints the lane position,
+`score T = priority P + class W*r + unblock W*d + age W*a - failures W*f`, the
+pools line `regular N/7, priority M/3` and the cards ahead; off the hub it says the
+score is not used (plain priority). `hermes kanban queue --json` lists both lanes.
+Ready-wait notices recommend class/placement corrections, never priority bidding.
+
+## Effect reporting
+
+`hermes kanban queue --report [--days 7] [--json]` (run on the hub) lists capacity
+cards completed in the window with their `frees:` claim and claim-time origin, and
+the local ready-wait p50 (claim start minus that ready interval's start) of other
+cards claimed in the 24 h before and after completion. With fewer than 3 claims on
+either side the effect is `unknown`, never a success or failure; `moved` means
+after <= 0.9 * before, otherwise `no_effect`. An origin with at least 2 measured
+no-effect cards and none moved is flagged `revoke_recommended`; the report only
+recommends, an operator acts (`hermes kanban edit <id> --class normal`). Worker
+free slots are not yet part of the report.
+
+## Acceptance
+
+All original CPU/fence/grant-echo tests remain. Add cases to
+`tests/hermes_cli/test_kanban_hub_admission.py` proving:
+
+- marked claim with seven regular runs active;
+- fourth marked claim falls back to a free regular slot or waits;
+- idle priority pool never admits an eighth normal card;
+- numeric priority alone never qualifies;
+- exact 85% boundary, unknown CPU, critical/elevated memory and unchanged workers;
+- ready/review races across boards, own-grant echo and immutable receipt accounting;
+- capacity origin cap survives active task class edits;
+- aging, descendants, score breakdown and explain output.
+
+Per-guard mutation tests and read-only old/new replay across real boards and
+sync-shadow inputs accompany broader classifiers. Require independent exact-head
+review and green required CI through `hermes-core-wt ship` for each phase.
+
+After natural hub installation, class the designated capacity work through the
+supported edit path; read back a claimed event in the priority pool while regular
+occupancy is seven. Record ready-wait p50 before and after with sample counts and
+windows. If original target cards have finished, preserve that history and use
+remaining real capacity work, documenting the substitution rather than inventing
+a live claim. Final handoff is review, not completion before live proof.

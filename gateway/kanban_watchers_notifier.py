@@ -356,7 +356,10 @@ class _Collector:
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
-        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
+        from gateway.kanban_wake_sibling import tui_sibling_floor
+        tui_floor = tui_sibling_floor(conn, sub)
+        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug,
+                "tui_notice": tui_floor is not None, "tui_floor": tui_floor}
 
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
@@ -726,10 +729,19 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        lines = []
+        if self.d.get("tui_notice"):
+            # The chat's tui row stays silent for these events (kanban_wake_sibling): this turn shows its notice.
+            from gateway.kanban_wake_sibling import notice_lines
+            if lines := notice_lines(sub, task, self.d["events"], self.board_slug, self.d.get("tui_floor")):
+                synth += "\n" + "\n".join(lines)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
-        # What a later wake for the same chat folds from while this one still waits (kanban_wake_fold).
+        # What a later wake for the same chat folds from while this one still waits (kanban_wake_fold). The
+        # notices survive a fold that replaces this card: the tui row was settled past them.
         self.wake_card = {"task_id": sub["task_id"], "board": self.board_slug or "",
                           "kinds": [k for k in _WAKE_KINDS if k in self.wake_kinds], "text": synth}
+        if lines:
+            self.wake_card["notices"] = list(lines)
 
     def _log_woke(self) -> None:
         logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
@@ -769,6 +781,7 @@ class _KanbanNotification:
             # unprefixed self-post would resume the session in the DEFAULT profile's store.
             async with self._owner_scope():
                 await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key,
+                                   core_update_notifier=True,
                                    profile=self._served_wake_profile(),
                                    notification_category="diagnostic" if self.wake_diagnostic else "result")
             self._log_woke()
@@ -799,6 +812,7 @@ class _KanbanNotification:
                 raise RuntimeError(f"Kanban wake profile {self.sub_profile!r} no longer exists")
         async with _async_profile_runtime_scope(self.runner._resolve_profile_home_for_source(_source)):
             await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key, source=_source,
+                               core_update_notifier=True,
                                notification_category="diagnostic" if self.wake_diagnostic else "result",
                                kanban_card=self.wake_card)
         self._log_woke()
@@ -838,6 +852,16 @@ class _KanbanNotification:
             except Exception as art_exc:
                 logger.debug("kanban notifier: artifact delivery for %s failed: %s", self.task_id, art_exc)
         return True
+
+    async def _settle_tui_sibling(self) -> None:
+        """Record this wake on the chat's tui row too (kanban_wake_sibling.settle_tui_sibling); never fails delivery."""
+        from gateway.kanban_wake_sibling import carried_ids, settle_tui_sibling
+        carried = carried_ids(self.d["events"], self.d.get("tui_floor"))  # their lines rode this wake turn
+        try:
+            await _to_thread_process_service(partial(settle_tui_sibling, self.board_slug, self.sub,
+                                                     int(self.d["cursor"]), carried))
+        except Exception:  # health: allow BLE001 -- the wake is delivered; the tui row's claim-time check still covers it
+            logger.warning("kanban notifier: settling the tui sibling of %s failed", self.task_id, exc_info=True)
 
     async def failure_receipts(self, lane, run_uids=()):
         return await _to_thread_process_service(partial(
@@ -917,6 +941,13 @@ class _KanbanNotification:
         # Pings, artifact uploads (media policy) and the wake text (display.language) all read the
         # SUBSCRIBER profile's config; the notifier thread itself runs in the launch profile's scope.
         async with self._owner_scope():
+            from gateway.session_notifier_drain import held_noted
+            if self.wake_agent and held_noted():
+                # Decide once before any delivery. Refusing a later chunk on a new
+                # hold would rewind and replay earlier accepted chunks. An admitted
+                # batch settles; the next tick waits with its cursor retained.
+                await self.rewind()
+                return
             if not await self._send_pings():
                 return
             # All text pings delivered (or skipped for non-push / wake-only).
@@ -969,6 +1000,8 @@ class _KanbanNotification:
                 return
 
         # Delivery complete: advance the cursor (the dedup mechanism).
+        if wake_payloads and self.d.get("tui_notice"):
+            await self._settle_tui_sibling()
         await self.advance()
         if not is_push:
             self.clear_failures()

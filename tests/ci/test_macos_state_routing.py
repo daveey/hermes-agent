@@ -1,6 +1,8 @@
 """Replay the macOS state lane's real workflow wiring, without running a mini job."""
+import functools
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -121,6 +123,77 @@ def test_standalone_pushes_collapse_without_superseding_required_calls():
     assert render('CI', 1) != render('CI', 2)
     assert render('CI', 1) != render('hermes_state (macOS)', 1)
     assert render('hermes_state (macOS)', 1, 'workflow_dispatch') != render('hermes_state (macOS)', 2, 'workflow_dispatch')
+
+
+def _gha_path_glob(pattern):
+    """GitHub ``on.push.paths`` glob: ``*`` stops at ``/``, ``**`` crosses it, whole-path match."""
+    out, i = '', 0
+    while i < len(pattern):
+        if pattern.startswith('**', i):
+            out, i = out + '.*', i + 2
+        elif pattern[i] == '*':
+            out, i = out + '[^/]*', i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out + r'\Z')
+
+
+@functools.cache
+def _main_push_path_patterns():
+    on_push = workflow('hermes-state-macos.yml')['on']['push']
+    # The emulator models only * and **; GitHub gives ? + [] and a leading ! other meanings.
+    for p in on_push['paths']:
+        assert not set('?+[]') & set(p) and not p.startswith('!'), p
+    return tuple(_gha_path_glob(p) for p in on_push['paths'])
+
+
+def _main_push_starts_lane(path):
+    return any(p.match(path) for p in _main_push_path_patterns())
+
+
+_EDGE_PATHS = [
+    'hermes_state.py', 'hermes_state_new_module.py', 'hermes_state_pkg/inner/mod.py',
+    'tests/hermes_state/sub/test_x.py', 'tests/hermes_statex/test_y.py', 'tests/test_hermes_state.py',
+    'docs/hermes_state.md', 'pkg/hermes_state.py', 'tests/_fixtures/a/b.py', 'tests/fakes/x.py',
+    'tests/e2e/core/_harness.py', 'tests/e2e/core/_pkg/mod.py', 'tests/e2e/core/test_x.py',
+    'tests/e2e/conftest.py', 'tests/e2e/other/conftest.py', 'tests/sub/conftest.py',
+    'scripts/run_tests.sh', 'scripts/run_tests_new.py', 'scripts/run_tests_launch.py',
+    'pyproject.toml', 'sub/pyproject.toml', 'uv.lock', 'setup.py', 'justfile', 'sub/justfile',
+    'scripts/hermes-python', '.github/workflows/x.yml', '.github/a/b/c', 'run_agent.py', 'README.md',
+]
+
+
+@pytest.mark.parametrize('path', _EDGE_PATHS)
+def test_main_push_paths_equal_classifier_selection_edges(path):
+    # A main push starts the standalone lane exactly when a PR with that file selects it.
+    assert _main_push_starts_lane(path) is classify([path])['hermes_state'], path
+
+
+def test_main_push_paths_equal_classifier_selection_for_every_tracked_file():
+    files = subprocess.run(['git', 'ls-files'], cwd=ROOT, capture_output=True, text=True,
+                           check=True, timeout=60).stdout.split('\n')
+    files = [f for f in files if f]
+    assert len(files) > 1000
+    mismatched = [f for f in files if _main_push_starts_lane(f) is not classify([f])['hermes_state']]
+    assert not mismatched, mismatched[:20]
+    assert sum(map(_main_push_starts_lane, files)) < len(files) // 4, 'filter must not select most of main'
+
+
+def test_schedule_backstop_tests_main_and_collapses_with_pushes():
+    doc = workflow('hermes-state-macos.yml')
+    crons = [entry['cron'] for entry in doc['on']['schedule']]
+    assert len(crons) == 1
+    minute, hour, *rest = crons[0].split()
+    assert hour == '*/4' and rest == ['*', '*', '*'] and minute.isdigit()
+    group = doc['concurrency']['group']
+    def render(event, run_id):
+        ctx = context(event, 'refs/heads/main')
+        ctx['github'].update(workflow='hermes_state (macOS)', run_id=run_id, sha=f'sha-{run_id}')
+        return gha.render(group, ctx)
+    assert render('schedule', 1) == render('push', 2) == render('schedule', 3)
+    assert render('schedule', 1) != render('workflow_dispatch', 4)
+    job = doc['jobs']['hermes-state-macos']
+    assert gha.condition(job['if'], context('schedule', 'refs/heads/main'))
 
 
 @pytest.mark.parametrize('selected', ['true', 'false', None, '', 'TRUE', 0, 1, True, False])

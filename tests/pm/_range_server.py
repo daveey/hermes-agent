@@ -24,6 +24,11 @@ class RangeHandler(BaseHTTPRequestHandler):
     no_range: bool = False           # ignore Range, serve 200 full body
     etags: bool = True
     chunk: int = 1 << 20             # serve piece size
+    # Ranged pieces reaching past this payload offset wait for ``hold`` to be
+    # set, so a test can observe a transfer that is provably still incomplete
+    # however the downloader's threads are scheduled.
+    hold_from: int | None = None
+    hold: threading.Event | None = None
 
     def log_message(self, *args):
         pass
@@ -90,6 +95,9 @@ class RangeHandler(BaseHTTPRequestHandler):
                 if self.abort_after is not None:
                     end = min(end, self.abort_after - start)
                 piece = body[served:end]
+                if self.hold_from is not None and self.hold is not None \
+                        and start + served + len(piece) > self.hold_from:
+                    self.hold.wait(120)
                 self.wfile.write(piece)
                 self.wfile.flush()
                 served += len(piece)
@@ -110,6 +118,8 @@ def dl_server():
     RangeHandler.no_range = False
     RangeHandler.etags = True
     RangeHandler.chunk = 1 << 20
+    RangeHandler.hold_from = None
+    RangeHandler.hold = None
     # Threaded, like any real file host: the downloader opens up to 8 range
     # connections at once. A single-threaded server (listen backlog 5)
     # served them one by one, so a paused download had to wait for every
@@ -124,6 +134,8 @@ def dl_server():
     try:
         yield server
     finally:
+        if RangeHandler.hold is not None:
+            RangeHandler.hold.set()
         server.shutdown()
         server.server_close()
 

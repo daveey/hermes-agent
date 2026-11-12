@@ -14,6 +14,7 @@ from tests.hermes_cli import test_kanban_worker_node as helpers
 gws = helpers.gws
 svc = helpers.svc
 PR = "https://github.com/example/project/pull/123"
+NEW_PR = "https://github.com/example/project/pull/124"
 
 
 def _owner(hub, monkeypatch, *, park=True, repeat=False):
@@ -41,8 +42,11 @@ def _owner(hub, monkeypatch, *, park=True, repeat=False):
             hub.conn.execute("UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, "
                              "claim_expires=NULL WHERE id=?", (tid,))
     if repeat:
+        # The parking run's own note after its park: restating the PR it parked on belongs to
+        # the park; naming a NEW PR is fresh publication and holds.
         clock[0] += 1
-        kb.add_comment(hub.conn, tid, author="default", body=f"Published again {PR}")
+        kb.add_comment(hub.conn, tid, author="default",
+                       body=f"Published again {PR}" if repeat == "same" else f"Published another {NEW_PR}")
     # Preserve the incident shape: noisy queue/guard events push ALL policy events
     # outside the old 200-row tail, while comments and runs still travel in full.
     with kb.write_txn(hub.conn):
@@ -53,7 +57,7 @@ def _owner(hub, monkeypatch, *, park=True, repeat=False):
 
 
 @pytest.mark.parametrize("park,repeat,expected", [(True, False, None), (False, False, "active_pr"),
-                                                  (True, True, "active_pr")])
+                                                  (True, "same", None), (True, "new", "active_pr")])
 @pytest.mark.parametrize("github_state", ["OPEN", None])
 def test_pickup_preserves_guard_decision_and_event_identity(gws, monkeypatch, park, repeat, expected, github_state):
     hub, worker = gws

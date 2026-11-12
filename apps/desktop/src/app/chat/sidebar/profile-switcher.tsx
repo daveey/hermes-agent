@@ -142,6 +142,11 @@ function railCondensed(profileCount: number, restGroups: readonly FleetGroup[]):
 // row. It paints the session status dot's own class for the same state, so a
 // profile's loudest state reads the same as its sessions' dots below. The
 // `profile-status-dot` slot lets tests (and tours) find it.
+// [daveey] Its unread state stays the plain emerald unread class, not an outcome tone (unlike a session row's
+// unread dot): it is a rollup of N unread sessions, some only persisted markers with no loaded row and so no
+// stored outcome, with mixed outcomes no single tone describes. Its label is the unread count, never "Finished",
+// and visible session row dots carry per-session outcome tones. In a single-profile scope, background profiles'
+// squares have no session rows below them; ALL-profiles mode can show rows from multiple profiles.
 function ProfileStatusDot({ summary }: { summary: ProfileDotSummary }) {
   return <span aria-hidden="true" className={sessionDotClassName(summary.state)} data-slot="profile-status-dot" />
 }

@@ -491,6 +491,8 @@ def import_cards(conn: sqlite3.Connection, replica: sqlite3.Connection, ids: Ite
         # The copy's foreign parents are gated by the mirror; filled only in the sync round, a parent read as
         # missing in this tick would demote the ready copy to todo and push that to the Board.
         sync.refresh_remote_parents(conn, replica)
+        from hermes_cli.kanban_admission_origin import record_pickup_origins
+        record_pickup_origins(conn, replica, done)
     return done
 
 
@@ -525,7 +527,7 @@ def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, ow
         return set()
 
 
-def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: int,
+def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: Any,
               profile_exists: Optional[Callable[[str], bool]], full_detail: str,
               held: Optional[dict[str, tuple]] = None,
               ) -> tuple[list[str], dict[str, tuple[str, Optional[str]]]]:
@@ -551,9 +553,12 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
-    free = 0
+    free = 0  # guard-held copies take no budget: they `continue` before room.take
+    from hermes_cli.kanban_admission_pools import PoolBudget, row_class
+    room = PoolBudget(limit.regular, limit.priority, limit.limit) if isinstance(limit, PoolBudget) else \
+        PoolBudget(limit, 0)  # an int is a classless budget; a hub's pool budget never copies unstartable work
     for card in listed:
-        full = len(picked) - free >= limit
+        full = not room.admits(row_class(card))
         if full and card["id"] not in mine:
             continue
         reason = _skip_reason(conn, card, own, reg["machines"], mode=mode, review_enabled=review_enabled,
@@ -572,6 +577,7 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
             reason = ("budget_exhausted", full_detail)
         if reason is None:
             picked.append(card["id"])
+            room.take(row_class(card))
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
@@ -622,7 +628,7 @@ def note_capped(conn: sqlite3.Connection, profile_exists: Optional[Callable[[str
     _record_skips(conn, skips)
 
 
-def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
+def pickup(conn: sqlite3.Connection, *, budget: Any,
            profile_exists: Optional[Callable[[str], bool]] = None) -> list[str]:
     """One tick's pickup: evict finished copies, then copy up to ``budget`` eligible foreign cards. Returns the
     ids copied. A no-op unless the board is primary and ``kanban.sync.pickup`` is on. Each card pinned to this
@@ -633,7 +639,7 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     evict(conn)
     _refill_copies(conn)
     limit = DEFAULT_PICKUP_BATCH if budget is None else budget
-    if limit <= 0:
+    if getattr(limit, "total", limit) <= 0:
         note_capped(conn, profile_exists)
         return []
     replica = open_replica(conn)

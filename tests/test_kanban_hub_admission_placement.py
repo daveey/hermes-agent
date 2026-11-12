@@ -202,3 +202,12 @@ def test_origin_and_courier_denies_never_queue(gate, monkeypatch):
     audit = {"admit": False}
     assert "runs_on" not in hap.pool_route({"title": "x"}, QUEUE_CFG, "hub", audit, ["hub:write"], queue=False)
     assert hap.pool_route({"title": "x"}, QUEUE_CFG, "hub", audit, ["hub:write"])["runs_on"][0] == "pool:worker"
+
+
+def test_assignee_keep_remedy_tracks_structural_reason():
+    """The remedy keys on structural_reason's exact text; a reworded reason must not silently drop it."""
+    from hermes_cli import kanban_hub_admission_placement as hap
+    cfg = {"worker_pools": {"hub": ["worker-1"]}, "assignees": ["default", "bb-tuner"]}
+    assert placement.structural_reason({"assignee": "mac-ops"}, cfg) == hap.ASSIGNEE_KEEP
+    text = hap.hub_stay_remedy(hap.ASSIGNEE_KEEP, None, assignee="mac-ops", pool_profiles={"default", "bb-tuner"})
+    assert "'mac-ops'" in text and "pool profiles: bb-tuner, default" in text and "assignee='default'" in text

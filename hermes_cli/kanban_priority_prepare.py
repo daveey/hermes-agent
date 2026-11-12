@@ -27,8 +27,13 @@ def verify(hub, manifest: dict, *, undo: bool = False) -> dict:
     except ValueError as exc:
         raise ValueError(f'canonical {exc}') from exc
     actual = {r['id']: (r['created_on'], r['priority']) for r in rows}
-    target = "old" if undo else "new"
-    if any(actual[r['id']] != (r['origin'], r[target]) for r in active):
+    from hermes_cli.kanban_priority import at_value
+    # A restore without the legacy policy rollback lands an above-cap original at
+    # the cap; that is the restored state, not drift (see executor.apply_attached).
+    def holds(row) -> bool:
+        origin, value = actual[row['id']]
+        return origin == row['origin'] and (at_value(value, row['old']) if undo else value == row['new'])
+    if not all(holds(r) for r in active):
         raise ValueError("canonical ownership, membership or priorities differ from manifest")
     return {"verified": len(active), "board_id": manifest["board_id"],
             "direction": "restore" if undo else "apply", **report}

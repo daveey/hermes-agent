@@ -4,17 +4,35 @@ from dataclasses import replace
 
 
 def supported(authority, row, event, live, *, is_api):
-    """Only a claimed native messaging or local chat turn can be checkpointed. API, finite and
-    producer-admitted automation have other result contracts and keep counting as active work.
+    """Only a claimed native messaging or local chat turn can be checkpointed, including a local
+    route's producer wake (below). API and noted-completion admissions have other result contracts
+    and keep counting as active work.
     Native notices retain their presentation traits on resume, but must pass current ingress
     authorization again; a formerly internal wake is never a license to bypass Stop or policy.
+
+    [daveey] A finite local turn (``chat -q`` / ``-z``: the hub's ``oneshot`` reviewer chats) parks too:
+    its admission keeps the finite flags, so the resumed run is finite again, and its viewer redials
+    the restarted owner for the same admission's settlement (``gateway_chat_view``). Unparkable, it
+    refused every instant checkpoint for as long as it ran (hermes-hub 2026-11-12 15:09-15:40Z).
     """
     payload = row['payload']
-    if is_api or payload.get('finite') is True:
+    local = getattr(getattr(live.source, 'platform', None), 'value', None) == 'local'
+    if is_api or (payload.get('finite') is True and not local) or 'api_turn_v1' in payload:
         return False
-    if any(key in payload for key in ('api_turn_v1', 'local_automation_v1')):
-        return False
-    return 'native_text_v1' in payload or getattr(live.source.platform, 'value', None) == 'local'
+    if 'local_automation_v1' in payload:
+        # [daveey] A producer wake on a local route (Kanban notice, /loop tick, plugin injection,
+        # heartbeat) runs as a turn and resumes like a local chat turn: the claim re-checks its route
+        # (``check_local_automation``) and ``resume_event`` keeps its mute/heartbeat traits only.
+        # Unparkable, a notice turn held a restart-safe drain for its whole claim lease (David-MBP
+        # 2026-11-12 06:03/07:16 PST). Not a noted completion: at an unviewed resume
+        # ``note_if_unviewed`` would write it as a note instead of continuing. Not a detached
+        # route's wake: its resume is not covered here.
+        descriptor = payload['local_automation_v1']
+        if not (isinstance(descriptor, dict) and isinstance(descriptor.get('identity'), str)):
+            return False  # malformed: the claim refuses it anyway, never park it
+        from gateway.session_completion_notes import noted_completion
+        return local and not noted_completion(row)
+    return 'native_text_v1' in payload or local
 
 
 @contextmanager

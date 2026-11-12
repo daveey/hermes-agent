@@ -49,6 +49,11 @@ class _FakeRegistry:
     def is_completion_consumed(self, session_id):
         return self._consumed
 
+    def settle_completion(self, session_id, how):
+        """The watcher's owed-completion acknowledgement (process_registry_obligations)."""
+        self.settled = (session_id, how)
+        return False
+
 
 def _build_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
     """Create a GatewayRunner with a fake config for the given mode."""

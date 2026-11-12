@@ -55,7 +55,10 @@ fences. The coordinator checks lineage before reading configuration or starting
 SSH; remote staging checks it before reading stdin. SSH is transport for an
 already authorized operator, never a worker authorization mechanism.
 
-Create an explicit JSON mapping for **every origin in the captured manifest**:
+Create an explicit JSON mapping for **every origin in the captured manifest**.
+Entries for other enrolled origins that own no captured row are allowed; the
+coordinator reports them as `skipped` and never contacts them, so a map listing
+every enrolled gateway keeps working when one drains:
 
 ```json
 {
@@ -83,20 +86,50 @@ attachment tasks must already belong to their corresponding writers.
 ```sh
 hermes kanban --board default supervisor-requests --priority-operation migrate \
   --writer origin-a --host-map-file /absolute/operator-host-map.json \
-  --exception EXCEPTION_LOW --exception EXCEPTION_HIGH --allow-legacy-rollback
+  --exception EXCEPTION_LOW --exception EXCEPTION_HIGH
 ```
 
 Alternatively pass the JSON directly with `--host-map '{...}'` (exactly one map
-flag). `--allow-legacy-rollback` explicitly permits automatic guarded recovery
-of above-cap originals; omit it only if refusing that policy rollback is intended.
+flag). `--allow-legacy-rollback` makes the automatic guarded recovery restore
+above-cap originals exactly (a policy rollback). Without it, recovery restores
+them at the cap (1000), which ranks identically because effective priority is
+capped at read time, so a guarded restore never raises a card above the cap.
+Prefer omitting it.
+
+Apply and restore treat a stored value of exactly 1000 as holding an above-cap
+manifest original (clamp equivalence, `kanban_priority.at_value`): the sync pull
+bounds every received priority in place with no event or outbox op, so an
+origin's replica can read 1000 while the Board, and therefore the manifest, keeps
+the raw legacy value. Any other difference is still a refusing edit.
 Do not pass separate task, backup, manifest, attachment or digest flags to migrate.
 
-The coordinator captures one global raw manifest, secures its local original and
-attachment, sends the **exact UTF-8 bytes** over SSH stdin with `stage --manifest -`,
-and validates every origin's attachment, writer, inventory and identical SHA256
+Before a run, check the map against the live origins with the read-only
+`origins` operation (same operator fence, same map flags, no `--allow-legacy-rollback`):
+
+```sh
+hermes kanban --board default supervisor-requests --priority-operation origins \
+  --writer origin-a --host-map-file /absolute/operator-host-map.json
+```
+
+It captures the canonical inventory and prints
+`{"origins": {name: open-row count}, "missing": [...], "extra": [...], "errors": [...]}`.
+It exits 1 when an origin has no map entry or the writer is unmapped or owns no
+rows; `extra` entries alone pass. It writes no backup, attachment or priority,
+and does not use the backup paths, so they stay fresh for the real run. Hosts are
+still never inferred: fix a `missing` origin by adding its entry by hand.
+
+The coordinator captures one global raw manifest and checks host-map coverage on
+it **before writing anything**. A coverage mismatch (an origin missing from the
+map, or a local writer that is unmapped or owns no rows) exits 1 with `missing`,
+`extra` and `errors` in the report and consumes **no backup path and no
+attachment**: fix the map and rerun with the same paths. Only then does it stage
+that same captured manifest locally (backup plus attachment, so the staged digest
+is that of the checked capture), send the **exact UTF-8 bytes** over SSH stdin with
+`stage --manifest -` to every covered origin,
+and validate every origin's attachment, writer, inventory and identical SHA256
 receipt **before any apply**. Staging failure or digest mismatch writes no
 priorities, but local preparation and any completed staging consume their fresh
-backup paths even if host-map coverage validation or later staging fails. Retain
+backup paths if later staging fails. Retain
 those backups and choose new paths before retrying. It then applies each origin,
 publishes each normal outbox via the
 supported `kanban_sync_client.push` API (no snapshot pull), rejects pending or
@@ -203,13 +236,13 @@ Save stdout as the durable operation report. No credentials or lineage are clear
 
    ```sh
    hermes kanban --board default supervisor-requests --priority-operation restore \
-     --writer ORIGIN --attachment-id LOCAL_ATTACHMENT_ID --digest SHA256 \
-     --allow-legacy-rollback
+     --writer ORIGIN --attachment-id LOCAL_ATTACHMENT_ID --digest SHA256
    ```
 
-   The explicit flag acknowledges policy rollback when restoring above-cap old
-   values; coordinate cap-aware import/deployment policy first or imports may
-   immediately clip restored values. Restore requires exact owned membership and
+   Without `--allow-legacy-rollback` an above-cap original is restored at the cap
+   (1000, same effective rank). The explicit flag restores the exact legacy value
+   (policy rollback); the sync pull may clip it again on any replica. Restore
+   requires exact owned membership and
    target-value CAS, just like apply (new cards also cause refusal). It never
    reverts lifecycle state, lease, parents or runs. Publish and read back restore
    through normal sync too.

@@ -11,6 +11,17 @@ def bounded(value: int) -> int:
     return min(PRIORITY_CAP, int(value))
 
 
+def at_value(stored: int, recorded: int) -> bool:
+    """Whether a stored priority still holds a recorded one, up to the cap clamp.
+
+    The sync pull stores ``bounded()`` of every received priority without an event,
+    so a replica of an above-cap legacy value reads PRIORITY_CAP while the Board
+    keeps the raw value. Both rank identically (effective priority is capped at
+    read time); any other difference is a real edit.
+    """
+    return stored == recorded or (recorded > PRIORITY_CAP and stored == PRIORITY_CAP)
+
+
 def bound_reopened(conn, task_id: str) -> None:
     """Bound an opened legacy row in the caller's transaction, retaining its audit."""
     from hermes_cli import kanban_db as kb

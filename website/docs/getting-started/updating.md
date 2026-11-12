@@ -440,6 +440,19 @@ pending-restart marker is kept, so the next CLI start warns and the next normal 
 example a timer 10–15 minutes after the update job. The receipt records the deferral; a stale
 fleet caused only by the deferral does not make the update `partial`.
 
+### Stopping before the tip: `--up-to <sha>`
+
+`hermes update --yes --up-to <sha>` fast-forwards branch `main` only as far as `<sha>`, a full
+40-hex commit on `origin/main`'s first-parent line after the checkout's HEAD, instead of the tip.
+Automation uses it to apply a commit it already built and verified (for example a prepared
+Desktop bundle) while newer commits are still building. After the fetch, the update refuses
+(exit 1, nothing changed: `✗ --up-to <sha10>: <reason>. No update was applied.`) unless the
+checkout is on `main`, HEAD is a proper ancestor of `<sha>`, and `<sha>` is on the first-parent
+line of `origin/main`. It also refuses with `--branch`, `--channel`, `--set-channel`, `--check`,
+`--plan`, and on ZIP, image or package-managed installs. The preflight, the commit point, the
+receipt and the restart marker all name `<sha>`. A fork skips its upstream sync and push for this
+run. The next plain `hermes update` moves on to the tip.
+
 ### Interrupted gateway restarts
 
 If an earlier update pulled code but did not finish restarting the fleet, the next `hermes update` retries even when the checkout is already current. An empty process scan does not prove recovery: failed systemd units and installed launchd jobs may have no live PID. If discovery or restart fails, or a requested service cannot be verified active, the marker stays pending: the update still exits 0 (the new code is in place), prints a `⚠` line and a `gateway_restart` follow-up in its receipt, every CLI start warns about the owed restart, and the next `hermes update` retries it. Recover the affected services with the printed commands, or rerun `hermes update`.

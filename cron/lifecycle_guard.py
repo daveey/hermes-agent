@@ -560,6 +560,13 @@ def _budget_exhausted(budget: _LifecycleScanBudget, what: str, depth: int) -> bo
     return True
 
 
+def _depth_limit_reached(budget: _LifecycleScanBudget, depth: int, *, executed: bool) -> bool:
+    """Only executed text turns an incomplete scan into a refusal."""
+    if executed:
+        budget.refusal = f"the scan depth limit was reached (depth {depth})"
+    return executed
+
+
 def _unreadable_reason(path: Path) -> str:
     """Name why an *executed* script failed closed without being scanned (live SQLite, device,
     oversized). Message-only: the fail-closed verdict itself came from the bounded reader."""
@@ -1103,7 +1110,7 @@ def _contains_unsafe_gateway_action(
     if _direct_lifecycle_scan(command):
         return True
     if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
-        return executed
+        return _depth_limit_reached(budget, depth, executed=executed)
 
     def recurse(text: str, cwd: Optional[str], executed: bool) -> bool:
         return _contains_unsafe_gateway_action(

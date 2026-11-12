@@ -308,9 +308,10 @@ def _historical_parent_history(conn, parent_id, parked_at):
     if ended is None or ended >= parked_at:
         return False
     events = conn.execute(
-        # Archival and late process-exit receipts do not reopen finished work.
+        # Archival, late process-exit receipts and the wake-episode snapshot a comment on a
+        # finished card appends (kanban_wake_episode.EVIDENCE_EVENT) do not reopen it.
         "SELECT created_at FROM task_events WHERE task_id = ? "
-        "AND kind NOT IN ('commented', 'archived', 'worker_result')",
+        "AND kind NOT IN ('commented', 'archived', 'worker_result', 'wake_episode_evidence')",
         (parent_id,),
     )
     return all((kb._to_epoch(e["created_at"]) or float("inf")) < parked_at for e in events)

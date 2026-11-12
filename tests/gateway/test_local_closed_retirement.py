@@ -92,12 +92,12 @@ async def test_prompt_admitted_while_the_close_runs_is_never_stranded(tmp_path, 
 
     original_claim = authority._claim_next
 
-    async def held_claim(ref, live):
+    async def held_claim(ref, live, attempted=None):
         if replies == [] and not release_claim.is_set():
             async with live.claim_gate:  # parked mid-claim, as a drain awaiting the claim's write is
                 claim_started.set()
                 await release_claim.wait()
-        return await original_claim(ref, live)
+        return await original_claim(ref, live, attempted)
 
     async def finalize(**_kwargs):
         # The lifecycle's await: a prompt arrives and its drain starts claiming meanwhile.
@@ -162,12 +162,12 @@ async def test_prompt_parked_behind_a_busy_head_while_the_close_runs_is_never_st
 
     original_claim = authority._claim_next
 
-    async def busy_claim(ref, live):
+    async def busy_claim(ref, live, attempted=None):
         if not parked.is_set():  # the head is held by a worker: the drain pauses ``session_busy``
             live.rescan = False
             parked.set()
             return None, {"admission_id": "held"}
-        return await original_claim(ref, live)
+        return await original_claim(ref, live, attempted)
 
     async def finalize(**_kwargs):
         await authority.submit(_viewer(), Submission("parked", ref, {"text": "parked"}, "queue"))

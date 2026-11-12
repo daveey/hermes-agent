@@ -59,6 +59,7 @@ SYNCED_COLUMNS: dict[str, frozenset[str]] = {
         "workflow_template_id", "current_step_key", "skills", "requires", "model_override",
         "provider_override", "model_pin_mandatory", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
         "block_kind", "human_request", "block_recurrences", "completion_contract", "runs_on", "placement_policy",
+        "admission_class", "admission_frees",
     }),
     "task_links": frozenset({"parent_id", "child_id"}),
     "task_comments": frozenset({"task_id", "author", "body", "created_at"}),
@@ -81,7 +82,7 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "tasks": frozenset({
         "claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
         "workspace_path", "session_id", "project_id", "sync_version", "field_hlc", "lease_holder",
-        "lease_expires", "lease_version",
+        "lease_expires", "lease_version", "admission_origin",
     }),
     "task_links": frozenset(),
     # ``origin_gateway``: the sending gateway as this gateway saw it (relay sender); peers keep their own.
@@ -90,7 +91,7 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     # ``sync_version``: the Board version of the row this gateway last applied or had acknowledged (the fence that
     # keeps an older copy of a run from the feed off a newer local row).
     "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
-                            "sync_version"}),
+                            "sync_version", "admission_pool", "admission_class", "admission_origin"}),
     "task_attachments": frozenset({"stored_path"}),
     "task_chat_links": frozenset(),
 }
@@ -1068,7 +1069,7 @@ def set_runs_on(conn: sqlite3.Connection, task_id: str, runs_on: Any) -> None:
     wn.set_runs_on(conn, task_id, wn.normalize_runs_on(runs_on if isinstance(runs_on, str) else list(runs_on)))
 
 
-def worker_pickup(conn: sqlite3.Connection, budget: Optional[int], dry_run: bool, profile_exists_fn: Any) -> None:
+def worker_pickup(conn: sqlite3.Connection, budget: Any, dry_run: bool, profile_exists_fn: Any) -> None:
     """Dispatcher seam: a worker node copies eligible cards other gateways created (``kanban_worker_node``)."""
     if dry_run or board_mode(conn) != "primary":
         return

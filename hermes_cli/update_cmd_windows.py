@@ -333,6 +333,17 @@ def _venv_holder_kind(cmdline: str) -> str:
 VENV_HOLDERS_EXIT = 3  # ``hermes update --list-venv-holders``: holders present (distinct from refusal 2)
 
 
+def print_venv_holders() -> None:
+    """``hermes update --list-venv-holders``: print the list as JSON; exit ``VENV_HOLDERS_EXIT`` when
+    holders remain, so automation can stop exactly those PIDs and retry."""
+    import json
+
+    holders = list_venv_holders()
+    print(json.dumps(holders, indent=2))
+    if holders:
+        sys.exit(VENV_HOLDERS_EXIT)
+
+
 def list_venv_holders() -> list[dict]:
     """``[{pid, exe, argv, kind}]`` for every process the venv-holder guard would refuse on, read-only.
 

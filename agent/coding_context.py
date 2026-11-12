@@ -202,7 +202,8 @@ def _resolve_cwd(cwd: Optional[str | Path]) -> Path:
         from agent.runtime_cwd import resolve_agent_cwd
         return resolve_agent_cwd()
     except Exception:
-        return Path(os.getcwd())
+        from agent.runtime_cwd import process_cwd_or_fallback
+        return Path(process_cwd_or_fallback())
 
 
 def _git_root(cwd: Path) -> Optional[Path]:

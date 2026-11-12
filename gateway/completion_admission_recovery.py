@@ -10,7 +10,10 @@ Two halves close it:
 
 - ``reconcile_failed_completion_admissions`` (once per gateway start, bounded) finds local completion
   admissions that settled ``failed`` with no note and no copy of their text in the parent, and reopens
-  each async delegation they carried through ``requeue_admitted_completion``. The ledger stays the
+  each async delegation they carried through ``requeue_admitted_completion``. A delegation whose
+  Desktop row (``async_delegation_complete`` stamped with its id) is in the parent counts as
+  delivered, and the reopen records the admission it was made for (``recovered_admission_id``), so a
+  (delegation, admission) pair is reopened at most once across starts. The ledger stays the
   gate: the reopened row is claimed (``claim_completion_delivery``, one attempt each) like any pending
   result, and a row past its attempts or its replay age is dropped there with a logged reason.
 - ``deliver_admitted`` is the claimed offer's step when the result already has an admission: a
@@ -32,6 +35,11 @@ _FAILED_SQL = ("SELECT * FROM session_admissions WHERE status = 'terminal' AND o
                "ORDER BY seq DESC LIMIT ?")
 _NOTED_SQL = ("SELECT 1 FROM messages WHERE session_id IN (?, ?) AND "
               "(json_extract(display_metadata, '$.completion_admission') = ? OR content = ?) LIMIT 1")
+# A Desktop consumer ("tui-poller") writes its own row for the delegation: no admission id, and its
+# content lacks the gateway's INTERNAL NOTIFICATION footer, so only the delegation id names it.
+_DELIVERED_SQL = ("SELECT 1 FROM messages WHERE session_id IN (?, ?) AND "
+                  "display_kind = 'async_delegation_complete' AND "
+                  "json_extract(display_metadata, '$.delegation_id') = ? LIMIT 1")
 
 
 def _local_descriptor(row):
@@ -63,9 +71,17 @@ def _noted(authority, row, target) -> bool:
                                          str(row['payload'].get('text') or ''))).fetchone() is not None
 
 
+def _delivered(authority, row, target, delegation_id) -> bool:
+    """The delegation's result reached the session through a consumer that stamps its id."""
+    with authority.db._read_ctx() as conn:
+        return conn.execute(_DELIVERED_SQL, (row['target_session_id'], target,
+                                             delegation_id)).fetchone() is not None
+
+
 def unnoted_failed_completions(authority, limit: int = RECONCILE_SCAN_LIMIT) -> list[tuple[str, dict]]:
     """``(delegation_id, admission)`` for each async delegation carried by a local completion admission
-    that settled ``failed`` and left nothing in its session."""
+    that settled ``failed`` and left nothing in its session (per delegation: a coalesced admission
+    yields only the ids no consumer delivered)."""
     from hermes_state_runtime import _row
     with authority.db._read_ctx() as conn:
         rows = [_row(r) for r in conn.execute(_FAILED_SQL, (limit,)).fetchall()]
@@ -73,8 +89,13 @@ def unnoted_failed_completions(authority, limit: int = RECONCILE_SCAN_LIMIT) -> 
     for row in rows:
         descriptor = _local_descriptor(row)
         ids = _delegation_ids(descriptor) if descriptor else []
-        if ids and not _noted(authority, row, _target(authority, row)):
-            found.extend((delegation_id, row) for delegation_id in ids)
+        if not ids:
+            continue
+        target = _target(authority, row)
+        if _noted(authority, row, target):
+            continue
+        found.extend((delegation_id, row) for delegation_id in ids
+                     if not _delivered(authority, row, target, delegation_id))
     return found
 
 
@@ -83,7 +104,10 @@ def reconcile_failed_completion_admissions(authority, target_queue) -> int:
     from tools.async_delegation import requeue_admitted_completion
     reopened = 0
     for delegation_id, row in unnoted_failed_completions(authority):
-        if requeue_admitted_completion(delegation_id, target_queue):
+        # One reopen per (delegation, failed admission), whichever consumer then delivers it (a
+        # batch row stamps no delegation id, so the transcript alone cannot say it arrived).
+        if requeue_admitted_completion(delegation_id, target_queue,
+                                       recovered_admission_id=row['admission_id']):
             reopened += 1
             logger.warning('Async delegation %s: its admission %s on %s failed before delivery; offered again',
                            delegation_id, row['admission_id'], row['target_session_id'])

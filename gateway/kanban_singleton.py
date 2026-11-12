@@ -35,6 +35,9 @@ DEFAULT_RETRY_SECONDS = 30.0
 DEFAULT_GRACE_SECONDS = 60.0
 DEFAULT_WARN_AFTER_SECONDS = 300.0
 _YIELD_CACHE_SECONDS = 5.0
+# A root gateway whose claim is posted retries this often: the profile holder yields within ~_YIELD_CACHE_SECONDS plus
+# its loop's next check, and every second the lock sits idle is a second without the hub's sync (and CPU reports).
+ROOT_CLAIM_RETRY_SECONDS = 2.0
 
 
 def _resolve(path: Path) -> str:
@@ -250,10 +253,17 @@ class SingletonLease:
         if not self._logged_contended:
             self._logged_contended = True
             logger.info("kanban %s: another gateway holds %s (%s); retrying every %.0fs%s", self.name,
-                        self.lock_path, describe_holder(holder_info(self.lock_path)), self.retry_seconds,
+                        self.lock_path, describe_holder(holder_info(self.lock_path)), self.retry_interval(),
                         " and asking a profile holder to yield" if self.root else "")
         self._maybe_warn(now)
         return False
+
+    def retry_interval(self) -> float:
+        """Seconds until the next ``try_acquire``: short while this root gateway's claim asks a holder to yield
+        (hermes-hub 2026-11-12: the full 30 s retry made every core-update restart cost 30-31 s of contention)."""
+        if self.root and self.state == "contended":
+            return min(self.retry_seconds, ROOT_CLAIM_RETRY_SECONDS)
+        return self.retry_seconds
 
     def _maybe_warn(self, now: float) -> None:
         if self._contended_since is None or now - self._contended_since < self.warn_after_seconds:

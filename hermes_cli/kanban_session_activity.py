@@ -29,7 +29,7 @@ from hermes_cli import kanban_execution_receipt as _receipts
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
-from hermes_cli import kanban_replica_projection as _replica_projection
+from hermes_cli import kanban_replica_projection as _replica_projection, kanban_replica_execution as _replica_exec
 from hermes_cli import kanban_replica_rows as _replica_rows
 from hermes_cli.kanban_session_activity_release import TERMINAL_STATUSES
 from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
@@ -1217,6 +1217,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
+        _replica_exec.collect(card, execution)
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
         # only its last report) is never counted stalled, so stalled can't exceed what the row shows parked.
         if card.get("status") != "unknown" and (_remote_wait(card) or {}).get("wait_state") == "stalled":

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
@@ -95,6 +96,53 @@ def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] 
     return out[:_MAX_TREES]
 
 
+_REMOTE_TIMEOUT = 20
+_MAX_ANCESTRY_CHECKS = 50
+_MAX_REFRESHES = 5
+
+
+def pushed_on_remote(tree: str) -> bool:
+    """Whether a tree the local refs call unpushed has HEAD on a remote branch after all. Fails toward False.
+
+    ``git push https://github.com/<o>/<r>.git HEAD:wt/x`` (a URL, not the remote's name: the HTTPS-credential push
+    workers use) leaves ``refs/remotes/origin/wt/x`` at the old tip, and a server-side ``update-branch`` moves the
+    branch past HEAD again. The local check then reports pushed work as unpushed, and the park pinned a card to
+    its worker (11-12: t_01a1d0a1eaa00371 sat ready on ``machine:worker-2`` while worker-2 was on a Board hold).
+    So ask the remote: HEAD is a remote branch tip, or a stale tracking ref HEAD builds on, once refreshed from
+    the remote, contains HEAD."""
+    from hermes_cli.worktree_ops import _git_out, _worktree_has_unpushed_commits
+    try:
+        head = _git_out(["rev-parse", "HEAD"], tree)
+        remotes = (_git_out(["remote"], tree) or "").split()
+        if not head or not remotes:
+            return False
+        stale: list[tuple[str, str, str]] = []
+        checks = 0
+        for remote in remotes:
+            listing = _git_out(["ls-remote", "--heads", remote], tree, timeout=_REMOTE_TIMEOUT)
+            if not listing:
+                continue
+            tracked = dict(line.split(" ", 1)[::-1] for line in (_git_out(
+                ["for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}"], tree) or ""
+            ).splitlines() if " " in line)
+            for line in listing.splitlines():
+                sha, _, ref = line.partition("\t")
+                if sha == head:
+                    return True
+                tracking = f"refs/remotes/{remote}/{ref[len('refs/heads/'):]}"
+                local = tracked.get(tracking)
+                if not local or local == sha or checks >= _MAX_ANCESTRY_CHECKS:
+                    continue
+                checks += 1
+                if _git_out(["merge-base", "--is-ancestor", local, "HEAD"], tree) is not None:
+                    stale.append((remote, ref, tracking))
+        for remote, ref, tracking in stale[:_MAX_REFRESHES]:
+            _git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=_REMOTE_TIMEOUT)
+        return bool(stale) and not _worktree_has_unpushed_commits(tree)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 def tree_state(trees: Iterable[str]) -> Optional[str]:
     """``dirty worktree <p>`` / ``unpushed commits in <p>`` for the first tree with state, else None."""
     from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
@@ -103,7 +151,7 @@ def tree_state(trees: Iterable[str]) -> Optional[str]:
             continue
         if _worktree_is_dirty(tree, tree):
             return f"dirty worktree {tree}"
-        if _worktree_has_unpushed_commits(tree):
+        if _worktree_has_unpushed_commits(tree) and not pushed_on_remote(tree):
             return f"unpushed commits in {tree}"
     return None
 

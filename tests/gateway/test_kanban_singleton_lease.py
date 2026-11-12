@@ -170,7 +170,7 @@ def test_dispatcher_watcher_retries_a_contended_lock_then_dispatches(root, monke
         asyncio.run(runner._kanban_dispatcher_watcher())
     finally:
         _release_singleton_lock(other)
-    assert sleeps[0] == ks.DEFAULT_RETRY_SECONDS
+    assert sleeps[0] == ks.ROOT_CLAIM_RETRY_SECONDS  # the root gateway asked the holder to yield: retry soon
     assert ticks == [True]
     assert runner._kanban_dispatcher_lock_handle is None  # released on stop
 
@@ -353,3 +353,42 @@ def test_update_resume_root_lock_wait_is_bounded(root):
         _release_singleton_lock(other)
     lone = [_unit("hermes-gateway-x.service", root / "profiles" / "x", 1)]
     assert pause._root_first(lone) == (lone, None)
+
+
+def test_root_gateway_retries_a_profile_held_lock_every_few_seconds_after_posting_its_claim(root, monkeypatch):
+    """hermes-hub 2026-11-12: on all 7 core-update restarts the root gateway found askeve-reviewer/-builder holding
+    .sync.lock, posted its claim and then slept the full 30 s retry, although the profile yields within a few seconds
+    (should_yield cache 5 s); each restart cost 30-31 s of contention without hub CPU reports. While the root's claim
+    is posted it retries every ROOT_CLAIM_RETRY_SECONDS; a profile gateway keeps the slow retry."""
+    clock = Clock()
+    profile = _lease(root, is_root=False, clock=clock, name="sync", grace=0.0)
+    rootl = _lease(root, is_root=True, clock=clock, name="sync")
+    assert profile.try_acquire()
+    assert rootl.retry_interval() == 30.0  # never tried: the configured interval
+    assert not rootl.try_acquire() and rootl.state == "contended"
+    assert rootl.retry_interval() == ks.ROOT_CLAIM_RETRY_SECONDS <= 2.0
+    other = _lease(root, is_root=False, clock=clock, name="sync")
+    assert not other.try_acquire()
+    assert other.retry_interval() == 30.0
+    profile.release()
+    assert rootl.try_acquire() and rootl.retry_interval() == 30.0
+    rootl.release()
+
+
+def test_lease_acquire_loop_sleeps_the_leases_retry_interval(root, monkeypatch):
+    runner = _runner()
+    attempts, sleeps = iter([False, False, True]), []
+
+    class Lease:
+        def try_acquire(self):
+            return next(attempts)
+
+        def retry_interval(self):
+            return 2.0
+    runner._running = True
+
+    async def between(interval):
+        sleeps.append(interval)
+    monkeypatch.setattr(runner, "_sleep_between_ticks", between)
+    assert asyncio.run(runner._acquire_kanban_lease(Lease())) is True
+    assert sleeps == [2.0, 2.0]

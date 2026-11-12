@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -14,7 +15,7 @@ import time
 
 from websockets.asyncio.client import connect
 from tests.gateway.test_normal_runtime_boot import control
-from tests.waiting import async_wait_until
+from tests.waiting import async_wait_until, wait_until
 from tests.child_log import ChildLog
 
 
@@ -84,6 +85,21 @@ async def rpc(ws, method, **params):
                 return reply
 
 
+async def settled_receipt(ws, sid, admission_id, timeout=RPC_DEADLINE):
+    """``prompt.receipt`` (with its committed result) once the receipt itself reads settled.
+
+    A ``terminal`` row in ``session_admissions`` is not enough: until the owner publishes the
+    completion frame (``live.settling``) the receipt still reads as the started claim and carries
+    no result. Poll the receipt, never the database row, for the result."""
+    async def read():
+        reply = await rpc(ws, 'prompt.receipt', session_id=sid, admission_id=admission_id, include_result=True)
+        assert 'result' in reply, reply
+        return reply if reply['result']['status'] in ('terminal', 'unknown') else None
+    settled = await async_wait_until(read, timeout=timeout, interval=.05, what=f'receipt {admission_id} settled')
+    assert settled is not None
+    return settled
+
+
 def websocket(home, desc, **kw):
     # These probes test RPC behavior, not heartbeat responsiveness. A CPU-starved
     # daemon can miss the library's 20s pong deadline before RPC_DEADLINE expires.
@@ -127,6 +143,59 @@ def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
             yield proc, desc
         finally:
             stop_child(proc)
+
+
+def free_port():
+    with closing(socket.socket()) as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def _log_text(path):
+    try:
+        return Path(path).read_text(encoding='utf-8', errors='replace')
+    except FileNotFoundError:
+        return ''
+
+
+def api_listener_state(home, desc, log=None):
+    """This daemon's settled ``api_server`` record from its ``gateway_state.json``: ``state`` is
+    ``connected``, or ``fatal`` with its ``error_code`` (``api_server_port_in_use`` when the port was
+    already taken). Keyed on identify's pid, so a killed predecessor's retained record never answers
+    for its successor. A timeout carries the daemon's log (``log``, default ``restart.log``), as
+    ``daemon()``'s ready assert does."""
+    def settled():
+        try:
+            record = json.loads((Path(home) / 'gateway_state.json').read_text())
+        except (OSError, ValueError):
+            return None
+        api = ((record.get('platforms') or {}).get('api_server') or {}) if record.get('pid') == desc['pid'] else {}
+        return api if api.get('state') in ('connected', 'fatal') else None
+    try:
+        return wait_until(settled, timeout=RPC_DEADLINE, what='api_server listener settled')
+    except AssertionError as exc:
+        raise AssertionError(f'{exc}\n{_log_text(log or Path(home) / "restart.log")}') from None
+
+
+@contextmanager
+def api_daemon(root, home, env, write_config, attempts=5):
+    """``daemon`` (no barrier) whose ``api_server`` listener is its own. A port picked free here can
+    be bound by a concurrent test's daemon before this one starts; the loser parks api_server
+    (``api_server_port_in_use``) yet still reports ready, and the winner, built from the same
+    fixtures (API key, model stub), answers every request, so the turns land in its state.db, not
+    this home's. Only that race re-boots on a fresh port; any other fatal fails at once with its
+    own error code. ``write_config(port)`` writes the boot's config.yaml; yields ``(proc, desc, port)``."""
+    for _ in range(attempts):
+        port = free_port()
+        write_config(port)
+        with daemon(root, home, {**env, 'API_SERVER_PORT': str(port)}, barrier=False) as (proc, desc):
+            api = api_listener_state(home, desc)
+            if api['state'] == 'connected':
+                yield proc, desc, port
+                return
+            if api.get('error_code') != 'api_server_port_in_use':
+                raise AssertionError(f'api_server fatal on port {port}: {api}\n{_log_text(Path(home) / "restart.log")}')
+    raise AssertionError(f'api_server never owned a free port in {attempts} boots')
 
 
 def probe(tmp_path):

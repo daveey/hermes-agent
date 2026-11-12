@@ -22,7 +22,7 @@ stale (fail-closed).
 from __future__ import annotations
 
 import logging
-from threading import Event, Lock, Thread, current_thread  # bound now: loop tests stub threading.Thread
+from threading import Condition, Event, Lock, Thread, current_thread  # bound now: loop tests stub threading.Thread
 import time
 from typing import Any, Callable, Optional
 
@@ -72,6 +72,7 @@ class AdvisorySampler:
         self.consecutive_drops = 0
         self.records = 0
         self._lock = Lock()
+        self._published = Condition(self._lock)  # notified when a new sample is published
         self._prev: Optional[tuple[tuple[int, int], float, int]] = None  # (counters, monotonic, wall end ms)
         self._latest: Optional[tuple[dict, Any]] = None  # (sample, limit it was measured under)
         self._taken: Optional[tuple] = None
@@ -114,6 +115,7 @@ class AdvisorySampler:
         self.consecutive_drops = 0
         with self._lock:
             self._latest = (dict(measured), limit)
+            self._published.notify_all()
         self.records += 1
         _STATUS.update(records=self.records, consecutive_drops=0, last_end_ms=measured["cpu_busy_sample_end_ms"])
         now = self.clock()
@@ -124,6 +126,20 @@ class AdvisorySampler:
             except OSError as exc:
                 _log.debug("hub CPU advisory sample not recorded: %s", exc)
         return measured
+
+    def _takeable(self) -> bool:
+        latest = self._latest
+        if latest is None or latest is self._taken:
+            return False
+        return 0 <= int(self.wall() * 1000) - latest[0]["cpu_busy_sample_end_ms"] <= REPORT_MAX_AGE_MS
+
+    def wait_fresh(self, timeout: float) -> bool:
+        """Block at most *timeout* s until a sample is ready for :meth:`take` (not yet reported, fresh enough).
+
+        For the anchored metrics sender only (never the sync loop thread): after a process-wide stall the sampler drops
+        the over-long window and restarts it, so its next sample is ~1 s away when the sender's late tick runs."""
+        with self._published:
+            return self._published.wait_for(self._takeable, timeout)
 
     def take(self, limit: Any) -> Optional[dict]:
         """The newest sample for one metrics report: measured under *limit*, not yet reported, and ending at most

@@ -186,7 +186,8 @@ def _persist_dispatch(record: dict[str, Any]) -> None:
         owner_started_at = None
     task_payload = {
         key: record.get(key)
-        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch", "task_indexes", "task_transcripts", *_ROUTING_KEYS)
+        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch", "task_indexes", "task_transcripts",
+                    "task_session_ids", *_ROUTING_KEYS)
         if key in record}
     try:  # where the children's terminals started; lets recovery add a git-state hint
         task_payload["owner_cwd"] = os.getcwd()
@@ -302,7 +303,7 @@ def recover_abandoned_delegations() -> int:
     alive = _owner_liveness()
     if alive is None:
         return 0
-    now, recovered = time.time(), 0
+    now, recovered, ended = time.time(), 0, []
     from tools.delegate_tool_resumable import plan_recovery, recover_abandoned
     plan = plan_recovery(_db_path(), alive)  # its git probes run before the write lock below
     with _DB_LOCK, _transaction() as conn:
@@ -351,8 +352,87 @@ def recover_abandoned_delegations() -> int:
             conn.execute("""UPDATE async_delegations SET state='unknown', completed_at=?,
                    updated_at=?, event_json=?, result_json=?, delivery_state='pending'
                    WHERE delegation_id=?""", (now, now, json.dumps(event), json.dumps(result), delegation_id))
+            ended.extend(_end_child_session_rows(conn, parent_id, task.get("task_session_ids"), "delegation_unknown", now))
             recovered += 1
+    _refresh_ended_child_outcomes(ended)
     return recovered
+
+
+# [daveey] End reasons for a delegate child row whose unit reached a terminal state without the child closing its own
+# row (``agent_close``): its owner process died (``unknown``) or the stall monitor force-finalized it (``stalled``).
+# Distinct from ``startup_orphan_reap`` so the reap's killed-subagent notice does not repeat the delegation's result.
+CHILD_END_REASONS = {"unknown": "delegation_unknown", "stalled": "delegation_stalled"}
+
+
+def _child_lineage_open_rows_sql(n_ids: int) -> str:
+    """Open rows of the unit's children: each persisted id that really is the parent's ``subagent`` child, plus every
+    compression continuation of it (a compressed child keeps working in a new row whose parent is its previous
+    segment, so the id persisted at dispatch is stale). A delegate child of a segment is not a continuation."""
+    from hermes_state_common import _non_continuation_child_sql
+    return ("WITH RECURSIVE lineage(id) AS ("
+            f" SELECT id FROM sessions WHERE id IN ({','.join('?' * n_ids)}) AND parent_session_id=?"
+            " AND source='subagent'"
+            " UNION SELECT c.id FROM lineage l JOIN sessions p ON p.id = l.id"
+            " JOIN sessions c ON c.parent_session_id = p.id"
+            " WHERE c.source='subagent' AND p.end_reason = 'compression'\n"
+            + _non_continuation_child_sql("c.", "p.id") +
+            ") SELECT s.id FROM sessions s JOIN lineage l ON l.id = s.id WHERE s.ended_at IS NULL")
+
+
+def _end_child_session_rows(conn, parent_session_id, task_session_ids, end_reason: str, now: float) -> list[str]:
+    """End the still-open session rows of a terminal unit's children inside the caller's transaction, including the
+    open tip of a child that compressed after dispatch. Only rows that really are this parent's ``subagent``
+    children (or their continuations) are touched, so a stale or foreign id cannot end another chat.
+    Without this a child killed with its owner stayed open until a startup sweep proved no live backend could own it,
+    which on a host whose backends restart many times a day can be never. Never raises."""
+    ids = [str(v) for v in task_session_ids.values() if v] if isinstance(task_session_ids, dict) else []
+    if not ids or not parent_session_id:
+        return []
+    try:
+        open_ids = [r[0] for r in conn.execute(_child_lineage_open_rows_sql(len(ids)), (*ids, parent_session_id))]
+        if open_ids:
+            conn.execute(
+                f"UPDATE sessions SET ended_at=?, end_reason=? WHERE id IN ({','.join('?' * len(open_ids))})"
+                " AND ended_at IS NULL", (now, end_reason, *open_ids))
+        return open_ids
+    except sqlite3.Error:
+        logger.debug("Could not end child session rows %s (%s)", ids, end_reason, exc_info=True)
+        return []
+
+
+def _refresh_ended_child_outcomes(ended: list[str]) -> None:
+    """Best-effort outcome refresh for child rows this module just ended (they ended mid-turn)."""
+    if not ended:
+        return
+    try:
+        from hermes_state_outcome import refresh_outcomes_quietly
+        refresh_outcomes_quietly(ended, "reap")
+    except Exception:
+        logger.debug("child outcome refresh failed for %s", ended, exc_info=True)
+
+
+def end_terminal_unit_children(record: dict[str, Any], status: str) -> list[str]:
+    """End the open child rows of a unit this process finalized as ``status`` without its runner returning
+    (``stalled``). Never raises. A worker process (no state.db access) ends nothing here, and nothing ends its
+    units' rows on its behalf: its dispatch does not forward ``task_session_ids`` and the owner's
+    ``recover_abandoned_delegations`` only visits units still ``running`` under a dead owner pid. Such rows close
+    only once their parent row ends (``SessionDB.end_subagents_of_ended_parents``) or the heartbeat-gated orphan
+    sweep proves no backend owns them."""
+    end_reason = CHILD_END_REASONS.get(status)
+    if not end_reason or not record.get("task_session_ids"):
+        return []
+    try:
+        from agent.runtime_session_store import is_worker_process
+        if is_worker_process() or not _db_path().exists():
+            return []
+        with _DB_LOCK, _transaction() as conn:
+            ended = _end_child_session_rows(conn, record.get("parent_session_id"), record.get("task_session_ids"),
+                                            end_reason, time.time())
+    except Exception:
+        logger.debug("Could not end child rows of %s", record.get("delegation_id"), exc_info=True)
+        return []
+    _refresh_ended_child_outcomes(ended)
+    return ended
 
 
 def restore_undelivered_completions(target_queue) -> int:
@@ -732,14 +812,24 @@ def complete_completion_delivery(delegation_id: str, claim_id: str) -> bool:
              AND delivery_claim=?""", (now, now, delegation_id, claim_id))
 
 
-def requeue_admitted_completion(delegation_id: str, target_queue) -> bool:
+def requeue_admitted_completion(delegation_id: str, target_queue,
+                                recovered_admission_id: str | None = None) -> bool:
     """Offer an acknowledged completion again when its receiving turn could not confirm the owner.
 
     The row returns to pending and its event goes back on ``target_queue``, so the next delivery
     re-runs the pre-flight. A row past the delivery budget converges to ``dropped`` instead, which
-    bounds the loop; a row without a stored event is left as it is."""
+    bounds the loop; a row without a stored event is left as it is.
+
+    ``recovered_admission_id``: the failed admission a start-up reconcile reopens the row for. It is
+    stored in the reopening transaction, and a row already reopened for that admission is left as it
+    is, so a result delivered by a consumer that leaves no trace the reconcile can read is never
+    offered again at the next start."""
     now = time.time()
     with _DB_LOCK, _transaction() as conn:
+        if recovered_admission_id is not None and conn.execute(
+                "SELECT 1 FROM async_delegations WHERE delegation_id=? AND recovered_admission_id=?",
+                (delegation_id, recovered_admission_id)).fetchone() is not None:
+            return False
         exhausted = conn.execute("""UPDATE async_delegations SET delivery_state='dropped', updated_at=?
                WHERE delegation_id=? AND delivery_state='delivered' AND delivery_attempts>=?""",
             (now, delegation_id, _MAX_DELIVERY_ATTEMPTS))
@@ -759,9 +849,10 @@ def requeue_admitted_completion(delegation_id: str, target_queue) -> bool:
                            "terminally dropped (result remains queryable).", delegation_id)
             return False
         reopened = conn.execute("""UPDATE async_delegations SET delivery_state='pending',
-                      delivered_at=NULL, updated_at=?
+                      delivered_at=NULL, updated_at=?,
+                      recovered_admission_id=COALESCE(?, recovered_admission_id)
                WHERE delegation_id=? AND delivery_state='delivered' AND event_json IS NOT NULL""",
-            (now, delegation_id))
+            (now, recovered_admission_id, delegation_id))
         if reopened.rowcount != 1:
             return False
         rows = conn.execute("""SELECT delegation_id, event_json, completed_at, dispatched_at
@@ -984,6 +1075,7 @@ def _dispatch_admitted(
     progress_fn: Optional[Callable[[], tuple]], capacity_error: str, slot_key: Optional[str] = None,
     task_indexes: Optional[list[int]] = None,
     task_transcripts: Optional[dict[str, str]] = None,
+    task_session_ids: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Shared dispatch core for single (``goals is None``) and batch units. Capacity check +
     record insert happen under ONE lock hold so concurrent dispatches can't both pass the check
@@ -1007,6 +1099,8 @@ def _dispatch_admitted(
         "interrupt_fn": interrupt_fn, **({"is_batch": True} if is_batch else {}), "progress_fn": progress_fn,
         "slot_key": slot_key or delegation_id,
         **({"task_transcripts": dict(task_transcripts)} if task_transcripts else {}),
+        # Child session ids by task index: a terminal unit whose children never closed their rows ends them.
+        **({"task_session_ids": dict(task_session_ids)} if task_session_ids else {}),
         # Which of the call's ``goals`` this unit runs (None = all of them).
         **({"task_indexes": list(task_indexes)} if task_indexes is not None else {}),
         # The one stale-monitor thread serves every profile and starts with an empty Context;
@@ -1103,6 +1197,7 @@ def dispatch_async_delegation_batch(
     progress_fn: Optional[Callable[[], tuple]] = None, slot_key: Optional[str] = None,
     task_indexes: Optional[list[int]] = None,
     task_transcripts: Optional[dict[str, str]] = None,
+    task_session_ids: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Dispatch a fan-out unit (a whole batch, or one ``group`` of a delegate_task call) as ONE
     background unit: ``runner`` runs its tasks and returns the combined ``{"results": [...],
@@ -1120,7 +1215,7 @@ def dispatch_async_delegation_batch(
         parent_session_id=parent_session_id, runner=runner,
         origin_ui_session_id=origin_ui_session_id, origin_session_id=origin_session_id,
         interrupt_fn=interrupt_fn, max_async_children=max_async_children, progress_fn=progress_fn, slot_key=slot_key,
-        task_indexes=task_indexes, task_transcripts=task_transcripts,
+        task_indexes=task_indexes, task_transcripts=task_transcripts, task_session_ids=task_session_ids,
         capacity_error=(
             f"Async delegation capacity reached ({max_async_children} running). Wait for one to finish "
             "(its result will re-enter the chat), or raise delegation.max_concurrent_children in "
@@ -1162,6 +1257,8 @@ def _finalize(delegation_id: str, result: Any, status: str) -> None:
         snapshot = dict(record)
     final = result(snapshot) if callable(result) else result
     _push_completion_event(snapshot, _keep_finished_children(snapshot, final, status), status)
+    if status == "stalled":  # its runner never returned, so its children never closed their rows
+        end_terminal_unit_children(snapshot, status)
     with _records_lock:
         if delegation_id in _records:
             _records[delegation_id]["status"] = status

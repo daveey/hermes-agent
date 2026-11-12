@@ -49,18 +49,8 @@ _log = logging.getLogger(__name__)
 
 # --- Shared micro-helpers (row access, JSON, env, git) ---
 
-def _lossy_text(value: Any) -> Any:
-    """``bytes`` -> ``str`` with U+FFFD for undecodable sequences; anything else passes through.
-
-    Installed as every board connection's ``text_factory`` (a TEXT cell holding
-    invalid UTF-8 otherwise aborts the whole ``fetchall`` with "Could not decode
-    to UTF-8") and applied to BLOB-typed cells in the ``from_row`` constructors
-    (task, comment, event, run), so one
-    corrupt row degrades to replacement characters instead of taking the board
-    listing down."""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
+from hermes_cli.kanban_db_values import _lossy_text
+from hermes_cli.kanban_admission_class import validate as validate_admission_class  # module scope: not in locals()
 
 
 def _row_get(row: Any, col: str, default: Any = None) -> Any:
@@ -668,6 +658,8 @@ class Task:
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
     placement_policy: Optional[str] = None
+    admission_class: str = "normal"
+    admission_frees: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Task:
@@ -688,6 +680,8 @@ class Task:
             requires=_json_or(g("requires")) or [],
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
+            admission_class=g("admission_class", "normal"),
+            admission_frees=g("admission_frees"),
         )
 
 
@@ -1210,6 +1204,7 @@ def create_task(
     placement_policy: Optional[str] = None,
     placement_checked: bool = False,
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
+    admission_class: str = "normal", admission_frees: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1234,6 +1229,7 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    validate_admission_class(admission_class, admission_frees)
     validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
                       workspace_path=workspace_path, project=project_id,
                       origin_intent=origin_intent, board=board)
@@ -1351,8 +1347,9 @@ def create_task(
                         id, title, body, assignee, status, priority, created_by, created_at, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, model_override, provider_override, model_pin_mandatory, reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract, requires, placement_policy
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract, requires, placement_policy,
+                        admission_class, admission_frees
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, kanban_priority.bounded(priority),
@@ -1361,7 +1358,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, pin_column,
                         reasoning_effort, 1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
-                        json.dumps(required), placement_policy,
+                        json.dumps(required), placement_policy, admission_class, admission_frees,
                     ),
                 )
                 _sync.set_runs_on(conn, task_id, runs_on)  # placement labels (RFC "Placement"), synced boards only
@@ -2056,7 +2053,7 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     # [daveey] Refuse a held fence, and a lock-free hub CPU advisory (final gate is under the lock), before the lease.
-    if admission_hold_set(task_id) or hub_cpu_advisory(task_id):
+    if admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):
         return None
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
@@ -2096,7 +2093,7 @@ def claim_review_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    if admission_hold_set(task_id) or hub_cpu_advisory(task_id):  # [daveey] before the Board-service lease (see claim_task)
+    if admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):  # [daveey] before the Board-service lease (see claim_task)
         return None
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:

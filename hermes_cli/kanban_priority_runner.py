@@ -1,6 +1,7 @@
 """Operator-only all-origin coordinator; never grants authority or edits lineage."""
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import json
 import logging
@@ -61,27 +62,68 @@ def ssh(entry, words, data=None):
     return receipt
 
 
+def coverage(hosts, manifest, writer):
+    """Compare an explicit host map with the origins owning captured rows.
+
+    Hosts are never derived from this: a missing origin refuses. An extra entry
+    (an enrolled origin owning no captured row) is reported and skipped.
+    """
+    origins = dict(sorted(Counter(row['origin'] for row in manifest['rows']).items()))
+    report = {'origins': origins, 'missing': sorted(set(origins) - set(hosts)),
+              'extra': sorted(set(hosts) - set(origins))}
+    errors = []
+    if report['missing']:
+        errors.append(f"host map missing manifest origins: {', '.join(report['missing'])}")
+    if writer not in hosts:
+        errors.append('local writer missing from host map')
+    elif writer not in origins:
+        errors.append('local writer owns no manifest rows; choose a writer that does')
+    return report, errors
+
+
+def _capture_coverage(conn, args, operation):
+    require_operator()
+    from hermes_cli import kanban_priority_cli as cli
+
+    hosts = load_hosts(args)
+    if args.manifest or args.backup or args.task or args.attachment_id or args.digest:
+        raise ValueError(f'{operation} takes attachment task/backup paths only from host map')
+    manifest = cli._capture(conn, args)  # Read-only: no backup, attachment or priority.
+    cover, errors = coverage(hosts, manifest, args.writer)
+    return hosts, manifest, cover, errors
+
+
+def check_host_map(conn, args):
+    """Read-only preflight: (0, report) iff ``migrate`` would accept this host map."""
+    require_operator()
+    if args.allow_legacy_rollback:
+        raise ValueError('origins is read-only; it takes no rollback policy')
+    _hosts, _manifest, cover, errors = _capture_coverage(conn, args, 'origins')
+    return (1 if errors else 0), {**cover, 'writer': args.writer, 'errors': errors}
+
+
 def run(conn, args):
     """Return (exit status, full receipts), including guarded rollback failures."""
     require_operator()
     from hermes_cli import kanban_priority_cli as cli
     from hermes_cli import kanban_priority_executor as executor
 
-    hosts = load_hosts(args)
-    if args.writer not in hosts:
-        raise ValueError('local writer missing from host map')
-    if args.manifest or args.backup or args.task or args.attachment_id or args.digest:
-        raise ValueError('migrate takes attachment task/backup paths only from host map')
+    hosts, manifest, cover, errors = _capture_coverage(conn, args, 'migrate')
+    # Coverage refuses before stage() writes any backup or attachment.
+    base = {**cover, 'skipped': cover['extra'], 'staged': {}, 'attempted': [],
+            'applied': {}, 'restored': {}, 'published': {}, 'errors': errors}
+    if errors:
+        return 1, base
     local = hosts[args.writer]
     prepared_args = SimpleNamespace(**vars(args))
     prepared_args.task, prepared_args.backup = local['task'], local['backup']
     prepared_args.priority_operation = 'prepare'
-    prepared = cli._prepare_stage(conn, prepared_args)
+    # Stage exactly the manifest whose coverage was checked; no second capture.
+    prepared = cli._prepare_stage(conn, prepared_args, manifest=manifest)
     data = Path(local['backup']).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     origins = prepared['origins']
-    report = {'manifest_sha256': digest, 'staged': {args.writer: prepared},
-              'attempted': [], 'applied': {}, 'restored': {}, 'published': {}, 'errors': []}
+    report = {**base, 'manifest_sha256': digest, 'staged': {args.writer: prepared}}
 
     def invoke(origin, action):
         require_operator()
@@ -102,8 +144,8 @@ def run(conn, args):
         return receipt
 
     try:
-        if set(hosts) != set(origins):
-            raise ValueError('host map must exactly cover manifest origins')
+        if origins != cover['origins']:
+            raise ValueError('staged origins differ from the coverage-checked capture')
         checked(prepared, args.writer)
         for origin in sorted(origins):
             if origin == args.writer:

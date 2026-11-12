@@ -169,60 +169,18 @@ async def run_gateway_chat(args, emitter=None):
     # Finite: answer one prompt and exit (-z, --oneshot, -Q, stream-json, or -q off a TTY).
     oneshot = bool(oneshot_prompt or getattr(args, "oneshot_exit", False) or quiet or
                    (query and not (sys.stdin.isatty() and sys.stdout.isatty())))
-    async with connect_gateway() as client:
-        description = await client.rpc("runtime.describe")
-        title = continue_title(args)
-        create_if_missing = bool(title and getattr(args, "create_if_missing", False))
-        latest = wants_latest(args)
-        if latest:
-            snapshot = await _resume_latest(client, args)
-            check_resume_policy(args, snapshot)
-        elif getattr(args, "resume", None) or (title and not create_if_missing):
-            name = getattr(args, "resume", None) or title
-            try:
-                # Exact id first, then title (latest lineage continuation), as the classic CLI did.
-                snapshot = await _resume(client, args, session_id=name)
-            except GatewayClientError as exc:
-                if str(exc) != "not_found":
-                    raise
-                try:
-                    snapshot = await _resume(client, args, title=name)
-                except GatewayClientError as exc:
-                    if str(exc) != "not_found":
-                        raise
-                    raise GatewayClientError(
-                        f"No session found matching '{name}'. Use 'hermes sessions list' to see available "
-                        "sessions, or pass -c <name> --create-if-missing to start a new session with that title.")
-            check_resume_policy(args, snapshot)
+    async with contextlib.AsyncExitStack() as connections:
+        wait = None
+        if oneshot:
+            # [daveey] Started while a core update holds the gateway: wait for the restarted owner
+            # (``gateway_update_wait``) instead of exiting on its refusal with the prompt lost.
+            from hermes_cli.gateway_update_wait import UpdateWait
+            wait = UpdateWait(announce=emitter is None)
+            client, snapshot = await _attach_through_update(connections, wait, args, oneshot, oneshot_prompt)
         else:
-            contract = description.get("session_create", {})
-            # Finite runs are stored as ``oneshot`` (hidden from human pickers, still CLI history);
-            # an explicit ``--source`` always wins. A remote gateway predating the label stores ``cli``.
-            sources = contract.get("sources", [])
-            from agent.session_source import create_surface
-            source = create_surface(getattr(args, "source", None) or ("oneshot" if oneshot and "oneshot" in sources else "cli"))
-            if source not in sources:
-                raise GatewayClientError(f"Gateway does not support source {source!r}")
-            parameters = contract.get("parameters", [])
-            policy = _requested_policy(args)
-            policy.pop("source", None)
-            if create_if_missing:
-                policy["title"] = title
-            policy.update(env_launch_flags())
-            policy.update(client_env_policy(parameters))
-            cwd = await asyncio.to_thread(_caller_cwd, args)
-            if "cwd" in parameters:
-                policy["cwd"] = cwd
-            elif getattr(args, "in_dir", None):
-                raise GatewayClientError("Gateway does not support --in / caller cwd; update the gateway")
-            else:
-                print("Warning: this gateway cannot preserve caller cwd; it uses its configured execution directory.", file=sys.stderr)
-            missing = sorted(set(policy) - set(parameters))
-            if missing:
-                raise GatewayClientError("Gateway does not support creation options: " + ", ".join(missing))
-            snapshot = await client.rpc("session.create", request_id=uuid.uuid4().hex, source=source, **policy)
-            if (warning := (snapshot.get("info") or {}).get("config_warning")) and not isinstance(oneshot_prompt, str):
-                print(f"Warning: {warning}", file=sys.stderr)
+            client = await connections.enter_async_context(connect_gateway())
+            snapshot = await _open_session(client, args, oneshot, oneshot_prompt)
+        title, latest = continue_title(args), wants_latest(args)
         if not isinstance(oneshot_prompt, str):  # main's -z writes nothing to stderr on success
             print("Session: " + snapshot["stored_session_id"], file=sys.stderr, flush=True)
         if not oneshot:
@@ -235,6 +193,18 @@ async def run_gateway_chat(args, emitter=None):
         view.launch_api_key = getattr(args, "api_key", None)  # /new keeps this launch's key
         view.unattended = isinstance(oneshot_prompt, str)
         view.resume_footer = oneshot and not quiet
+        # [daveey] A core update restarting the owner parks a finite turn and continues it on the next owner:
+        # the one-shot wait redials it (``GatewayChatView._redial``). Each dial is closed on exit. A submit the
+        # draining owner refused is taken to the next owner within the same wait (``_submit_finite``).
+        redial = await connections.enter_async_context(contextlib.AsyncExitStack())
+
+        async def reconnect():
+            # A refused resume must not retain its socket until the whole run exits.
+            await redial.aclose()
+            return await redial.enter_async_context(connect_gateway())
+
+        view.reconnect = reconnect
+        view.update_wait = wait
         if (getattr(args, "resume", None) or title or latest) and not quiet:
             from agent.context_compressor import MODEL_ONLY_DISPLAY_METADATA_KEY
             for row in snapshot.get("messages", []):
@@ -244,6 +214,85 @@ async def run_gateway_chat(args, emitter=None):
                 if row.get("role") in {"user", "assistant"} and isinstance(row.get("content"), str) and not merged:
                     print(f"{row['role']}: {row['content']}")
         return await view.run(query, oneshot=oneshot)
+
+
+async def _attach_through_update(connections, wait, args, oneshot, oneshot_prompt):
+    """[daveey] A finite run's connection and session, retried while the owner refuses them only because a
+    core update is swapping it (``UpdateWait``); every retry dials afresh. A create can commit before its
+    resume hits retirement: keep its request identity so the next owner reuses that session."""
+    request_id = uuid.uuid4().hex
+    while True:
+        attempt = contextlib.AsyncExitStack()
+        try:
+            client = await wait.dial(lambda: attempt.enter_async_context(connect_gateway()))
+            snapshot = await _open_session(client, args, oneshot, oneshot_prompt, request_id=request_id)
+        except GatewayClientError as exc:
+            await attempt.aclose()
+            await wait.retry(exc)  # raises exc unless it is a restart refusal inside the window
+            continue
+        except BaseException:
+            await attempt.aclose()
+            raise
+        await connections.enter_async_context(attempt)
+        return client, snapshot
+
+
+async def _open_session(client, args, oneshot, oneshot_prompt, *, request_id=None):
+    """The session this run attaches to: resumed (``-c``/``--resume``) or created."""
+    description = await client.rpc("runtime.describe")
+    title = continue_title(args)
+    create_if_missing = bool(title and getattr(args, "create_if_missing", False))
+    latest = wants_latest(args)
+    if latest:
+        snapshot = await _resume_latest(client, args)
+        check_resume_policy(args, snapshot)
+    elif getattr(args, "resume", None) or (title and not create_if_missing):
+        name = getattr(args, "resume", None) or title
+        try:
+            # Exact id first, then title (latest lineage continuation), as the classic CLI did.
+            snapshot = await _resume(client, args, session_id=name)
+        except GatewayClientError as exc:
+            if str(exc) != "not_found":
+                raise
+            try:
+                snapshot = await _resume(client, args, title=name)
+            except GatewayClientError as exc:
+                if str(exc) != "not_found":
+                    raise
+                raise GatewayClientError(
+                    f"No session found matching '{name}'. Use 'hermes sessions list' to see available "
+                    "sessions, or pass -c <name> --create-if-missing to start a new session with that title.")
+        check_resume_policy(args, snapshot)
+    else:
+        contract = description.get("session_create", {})
+        # Finite runs are stored as ``oneshot`` (hidden from human pickers, still CLI history);
+        # an explicit ``--source`` always wins. A remote gateway predating the label stores ``cli``.
+        sources = contract.get("sources", [])
+        from agent.session_source import create_surface
+        source = create_surface(getattr(args, "source", None) or ("oneshot" if oneshot and "oneshot" in sources else "cli"))
+        if source not in sources:
+            raise GatewayClientError(f"Gateway does not support source {source!r}")
+        parameters = contract.get("parameters", [])
+        policy = _requested_policy(args)
+        policy.pop("source", None)
+        if create_if_missing:
+            policy["title"] = title
+        policy.update(env_launch_flags())
+        policy.update(client_env_policy(parameters))
+        cwd = await asyncio.to_thread(_caller_cwd, args)
+        if "cwd" in parameters:
+            policy["cwd"] = cwd
+        elif getattr(args, "in_dir", None):
+            raise GatewayClientError("Gateway does not support --in / caller cwd; update the gateway")
+        else:
+            print("Warning: this gateway cannot preserve caller cwd; it uses its configured execution directory.", file=sys.stderr)
+        missing = sorted(set(policy) - set(parameters))
+        if missing:
+            raise GatewayClientError("Gateway does not support creation options: " + ", ".join(missing))
+        snapshot = await client.rpc("session.create", request_id=request_id or uuid.uuid4().hex, source=source, **policy)
+        if (warning := (snapshot.get("info") or {}).get("config_warning")) and not isinstance(oneshot_prompt, str):
+            print(f"Warning: {warning}", file=sys.stderr)
+    return snapshot
 
 
 _RESUME_POLICY_MISMATCH = "Resume retains gateway session policy; creation overrides are unsupported on resume."

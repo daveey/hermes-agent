@@ -86,6 +86,7 @@ def test_run_execs_the_isolated_ssh_backend_and_publishes_its_record(home, monke
         captured.update(path=path, argv=argv, env=env)
 
     monkeypatch.setattr(ao.os, "execve", fake_execve)
+    monkeypatch.setattr(ao, "_uses_rollover", lambda: False)  # the launchd (macOS) shape
     ao.cmd_run(argparse.Namespace(port=9147, hermes="/opt/h/bin/hermes"))
     token, nonce = ao.ensure_credentials()
     argv = captured["argv"]

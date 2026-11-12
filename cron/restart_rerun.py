@@ -45,7 +45,7 @@ def _at_or_after(value: Any, claimed: datetime) -> bool:
 
 def _skip_reason(
     job: dict[str, Any], record: dict[str, Any], claimed: datetime, now: datetime,
-    restart_cut: bool = False,
+    restart_cut: bool = False, deferred: bool = False,
 ) -> Optional[str]:
     from cron.jobs import _is_recoverable_error_job, is_job_runnable, is_terminal_job
     from cron.scheduler_ownership import _claim_owner_is_dead
@@ -55,7 +55,10 @@ def _skip_reason(
         if marker.get("execution_id") == record["id"]:
             return "already rescheduled"
         rescheduled_at = _parse(marker.get("at"))
-        if rescheduled_at is not None and claimed >= rescheduled_at:
+        # A deferral re-arms a fire that never ran (defer_unadmitted), so it spends no rerun: neither
+        # the attempt a deferral leads to nor a deferred rerun (re-armed, still the rerun) is skipped.
+        if (not deferred and not marker.get("deferred")
+                and rescheduled_at is not None and claimed >= rescheduled_at):
             # Claimed after a reschedule that no real outcome has settled: the rerun itself.
             return "the interrupted attempt was itself a restart rerun"
     # A verified restart cut (the owner's own verdict) is settled by its firer or journal recovery,
@@ -92,7 +95,18 @@ def _future_slot_pending(job: dict[str, Any], now: str) -> bool:
     return not is_terminal_job(job) and slot is not None and slot > datetime.fromisoformat(now)
 
 
-def _apply(job: dict[str, Any], record: dict[str, Any], now: str) -> None:
+def _marker(job: dict[str, Any], record: dict[str, Any], now: str, deferred: bool) -> dict[str, Any]:
+    """The loop guard written with a reschedule. A deferral marks itself ``deferred`` so it spends no
+    rerun, except when it defers a pending rerun: that keeps the rerun's time, still unsettled."""
+    if not deferred:
+        return {"execution_id": record["id"], "at": now}
+    prior = job.get(MARKER_KEY)
+    if isinstance(prior, dict) and not prior.get("deferred") and _parse(prior.get("at")) is not None:
+        return {"execution_id": record["id"], "at": prior["at"]}
+    return {"execution_id": record["id"], "at": now, "deferred": True}
+
+
+def _apply(job: dict[str, Any], record: dict[str, Any], now: str, deferred: bool = False) -> None:
     from cron import extra_fire
     from cron.jobs import _activate_job_record
 
@@ -113,7 +127,7 @@ def _apply(job: dict[str, Any], record: dict[str, Any], now: str) -> None:
         job["next_run_at"] = now
     # A fire/run claim left by the dead scheduler needs no clearing: its owner is provably dead
     # (checked above), so the next tick's claim reclaims it at once (_claim_owner_is_dead).
-    job[MARKER_KEY] = {"execution_id": record["id"], "at": now}
+    job[MARKER_KEY] = _marker(job, record, now, deferred)
 
 
 def _newest_attempt_id(job_id: str) -> Optional[str]:
@@ -125,12 +139,14 @@ def _newest_attempt_id(job_id: str) -> Optional[str]:
     return None
 
 
-def reschedule_interrupted(record: dict[str, Any], *, restart_cut: bool = False) -> bool:
+def reschedule_interrupted(record: dict[str, Any], *, restart_cut: bool = False,
+                           deferred: bool = False) -> bool:
     """Put ``record``'s job back on the schedule for now; True when it was rescheduled.
 
     ``restart_cut``: the owner itself reported that its restart cut this attempt (``RESTART_CUT_FLAG``
     on the canonical result), and the caller (the attempt's firer or its journal recovery) is the
-    one settling it, so the journal and a live claim are no reason to defer."""
+    one settling it, so the journal and a live claim are no reason to defer. ``deferred``: the
+    attempt never ran (refused while draining), so its re-arm spends no rerun (``_marker``)."""
     from cron.jobs import _MISSING, _hermes_now, _under_fire_fence, _with_job, save_jobs
 
     job_id = str(record.get("job_id") or "")
@@ -156,12 +172,12 @@ def reschedule_interrupted(record: dict[str, Any], *, restart_cut: bool = False)
     def apply(jobs, _i, job):
         _fence_reported[0] = True
         now = _hermes_now()
-        reason = _skip_reason(job, record, claimed, now, restart_cut)
+        reason = _skip_reason(job, record, claimed, now, restart_cut, deferred)
         if reason is not None:
             logger.info("cron: not rescheduling %s (execution %s) after restart interruption: %s",
                         job_id, record["id"], reason)
             return False
-        _apply(job, record, now.isoformat())
+        _apply(job, record, now.isoformat(), deferred)
         save_jobs(jobs)
         return True
 

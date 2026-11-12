@@ -1,6 +1,6 @@
 {
   "repository": "daveey/hermes-hub",
-  "commit": "dd80655bcbb8d0dadc0d68dd80512ef6420feeef",
+  "commit": "d8c1d0d801a3e7a31b34f80944be63f11cc8cbde",
   "row_fields": {
     "tasks": [
       "title",
@@ -32,7 +32,10 @@
       "max_retries",
       "goal_mode",
       "goal_max_turns",
+      "review_required",
       "block_kind",
+      "admission_class",
+      "admission_frees",
       "human_request",
       "block_recurrences",
       "completion_contract",

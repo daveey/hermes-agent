@@ -30,6 +30,10 @@ class ProcessCheckpointMixin:
         """Subclass supplies the live PID decision. See ProcessRegistry."""
         raise NotImplementedError
 
+    def _recover_owed_completions_locked(self, owner: Optional[str]) -> int:
+        """ProcessObligationMixin re-arms owed gateway completions; a bare checkpoint owes none."""
+        return 0
+
     # ----- Checkpoint (crash recovery) -----
 
     def _write_checkpoint(self, extra_entries: Optional[list[dict[str, Any]]] = None, *,
@@ -268,6 +272,11 @@ class ProcessCheckpointMixin:
         try:
             with self._checkpoint_file_lock():
                 recovered, foreign, settled, source = self._recover_from_checkpoint_locked(owner)
+                # Completions a stopped gateway still owed (exit settled before its watcher ticked). [daveey]
+                try:
+                    recovered += self._recover_owed_completions_locked(owner)
+                except Exception:
+                    logger.warning("Owed process completion recovery failed", exc_info=True)
         except Exception as e:
             logger.warning("Process checkpoint recovery failed: %s", e, exc_info=True)
             return 0
@@ -315,8 +324,9 @@ class ProcessCheckpointMixin:
                 already_tracked = entry.get("session_id") in self._running
             if already_tracked:
                 continue
-            # Its exit was already observed and delivered (a result receipt exists in some profile):
-            # re-attaching would start a watcher on a finished job's (maybe reused) PID. [daveey]
+            # Its exit was already observed (a result receipt exists in some profile): re-attaching would start
+            # a watcher on a finished job's (maybe reused) PID. A notice it still owes rides that receipt
+            # (process_registry_obligations). [daveey]
             if result_recorded(entry.get("session_id")):
                 logger.info("Not re-attaching finished process %s of session %s: its exit is already recorded",
                             entry.get("session_id"), entry.get("session_key") or "-")

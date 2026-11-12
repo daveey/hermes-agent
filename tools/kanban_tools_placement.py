@@ -31,10 +31,23 @@ def _origin_enrollment(args, origin, marker, **effective):
     cfg, gateway = kp.config(), kp.reg.self_gateway()
     from hermes_cli.kanban_hub_admission_placement import apply
     view = {**args, **effective}
+    # Execution routing is the same as a local create's (worker queue first); only storage is pinned here.
     decision = creation_decision(view, cfg, gateway,
-                                 kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None,
-                                 queue=False)  # [daveey] origin-bound: the worker queue is not applied here
-    return apply(view, decision or {"where": "local", "why": "origin-bound storage"}, gateway, cfg, queue=False)
+                                 kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None)
+    return apply(view, decision or {"where": "local", "why": "origin-bound storage"}, gateway, cfg)
+
+
+def _landing_placement(conn, args, origin, origin_intent, marker, runs_on, *, title, **effective):
+    """``(marker, runs_on)`` after origin-bound enrollment and the courier landing judgement. [daveey]
+
+    A queued outcome (``runs_on: [<pool label>, ...]``) becomes the card's ``runs_on`` unless the caller gave one;
+    t_01a1d0571c2f07d6: both entries used to take worker-first, which pins one worker.
+    """
+    marker = _origin_enrollment(args, origin, marker, **effective)
+    marker = _courier_landing(conn, args, origin_intent, marker, runs_on, title=title, **effective)
+    if runs_on is None and (marker or {}).get("runs_on"):
+        runs_on = list(marker["runs_on"])
+    return marker, runs_on
 
 
 def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:

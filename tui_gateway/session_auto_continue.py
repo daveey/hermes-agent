@@ -74,7 +74,7 @@ def _session_home(session: dict) -> Path:
     return Path(session.get("profile_home") or _hermes_home)
 
 
-def _retire_turn_marker(session: dict, *keys: str) -> None:
+def _retire_turn_marker(session: dict, *keys: str, concluding_turn: frozenset | None = None) -> None:
     """Drop the crash marker right before the terminal frame (not at turn-thread end: post-turn work outlives the
     client's answer, and quitting in that window would leave a marker that re-runs a finished turn). Extra ``keys``
     cover a session_key that compression rotated mid-turn. A turn stopped by backend shutdown keeps its marker
@@ -87,7 +87,10 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
-            clear_turn_marker(home, key)
+            if concluding_turn is None:
+                clear_turn_marker(home, key)
+            else:
+                clear_turn_marker(home, key, concluding_turn=concluding_turn)
 
 
 def _hold_refused_turn(session: dict, marker_key: str, display_kind, error_surface) -> None:
@@ -116,9 +119,12 @@ def _hold_refused_turn(session: dict, marker_key: str, display_kind, error_surfa
                    _auto_continue_retry_after=time.monotonic() + delay - 1.0)
 
 
-def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str) -> None:
+def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str,
+                                 concluding: frozenset = frozenset()) -> None:
     """Start the wait ``_hold_refused_turn`` armed. A skewed backend leaves the marker for its replacement's boot
-    sweep; a replay that can no longer run (the marker aged out) settles the chat's outcome."""
+    sweep; a replay that can no longer run (the marker aged out) settles the chat's outcome. ``concluding``: the
+    refused turn's own evidence (``turn_outcome.concluding_turn_identity``); a turn the user starts during the wait
+    is a live turn the refresh must not paint over."""
     delay = session.pop("_refused_turn_delay", None)
     if delay is None:
         return
@@ -130,7 +136,7 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str) -> No
         if _maybe_schedule_auto_continue(sid, session, marker_key) is None \
                 and read_turn_marker(_session_home(session), marker_key) is None:
             from tui_gateway.turn_outcome import refresh_turn_outcome
-            refresh_turn_outcome(session, session.get("agent"))
+            refresh_turn_outcome(session, session.get("agent"), concluding)
 
     timer = threading.Timer(delay, fire)
     timer.daemon = True

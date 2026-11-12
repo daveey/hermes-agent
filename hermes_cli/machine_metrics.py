@@ -31,6 +31,12 @@ _log = logging.getLogger(__name__)
 REPORT_EVERY_S = 10.0
 # A Board without the route (older deploy) answers 404/405: ask again rarely, not every 10 s.
 UNSUPPORTED_RETRY_S = 600.0
+# The anchored sender waits at most this long for the advisory sampler's next sample when it has none fresh (a stalled
+# process restarts the sampler's window: its next sample is one ~1 s window away). Never on the loop thread.
+CPU_WAIT_S = 1.5
+# While the root CPU gate is on, a report without the CPU triple would erase the Board row's triple: it goes out only
+# as a keepalive, when no report was sent for this long (well inside the Board's 90 s stale-signal limit).
+KEEPALIVE_S = 30.0
 _GB = 1024 ** 3
 
 
@@ -98,7 +104,10 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
             seen.add(identity)
             db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
             try:
+                # Count, own-grant matching and receipt grouping must see one WAL snapshot.
+                db.execute("BEGIN")
                 cols = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+                own, matched = None, []
                 if "lease_holder" in cols:
                     own = db.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
                     if own is None or not own[0]:
@@ -115,20 +124,26 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
                         excluded += len(matched)
                 else:
                     total += db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
+                if detail is not None and "pools" in detail:
+                    from hermes_cli.kanban_admission_pools import board_pools
+                    counts = board_pools(db, own=own[0] if own else None, excluded=matched,
+                                         origins=detail.get("capacity_origins"))
+                    for pool, count in counts.items():
+                        detail["pools"][pool] += count
             finally:
                 db.close()
         if detail is not None:
             detail["excluded"] = excluded
         return total
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error, ValueError):
         return None
 
 
 def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}`` plus the throughput counters
     (``machine_throughput_metrics``); a value that cannot be read is left out."""
-    out: dict[str, Any] = {"active_card_runs": active_card_runs()}
-    from hermes_cli import machine_drain_metrics, machine_throughput_metrics
+    from hermes_cli import machine_admission_metrics, machine_drain_metrics, machine_throughput_metrics
+    out: dict[str, Any] = machine_admission_metrics.collect(active_card_runs)
     out.update(machine_drain_metrics.collect())
     out.update(machine_throughput_metrics.cached_counters())
     try:
@@ -202,6 +217,10 @@ class Reporter:
         # loop's next_at is always a full period after the latest start; the sender checks started_at).
         self._lock = threading.Lock()
         self.started_at: Optional[float] = None
+        # The sender path's bounded wait for a fresh sample (the sync loop sets AdvisorySampler.wait_fresh).
+        self.cpu_wait_fn: Optional[Callable[[float], Any]] = None
+        self.sent_at: Optional[float] = None  # the latest report actually sent (either path)
+        self.suppressed = 0  # CPU-less reports withheld while the gate was on
 
     def _sample(self, sample: dict, measured: Optional[dict]) -> dict:
         from hermes_cli import kanban_sync_timing as timing
@@ -209,12 +228,20 @@ class Reporter:
         timing.note_cpu_sample(measured)
         if measured and all(k in measured for k in cpu.FIELDS):
             sample.update({k: measured[k] for k in cpu.FIELDS})
+        if "admission_version" in sample:
+            from hermes_cli import machine_admission_metrics as admission
+            current = admission.policy()
+            if not current or any(sample.get(key) != value for key, value in current.items()):
+                for key in admission.FIELDS:
+                    sample.pop(key, None)
         return sample
 
     def _spaced(self, now: float) -> bool:
         return self.started_at is None or now - self.started_at >= REPORT_EVERY_S / 2
 
-    def report_due(self) -> bool:
+    def report_due(self, send: Optional[Callable[[dict], Any]] = None) -> bool:
+        """The sync loop's report (through *send*, default the Reporter's own): True sent; False not due, failed, or
+        withheld (a CPU-less report while the gate is on and a report was sent within KEEPALIVE_S)."""
         if not self._lock.acquire(blocking=False):
             return False  # the sender thread is reporting right now
         try:
@@ -222,7 +249,7 @@ class Reporter:
             if now < self.next_at:
                 return False
             self.next_at = now + REPORT_EVERY_S
-            return self._report(now, self.send)
+            return self._report(now, send or self.send) is True
         finally:
             self._lock.release()
 
@@ -239,13 +266,17 @@ class Reporter:
             now = self.clock()
             if self.next_at - now > REPORT_EVERY_S or not self._spaced(now):
                 return None
+            next_at = self.next_at
             self.next_at = now + REPORT_EVERY_S
-            return self._report(now, send)
+            result = self._report(now, send, wait=True)
+            if result is None:
+                self.next_at = next_at  # nothing was sent: the loop's own due time is unchanged
+            return result
         finally:
             self._lock.release()
 
-    def _report(self, now: float, send: Callable[[dict], Any]) -> bool:
-        self.started_at = now
+    def _report(self, now: float, send: Callable[[dict], Any], wait: bool = False) -> Optional[bool]:
+        """Collect, attach the CPU triple and send. None: withheld (CPU-less while the gate is on, see KEEPALIVE_S)."""
         try:
             from hermes_cli import kanban_sync_timing as timing
             from hermes_cli import machine_cpu_metrics as cpu
@@ -258,6 +289,16 @@ class Reporter:
             if state == cpu.ON and self.cpu_take_fn is not None:
                 with timing.span("cpu"):  # nonblocking: the sampler's newest unreported sample
                     measured = self.cpu_take_fn(limit)
+                if measured is None and wait and self.cpu_wait_fn is not None:
+                    # [daveey] hermes-hub 2026-11-12 13:42:12 / 13:43:27: the tick ran ~0.3 s after a process-wide stall
+                    # ended, before the sampler's restarted window closed, and sent the row CPU-less. Wait (bounded).
+                    if self.cpu_wait_fn(CPU_WAIT_S):
+                        measured = self.cpu_take_fn(limit)
+            if state == cpu.ON and not (measured and all(k in measured for k in cpu.FIELDS)):
+                if self.sent_at is not None and self.clock() - self.sent_at < KEEPALIVE_S:
+                    self.suppressed += 1
+                    timing.note_cpu_sample(measured)
+                    return None  # withheld: it would erase the Board row's CPU triple
             sample = self._sample(sample, measured)
             if now < self.counters_off_until:  # this Board rejected them lately: the normal report only
                 from hermes_cli.machine_throughput_metrics import FIELDS
@@ -265,8 +306,10 @@ class Reporter:
 
             def counters_rejected() -> None:
                 self.counters_off_until = now + UNSUPPORTED_RETRY_S
+            self.started_at = now
             with timing.span("send"):  # preserve the transport's existing hard 2 s budget
                 send_compatible(send, sample, counters_rejected)
+            self.sent_at = self.clock()  # a failed send left the row as it was: it is no keepalive
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync
             status = getattr(exc, "status", None)

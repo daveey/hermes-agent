@@ -27,6 +27,7 @@ def edit_task(
     metadata: Optional[dict] = None, board: Optional[str] = None,
     priority_reason: Optional[str] = None, require_lower_reason: bool = False,
     priority_bump: Optional[int] = None,
+    admission_class: Optional[str] = None, admission_frees: Optional[str] = None,
 ) -> bool:
     """Edit task fields, optionally backfilling a completed task's result.
 
@@ -60,7 +61,10 @@ def edit_task(
                 raise PriorityLowerRefused(task_id, current, priority)
         assignments = []
         params = []
-        for field, value in (("title", title), ("body", body), ("priority", priority)):
+        from hermes_cli.kanban_admission_class import edit_fields
+        admission = edit_fields(conn, task_id, admission_class, admission_frees)
+        changed_fields.extend(admission)
+        for field, value in (("title", title), ("body", body), ("priority", priority), *admission.items()):
             if value is not None:
                 assignments.append(f"{field} = ?")
                 params.append(value)

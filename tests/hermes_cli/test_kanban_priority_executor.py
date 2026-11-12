@@ -123,12 +123,16 @@ def test_attached_manifest_is_validated_not_trusted(conn, mutation):
     assert helpers.priorities(conn, ids) == before
 
 
-def test_restore_requires_explicit_policy_rollback_and_cas(conn):
+def test_restore_caps_without_explicit_policy_rollback_and_keeps_cas(conn):
     from hermes_cli import kanban_priority_executor as executor
     ids, attachment, digest = setup_plan(conn)
     executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)
-    with pytest.raises(ValueError, match="explicit legacy policy rollback"):
-        executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME, undo=True)
+    # Without the legacy flag a guarded restore never raises a card above the cap.
+    assert executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME, undo=True)["changed"] == 2
+    assert helpers.priorities(conn, ids) == [1000, 10000, 1000]
+    event = kb.list_events(conn, ids[2])[-1]
+    assert (event.payload["priority"], event.payload["manifest_priority"]) == (1000, 50000)
+    executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)
     assert helpers.priorities(conn, ids) == [450, 10000, 900]
     result = executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME,
                                      undo=True, allow_legacy_rollback=True)

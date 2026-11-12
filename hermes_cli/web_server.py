@@ -1472,9 +1472,16 @@ def _on_server_started(
         # outlives the handoff, #99859), so it retires itself (between turns) when the install
         # moves on. The retirement fence closes admission process-wide before the exit, so a
         # connected Desktop just sees its next request reconnect-respawn the backend on new code.
-        from hermes_cli.web_server_skew_exit import start_code_skew_watchdog
+        from hermes_cli.always_on_rollover import pop_backend_port
+        from hermes_cli.web_server_skew_exit import start_code_skew_watchdog, start_superseded_watchdog
 
-        start_code_skew_watchdog(server)
+        # [daveey] An always-on blue/green backend is replaced warm by its roller; it retires once
+        # superseded, never on skew before its successor serves (always_on_rollover).
+        always_on_port = pop_backend_port()
+        if always_on_port is not None:
+            start_superseded_watchdog(server, port=always_on_port)
+        else:
+            start_code_skew_watchdog(server)
     if getattr(app.state, "ssh_isolated_clients", None) is not None and ssh_lock_path and _SSH_OWNER_NONCE:
         # A reconnect that cannot prove this pid is its own drops the lock without signalling us
         # and spawns a new nonce (#132034); retire (between turns) once the lock names that spawn.

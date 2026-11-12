@@ -527,6 +527,13 @@ def generate_launchd_plist() -> str:
     <key>ThrottleInterval</key>
     <integer>30</integer>
 
+    <!-- [daveey] The gateway is the backend the Desktop polls. An unset
+         ProcessType (Standard) runs every thread at priority 20 under load, so
+         event-loop stalls passed the Desktop's 4 s timeout; Interactive runs
+         at 31 (mirrors always_on_dashboard). -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
     <key>ExitTimeOut</key>
     <integer>60</integer>
 {nofile_block}

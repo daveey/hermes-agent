@@ -33,7 +33,23 @@ name: CI review comment
 on:
   schedule:
     - cron: "17 * * * *"
+  # Bare dispatch = the full sweep. With head_sha it is a targeted refresh of that head: a failed CI-triggered refresh
+  # queues exactly one (after delay_seconds) so a transient artifact error does not leave "running on" for an hour
+  # (PR1661, 2026-11-12). A dispatched refresh never queues another.
   workflow_dispatch:
+    inputs:
+      head_sha:
+        description: "Refresh only the open PR at this exact 40-hex head (empty = every open PR)"
+        required: false
+        default: ""
+      delay_seconds:
+        description: "Wait this long before refreshing (capped at 600)"
+        required: false
+        default: "0"
+      retry_of:
+        description: "Run id of the failed refresh that queued this one (log only)"
+        required: false
+        default: ""
   workflow_run:
     workflows: [CI, "Docker Build, Test, and Publish"]
     types: [completed]
@@ -41,14 +57,17 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  # write: a failed CI-triggered refresh dispatches this workflow once more for its head (queue_re_refresh).
+  actions: write
   pull-requests: write
 
 # One batch at a time; a running batch is never cancelled. A targeted refresh
 # has its own group per head sha: in a shared group GitHub keeps only the newest
 # pending run and cancels the others, which would drop another PR's refresh.
+# A queued re-refresh (dispatch with head_sha) has its own per-head group too,
+# so its wait neither holds the sweep nor is cancelled by a pending sweep.
 concurrency:
-  group: ci-review-comment${{ github.event_name == 'workflow_run' && format('-{0}', github.event.workflow_run.head_sha) || '' }}
+  group: ci-review-comment${{ github.event_name == 'workflow_run' && format('-{0}', github.event.workflow_run.head_sha) || (inputs.head_sha && format('-retry-{0}', inputs.head_sha)) || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -78,6 +97,13 @@ jobs:
           # Which workflow completed (CI or a watched sibling); empty on
           # schedule/dispatch. A sibling completing before CI writes nothing.
           TRIGGER_WORKFLOW: ${{ github.event.workflow_run.name }}
+          # workflow_dispatch inputs (empty otherwise): a targeted re-refresh of one head after a wait.
+          # The script validates the sha (40-hex) and the delay (digits, capped); never interpolated into run:.
+          DISPATCH_HEAD_SHA: ${{ inputs.head_sha }}
+          REFRESH_DELAY_SECONDS: ${{ inputs.delay_seconds }}
+          RETRY_OF_RUN: ${{ inputs.retry_of }}
+          # Where a re-refresh is dispatched (this workflow runs from the default branch only).
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # Sibling workflows whose jobs join each comment, one name per line.
           # Each must also be listed under on.workflow_run.workflows.
           WATCH_WORKFLOWS: |

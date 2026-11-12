@@ -41,7 +41,9 @@ PREFIX = "kanban_activity_rev_"
 LOCAL_TABLES = ("tasks", "task_links", "task_runs", "task_events", "task_comments", "kanban_notify_subs",
                 "task_chat_links")
 # A sync replica (``sync-shadow/<board>.db``) is read only for this gateway's chat links and their card rows
-# (``kanban_chat_links._read_replica``). Its events/runs mirror the whole board's traffic and are never read.
+# (``kanban_chat_links._read_replica``). Its events/runs mirror the whole board's traffic; the one read of them (the
+# linked running cards' newest liveness event, ``kanban_replica_execution.read_runs``) runs on every read, outside
+# any cache keyed on this revision, so their (bookkeeping) heartbeat writes need not, and do not, move it.
 SHADOW_TABLES = ("tasks", "task_chat_links")
 # Columns no activity reader selects, written by claims, leases, heartbeats, the sync apply path and the notifier's
 # delivery claim. An update that changes only these is bookkeeping.

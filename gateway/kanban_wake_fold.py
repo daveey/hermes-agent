@@ -26,7 +26,7 @@ from hermes_state_runtime import RuntimeStoreError, list_session_admissions
 logger = logging.getLogger(__name__)
 
 PRODUCER = 'kanban-wake'
-_CARD_KEYS = frozenset({'task_id', 'board', 'kinds', 'text'})
+_CARD_KEYS = frozenset({'task_id', 'board', 'kinds', 'text', 'notices'})
 _MAX_CARDS = 200
 _MAX_CARD_TEXT = 32000
 
@@ -53,10 +53,12 @@ _LEGACY_BOARD = re.compile(r'^Board: (\S+)$', re.MULTILINE)
 
 
 def card_metadata(metadata):
-    """Validate a wake's ``kanban_cards`` (what a later wake folds from) for the stored descriptor."""
+    """Validate a wake's ``kanban_cards`` (what a later wake folds from) for the stored descriptor,
+    plus a remote notice's ``kanban_event_keys`` (:func:`event_keys_metadata`)."""
+    keys = event_keys_metadata(metadata)
     cards = metadata.get('kanban_cards')
     if cards is None:
-        return {}
+        return keys
     if not isinstance(cards, list) or not cards or len(cards) > _MAX_CARDS:
         raise RuntimeStoreError('invalid_params')
     for card in cards:
@@ -64,9 +66,24 @@ def card_metadata(metadata):
                 or len(card['text']) > _MAX_CARD_TEXT
                 or not all(isinstance(card.get(key, ''), str) for key in ('task_id', 'board'))
                 or not isinstance(card.get('kinds', []), list)
-                or not all(isinstance(kind, str) for kind in card.get('kinds', []))):
+                or not all(isinstance(kind, str) for kind in card.get('kinds', []))
+                or not isinstance(card.get('notices', []), list)
+                or not all(isinstance(line, str) for line in card.get('notices', []))):
             raise RuntimeStoreError('invalid_params')
-    return {'kanban_cards': [dict(card) for card in cards]}
+    return {'kanban_cards': [dict(card) for card in cards], **keys}
+
+
+def event_keys_metadata(metadata):
+    """A remote Kanban notice's ``kanban_event_keys`` (``gateway.kanban_remote_owner``): its ledger claim
+    is acked only once a transcript row carries them, so the turn's user row must (``kanban_notice``
+    rows are what ``kanban_notice_keys_delivered`` reads). Only allowed on a ``kanban_notice`` card."""
+    keys = metadata.get('kanban_event_keys')
+    if keys is None:
+        return {}
+    if (metadata.get('display_kind') != 'kanban_notice' or not isinstance(keys, list) or not keys
+            or len(keys) > _MAX_CARDS or not all(isinstance(key, str) and key for key in keys)):
+        raise RuntimeStoreError('invalid_params')
+    return {'kanban_event_keys': list(keys)}
 
 
 def wake_lock(runner):
@@ -99,9 +116,17 @@ def waiting_wake(authority, owner, route):
     tail = queued[-1] if queued else None
     if tail is None or tail['principal_id'] != 'automation:' + route or _producer(tail['request_id']) != PRODUCER:
         return None
-    if _descriptor(tail['payload']).get('display_kind'):
+    descriptor = _descriptor(tail['payload'])
+    if descriptor.get('display_kind') and not _remote_batch(descriptor):
         return None
     return tail
+
+
+def _remote_batch(descriptor):
+    """A wake carrying remote cards' notices (``gateway.kanban_remote_owner``): a ``kanban_notice`` card
+    with its custody keys and its cards, which folds like any Kanban wake (review t_01a1d013e0411032)."""
+    return (descriptor.get('display_kind') == 'kanban_notice' and bool(descriptor.get('kanban_event_keys'))
+            and bool(descriptor.get('kanban_cards')))
 
 
 def _legacy_cards(text):
@@ -113,14 +138,42 @@ def _legacy_cards(text):
 
 
 def _merge(old_cards, new_cards):
-    """Cards in first-seen order; a later event for the same card replaces the earlier one."""
+    """Cards in first-seen order; a later event for the same card replaces the earlier one, keeping the
+    earlier card's notice lines (:func:`_keep_notices`)."""
     merged, order = {}, []
     for index, card in enumerate([*old_cards, *new_cards]):
         key = card.get('task_id') or f'#opaque-{index}'
         if key not in merged:
             order.append(key)
-        merged[key] = dict(card)
+            merged[key] = dict(card)
+        else:
+            merged[key] = _keep_notices(merged[key], card)
     return [merged[key] for key in order]
+
+
+def _keep_notices(old, new):
+    """``new`` (a later wake for the same card) with ``old``'s ``notices`` it does not show yet, ahead of its own.
+
+    A card's ``notices`` are Kanban notice lines its wake turn carries for the chat's ``tui`` row, which was settled
+    past them when the wake was admitted (``kanban_wake_sibling.settle_tui_sibling``). Replacing the card dropped
+    them for good: a ``status → ready`` line carried by a queued wake vanished when the completion's wake folded
+    into it (review of PR #1465 at b0fdf842f2). The earlier premise text itself still collapses to the latest."""
+    card = dict(new)
+    have = [str(line) for line in card.get('notices') or []]
+    text = str(card.get('text') or '')
+    missing = [line for line in old.get('notices') or [] if line not in have and line not in text]
+    while missing and len(text) + sum(len(line) + 1 for line in missing) > _MAX_CARD_TEXT:
+        missing.pop(0)  # card_metadata refuses an oversized card; the oldest notice goes first
+    if not missing:
+        return card
+    block = '\n'.join(missing)
+    at = text.find(have[0]) if have else -1
+    if at > 0 and text[at - 1] == '\n':
+        text = text[:at] + block + '\n' + text[at:]
+    else:
+        text = text.rstrip() + '\n' + block
+    card['text'], card['notices'] = text, [*missing, *have]
+    return card
 
 
 def _live_task(card):
@@ -257,6 +310,10 @@ def fold_into(event, waiting, identity):
     old_cards = descriptor.get('kanban_cards') or _legacy_cards(str(waiting['payload'].get('text') or ''))
     if not descriptor.get('kanban_cards') and guidance and old_cards[0]['text'].endswith(guidance):
         old_cards[0]['text'] = old_cards[0]['text'][:-len(guidance)].rstrip()
+    if not guidance and descriptor.get('kanban_cards'):
+        # [daveey] A remote notice carries no guidance: keep the waiting batch's, or a local wake folded under
+        # it loses its "inspect the board, don't re-decompose" line (review t_01a1d03acceb95c1).
+        guidance = _guidance(str(waiting['payload'].get('text') or ''), old_cards) or ''
     # The stored cards stay as delivered; the live relabel is redone each time the batch is rebuilt.
     cards = _merge(old_cards, new_cards)
     event.text = _compose(cards, guidance)
@@ -264,6 +321,14 @@ def fold_into(event, waiting, identity):
     event.metadata['automation_identities'] = sorted({
         *(descriptor.get('identities') or [waiting['request_id']]),
         *(event.metadata.get('automation_identities') or [identity])})
+    # [daveey] Remote notices' custody keys ride the batch: their ledger claims are acked when a row carries
+    # them, and that row must be a kanban_notice (``kanban_notice_keys_delivered``), whichever side folded.
+    keys = list(dict.fromkeys([*(descriptor.get('kanban_event_keys') or []),
+                               *(event.metadata.get('kanban_event_keys') or [])]))
+    if keys:
+        from gateway.session_automation import _DISPLAY_TEXT_LIMIT
+        shown = event.text if len(event.text) <= _DISPLAY_TEXT_LIMIT else event.text[:_DISPLAY_TEXT_LIMIT - 1] + '…'
+        event.metadata.update({'kanban_event_keys': keys, 'display_kind': 'kanban_notice', 'display_text': shown})
     # The batch mutes only when every wake in it did.
     if descriptor.get('notification_category', 'result') == 'result':
         event.metadata.pop('notification_category', None)

@@ -34,14 +34,10 @@ def apply_attached(conn, attachment_id: int, digest: str, *, writer: str,
         if hashlib.sha256(data).hexdigest() != digest:
             raise ValueError("manifest digest mismatch")
         from hermes_cli.kanban_priority_manifest import validate
-        from hermes_cli.kanban_priority import PRIORITY_CAP
+        from hermes_cli.kanban_priority import PRIORITY_CAP, at_value
         manifest = validate(json.loads(data))
         if manifest["board_id"] != identity.get("board_id"):
             raise ValueError("manifest belongs to a different board")
-        rows = [r for r in manifest["rows"] if r["origin"] == writer]
-        if undo and any(r["old"] > PRIORITY_CAP for r in rows) and not allow_legacy_rollback:
-            raise ValueError("restoring above-cap values requires explicit legacy policy rollback")
-        source, target = ("new", "old") if undo else ("old", "new")
         unknown = conn.execute("SELECT id FROM tasks WHERE status NOT IN ('done','archived') "
                                "AND (created_on IS NULL OR created_on='') LIMIT 1").fetchone()
         if unknown is not None:
@@ -50,20 +46,39 @@ def apply_attached(conn, attachment_id: int, digest: str, *, writer: str,
         observed = [dict(r) for r in conn.execute("SELECT id,priority,created_on,status FROM tasks")]
         rows, report = classify(manifest['rows'], observed, writer=writer)
         live = {r['id']: r['priority'] for r in observed}
-        if all(live[r["id"]] == r[target] for r in rows):
-            return {"changed": 0, "writer": writer, "manifest_sha256": digest, **report}
-        if any(live[r["id"]] != r[source] for r in rows):
-            raise ValueError("priorities changed; capture a new manifest")
+        # A row holds its manifest value, or for an above-cap original also the
+        # cap: the sync pull bounds every received priority in place (no event,
+        # no outbox op) while the Board keeps the raw value the manifest captured.
+        if undo:
+            if all(at_value(live[r["id"]], r["old"]) for r in rows):
+                return {"changed": 0, "writer": writer, "manifest_sha256": digest, **report}
+            if any(live[r["id"]] != r["new"] for r in rows):
+                raise ValueError("priorities changed; capture a new manifest")
+        else:
+            if all(live[r["id"]] == r["new"] for r in rows):
+                return {"changed": 0, "writer": writer, "manifest_sha256": digest, **report}
+            if any(not at_value(live[r["id"]], r["old"]) for r in rows):
+                raise ValueError("priorities changed; capture a new manifest")
         for row in rows:
             current = live[row["id"]]
-            if current == row[target]:
+            # Only the explicit legacy policy rollback restores above the cap.
+            if not undo:
+                value = row["new"]
+            elif allow_legacy_rollback:
+                value = row["old"]
+            else:
+                value = min(PRIORITY_CAP, row["old"])
+            if current == value:
                 continue
-            conn.execute("UPDATE tasks SET priority=? WHERE id=?", (row[target], row["id"]))
-            kb._append_event(conn, row["id"], "reprioritized", {
-                "priority": row[target], "previous_priority": current,
+            conn.execute("UPDATE tasks SET priority=? WHERE id=?", (value, row["id"]))
+            payload = {
+                "priority": value, "previous_priority": current,
                 "reason": "priority normalization rollback" if undo else "priority normalization v2",
                 "manifest_sha256": digest,
-            })
+            }
+            if value != (row["old"] if undo else row["new"]):
+                payload["manifest_priority"] = row["old"]  # capped legacy original, kept for audit
+            kb._append_event(conn, row["id"], "reprioritized", payload)
             changes.append(row["id"])
     for task_id in changes:
         kb.notify_task_updated(conn, task_id, ["priority"])

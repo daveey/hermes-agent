@@ -213,6 +213,12 @@ async def standalone_lifespan(app: "FastAPI"):
 
     start_background_bootstrap()
 
+    # Always-on backend only: keep the port closed until the boot prewarms finish (bounded), so the Desktop's
+    # reconnect burst after a core-update restart meets warm caches (hermes_cli/boot_warmup_gate.py). [daveey]
+    from hermes_cli.boot_warmup_gate import hold_bind_for_prewarm
+
+    await asyncio.to_thread(hold_bind_for_prewarm)
+
     try:
         yield
     finally:

@@ -50,6 +50,8 @@ from hermes_cli.kanban_ops import (
 )
 from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
+from hermes_cli.kanban_admission_explain import cmd_queue as _cmd_queue
+from hermes_cli.kanban_assignees_cli import cmd_assignees as _cmd_assignees  # moved; re-exported for callers
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
     _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
     _worker_may_archive_capability_owner, _worker_may_archive_own,
@@ -355,21 +357,6 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
                       f"Heartbeat recorded for {args.task_id}")
 
 
-def _cmd_assignees(args: argparse.Namespace) -> int:
-    with kbc.connect_closing() as conn:
-        data = kb.known_assignees(conn)
-    if _json_out(args, data):
-        return 0
-    if not data:
-        print("(no assignees — create a profile with `hermes -p <name> setup`)")
-        return 0
-    print(f"{'NAME':20s}  {'ON DISK':8s}  COUNTS")
-    for entry in data:
-        on_disk = "yes" if entry["on_disk"] else "no"
-        print(f"{entry['name']:20s}  {on_disk:8s}  {_fmt_counts(entry['counts'] or {}, '(idle)')}")
-    return 0
-
-
 def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
     """Print a ``create_overlap`` refusal (JSON with ``--json``, else a summary on stderr); exit code 2."""
     if getattr(args, "json", False):
@@ -463,6 +450,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
+        from hermes_cli.kanban_admission_class import AdmissionMetadataError
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -480,6 +468,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 created_by=args.created_by or _profile_author(),
                 workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
                 project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
+                admission_class=getattr(args, "admission_class", "normal"),
+                admission_frees=getattr(args, "admission_frees", None),
                 parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
                 idempotency_key=idem_key,
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
@@ -505,7 +495,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused,
                 AskFilingRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
-        except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
+        except (PinProviderUnresolvedError, ModelProviderMismatchError, AdmissionMetadataError) as exc:
             return _err(f"kanban: {exc}", 2)
         if not idem_hit:
             after_create(conn, task_id)  # records an accepted --distinct-from override on the new card
@@ -1290,7 +1280,9 @@ _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runti
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_admission_class import AdmissionMetadataError
     from hermes_cli.kanban_requires_edit import edit_preflight  # --requires / --completion-contract / --reason
+    admission = {name: getattr(args, name, None) for name in ("admission_class", "admission_frees")}
     if (rc := edit_preflight(args)) is not None:
         return rc
     reason = getattr(args, "reason", None)
@@ -1310,9 +1302,12 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if operator["goal_mode"] is not None:
         operator["goal_mode"] = operator["goal_mode"] == "on"
     has_operator = any(value is not None for value in operator.values())
+    has_admission = any(value is not None for value in admission.values())
+    if has_operator and has_admission:
+        return _err("kanban edit: admission metadata cannot be combined with operator fields", 2)
     if result is None and (summary is not None or raw_metadata is not None):
         return _err("kanban edit: --summary and --metadata require --result", 2)
-    if all(value is None for value in (title, body, priority, priority_bump, result)) and not has_operator:
+    if all(value is None for value in (title, body, priority, priority_bump, result)) and not (has_operator or has_admission):
         return _err(
             "kanban edit: provide --title, --body, --priority, --result, --max-retries, --goal-mode, "
             "--goal-max-turns, --max-runtime-seconds, --session-id, or --completion-contract", 2,
@@ -1342,14 +1337,14 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                 return _err(f"kanban edit: {exc}")
             if changed is None:
                 return _err(f"cannot edit {args.task_id} (unknown id)")
-        if any(value is not None for value in (title, body, priority, priority_bump, result)):
+        if has_admission or any(value is not None for value in (title, body, priority, priority_bump, result)):
             try:
                 ok = kb.edit_task(
                     conn, args.task_id, title=title, body=body, priority=priority,
-                    result=result, summary=summary, metadata=metadata,
+                    result=result, summary=summary, metadata=metadata, **admission,
                     priority_reason=reason, require_lower_reason=True, priority_bump=priority_bump,
                 )
-            except (kb.PriorityLowerRefused, ReceiptEditRefused) as exc:
+            except (kb.PriorityLowerRefused, AdmissionMetadataError, ReceiptEditRefused) as exc:
                 return _err(f"kanban edit: {exc}")
             if not ok:
                 return _err(f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)")
@@ -1854,7 +1849,7 @@ _HANDLERS = {
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
-    "gc": _cmd_gc, "sync": _cmd_sync,
+    "gc": _cmd_gc, "sync": _cmd_sync, "queue": _cmd_queue,
 }
 
 

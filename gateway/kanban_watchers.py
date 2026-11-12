@@ -68,11 +68,11 @@ class GatewayKanbanWatchersMixin:
                                   warn_after_seconds=_ks.DEFAULT_WARN_AFTER_SECONDS)
 
     async def _acquire_kanban_lease(self, lease) -> bool:
-        """Retry *lease* every ``lease.retry_seconds`` until held; False when the gateway stops first."""
+        """Retry *lease* every ``lease.retry_interval()`` until held; False when the gateway stops first."""
         while self._running:
             if lease.try_acquire():
                 return True
-            await self._sleep_between_ticks(lease.retry_seconds)
+            await self._sleep_between_ticks(lease.retry_interval())
         return False
 
     async def _sleep_between_ticks(self, interval: float) -> None:
@@ -160,6 +160,9 @@ class GatewayKanbanWatchersMixin:
                     await _KanbanNotification(
                         self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
                     ).deliver()
+                # Remote cards' notices for busy chats this gateway owns (gateway/kanban_remote_owner.py). [daveey]
+                from gateway import kanban_remote_owner
+                await kanban_remote_owner.tick(self)
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
             await self._sleep_between_ticks(interval)

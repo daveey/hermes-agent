@@ -366,6 +366,10 @@ def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt,
     if oldest > now - grace_s:
         return None  # a live poller still has time to take it
     done = None
+    from gateway.kanban_wake_sibling import tui_defer, tui_formatter
+    if tui_defer(conn, sub, now):
+        return None  # the chat's waking local row still owes this event's turn; it settles this row [daveey]
+    fmt = tui_formatter(conn, sub, fmt)  # a waking local row's turn carries the events it wakes on [daveey]
     try:
         done = _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, kinds, fmt, wake, holders,
                             spawn)
@@ -407,6 +411,12 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 _kbn.remove_notify_sub(conn, **ident)
         if not claimed:
             return None  # a live poller or another sweeper got there first
+        from gateway.kanban_wake_sibling import wake_owes_after
+        if skip is None and wake_owes_after(conn, sub, old, now):
+            # A covered event landed between tui_defer and this claim: hand it back to the wake. [daveey]
+            with contextlib.suppress(Exception):
+                _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+            return None
         claimed = _undelivered(db, tip, slug, claimed)
     if skip is not None:
         logger.info("kanban notice for %s/%s not delivered to chat %s: %s", slug, ident["task_id"], tip, skip)
@@ -575,10 +585,11 @@ class _RemoteWaker:
                 if verdict == "started":
                     _charge_wake(tip, now)
                     started()
+                    outcome = "turn started"
                 else:
-                    persist()
-                logger.info("remote kanban notice for %s (task=%s): %s", tip, task.get("id"),
-                            "turn started" if verdict == "started" else f"{verdict}, notice row written")
+                    # [daveey] Only a written row says so: persist() hands a busy chat's claim back (False).
+                    outcome = f"{verdict}, notice row written" if persist() else f"{verdict}, deferred"
+                logger.info("remote kanban notice for %s (task=%s): %s", tip, task.get("id"), outcome)
                 return verdict
             except Exception:
                 logger.warning("remote kanban wake job for %s failed", tip, exc_info=True)

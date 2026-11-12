@@ -72,7 +72,11 @@ def list_context_file_sources(
     duplicate / missing. Global files (``agent.global_context_files``) come first, labelled ``<path> (global)``;
     ``include_project=False`` lists only them (``build_global_context_prompt``: cron without a workdir).
     """
-    cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
+    if cwd is None:
+        from agent.runtime_cwd import process_cwd_or_fallback
+        cwd_path = Path(process_cwd_or_fallback()).resolve()
+    else:
+        cwd_path = Path(cwd).resolve()
     max_chars = _pb._get_context_file_max_chars(context_length)
     suppressed = _pb._project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback)
     sources: list[dict[str, Any]] = []
