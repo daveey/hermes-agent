@@ -128,7 +128,8 @@ async def test_displaced_handler_uses_worker_receipt_not_successor_slot(db, monk
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True])
 @pytest.mark.parametrize("newer", [False, True])
-async def test_abandoned_worker_captures_own_live_lease(db, monkeypatch, cancelled, newer):
+@pytest.mark.parametrize("followup", [False, True])
+async def test_abandoned_worker_captures_own_live_lease(db, monkeypatch, cancelled, newer, followup):
     helpers._declare_then_reply(db)
     if newer:
         late._next_turn_starts(db)
@@ -147,6 +148,9 @@ async def test_abandoned_worker_captures_own_live_lease(db, monkeypatch, cancell
                              _session_state=lambda *a: pytest.fail("successor slot read"))
     token = gw.run_outcome.set({"session_id": "chat"})
     try:
+        if followup:
+            # A completed first conversation in the same handler left its receipt.
+            gw.capture_run_outcome(SimpleNamespace(session_id="chat", _last_session_turn_lease_holder="turn-A1"))
         call = GatewayTurnMixin._run_agent_await_turn_worker(runner, worker, ctx, None, None)
         if cancelled:
             with pytest.raises(asyncio.CancelledError):
@@ -165,12 +169,27 @@ async def test_abandoned_worker_captures_own_live_lease(db, monkeypatch, cancell
         gw.run_outcome.reset(token)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("holder", [None, "turn-A"])
-def test_pending_capture_preserves_finished_receipt(holder):
+@pytest.mark.parametrize("failed", [False, True])
+async def test_finished_worker_preserves_frozen_receipt(holder, failed):
     owned = {"session_id": "chat", "lease_holder": holder}
     token = gw.run_outcome.set(owned.copy())
+    completed = asyncio.get_running_loop().create_future()
+    if failed:
+        completed.set_exception(ValueError("worker failed"))
+    else:
+        completed.set_result({"done": True})
+    worker = SimpleNamespace(executor_task=completed)
+    ctx = SimpleNamespace(agent_holder=[SimpleNamespace(
+        session_id="new-chat", _last_session_turn_lease_holder="turn-B")])
     try:
-        gw.capture_pending_run_outcome(SimpleNamespace(session_id="new-chat", _last_session_turn_lease_holder="turn-B"))
+        call = GatewayTurnMixin._run_agent_await_turn_worker(None, worker, ctx, None, None)
+        if failed:
+            with pytest.raises(ValueError, match="worker failed"):
+                await call
+        else:
+            assert await call == {"done": True}
         assert gw.run_outcome.get() == owned
     finally:
         gw.run_outcome.reset(token)
@@ -192,7 +211,6 @@ def test_no_run_scope_never_names_successor():
     token = gw.run_outcome.set(None)
     try:
         gw.capture_run_outcome(SimpleNamespace(_last_session_turn_lease_holder="foreign"))
-        gw.capture_pending_run_outcome(SimpleNamespace(_last_session_turn_lease_holder="foreign"))
         runner = SimpleNamespace(_session_state=lambda key: pytest.fail("mutable slot read"))
         assert gw.concluding_turn_identity(runner, None, "key") == frozenset()
     finally:

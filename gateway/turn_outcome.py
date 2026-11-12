@@ -30,13 +30,6 @@ def capture_run_outcome(agent) -> None:
         owned["session_id"] = str(getattr(agent, "session_id", "") or owned["session_id"] or "")
 
 
-def capture_pending_run_outcome(agent) -> None:
-    """Fill missing evidence on handler abandonment, retaining a finished worker's receipt."""
-    owned = run_outcome.get()
-    if owned is not None and "lease_holder" not in owned:
-        capture_run_outcome(agent)
-
-
 def concluding_turn_identity(runner, event=None, session_key: Optional[str] = None) -> frozenset:
     """The concluding gateway turn's OWN evidence: its routing ``active_turn_token`` (the event owns it until
     ``_clear_durable_active_turn``) and its agent's turn-lease holder. Never a snapshot of the chat's live

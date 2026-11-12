@@ -8,7 +8,7 @@ import threading
 async def await_turn_worker(runner, worker, turn_ctx, interrupt_detected, interrupt_monitor):
     """Poll the executor, preserving this run's evidence even on timeout/cancellation."""
     from gateway.run import _abandon_timed_out_gateway_turn
-    from gateway.turn_outcome import capture_pending_run_outcome
+    from gateway.turn_outcome import capture_run_outcome
 
     agent_holder = turn_ctx.agent_holder
     warning_fired = False
@@ -36,6 +36,8 @@ async def await_turn_worker(runner, worker, turn_ctx, interrupt_detected, interr
             await runner._run_agent_backup_interrupt_check(turn_ctx, interrupt_detected, interrupt_monitor)
         return runner._run_agent_timeout_result(worker, turn_ctx)
     finally:
-        # The worker can still be inside run_conversation. Do not consult the
-        # replacement session turn slot or overwrite an already finished receipt.
-        capture_pending_run_outcome(agent_holder[0])
+        # A queued follow-up shares the handler scope, so an existing receipt may
+        # belong to its predecessor. Only this worker's completion proves that
+        # its frozen receipt is ready and the cached agent must not be reread.
+        if not worker.executor_task.done():
+            capture_run_outcome(agent_holder[0])
