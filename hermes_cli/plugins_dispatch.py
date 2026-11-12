@@ -65,6 +65,32 @@ _HOOK_TIMEOUT_SUPPRESSION_SECONDS = 60.0
 # Live workers a hung callback may accumulate before it is skipped outright (#105223 / #98382).
 _HOOK_MAX_ABANDONED_WORKERS = 3
 _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE = "pre_tool_call plugin callback timed out or is still running"
+# [daveey] Kanban calls a worker needs to park or report. A skipped (slow/hung) fail-closed guard does not
+# refuse these: refusing them turns a short host stall into a failed run booked as the worker's protocol
+# violation. kanban_complete stays fail-closed (it finishes the card; a guard may need to veto it).
+_HOOK_SKIP_EXEMPT_LIFECYCLE_TOOLS = frozenset({
+    "kanban_block", "kanban_continue", "kanban_schedule", "kanban_heartbeat", "kanban_comment",
+    "kanban_request_review",
+})
+
+
+def _callback_label(cb: Callable) -> tuple[str, str]:
+    """``(name, module)`` of a hook callback: the module names the plugin (many share a callback name)."""
+    return getattr(cb, "__name__", repr(cb)), getattr(cb, "__module__", None) or "unknown plugin"
+
+
+def _lifecycle_exempt(hook_name: str, kwargs: Mapping[str, Any]) -> bool:
+    """A ``pre_tool_call`` for a Kanban lifecycle tool, which a skipped guard does not refuse."""
+    return hook_name == "pre_tool_call" and kwargs.get("tool_name") in _HOOK_SKIP_EXEMPT_LIFECYCLE_TOOLS
+
+
+def _skipped_policy_block_directive(cb: Callable, retry_in: Optional[float]) -> dict[str, str]:
+    """Refusal for a skipped fail-closed callback, naming the plugin and when a retry can pass."""
+    name, module = _callback_label(cb)
+    when = (f"retry in {max(1, round(retry_in))} s" if retry_in is not None
+            else "retry shortly")
+    return {"action": "block",
+            "message": f"{_PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE} (plugin {module}, callback {name}); {when}"}
 
 # The one hook whose callback rewrites the reply the user would otherwise see streaming.
 STREAM_HOLDING_HOOK = "transform_llm_output"
@@ -359,7 +385,9 @@ class PluginDispatchMixin:
                         if failed is not None:
                             failed.append(cb)
                         if fail_closed:  # policy hook: fail closed with a block directive
-                            results.append({"action": "block", "message": _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE})
+                            directive = self._skipped_policy_directive(hook_name, cb, kwargs)
+                            if directive is not None:
+                                results.append(directive)
                         continue
                 else:
                     ret = self._invoke_hook_callback(cb, kwargs)
@@ -372,6 +400,26 @@ class PluginDispatchMixin:
                 if fail_closed:  # a guard that raised made no decision: same veto as a timeout
                     results.append(_policy_error_block_directive(hook_name, cb, exc))
         return results
+
+    def _skipped_policy_directive(self, hook_name: str, cb: Callable, kwargs: dict[str, Any]) -> Optional[dict[str, str]]:
+        """Block directive for a skipped fail-closed callback, or ``None`` for a Kanban lifecycle tool:
+        a worker must still be able to park or report while one guard is slow (the tool runs unguarded
+        by this callback, with one WARNING naming it)."""
+        tool_name = kwargs.get("tool_name")
+        name, module = _callback_label(cb)
+        if _lifecycle_exempt(hook_name, kwargs):
+            logger.warning(
+                "Hook '%s' callback %s (%s) skipped; running Kanban lifecycle tool %s without it",
+                hook_name, name, module, tool_name)
+            return None
+        return _skipped_policy_block_directive(cb, self._hook_suppression_remaining(hook_name, cb))
+
+    def _hook_suppression_remaining(self, hook_name: str, cb: Callable) -> Optional[float]:
+        """Seconds left in *cb*'s post-timeout suppression window, or ``None`` when none is active."""
+        with self._hook_timeout_lock:
+            until = self._hook_timeout_suppressed_until.get((hook_name, id(cb)))
+        left = None if until is None else until - time.monotonic()
+        return left if left is not None and left > 0 else None
 
     def _report_hook_failure(
         self, hook_name: str, cb: Callable, kwargs: dict[str, Any], exc: BaseException, *, surface: str = "Hook"
@@ -404,7 +452,7 @@ class PluginDispatchMixin:
         suppressed, still running for this call id, over the abandoned-worker cap, timed out
         (worker abandoned, never joined), or the worker could not be started. Exceptions
         propagate."""
-        callback_name = getattr(cb, "__name__", repr(cb))
+        callback_name, module = _callback_label(cb)
         # Suppression is a fact about the CALLBACK — a hung one must keep its back-off —
         # so that key stays coarse. The gate must instead tell CONCURRENT CALLS apart.
         suppression_key = (hook_name, id(cb))
@@ -412,11 +460,16 @@ class PluginDispatchMixin:
         token = object()
         with self._hook_timeout_lock:
             suppressed_until = self._hook_timeout_suppressed_until.get(suppression_key)
+            now = time.monotonic()
             if (gate_key in self._hook_running_callbacks
-                    or (suppressed_until is not None and suppressed_until > time.monotonic())):
-                logger.warning(
-                    "Hook '%s' callback %s skipped after previous "
-                    "timeout or while still running", hook_name, callback_name)
+                    or (suppressed_until is not None and suppressed_until > now)):
+                why = (f"retry in {max(1, round(suppressed_until - now))} s"
+                       if suppressed_until is not None and suppressed_until > now else "a call is still running")
+                # An exempt lifecycle call logs its one WARNING when it runs without this guard.
+                logger.log(
+                    logging.DEBUG if _lifecycle_exempt(hook_name, kwargs) else logging.WARNING,
+                    "Hook '%s' callback %s (%s) skipped after previous "
+                    "timeout or while still running (%s)", hook_name, callback_name, module, why)
                 return _HOOK_SKIPPED
             # Workers abandoned on timeout still hold threads. Once the suppression window has
             # passed, a fresh call id may start a new worker (a hung guard must not fail every
@@ -429,7 +482,7 @@ class PluginDispatchMixin:
                 logger.warning(
                     "Hook '%s' callback %s (%s) skipped: %d abandoned worker(s) still running — "
                     "the plugin is hung; fix or disable it (retried when a worker finishes)",
-                    hook_name, callback_name, getattr(cb, "__module__", "unknown plugin"), len(abandoned))
+                    hook_name, callback_name, module, len(abandoned))
                 return _HOOK_SKIPPED
             if suppressed_until is not None:
                 self._hook_timeout_suppressed_until.pop(suppression_key, None)
@@ -462,8 +515,8 @@ class PluginDispatchMixin:
                 done.set()
                 if budget.abandoned.is_set():
                     logger.warning(
-                        "Hook '%s' callback %s finished %.1fs after the host stopped waiting — result discarded",
-                        hook_name, callback_name, time.monotonic() - budget.deadline)
+                        "Hook '%s' callback %s (%s) finished %.1fs after the host stopped waiting — result discarded",
+                        hook_name, callback_name, module, time.monotonic() - budget.deadline)
 
         thread = threading.Thread(target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True)
         try:
@@ -471,8 +524,8 @@ class PluginDispatchMixin:
         except RuntimeError as exc:
             _release_token()  # the runner's finally never runs when OS thread creation fails
             logger.warning(
-                "Hook '%s' callback %s worker failed to start: %s — skipping",
-                hook_name, callback_name, exc)
+                "Hook '%s' callback %s (%s) worker failed to start: %s — skipping",
+                hook_name, callback_name, module, exc)
             return _HOOK_SKIPPED
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
             budget.abandoned.set()  # before any bookkeeping: the callback must see it as soon as possible
@@ -486,7 +539,8 @@ class PluginDispatchMixin:
                 if self._hook_running_callbacks.get(gate_key) is token:
                     self._hook_abandoned.setdefault(suppression_key, set()).add(gate_key)
             logger.warning(
-                "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name, timeout)
+                "Hook '%s' callback %s (%s) timed out after %gs — skipping; suppressed for %gs",
+                hook_name, callback_name, module, timeout, self._hook_timeout_suppression_seconds)
             return _HOOK_SKIPPED
         if "exc" in failure:
             raise failure["exc"]
@@ -686,7 +740,7 @@ class PluginDispatchMixin:
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
         for cb in self._hooks.get(hook_name, []):
-            callback_name = getattr(cb, "__name__", repr(cb))
+            callback_name, module = _callback_label(cb)
             try:
                 ret = cb(**self._hook_callback_kwargs(cb, kwargs))
                 if inspect.isawaitable(ret):
@@ -694,9 +748,12 @@ class PluginDispatchMixin:
                 if ret is not None:
                     results.append(ret)
             except TimeoutError:
-                logger.warning("Hook '%s' callback %s timed out after %.0fs", hook_name, callback_name, timeout)
-                if fail_closed:  # policy hook: fail closed with a block directive
-                    results.append({"action": "block", "message": _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE})
+                logger.warning("Hook '%s' callback %s (%s) timed out after %.0fs",
+                               hook_name, callback_name, module, timeout)
+                if fail_closed:  # policy hook: fail closed (a Kanban lifecycle tool still runs)
+                    directive = self._skipped_policy_directive(hook_name, cb, kwargs)
+                    if directive is not None:
+                        results.append(directive)
             except (Exception, SystemExit) as exc:
                 # Same isolation + failure contract as the sync path (#111922 warn-once, #109624
                 # a raising policy guard fails closed).
