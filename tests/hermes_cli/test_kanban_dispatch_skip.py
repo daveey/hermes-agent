@@ -284,3 +284,157 @@ def test_skip_records_neither_reset_a_guard_hold_nor_grow_without_bound(board, m
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
         assert not skips.record(conn, tid, "per_profile_capped", detail="a")  # off the lane: nothing waits
+
+
+# --- flapping details, the pickup round trip, concurrent writers (hub 2026-11-12) ------------------------------
+# t_01a1c75a008956d3 got 8 rows in 5 min: claim_deferred flapped capacity <-> hub_cpu_at_or_above_limit, and the
+# dedupe only compared the newest row. One identical pair (28 s apart) came from the pickup copy being evicted and
+# re-imported from a replica that had not pulled the host's own just-pushed skip back yet.
+
+FLAP = ("capacity", "hub_cpu_at_or_above_limit")
+
+
+def _deferred(tid, detail):
+    from types import SimpleNamespace
+    return SimpleNamespace(claim_deferred=[(tid, detail)])
+
+
+def test_flapping_detail_over_40_ticks_keeps_two_rows_and_latest_tracks_the_current_one(board, monkeypatch):
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(qp, "_running_and_limit", lambda *_a: (4, 7))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="flapping", assignee="a")
+        for i in range(40):
+            detail = FLAP[i % 2]
+            skips.record_tick(conn, _deferred(tid, detail))
+            assert skips.latest(conn, tid)["detail"] == detail, i
+            place = qp.position(conn, kb.get_task(conn, tid))
+            assert f"the Board deferred its claim ({detail})" in qp.describe(place), i
+            clock[0] += 10
+        assert [(p["reason"], p["detail"]) for p in _skips(conn, tid)] == [("claim_deferred", d) for d in FLAP]
+
+
+def test_latest_tracks_the_current_skip_after_the_episode_cap(board, monkeypatch):
+    clock = _clock(monkeypatch)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="capped", assignee="a")
+        for i in range(skips.MAX_PER_EPISODE):
+            assert skips.record(conn, tid, "claim_deferred", detail=f"code{i}")
+            clock[0] += 1
+        assert not skips.record(conn, tid, "claim_deferred", detail="past_the_cap")
+        assert len(_skips(conn, tid)) == skips.MAX_PER_EPISODE
+        assert skips.latest(conn, tid)["detail"] == "past_the_cap"
+        clock[0] += 1
+        assert not skips.record(conn, tid, "claim_deferred", detail="code3")  # flaps back: still no row
+        assert skips.latest(conn, tid)["detail"] == "code3"
+
+
+def test_since_is_kept_while_the_skip_stays_current_and_writes_are_throttled(board, monkeypatch):
+    clock = _clock(monkeypatch)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="steady", assignee="a")
+        skips.record(conn, tid, "claim_deferred", detail="capacity")
+        def seen_at():
+            return conn.execute(f"SELECT seen_at FROM {skips.SEEN_TABLE} WHERE task_id = ?", (tid,)).fetchone()[0]
+        for _ in range(5):
+            clock[0] += 10
+            skips.record(conn, tid, "claim_deferred", detail="capacity")
+        assert seen_at() == START  # inside the refresh window: no write
+        clock[0] += skips.SEEN_REFRESH_SECONDS
+        skips.record(conn, tid, "claim_deferred", detail="capacity")
+        assert seen_at() == clock[0]
+        assert skips.latest(conn, tid)["at"] == START  # the current reason holds since its first tick
+
+
+def test_reimported_copy_missing_its_own_skip_does_not_append_it_again(board, monkeypatch):
+    clock = _clock(monkeypatch)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="picked up", assignee="a")
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "continued", {})
+        clock[0] += 5
+        assert skips.record(conn, tid, "claim_deferred", detail="hub_cpu_at_or_above_limit")
+        pushed = conn.execute("SELECT task_id, run_id, kind, payload, created_at FROM task_events "
+                              "WHERE task_id = ? AND kind = ?", (tid, skips.EVENT)).fetchone()
+        # evict + import_cards: the history comes back renumbered, without the skip the replica has not pulled yet.
+        rows = conn.execute("SELECT task_id, run_id, kind, payload, created_at FROM task_events WHERE task_id = ? "
+                            "AND kind != ? ORDER BY id", (tid, skips.EVENT)).fetchall()
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (tid,))
+            conn.executemany("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                             "VALUES (?, ?, ?, ?, ?)", [tuple(r) for r in rows])
+        clock[0] += 28
+        assert not skips.record(conn, tid, "claim_deferred", detail="hub_cpu_at_or_above_limit")
+        assert _skips(conn, tid) == []
+        assert skips.latest(conn, tid)["detail"] == "hub_cpu_at_or_above_limit"
+        with kb.write_txn(conn):  # the replica catches up: exactly one row
+            conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+                         tuple(pushed))
+        assert len(_skips(conn, tid)) == 1
+
+
+def test_a_new_episode_starts_a_fresh_skip_history(board, monkeypatch):
+    clock = _clock(monkeypatch)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="again", assignee="a")
+        skips.record(conn, tid, "claim_deferred", detail="capacity")
+        clock[0] += 5
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "continued", {})
+        assert skips.latest(conn, tid) is None
+        clock[0] += 5
+        assert skips.record(conn, tid, "claim_deferred", detail="capacity")  # a key of the old episode is news
+        assert skips.latest(conn, tid)["at"] == clock[0]
+
+
+def test_another_writers_newer_skip_wins_until_this_host_records_again(board, monkeypatch):
+    clock = _clock(monkeypatch)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="two writers", assignee="a")
+        skips.record(conn, tid, "claim_deferred", detail="capacity")
+        clock[0] += 30
+        with kb.write_txn(conn):  # synced in from another machine's dispatcher
+            kb._append_event(conn, tid, skips.EVENT, {"reason": "skipped_ineligible", "detail": "labels_mismatch"})
+        assert skips.latest(conn, tid)["detail"] == "labels_mismatch"
+        clock[0] += skips.SEEN_REFRESH_SECONDS
+        skips.record(conn, tid, "claim_deferred", detail="capacity")
+        assert skips.latest(conn, tid)["detail"] == "capacity"
+
+
+@pytest.mark.parametrize("precheck", [True, False])
+def test_two_connections_recording_the_same_key_concurrently_write_one_row(board, monkeypatch, precheck):
+    import threading
+    _clock(monkeypatch)
+    if not precheck:  # both reach the write lock: the in-transaction recheck alone must dedupe
+        monkeypatch.setattr(skips, "_settled", lambda *_a: False)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="raced", assignee="a")
+    gate, results, errors = threading.Barrier(2), [], []
+
+    def writer():
+        try:
+            with kbc.connect() as mine:
+                gate.wait(timeout=10)
+                results.append(skips.record(mine, tid, "claim_deferred", detail="hub_cpu_at_or_above_limit"))
+        except Exception as exc:  # surfaced below
+            errors.append(exc)
+    threads = [threading.Thread(target=writer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not errors and sorted(results) == [False, True]
+    with kbc.connect() as conn:
+        assert len(_skips(conn, tid)) == 1
+
+
+def test_seen_rows_are_pruned(board, monkeypatch):
+    clock = _clock(monkeypatch)
+    with kbc.connect() as conn:
+        old = kb.create_task(conn, title="old", assignee="a")
+        skips.record(conn, old, "claim_deferred", detail="capacity")
+        clock[0] += skips.SEEN_RETENTION_SECONDS + 1
+        fresh = kb.create_task(conn, title="fresh", assignee="a")
+        skips.record_tick(conn, _deferred(fresh, "capacity"))
+        assert [r[0] for r in conn.execute(f"SELECT task_id FROM {skips.SEEN_TABLE}")] == [fresh]
+        assert skips.latest(conn, old)["detail"] == "capacity"  # falls back to the durable row
