@@ -148,8 +148,11 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
         def send(data):
             with write_lock:
                 cancelled = pause_event is not None and pause_event.is_set()
-                writer.write(json.dumps({"id": request_id, "cancel": cancelled, **data}) + "\n")
-                writer.flush()
+                try:
+                    writer.write(json.dumps({"id": request_id, "cancel": cancelled, **data}) + "\n")
+                    writer.flush()
+                except BrokenPipeError:
+                    pass  # The worker is gone; its stdout EOF reports the missing result.
 
         def watch_pause():
             assert pause_event is not None
@@ -200,6 +203,10 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
             stopped.set()
             if monitor is not None:
                 monitor.join()
+            try:
+                writer.close()  # Popen.__exit__ would re-flush a write the dead worker refused.
+            except BrokenPipeError:
+                pass
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=5)

@@ -514,8 +514,17 @@ def test_invalid_arguments_keep_the_engine_exception_type(client):
         client.ensure("no-such-package", explicit=True)
 
 
-def test_worker_death_reports_transport_failure(client, monkeypatch, isolated_python):
+@pytest.mark.parametrize("exits_before_request", [False, True], ids=["natural", "exits-before-request"])
+def test_worker_death_reports_transport_failure(client, monkeypatch, isolated_python, exits_before_request):
     monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: [str(isolated_python), "-I", "-c", "import os; os._exit(7)"])
+    if exits_before_request:
+        # A starved caller can reach its first write after the worker is gone (EPIPE).
+        class ExitedFirst(subprocess.Popen):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.wait(timeout=120)
+
+        monkeypatch.setattr(subprocess, "Popen", ExitedFirst)
     with pytest.raises(InstallError, match="worker.*result"):
         client.ensure("node", explicit=True)
 
