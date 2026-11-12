@@ -91,9 +91,8 @@ def cli_creation(args, body, workspace_kind, workspace_path, board, task, *, ski
     runs_on = getattr(args, "runs_on", None)
     if runs_on is not None:
         return {**result, "runs_on": runs_on, "why": "execution labels specified by the caller"}
-    fields = _cli_fields(args, body, workspace_kind, workspace_path, board)
-    fields["assignee"] = task.assignee
     try:
+        fields = _cli_fields(args, body, workspace_kind, workspace_path, board, assignee=task.assignee)
         result["why"] = local_why(fields, fallback="CLI creates on this gateway")
     except Exception:  # health: allow BLE001 -- diagnostics cannot fail an already committed create
         result["why"] = "portability diagnostic failed"

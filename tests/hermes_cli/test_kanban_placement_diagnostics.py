@@ -166,13 +166,27 @@ def test_cli_diagnostic_judges_the_resolved_assignee(local_board):
     assert out == {"where": "local", "why": "assignee not allowlisted"}
 
 
-def test_cli_diagnostic_failure_does_not_fail_committed_create(local_board, monkeypatch):
+@pytest.mark.parametrize("module,attr", [("kanban_placement_diagnostics", "local_why"),
+                                         ("kanban_worker_placement", "_cli_fields")])
+def test_cli_diagnostic_failure_does_not_fail_committed_create(local_board, monkeypatch, module, attr):
+    """Field building is diagnostic too: helper drift (e.g. a new keyword-only argument)
+    must not turn an already committed create into a CLI crash."""
+    import importlib
+    import sys
+
     from hermes_cli import kanban as cli
-    from hermes_cli import kanban_placement_diagnostics as diagnostics
+    target = importlib.import_module(f"hermes_cli.{module}")
+    real = getattr(target, attr)
+    calls = []
+
     def broken(*args, **kwargs):
+        if sys._getframe(1).f_code.co_name != "cli_creation":
+            return real(*args, **kwargs)  # cli_policy/cli_audit judge the same fields before the commit
+        calls.append(attr)
         raise ValueError("broken diagnostic")
-    monkeypatch.setattr(diagnostics, "local_why", broken)
+    monkeypatch.setattr(target, attr, broken)
     out = json.loads(cli.run_slash("create 'Inspect special-device' --assignee default --json"))
+    assert calls == [attr]
     assert out["placement"] == {"where": "local", "why": "portability diagnostic failed"}
     with kbc.connect() as conn:
         assert kb.get_task(conn, out["id"]) is not None
