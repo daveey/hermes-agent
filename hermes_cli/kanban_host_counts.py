@@ -52,11 +52,34 @@ def board_of(conn: sqlite3.Connection) -> Optional[str]:
         return None
 
 
+def _own_gateway(conn: sqlite3.Connection) -> Optional[str]:
+    """The file's own gateway id when the file says it is a ``primary`` synced board, else None.
+
+    Read from ``kanban_sync_state`` in the file, not from ``kanban_db_sync.board_mode``: that answers ``off`` unless
+    THIS process installed sync on the file, and a fenced worker's ``mode=ro`` connection (or another board's file
+    opened here) never does. hermes-hub 2026-11-12: a worker's ``kanban show`` said "14/7 running" while the gateway
+    held 6, because 8 cards leased to pool workers were counted as local slots. No ``kanban_sync_state`` table, no
+    row, or a mode other than ``primary`` counts every running card. A primary row without a gateway id, or a
+    state that cannot be read, raises (the caller reports the count unknown)."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_sync_state'").fetchone():
+        return None
+    row = conn.execute("SELECT mode, gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
+    if row is None or row[0] != "primary":
+        return None
+    if not row[1]:
+        raise ValueError("primary kanban_sync_state has no gateway_id")
+    return str(row[1])
+
+
 def _running_in(conn: sqlite3.Connection) -> int:
-    """Running cards on ``conn``'s file this gateway owns (a card another gateway's lease holds is elsewhere)."""
-    from hermes_cli import kanban_db as kb
+    """Running cards on ``conn``'s file this gateway owns (a card another gateway's lease holds is elsewhere: the
+    same condition as ``kanban_db_sync.held_elsewhere_sql``, keyed on the file's state, see :func:`_own_gateway`)."""
+    own = _own_gateway(conn)
+    if own is None:
+        return int(conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'").fetchone()[0])
     return int(conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'running'" + kb._sync.held_elsewhere_sql(conn)).fetchone()[0])
+        "SELECT COUNT(*) FROM tasks WHERE status = 'running' "
+        "AND NOT (lease_holder IS NOT NULL AND lease_holder != ? AND claim_lock IS NULL)", (own,)).fetchone()[0])
 
 
 def _running_in_file(path: Path) -> int:

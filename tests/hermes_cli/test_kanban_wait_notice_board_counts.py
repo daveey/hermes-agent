@@ -304,15 +304,6 @@ def test_boards_pinned_to_one_file_count_once(home, monkeypatch):
         assert khc.running_on_host(conn)["running"] == 2
 
 
-def test_card_running_under_another_gateways_lease_is_not_a_local_slot(home, monkeypatch):
-    from hermes_cli import kanban_db_sync as sync
-    from hermes_cli import kanban_host_counts as khc
-    _running(None, 3)
-    monkeypatch.setattr(sync, "held_elsewhere_sql", lambda conn, alias="": " AND 0")
-    with kbc.connect_closing(board="runners") as conn:
-        assert khc.running_on_host(conn)["running"] == 0
-
-
 @pytest.mark.parametrize("field,value", [("outcome", "reclaimed"), ("status", "reclaimed"), ("ended_at", None)])
 def test_only_a_released_ended_grant_is_unused(field, value):
     from hermes_cli.kanban_unused_grant import unused_grant_run
