@@ -198,3 +198,56 @@ def test_draining_owner_still_answers_status_and_cancel_of_admitted_cron_work(tm
         asyncio.run(probe())
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_draining_owner_answers_an_external_firers_cron_observation_over_the_socket(tmp_path, monkeypatch):
+    """The restart-safe cron worker fires out of process: it submits and then polls ``cron.status``
+    over an operator WebSocket. A restart's after-turn wait refused every operator verb outside the
+    interactive allowlist with ``runtime_draining``, so the worker's poll was refused, the firer gave
+    up (CronExecutionUnknown: pause + released fire claim) and the still-running gateway-side run
+    then died with "cron fire ownership was lost" (hub kanban-hub-pin-sweep, 2026-11-12 12:47Z).
+    Observing/stopping admitted work stays reachable during the drain; a new submit stays fenced."""
+    from cron import jobs
+    from gateway import run
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    from gateway.session_authority import SessionAuthority
+    from gateway.session_controls import AuthorityConnection
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setattr(jobs, 'get_job', lambda jid: {'id': jid, 'prompt': 'p', 'model': 'm'})
+    monkeypatch.setattr(run, '_load_gateway_config', lambda: {'model': {}, 'platform_toolsets': {'cli': []}})
+    db = SessionDB(tmp_path / 'state.db')
+    runner = SimpleNamespace(_draining=False, _running=True,
+                             session_store=SessionStore(tmp_path / 'sessions', GatewayConfig()), adapters={})
+    authority = SessionAuthority(runner, profile_id=str(tmp_path), instance_id='owner', db=db,
+                                 epoch=begin_runtime_epoch(db, instance_id='owner'))
+    runner.session_authority = authority
+    monkeypatch.setattr(authority, '_schedule', lambda ref: None)
+    firer = AuthorityConnection(authority, object(), {'user_id': 'owner'}, operator=True)
+    fire = {'job_id': 'job', 'request_id': 'fire', 'extra_prompt': None}
+
+    async def call(method, **params):
+        return await firer.dispatch({'id': 1, 'method': method, 'params': params})
+
+    try:
+        submitted = await call('cron.submit', **fire)
+        receipt = submitted['result']
+        runner._draining = True  # a restart's after-turn wait begins while the fire runs
+        runner.session_runtime_descriptor = {'state': 'draining', 'drain_reason': 'restart_wait'}
+        status = await call('cron.status', **receipt)
+        assert 'error' not in status, status
+        assert status['result']['status'] == 'queued'
+        recovered = await call('cron.recover', **fire)
+        assert 'error' not in recovered, recovered
+        assert recovered['result']['admission_id'] == receipt['admission_id']
+        cancelled = await call('cron.cancel', **receipt)
+        assert cancelled.get('error', {}).get('message') != 'runtime_draining', cancelled
+        refused = await call('cron.submit', **dict(fire, request_id='next'))
+        assert refused['error']['message'] == 'runtime_draining'
+    finally:
+        await firer.close()
+        db.close()
