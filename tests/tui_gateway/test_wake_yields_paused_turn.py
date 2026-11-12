@@ -27,6 +27,13 @@ KEY = "paused"
 _REAL_PROFILE_HOME = server._profile_home  # the recovery fixture stubs it; these tests need the real resolver
 
 
+@pytest.fixture(autouse=True)
+def _waker_predates_the_pause(monkeypatch):
+    """This process did not restart with the writer: the window counts from the pause stamp (the other clock is
+    covered in test_cold_resume_yields_paused_turn.py)."""
+    monkeypatch.setattr(up, "_process_started_at", lambda: 0.0)
+
+
 def _loaded() -> bool:
     return server._find_live_session_by_key(KEY) is not None
 
@@ -41,7 +48,7 @@ def _edit_marker(home, **fields) -> None:
 def test_headless_wake_leaves_a_fresh_paused_turn_to_its_successor(recovery, caplog):
     before = read_turn_marker(recovery.home, KEY)
     assert before["reason"] == up.PAUSE_REASON
-    with caplog.at_level("INFO", logger="tui_gateway.server"):
+    with caplog.at_level("INFO", logger="tui_gateway.update_pause"):
         verdict = server._wake_session_turn(KEY, "a card finished", display_kind="kanban_notice",
                                             label="kanban-sweep-wake")
     assert verdict == "busy"  # the sweeper writes the passive notice row; the continuation reads it
@@ -52,7 +59,7 @@ def test_headless_wake_leaves_a_fresh_paused_turn_to_its_successor(recovery, cap
 
 
 def test_wake_continues_a_pause_no_successor_picked_up(recovery):
-    old = time.time() - up.SUCCESSOR_YIELD_S - 1
+    old = time.time() - up.SUCCESSOR_YIELD_UNKNOWN_S - 1
     _edit_marker(recovery.home, started_at=old, paused_at=old)
     server._wake_session_turn(KEY, "a card finished", display_kind="kanban_notice", label="kanban-sweep-wake")
     assert _loaded()
@@ -111,7 +118,7 @@ def test_a_fresh_pause_in_a_profile_home_is_left_to_its_successor(recovery, prof
     monkeypatch.setattr("tui_gateway.turn_marker.marker_writer_state", lambda marker: "dead")  # no real pid probe
     _profile(profiles_root.root, "Not A Profile!")
     work = _profile(profiles_root.root, "work")
-    old = time.time() - up.SUCCESSOR_YIELD_S - 1
+    old = time.time() - up.SUCCESSOR_YIELD_UNKNOWN_S - 1
     _edit_marker(recovery.home, started_at=old, paused_at=old)  # the launch home owes nothing
     record_turn_start(work, KEY, "finish the request")
     mark_turn_paused(work, KEY, up.PAUSE_REASON)

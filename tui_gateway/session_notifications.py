@@ -1639,6 +1639,9 @@ def _wake_chat_for_readopted_exit(key: str):
     if handler is None:
         logger.warning("readopt wake: session.resume not installed; %s waits until it is opened", key)
         return None
+    from tui_gateway.update_pause import readopt_wake_yields
+    if readopt_wake_yields(key):  # [daveey] waited out a paused turn's hand-off and the chat is now loaded here
+        return None
     for n, profile in zip(_it.count(1), _readopt_wake_profiles()):
         params = {"session_id": key, "omit_messages": True, **({"profile": profile} if profile else {})}
         try:
@@ -1699,12 +1702,9 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
     try:
         live = _find_live_session_by_key(key)
         if live is None:
-            # [daveey] A turn paused for an update belongs to the restarting backend's startup sweep; resuming it
-            # here would continue it in a process its viewers are not attached to (update_pause).
-            from tui_gateway.update_pause import paused_turn_homes, successor_owes_continuation
-            if any(successor_owes_continuation(h, key) for h in paused_turn_homes(_hermes_home, _readopt_wake_profiles())):
-                logger.info("%s: %s is paused for a Hermes update and its backend is restarting; left to that "
-                            "backend's continuation", label, key)
+            # [daveey] A paused turn is its restarting backend's: here its viewers are not attached (update_pause).
+            from tui_gateway.update_pause import left_to_successor
+            if left_to_successor(_hermes_home, _readopt_wake_profiles(), key, label):
                 return "busy"
             handler = _methods.get("session.resume")
             if handler is None:
