@@ -181,8 +181,9 @@ def decompose_triage_task(
 
     if not children:
         return None
+    from hermes_cli.kanban_gate_only import create_assignee
     if root_assignee is not None:
-        root_assignee = _canonical_assignee(root_assignee)
+        root_assignee = create_assignee(_canonical_assignee(root_assignee))  # gate-only -> its queue [daveey]
     _validate_children_graph(children)
 
     # ONE txn so the fan-out is atomic; helpers that open their own write_txn
@@ -279,7 +280,9 @@ def _insert_decomposed_child(
     new_id = new_task_id(conn)
     import json
     from hermes_cli.kanban_capabilities import check_declaration, validate_assignment
-    assignee = _canonical_assignee(child.get("assignee"))
+    from hermes_cli.kanban_gate_only import create_assignee
+    # A fan-out child is a fresh card: a gate-only pick files under its queue, as a create would. [daveey]
+    assignee = create_assignee(_canonical_assignee(child.get("assignee")))
     if require_declaration:
         check_declaration(child.get("requires"), child_ws_kind, assignee=assignee,
                           where=f"tasks[{index}].requires")

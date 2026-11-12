@@ -167,6 +167,9 @@ def _build_roster() -> tuple[list[dict], set[str]]:
     except Exception as exc:
         logger.warning("decompose: failed to list profiles: %s", exc)
         return [], set()
+    from hermes_cli.kanban_gate_only import gate_only_assignees
+    gate_only = set(gate_only_assignees())  # only their admission gate assigns them, never the decomposer [daveey]
+    all_profiles = [p for p in all_profiles if p.name not in gate_only]
     roster = []
     for p in all_profiles:
         desc = (p.description or "").strip()

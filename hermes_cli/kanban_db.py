@@ -3615,13 +3615,13 @@ def specify_triage_task(
     conn: sqlite3.Connection, task_id: str, *, title: Optional[str] = None,
     body: Optional[str] = None, assignee: Optional[str] = None, author: Optional[str] = None,
 ) -> bool:
-    """Update title/body/assignee (when given) and move ``triage -> todo`` in one
-    txn; False when not in triage. Lands in ``todo`` (not ``ready``) so parent
-    gating still applies; the audit comment is written only when a field changed.
+    """Update title/body/assignee (when given) and move ``triage -> todo`` in one txn; False when not in triage.
+    Lands in ``todo`` (not ``ready``) so parent gating still applies; the audit comment only when a field changed.
     """
     if title is not None and not title.strip():
         raise ValueError("title cannot be blank")
-    assignee = _canonical_assignee(assignee)
+    from hermes_cli.kanban_gate_only import create_assignee
+    assignee = create_assignee(_canonical_assignee(assignee))  # promotion is not the gate: gate-only -> queue [daveey]
     with write_txn(conn):
         existing = conn.execute(
             "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",

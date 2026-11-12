@@ -157,3 +157,36 @@ def test_board_home_config_declares_it_too(home, monkeypatch, tmp_path):
     from hermes_cli import config
     monkeypatch.setattr(config, "load_config_readonly", dict)
     assert go.gate_only_assignees() == {"bb-repair-native": "bb-queue"}
+
+
+def test_triage_fanout_files_a_gate_only_pick_under_the_queue(home):
+    """Review 5878651070: the auto-decomposer inserts children by raw INSERT, never create_task."""
+    from hermes_cli.kanban_db_graph import decompose_triage_task
+    _gate(home)
+    with kbc.connect() as conn:
+        root = kb.create_task(conn, title="fix BB-12", created_by="bb-dev", triage=True)
+        kids = decompose_triage_task(conn, root, root_assignee="bb-repair-native", children=[
+            {"title": "native repair", "assignee": "bb-repair-native", "requires": []},
+            {"title": "write it up", "assignee": "default", "requires": []}], author="decomposer")
+        assert [kb.get_task(conn, k).assignee for k in kids] == ["bb-queue", "default"]
+        assert kb.get_task(conn, root).assignee == "bb-queue"
+
+
+def test_triage_single_task_promotion_files_a_gate_only_pick_under_the_queue(home):
+    _gate(home)
+    with kbc.connect() as conn:
+        root = kb.create_task(conn, title="fix BB-12", created_by="bb-dev", triage=True)
+        assert kb.specify_triage_task(conn, root, assignee="bb-repair-native", author="decomposer")
+        assert kb.get_task(conn, root).assignee == "bb-queue"
+
+
+def test_decomposer_roster_never_offers_a_gate_only_profile(home):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from hermes_cli import kanban_decompose as kd
+    profiles = [SimpleNamespace(name=n, description=f"desc {n}") for n in ("default", "bb-repair-native")]
+    with patch("hermes_cli.profiles.list_profiles", return_value=profiles):
+        assert kd._build_roster()[1] == {"default", "bb-repair-native"}  # without the config: offered
+        _gate(home)
+        roster, names = kd._build_roster()
+    assert names == {"default"} and [e["name"] for e in roster] == ["default"]
