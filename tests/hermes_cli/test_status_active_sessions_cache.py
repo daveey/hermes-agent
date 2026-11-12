@@ -55,16 +55,27 @@ def test_unchanged_store_is_read_once(home, opens, settle):
     db.close()
 
 
-def test_a_session_write_shows_on_the_next_poll(home, opens, settle):
+@pytest.mark.parametrize("coarse_stat", [False, True], ids=["real-stat", "same-tick-stat"])
+def test_a_session_write_shows_on_the_next_poll(home, opens, monkeypatch, coarse_stat):
     db = SessionDB(home / "state.db")
-    db.create_session("s1", source="cli")
-    settle(home)
-    assert st._count_status_active_sessions() == 1
-    db.create_session("s2", source="cli")
-    assert st._count_status_active_sessions() == 2
-    db.end_session("s1", "done")
-    assert st._count_status_active_sessions() == 1
-    db.close()
+    try:
+        db.create_session("s1", source="cli")
+        # Writes are not settled: disabling the racy window assumes every commit
+        # changes a stat signature, which coarse-timestamp filesystems cannot promise.
+        # Pin only this clock so descheduling cannot age the files out of the window.
+        initial = (home / "state.db").stat()
+        monkeypatch.setattr(time, "time_ns", lambda: initial.st_mtime_ns)
+        if coarse_stat:
+            signature = utils.file_signature(initial)
+            monkeypatch.setattr(utils, "file_signature", lambda _stat: signature)
+        assert st._count_status_active_sessions() == 1
+        db.create_session("s2", source="cli")
+        assert st._count_status_active_sessions() == 2
+        db.end_session("s1", "done")
+        assert st._count_status_active_sessions() == 1
+        assert len(opens) == 3
+    finally:
+        db.close()
 
 
 def test_a_racy_store_is_never_cached(home, opens):
