@@ -268,5 +268,7 @@ def test_every_wake_kind_has_a_status_label():
     "Task <id> gateway.kanban.wake.chat_wait_unclaimed." (state.db message 873383, 2026-11-11)."""
     from agent.i18n import t
     from gateway.kanban_watchers_notifier import _WAKE_KINDS
-    missing = [kind for kind in _WAKE_KINDS if t(f'gateway.kanban.wake.{kind}') == f'gateway.kanban.wake.{kind}']
+    # failure_finalized has no label by design: build_wake_text renders it through describe_failure.
+    labelled = [kind for kind in _WAKE_KINDS if kind != 'failure_finalized']
+    missing = [kind for kind in labelled if t(f'gateway.kanban.wake.{kind}') == f'gateway.kanban.wake.{kind}']
     assert not missing
