@@ -249,7 +249,9 @@ def test_screen_makes_no_model_call_inside_a_write_transaction(gws, hub_judge):
 
 @pytest.mark.parametrize("change", [
     "runs_on = '[\"linux\"]'", "placement_policy = 'worker-first-v1'", "status = 'blocked'",
-    "claim_lock = 'hermes-hub:1'"])
+    "claim_lock = 'hermes-hub:1'", "body = 'needs signed-in hub Chrome'",
+    "title = 'new brief'", "workspace_kind = 'dir'", "requires = '[\"host_repo\"]'",
+    "assignee = 'other'", "workspace_path = '/home/example/work'", "created_on = 'other'"])
 def test_a_card_changed_while_judged_is_left_to_its_new_owner(gws, monkeypatch, change):
     hub, _worker, _svc = gws
     tid = _hub_card(hub)
@@ -266,6 +268,29 @@ def test_a_card_changed_while_judged_is_left_to_its_new_owner(gws, monkeypatch, 
     assert _events(hub.conn, tid, "moved") == [] and _events(hub.conn, tid, "hub_admission") == [], change
     after = hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
     assert after == (before if "runs_on" not in change else '["linux"]'), change
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("scheduled", {"wake_check": "test -f ~/.hermes/cache/new-probe"}),
+    ("hub_admission", {"admit": True, "entry": "move", "why": "new decision"}),
+])
+def test_event_change_before_apply_invalidates_the_decision(gws, hub_judge, monkeypatch, kind, payload):
+    hub, _worker, _svc = gws
+    hub_judge.admit_next = False
+    tid = _hub_card(hub)
+    apply = hac._apply
+
+    def changed(*args, **kwargs):
+        with kb.write_txn(hub.conn):
+            kb._append_event(hub.conn, tid, kind, payload)
+        return apply(*args, **kwargs)
+
+    monkeypatch.setattr(hac, "_apply", changed)
+    hub.enter()
+    counts = hac.screen(hub.conn)
+    assert counts.moved == 0 and counts.kept == 0
+    assert _events(hub.conn, tid, "moved") == []
+    assert _events(hub.conn, tid, "hub_admission") == ([payload] if kind == "hub_admission" else [])
 
 
 def test_unjudged_claims_is_empty_before_the_gate_and_ignores_later_verdicts(gws, monkeypatch):

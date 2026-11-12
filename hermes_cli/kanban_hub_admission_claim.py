@@ -86,6 +86,10 @@ def keep_reason(conn: sqlite3.Connection, card: sqlite3.Row, fields: dict, cfg: 
     return None
 
 
+def _event_head(conn: sqlite3.Connection, tid: str) -> int:
+    return conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ?", (tid,)).fetchone()[0]
+
+
 def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None) -> Counts:
     """Judge this hub's ready, label-less, unjudged cards before the claim pass; see the module docstring."""
     from hermes_cli import kanban_db_sync as sync
@@ -103,6 +107,7 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None) -> Counts:
     down = False
     for card in _candidates(conn):
         tid = card["id"]
+        event_head = _event_head(conn, tid)
         if pickup.verdict(conn, tid) is not None:
             continue
         if down:
@@ -130,26 +135,26 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None) -> Counts:
                 kept = NO_QUEUE
             if kept:
                 audit["kept"] = kept
-        if _apply(conn, own, tid, audit, target):
+        applied = _apply(conn, own, tid, audit, target, expected=card, event_head=event_head)
+        if applied:
             counts.moved += 1
-        elif "kept" in audit:
+        elif applied is False and "kept" in audit:
             counts.kept += 1
     if counts != Counts():
         _log.info(counts.line())
     return counts
 
 
-def _apply(conn: sqlite3.Connection, own: str, tid: str, audit: dict, target: Optional[list[str]]) -> bool:
+def _apply(conn: sqlite3.Connection, own: str, tid: str, audit: dict, target: Optional[list[str]],
+           *, expected: sqlite3.Row, event_head: int) -> Optional[bool]:
     """Record the verdict; move a denied card to ``target``. True when moved. Skips a card that changed meanwhile."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_move as km
     from hermes_cli import kanban_worker_node as wn
     with kb.write_txn(conn):
-        row = conn.execute("SELECT status, claim_lock, runs_on, placement_policy FROM tasks WHERE id = ?",
-                           (tid,)).fetchone()
-        if (row is None or row["status"] != "ready" or row["claim_lock"] is not None
-                or row["runs_on"] not in (None, "", "[]") or row["placement_policy"] is not None):
-            return False  # claimed, parked or re-placed while judged: its new owner decides
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        if row is None or dict(row) != dict(expected) or _event_head(conn, tid) != event_head:
+            return None  # the verdict and route belong only to the snapshot the judge saw
         kb._append_event(conn, tid, "hub_admission", audit)
         if target is None:
             return False
