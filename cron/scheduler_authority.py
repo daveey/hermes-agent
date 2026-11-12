@@ -63,6 +63,26 @@ def journal_path(job_id, request_id):
     return get_hermes_home() / 'cron' / 'admissions' / (key + '.json')
 
 
+def has_pending_admission(job_id):
+    """An admission journal owns settlement, even after its firer died. Do not retire its job.
+
+    Only a matching, identity-checked journal holds the job; unrelated journals do not. Read
+    errors propagate so a damaged journal cannot turn an uncertain fire into destructive cleanup.
+    """
+    root = journal_path(job_id, '').parent
+    for path in root.glob('*.json'):
+        try:
+            record = json.loads(path.read_text(encoding='utf-8-sig'))
+        except FileNotFoundError:
+            continue  # reconciliation just retired it
+        params = record['params']
+        if params['job_id'] == job_id:
+            if path != journal_path(job_id, params['request_id']):
+                raise ValueError('cron journal identity conflict')
+            return True
+    return False
+
+
 def _pause_identity(paused):
     """The exact pause this recovery uncertainty caused, so only that pause is ever lifted."""
     return {'paused_at': paused.get('paused_at'), 'reason': paused.get('paused_reason')} if paused else True
