@@ -33,14 +33,34 @@ class Transfer:
         transfer = self
 
         class Connection(base):
-            def connect(self):
-                super().connect()
+            def register_socket(self):
                 with transfer.lock:
                     if transfer.expired:
                         transfer.cut(self.sock)
                         self.close()
                         raise TimeoutError("attachment transfer deadline exceeded")
                     transfer.sockets.append(self.sock)
+
+            def _tunnel(self):
+                # CONNECT reads occur inside HTTPConnection.connect, before the
+                # outer connect returns. Own the raw socket before those reads.
+                self.register_socket()
+                return super()._tunnel()
+
+            def connect(self):
+                if issubclass(base, http.client.HTTPSConnection):
+                    http.client.HTTPConnection.connect(self)
+                    self.register_socket()
+                    # Register the SSL socket before its blocking handshake:
+                    # wrap_socket detaches the raw descriptor we registered.
+                    self.sock = self._context.wrap_socket(
+                        self.sock, server_hostname=self._tunnel_host or self.host,
+                        do_handshake_on_connect=False)
+                    self.register_socket()
+                    self.sock.do_handshake()
+                else:
+                    super().connect()
+                self.register_socket()
 
         return Connection
 

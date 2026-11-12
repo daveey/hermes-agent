@@ -158,6 +158,69 @@ def test_connection_finishing_after_expiry_cannot_send():
         right.close()
 
 
+@pytest.mark.parametrize("phase", ["proxy", "tls"])
+def test_https_setup_deadline_closes_socket_and_reader(monkeypatch, phase):
+    import socket
+    from hermes_cli.kanban_sync_attachment_deadline import Transfer
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(2)
+    finished = threading.Event()
+    stop = threading.Event()
+    readers = []
+    original_run = Transfer.run
+
+    def record_run(self, operation):
+        def recorded():
+            readers.append(threading.current_thread())
+            return operation()
+        return original_run(self, recorded)
+
+    monkeypatch.setattr(Transfer, "run", record_run)
+
+    def peer():
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                conn.settimeout(2)
+                conn.recv(4096)
+                if phase == "proxy":
+                    try:
+                        for byte in b"HTTP/1.1 200 Connection established\r\nX-Slow: " + b"a" * 100:
+                            conn.sendall(bytes([byte]))
+                            if stop.wait(0.02):
+                                break
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                else:
+                    assert conn.recv(4096) == b""
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=peer, daemon=True)
+    thread.start()
+    port = listener.getsockname()[1]
+    monkeypatch.setattr(transport.urllib.request, "getproxies", lambda: (
+        {"https": f"http://127.0.0.1:{port}"} if phase == "proxy" else {}))
+    monkeypatch.setattr(transport.urllib.request, "proxy_bypass", lambda host: False)
+    url = "https://example.invalid" if phase == "proxy" else f"https://127.0.0.1:{port}"
+    hub = Hub(Identity(url, "fixture-key", "worker"))
+    hub.deadline = time.monotonic() + 0.3
+    try:
+        with pytest.raises(TimeoutError):
+            hub.get_attachment_blob("board", "uid")
+        readers[0].join(0.8)
+        assert not readers[0].is_alive(), "expired transfer left a live reader"
+        assert finished.wait(0.8), "expired transfer left a live peer socket"
+    finally:
+        stop.set()
+        thread.join(3)
+        listener.close()
+        hub.close()
+
+
 def test_body_size_is_capped_without_content_length(server, monkeypatch):
     hub, state = server
     monkeypatch.setattr(transport, "KANBAN_ATTACHMENT_MAX_BYTES", 2)
