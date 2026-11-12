@@ -1320,14 +1320,10 @@ _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runti
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
-    if getattr(args, "requires", None) is not None:
-        from hermes_cli.kanban_requires_edit import cmd_edit_requires
-        return cmd_edit_requires(args)
-    if getattr(args, "completion_contract", None) is not None:
-        return _contract_cli.cmd_edit_contract(args)
+    from hermes_cli.kanban_requires_edit import edit_preflight  # --requires / --completion-contract / --reason
+    if (rc := edit_preflight(args)) is not None:
+        return rc
     reason = getattr(args, "reason", None)
-    if reason is not None and getattr(args, "priority", None) is None and getattr(args, "priority_bump", None) is None:
-        return _err("kanban edit: --reason only applies to --completion-contract or --priority", 2)
     result = getattr(args, "result", None)
     raw_metadata = getattr(args, "metadata", None)
     summary = getattr(args, "summary", None)

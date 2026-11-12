@@ -36,6 +36,21 @@ def set_requires(conn, task_id, requires):
     return changes
 
 
+def edit_preflight(args):
+    """Dispatch `kanban edit` flags with their own transaction; None means run the ordinary edit."""
+    from hermes_cli import kanban_contract_cli
+    from hermes_cli.kanban import _err
+
+    if getattr(args, "requires", None) is not None:
+        return cmd_edit_requires(args)
+    if getattr(args, "completion_contract", None) is not None:
+        return kanban_contract_cli.cmd_edit_contract(args)
+    if getattr(args, "reason", None) is not None and getattr(args, "priority", None) is None \
+            and getattr(args, "priority_bump", None) is None:
+        return _err("kanban edit: --reason only applies to --completion-contract or --priority", 2)
+    return None
+
+
 def cmd_edit_requires(args):
     """Separate edit transaction: reject mixed flags rather than partially applying an edit."""
     from hermes_cli.kanban import _OPERATOR_EDIT_FLAGS, _err
