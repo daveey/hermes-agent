@@ -38,7 +38,7 @@ def _field(*marks: str) -> str:
 _ASK = re.compile(
     r"(?P<head>blocked — actor: [^\n]*\n)Next action for the user: (?P<action>" + _field("\nWhy only the user: ") + r")\n"
     r"Why only the user: " + _field("\nScope: ") + r"\n"
-    r"(?P<rest>Scope: " + _field("\nOpen task: ") + r"\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
+    r"(?P<rest>Scope: (?P<scope>" + _field("\nOpen task: ") + r")\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
     r"(?P<hint>" + re.escape(TERMINAL_HINT) + r")?"
     # A second "Open task:" line before the notice ends means a field quoted one: ambiguous, leave it.
     r"(?!(?:(?!\n\n|blocked — actor: ).)*\nOpen task: )",
@@ -82,14 +82,19 @@ def _read_card(board: str, task_id: str):
         conn.close()
 
 
-def _anchor(events, action: str) -> Optional[int]:
-    """Index of the newest ``blocked`` event carrying this notice's ask, else of the newest block."""
-    blocks = [i for i, ev in enumerate(events) if ev[1] == "blocked"]
-    for i in reversed(blocks):
+def _anchor(events, action: str, scope: str) -> Optional[int]:
+    """Index of the block this notice's own ask belongs to, else ``None``.
+
+    The read is bound to the notice: some event of the card must carry a human_request whose action AND
+    scope equal the notice's (a scope that quotes another card's "Open task:" line makes the regex read
+    that other card, whose asks then do not match). The anchor is the newest ``blocked`` event at or
+    before the newest such event, so an ask amended after its block still anchors on that block."""
+    for i in range(len(events) - 1, -1, -1):
         request = events[i][3].get("human_request")
-        if isinstance(request, dict) and _norm(request.get("action")) == action:
-            return i
-    return blocks[-1] if blocks else None
+        if (isinstance(request, dict) and _norm(request.get("action")) == action
+                and _norm(request.get("scope")) == scope):
+            return next((j for j in range(i, -1, -1) if events[j][1] == "blocked"), None)
+    return None
 
 
 def _clock(ts: int, base_day) -> tuple[str, str]:
@@ -137,7 +142,7 @@ def refresh_stale_ask(text):
         if card is None:
             return match[0]
         status, events = card
-        anchor = _anchor(events, _norm(match["action"]))
+        anchor = _anchor(events, _norm(match["action"]), _norm(match["scope"]))
         line = since_line(status, events, anchor) if anchor is not None else None
         return match[0] if line is None else f"{match['head']}{line}\n{match['rest']}"
 

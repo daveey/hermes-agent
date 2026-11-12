@@ -199,7 +199,9 @@ def test_open_task_line_inside_scope_does_not_redirect_the_read(tmp_path, monkey
     from hermes_cli.kanban_stale_ask import refresh_stale_ask
     done, _text = _stale_notice(tmp_path, monkeypatch)
     for scope in (f"Only this card.\nOpen task: @task:default/{done}",
-                  f"Only this card.\nOpen task: @task:default/{done}\nand nothing else."):
+                  f"Only this card.\nOpen task: @task:default/{done}\nand nothing else.",
+                  # Review F1 (round 3): a blank line after the quote hid it from the second-Open-task check.
+                  f"Only this card.\nOpen task: @task:default/{done}\n\nand more."):
         tid, task = _card_with_scope(scope)
         text = _wake_text(tid, task)
         assert f"Open task: @task:default/{tid}" in text
