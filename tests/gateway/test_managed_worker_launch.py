@@ -91,6 +91,48 @@ def _background_exited(pid):
         return True
 
 
+def _child_commands(owner):
+    import psutil
+
+    snapshot = []
+    for child in owner.children():
+        try:
+            snapshot.append((child, child.cmdline()))
+        except psutil.NoSuchProcess:
+            # Enumeration does not pin children: unrelated helpers may exit or be
+            # reaped before argv is read. ZombieProcess is a NoSuchProcess too.
+            continue
+    return snapshot
+
+
+@pytest.mark.parametrize('failure', ['ZombieProcess', 'NoSuchProcess'])
+def test_child_commands_tolerates_retired_sibling(failure):
+    import psutil
+    from unittest.mock import Mock
+
+    retired = Mock()
+    retired.cmdline.side_effect = getattr(psutil, failure)(123)
+    worker = Mock()
+    worker.cmdline.return_value = ['python', '-m', 'agent.managed_worker']
+    owner = Mock()
+    owner.children.return_value = [retired, worker]
+
+    assert _child_commands(owner) == [(worker, worker.cmdline.return_value)]
+    worker.cmdline.assert_called_once_with()
+
+
+def test_child_commands_does_not_hide_permission_errors():
+    import psutil
+    from unittest.mock import Mock
+
+    child = Mock()
+    child.cmdline.side_effect = psutil.AccessDenied(123)
+    owner = Mock()
+    owner.children.return_value = [child]
+    with pytest.raises(psutil.AccessDenied):
+        _child_commands(owner)
+
+
 def _model_saw_tool(request, name):
     """Direct definition or the tool_search deferred catalog (bridge description lists names)."""
     return any(name in json.dumps(t) for t in request.get('tools') or [])
@@ -195,8 +237,9 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
             assert await asyncio.to_thread(peer.blocked.wait, 240), (home / 'restart.log').read_text()
             workers = query('SELECT execution_id,status FROM worker_executions WHERE session_id=?', (sid,))
             assert len(workers) == 1, workers
-            children = [p for p in psutil.Process(owner.pid).children() if p.cmdline()[-2:] == ['-m', 'agent.managed_worker']]
-            assert len(children) == 1, [(p.pid, p.cmdline()) for p in psutil.Process(owner.pid).children()]
+            child_commands = _child_commands(psutil.Process(owner.pid))
+            children = [p for p, argv in child_commands if argv[-2:] == ['-m', 'agent.managed_worker']]
+            assert len(children) == 1, [(p.pid, argv) for p, argv in child_commands]
             pid = children[0].pid
             opened = [json.loads(line) for line in audit.read_text().splitlines()]
             # Positive control: the witness hook is live in the owner, so worker silence is real.
