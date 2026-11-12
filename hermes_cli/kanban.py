@@ -459,7 +459,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return _err(f"kanban: {exc.code}: {exc}", 2)
     origin_binding = None
     # [daveey] Hub admission (a model call) runs before any connection/write lock.
-    from hermes_cli.kanban_hub_admission_placement import cli_create_fields, cli_preflight
+    from hermes_cli.kanban_hub_admission_placement import cli_create_fields, cli_preflight, cli_report
     assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
                 or _cli_default_assignee(args))
     plan, refused_rc = cli_preflight(args, body, ws_kind, ws_path, getattr(args, "board", None)
@@ -553,7 +553,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
     from hermes_cli.kanban_placement_diagnostics import cli_creation, cli_json_fields, print_cli_creation
-    creation_placement = cli_creation(args, body, ws_kind, ws_path, board, task, skip=idem_hit)
+    creation_placement = cli_report(cli_creation(args, body, ws_kind, ws_path, board, task, skip=idem_hit), plan)
     contract_extra = _contract_cli.create_warning_fields(task, skip=idem_hit, stderr=True)
     unlinked_warning = None
     if not in_worker and not session_id and not idem_hit and _agent_invoked():

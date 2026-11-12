@@ -276,13 +276,34 @@ def with_admission(audit, plan):
     return audit
 
 
+def denied_placement(verdict, *, runs_on=None, placement_policy=None):
+    """The create report for a card admission denied and re-enrolled in the pool, else None.
+
+    Built from what was persisted (``runs_on`` / ``placement_policy``), never the pre-judge marker
+    diagnostic: ``where: local`` / "home gateway marker" for a pooled card read as a hub pin and
+    invited manual re-placement (self-heal t_01a1cfae6c9413c8). ``note`` is a reply-level sentence.
+    """
+    if not isinstance(verdict, dict) or verdict.get("admit") is not False or not (runs_on or placement_policy):
+        return None
+    if runs_on:
+        route, target = {"runs_on": list(runs_on)}, f"a worker matching runs_on={list(runs_on)} via the board lease"
+    else:
+        route, target = {"placement_policy": placement_policy}, "the worker pool (waiting_for_worker_capacity)"
+    return {"where": "pool", **route, "why": f"hub admission denied ({verdict.get('why') or '?'}); queued for {target}",
+            "hub_admission": verdict,
+            "note": f"Hub admission denied this card a hub slot: it runs on {target}, not on the hub. "
+                    "Do not re-place or re-create it."}
+
+
 def cli_create_fields(conn, plan, args, body, workspace_kind, workspace_path, board, *, assignee):
     """``create_task`` placement kwargs for ``hermes kanban create`` from the preflight ``plan``.
 
     A denied card the plan queued (``runs_on: [<pool label>, ...]``) keeps that queue only on a Board
     primary (``runs_on`` is a Board placement field); elsewhere it is enrolled worker-first instead.
+    The persisted route is recorded on ``plan["persisted"]`` for the create report (:func:`cli_report`).
     """
     from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_worker_node as wn
     from hermes_cli.kanban_worker_placement import POLICY, cli_audit, cli_runs_on
 
     policy, runs_on = plan.get("placement_policy"), plan.get("runs_on")
@@ -290,10 +311,24 @@ def cli_create_fields(conn, plan, args, body, workspace_kind, workspace_path, bo
         policy, runs_on = (POLICY if plan.get("hub_admission") else policy), None
     if policy is None and runs_on is None:
         runs_on = cli_runs_on(conn, args, body, workspace_kind, workspace_path, board, assignee=assignee)
+    try:  # the labels exactly as create_task persists them (sorted, deduplicated)
+        persisted = wn.normalize_runs_on(runs_on)
+    except ValueError:
+        persisted = runs_on  # create_task rejects them before any write
+    plan["persisted"] = {"runs_on": persisted, "placement_policy": policy}
     return {"requires": plan.get("requires", getattr(args, "requires", None)), "runs_on": runs_on,
             "placement_policy": policy,
             "placement_audit": with_admission(cli_audit(args, body, workspace_kind, workspace_path, board,
                                                         assignee=assignee), plan)}
+
+
+def cli_report(diagnostic, plan):
+    """``hermes kanban create``'s placement report after admission: a denied card reports the pool it
+    was persisted to; any other card (admitted included) keeps the local diagnostic unchanged."""
+    verdict = (plan or {}).get("hub_admission")
+    if not diagnostic or not verdict:
+        return diagnostic
+    return denied_placement(verdict, **((plan or {}).get("persisted") or {})) or diagnostic
 
 
 def cli_plan(args, body, workspace_kind, workspace_path, board, *, assignee=None):

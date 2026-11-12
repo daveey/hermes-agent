@@ -160,11 +160,36 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
     return placement
 
 
+def _denied_fields(conn, task_id: str, marker_placement: dict) -> Optional[dict]:
+    """``placement`` + ``note`` for a card hub admission denied: the pool route it was persisted with,
+    never the pre-judge ``where: local`` (self-heal t_01a1cfae6c9413c8). None for any other card. [daveey]"""
+    import json
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_hub_admission_placement import denied_placement
+
+    verdict = marker_placement.get("hub_admission")
+    if not isinstance(verdict, dict) or verdict.get("admit") is not False:
+        return None
+    # runs_on is a Board column: an unsynced board has none (its denied cards are worker-first).
+    cols = "runs_on, placement_policy" if "runs_on" in sync.table_columns(conn, "tasks") else "NULL, placement_policy"
+    row = conn.execute(f"SELECT {cols} FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    report = denied_placement(verdict, runs_on=json.loads(row[0]) if row and row[0] else None,
+                              placement_policy=row[1] if row else None)
+    if report is None:
+        return None
+    note = report.pop("note")
+    if marker_placement.get("requires") is not None:
+        report["requires"] = marker_placement["requires"]
+    return {"placement": report, "note": note}
+
+
 def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict], session_id: Optional[str],
                              origin_profile: Optional[str] = None) -> dict:
     """Result fields for a card a placement marker kept here; a deferred card records its forward. [daveey]"""
     if not marker_placement:
         return {}
+    if denied := _denied_fields(conn, new_tid, marker_placement):
+        return denied
     if marker_placement.get("defer"):
         # Run on the routed gateway once the parents finish (kanban_placement_forward).
         from hermes_cli import kanban_placement_forward as _kpf
@@ -230,6 +255,8 @@ def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
     if runs_on is not None:
         if pinned_machine:
             return f"{pinned_machine} via the board lease (runs_on={runs_on})"
+        if ((marker_placement or {}).get("hub_admission") or {}).get("admit") is False:
+            return f"worker pool: a machine matching runs_on={runs_on} via the board lease (hub admission denied)"
         return f"a machine matching runs_on={runs_on} via the board lease"
     if marker_placement and marker_placement.get("defer"):
         return f"{marker_placement['defer']} once its parents finish"

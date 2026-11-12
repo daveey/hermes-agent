@@ -93,3 +93,5 @@ def cli_json_fields(diagnostic) -> dict:
 def print_cli_creation(diagnostic) -> None:
     if diagnostic:
         print(f"Placement: {diagnostic['why']}")
+        if diagnostic.get("note"):  # a hub-admission-denied card: where it runs instead [daveey]
+            print(diagnostic["note"])
