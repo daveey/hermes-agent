@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.tools.test_delegate_continue import _completion, _parent, _ScriptedModel, _spawn
+from tests.tools.test_delegate_continue import _completion, _no_private_scratch_note, _parent, _ScriptedModel, _spawn  # noqa: F401 -- autouse fixture
 
 
 def _db_rows(parent):

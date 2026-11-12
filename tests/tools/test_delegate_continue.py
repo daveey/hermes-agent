@@ -29,6 +29,14 @@ def _empty_completion_queue():
     drain()
 
 
+@pytest.fixture(autouse=True)
+def _no_private_scratch_note(monkeypatch):
+    """These tests pin the child's exact turns; the fork's private-scratch note on a non-git child's first turn
+    is covered by test_delegate_private_scratch.py. [daveey]"""
+    from tools.delegate_tool_child_run import _ChildRun
+    monkeypatch.setattr(_ChildRun, "attach_private_scratch", lambda self, parent_cwd: None)
+
+
 class _ScriptedModel:
     """Stands in for AIAgent: records how each child was built and what each turn saw, and persists each turn
     into the child's dedicated SessionDB handle the way a real child's transcript lands there."""

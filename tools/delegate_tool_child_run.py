@@ -834,6 +834,7 @@ class _ChildRun:
     child_start: float = field(default_factory=time.monotonic)
     worktree_info: Optional[dict[str, str]] = None
     private_scratch: Optional[str] = None
+    private_scratch_note: str = ""
     child_task_id: str = ""
     parent_task_id: Optional[str] = None
     wall_start: float = 0.0
@@ -912,7 +913,7 @@ class _ChildRun:
             # the goal message instead (same turn, no system-prompt mutation).
             from tools.subagent_worktree import build_worktree_context_note
             self.goal = self.goal + build_worktree_context_note(self.worktree_info)
-        else:
+        elif resumed is None:  # a continued child's saved first turn already names its folder
             self.attach_private_scratch(parent_cwd)
         self.wall_start = time.time()
         self.parent_reads_snapshot = list(file_state.known_reads(self.parent_task_id)) if self.parent_task_id else []
@@ -925,8 +926,8 @@ class _ChildRun:
 
     def attach_private_scratch(self, parent_cwd: Optional[str]) -> None:
         """Without git isolation the child shares its parent's cwd with the parent and its siblings: give it a
-        private folder under TMPDIR (pruned with the rest of scratch) and name both on its goal turn, like the
-        worktree note: the system prompt stays byte-identical across siblings so they share one prompt cache. The
+        private folder under TMPDIR (pruned with the rest of scratch) and name both after the brief on its first turn
+        (``self.goal`` stays the parent's words): the system prompt stays byte-identical across siblings so they share one prompt cache. The
         session cwd stays the parent's, since brief paths are relative to it. Local backend only: a host folder is
         invisible to a docker/ssh child's tools."""
         from tools import subagent_worktree
@@ -939,7 +940,7 @@ class _ChildRun:
                 dir=os.environ.get("TMPDIR") or tempfile.gettempdir(),
             )
             shared = parent_cwd or _resolve_workspace_hint(self.parent_agent)
-            self.goal = self.goal + "\n\n" + _build_private_scratch_block(self.private_scratch, shared)
+            self.private_scratch_note = "\n\n" + _build_private_scratch_block(self.private_scratch, shared)
 
     def finish_failed(
         self, entry: dict[str, Any], late_steer: Optional[str], *, preview: str, summary: str = "", status: Optional[str] = None,
@@ -1028,7 +1029,7 @@ class _ChildRun:
         _history = getattr(child, "_delegate_continue_history", None)
         resume = {"conversation_history": _history} if isinstance(_history, list) else {}
         from tools.delegate_tool_progress import child_task_message
-        _brief = child_task_message(self.goal, getattr(child, "_delegate_context", None))
+        _brief = child_task_message(self.goal, getattr(child, "_delegate_context", None)) + self.private_scratch_note
         task_text = self.goal if resume else _brief
         user_message: Any = _build_child_goal_message(task_text, _images, child) if _images else task_text
 
