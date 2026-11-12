@@ -1004,8 +1004,11 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                 deferred = not rebuilt and _defer_repair(key, inputs)
                 from hermes_cli.kanban_sync_partition_repair import repair_partition_chat_links, repair_partition_links
                 if not deferred:
-                    repair_partition_links(live, replica, gateway)
-                    repair_partition_chat_links(live, replica, gateway)
+                    from hermes_cli import kanban_sync_partition_content as partition_content
+                    decision = partition_content.prepare(live, replica, path=path, inputs=inputs, rebuilt=rebuilt)
+                    if not decision.skip:
+                        repair_partition_links(live, replica, gateway)
+                        repair_partition_chat_links(live, replica, gateway)
                 # The remote-parent mirror is cheap and gates child promotion, so a deferral never delays it.
                 if mode == "primary" and sync.refresh_remote_parents(live, replica):
                     sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
@@ -1014,7 +1017,9 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                 else:
                     from hermes_cli.kanban_sync_repair_content import run
                     result.repaired = run(live, replica, gateway, path=path, inputs=inputs, rebuilt=rebuilt)
-                    retire_lost_placeholder_links(live, replica, gateway)
+                    if not decision.skip:
+                        retire_lost_placeholder_links(live, replica, gateway)
+                        partition_content.commit(decision, live, replica, inputs=inputs)
                     if inputs is not None:
                         _REPAIRED[key] = inputs
                         _REPAIRED_AT[key] = _repair_clock()
@@ -1371,7 +1376,9 @@ def _repair_clock() -> float:
 def reset_board_watch() -> None:
     """Tests: close the kept connections and forget completed repair passes."""
     from hermes_cli.kanban_sync_repair_content import reset
+    from hermes_cli import kanban_sync_partition_content
     reset()
+    kanban_sync_partition_content.reset()
     _WATCH.reset()
     _REPAIRED.clear()
     _REPAIRED_AT.clear()

@@ -22,7 +22,7 @@ clock = window.clock
 
 
 @pytest.mark.parametrize("mode", ["shadow", "primary"])
-def test_event_only_feed_skips_content_but_keeps_partition_repairs(
+def test_event_only_feed_skips_content_and_partition_repairs(
     live, svc, kanban_home, monkeypatch, clock, mode,
 ):
     # Checkpoints deliberately invalidate file identity. This case isolates
@@ -41,6 +41,14 @@ def test_event_only_feed_skips_content_but_keeps_partition_repairs(
             "repair_divergence", "repair_missing_children", "repair_partition_links",
             "repair_partition_chat_links", "retire_lost_placeholder_links",
         ))
+        assert window._round(kanban_home, svc).error is None
+        assert not any(calls.values())  # Warm unchanged ticks also do no scans.
+        refreshes = []
+        refresh = window.sync.refresh_remote_parents
+        def refreshed(*args):
+            refreshes.append(True)
+            return refresh(*args)
+        monkeypatch.setattr(window.sync, "refresh_remote_parents", refreshed)
         clock[0] += ksc.REPLICA_REPAIR_MIN_S + 1
         window._remote(svc, table="task_events", uid="event-foreign", fields={
             "task_id": parent, "kind": "commented", "created_at": 1, "payload": "{}",
@@ -50,9 +58,18 @@ def test_event_only_feed_skips_content_but_keeps_partition_repairs(
         assert not result.repair_deferred
         assert calls == {
             "repair_divergence": 0, "repair_missing_children": 0,
-            "repair_partition_links": 1, "repair_partition_chat_links": 1,
-            "retire_lost_placeholder_links": 1,
+            # Event cursors do not change eligible partition repair content.
+            "repair_partition_links": 0, "repair_partition_chat_links": 0,
+            "retire_lost_placeholder_links": 0,
         }
+        assert refreshes == ([True] if mode == "primary" else [])
+        # A relevant local edit is visible on the very next tick, even inside
+        # the outer repair window that just admitted the event-only pass.
+        with kbc.write_txn(live):
+            live.execute("UPDATE tasks SET title='next tick' WHERE id=?", (parent,))
+        assert not window._round(kanban_home, svc).repair_deferred
+        assert all(count == 1 for count in calls.values())
+        assert svc.board(window.BOARD)["rows"]["tasks"][parent]["title"] == "next tick"
 
 
 @pytest.fixture
