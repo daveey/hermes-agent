@@ -137,10 +137,10 @@ def _live_task(card):
         return task.status, summary.strip()
 
 
-def refresh_card(card):
+def refresh_card(card, *, strict=False):
     """``card`` with its live status applied: a wake whose premise no longer holds (an unclaimed wait
     since claimed or done, a block since resolved) is relabelled with the card's current status. An
-    unreadable board leaves the card as delivered."""
+    unreadable board leaves the card as delivered, or raises when ``strict``."""
     kinds = card.get('kinds') or []
     premises = [kind for kind in kinds if kind in _PREMISE_HOLDS]
     if not card.get('task_id') or not premises:
@@ -149,6 +149,8 @@ def refresh_card(card):
         status, result = _live_task(card)
     except Exception:  # health: allow BLE001 -- a live read is best effort: the wake still goes in as delivered
         logger.debug('kanban wake fold: live state of %s unreadable', card['task_id'], exc_info=True)
+        if strict:
+            raise
         return card
     if status is None:
         return card
@@ -169,6 +171,82 @@ def refresh_card(card):
     return {**card, 'kinds': [{'done': 'completed'}.get(status, status)], 'text': '\n'.join(out).rstrip()}
 
 
+def _compose(cards, guidance, *, strict=False):
+    """The turn text of a batch of ``cards`` (each live-refreshed), with the trailing ``guidance``."""
+    parts = [refresh_card(card, strict=strict)['text'] for card in cards]
+    if len(cards) > 1:
+        parts.insert(0, _FOLD_HEADER.format(count=len(cards)))
+    if guidance:
+        parts.append(guidance)
+    return '\n\n'.join(parts)
+
+
+def _head_at(text, task_id, pos):
+    """Offset of card ``task_id``'s ``[kanban] Task <id> `` line at or after ``pos``, or -1."""
+    head = f'[kanban] Task {task_id} '
+    at = text.find(head, pos)
+    while at > 0 and text[at - 1] != '\n':
+        at = text.find(head, at + 1)
+    return at
+
+
+def _guidance(text, cards):
+    """What follows the last card in ``text`` (a row built by ``_compose`` from ``cards``, each card
+    rendered as delivered or relabelled), or ``None`` when ``text`` does not have that shape."""
+    if len(cards) > 1 and not text.startswith(_FOLD_HEADER.format(count=len(cards))):
+        return None
+    pos = 0
+    for card in cards:  # every card's head line, in order: the batch these cards built
+        if card.get('task_id') and _LEGACY_HEAD.match(card['text']):
+            pos = _head_at(text, card['task_id'], pos)
+            if pos < 0:
+                return None
+    last = cards[-1]
+    lines = last['text'].rstrip().split('\n')
+    rest = lines[1:] if _LEGACY_HEAD.match(lines[0]) else lines
+    tail = '\n'.join(rest).rstrip()
+    if tail:  # refresh_card keeps every line after the head, in order, at the end of the card
+        end = text.find(tail, pos)
+        if end < 0:
+            return None
+        end += len(tail)
+    else:  # a one-line card: its head, then a relabel's Note and Result lines when present
+        end = text.find('\n', pos)
+        end = len(text) if end < 0 else end
+        for prefix in ('Note: an earlier wake for this card said', 'Result: '):
+            if text.startswith(prefix, end + 1):
+                nxt = text.find('\n', end + 1)
+                end = len(text) if nxt < 0 else nxt
+    if text[end:end + 1] not in ('', '\n'):
+        return None
+    return text[end:].strip()
+
+
+def refresh_claimed(payload):
+    """Rebuild a claimed Kanban wake's text in place from its cards' live state, before it becomes a
+    turn (``session_ingress.execute_admission``). A lone wake that no later wake folded into was
+    otherwise drained with the premise it was built with, however long it waited (row 3605 on
+    2026-11-12 told its chat a card claimed 15 min earlier had no worker). Only the in-memory claim
+    payload changes, never the stored row. Any other row, a row whose text no longer has the shape
+    its cards built, and an unreadable board leave the text as it was."""
+    try:
+        if not isinstance(payload, dict) or not isinstance(payload.get('text'), str):
+            return
+        descriptor = _descriptor(payload)
+        if not descriptor.get('kanban_cards') or _producer(descriptor.get('identity')) != PRODUCER:
+            return
+        cards = card_metadata(descriptor)['kanban_cards']
+        if not any(kind in _PREMISE_HOLDS for card in cards for kind in card.get('kinds') or []):
+            return  # outcome-only batch: nothing can have gone stale, so no board read
+        guidance = _guidance(payload['text'], cards)
+        if guidance is not None:
+            # Strict: an unreadable card would fall back to its as-delivered text and undo the
+            # relabel the fold already made, so any unreadable card leaves the whole text as it was.
+            payload['text'] = _compose(cards, guidance, strict=True)
+    except Exception:  # health: allow BLE001 -- a refresh must never cost the wake itself
+        logger.warning('kanban wake: claim-time relabel skipped; delivering the wake unchanged', exc_info=True)
+
+
 def fold_into(event, waiting, identity):
     """Rewrite ``event`` (the new wake) as the batch of ``waiting``'s cards and its own, live-refreshed.
     Blocking: it reads the Kanban board, so callers run it off the event loop."""
@@ -181,12 +259,7 @@ def fold_into(event, waiting, identity):
         old_cards[0]['text'] = old_cards[0]['text'][:-len(guidance)].rstrip()
     # The stored cards stay as delivered; the live relabel is redone each time the batch is rebuilt.
     cards = _merge(old_cards, new_cards)
-    parts = [refresh_card(card)['text'] for card in cards]
-    if len(cards) > 1:
-        parts.insert(0, _FOLD_HEADER.format(count=len(cards)))
-    if guidance:
-        parts.append(guidance)
-    event.text = '\n\n'.join(parts)
+    event.text = _compose(cards, guidance)
     event.metadata['kanban_cards'] = cards
     event.metadata['automation_identities'] = sorted({
         *(descriptor.get('identities') or [waiting['request_id']]),

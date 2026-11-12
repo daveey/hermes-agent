@@ -7,6 +7,7 @@ real Kanban board; nothing claims (``_schedule`` is disabled), so every admitted
 exactly as it does behind a running turn.
 """
 import inspect
+import json
 
 import pytest
 
@@ -276,6 +277,141 @@ async def test_a_wake_past_the_card_cap_queues_alone_instead_of_being_refused(tm
             't_overflow', 't_after']
     finally:
         authority.db.close()
+
+
+async def _drain(authority, row, monkeypatch):
+    """Run the queued ``row`` the way the drain does once it claims it; return the turn's text."""
+    from gateway.session_ingress import execute_admission
+    from gateway.session_contract import SessionRef
+    seen = []
+
+    async def turn(event):
+        seen.append(event.text)
+        return 'ok'
+    monkeypatch.setattr(authority.runner, '_handle_message', turn)
+    descriptor = kanban_wake_fold._descriptor(row['payload'])
+    await execute_admission(authority, SessionRef(authority.profile_id, descriptor['owner']), row)
+    assert seen, 'the queued wake never ran as a turn'
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_a_lone_unclaimed_wait_claimed_before_the_drain_runs_with_its_live_status(tmp_path, monkeypatch, board):
+    """Row 3605 (2026-11-12, chat 20261026_170127_f07c32) waited behind a running turn with no later
+    wake to fold into it, so it would have told the chat a card claimed 15 min earlier had no worker."""
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        tid = board('waited on')
+        await _wake(adapter, source, tid, 'chat_wait_unclaimed')
+        [row] = _automation(queued())
+        stored = json.loads(json.dumps(row['payload']))
+        _claim(tid)
+        text = await _drain(authority, row, monkeypatch)
+        assert text.startswith(f'[kanban] Task {tid} claimed by a worker (running).\n')
+        assert 'Note: an earlier wake for this card said "is ready with no worker claiming it"' in text
+        assert 'Live status: running.' in text and f'Title: card {tid}' in text
+        assert text.count(GUIDANCE) == 1 and text.endswith(GUIDANCE)
+        [after] = [r for r in list_session_admissions(authority.db, session_id=stored['local_automation_v1']['owner'],
+                                                     pending_only=False) if r['admission_id'] == row['admission_id']]
+        assert after['payload'] == stored  # the stored row is never rewritten
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_lone_wait_whose_premise_still_holds_runs_byte_identical(tmp_path, monkeypatch, board):
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        tid = board('still waiting')
+        await _wake(adapter, source, tid, 'chat_wait_unclaimed')
+        [row] = _automation(queued())
+        original = row['payload']['text']
+        assert await _drain(authority, row, monkeypatch) == original
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_folded_row_is_relabelled_again_at_the_claim(tmp_path, monkeypatch, board):
+    """Folded while both cards still waited; one is claimed and the other completed before the drain."""
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        first, second, done = board('first'), board('second'), board('done meanwhile')
+        await _wake(adapter, source, first, 'chat_wait_unclaimed')
+        await _wake(adapter, source, done, 'chat_wait_unclaimed')
+        _claim(second)
+        await _wake(adapter, source, second, 'chat_wait_unclaimed')  # relabelled running at fold time
+        [row] = _automation(queued())
+        assert f'[kanban] Task {first} is ready with no worker claiming it.' in row['payload']['text']
+        _claim(first)
+        _complete(done, 'shipped it')
+        text = await _drain(authority, row, monkeypatch)
+        assert text.startswith('[IMPORTANT: 3 Kanban task updates arrived')
+        assert text.count('Kanban task updates arrived') == 1
+        assert f'[kanban] Task {first} claimed by a worker (running).' in text
+        assert f'[kanban] Task {done} completed.' in text and 'Result: shipped it' in text
+        assert f'[kanban] Task {second} claimed by a worker (running).' in text
+        assert 'is ready with no worker claiming it.\n' not in text
+        assert text.count('Note: an earlier wake for this card said') == 3
+        assert text.count(GUIDANCE) == 1 and text.endswith(GUIDANCE)
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_board_leaves_the_claimed_wake_unchanged(tmp_path, monkeypatch, board):
+    """Even a relabel the fold already made stays: the as-delivered card text never comes back."""
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        first, second = board('waited on'), board('claimed before its wake folded')
+        await _wake(adapter, source, first, 'chat_wait_unclaimed')
+        _claim(second)
+        await _wake(adapter, source, second, 'chat_wait_unclaimed')
+        [row] = _automation(queued())
+        original = row['payload']['text']
+        assert f'[kanban] Task {second} claimed by a worker (running).' in original
+        _claim(first)
+
+        def unreadable(card):
+            raise OSError('board unreadable')
+        monkeypatch.setattr(kanban_wake_fold, '_live_task', unreadable)
+        assert await _drain(authority, row, monkeypatch) == original
+    finally:
+        authority.db.close()
+
+
+def test_refresh_claimed_leaves_unparsable_or_foreign_rows_alone(tmp_path, monkeypatch, board):
+    tid = board('waited on')
+    _claim(tid)
+    body = f'[kanban] Task {tid} is ready with no worker claiming it.\nTitle: x\nBoard: default'
+    card = {'task_id': tid, 'board': '', 'kinds': ['chat_wait_unclaimed'], 'text': body}
+    identity = json.dumps(['kanban-wake', 'x'])
+    # A row whose text no longer contains the stored card (a producer truncated it) is left as is.
+    odd = {'text': 'something else\n\n' + GUIDANCE,
+           'local_automation_v1': {'identity': identity, 'kanban_cards': [card]}}
+    before = json.loads(json.dumps(odd))
+    kanban_wake_fold.refresh_claimed(odd)
+    assert odd == before
+    # Another producer's row is never touched, cards or not.
+    other = {'text': body, 'local_automation_v1': {'identity': json.dumps(['loop-tick', 'x']), 'kanban_cards': [card]}}
+    kanban_wake_fold.refresh_claimed(other)
+    assert other['text'] == body
+    # A typed row is never touched.
+    typed = {'text': body}
+    kanban_wake_fold.refresh_claimed(typed)
+    assert typed == {'text': body}
+    # The native envelope relabels the same way.
+    native = {'text': body + '\n\n' + GUIDANCE,
+              'native_text_v1': {'automation': {'identity': identity, 'kanban_cards': [card]}}}
+    kanban_wake_fold.refresh_claimed(native)
+    assert native['text'].startswith(f'[kanban] Task {tid} claimed by a worker (running).\n')
+    assert native['text'].endswith('Board: default\n\n' + GUIDANCE)
+    # A one-line card (the TUI owner's notice) with no guidance.
+    line = f'[kanban] Task {tid} is ready with no worker claiming it.'
+    tui = {'text': line, 'local_automation_v1': {'identity': identity, 'kanban_cards': [{**card, 'text': line}]}}
+    kanban_wake_fold.refresh_claimed(tui)
+    assert tui['text'].startswith(f'[kanban] Task {tid} claimed by a worker (running).\nNote: ')
+    assert tui['text'].endswith('Live status: running.')
 
 
 def test_the_relabel_reads_the_notifiers_db_under_the_env_pin(tmp_path, monkeypatch, board):
