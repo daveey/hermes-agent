@@ -137,7 +137,7 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
     if pool:
         from hermes_cli import kanban_move as km
         from hermes_cli import kanban_worker_node as wn
-        registry = wn.registry()
+        registry = wn.registry(require_fresh=True)
         if registry is None:
             return _refuse("registry_unavailable", "the Board machine registry is unreachable; try again")
         matches = km.matching_machines(labels, registry.get("machines") or {}, me=me, exclude_me=False)

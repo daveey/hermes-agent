@@ -32,8 +32,10 @@ svc = node_fixtures.svc
 @pytest.fixture(autouse=True)
 def pool_registry(monkeypatch):
     from hermes_cli import kanban_worker_node as wn
-    monkeypatch.setattr(wn, "registry", lambda: {"machines": {
+    original = wn.registry
+    monkeypatch.setattr(wn, "registry", lambda **kw: {"machines": {
         "worker-1": {"labels": ["pool:worker", "capability:hub-write"]}}})
+    return original
 
 
 @pytest.mark.parametrize("status", ["ready", "scheduled", "todo"])
@@ -50,7 +52,7 @@ def test_cli_started_pool_requires_live_complete_label_match(conn, monkeypatch, 
     }
     if available:
         machines["capable"] = {"labels": target}
-    monkeypatch.setattr(wn, "registry", lambda: {"machines": machines})
+    monkeypatch.setattr(wn, "registry", lambda **kw: {"machines": machines})
     before = list(conn.iterdump())
     calls = []
 
@@ -81,11 +83,41 @@ def test_cli_started_pool_requires_live_complete_label_match(conn, monkeypatch, 
 def test_pool_registry_unavailable_refuses_without_write(conn, monkeypatch):
     from hermes_cli import kanban_worker_node as wn
     tid = _acknowledged(conn, started_at=1)
-    monkeypatch.setattr(wn, "registry", lambda: None)
+    monkeypatch.setattr(wn, "registry", lambda **kw: None)
     before = list(conn.iterdump())
     out = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="queue", hub=NoCallHub())
     assert out["reason_code"] == "registry_unavailable"
     assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("retry_cached", [False, True])
+def test_pool_failed_registry_refresh_preserves_reservation(conn, monkeypatch, pool_registry, retry_cached):
+    from hermes_cli import kanban_worker_node as wn
+    tid = _acknowledged(conn, started_at=1, requires=json.dumps(["hub:write"]))
+    monkeypatch.setattr(wn, "registry", pool_registry)
+    clock = [100.0]
+    monkeypatch.setattr(wn.time, "monotonic", lambda: clock[0])
+    fetches = []
+
+    def fetch():
+        fetches.append(clock[0])
+        if len(fetches) > 1:
+            raise OSError("registry offline")
+        return {"machines": [{"name": "capable", "labels": ["pool:worker", "capability:hub-write"]}]}
+
+    wn.set_registry_fetch(fetch)
+    try:
+        assert wn.registry()["machines"]["capable"]
+        clock[0] += wn.REGISTRY_TTL_S + 1
+        if retry_cached:
+            assert wn.registry()["machines"]["capable"]  # discovery retains last good on failure
+        before = list(conn.iterdump())
+        out = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="queue", hub=NoCallHub())
+        assert out["reason_code"] == "registry_unavailable", out
+        assert list(conn.iterdump()) == before
+        assert len(fetches) == 2
+    finally:
+        wn.set_registry_fetch(None)
 
 
 class RepinHub(FakeHub):
