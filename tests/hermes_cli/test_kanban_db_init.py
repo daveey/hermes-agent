@@ -97,7 +97,7 @@ def test_legacy_text_pk_tables_rebuilt_to_integer_autoincrement(tmp_path, monkey
 
         # Indexes restored, including idx_events_run (added by the additive pass).
         indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
-        for name in ("idx_events_task", "idx_events_run", "idx_comments_task",
+        for name in ("idx_events_task", "idx_events_run", "idx_events_kind_task_id", "idx_comments_task",
                      "idx_runs_task", "idx_runs_status", "idx_notify_task"):
             assert name in indexes
 
