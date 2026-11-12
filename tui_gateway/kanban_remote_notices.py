@@ -102,8 +102,11 @@ def _task_rows(conn: sqlite3.Connection, me: Optional[str] = None) -> list[tuple
     """``(gw, key, seq, data)`` task rows of the replica, other gateways only when ``me`` is given."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(replica)")}
     seq = "seq" if "seq" in cols else "0"
-    sql = f"SELECT gw, key, {seq}, data FROM replica WHERE coll = 'tasks'"
-    return conn.execute(sql + " AND gw != ?", (me,)).fetchall() if me else conn.execute(sql).fetchall()
+    # Keep data as text: json(data) would let one malformed task poison the entire read.
+    # A single result avoids one GIL reacquisition per task in sqlite3_step.
+    sql = f"SELECT json_group_array(json_array(gw, key, {seq}, data)) FROM replica WHERE coll = 'tasks'"
+    row = conn.execute(sql + " AND gw != ?", (me,)).fetchone() if me else conn.execute(sql).fetchone()
+    return [tuple(values) for values in json.loads(row[0])]
 
 
 def _canonical(rows: list[tuple]) -> list[tuple]:

@@ -84,9 +84,11 @@ def _terminal_states():
 def _changed_rows_cards(conn, replica: Path, me) -> list[tuple]:
     from tui_gateway.kanban_remote_notices import _canonical
 
-    sql = "SELECT gw, key, seq, NULL FROM replica WHERE coll = 'tasks'"
-    rows = conn.execute(sql + " AND gw != ?", (me,)).fetchall() if me else conn.execute(sql).fetchall()
-    rows = _canonical(rows)
+    # One SQLite result row avoids a GIL reacquisition per task while observe's
+    # shared lock is held; payload point reads remain proportional to changes.
+    sql = "SELECT json_group_array(json_array(gw, key, seq, NULL)) FROM replica WHERE coll = 'tasks'"
+    row = conn.execute(sql + " AND gw != ?", (me,)).fetchone() if me else conn.execute(sql).fetchone()
+    rows = _canonical([tuple(item) for item in json.loads(row[0])])
     tag = str(replica)
     seen = set()
     cards = []

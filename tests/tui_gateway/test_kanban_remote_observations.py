@@ -74,6 +74,12 @@ def test_changed_snapshot_decodes_only_the_rows_whose_seq_moved(tmp_path, monkey
     with sqlite3.connect(replica) as conn:
         conn.execute("UPDATE replica SET data=?, seq=seq+1000 WHERE key=?", (json.dumps(moved["task"]), moved["key"]))
     second = obs.observe(replica, ledger, now + 10)
-    assert len(decoded) == 1
+    # The identity scan is one JSON array envelope; only one task payload decodes.
+    assert len(decoded) == 2
+    assert real_loads(decoded[0]) == [
+        ['hub', card['key'], i + 1 + (1000 if i == 3 else 0), None]
+        for i, card in enumerate(cards)
+    ]
+    assert real_loads(decoded[1]) == moved['task']
     assert any(state.startswith("blocked@") for (_gw, key, state) in second if key == moved["key"])
     assert len(second) == len(first)

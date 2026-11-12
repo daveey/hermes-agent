@@ -12,7 +12,7 @@ import pytest
 from hermes_cli import kanban_session_activity as activity
 from hermes_cli import profiles
 
-ROWS_SQL = 'SELECT gw, key, data, updated_at'
+ROWS_SQL = 'SELECT json_group_array(json_array(gw, key, data, updated_at'
 
 
 def card(tid, **extra):

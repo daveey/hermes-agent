@@ -24,9 +24,11 @@ def _read_rows(conn, me, previous):
         return remote._canonical(remote._task_rows(conn, me))
     conn.execute("BEGIN")
     try:
-        rows = remote._canonical(conn.execute(
-            "SELECT gw, key, seq, NULL FROM replica WHERE coll='tasks' AND gw != ?", (me,)
-        ).fetchall())
+        packed = conn.execute(
+            "SELECT json_group_array(json_array(gw, key, seq, NULL)) "
+            "FROM replica WHERE coll='tasks' AND gw != ?", (me,)
+        ).fetchone()[0]
+        rows = remote._canonical([tuple(row) for row in json.loads(packed)])
         result = []
         for owner, key, seq, _ in rows:
             hit = previous.get((owner, key))

@@ -651,7 +651,7 @@ def _decode_replica_task(record_key: str, data: Any) -> tuple[dict[str, Any], st
 # [daveey] Last live (``now=None``) replica read: (key, read_at, None, cards, qualified, owners). The remote
 # projection rebuilds on every local board write (its fingerprint covers every kanban.db), and hub.db itself is
 # written ~45 times a minute (outbox, ledger, cursor), but its task rows change only when a pull lands. Re-reading
-# ~6k replica rows (~23 MB of JSON) cost ~0.1 s CPU per sidebar poll for an unchanged answer. hermes-hub stamps
+# thousands of replica rows (tens of MB of JSON) wastes CPU per sidebar poll for an unchanged answer. hermes-hub stamps
 # every replica write with the hub feed's monotonic ``seq``, so an insert or update raises ``max(seq)`` and a
 # delete lowers ``count``: ``_REPLICA_PROBE`` (index-only, ~6 ms) plus the small identity/heartbeat rows is the
 # whole input. Reused while that key (scope heartbeats as their freshness verdicts at read time), the origin
@@ -709,7 +709,11 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                 if moved_out is not None:
                     moved_out.update(memo[9])
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
-        rows = conn.execute(f"SELECT gw, key, data, updated_at, {version_column} FROM replica WHERE coll = 'tasks'").fetchall()
+        # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
+        # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
+        packed = conn.execute(f"SELECT json_group_array(json_array(gw, key, data, updated_at, {version_column})) "
+                              "FROM replica WHERE coll = 'tasks'").fetchone()[0]
+        rows = [tuple(row) for row in json.loads(packed)]
     finally:
         conn.close()
     if key is None:
