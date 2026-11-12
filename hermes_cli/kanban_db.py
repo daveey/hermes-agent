@@ -3045,7 +3045,7 @@ def block_task(
         ):
             return False
         store_request(conn, task_id, human_request)
-        payload.update(human_request=human_request, **({"actor": actor} if actor else {}), **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
+        payload.update(status=new_status, human_request=human_request, **({"actor": actor} if actor else {}), **(filing_fields(conn, human_request) if new_status == "blocked" else {}))  # status: where it landed, read by the sync heal [daveey]
         from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
         payload.update(run_meta)
         if clear_blocker:

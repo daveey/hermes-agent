@@ -86,6 +86,19 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         assert payload.get("kind") == "capability"
 
 
+def test_block_events_record_where_the_block_landed(kanban_home: Path) -> None:
+    """A ``blocked`` event can land ``triage`` (an exhausted budget); the sync heal reads ``status`` to restore it."""
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(conn, tid, reason="x", kind="capability")
+        assert kb.list_events(conn, tid)[-1].payload["status"] == kb.get_task(conn, tid).status == "blocked"
+        kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="x", kind="capability")
+        last = [e for e in kb.list_events(conn, tid) if e.kind == "block_loop_detected"][-1]
+        assert last.payload["status"] == kb.get_task(conn, tid).status == "triage"
+
+
 # ---------------------------------------------------------------------------
 # Dependency routing
 # ---------------------------------------------------------------------------

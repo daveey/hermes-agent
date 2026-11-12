@@ -120,17 +120,23 @@ def _adopt_replica(live: sqlite3.Connection, shadow: sqlite3.Connection, tid: st
                  "took the service's copy instead of re-sending it", tid, stale, theirs["status"])
 
 
-# A run outcome that parks the card -> (its landing status, the event the park writes).
+# A run outcome that parks the card -> (its default landing status, the event the park writes).
 _PARKS = {"blocked": ("blocked", "blocked"), "review_requested": ("review", "review_requested"),
-          "scheduled": ("scheduled", "scheduled")}
-# Every park event lands its own status (all ``blocked`` writers land ``blocked``; a dependency or loop writes
-# ``dependency_wait`` / ``block_loop_detected``), so a later park event, e.g. the wake invariant's
-# scheduled -> blocked, moves the card into that park.
+          "scheduled": ("scheduled", "scheduled"), "continued": ("scheduled", "continued")}
 _PARK_EVENTS = {kind: status for status, kind in _PARKS.values()}
-# Moves that take a card out of a park after its run ended; any later event naming a ``status`` counts too.
+# Where a park event can land. The event's own ``status`` wins over the default (``_landing``): ``block_task``
+# lands an exhausted budget in ``triage`` under a ``blocked`` event, and ``continue_task`` lands ``ready`` (not a
+# park) when it has no wait.
+_PARKED = frozenset({"blocked", "review", "scheduled", "triage"})
+# A ``blocked`` event that predates ``block_task`` recording its landing: these re-kinds landed ``triage``.
+_TRIAGE_REKINDS = frozenset({"continuation_exhausted", "goal_unachievable"})
+# Moves that take a card out of a park after its run ended (``kanban_resume_exec._LIFECYCLE_KINDS`` plus the
+# wake and sweep events; its ``claimed``/``spawned`` are left out: a later claim opens a new run, so the card's
+# current run is no longer the ended one this heal looks at); any later event naming a ``status`` counts too.
 _LEFT_PARK = frozenset({
     "unblocked", "promoted", "promoted_manual", "reopened", "continuation_woken", "condition_met",
     "changes_requested", "dependency_wait", "block_loop_detected", "completed", "archived",
+    "review_reopened", "triage_swept", "gave_up", "reclaimed", "status",
     "agent_block_escalated", "ask_rechecked", "supervisor_escalated"})  # the triage sweeps
 _WARNED_CAP = 4096  # bound on the once-gate's warned (task, run) set
 _warned_once: set[tuple[str, int]] = set()
@@ -143,10 +149,10 @@ def _event_order(event: dict) -> tuple[int, int, int]:
     The local id is arrival order: the Board can deliver an ``unblocked`` before the ``blocked`` it follows, and
     both carry the same second. Every synced event's uid is a UUIDv7 minted at its insert on its own gateway, so
     its 48-bit millisecond orders the two. A row with no uid (sync off, or written while the triggers were down)
-    falls back to arrival order."""
+    falls back to arrival order, and so does a uid that is not a v7 (its leading bits are random, not time)."""
     ms = 0
     uid = event.get("uid")
-    if isinstance(uid, str) and len(uid) >= 13:
+    if isinstance(uid, str) and len(uid) >= 15 and uid[14] == "7":
         try:
             ms = int(uid[:8] + uid[9:13], 16)
         except ValueError:
@@ -164,17 +170,34 @@ def _payload(event: dict) -> dict:
 
 
 def _lifecycle(event: dict) -> bool:
-    return event["kind"] in _PARK_EVENTS or event["kind"] in _LEFT_PARK or "status" in _payload(event)
+    payload = _payload(event)
+    if payload.get("metadata_only"):  # ``kanban_human_request_migration.classify`` re-files an ask, no move
+        return False
+    return event["kind"] in _PARK_EVENTS or event["kind"] in _LEFT_PARK or "status" in payload
+
+
+def _landing(event: dict) -> str | None:
+    """Where a park event left the card: its own recorded ``status``, else its kind's default; None when that is
+    not a park (a ``continued`` run with no wait went straight back to ``ready``)."""
+    payload = _payload(event)
+    status = payload.get("status")
+    if not isinstance(status, str):
+        status = _PARK_EVENTS[event["kind"]]
+        if event["kind"] == "blocked" and payload.get("rekind_reason") in _TRIAGE_REKINDS \
+                and not payload.get("shared_blocker_probe"):
+            status = "triage"
+    return status if status in _PARKED else None
 
 
 def _parked_status(live: sqlite3.Connection, tid: str, run: sqlite3.Row) -> tuple[str, dict] | None:
     """The park the card sits in after its ended run, with that park's event payload; None when the card left it.
 
-    A ``blocked`` outcome is not proof of ``blocked``: a dependency block lands ``todo`` and a loop ``triage``, so the
-    park's own event (written in the run's end transaction, at or after the run's start) must name it. The card's
-    last lifecycle move since then decides: that park event, or a later park event (the wake invariant turns a
-    wakeless human ``scheduled`` wait into ``blocked``), lands its park; anything else (an unblock, a wake, a review
-    reopen, a triage sweep) means the card left it. Events are ordered by origin time (``_event_order``)."""
+    A ``blocked`` outcome is not proof of ``blocked``: a dependency block lands ``todo``, a loop or an exhausted
+    budget ``triage``, so the park's own event (written in the run's end transaction, at or after the run's start)
+    must name it. The card's last lifecycle move since then decides: that park event, or a later park event (the
+    wake invariant turns a wakeless human ``scheduled`` wait into ``blocked``), lands where it recorded
+    (``_landing``); anything else (an unblock, a wake, a review reopen, a triage sweep) means the card left it.
+    Events are ordered by origin time (``_event_order``)."""
     if (run["outcome"] or "") not in _PARKS:
         return None
     cols = {r[1] for r in live.execute("PRAGMA table_info(task_events)")}
@@ -190,21 +213,22 @@ def _parked_status(live: sqlite3.Connection, tid: str, run: sqlite3.Row) -> tupl
     if end is None:
         return None
     last = max(events, key=_event_order)  # ``end`` itself when nothing moved the card since
-    status = _PARK_EVENTS.get(last["kind"])
+    status = _landing(last) if last["kind"] in _PARK_EVENTS else None
     return (status, _payload(last)) if status else None
 
 
 def _park_fields(status: str, payload: dict) -> dict:
     """Columns a restored park takes from its own event, over whatever the stale copy carried.
 
-    ``blocked``: the block's ``kind`` and ``human_request`` (``block_task`` writes both in the same transaction as
-    the event; a copy sent before the block carries the pre-park NULLs, and a blocked card with no ask is escalated
-    to triage by the agent-block sweep). ``scheduled``: ``schedule_task`` clears ``human_request``. The wake itself
-    (``task_wake_checks`` rows, the event's ``wake_at``) is not a ``tasks`` column, so no stale task copy changes it.
-    ``review`` carries no park field."""
+    ``blocked`` (and an exhausted budget's ``triage``): the block's ``kind`` and ``human_request`` (``block_task``
+    writes both in the same transaction as the event; a copy sent before the block carries the pre-park NULLs, and a
+    blocked card with no ask is escalated to triage by the agent-block sweep). ``scheduled``: ``schedule_task`` and
+    ``continue_task`` clear ``human_request``. The wake itself (``task_wake_checks`` rows, the event's ``wake_at``)
+    is not a ``tasks`` column, so no stale task copy changes it; the ask's own probe row is re-synced by
+    ``_heal_one``. ``review`` carries no park field."""
     if status == "scheduled":
         return {"human_request": None}
-    if status != "blocked":
+    if status not in ("blocked", "triage"):
         return {}
     fields = {}
     if isinstance(payload.get("kind"), str):
@@ -224,11 +248,11 @@ def heal_running_over_ended_run(live: sqlite3.Connection) -> dict[str, str]:
     stale copy sent over the run's end (hub t_01a1ceaeb6ba593c, 2026-11-12), and the dispatcher's stale-claim sweep
     never sees it (no claim to expire), so the card read ``running`` for good. A run ended ``completed`` with the
     card's latest ``completed`` event naming it is a completion: ``done``. A run that parked the card (``blocked``,
-    ``review_requested``, ``scheduled``) puts it back in that park when the park's own event is the card's last
-    lifecycle move (``_parked_status``), so a heal never re-dispatches a card that was waiting. Any other end is a
-    reclaim: ``todo``, which the promoter turns into ``ready`` once the card's parents are done. The write goes
-    through the capture triggers, so the Board's copy is corrected by the same round's push. Each card heals in its
-    own transaction, and a card whose heal raises is logged and skipped, never the round. [daveey]"""
+    ``review_requested``, ``scheduled``, ``continued``) puts it back in that park when the park's own event is the
+    card's last lifecycle move (``_parked_status``), so a heal never re-dispatches a card that was waiting. Any other
+    end is a reclaim: ``todo``, which the promoter turns into ``ready`` once the card's parents are done. The write
+    goes through the capture triggers, so the Board's copy is corrected by the same round's push. Each card heals in
+    its own transaction, and a card whose heal raises is logged and skipped, never the round. [daveey]"""
     rows = live.execute(
         "SELECT t.id, r.id AS run_id, r.outcome, r.started_at, r.ended_at FROM tasks t "
         "JOIN task_runs r ON r.id = t.current_run_id "
@@ -286,6 +310,9 @@ def _heal_one(live: sqlite3.Connection, row: sqlite3.Row) -> str | None:
             (status, done, row["ended_at"], *values, tid, row["run_id"])).rowcount
         if not changed:
             return None
+        if "human_request" in extra:  # the restored ask's resolved_check probe row, which nobody ran meanwhile
+            from hermes_cli.kanban_ask_resolved import sync_row
+            sync_row(live, tid, due_now=True)
         kb._append_event(live, tid, "status_healed", {"from": "running", "to": status,
                                                       "outcome": row["outcome"]}, run_id=row["run_id"])
     return status

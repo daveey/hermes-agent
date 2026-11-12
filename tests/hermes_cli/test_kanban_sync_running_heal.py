@@ -22,7 +22,7 @@ kanban_home, svc, live = base.kanban_home, base.svc, base.live
 
 # The event each run end writes in its own transaction.
 _END_EVENT = {"completed": "completed", "blocked": "blocked", "review_requested": "review_requested",
-              "scheduled": "scheduled"}
+              "scheduled": "scheduled", "continued": "continued"}
 
 
 def _regressed(live, kanban_home, svc, *, status, outcome, completed_at, end_event=True, after=None,
@@ -137,6 +137,76 @@ def test_a_scheduled_park_the_wake_invariant_moved_to_blocked_lands_blocked(live
                                          "source_status": "scheduled"})])
     _heal_through_rounds(live, kanban_home, svc)
     assert live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "blocked"
+
+
+def _status(live, tid):
+    return live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+
+
+@pytest.mark.parametrize("landing,expected", [("scheduled", "scheduled"), ("ready", "todo")])
+def test_a_continued_run_lands_where_its_own_event_put_it(live, kanban_home, svc, landing, expected):
+    """``kanban_continue(resume_after_seconds=N)`` parks ``scheduled`` until its wake (PR1381 review probe 1); with
+    no wait the card went straight back to ``ready``, which a reclaim's ``todo`` reaches as well."""
+    tid = _regressed(live, kanban_home, svc, status=landing, outcome="continued", completed_at=None,
+                     end_payload={"continuation": 1, "status": landing, "resume_status": "ready",
+                                  "wake_at": int(time.time()) + 3600})
+    _heal_through_rounds(live, kanban_home, svc)
+    assert _status(live, tid) == expected
+
+
+@pytest.mark.parametrize("left", [
+    ("review_reopened", None),  # reopen_review_task writes no payload when it lands ``ready`` (review probe 2)
+    ("triage_swept", {"reason": "sweep"}), ("gave_up", {"reason": "limit"}), ("reclaimed", {"reason": "stale"}),
+])
+def test_every_resume_lifecycle_move_counts_as_leaving_the_park(live, kanban_home, svc, left):
+    """The list matches ``kanban_resume_exec._LIFECYCLE_KINDS``: each of these moves the card out of its park."""
+    tid = _regressed(live, kanban_home, svc, status="ready", outcome="review_requested", completed_at=None,
+                     after=[left])
+    _heal_through_rounds(live, kanban_home, svc)
+    assert _status(live, tid) == "todo"
+
+
+@pytest.mark.parametrize("end_payload", [
+    {"reason": "r", "kind": "transient", "source_status": "ready", "status": "triage"},  # block_task now records it
+    {"reason": "r", "kind": "transient", "source_status": "ready", "rekind_reason": "continuation_exhausted"},
+    {"reason": "r", "kind": "transient", "source_status": "ready", "rekind_reason": "goal_unachievable"},
+])
+def test_an_exhausted_budget_block_lands_triage_not_blocked(live, kanban_home, svc, end_payload):
+    """``block_task`` writes a ``blocked`` event but lands ``triage`` on an exhausted budget (review probe 3)."""
+    tid = _regressed(live, kanban_home, svc, status="triage", outcome="blocked", completed_at=None,
+                     end_payload=end_payload)
+    _heal_through_rounds(live, kanban_home, svc)
+    assert _status(live, tid) == "triage"
+
+
+def test_a_metadata_only_block_event_is_not_a_move(live, kanban_home, svc):
+    """``kanban_human_request_migration.classify`` re-files the ask on a ``triage`` card with a ``blocked`` event."""
+    tid = _regressed(live, kanban_home, svc, status="triage", outcome="blocked", completed_at=None,
+                     after=[("agent_block_escalated", {"reason": "sweep"}),
+                            ("blocked", {"kind": "needs_input", "reason": "re-filed", "classified_in_place": True,
+                                         "metadata_only": True, "human_request": None})])
+    _heal_through_rounds(live, kanban_home, svc)
+    assert _status(live, tid) == "todo"
+
+
+def test_a_restored_ask_with_a_resolved_check_gets_its_probe_row(live, kanban_home, svc):
+    ask = {"action": "Reply A or B. Unblock = build it; archive = drop it.", "why_human": "a toss-up",
+           "interaction": "reply", "scope": "this card", "evidence": "two designs", "resolved_check": "false"}
+    tid = _regressed(live, kanban_home, svc, status="blocked", outcome="blocked", completed_at=None,
+                     end_payload={"reason": "pick", "kind": "needs_input", "human_request": ask},
+                     stale={"block_kind": None, "human_request": None})
+    live.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (tid,))
+    _heal_through_rounds(live, kanban_home, svc)
+    assert live.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ? AND purpose = 'ask_resolved'",
+                        (tid,)).fetchone()[0] == "false"
+
+
+def test_a_non_v7_uid_does_not_reorder_same_second_events():
+    from hermes_cli.kanban_sync_divergence import _event_order
+    v4 = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    assert _event_order({"created_at": 100, "id": 5, "uid": v4}) == (100, 0, 5)
+    v7 = "01a1cf86-8673-7c4f-883e-0f361585d8e4"
+    assert _event_order({"created_at": 100, "id": 5, "uid": v7})[1] == 0x01a1cf868673
 
 
 @pytest.mark.parametrize("unblock_later_ms,expected", [(5, "todo"), (-5, "blocked")])
