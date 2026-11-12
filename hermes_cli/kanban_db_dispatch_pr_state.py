@@ -124,12 +124,13 @@ def _immediate_checkpoint_after(
     Same-second PR reporting and checkpointing is normal within one worker run.
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_core_update_requeue import is_core_update_requeue
 
-    run = conn.execute(
-        "SELECT id, outcome, ended_at, metadata FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+    # A core-update requeue after the checkpoint is skipped, not a newer run. [daveey]
+    run = next((r for r in conn.execute(
+        "SELECT * FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC",
         (task_id,),
-    ).fetchone()
+    ) if not is_core_update_requeue(conn, r)), None)
     if run is None or run["outcome"] != "continued":
         return False
     ended_at = kb._to_epoch(run["ended_at"])
@@ -331,9 +332,10 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     """
     from hermes_cli import kanban_db as kb
 
-    from hermes_cli.kanban_unused_grant import latest_started_run
+    from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues, requeued_run_ids
 
-    run = latest_started_run(conn, task_id)
+    # A core-update requeue is a pause, not the consuming execution (kanban_core_update_requeue).
+    run = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
     task = kb.get_task(conn, task_id)
     if run is not None and (task is None or run["profile"] != task.assignee):
         return False
@@ -374,7 +376,9 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     if not any(e["kind"] == "claimed" and e["run_id"] == run["id"] and at <= parked_at
                for at, e in timed):
         return False
+    requeued = requeued_run_ids(conn, task_id)
     if any(e["kind"] in {"crashed", "reclaimed", "timed_out"} and at >= parked_at
+           and not (e["kind"] == "reclaimed" and e["run_id"] in requeued)
            for at, e in timed):
         return False
     if not any(e["kind"] == "promoted" and at >= ended
@@ -434,7 +438,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     one continuation after parent completion/promotion: it must belong to the latest
     claimed run of this card and assignee, ended orderly as blocked, with no subsequent
     crash/reclaim/timeout. Operator-only links or synthetic unclaimed runs do not count;
-    the next execution claim consumes the handoff (a proven unused grant does not).
+    the next execution claim consumes the handoff (a proven unused grant or a hermes-sync
+    core-update restart-safe requeue does not: :mod:`kanban_core_update_requeue`).
     A same-second dependency park counts only when
     its server-stamped comment watermark covers the newest PR comment; otherwise it stays guarded.
     This does not change the separate review-checkpoint exception below. So does

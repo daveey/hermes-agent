@@ -335,17 +335,21 @@ def _checkpoint_matches_run(evidence, run):
 
 
 def resumes_review(conn, task_id, pr_urls, *, discharged=()):
-    """One continuation only: claiming any new run consumes the park's permission."""
+    """One continuation only: claiming any new run consumes the park's permission
+    (a hermes-sync core-update requeue does not: :mod:`kanban_core_update_requeue`)."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_core_update_requeue import latest_run_id
     from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
 
+    # Latest run passing over core-update requeues: that pause is not the consuming claim
+    # (2026-11-12: t_01a1ce8aff1f09c1 held after an exact-head APPROVE). [daveey]
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.*, t.assignee "
         "FROM task_events e JOIN task_runs r ON r.id = e.run_id "
         "JOIN tasks t ON t.id = e.task_id "
         "WHERE e.task_id = ? AND e.kind = 'dependency_wait' AND r.task_id = t.id "
-        "AND r.id = (SELECT MAX(id) FROM task_runs WHERE task_id = t.id) "
-        "ORDER BY e.id DESC LIMIT 1", (task_id,),
+        "AND r.id IS ? "
+        "ORDER BY e.id DESC LIMIT 1", (task_id, latest_run_id(conn, task_id)),
     ).fetchone()
     if row is None or row["outcome"] != "blocked" or row["profile"] != row["assignee"]:
         return False
