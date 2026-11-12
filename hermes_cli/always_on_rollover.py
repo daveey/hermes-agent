@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import http.client
 import json
 import os
 import re
@@ -40,6 +41,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -71,7 +73,9 @@ WARM_MAX_REPLAYS = 40
 SUPERVISE_POLL_S = 15.0
 DRIFT_CONFIRMATIONS = 2      # consecutive polls a commit/runtime drift must persist before it rolls
 FAILED_ROLL_BACKOFF_S = 300.0
-SUPERSEDED_GRACE_S = 900.0   # a superseded backend that has not retired itself by then is stopped (SIGTERM)
+SUPERSEDED_GRACE_S = 900.0   # a superseded backend not retired by then is retired by the roller through its idle fence
+SUPERSEDED_HARD_S = 6 * 3600.0  # ... and stopped (SIGTERM, turns checkpoint) once this old, busy or not
+SUPERSEDED_NAME = "superseded.json"
 LOOP_WATCH_TAIL_BYTES = 4 * 1024 * 1024
 
 # Read-only GETs safe to replay into a warming backend. Anything else Desktop polls (a courier outbox
@@ -132,6 +136,17 @@ def is_superseded(port: int, home: Optional[Path] = None) -> bool:
     return record is not None and port != record["port"] and port not in record["warming"]
 
 
+def successor_pending(port: int, home: Optional[Path] = None) -> bool:
+    """In backend *port*: True while a successor is on its way, i.e. ``active.json`` names another port as
+    warming (a roll is booting or warming it) or has already switched away from this port. A turn paused for
+    a core update keeps waiting for that successor (``tui_gateway.update_pause``) instead of continuing here
+    on stale code. A missing record proves nothing."""
+    record = read_active(home)
+    if record is None or port in record["warming"]:
+        return False  # no proof, or this backend is itself the one warming
+    return port != record["port"] or bool(record["warming"])
+
+
 def backend_port_for_pid(pid: int, proc: Path = Path("/proc")) -> Optional[int]:
     """The port of the ``hermes-always-on-backend@<port>.service`` unit whose cgroup holds *pid*, else None.
     By cgroup, not environment: an agent child of a backend inherits its environment, not its unit."""
@@ -176,9 +191,13 @@ def route_always_on_backends(pids: Iterable[int], *, roll: Callable[[], bool] = 
 def route_update_pids(pids: list[int], *, restart_managed: bool) -> list[int]:
     """``_kill_stale_dashboard_processes``'s hook: only an update refresh on Linux (where the units exist)
     routes always-on backends to a warm roll; ``dashboard --stop`` and other platforms keep every pid."""
-    if not (pids and restart_managed and sys.platform.startswith("linux")):
+    if not (pids and restart_managed and _on_linux()):
         return pids
     return route_always_on_backends(pids)
+
+
+def _on_linux() -> bool:
+    return sys.platform.startswith("linux")
 
 
 # ── the proxy ────────────────────────────────────────────────────────────────────────────────────────
@@ -191,17 +210,18 @@ class Proxy:
     def __init__(self, *, home: Optional[Path] = None, hold_s: float = PROXY_HOLD_S,
                  clock: Callable[[], float] = time.monotonic):
         self.home, self.hold_s, self.clock = home, hold_s, clock
-        self._cached: tuple[Optional[int], Optional[int]] = (None, None)  # (mtime_ns, port)
+        self._cached: tuple[Optional[tuple[int, int]], Optional[int]] = (None, None)  # ((ino, mtime_ns), port)
         self.last_port: Optional[int] = None
 
     def target(self) -> Optional[int]:
         try:
-            mtime = active_path(self.home).stat().st_mtime_ns
+            st = active_path(self.home).stat()
         except OSError:
             return None
-        if self._cached[0] != mtime:
+        key = (st.st_ino, st.st_mtime_ns)  # each atomic replace is a new inode, even inside one mtime tick
+        if self._cached[0] != key:
             record = read_active(self.home)
-            self._cached = (mtime, record["port"] if record else None)
+            self._cached = (key, record["port"] if record else None)
             if record and record["port"] != self.last_port:
                 log(f"proxy: routing new connections to :{record['port']}")
                 self.last_port = record["port"]
@@ -226,10 +246,28 @@ class Proxy:
             client_writer.close()
             return
         up_reader, up_writer = upstream
-        await asyncio.gather(_pipe(client_reader, up_writer), _pipe(up_reader, client_writer))
+        # Each direction half-closes its destination on EOF; both sockets close only once both directions
+        # are done, so a client that shuts down its write side after the request still gets the response.
+        # A direction that breaks (a reset) ends the other: nothing more can flow through this splice.
+        tasks = {asyncio.ensure_future(_pipe(client_reader, up_writer)),
+                 asyncio.ensure_future(_pipe(up_reader, client_writer))}
+        try:
+            while tasks:
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if any(task.result() is False for task in done):
+                    break
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for writer in (up_writer, client_writer):
+                with contextlib.suppress(OSError, RuntimeError):
+                    writer.close()
 
 
-async def _pipe(reader, writer) -> None:
+async def _pipe(reader, writer) -> bool:
+    """Copy until EOF, then half-close *writer*. True on a clean EOF, False when either side broke. It never
+    closes *writer*: ``Proxy.handle`` closes both sockets once both directions are done."""
     try:
         while True:
             data = await reader.read(65536)
@@ -240,11 +278,9 @@ async def _pipe(reader, writer) -> None:
         with contextlib.suppress(OSError, RuntimeError):
             if writer.can_write_eof():
                 writer.write_eof()
+        return True
     except (ConnectionError, OSError):
-        pass
-    finally:
-        with contextlib.suppress(OSError, RuntimeError):
-            writer.close()
+        return False
 
 
 def bind_listener(port: int, *, wait_s: float = 60.0, sleep: Callable[[float], None] = time.sleep) -> socket.socket:
@@ -321,16 +357,18 @@ class Roller:
 
     def __init__(self, *, token: str, checkout: Optional[Path], marker: Path, home: Optional[Path] = None,
                  systemctl: Callable[..., subprocess.CompletedProcess] = _systemctl,
-                 get: Optional[Callable] = None, clock: Callable[[], float] = time.monotonic,
+                 get: Optional[Callable] = None, post: Optional[Callable] = None,
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep, loop_watch: Optional[Path] = None,
                  ports: tuple[int, ...] = BACKEND_PORTS, boot_timeout_s: float = BOOT_TIMEOUT_S,
                  warm_cap_s: float = WARM_CAP_S):
         self.token, self.checkout, self.marker, self.home = token, checkout, marker, home
         self.systemctl, self.clock, self.sleep, self.ports = systemctl, clock, sleep, ports
         self.get = get or self._http_get
+        self.post = post or self._http_post
+        self.wall = wall
         self.loop_watch = loop_watch
         self.boot_timeout_s, self.warm_cap_s = boot_timeout_s, warm_cap_s
-        self.superseded_since: dict[int, float] = {}
 
     # -- probes --
     def _http_get(self, port: int, path: str, timeout: float) -> tuple[Optional[int], float, Optional[dict]]:
@@ -343,12 +381,24 @@ class Roller:
                 status = response.status
         except urllib.error.HTTPError as exc:
             return exc.code, time.monotonic() - started, None
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             return None, time.monotonic() - started, None
         parsed = None
         with contextlib.suppress(ValueError):
             parsed = json.loads(body) if body[:1] in (b"{", b"[") else None
         return status, time.monotonic() - started, parsed if isinstance(parsed, dict) else None
+
+    def _http_post(self, port: int, path: str, payload: dict) -> Optional[dict]:
+        request = urllib.request.Request(f"http://127.0.0.1:{int(port)}{path}", method="POST",
+                                         data=json.dumps(payload).encode(),
+                                         headers={"X-Hermes-Session-Token": self.token,
+                                                  "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=30.0) as response:
+                parsed = json.loads(response.read(65536))
+        except (OSError, ValueError, http.client.HTTPException):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def unit_active(self, port: int) -> bool:
         try:
@@ -394,15 +444,20 @@ class Roller:
         return self.marker.exists()
 
     # -- the roll --
-    def pick_port(self, active_port: Optional[int], head: Optional[str]) -> tuple[Optional[int], bool]:
-        """(port, adopted). Adopt a non-active backend already answering on HEAD (a roll a restart cut
-        short); else the first port with no unit; else None."""
+    def pick_port(self, active_port: Optional[int], head: Optional[str],
+                  warming: Iterable[int] = ()) -> tuple[Optional[int], bool]:
+        """(port, adopted). Adopt a non-active backend a restart cut short: one already answering on HEAD,
+        or one the previous roll recorded as warming that is still booting, so restarts close together never
+        stack cold boots onto the pool. Else the first port with no unit; else None."""
+        warming = set(warming)
         others = [p for p in self.ports if p != active_port]
         running = [p for p in others if self.unit_active(p)]
         for port in running:
             body = self.health(port)
             if body and self.same_commit(body.get("commit"), head):
                 return port, True
+            if body is None and port in warming:
+                return port, True  # still booting for the roll this restart cut short
         for port in others:
             if port not in running and not _port_listening(port):
                 return port, False
@@ -414,7 +469,7 @@ class Roller:
         record = read_active(self.home)
         active_port = record["port"] if record and self.unit_active(record["port"]) else None
         head = self.head()
-        port, adopted = self.pick_port(active_port, head)
+        port, adopted = self.pick_port(active_port, head, record["warming"] if record else ())
         if port is None:
             log(f"roll ({reason}) skipped: every backend port {self.ports} is busy; retiring backends hold them")
             return False
@@ -439,6 +494,11 @@ class Roller:
             self._abandon(port, active_port)
             return False
         warm = self.warm(port, self.replay_paths(record.get("pid") if record else None))
+        body = self.health(port) if self.unit_active(port) else None  # it may have died while it warmed
+        if body is None:
+            log(f"roll: backend :{port} stopped answering while it warmed; keeping :{active_port or '-'}")
+            self._abandon(port, active_port)
+            return False
         write_active(port, home=self.home, pid=self.unit_pid(port), commit=body.get("commit") or "",
                      reason=reason, warm=warm)
         log(f"roll: switched to :{port} (commit {str(body.get('commit') or '?')[:10]}); warm {warm};"
@@ -463,13 +523,16 @@ class Roller:
     # -- warming --
     def replay_paths(self, old_pid: object) -> list[str]:
         """The default reads plus the allowlisted GETs (with their queries) the old backend served in the
-        last hour, from loop-watch's request_stats. Best effort: no log, no replays."""
+        last two hours, from loop-watch's request_stats. Best effort: no log, no replays."""
         paths: list[str] = list(DEFAULT_WARM)
         counts: dict[str, int] = {}
         for row in _tail_jsonl(self.loop_watch, LOOP_WATCH_TAIL_BYTES):
             if row.get("kind") != "request_stats" or (old_pid and row.get("pid") != old_pid):
                 continue
-            if time.time() - float(row.get("hour_epoch") or 0) > 7200:
+            try:
+                if time.time() - float(row.get("hour_epoch") or 0) > 7200:
+                    continue
+            except (TypeError, ValueError):
                 continue
             for path, stats in (row.get("paths") or {}).items():
                 if path not in REPLAY_PATHS or not isinstance(stats, dict):
@@ -524,41 +587,79 @@ class Roller:
             return f"active backend :{port} lost its runtime (runtimeIntact false)"
         return None
 
-    def reap_superseded(self, grace_s: float = SUPERSEDED_GRACE_S) -> list[int]:
-        """Stop backends that are neither active nor warming once they have outlived *grace_s* since this roller
-        first saw them superseded. They normally retire themselves when idle (the superseded watchdog); this is
-        the backstop for one that never goes idle, or a core without that watchdog. SIGTERM checkpoints turns
-        exactly as the old in-place restart did, only later."""
+    def _superseded_path(self) -> Path:
+        return aod.state_dir(self.home) / SUPERSEDED_NAME
+
+    def _load_superseded(self) -> dict[int, float]:
+        """{port: wall time first seen superseded}. Persisted, because the roller itself restarts on every
+        core update and an in-memory clock would never reach the grace."""
+        with contextlib.suppress(OSError, ValueError, TypeError):
+            data = json.loads(self._superseded_path().read_text(encoding="utf-8-sig"))
+            return {int(k): float(v) for k, v in data.items()}
+        return {}
+
+    def _save_superseded(self, since: dict[int, float]) -> None:
+        with contextlib.suppress(OSError):
+            aod._write_private(self._superseded_path(), json.dumps({str(k): v for k, v in since.items()}))
+
+    def _retire_fenced(self, port: int) -> bool:
+        """Retire *port* through its own idle fence (``/api/health/retirement``), as its watchdog would: only
+        a backend proven idle is committed and then stopped. A live turn refuses the prepare."""
+        permit = self.post(port, "/api/health/retirement", {"action": "prepare"}) or {}
+        if permit.get("ok") is not True or not isinstance(permit.get("token"), str):
+            return False
+        commit = self.post(port, "/api/health/retirement", {"action": "commit", "token": permit["token"]}) or {}
+        if commit.get("ok") is not True:
+            return False
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)
+        return True
+
+    def reap_superseded(self, grace_s: float = SUPERSEDED_GRACE_S, hard_s: float = SUPERSEDED_HARD_S) -> list[int]:
+        """Backstop for backends that are neither active nor warming and have not retired themselves (a core
+        without the superseded watchdog, a lost watchdog thread). After *grace_s* the roller retires one
+        through its idle fence, so a live turn is never cut. Only after *hard_s*, a backend that has stayed
+        busy that long is stopped (SIGTERM checkpoints its turns) so the port pool cannot leak forever."""
         record = read_active(self.home)
         if record is None:
             return []
         live = {record["port"], *record["warming"]}
-        now, stopped = self.clock(), []
+        since = self._load_superseded()
+        now, stopped = self.wall(), []
         for port in self.ports:
             if port in live or not self.unit_active(port):
-                self.superseded_since.pop(port, None)
+                since.pop(port, None)
                 continue
-            first = self.superseded_since.setdefault(port, now)
-            if now - first >= grace_s:
-                log(f"backend :{port} still running {now - first:.0f}s after it was superseded; stopping it")
+            age = now - since.setdefault(port, now)
+            if age >= hard_s:
+                log(f"backend :{port} still busy {age:.0f}s after it was superseded; stopping it")
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
                     self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)
-                self.superseded_since.pop(port, None)
-                stopped.append(port)
+            elif age >= grace_s and self._retire_fenced(port):
+                log(f"backend :{port} superseded {age:.0f}s ago and idle; retired it through its fence")
+            else:
+                continue
+            since.pop(port, None)
+            stopped.append(port)
+        self._save_superseded(since)
         return stopped
 
     def supervise(self, *, max_polls: Optional[int] = None) -> None:
         seen, polls, retry_at = 0, 0, 0.0
         while max_polls is None or polls < max_polls:
             polls += 1
-            self.reap_superseded()
-            reason = self.drift()
-            dead = bool(reason) and "not running" in reason or reason == "no active backend recorded"
-            seen = seen + 1 if reason else 0
-            if reason and (dead or seen >= DRIFT_CONFIRMATIONS) and self.clock() >= retry_at:
-                seen = 0
-                if not self.roll(reason):
-                    retry_at = self.clock() + FAILED_ROLL_BACKOFF_S
+            try:
+                self.reap_superseded()
+                reason = self.drift()
+                dead = bool(reason) and "not running" in reason or reason == "no active backend recorded"
+                seen = seen + 1 if reason else 0
+                if reason and (dead or seen >= DRIFT_CONFIRMATIONS) and self.clock() >= retry_at:
+                    seen = 0
+                    if not self.roll(reason):
+                        retry_at = self.clock() + FAILED_ROLL_BACKOFF_S
+            # One bad poll (a malformed answer, a systemctl hiccup) must not end supervision.
+            except Exception:  # health: allow BLE001 -- supervisor loop boundary; traceback logged
+                log(f"supervise: poll failed:\n{traceback.format_exc()}")
             self.sleep(SUPERVISE_POLL_S)
 
 
@@ -662,5 +763,6 @@ def stop_all(run: Callable = aod._run) -> None:
 __all__ = [
     "BACKEND_PORTS", "ENV_BACKEND", "PROXY_UNIT", "Proxy", "Roller", "backend_port_for_pid", "bind_listener",
     "cmd_backend", "cmd_proxy", "cmd_roll", "install_units", "is_superseded", "pop_backend_port",
-    "read_active", "render_units", "request_roll", "route_always_on_backends", "stop_all", "write_active",
+    "read_active", "render_units", "request_roll", "route_always_on_backends", "stop_all", "successor_pending",
+    "write_active",
 ]

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -78,13 +80,14 @@ def test_kill_stale_dashboard_processes_never_kills_an_always_on_backend(monkeyp
     from hermes_cli import dashboard_procs as dp
     from hermes_cli import main_dashboard as dash
 
-    monkeypatch.setattr(dp.sys, "platform", "linux")
+    monkeypatch.setattr(ro, "_on_linux", lambda: True)
     monkeypatch.setattr(dash, "_restart_managed_dashboard_service", lambda reason: False)
     monkeypatch.setattr(dp, "_lock_owned_serve_pids", set)
     monkeypatch.setattr(dash, "_find_stale_dashboard_pids", lambda **kw: [4242])
     rolls = []
-    monkeypatch.setattr(ro.route_always_on_backends, "__kwdefaults__",
-                        {"roll": lambda: rolls.append(1) or True, "port_for_pid": lambda pid: 9148})
+    real_route = ro.route_always_on_backends
+    monkeypatch.setattr(ro, "route_always_on_backends", lambda pids: real_route(
+        pids, roll=lambda: rolls.append(1) or True, port_for_pid=lambda pid: 9148))
     killed = []
     monkeypatch.setattr(dp, "_kill_pids_posix", lambda pids, k, f: killed.extend(pids))
     result = dp._kill_stale_dashboard_processes(restart_managed=True)
@@ -135,6 +138,43 @@ def test_proxy_closes_a_client_only_after_the_hold(home):
 
     data, elapsed = asyncio.run(scenario())
     assert data == b"" and elapsed >= 0.4
+
+
+def test_proxy_delivers_the_response_to_a_client_that_half_closed_after_its_request(home):
+    # Review B2 of #1611: _pipe closed the upstream socket right after the client's EOF, so a client that
+    # shuts down its write side after sending its request got b"" instead of the response.
+    async def scenario():
+        async def respond_after_eof(reader, writer):
+            request = await reader.read()  # until the client's EOF
+            await asyncio.sleep(0.2)  # health: allow HX013 -- the response is produced after the half-close
+            writer.write(b"RESPONSE:" + request)
+            await writer.drain()
+            writer.close()
+
+        backend = await asyncio.start_server(respond_after_eof, "127.0.0.1", 0)
+        ro.write_active(backend.sockets[0].getsockname()[1])
+        front = await asyncio.start_server(ro.Proxy(hold_s=5).handle, "127.0.0.1", 0)
+        reader, writer = await asyncio.open_connection("127.0.0.1", front.sockets[0].getsockname()[1])
+        writer.write(b"hello")
+        writer.write_eof()
+        data = await asyncio.wait_for(reader.read(), 5)
+        writer.close()
+        front.close()
+        backend.close()
+        return data
+
+    assert asyncio.run(scenario()) == b"RESPONSE:hello"
+
+
+def test_proxy_target_follows_every_atomic_replace(home):
+    proxy = ro.Proxy()
+    ro.write_active(9148)
+    assert proxy.target() == 9148
+    path = ro.active_path()
+    stamp = path.stat().st_mtime_ns
+    ro.write_active(9149)
+    os.utime(path, ns=(stamp, stamp))  # the replace landed inside the same mtime tick
+    assert proxy.target() == 9149
 
 
 def socket_free_port() -> int:
@@ -262,17 +302,107 @@ def test_supervisor_rolls_on_a_dead_backend_and_on_confirmed_commit_drift(home):
     assert rolls and "not running" in rolls[0]
 
 
-def test_superseded_backend_that_never_retires_is_stopped_after_the_grace(home):
-    host = FakeHost(running={9148, 9149})
-    ro.write_active(9149)
+class FakeFence:
+    """``/api/health/retirement`` of each backend: prepare refuses while the port is busy (a live turn)."""
+
+    def __init__(self, busy=()):
+        self.busy, self.posts = set(busy), []
+
+    def post(self, port, path, payload):
+        self.posts.append((port, payload["action"]))
+        if payload["action"] == "prepare":
+            return {"ok": False, "reason": "busy"} if port in self.busy else {"ok": True, "token": f"tok{port}"}
+        return {"ok": payload.get("token") == f"tok{port}"}
+
+
+def make_reaper(home, host, fence, wall):
     roller = make_roller(home, host)
-    assert roller.reap_superseded(grace_s=600) == []  # first sighting starts its clock
-    roller.sleep(599)
-    assert roller.reap_superseded(grace_s=600) == []
-    roller.sleep(2)
-    assert roller.reap_superseded(grace_s=600) == [9148]
+    roller.post, roller.wall = fence.post, lambda: wall[0]
+    return roller
+
+
+def test_superseded_backend_is_retired_through_its_fence_never_mid_turn(home):
+    # Review B1 of #1611: the backstop used to SIGTERM a superseded backend 900 s in, even mid-turn.
+    host, fence, wall = FakeHost(running={9148, 9149}), FakeFence(busy={9148}), [1000.0]
+    ro.write_active(9149)
+    assert make_reaper(home, host, fence, wall).reap_superseded(grace_s=600, hard_s=7200) == []
+    wall[0] += 601
+    # A fresh roller (each core update restarts it) still knows when 9148 was superseded.
+    assert make_reaper(home, host, fence, wall).reap_superseded(grace_s=600, hard_s=7200) == []
+    assert (9148, "prepare") in fence.posts and not any(c[0] == "stop" for c in host.calls)  # busy: kept
+    fence.busy.clear()  # the turn ended
+    assert make_reaper(home, host, fence, wall).reap_superseded(grace_s=600, hard_s=7200) == [9148]
+    assert (9148, "commit") in fence.posts
     assert ("stop", "--no-block", ro.backend_unit(9148)) in host.calls
     assert not any(c[0] == "stop" and ro.backend_unit(9149) in c for c in host.calls)
+
+
+def test_superseded_backend_busy_past_the_hard_bound_is_stopped(home):
+    host, fence, wall = FakeHost(running={9148, 9149}), FakeFence(busy={9148}), [1000.0]
+    ro.write_active(9149)
+    roller = make_reaper(home, host, fence, wall)
+    assert roller.reap_superseded(grace_s=600, hard_s=7200) == []
+    wall[0] += 7200
+    assert roller.reap_superseded(grace_s=600, hard_s=7200) == [9148]
+    assert ("stop", "--no-block", ro.backend_unit(9148)) in host.calls
+    host.running.discard(9148)
+    roller.reap_superseded(grace_s=600, hard_s=7200)
+    assert json.loads((ao.state_dir() / ro.SUPERSEDED_NAME).read_text()) == {}  # forgotten once gone
+
+
+def test_roll_adopts_a_still_booting_backend_the_previous_roll_left_warming(home):
+    # Nit of review 5878814630: restarts close together must not stack cold boots onto the 4-port pool.
+    host = FakeHost(running={9148, 9149}, commits={9148: "a" * 40, 9149: "c" * 40})
+    ro.write_active(9148, warming=[9149])
+    booting = [3]
+    real_get = host.get
+
+    def get(port, path, timeout):
+        if port == 9149 and booting[0] > 0:
+            booting[0] -= 1
+            return None, 0.0, None
+        return real_get(port, path, timeout)
+
+    roller = make_roller(home, host)
+    roller.get = get
+    assert roller.roll("restart mid-boot") is True
+    assert ro.read_active()["port"] == 9149
+    assert not any(c[0] == "start" for c in host.calls)
+
+
+def test_roll_never_switches_to_a_backend_that_died_while_it_warmed(home):
+    host = FakeHost(running={9148}, commits={9148: "a" * 40})
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    real_warm = roller.warm
+
+    def warm(port, paths):
+        summary = real_warm(port, paths)
+        host.running.discard(port)  # e.g. OOM-killed during the warm rounds
+        return summary
+
+    roller.warm = warm
+    assert roller.roll("test") is False
+    assert ro.read_active()["port"] == 9148 and ro.read_active()["warming"] == []
+
+
+def test_supervisor_survives_a_poll_that_raises(home, capsys):
+    host = FakeHost(running={9148})
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    roller.drift = lambda: (_ for _ in ()).throw(ValueError("bad hour_epoch"))  # type: ignore[method-assign]
+    roller.supervise(max_polls=3)
+    assert capsys.readouterr().err.count("poll failed") == 3
+
+
+def test_successor_pending_while_another_port_warms_or_after_the_switch(home):
+    assert ro.successor_pending(9148) is False  # no record proves nothing
+    ro.write_active(9148)
+    assert ro.successor_pending(9148) is False
+    ro.write_active(9148, warming=[9149])
+    assert ro.successor_pending(9148) is True and ro.successor_pending(9149) is False
+    ro.write_active(9149)
+    assert ro.successor_pending(9148) is True
 
 
 def test_replay_paths_take_only_allowlisted_reads_the_old_backend_served(home, tmp_path):
@@ -364,6 +494,33 @@ def test_active_or_busy_backend_stays_up():
     skew.start_superseded_watchdog(server, port=9148, superseded=lambda p: True, fence=_Fence(idle=False),
                                    poll_s=0.01, max_polls=4).join(5)
     assert server.should_exit is False  # a live turn holds it
+
+
+def test_superseded_watchdog_polls_fast_and_reports_its_successor(monkeypatch):
+    # Review B1 of #1611: a paused turn must learn that the successor is still warming (so it waits past
+    # HANDOFF_WAIT_S), and the old backend must retire within seconds of the switch, not 30-60 s.
+    assert skew.SUPERSEDED_POLL_S <= 2.0
+    sleeps = []
+    monkeypatch.setattr(skew, "time", types.SimpleNamespace(sleep=sleeps.append))
+    monkeypatch.setattr(skew, "_SUCCESSOR_PROBES", [])
+    state = {"pending": True}
+    busy = skew.start_superseded_watchdog(_Server(), port=9148, superseded=lambda p: True,
+                                          pending=lambda p: state["pending"], fence=_Fence(idle=False),
+                                          max_polls=4)
+    busy.join(5)
+    # a busy superseded backend re-tries the fence at the slower busy cadence, not every 2 s
+    assert sleeps == [skew.SUPERSEDED_POLL_S, skew.SUPERSEDED_BUSY_POLL_S, skew.SUPERSEDED_BUSY_POLL_S,
+                      skew.SUPERSEDED_BUSY_POLL_S]
+    assert skew.successor_pending() is False  # the thread ended: its probe no longer counts
+    skew._SUCCESSOR_PROBES.append((_alive(), lambda: state["pending"]))  # type: ignore[arg-type]
+    assert skew.successor_pending() is True
+    state["pending"] = False
+    assert skew.successor_pending() is False
+
+
+class _alive:
+    def is_alive(self):
+        return True
 
 
 def test_always_on_backend_arms_the_superseded_watchdog_not_code_skew(monkeypatch):

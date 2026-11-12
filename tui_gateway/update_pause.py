@@ -77,6 +77,12 @@ NO_REPLACEMENT_S = 60.0
 # polls (_CONFIRMATIONS x DEFAULT_SKEW_POLL_S = 60 s) of the move being visible. One that has not even begun
 # retiring after this long is not going to: continue here instead of trusting the outlook up to the backstop.
 HANDOFF_WAIT_S = 90.0
+# [daveey] t_01a1d09123dbb9c4: an always-on blue/green backend is replaced by a successor the roller boots and
+# warms first (always_on_rollover: boot up to 180 s, warm up to 75 s), so its hand-off routinely takes longer
+# than HANDOFF_WAIT_S. While its superseded watchdog reports that successor on the way
+# (web_server_skew_exit.successor_pending), the paused turn waits for it up to this bound instead of
+# continuing on stale code; the old backend retires within seconds of the switch once idle.
+SUCCESSOR_WARMING_GRACE_S = 420.0
 # Automatic turns hold off at most this long past the watcher's last poll, so a dead watcher or a failed
 # continuation kickoff never holds them for good.
 DUE_HOLD_S = 2 * WATCH_POLL_S + 5.0
@@ -784,15 +790,26 @@ def _release_automatic_turns(session: dict, *, watching: bool = False) -> None:
             session.pop("_update_pause_due_until", None)
 
 
-def _leave_decision(waited: float, outlook: str) -> str | None:
-    """Why to continue a paused turn here now that the checkout moved (``waited`` s ago), else None."""
+def _successor_pending() -> bool:
+    """[daveey] Whether a warmed successor is being prepared for this always-on backend (False elsewhere)."""
+    try:
+        from hermes_cli.web_server_skew_exit import successor_pending
+    except ImportError:
+        return False
+    return successor_pending()
+
+
+def _leave_decision(waited: float, outlook: str, *, successor_pending: bool = False) -> str | None:
+    """Why to continue a paused turn here now that the checkout moved (``waited`` s ago), else None.
+    ``successor_pending``: a warmed successor is on its way, so ``HANDOFF_WAIT_S`` does not apply (the
+    caller's ``SUCCESSOR_WARMING_GRACE_S`` backstop does)."""
     if outlook == "retiring":
         return None  # the fence refuses in-place work from here on; only the backstop retries
     if outlook == "none":
         return "no retirement watchdog"
     if outlook == "blocked" and waited >= NO_REPLACEMENT_S:
         return f"backend kept busy, {waited:.0f}s since the checkout moved"
-    if waited >= HANDOFF_WAIT_S:
+    if waited >= HANDOFF_WAIT_S and not successor_pending:
         return f"no retirement began within {waited:.0f}s of the checkout moving"
     return None
 
@@ -854,13 +871,15 @@ def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threadin
                             logger.info("core-update pause: replacement outlook for session %s is %s (%.0fs since "
                                         "the checkout moved)", marker_key, outlook, now - left_at)
                             last_outlook = outlook
-                        why = _leave_decision(now - left_at, outlook)
+                        pending = _successor_pending()
+                        why = _leave_decision(now - left_at, outlook, successor_pending=pending)
+                        grace = SUCCESSOR_WARMING_GRACE_S if pending else LEAVE_GRACE_S
                         if why is not None:
                             logger.info("core-update pause: no backend replacement is coming (%s); continuing "
                                         "session %s here", why, marker_key)
-                        elif now - left_at >= LEAVE_GRACE_S:
+                        elif now - left_at >= grace:
                             logger.info("core-update pause: backend still not replaced after %.0fs; continuing "
-                                        "session %s here", LEAVE_GRACE_S, marker_key)
+                                        "session %s here", grace, marker_key)
                         else:
                             continue
                         action = "resume"

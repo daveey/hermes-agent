@@ -29,6 +29,11 @@ from typing import Callable, Optional
 _log = logging.getLogger(__name__)
 
 DEFAULT_SKEW_POLL_S = 30.0
+# [daveey] The superseded watchdog reads one small file per poll, so it polls fast: an idle superseded
+# always-on backend retires within two polls of the switch and its paused turns move to the successor.
+SUPERSEDED_POLL_S = 2.0
+# ... but a superseded backend that is busy (a live turn refused the fence) re-tries the fence only this often.
+SUPERSEDED_BUSY_POLL_S = 10.0
 # Two consecutive observations: a checkout mid-rewrite (ref file replaced, packed-refs repacked) can
 # briefly read differently; a real update reads the new revision on every poll after it finishes.
 _CONFIRMATIONS = 2
@@ -126,10 +131,12 @@ def _runtime_key() -> str:
 
 def _run_retirement_watchdog(server, *, observe: Callable[[], Optional[str]], fence, poll_s: float,
                              max_polls: Optional[int], thread_name: str,
-                             on_retire: Optional[Callable[[str], None]] = None) -> threading.Thread:
+                             on_retire: Optional[Callable[[str], None]] = None,
+                             busy_poll_s: Optional[float] = None) -> threading.Thread:
     """Daemon thread shared by the SSH-isolated retirement watchdogs: ``observe`` returns the log
     reason while retirement is warranted (else None); after ``_CONFIRMATIONS`` consecutive reasons
-    the backend exits only through the retirement fence (proven idle, admission closed first)."""
+    the backend exits only through the retirement fence (proven idle, admission closed first). After a
+    refused prepare the next poll waits ``busy_poll_s`` (default ``poll_s``)."""
     if fence is None:
         from hermes_cli.backend_retirement import retirement
 
@@ -141,6 +148,7 @@ def _run_retirement_watchdog(server, *, observe: Callable[[], Optional[str]], fe
             polls += 1
             reason = observe()
             seen = seen + 1 if reason else 0
+            wait = poll_s
             if reason and seen >= _CONFIRMATIONS:
                 permit = fence.prepare()
                 if permit.get("ok") and fence.commit(permit.get("token")).get("ok"):
@@ -149,7 +157,8 @@ def _run_retirement_watchdog(server, *, observe: Callable[[], Optional[str]], fe
                         on_retire(reason)
                     server.should_exit = True
                     return
-            time.sleep(poll_s)
+                wait = poll_s if busy_poll_s is None else busy_poll_s
+            time.sleep(wait)
 
     thread = threading.Thread(target=_loop, daemon=True, name=thread_name)
     thread.start()
@@ -236,18 +245,20 @@ def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = 
 
 
 def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callable[[int], bool]] = None,
-                              fence=None, poll_s: float = DEFAULT_SKEW_POLL_S,
+                              pending: Optional[Callable[[int], bool]] = None,
+                              fence=None, poll_s: float = SUPERSEDED_POLL_S,
                               max_polls: Optional[int] = None) -> threading.Thread:
     """[daveey] An always-on blue/green backend (``hermes_cli/always_on_rollover``) runs this INSTEAD of the
     code-skew watchdog: the roller replaces it with a warmed successor, so it must not exit on skew before
     that successor serves. It retires (through the same idle fence) once ``active.json`` names neither its
     port as active nor as warming. Registered as a skew watchdog: a core-update-paused turn still learns
-    that this process will be replaced (``tui_gateway.update_pause``)."""
-    if superseded is None:
-        from hermes_cli.always_on_rollover import is_superseded
+    that this process will be replaced (``tui_gateway.update_pause``), and ``successor_pending`` tells it the
+    successor is still booting or warming, which takes longer than a plain skew retirement. The poll is
+    fast (a file read), so an idle superseded backend hands its paused turns over seconds after the switch."""
+    from hermes_cli import always_on_rollover
 
-        superseded = is_superseded
-    check: Callable[[int], bool] = superseded
+    check: Callable[[int], bool] = superseded or always_on_rollover.is_superseded
+    on_the_way: Callable[[int], bool] = pending or always_on_rollover.successor_pending
 
     def _observe() -> Optional[str]:
         if not check(port):
@@ -256,6 +267,26 @@ def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callabl
                 "retiring now that it is idle.")
 
     thread = _run_retirement_watchdog(server, observe=_observe, fence=fence, poll_s=poll_s,
-                                      max_polls=max_polls, thread_name="always-on-superseded-watchdog")
+                                      max_polls=max_polls, thread_name="always-on-superseded-watchdog",
+                                      busy_poll_s=max(poll_s, SUPERSEDED_BUSY_POLL_S))
     _SKEW_WATCHDOGS[:] = [t for t in _SKEW_WATCHDOGS if t.is_alive()] + [thread]
+    _SUCCESSOR_PROBES[:] = [(t, p) for t, p in _SUCCESSOR_PROBES if t.is_alive()]
+    _SUCCESSOR_PROBES.append((thread, lambda: on_the_way(port)))
     return thread
+
+
+# [daveey] Live superseded watchdogs with their "successor on the way" probe (``successor_pending``).
+_SUCCESSOR_PROBES: list[tuple[threading.Thread, Callable[[], bool]]] = []
+
+
+def successor_pending() -> bool:
+    """Whether a live superseded watchdog in this process says its warmed successor is being prepared (or
+    already serves): a paused turn then waits past ``update_pause.HANDOFF_WAIT_S`` for it. Errors read False."""
+    for thread, probe in _SUCCESSOR_PROBES.copy():
+        if thread.is_alive():
+            try:
+                if probe():
+                    return True
+            except (OSError, ValueError, TypeError, KeyError):
+                _log.debug("successor probe failed", exc_info=True)
+    return False
