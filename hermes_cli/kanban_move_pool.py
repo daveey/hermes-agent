@@ -126,6 +126,13 @@ def pushed_on_remote(tree: str) -> bool:
         remotes = (git_out(["remote"], tree) or "").split()
         if not head or not remotes:
             return False
+        branch = git_out(["symbolic-ref", "-q", "HEAD"], tree)
+        preferred: set[tuple[str, str]] = set()
+        if branch:
+            destinations = git_out(["for-each-ref", "--format=%(upstream:remotename) %(upstream:remoteref)"
+                                    "%0a%(push:remotename) %(push:remoteref)", branch], tree) or ""
+            preferred = {(remote, ref) for line in destinations.splitlines() if " " in line
+                         for remote, ref in [line.split(" ", 1)]}
         stale: list[tuple[str, str, str]] = []
         fallback: list[tuple[str, str, str]] = []
         checks = 0
@@ -153,7 +160,11 @@ def pushed_on_remote(tree: str) -> bool:
                 # New URL-pushed branches have no tracking ref; rebased URL pushes
                 # can leave a tracking tip unrelated to HEAD. Both need a refresh.
                 fallback.append(candidate)
-        refresh = (stale + fallback)[:_MAX_REFRESHES]
+        # Spend the bounded refresh budget on this branch's likely destinations first,
+        # not the first five alphabetic heads of a large remote.
+        refresh = sorted(stale + fallback, key=lambda c: (
+            (c[0], c[1]) not in preferred, c[1] != branch,
+        ))[:_MAX_REFRESHES]
         for remote, ref, tracking in refresh:
             git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=_REMOTE_TIMEOUT)
         return bool(refresh) and not _worktree_has_unpushed_commits(tree)

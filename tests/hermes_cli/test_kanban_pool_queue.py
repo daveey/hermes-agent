@@ -362,6 +362,32 @@ def test_url_push_moved_tip_without_ancestral_tracking(w2, tmp_path, monkeypatch
     assert _runs_on(w2.conn, tid) == [POOL]
 
 
+@pytest.mark.parametrize("destination", ["same-name", "upstream", "push"])
+def test_url_push_refresh_prioritizes_branch_over_earlier_heads(tmp_path, destination):
+    from hermes_cli import kanban_move_pool as kmp
+    tree = _pushed_clone(tmp_path, tmp_path / "priority")
+    remote = str(tmp_path / "priority-remote.git")
+    _git(tree, "branch", "-m", "wt/x")
+    # Six earlier heads must not spend the entire five-fetch budget.
+    for i in range(6):
+        _git(tree, "push", "-q", remote, f"HEAD:refs/heads/aaa/{i}")
+    _git(tree, "commit", "--amend", "-qm", "rewritten root")
+    branch = "wt/x" if destination == "same-name" else "zzz/destination"
+    if destination == "upstream":
+        _git(tree, "config", "branch.wt/x.remote", "origin")
+        _git(tree, "config", "branch.wt/x.merge", f"refs/heads/{branch}")
+    elif destination == "push":
+        _git(tree, "config", "remote.origin.push", f"refs/heads/wt/x:refs/heads/{branch}")
+    _git(tree, "push", "-q", "--force", remote, f"HEAD:refs/heads/{branch}")
+    other = tmp_path / "priority-other"
+    _git(tmp_path, "clone", "-q", "-b", branch, remote, str(other))
+    _commit(other, "advanced.txt")
+    _git(other, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+    assert kmp.pushed_on_remote(str(tree))
+    _commit(tree, "unpublished.txt")
+    assert not kmp.pushed_on_remote(str(tree))
+
+
 @pytest.mark.parametrize("failure", ["bad-url", "timeout"])
 def test_remote_failure_pins_without_reading_stdin(w2, tmp_path, monkeypatch, failure):
     from hermes_cli import worktree_ops
