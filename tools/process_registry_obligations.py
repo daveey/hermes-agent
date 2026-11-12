@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -179,6 +180,8 @@ class ProcessObligationMixin:
         keeps the one the receipt carries (never re-creates it). Read and write under ``self._lock``."""
         from tools import process_registry as registry_module  # its save name (tests patch it there)
         with self._lock:
+            if consume_output:
+                settle_quietly(session.id, "consumed via kill")
             registry_module.save_completed_result(session, None if consume_output else owed_still(session.id))
 
     def _recover_owed_completions_locked(self, owner: Optional[str]) -> int:
@@ -209,27 +212,35 @@ class ProcessObligationMixin:
                 continue
             if owed.get("writer_pid") != os.getpid() and self._writer_alive(owed):
                 continue  # a live gateway still has this watcher
+            reason, tries = "", 0
             try:
                 age, tries = now - float(owed.get("owed_since") or 0), int(owed.get("recoveries") or 0)
-                session = self._owed_session(record, owed)
-            except (KeyError, TypeError, ValueError):
-                # One malformed receipt must not stop the owed receipts after it from being re-armed.
-                logger.warning("Skipping the unreadable owed completion %s", sid, exc_info=True)
-                continue
-            if age > OBLIGATION_MAX_AGE_SECONDS or tries >= OBLIGATION_MAX_RECOVERIES:
+                if not math.isfinite(age) or tries < 0:
+                    raise ValueError("invalid recovery budget")
+                if tries >= OBLIGATION_MAX_RECOVERIES:
+                    reason = f"{tries} gateway starts did not admit it"
+                elif age > OBLIGATION_MAX_AGE_SECONDS:
+                    reason = f"owed for {int(age)}s"
+            except (TypeError, ValueError, OverflowError):
+                reason = "unreadable recovery budget"
+            if reason:
                 record.pop(OBLIGATION_KEY, None)
                 with suppress(OSError):
                     _rewrite(path, record)
                 logger.warning("Dropped the owed completion of %s (session %s): %s", sid,
-                               record.get("session_key") or "-",
-                               f"{tries} gateway starts did not admit it" if tries >= OBLIGATION_MAX_RECOVERIES
-                               else f"owed for {int(age)}s")
+                               record.get("session_key") or "-", reason)
                 continue
+            # Failed reconstruction spends a start too; otherwise malformed sessions never hit the cap.
             record[OBLIGATION_KEY] = {**owed, "recoveries": tries + 1, **_writer()}
             try:
                 _rewrite(path, record)
             except OSError:
                 logger.warning("Could not claim the owed completion of %s", sid, exc_info=True)
+                continue
+            try:
+                session = self._owed_session(record, owed)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                logger.warning("Skipping the unreadable owed completion %s", sid, exc_info=True)
                 continue
             with self._lock:
                 self._finished[sid] = session

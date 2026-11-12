@@ -41,10 +41,13 @@ def _result_paths():
         except FileNotFoundError:
             continue  # Another producer pruned it.
     retained.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+    visible = [path for _, path in retained[:MAX_RETAINED_RESULTS]]
     for _, path in retained[MAX_RETAINED_RESULTS:]:
-        if not _owed(path):  # an owed notice keeps its receipt until settled or aged out [daveey]
+        if _owed(path):  # retained custody must also remain retrievable [daveey]
+            visible.append(path)
+        else:
             path.unlink(missing_ok=True)
-    return [path for _, path in retained[:MAX_RETAINED_RESULTS]]
+    return visible
 
 
 def _owed(path) -> bool:
