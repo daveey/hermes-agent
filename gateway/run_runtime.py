@@ -324,20 +324,11 @@ def stop_authority_turns(authority, *, in_process=False, reason=None):
     ``reason`` (a gateway restart/shutdown) is recorded on each worker it signals, so the turn settles
     with that cause; a worker already stopped (the user's Stop came first) keeps none. A worker
     still being spawned gets the same Stop and cause through latches (``_stop_spawning_managed``)."""
-    from hermes_state_runtime import RuntimeStoreError
+    from gateway.session_managed_worker import ManagedWorker
     signalled = 0
     workers = getattr(authority, '_managed_workers', {})
     for worker in list(workers.values()):
-        if worker.closed.is_set() or (getattr(worker, 'stop', None) is not None and worker.stop.is_set()):
-            continue
-        worker.stop_cause = reason
-        try:
-            worker.control({'type': 'stop'})
-        except RuntimeStoreError as exc:
-            # A full control queue: control() latched worker.stop first, and the owner's read
-            # loop escalates on that latch alone (terminate after STOP_ACK_SECONDS).
-            logger.debug('managed Stop not queued (%s); the latch escalates it', exc.reason)
-        signalled += 1
+        signalled += _stop_managed_handle(worker, reason)
     signalled += _stop_spawning_managed(authority, workers, reason)
     if not in_process:
         return signalled
@@ -353,10 +344,29 @@ def stop_authority_turns(authority, *, in_process=False, reason=None):
             agent = running.get(live.route)
         if agent is None or agent is _AGENT_PENDING_SENTINEL:
             authority.pending_stops[sid] = generation
+        elif isinstance(agent, ManagedWorker):
+            # Adoption outlives registry removal until this generation settles. It is still
+            # a process handle, not an in-process agent accepting interrupt(message).
+            signalled += _stop_managed_handle(agent, reason)
+            continue
         else:
             request_hard_interrupt(agent, 'Profile stopping', tool_reason='gateway shutdown')
         signalled += 1
     return signalled
+
+
+def _stop_managed_handle(worker, reason):
+    """Stop a live process handle once, including one retained only by adoption."""
+    from hermes_state_runtime import RuntimeStoreError
+    if worker.closed.is_set() or (getattr(worker, 'stop', None) is not None and worker.stop.is_set()):
+        return 0
+    worker.stop_cause = reason
+    try:
+        worker.control({'type': 'stop'})
+    except RuntimeStoreError as exc:
+        # control() latches Stop before queueing; supervision escalates even on a full queue.
+        logger.debug('managed Stop not queued (%s); the latch escalates it', exc.reason)
+    return 1
 
 
 def _stop_spawning_managed(authority, workers, reason):
