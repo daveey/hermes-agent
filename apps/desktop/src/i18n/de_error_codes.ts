@@ -25,5 +25,9 @@ export const deErrorCodes: Partial<ThreadCopy['errorCodes']> = {
     body: 'Der lokale Modellserver läuft noch nicht: Er startet möglicherweise noch. Versuchen Sie es gleich noch einmal oder wechseln Sie zu einem anderen Modell.',
     bodyNoRetry:
       'Der lokale Modellserver ist ausgeschaltet. Starten Sie ihn in der Hermes-Desktop-App oder mit `hermes model` im Terminal, oder wechseln Sie zu einem anderen Modell.'
+  },
+  route_refused: {
+    title: 'Das Modell dieses Chats ist nicht verfügbar',
+    body: 'Das Modell, auf das dieser Chat festgelegt ist, nimmt gerade keine Anfragen an, daher wurde Ihre Nachricht nicht gesendet. Wählen Sie ein anderes Modell oder senden Sie erneut, sobald es wieder verfügbar ist.'
   }
 }

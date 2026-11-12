@@ -238,6 +238,10 @@ export const zhHantAssistant = {
           body: '本機模型伺服器尚未執行：它可能仍在啟動中。請稍後重試，或切換到其他模型。',
           bodyNoRetry:
             '本機模型伺服器已關閉。請在 Hermes 桌面應用程式或終端機中的 `hermes model` 啟動它，或切換到其他模型。'
+        },
+        route_refused: {
+          title: '此聊天的模型無法使用',
+          body: '此聊天固定使用的模型目前無法接受請求，因此你的訊息未送出。請選擇其他模型，或在其恢復後重新傳送。'
         }
       },
       errorLayers: {

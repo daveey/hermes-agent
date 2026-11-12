@@ -213,6 +213,24 @@ def _resolution_failure_reply(exc: Exception, platform: Platform) -> tuple[str, 
     return t("gateway.errors.no_credentials"), auth_permanent, False
 
 
+def _resolution_failure_result(exc: Exception, platform: Platform) -> dict:
+    """The FAILED, never-run turn result for a model/credential resolution failure."""
+    from agent.turn_failure_copy import stamp_failure
+    text, reason, retryable = _resolution_failure_reply(exc, platform)
+    result = stamp_failure({"final_response": text, "messages": [], "api_calls": 0, "tools": [],
+                            "failed": True, "completed": False, "error": str(exc)}, reason, retryable)
+    if reason == "route_refused":
+        # [daveey] The router refused the chat's own route (a pinned subscription wall): the reply names
+        # the reset and /model, and a resend repeats the refusal. Like the policy refusals
+        # (session_policy.refused_turn_result) the result brings its card (the reply as its body), so
+        # settlement commits it on the failed-turn boundary and a reopened chat still shows the way out.
+        from agent.error_surface import build_error_surface_from_result
+        from agent.turn_failure_copy import ROUTE_REFUSED_TURN_NOTICE
+        result["error_surface"] = build_error_surface_from_result(result)
+        result["refusal_notice"] = ROUTE_REFUSED_TURN_NOTICE
+    return result
+
+
 
 def _observed_turn_persist_message(run_message, override, live_text):
     """The durable user row for an observed-group turn: the clean text, or for a native image turn the
@@ -1394,10 +1412,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # a FAILED turn: a one-shot client exits non-zero, transcript persistence closes the
             # turn, and an API receipt reports failure, never a completed turn with an apology.
             logger.warning("Model resolution failed for session %s: %s", ctx.session_key or "", exc, exc_info=True)
-            from agent.turn_failure_copy import stamp_failure
-            text, reason, retryable = _resolution_failure_reply(exc, ctx.source.platform)
-            return stamp_failure({"final_response": text, "messages": [], "api_calls": 0, "tools": [],
-                                  "failed": True, "completed": False, "error": str(exc)}, reason, retryable)
+            return _resolution_failure_result(exc, ctx.source.platform)
         from gateway.session_authorities import active_authority
         from gateway.session_worker_construct import session_routing
         pr = session_routing(active_authority(runner), policy) if policy else runner._provider_routing

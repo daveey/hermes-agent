@@ -106,5 +106,9 @@ export const zhErrorCodes: Partial<ThreadCopy['errorCodes']> = {
     body: '本地模型服务器尚未运行：它可能仍在启动。请稍后重试，或切换到其他模型。',
     bodyNoRetry:
       '本地模型服务器已关闭。请在 Hermes 桌面应用或终端中的 `hermes model` 启动它，或切换到其他模型。'
+  },
+  route_refused: {
+    title: '此聊天的模型不可用',
+    body: '此聊天固定使用的模型目前无法接受请求，因此你的消息未发送。请选择其他模型，或在其恢复后重新发送。'
   }
 }

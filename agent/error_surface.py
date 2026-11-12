@@ -62,6 +62,10 @@ _NON_RETRYABLE_REASONS = {
     "context_overflow", "interpreter_shutdown", "upstream_blocked", "pre_final_gate_unresolved", "route_refused",
 }
 
+# Refusals whose ``final_response`` is a user-facing sentence written for this failure
+# (gateway/run_turn_runner.py ``_resolution_failure_reply``): it rides as ``message``.
+_OWN_SENTENCE_REASONS = {"route_refused"}
+
 # Providers whose base_url is user-supplied rather than a known vendor.
 _CUSTOM_ENDPOINT_PROVIDERS = {"custom", "local", "llama.cpp", "llamacpp", "ollama", "lmstudio", "vllm"}
 
@@ -206,6 +210,10 @@ def build_error_surface_from_result(result: Any, provider: str = "", model: str 
         if not isinstance(retryable, bool):
             retryable = reason not in _NON_RETRYABLE_REASONS
         surface = _surface(_result_layer(reason, error_text, provider), reason, retryable, provider, model)
+        # A pre-turn route refusal's reply is the backend's own sentence (which route, the reset in PT,
+        # /model): it is the card body, not the layer's generic "internal problem" gloss.
+        if reason in _OWN_SENTENCE_REASONS and isinstance(final := result.get("final_response"), str) and final.strip():
+            surface["message"] = final.strip()
         # When the provider named the moment its limit lifts (Retry-After / ``resets_at``,
         # ``agent/turn_recovery.py::_stamp_limit_reset``) the card can say "Limit resets at HH:mm"
         # next to Retry instead of leaving the user to guess (#98852). Epoch seconds.

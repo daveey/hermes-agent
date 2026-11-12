@@ -131,6 +131,10 @@ export const enErrorCodes: ThreadCopy['errorCodes'] = {
     bodyNoRetry:
       'The local model server is turned off. Start it from the Hermes desktop app or `hermes model` in a terminal, or switch to another model.'
   },
+  route_refused: {
+    title: "This chat's model is unavailable",
+    body: "The model this chat is pinned to can't take requests right now, so your message was not sent. Choose another model, or resend once it is back."
+  },
   SESSION_OWNER_UNCONFIRMED: {
     title: 'Your message may already be queued',
     body: 'The gateway did not confirm your message in time. If it was queued, it runs once the earlier turn finishes or is resolved. Check the chat before sending it again.'

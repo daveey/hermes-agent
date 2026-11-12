@@ -19,6 +19,8 @@ export interface ErrorCardText {
   body: string
 }
 
+const OWN_SENTENCE_CODES: ReadonlySet<string> = new Set(['usage_window', 'route_refused'])
+
 const render = (value: ErrorCardCopy['title'], provider: string, model = '') =>
   typeof value === 'function' ? value(provider, model) : value
 
@@ -84,9 +86,9 @@ export function errorCardText(
       }
     }
 
-    // Free-tier and usage-window refusals arrive with the backend's own sentence (the
+    // Free-tier, usage-window and route refusals arrive with the backend's own sentence (the
     // wait, the model, the way forward); the table body is only the fallback for an older backend.
-    const ownSentence = isFreeTierSurface(surface) || surface?.code === 'usage_window'
+    const ownSentence = isFreeTierSurface(surface) || OWN_SENTENCE_CODES.has(key.code)
 
     const body = surface?.retryable === false && copy.bodyNoRetry ? copy.bodyNoRetry : copy.body
 

@@ -68,6 +68,10 @@ export const ERROR_CODE_KEYS = [
   // The managed local model server is down (starting, or switched off): named as itself, not as
   // the custom-server endpoint copy, and with no Desktop-only pane (the Webapp shares this card).
   'local_runtime_unavailable',
+  // The router refused the chat's own model before the turn began (gateway/run_turn_runner.py
+  // `_resolution_failure_reply`: a pinned route's subscription wall or a routing refusal). The
+  // backend's sentence (model, reset time, /model) rides in `message`; a resend fails the same way.
+  'route_refused',
   // The owner did not confirm a forwarded send in time; it may already be queued: no Retry.
   'SESSION_OWNER_UNCONFIRMED',
   'agent_init_failed',
@@ -250,6 +254,27 @@ export function parseErrorSurface(value: unknown): ErrorSurface | null {
       : {}),
     ...(usageLimit ? { usageLimit } : {})
   }
+}
+
+// agent/turn_failure_copy.py FAILED_TURN_NOTICE / ROUTE_REFUSED_TURN_NOTICE: the messaging path
+// appends the boundary notice to a failed turn's reply. It is not part of the refusal's own sentence
+// (and its "Send it again" is the wrong advice for a refusal a resend repeats), so it never joins the body.
+const TRAILING_FAILED_TURN_NOTICE = /\s*Your request was not processed\.[^\n]*$/
+
+// Refusals whose turn text IS the backend's own user-facing sentence (the wall, the reset, the way
+// out), stamped before any model ran: gateway/run_turn_runner.py `_resolution_failure_reply`.
+const OWN_SENTENCE_REFUSALS: ReadonlySet<string> = new Set(['route_refused'])
+
+/** A stamped pre-turn refusal from a backend that did not put its sentence in `message`: the turn's
+ *  final text is that sentence, so it becomes the card body instead of the generic layer copy. */
+export function withRefusalSentence(surface: ErrorSurface | null, text: string): ErrorSurface | null {
+  if (!surface || surface.message || !OWN_SENTENCE_REFUSALS.has(surface.code)) {
+    return surface
+  }
+
+  const sentence = text.trim().replace(TRAILING_FAILED_TURN_NOTICE, '').trim()
+
+  return sentence ? { ...surface, message: sentence } : surface
 }
 
 /** "HH:mm" for a provider reset moment, in the user's local clock. */
@@ -554,6 +579,8 @@ const CODE_ACTIONS: Partial<Record<ErrorCodeKey, ErrorCardActions>> = {
   session_read_only: { primary: 'start_new_session' },
   workspace_unavailable: { primary: 'retry', secondary: 'start_new_session' },
   launch_credentials_unavailable: { primary: 'start_new_session' },
+  // The chat's model is walled until its reset: another model is the way on, never a Retry.
+  route_refused: { primary: 'choose_model' },
   loop_error: { primary: 'retry', secondary: 'start_new_session' }
 }
 
