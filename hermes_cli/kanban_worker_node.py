@@ -531,7 +531,8 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     to this machine that the pass leaves on the Board, why. ``budget_exhausted`` only for a card this pass would
     otherwise have copied, so a refusal is never hidden behind a full queue. A card the Board shows held by a
     respawn guard never takes the budget (``kanban_pickup_held``): with ``held`` it is copied outside ``limit``
-    (its id and hold signature added to ``held``), else it is left as ``hold``."""
+    (its id and hold signature added to ``held``), else it is left as ``guard_held`` (never ``hold``: that
+    one is this machine's registry hold)."""
     from hermes_cli import kanban_pickup_held as kph
     from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
     mine = _unimported_pinned(conn, replica, own)
@@ -564,7 +565,7 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
                 picked.append(card["id"])
                 free += 1
                 continue
-            reason = ("hold", f"respawn_guarded: {hold[0]}")
+            reason = ("guard_held", f"respawn_guarded: {hold[0]}")
         if reason is None and full:
             reason = ("budget_exhausted", full_detail)
         if reason is None:

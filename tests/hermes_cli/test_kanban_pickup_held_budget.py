@@ -138,7 +138,29 @@ def test_a_capped_tick_reports_a_held_pinned_card_as_held(gws):
     worker.round()
     worker.enter()
     wn.note_capped(worker.conn)
-    assert _skip(worker.conn, tid) == "hold"
+    assert _skip(worker.conn, tid) == "guard_held"
+
+
+def test_a_stalled_guard_held_card_does_not_file_the_registry_hold_repair(gws):
+    """A Board guard hold is not this machine's registry hold: no "Pickup held on <own>" / "do not lift it" card."""
+    from hermes_cli import kanban_pickup_stall as kps
+    from tests.hermes_cli.test_kanban_pickup_stall import _age, _repairs
+    hub, worker = gws
+    hub.enter()
+    tid = kb.create_task(hub.conn, title="pinned held", assignee="default", priority=0, runs_on=PIN)
+    with write_txn(hub.conn):
+        append_event(hub.conn, tid, "respawn_guarded", {"reason": "active_pr"})
+    hub.round()
+    worker.round()
+    worker.enter()
+    wn.note_capped(worker.conn)
+    assert _skip(worker.conn, tid) == "guard_held"
+    _age(worker, tid, 900)
+    kps.sweep(worker.conn)
+    [repair] = _repairs(worker.conn)
+    assert tid in repair["title"] and "respawn guard" in repair["title"] and "active_pr" in repair["title"]
+    assert "Pickup held on" not in repair["title"]
+    assert "do not lift it" not in repair["body"] and "not on a registry hold" in repair["body"]
 
 
 def test_an_unreadable_board_hold_takes_the_budget_as_before(gws, monkeypatch):

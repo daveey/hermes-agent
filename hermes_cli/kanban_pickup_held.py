@@ -11,7 +11,8 @@ The card is still copied, outside the budget (at most :data:`FREE_PER_TICK` per 
 decided where the card would run: a quota or PR hold can lift, and only a dispatcher that holds a copy re-checks it.
 A copy the local dispatcher then holds is kept (``kanban_worker_node._guard_held``). One it does not hold is
 evicted, and is not copied again for :data:`RECHECK_SECONDS` unless its Board hold changes (new hold start or a
-task row change), so an unkept copy is not re-imported every tick.
+task row change), so an unkept copy is not re-imported every tick. The signature includes the row's
+``sync_version``, so any Board change to the card re-arms one copy; :data:`FREE_PER_TICK` still bounds those.
 """
 from __future__ import annotations
 

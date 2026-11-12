@@ -39,7 +39,9 @@ _log = logging.getLogger(__name__)
 
 TABLE = "kanban_pickup_skips"
 REASONS = ("budget_exhausted", "profile_ineligible", "capability_missing", "parents_incomplete", "hold", "other",
-           "evidence_missing", "quota_hold")
+           "evidence_missing", "quota_hold", "guard_held")
+# ``hold`` is this machine's registry hold (host-wide, an operator's); ``guard_held`` is one card the Board shows held
+# by a dispatcher respawn guard (active_pr, subscription_quota_reset, ...), which lifts when that guard does.
 DEFAULT_STALL_SECONDS = 600
 REFRESH_SECONDS = 60
 RETENTION_SECONDS = 7 * 86400
@@ -564,6 +566,18 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
             continue
         reason = (card["skip"] or {}).get("reason") or "none recorded"
         waited = _minutes(card["since_ms"], now_ms)
+        if reason == "guard_held":
+            ids.append(_create(
+                conn, key=f"{KEY_PREFIX}{own}:{card['id']}:", tenant=card["tenant"], own=own, now_ms=now_ms,
+                title=(f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, held by a "
+                       f"respawn guard ({card['skip'].get('detail') or 'guard_held'})"),
+                body=(f"Card {card['id']} ({card['title']}) has been ready on the Board, pinned to machine:{own}, "
+                      f"for {waited} min (threshold {stall_seconds()} s). {own} is not on a registry hold: the "
+                      f"card's Board history shows a dispatcher respawn guard holding it, and that hold lifts when "
+                      f"the guard does. Check whether the guard named below is still right (an open PR, a quota "
+                      f"reset clock, a shared blocker) rather than the machine.\n\nLast pickup skip recorded on "
+                      f"{own}: {describe(card['skip'])}.")))
+            continue
         ids.append(_create(
             conn, key=f"{KEY_PREFIX}{own}:{card['id']}:", tenant=card["tenant"], own=own, now_ms=now_ms,
             title=f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, not imported ({reason})",
