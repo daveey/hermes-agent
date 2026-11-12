@@ -97,6 +97,28 @@ def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]
             "machines": sorted(machines)}
 
 
+def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Last dispatch hold in this ready episode; advisory, never a fresh verdict.
+
+    Do not run the guard here: PR lookups can do network I/O, and notice callers
+    hold a write transaction. A later lifecycle handoff invalidates the observation.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
+
+    kinds = {*_READY_WAIT_FLOOR_KINDS, "respawn_guarded", "continued", "scheduled", "reassigned", "reopened",
+             "hold_released"}
+    slots = ",".join("?" for _ in kinds)
+    row = conn.execute(
+        f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({slots}) "
+        "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id, *sorted(kinds)),
+    ).fetchone()
+    if row is not None and row["kind"] == "respawn_guarded":
+        reason = kb._json_dict(row["payload"]).get("reason")
+        return reason if isinstance(reason, str) and reason else None
+    return None
+
+
 def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
     """The queue a ``ready`` ``task`` in this gateway's live file waits in; None for any other status."""
     if task is None or task.status != "ready":
@@ -106,6 +128,9 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     lock = conn.execute("SELECT claim_lock, worker_pid FROM tasks WHERE id = ?", (task.id,)).fetchone()
     if lock is not None and lock[0]:
         return {"lane": "leftover_claim", "claim_lock": lock[0], "worker_pid": lock[1]}
+    guard = recorded_guard(conn, task.id)
+    if guard:
+        return {"lane": "respawn_guard", "reason": guard}
     from hermes_cli.kanban_worker_placement import POLICY
     if getattr(task, "placement_policy", None) == POLICY:
         from hermes_cli import kanban_queue_reason as kqr
@@ -133,6 +158,9 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     if not place:
         return None
     lane = place.get("lane")
+    if lane == "respawn_guard":
+        return (f"last recorded dispatch hold: respawn guard ({place.get('reason')}). "
+                "Check the current dispatcher verdict and resolve that guard; priority changes do not clear it")
     if lane == "leftover_claim":
         return (f"held by leftover claim {place.get('claim_lock')} (worker gone, pid {place.get('worker_pid')}): "
                 "the dispatcher skips a ready card with a claim_lock. Its leftover-claim sweep clears a dead local "

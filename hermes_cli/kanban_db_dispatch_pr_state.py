@@ -329,12 +329,12 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     """
     from hermes_cli import kanban_db as kb
 
-    run = conn.execute(
-        "SELECT r.* FROM task_runs r JOIN tasks t ON t.id = r.task_id "
-        "WHERE r.task_id = ? AND r.profile = t.assignee "
-        "AND r.id = (SELECT MAX(id) FROM task_runs WHERE task_id = t.id)",
-        (task_id,),
-    ).fetchone()
+    from hermes_cli.kanban_unused_grant import latest_started_run
+
+    run = latest_started_run(conn, task_id)
+    task = kb.get_task(conn, task_id)
+    if run is not None and (task is None or run["profile"] != task.assignee):
+        return False
     if run is None or run["outcome"] != "blocked" or run["ended_at"] is None:
         return False
     ended = kb._to_epoch(run["ended_at"])
@@ -429,7 +429,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     one continuation after parent completion/promotion: it must belong to the latest
     claimed run of this card and assignee, ended orderly as blocked, with no subsequent
     crash/reclaim/timeout. Operator-only links or synthetic unclaimed runs do not count;
-    the next claim consumes the handoff. A same-second dependency park counts only when
+    the next execution claim consumes the handoff (a proven unused grant does not).
+    A same-second dependency park counts only when
     its server-stamped comment watermark covers the newest PR comment; otherwise it stays guarded.
     This does not change the separate review-checkpoint exception below. So does
     a completed exact-head review of the checkpointed PRs (repair metadata, including

@@ -69,9 +69,11 @@ def notice_text(payload: Any) -> str:
     parent = str(payload.get("parent") or "<parent>")[:64]
     title = str(payload.get("parent_title") or "").strip()[:120]
     named = f"{parent} ({title})" if title else parent
+    advice = ("Check the current dispatcher verdict and resolve the recorded guard; priority changes do not clear it"
+              if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence")))
     return (f"Waiting {payload.get('wait_minutes', '?')} min on parent {named}, which has been ready "
             f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'}). "
-            + _options(parent, payload.get("priority_evidence")) + ".")
+            + advice + ".")
 
 
 def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
@@ -83,7 +85,11 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
     if waited < THRESHOLD_SECONDS:
         return None
     from hermes_cli.kanban_priority import lane_evidence
-    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(_place(conn, task.id))}. "
+    from hermes_cli import kanban_queue_position as kqp
+    place = _place(conn, task.id)
+    if place.get("lane") == "respawn_guard":
+        return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}."
+    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. "
             + _options(task.id, lane_evidence(conn, task.id)) + ".")
 
 
@@ -141,6 +147,9 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     wait (``kanban_chat_wait``), where ``waiting_on`` is ``task_id`` itself; ``extra`` adds payload fields (its
     clock hold). Returns True when it posted."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_queue_position as kqp
+    place = _place(conn, waiting_on)
+    guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     with kb.write_txn(conn):
         if any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
                for (p,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
@@ -153,7 +162,8 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
-            "queue": _queue_words(_place(conn, waiting_on)), **(extra or {}),
+            "queue": kqp.describe(place) if guard else _queue_words(place), **(extra or {}),
+            "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),
         })
     return True

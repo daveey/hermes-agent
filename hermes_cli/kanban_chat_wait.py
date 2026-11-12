@@ -98,6 +98,10 @@ def notice_text(payload: Any) -> str:
                 f"with no worker because it isn't on the shared Board (claim_deferred: not_found). "
                 f"Last sync rejection: {payload.get('sync_reject_reason') or 'no sync rejection recorded'}. "
                 "Repair the Board sync rejection before retrying dispatch.")
+    if payload.get("respawn_guard"):
+        return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min "
+                f"with no worker: last recorded respawn guard is {payload['respawn_guard']}. "
+                "Check the current dispatcher verdict and resolve that guard; priority changes do not clear it.")
     hold = ""
     if payload.get("hold_reason") and payload.get("hold_until"):
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["hold_until"])))
