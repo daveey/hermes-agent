@@ -36,6 +36,9 @@ def test_boot_hook_and_prompt_hand_the_prune_to_one_child(scratch_prune_spawns, 
     hints = _local_host_hints()
     assert env["TMPDIR"] == str(scratch) and scratch.is_dir()
     assert f"Scratch directory: {scratch} (TMPDIR points here" in hints[0]
+    # One dir for every session on the host: a generic name (suite.sh) silently runs another
+    # session's leftover file when this session's write never happened.
+    assert "shared by every session on this host" in hints[0] and "mktemp" in hints[0]
     assert scratch_prune_spawns == [scratch]
 
     monkeypatch.setattr(constants, "_scratch_pruned_once", False)  # the routed caller's own process

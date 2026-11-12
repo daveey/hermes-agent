@@ -1053,7 +1053,9 @@ def _local_host_hints() -> list[str]:
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
     try:
         host_lines.append(f"Scratch directory: {get_scratch_dir()} (TMPDIR points here; write temporary files "
-                          "and probes there, never under the system temp dir; entries idle for 24h are pruned)")
+                          "and probes there, never under the system temp dir; entries idle for 24h are pruned; "
+                          "shared by every session on this host: give files task-unique names (for example "
+                          "prefix the task id) or use `mktemp`)")
     except OSError:
         pass
     if not (sys.platform == "win32" and not is_wsl()):
