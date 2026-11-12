@@ -5,6 +5,20 @@ import json
 from typing import Any, Optional
 
 
+def _lossy_text(value: Any) -> Any:
+    """``bytes`` -> ``str`` with U+FFFD for undecodable sequences; anything else passes through.
+
+    Installed as every board connection's ``text_factory`` (a TEXT cell holding
+    invalid UTF-8 otherwise aborts the whole ``fetchall`` with "Could not decode
+    to UTF-8") and applied to BLOB-typed cells in the ``from_row`` constructors
+    (task, comment, event, run), so one
+    corrupt row degrades to replacement characters instead of taking the board
+    listing down."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _first_line(text: Optional[str], limit: int) -> str:
     """First non-blank-stripped line of ``text`` capped at ``limit`` chars; "" when empty."""
     lines = (text or "").strip().splitlines()

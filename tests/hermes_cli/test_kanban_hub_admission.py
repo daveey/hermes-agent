@@ -95,6 +95,78 @@ def test_invalid_admission_metadata_refuses_before_insertion(board, admission_cl
     assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == before
 
 
+def test_admission_edit_validates_resulting_pair_atomically(board):
+    conn, _home = board
+    task_id = kb.create_task(conn, title="Disk headroom")
+    assert kb.edit_task(conn, task_id, admission_class="capacity",
+                        admission_frees="frees: worker disk slots")
+    assert kb.get_task(conn, task_id).admission_class == "capacity"
+    before = conn.execute("SELECT count(*) FROM task_events").fetchone()[0]
+    with pytest.raises(ValueError, match="^capacity requires a one-line frees: claim$"):
+        kb.edit_task(conn, task_id, title="Must roll back", admission_frees="")
+    stored = kb.get_task(conn, task_id)
+    assert stored.title == "Disk headroom"
+    assert stored.admission_frees == "frees: worker disk slots"
+    assert conn.execute("SELECT count(*) FROM task_events").fetchone()[0] == before
+    assert kb.edit_task(conn, task_id, admission_class="normal", admission_frees="")
+    assert kb.get_task(conn, task_id).admission_class == "normal"
+    assert kb.get_task(conn, task_id).admission_frees == ""
+
+
+def test_cli_edit_admission_metadata(board, monkeypatch):
+    import argparse
+    from hermes_cli import kanban as cli
+
+    conn, home = board
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    task_id = kb.create_task(conn, title="Disk headroom")
+    parser = argparse.ArgumentParser()
+    cli.build_parser(parser.add_subparsers())
+    args = parser.parse_args(["kanban", "edit", task_id, "--class", "capacity",
+                              "--frees", "frees: worker disk slots"])
+    assert cli._cmd_edit(args) == 0
+    assert kb.get_task(conn, task_id).admission_class == "capacity"
+    args = parser.parse_args(["kanban", "edit", task_id, "--frees", ""])
+    assert cli._cmd_edit(args) != 0
+    assert kb.get_task(conn, task_id).admission_frees == "frees: worker disk slots"
+
+
+@pytest.mark.parametrize("options,reason", [
+    (["--max-retries", "4"], "operator fields"),
+    (["--completion-contract", "local-only", "--reason", "test"], "--completion-contract"),
+])
+def test_cli_admission_refuses_separate_transaction_edits(board, monkeypatch, capsys, options, reason):
+    import argparse
+    from hermes_cli import kanban as cli
+
+    conn, home = board
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    task_id = kb.create_task(conn, title="Unchanged")
+    before = tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+    parser = argparse.ArgumentParser()
+    cli.build_parser(parser.add_subparsers())
+    args = parser.parse_args(["kanban", "edit", task_id, "--class", "urgent", *options])
+    assert cli._cmd_edit(args) == 2
+    assert f"admission metadata cannot be combined with {reason}" in capsys.readouterr().err
+    assert tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()) == before
+
+
+@pytest.mark.parametrize("changes,reason", [
+    ({"admission_class": "capacity"}, "capacity requires a one-line frees: claim"),
+    ({"admission_class": "unknown"}, "admission_class must be normal, capacity or urgent"),
+    ({"admission_class": []}, "admission_class must be normal, capacity or urgent"),
+])
+def test_invalid_admission_edit_preserves_task_and_events(board, changes, reason):
+    conn, _home = board
+    task_id = kb.create_task(conn, title="Unchanged")
+    before = tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+    event_count = conn.execute("SELECT count(*) FROM task_events").fetchone()[0]
+    with pytest.raises(ValueError, match=f"^{reason}$"):
+        kb.edit_task(conn, task_id, title="Invalid edit", **changes)
+    assert tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()) == before
+    assert conn.execute("SELECT count(*) FROM task_events").fetchone()[0] == event_count
+
+
 def runs(conn):
     return conn.execute("SELECT count(*) FROM task_runs").fetchone()[0]
 

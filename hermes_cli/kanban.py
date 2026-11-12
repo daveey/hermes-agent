@@ -1289,7 +1289,13 @@ _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runti
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_admission_class import AdmissionMetadataError
     from hermes_cli.kanban_requires_edit import edit_preflight  # --requires / --completion-contract / --reason
+    admission = {name: getattr(args, name, None) for name in ("admission_class", "admission_frees")}
+    if any(value is not None for value in admission.values()):
+        for flag in ("completion_contract", "requires"):
+            if getattr(args, flag, None) is not None:
+                return _err(f"kanban edit: admission metadata cannot be combined with --{flag.replace('_', '-')}", 2)
     if (rc := edit_preflight(args)) is not None:
         return rc
     reason = getattr(args, "reason", None)
@@ -1309,9 +1315,12 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if operator["goal_mode"] is not None:
         operator["goal_mode"] = operator["goal_mode"] == "on"
     has_operator = any(value is not None for value in operator.values())
+    has_admission = any(value is not None for value in admission.values())
+    if has_operator and has_admission:
+        return _err("kanban edit: admission metadata cannot be combined with operator fields", 2)
     if result is None and (summary is not None or raw_metadata is not None):
         return _err("kanban edit: --summary and --metadata require --result", 2)
-    if all(value is None for value in (title, body, priority, priority_bump, result)) and not has_operator:
+    if all(value is None for value in (title, body, priority, priority_bump, result)) and not (has_operator or has_admission):
         return _err(
             "kanban edit: provide --title, --body, --priority, --result, --max-retries, --goal-mode, "
             "--goal-max-turns, --max-runtime-seconds, --session-id, or --completion-contract", 2,
@@ -1341,14 +1350,14 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                 return _err(f"kanban edit: {exc}")
             if changed is None:
                 return _err(f"cannot edit {args.task_id} (unknown id)")
-        if any(value is not None for value in (title, body, priority, priority_bump, result)):
+        if has_admission or any(value is not None for value in (title, body, priority, priority_bump, result)):
             try:
                 ok = kb.edit_task(
                     conn, args.task_id, title=title, body=body, priority=priority,
-                    result=result, summary=summary, metadata=metadata,
+                    result=result, summary=summary, metadata=metadata, **admission,
                     priority_reason=reason, require_lower_reason=True, priority_bump=priority_bump,
                 )
-            except (kb.PriorityLowerRefused, ReceiptEditRefused) as exc:
+            except (kb.PriorityLowerRefused, AdmissionMetadataError, ReceiptEditRefused) as exc:
                 return _err(f"kanban edit: {exc}")
             if not ok:
                 return _err(f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)")
