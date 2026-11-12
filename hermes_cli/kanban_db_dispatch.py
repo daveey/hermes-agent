@@ -2023,17 +2023,16 @@ def _dispatch_lane_task(
         _count_spawn(claimed.assignee)
         return True
     except Exception as exc:
-        from tools.process_registry import RestartSafeScopeUnavailable
-        from hermes_cli.kanban_review_model import ReviewModelUnavailable
+        from hermes_cli.kanban_review_model import admission_refusal
 
-        # Admission failed before any worker ran; preserve its retry budget.
-        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable))
+        # Admission failed before any worker ran; preserve its retry budget (a repeated review refusal: visible block).
+        infrastructure, exhausted, extra = admission_refusal(conn, claimed.id, exc)
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
             conn, claimed.id, str(exc),
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
-            infrastructure=infrastructure,
+            infrastructure=infrastructure, force_trip=exhausted, event_payload_extra=extra,
         ):
             result.auto_blocked.append(claimed.id)
         return False

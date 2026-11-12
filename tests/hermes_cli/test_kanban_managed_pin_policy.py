@@ -262,3 +262,81 @@ def test_registered_review_override_is_kept(board):
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
     assert seen == ['claude-opus-5-5']
     assert [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]['reason'] == 'review_override'
+
+
+def _receipts(conn, tid, *, route=None, ran=None):
+    """Rewrite the handoff run's run_route receipt to *route* and/or book a worker_result that ran *ran*."""
+    run = conn.execute("SELECT id FROM task_runs WHERE task_id=? AND outcome='review_requested' "
+                       "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0]
+    if route:
+        conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND run_id=? AND kind='run_route'",
+                     (json.dumps({'model': route[0], 'provider': route[1], 'lane': 'ready',
+                                  'source': 'class' if route[0].startswith('class:') else 'pin'}), tid, run))
+    if ran:
+        kb._append_event(conn, tid, 'worker_result', {'exit_code': 0, 'route_provider': ran[1],
+                                                      'route_model': ran[0]}, run_id=run)
+    conn.commit()
+
+
+def _second_deep_route():
+    """Register gpt-6.1-sol as a second deep route on the worker profile."""
+    import os
+    path = Path(os.environ['HERMES_HOME']) / 'profiles' / 'worker' / 'config.yaml'
+    extra = ('      - provider: openai-codex\n        model: gpt-6.1-sol\n        billing: subscription\n'
+             '        weight: 1\n        eligible: true\n        funding_verified: true\n'
+             '        capabilities: {tools: true, streaming: true}\n')
+    text = path.read_text()
+    path.write_text(text.replace('    standard:\n', extra + '    standard:\n', 1))
+
+
+def test_class_routed_implementer_is_named_by_worker_result(board):
+    """Finding (a) of review t_01a1cee1163b8aa2: a class-routed implementer run (run_route ``class:deep``, the
+    common case under ``kanban.strong_model: class:deep``) left _implementer_model with no concrete name, so a
+    refused override deferred silently on every claim. The run's worker_result.route_model is what ran."""
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    conn, _ = board
+    tid = _hand_off_for_review(conn, {'review_model': FABLE})
+    _receipts(conn, tid, route=('class:deep', None), ran=('claude-sonnet-5-5', 'anthropic'))
+    seen = []
+    dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
+    assert seen == ['claude-opus-5-5']
+    assert [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]['reason'] == (
+        'review_override_refused')
+
+
+def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monkeypatch):
+    """With no concrete implementer receipt at all, the third identical refusal stops deferring silently."""
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    DEFERRAL_LIMIT = 3  # hermes_cli.kanban_review_model.DEFERRAL_LIMIT
+    monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '0')
+    conn, _ = board
+    tid = _hand_off_for_review(conn, {'review_model': FABLE})
+    _receipts(conn, tid, route=('class:deep', None))
+    seen = []
+    for attempt in range(1, DEFERRAL_LIMIT + 1):
+        dispatch_once(conn, spawn_fn=lambda *args: seen.append(args), max_spawn=1)
+        task = kb.get_task(conn, tid)
+        if attempt < DEFERRAL_LIMIT:
+            assert (task.status, task.consecutive_failures) == ('review', 0), attempt
+    assert seen == []
+    assert task.status == 'triage'
+    gave_up = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'gave_up'][-1]
+    # The breaker owns reason_code (worker_failures_exhausted); the admission refusal rides beside it.
+    assert gave_up['admission_refusal'] == 'review_model_unavailable' and gave_up['sticky'] is True
+    assert 'implementer' in gave_up['error'] and FABLE in gave_up['error']
+
+
+@pytest.mark.parametrize('override', [None, FABLE])
+@pytest.mark.parametrize('receipt', ['run_route', 'worker_result'])
+def test_rerouted_pin_reviewer_is_distinct_from_the_model_that_ran(board, override, receipt):
+    """Finding (b): under ``pinned+pin_quota_reroute`` the card's pin is not the model that ran. Preferring
+    the pin let ``_distinct_deep(pin)`` choose the rerouted implementer (here gpt-6.1-sol) as its reviewer."""
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    conn, _ = board
+    _second_deep_route()
+    tid = _hand_off_for_review(conn, {'review_model': override} if override else None, pin='claude-opus-5-5')
+    ran = ('gpt-6.1-sol', 'openai-codex')
+    _receipts(conn, tid, **({'route': ran} if receipt == 'run_route' else {'ran': ran}))
+    seen = []
+    dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
+    assert seen == ['claude-opus-5-5']

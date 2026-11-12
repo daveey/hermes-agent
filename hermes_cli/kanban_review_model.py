@@ -69,21 +69,64 @@ def refused_override(conn, task):
     return {"model": override[0], "provider": override[1], "code": refusal.code, "allowed": refusal.allowed}
 
 
-def _implementer_model(conn, task):
-    """Concrete model the implementer ran: the card pin, else the handoff run's ``run_route`` receipt."""
-    pin = str(getattr(task, "model_override", None) or "").strip()
-    if pin and not is_class_selector(pin):
-        return pin
-    run_id = _handoff(conn, task)[0]
-    row = run_id is not None and conn.execute(
-        "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='run_route' "
-        "ORDER BY id DESC LIMIT 1", (task.id, run_id)).fetchone()
+def _run_model(conn, task_id, run_id, kind, key):
+    """Concrete model named by *run_id*'s latest *kind* event under *key*, else None."""
+    row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind=? "
+                       "ORDER BY id DESC LIMIT 1", (task_id, run_id, kind)).fetchone()
     try:
         payload = json.loads(row[0]) if row and row[0] else {}
     except (TypeError, ValueError):
         payload = {}
-    model = str(payload.get("model") or "").strip() if isinstance(payload, dict) else ""
+    model = str(payload.get(key) or "").strip() if isinstance(payload, dict) else ""
     return model if model and not is_class_selector(model) else None
+
+
+def _implementer_model(conn, task):
+    """Concrete model the implementer ran, most direct evidence first. [daveey]
+
+    The handoff run's ``worker_result.route_model`` (the live agent's model: the only concrete name when the
+    run was class-routed, e.g. ``kanban.strong_model: class:deep``), then its ``run_route`` receipt (under
+    ``pinned+pin_quota_reroute`` that is the peer that ran, not the pin), and only then the card's concrete pin.
+    Preferring the pin let ``_distinct_deep(pin)`` pick the rerouted implementer as its own reviewer."""
+    run_id = _handoff(conn, task)[0]
+    if run_id is not None:
+        for kind, key in (("worker_result", "route_model"), ("run_route", "model")):
+            model = _run_model(conn, task.id, run_id, kind, key)
+            if model:
+                return model
+    pin = str(getattr(task, "model_override", None) or "").strip()
+    return pin if pin and not is_class_selector(pin) else None
+
+
+# Identical review-admission refusals in a row (spaced by ``infrastructure_cooldown``) before the card leaves
+# the silent infrastructure-retry loop for a visible block. [daveey]
+DEFERRAL_LIMIT = 3
+
+
+def deferral_exhausted(conn, task_id, error):
+    """True when *error* would be the ``DEFERRAL_LIMIT``-th identical ReviewModelUnavailable deferral in a row.
+
+    Such a refusal is ``infrastructure`` (failures stay 0, the breaker never trips), so a cause that never
+    clears (no concrete implementer receipt, no registered independent reviewer) deferred the card forever."""
+    import sqlite3
+    try:
+        rows = conn.execute("SELECT outcome, error FROM task_runs WHERE task_id=? AND ended_at IS NOT NULL "
+                            "ORDER BY id DESC LIMIT ?", (task_id, DEFERRAL_LIMIT - 1)).fetchall()
+    except sqlite3.Error:
+        return False  # unreadable history keeps the plain infrastructure deferral
+    return len(rows) == DEFERRAL_LIMIT - 1 and all(
+        row[0] == "spawn_failed" and (row[1] or "") == str(error)[:500] for row in rows)
+
+
+def admission_refusal(conn, task_id, exc):
+    """``(infrastructure, force_trip, gave_up extra)`` for a spawn that failed before any worker ran. [daveey]
+
+    A host that cannot place the worker (no restart-safe scope) or an unavailable independent reviewer is
+    infrastructure: retried with the budget untouched, until ``deferral_exhausted`` sends the review to a block."""
+    from tools.process_registry import RestartSafeScopeUnavailable
+    if isinstance(exc, ReviewModelUnavailable) and deferral_exhausted(conn, task_id, str(exc)):
+        return False, True, {"admission_refusal": "review_model_unavailable", "deferrals": DEFERRAL_LIMIT}
+    return isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable)), False, None
 
 
 def _distinct_deep(pin, assignee, *, registered=False):
@@ -138,6 +181,7 @@ def resolve_review_model(conn, task, cfg):
     pin = str(getattr(task, "model_override", None) or "").strip()
     if not pin:
         return None
-    if is_class_selector(pin):
+    implementer = _implementer_model(conn, task)
+    if not implementer:
         raise ReviewModelUnavailable("A class pin does not identify the implementer; set review_model in the handoff")
-    return _independent(pin, cfg, assignee)
+    return _independent(implementer, cfg, assignee)
