@@ -92,6 +92,18 @@ def test_other_cards_still_go_to_the_judge(judge, title, body):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("hub_reason", [
+    "a Desktop-session interaction",  # tools/kanban_tools_schemas.py hub_reason wording for user_terminal
+    "board_admin_key", "instance_role_ssm", "user_terminal", "hub_worktree", "hub_chrome",
+    "gateway_key_cli", "hub_live_process",
+])
+def test_relay_shaped_card_with_an_allowlist_hub_reason_goes_to_the_judge(judge, hub_reason):
+    gate, calls = judge
+    title, body = RELAYS[3]
+    assert gate.admit({"title": title, "body": body}, hub_reason=hub_reason).admit is True
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("title,body", RELAYS)
 def test_worker_machine_hub_pin_for_a_relay_is_refused_with_the_route(judge, monkeypatch, title, body):
     """kanban_create on a worker with ``runs_on=['machine:hub']`` (how all four were filed) is refused."""
