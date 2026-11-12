@@ -272,3 +272,19 @@ def test_read_never_invents_generation_from_an_event_or_poll(board):
     assert "generation" not in observation["identity"]
     assert "run_id" not in observation["identity"]
     assert observation["state"] == "unknown"
+
+
+def test_recorded_source_validity_is_the_sidebar_bound_not_longer(board):
+    tid = kb.create_task(board, title="one", assignee="alice")
+    evidence.record(board, dispatch.DispatchResult(), board="default", machine="m", now=1000)
+    out = evidence.read(board, kb.get_task(board, tid), board="default", now=1001)
+    assert out["valid_until_ms"] - out["observed_at_ms"] == 180_000
+    assert out["execution_observation"]["valid_until"] == 1180
+
+
+def test_describe_without_observed_restrictions_never_asserts_availability(board):
+    tid = kb.create_task(board, title="one", assignee="alice")
+    evidence.record(board, dispatch.DispatchResult(), board="default", machine="m", now=1000)
+    text = evidence.describe(evidence.read(board, kb.get_task(board, tid), board="default", now=1001))
+    assert text == "current: restriction coverage incomplete; admissible capacity unknown"
+    assert "no restriction" not in text
