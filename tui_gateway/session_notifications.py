@@ -1710,6 +1710,14 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
     try:
         live = _find_live_session_by_key(key)
         if live is None:
+            # [daveey] A turn paused for an update belongs to the restarting backend's startup sweep; resuming it
+            # here would continue it in a process its viewers are not attached to (update_pause).
+            from tui_gateway.update_pause import successor_owes_continuation
+            homes = [_hermes_home, *filter(None, (_profile_home(p) for p in _readopt_wake_profiles() if p))]
+            if any(successor_owes_continuation(home, key) for home in homes):
+                logger.info("%s: %s is paused for a Hermes update and its backend is restarting; left to that "
+                            "backend's continuation", label, key)
+                return "busy"
             handler = _methods.get("session.resume")
             if handler is None:
                 return "error"

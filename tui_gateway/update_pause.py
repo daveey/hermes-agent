@@ -86,6 +86,10 @@ KICKOFF_HOLD_S = 120.0 + DUE_HOLD_S
 # Automatic turns never wait for a paused turn longer than this past the window's end (a continuation that
 # keeps failing to schedule, e.g. a live foreign marker writer, must not starve the chat's notices).
 HOLD_MAX_S = LEAVE_GRACE_S + WATCH_POLL_S
+# [daveey] A headless wake of a chat no backend holds (``successor_owes_continuation``) leaves a pause this fresh
+# to the dead writer's replacement: its startup sweep schedules the continuation within seconds of the restart
+# and the kickoff may wait out an agent build.
+SUCCESSOR_YIELD_S = KICKOFF_HOLD_S
 # A capped pause parked between drain windows restamps its freshness clock this often (``_keep_parked``).
 PARK_STAMP_S = 30.0
 # [daveey] t_01a18b11cabcd2c2: a capped pause used to stay parked for its drainer's whole life (David-MBP
@@ -608,6 +612,22 @@ def replacement_outlook() -> str:
     except Exception:
         idle = None
     return "coming" if idle is True else "blocked"
+
+
+def successor_owes_continuation(home: Path | str, session_key: str) -> bool:
+    """[daveey] True while unloaded chat ``session_key`` carries a fresh core-update pause whose writer is gone:
+    the backend that paused it is restarting for the update and its startup sweep continues the turn where
+    the chat's viewers attach. A wake that cold-resumed the chat here first (``session.resume`` schedules the
+    continuation) moved the turn into this process: on 2026-11-11 the gateway's kanban sweeper did so 21 s
+    after a pause, the continuation re-asked a clarify form no Desktop window could see, and the user's next
+    message cancelled it. Past ``SUCCESSOR_YIELD_S`` no successor came and any reader continues, as before."""
+    from tui_gateway.turn_marker import freshness_since, marker_writer_state, read_turn_marker
+    marker = read_turn_marker(home, session_key)
+    if not marker or marker.get("reason") != PAUSE_REASON or not marker.get("auto_continue", True):
+        return False
+    if marker_writer_state(marker) == "alive":
+        return False  # its own backend still holds the pause (in-place watcher)
+    return 0 <= _now() - freshness_since(marker) < SUCCESSOR_YIELD_S
 
 
 def continuation_due(session: dict) -> bool:
