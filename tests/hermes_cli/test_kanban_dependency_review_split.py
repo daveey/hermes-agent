@@ -4,12 +4,14 @@ Production shape (t_01a1ceba11be1290): a core PR and a plugin PR, one review car
 each approving only its own ``reviewed_pr``. The all-parents-approve-every-PR rule held
 that owner forever, although every awaited parent approved and every PR was approved.
 """
+import json
 import time
 
 import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as dispatch
+from hermes_cli.kanban_dependency_review import resumes_review
 from tests.hermes_cli import test_kanban_dependency_review as helpers
 from tests.hermes_cli.kanban_guard_helpers import worker_comment
 
@@ -80,4 +82,28 @@ def test_split_approvals_must_cover_every_pr_and_every_parent(board, prs, verdic
         assert kb.complete_task(board, review, summary="Review complete", expected_run_id=run,
                                 metadata=metadata)
     kb.recompute_ready(board)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+def test_live_shape_holding_core_only_sibling_approves_plugin_only(board):
+    # Live hold: only the core PR is holding; the plugin review approved only PR60.
+    task, reviews = parked_two_prs(board)
+    finish(board, reviews, (CORE, MODS))
+    assert resumes_review(board, task, [CORE]) is True
+    assert resumes_review(board, task, [MODS]) is True
+
+
+def test_legacy_checkpoint_without_awaited_needs_each_parent_to_cover_every_pr(board):
+    # Without an explicit awaited list the checkpoint never named which parents split the
+    # review, so each parent must cover every holding PR (the pre-split rule).
+    task, reviews = parked_two_prs(board)
+    row = board.execute("SELECT id, payload FROM task_events WHERE task_id = ? "
+                        "AND kind = 'dependency_wait'", (task,)).fetchone()
+    payload = json.loads(row["payload"])
+    payload["review_checkpoint"].pop("awaited", None)
+    with kb.write_txn(board):
+        board.execute("UPDATE task_events SET payload = ? WHERE id = ?",
+                      (json.dumps(payload), row["id"]))
+    finish(board, reviews, (CORE, MODS))
+    assert resumes_review(board, task, [CORE]) is False
     assert dispatch.check_respawn_guard(board, task) == "active_pr"
