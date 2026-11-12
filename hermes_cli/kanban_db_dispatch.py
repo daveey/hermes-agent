@@ -2005,6 +2005,7 @@ def dispatch_once(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
     dispatcher_id: Optional[str] = None,
+    observation_update_drain: bool = False,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2015,7 +2016,7 @@ def dispatch_once(
     resolved DB path so unrelated boards tick in parallel.
     """
     def _locked_tick() -> DispatchResult:
-        return _dispatch_once_locked(
+        result = _dispatch_once_locked(
             conn,
             spawn_fn=spawn_fn,
             ttl_seconds=ttl_seconds,
@@ -2029,6 +2030,10 @@ def dispatch_once(
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
         )
+        from hermes_cli.kanban_capacity_evidence import observe_dispatch
+        observe_dispatch(conn, result, board=board, dry_run=dry_run,
+                         update_drain=observation_update_drain)
+        return result
 
     from hermes_cli.kanban_dispatch_owner import run_owned_tick
     return run_owned_tick(conn, _locked_tick, dispatcher_id, board, dry_run)

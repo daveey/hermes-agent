@@ -44,7 +44,7 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
     tid = task.id
     worker_context = kb.build_worker_context(conn, tid)
     capsule = {}
-    queue = None
+    details = {}
     queue_hint = None
     if not replica:
         worker_context, capsule = own_card_view(task, tid, worker_context)
@@ -55,13 +55,13 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
             queue_hint = ready_hint(conn, task)
         except Exception:  # health: allow BLE001 -- an advisory hint must never fail the read
             queue_hint = None
-        queue = kqp.read(conn, task, args.get("board"))
+        details = kqp.detail_fields(conn, task, args.get("board"))
     return {
         "task": kt._fields(task, kt._TASK_FIELDS),
         "source": "replica" if replica else "live",
         **capsule,
         "queue_reason": kqr.latest(conn, tid),
-        **kqp.fields(queue),
+        **details,
         **({"queue_hint": queue_hint} if queue_hint else {}),
         "parents": kb.parent_ids(conn, tid),
         "unsatisfied_parents": [

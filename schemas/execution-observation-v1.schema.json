@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hermes:execution-observation:v1",
+  "title": "Source execution observation v1 (consumer unknown adapters may be incomplete)",
+  "type": "object",
+  "required": ["version", "identity", "owner", "state", "source", "source_revision", "evidence_refs", "observed_at", "valid_until"],
+  "properties": {
+    "version": {"const": 1},
+    "identity": {
+      "type": "object",
+      "required": ["gateway", "profile", "kind", "work_id"],
+      "properties": {
+        "gateway": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "work_id": {"type": "string", "minLength": 1},
+        "board": {"type": "string", "minLength": 1},
+        "session": {"type": "string", "minLength": 1},
+        "lineage": {"type": "string", "minLength": 1},
+        "run_id": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}]},
+        "generation": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}]}
+      },
+      "anyOf": [{"required": ["run_id"]}, {"required": ["generation"]}],
+      "if": {"properties": {"kind": {"const": "card"}}},
+      "then": {"required": ["board"]},
+      "else": {"anyOf": [{"required": ["session"]}, {"required": ["lineage"]}]}
+    },
+    "owner": {"type": "object", "required": ["gateway", "profile"], "properties": {
+      "gateway": {"type": "string", "minLength": 1}, "profile": {"type": "string", "minLength": 1}
+    }},
+    "state": {"enum": ["running", "queued", "waiting", "needs_user", "done", "failed", "cancelled", "unknown"]},
+    "last_known_state": {"type": ["string", "null"]},
+    "source": {"type": "string", "minLength": 1},
+    "source_revision": {"type": "string", "minLength": 1},
+    "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "observed_at": {"$ref": "#/$defs/epoch"},
+    "valid_until": {"$ref": "#/$defs/epoch"},
+    "last_activity": {"anyOf": [{"$ref": "#/$defs/epoch"}, {"type": "null"}]},
+    "last_progress": {"anyOf": [{"$ref": "#/$defs/epoch"}, {"type": "null"}]},
+    "diagnostics": {"type": "array", "items": {
+      "type": "object", "required": ["code", "native_code", "phase", "evidence_ref"],
+      "properties": {
+        "code": {"enum": ["capacity.memory_pressure", "capacity.provider_limit", "capacity.placement", "capacity.dependency", "capacity.update_drain"]},
+        "native_code": {"type": "string", "minLength": 1},
+        "phase": {"enum": ["pre_claim", "post_claim", "post_start"]},
+        "evidence_ref": {"type": "string", "minLength": 1}
+      }
+    }},
+    "required_sources": {"type": "array", "items": {"type": "object", "required": ["observed_at", "valid_until"], "properties": {
+      "observed_at": {"$ref": "#/$defs/epoch"}, "valid_until": {"$ref": "#/$defs/epoch"}
+    }}}
+  },
+  "$defs": {"epoch": {"type": "number", "minimum": 0, "maximum": 8640000000000}},
+  "$comment": "Consumers also check valid_until >= observed_at, now >= observed_at, separate source TTL bounds and min(required_sources.valid_until)."
+}

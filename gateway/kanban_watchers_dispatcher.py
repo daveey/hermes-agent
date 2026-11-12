@@ -222,6 +222,7 @@ class _KanbanDispatcher:
         kwargs["max_in_progress"] = self.live_max_in_progress()
         if suppress_spawn:
             kwargs["max_spawn"] = 0  # budget gate refuses every claim; bookkeeping phases still run
+            kwargs["observation_update_drain"] = True  # diagnostic only, never an admission input
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).

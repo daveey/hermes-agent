@@ -261,7 +261,21 @@ def fields(place: Optional[dict[str, Any]]) -> dict[str, Any]:
     return {"queue": place, "queue_note": describe(place)} if place else {}
 
 
+def detail_fields(conn, task, board=None):
+    """Additive card-read fields for every state; legacy queue shape is unchanged."""
+    from hermes_cli import kanban_capacity_evidence as evidence
+    out = fields(read(conn, task, board))
+    try:
+        capacity = evidence.read(conn, task, board=board)
+    except Exception:  # health: allow BLE001 -- diagnostics cannot fail a card read
+        capacity = evidence._unknown("observation_unavailable")
+    observation = capacity.get("execution_observation")
+    out.update(capacity_evidence=capacity, execution_observations=[observation] if observation else [])
+    out["capacity_note"] = evidence.describe(capacity)
+    return out
+
+
 def print_field(place: Optional[dict[str, Any]], queue_reason: Any, field) -> None:
     """The text ``queue:`` line, unless the worker-pool ``queue_reason`` line already took it."""
     if place and not queue_reason:
-        field("queue", describe(place))
+        field("queue", fields(place)["queue_note"])
