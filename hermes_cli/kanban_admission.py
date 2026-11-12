@@ -66,7 +66,7 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
     return reason
 
 
-def _root_max_in_progress():
+def _root_max_in_progress(*, root=None):
     """Root ``kanban.max_in_progress`` resolved like the dispatcher (unset → memory-derived default).
 
     ``(ok, cap)``: ok False when the root config is unreadable or the value is invalid (refuses)."""
@@ -75,7 +75,7 @@ def _root_max_in_progress():
     from hermes_cli.kanban_db_dispatch import resolve_max_in_progress
 
     try:
-        doc = read_config_doc_readonly(Path(get_default_hermes_root()) / "config.yaml")
+        doc = read_config_doc_readonly(Path(root if root is not None else get_default_hermes_root()) / "config.yaml")
     except FileNotFoundError:
         doc = None
     except Exception:  # health: allow BLE001 -- unreadable root config refuses the claim

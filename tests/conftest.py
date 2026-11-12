@@ -343,6 +343,11 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
 
     platform_default = hermes_constants._get_platform_default_hermes_home
 
+    # Per-test host policy is hermetic too. Do not change import-time / session
+    # admission: pytest itself must obey the real account's worker budget.
+    from hermes_cli import worker_compute_capacity
+    monkeypatch.setattr(worker_compute_capacity, "policy_root", lambda: tmp_path / "hermes_test")
+
     def isolated_platform_default() -> Path:
         root = platform_default()
         # Explicit Path.home()/LOCALAPPDATA overrides in individual tests

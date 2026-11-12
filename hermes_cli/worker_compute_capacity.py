@@ -104,13 +104,22 @@ def pool_path() -> Path:
     return CGROUP_ROOT / 'user.slice' / f'user-{uid}.slice' / f'user@{uid}.service' / 'hermes.slice' / 'hermes-kanban.slice'
 
 
+def policy_root() -> Path:
+    """Host policy is account-owned, independent of HOME and HERMES_HOME.
+
+    Worker enrollment uses this fixed Linux account installation. Custom profile
+    roots remain valid for session data, but cannot disable host CPU policy.
+    """
+    from hermes_constants import _account_home
+    return _account_home() / '.hermes'
+
+
 def worker_enabled() -> bool:
     """Read installation policy, never a card's environment or profile override."""
-    from hermes_constants import get_default_hermes_root
     from hermes_cli.config_backend import read_config_doc_readonly
 
     try:
-        doc = read_config_doc_readonly(Path(get_default_hermes_root()) / 'config.yaml')
+        doc = read_config_doc_readonly(policy_root() / 'config.yaml')
     except FileNotFoundError:
         return False
     raw = ((doc or {}).get('kanban') or {}).get('worker_resources', {})
@@ -127,7 +136,6 @@ def configure_card(board: str, task: str) -> str:
     """
     import os
     import subprocess
-    from hermes_constants import get_default_hermes_root
     from tools.process_registry import RestartSafeScopeUnavailable, systemd_user_bus_env
 
     env = systemd_user_bus_env()
@@ -147,7 +155,7 @@ def configure_card(board: str, task: str) -> str:
         _verify_quota(path, quota)
         if not 1 <= int((path / 'cpu.weight').read_text(encoding='utf-8')) <= 10:
             raise ValueError(f'Worker CPU weight is missing or too high: {unit}')
-    directory = Path(get_default_hermes_root()) / 'worker-resources' / 'owners'
+    directory = policy_root() / 'worker-resources' / 'owners'
     directory.mkdir(parents=True, exist_ok=True)
     # Immutable one-file-per-owner: concurrent retries write identical bytes.
     import tempfile

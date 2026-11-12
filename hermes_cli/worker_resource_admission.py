@@ -62,19 +62,17 @@ def pool_occupancy(pool: Path, owners, active):
 
 def refusal(echo=None) -> str | None:
     """Pre-lease and final-lock check. Unknown observations fail closed."""
-    from hermes_constants import get_default_hermes_root
-
     try:
         if not capacity.worker_enabled():
             return None
-        directory = Path(get_default_hermes_root()) / 'worker-resources'
+        directory = capacity.policy_root() / 'worker-resources'
         if _pressure(directory):
             return 'worker_load_pressure'
         from hermes_cli import machine_metrics
         from hermes_cli.kanban_admission import _root_max_in_progress
         active_owners = set()
         active = machine_metrics.active_card_runs(exclude=echo, owner_output=active_owners)
-        ok, cap = _root_max_in_progress()
+        ok, cap = _root_max_in_progress(root=capacity.policy_root())
         if active is None or not ok or cap is None:
             return 'worker_resources_unknown'
         owners = {}

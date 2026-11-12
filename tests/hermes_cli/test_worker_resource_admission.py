@@ -11,6 +11,7 @@ from hermes_cli import worker_compute_capacity as capacity
 @pytest.fixture
 def worker_rig(monkeypatch, tmp_path):
     rig = Rig(tmp_path, monkeypatch, cap=2)
+    monkeypatch.setattr(capacity, 'policy_root', lambda: rig.home)
     monkeypatch.setattr(capacity, 'worker_enabled', lambda: True)
     monkeypatch.setattr(capacity, 'effective_cores', lambda: 16)
     monkeypatch.setattr('os.getloadavg', lambda: (1, 1, 1))
@@ -67,6 +68,7 @@ def test_persistent_hysteresis_and_bad_state_refuse(worker_rig, monkeypatch):
 @pytest.mark.parametrize('lane', ['ready', 'review'])
 def test_parked_job_blocks_before_lease_then_releases(monkeypatch, tmp_path, lane):
     rig = Rig(tmp_path, monkeypatch, cap=1)
+    monkeypatch.setattr(capacity, 'policy_root', lambda: rig.home)
     try:
         monkeypatch.setattr(capacity, 'worker_enabled', lambda: True)
         monkeypatch.setattr(capacity, 'effective_cores', lambda: 16)
@@ -109,9 +111,8 @@ def test_absent_pool_is_empty_only_with_readable_manager(tmp_path):
 
 
 def test_malformed_root_config_refuses_without_raising(monkeypatch, tmp_path):
-    import hermes_constants
     from hermes_cli.worker_resource_admission import refusal
-    monkeypatch.setattr(hermes_constants, 'get_default_hermes_root', lambda: tmp_path)
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     for text in ['kanban: [broken', '- not-a-mapping', 'kanban: 7']:
         (tmp_path / 'config.yaml').write_text(text)
         assert refusal() == 'worker_resources_unknown'
@@ -119,8 +120,7 @@ def test_malformed_root_config_refuses_without_raising(monkeypatch, tmp_path):
 
 def test_worker_brake_is_not_bypassed_by_disabled_hub(monkeypatch, tmp_path):
     from hermes_cli import machine_cpu_metrics as cpu
-    import hermes_constants
-    monkeypatch.setattr(hermes_constants, 'get_default_hermes_root', lambda: tmp_path)
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     monkeypatch.setattr(cpu, 'root_limit', lambda: (cpu.OFF, None))
     monkeypatch.setattr(capacity, 'worker_enabled', lambda: True)
     monkeypatch.setattr(capacity, 'effective_cores', lambda: 16)

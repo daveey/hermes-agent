@@ -36,7 +36,15 @@ def test_receipt_requires_live_exclusive_lock(monkeypatch, tmp_path):
     monkeypatch.delenv(budget.RECEIPT_ENV, raising=False)
     monkeypatch.delenv(slots.HELD_ENV, raising=False)
     with slots.host_test_slot() as fd:
+        assert fd is not None
         env = {}
+        budget.child_environment(env, fd)
+        monkeypatch.setenv(budget.RECEIPT_ENV, env[budget.RECEIPT_ENV])
+        assert not slots.host_slots_enabled()
+        # Same PID/fd/inode can be reacquired for another file attempt. A stray
+        # grandchild's old receipt must not borrow that later acquisition.
+        slots._write_holder(fd)
+        assert slots.host_slots_enabled(), 'receipt must bind acquisition nonce'
         budget.child_environment(env, fd)
         monkeypatch.setenv(budget.RECEIPT_ENV, env[budget.RECEIPT_ENV])
         assert not slots.host_slots_enabled()
@@ -82,3 +90,38 @@ def test_worker_never_reclaims_held_inode(monkeypatch, tmp_path):
         inode = (tmp_path / '0.lock').stat().st_ino
         assert slots.reclaim_stale_slots(str(tmp_path), 1) == []
         assert (tmp_path / '0.lock').stat().st_ino == inode
+
+
+def test_receipt_in_real_child_and_bad_identities(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from scripts import worker_test_budget as budget
+    from tools.environments.local import build_subprocess_env
+    monkeypatch.setattr(capacity, 'worker_enabled', lambda: True)
+    monkeypatch.setattr(slots, 'host_slot_dir', lambda: str(tmp_path))
+    monkeypatch.setattr(slots, 'host_slot_count', lambda: 1)
+    monkeypatch.delenv(slots.HELD_ENV, raising=False)
+    monkeypatch.delenv(budget.RECEIPT_ENV, raising=False)
+    code = '''
+import json, os, sys
+from scripts import run_tests_host_slots as slots, worker_test_budget as budget
+slots.host_slot_dir = lambda: sys.argv[1]
+slots.host_slot_count = lambda: 1
+assert budget.inherited_slot(), 'real ancestor lock must validate without inherited fd'
+original = os.environ[budget.RECEIPT_ENV]
+for field, value in [('pid', 1), ('birth', -1), ('fd', 999999), ('slot', 1), ('nonce', 'wrong')]:
+    rec = json.loads(original)
+    rec[field] = value
+    os.environ[budget.RECEIPT_ENV] = json.dumps(rec)
+    assert not budget.inherited_slot(), field
+print('child receipt verified')
+'''
+    with slots.host_test_slot() as fd:
+        env = build_subprocess_env()
+        budget.child_environment(env, fd)
+        result = subprocess.run([sys.executable, '-c', code, str(tmp_path)], env=env,
+                                cwd=Path(__file__).resolve().parents[2], capture_output=True,
+                                text=True, encoding='utf-8', timeout=30, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'child receipt verified' in result.stdout

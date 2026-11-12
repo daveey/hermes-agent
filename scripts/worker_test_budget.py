@@ -49,6 +49,11 @@ def inherited_slot() -> bool:
         held = os.stat(f'/proc/{pid}/fd/{fd}')
         if (st.st_dev, st.st_ino) != (held.st_dev, held.st_ino):
             return False
+        record = json.loads(expected.read_text(encoding='utf-8'))
+        if (not isinstance(record, dict) or not isinstance(rec.get('nonce'), str) or not rec['nonce'] or
+                record.get('nonce') != rec['nonce'] or record.get('pid') != pid or
+                record.get('start') != birth):
+            return False
         identity = f'{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}'
         for line in Path(f'/proc/{pid}/fdinfo/{fd}').read_text(encoding='utf-8').splitlines():
             fields = line.split()
@@ -63,7 +68,7 @@ def inherited_slot() -> bool:
 
 def child_environment(env: MutableMapping[str, str], fd: int | None) -> None:
     from hermes_cli.worker_compute_capacity import worker_enabled
-    from scripts.run_tests_host_slots import HELD_ENV, host_slot_dir, host_slot_count
+    from scripts.run_tests_host_slots import HELD_ENV, host_slot_dir, host_slot_count, _read_holder
     env[HELD_ENV] = '1'
     if not worker_enabled():
         return
@@ -80,7 +85,10 @@ def child_environment(env: MutableMapping[str, str], fd: int | None) -> None:
             continue
         candidate = path.stat()
         if (candidate.st_dev, candidate.st_ino) == (st.st_dev, st.st_ino):
+            record = _read_holder(fd)
+            if not record or not record.get('nonce'):
+                raise RuntimeError('worker test lock has no acquisition identity')
             env[RECEIPT_ENV] = json.dumps({'pid': os.getpid(), 'birth': _stat(os.getpid())[1],
-                                         'fd': fd, 'slot': slot})
+                                         'fd': fd, 'slot': slot, 'nonce': record['nonce']})
             return
     raise RuntimeError('worker test lock is outside canonical slot domain')

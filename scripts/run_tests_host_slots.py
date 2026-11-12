@@ -157,7 +157,9 @@ def _write_holder(fd: int) -> None:
     except OSError:
         cwd = ""
     pid = os.getpid()
-    record = json.dumps({"pid": pid, "start": _proc_start(pid), "since": time.time(), "cwd": cwd}).encode()
+    import secrets
+    record = json.dumps({"pid": pid, "start": _proc_start(pid), "since": time.time(),
+                         "cwd": cwd, "nonce": secrets.token_hex(16)}).encode()
     with contextlib.suppress(OSError):
         os.ftruncate(fd, 0)
         os.pwrite(fd, record, 0)

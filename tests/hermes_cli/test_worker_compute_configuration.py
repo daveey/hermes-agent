@@ -29,13 +29,12 @@ def test_invalid_cpuset_refuses(monkeypatch, tmp_path, raw):
 
 @pytest.fixture
 def configured(monkeypatch, tmp_path):
-    import hermes_constants
     import subprocess
     from tools import process_registry
     root = tmp_path / 'cgroups'
     monkeypatch.setattr(capacity, 'CGROUP_ROOT', root)
     monkeypatch.setattr(capacity, 'effective_cores', lambda: 16)
-    monkeypatch.setattr(hermes_constants, 'get_default_hermes_root', lambda: tmp_path / 'home')
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path / 'home')
     monkeypatch.setattr(process_registry, 'systemd_user_bus_env', lambda: {'bus': 'fixture'})
     base = root / 'user.slice' / f'user-{os.getuid()}.slice'
     pool = base / f'user@{os.getuid()}.service/hermes.slice/hermes-kanban.slice'
