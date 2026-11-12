@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 
 _PREVIEW_CHARS = 80
 # [daveey] ``_redial``: a core update restarts the hub gateway in ~90-110 s; a finite run waits this long
-# per hang-up for the replacement owner, polling every REDIAL_RETRY_S, at most REDIAL_LIMIT hang-ups.
+# per hang-up for the replacement owner, polling every REDIAL_RETRY_S, at most REDIAL_LIMIT hang-ups. So a
+# one-shot whose gateway never comes back exits (turn outcome unknown) only after this window, not at once:
+# its turn may still be running on the next owner, and a stderr notice says what it waits for.
 REDIAL_WINDOW_S = 600.0
 REDIAL_RETRY_S = 2.0
 REDIAL_LIMIT = 5
@@ -224,14 +226,20 @@ class GatewayChatView:
         if (self.reconnect is None or self.redials >= REDIAL_LIMIT
                 or not isinstance(self.failure, GatewayClientError) or str(self.failure) != DISCONNECTED):
             return False
+        from websockets.exceptions import InvalidHandshake
         self.redials += 1
+        if self.emitter is None:  # stderr, even for a quiet one-shot: its 10-minute silence needs a reason
+            print(f"Gateway connection lost; waiting up to {REDIAL_WINDOW_S / 60:.0f} min for the restarted "
+                  "gateway to continue this turn.", file=sys.stderr, flush=True)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + REDIAL_WINDOW_S
         while True:
             try:
                 client = await self.reconnect()
                 break
-            except (GatewayClientError, OSError, TimeoutError) as exc:  # restarting: not ready yet
+            # Restarting, not ready yet: refused, timed out, or a half-started owner rejecting the WebSocket
+            # handshake (``connect_gateway`` passes websockets' ``InvalidHandshake``/``InvalidStatus`` through).
+            except (GatewayClientError, OSError, TimeoutError, InvalidHandshake) as exc:
                 if loop.time() >= deadline:
                     logger.debug("gateway redial gave up: %s", exc)
                     return False

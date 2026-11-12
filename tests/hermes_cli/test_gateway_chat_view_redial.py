@@ -89,6 +89,42 @@ async def test_oneshot_without_a_dialer_or_past_the_window_keeps_the_unknown_exi
 
 
 @pytest.mark.asyncio
+async def test_a_half_started_owner_rejecting_the_handshake_is_retried(capsys, monkeypatch):
+    """``connect_gateway`` passes websockets' handshake rejections through raw: a replacement owner that is
+    listening but not ready (HTTP 503 on the upgrade, a socket closed mid-handshake) is retried like a refused
+    connect, not an exit with the turn still running. The wait is announced on stderr."""
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidMessage, InvalidStatus
+    from websockets.http11 import Response
+    monkeypatch.setattr(gcv, "REDIAL_RETRY_S", 0.01)
+
+    async def second(life, method, params):
+        if method == "session.resume":
+            return {"pending": [], "prompts": []}
+        if method == "prompt.receipt":
+            return {"admission_id": "a", "status": "terminal", "outcome": "completed",
+                    "result": {"final_response": "Work done", "completed": True}}
+        raise AssertionError(method)
+
+    replacement = Life(second)
+    dials = [InvalidStatus(Response(503, "Service Unavailable", Headers(), b"starting")),
+             InvalidMessage("did not receive a valid HTTP response"), replacement]
+    view = gcv.GatewayChatView(Life(_first), {"stored_session_id": "s"}, quiet=True)
+
+    async def reconnect():
+        nxt = dials.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+    view.reconnect = reconnect
+    assert await asyncio.wait_for(view.run("review the PR", oneshot=True), 10) == 0
+    assert view.redials == 1 and dials == [] and "session.resume" in replacement.calls
+    captured = capsys.readouterr()
+    assert "Work done" in captured.out
+    assert "waiting up to 10 min for the restarted gateway" in captured.err
+
+
+@pytest.mark.asyncio
 async def test_a_refusal_that_is_not_a_hang_up_never_redials():
     async def refused(life, method, params):
         if method == "prompt.submit":
