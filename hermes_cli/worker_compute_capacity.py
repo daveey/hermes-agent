@@ -10,6 +10,59 @@ import json
 import math
 from pathlib import Path
 
+CGROUP_ROOT = Path('/sys/fs/cgroup')
+
+
+def effective_cores() -> float:
+    """Host cpuset/quota, not the caller's two-core card budget.
+
+    Worker mode requires the host unified hierarchy; enrollment rejects a
+    container-private hierarchy. Re-read on every admission/launch.
+    """
+    import os
+    cpus = set()
+    for span in (CGROUP_ROOT / 'cpuset.cpus.effective').read_text(encoding='utf-8').strip().split(','):
+        bounds = span.split('-')
+        low, high = int(bounds[0]), int(bounds[-1])
+        if len(bounds) > 2 or low < 0 or high < low or high > 1048576:
+            raise ValueError('invalid host cpuset')
+        part = set(range(low, high + 1))
+        if part & cpus:
+            raise ValueError('overlapping host cpuset')
+        cpus.update(part)
+    cores = float(len(cpus & os.sched_getaffinity(0)))
+    quota_file = CGROUP_ROOT / 'cpu.max'
+    # The real cgroup-v2 root has no cpu.max; a delegated mount may have one.
+    if quota_file.exists():
+        raw, period = quota_file.read_text(encoding='utf-8').split()
+        if int(period) <= 0:
+            raise ValueError('invalid host CPU period')
+        if raw != 'max':
+            cores = min(cores, int(raw) / int(period))
+    if cores <= 0:
+        raise ValueError('empty host CPU budget')
+    return cores
+
+
+def managed_target(policy, target: Path | None) -> bool:
+    """Validate the actual owner-launched interpreter's destination before spawn."""
+    if not policy or not getattr(policy, 'kanban_json', None) or not worker_enabled():
+        return False
+    context = json.loads(policy.kanban_json)
+    board, task = context.get('board') or 'default', context.get('task_id')
+    if not isinstance(board, str) or not isinstance(task, str) or not task:
+        raise ValueError('Worker compute scope requires board and task identity')
+    name = configure_card(board, task)
+    if target is None or target.parent.name != name:
+        raise ValueError('Managed worker is outside its card CPU slice')
+    return True
+
+
+def lower_priority(pid: int) -> None:
+    """The managed child is born from the gateway, not the nice'd submitter."""
+    import os
+    os.setpriority(os.PRIO_PROCESS, pid, max(15, os.getpriority(os.PRIO_PROCESS, pid)))
+
 
 def pressure_held(held: bool, load: float, cores: float) -> bool:
     """Load/core hysteresis; invalid observations must refuse rather than release."""
@@ -74,8 +127,8 @@ def configure_card(board: str, task: str) -> str:
     env = systemd_user_bus_env()
     if env is None:
         raise RestartSafeScopeUnavailable('Worker compute budget requires the user bus')
-    cores = len(os.sched_getaffinity(0))
-    base = Path('/sys/fs/cgroup/user.slice') / f'user-{os.getuid()}.slice'
+    cores = effective_cores()
+    base = CGROUP_ROOT / 'user.slice' / f'user-{os.getuid()}.slice'
     _verify_quota(base, cores * .875)
     name = owner_slice(board, task)
     manager = base / f'user@{os.getuid()}.service'
@@ -86,6 +139,8 @@ def configure_card(board: str, task: str) -> str:
             subprocess.run(['systemctl', '--user', *arguments], env=env, check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
         _verify_quota(path, quota)
+        if not 1 <= int((path / 'cpu.weight').read_text(encoding='utf-8')) <= 10:
+            raise ValueError(f'Worker CPU weight is missing or too high: {unit}')
     directory = Path(get_default_hermes_root()) / 'worker-resources' / 'owners'
     directory.mkdir(parents=True, exist_ok=True)
     # Immutable one-file-per-owner: concurrent retries write identical bytes.

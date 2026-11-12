@@ -145,6 +145,50 @@ def migration_access(run_scope):
     _probe_migration(target)
 
 
+def test_priority_failure_reaps_managed_child(run_scope, migration_access, monkeypatch):
+    from hermes_cli import worker_compute_capacity as capacity
+    monkeypatch.setattr(capacity, 'managed_target', lambda policy, target: True)
+    made = []
+
+    def spawn():
+        process = _spawn()
+        made.append(process)
+        return process
+
+    def denied(pid):
+        raise PermissionError('priority denied')
+
+    monkeypatch.setattr(capacity, 'lower_priority', denied)
+    with pytest.raises(PermissionError, match='priority denied'):
+        scope_mod.placing_spawn(spawn, run_scope.policy)()
+    assert len(made) == 1 and made[0].poll() is not None
+    assert made[0].stdin.closed and made[0].stdout.closed
+
+
+def test_compute_child_and_descendant_are_low_priority(run_scope, migration_access, monkeypatch):
+    from hermes_cli import worker_compute_capacity as capacity
+    observed = []
+
+    def validated(policy, target):
+        assert policy is run_scope.policy
+        assert target.name == run_scope.unit
+        observed.append(target)
+        return True
+
+    monkeypatch.setattr(capacity, 'managed_target', validated)
+    process = scope_mod.placing_spawn(_spawn, run_scope.policy)()
+    try:
+        process.stdin.write(b'go\n')
+        process.stdin.flush()
+        descendant = int(process.stdout.readline())
+        assert len(observed) == 1
+        assert os.getpriority(os.PRIO_PROCESS, process.pid) >= 15
+        assert os.getpriority(os.PRIO_PROCESS, descendant) >= 15
+        assert _cgroup(process.pid) == _cgroup(run_scope.submitter.pid)
+    finally:
+        _reap(process)
+
+
 def test_child_and_descendant_inherit_run_scope_and_limit(run_scope, migration_access):
     process = scope_mod.placing_spawn(_spawn, run_scope.policy)()
     try:
