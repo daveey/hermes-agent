@@ -560,6 +560,7 @@ test.skipIf(process.platform === 'win32').each([[false, false], [true, false], [
   writeFileSync(join(dir, 'owner/pnpm'), ['#!/bin/sh', 'if [ "$1" = install ]; then',
     `  echo $$ > '${dir}/owner.started'`,
     '  read -r _ || :',
+    `  touch '${dir}/owner.passed'`,
     `  echo third > node_modules/.written-by-the-stopped-pnpm; touch '${dir}/relay.release'; '${pnpmCommand()}' "$@"; exit $?`,
     'fi', `exec '${pnpmCommand()}' "$@"`, ''].join('\n'))
   chmodSync(join(dir, 'owner/pnpm'), 0o755)
@@ -617,7 +618,11 @@ test.skipIf(process.platform === 'win32').each([[false, false], [true, false], [
   expect(state('owner.started')[0]).toBe(state('relay.pid')[0])
   expect(state('watcher.pid')[0]).not.toBe(state('relay.pid')[0])
   owner.stop()
-  await until(() => state('owner.started')[1]?.startsWith('T') && state('relay.pid')[1]?.startsWith('T'))
+  // The pnpm must still be held at its gate: one already past it did its work before the stop, and
+  // then nothing below could see a stopped pnpm write into the next owner's trees.
+  const passed = join(dir, 'owner.passed')
+  await until(() => existsSync(passed) || (state('owner.started')[1]?.startsWith('T') && state('relay.pid')[1]?.startsWith('T')))
+  expect(existsSync(passed)).toBe(false)
   expect(state('watcher.pid')[1]).not.toMatch(/^T/)
   expect(existsSync(join(source, 'node_modules/.written-by-the-stopped-pnpm'))).toBe(false)
   Object.assign(lockTiming, { stale: 1_500 })
@@ -627,6 +632,7 @@ test.skipIf(process.platform === 'win32').each([[false, false], [true, false], [
     Object.assign(lockTiming, timing)
   }
   const built = readFileSync(join(webOnly(source), 'built'), 'utf8')
+  expect(existsSync(passed)).toBe(false)
   owner.input('\n')
   owner.resume()
   const { code, output } = await owner.exit
