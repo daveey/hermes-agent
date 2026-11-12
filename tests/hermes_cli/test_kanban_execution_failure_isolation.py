@@ -96,9 +96,21 @@ def test_assemble_failure_keeps_legacy_counts_and_marks_cards_unknown(two_cards,
     def boom(*a, **kw):
         raise sqlite3.OperationalError("fixture assemble failure")
     monkeypatch.setattr(source, "assemble", boom)
-    other = [{"id": "session2"}]
-    activity.annotate_kanban_activity(other)
-    assert not other[0].get("kanban_unknown") and other[0]["kanban_blocked"] == 1
+    rows = [{"id": "session"}, {"id": "session2"}]
+    activity.annotate_kanban_activity(rows)
+    work, other = rows
+    assert work["kanban_active"] == 1 and not work.get("kanban_unknown")
+    assert other["kanban_blocked"] == 1 and not other.get("kanban_unknown")
+    for row, tid in ((work, "card"), (other, "other")):
+        [value] = [v for v in row["execution_observations"] if v["source"] == "kanban.card"]
+        assert value["identity"]["work_id"] == tid
+        assert value["state"] == "unknown" and value["unknown_reason"] == "adapter_error"
+        assert value["observed_at"] is None and value["valid_until"] is None
+        if tid == "other":
+            assert value["human_request"]["action"] == "Approve"
+            assert "resolved_check" not in value["human_request"]
+        else:
+            assert not value.get("human_request")
     assert activity._all_counts(include_snapshot=True) is not None
 
 
@@ -136,6 +148,41 @@ def test_add_cards_adapter_failure_attaches_unknown_not_nothing(monkeypatch):
     assert value["source"] == "kanban.card" and value["state"] == "unknown"
     assert value["unknown_reason"] == "adapter_error" and value["human_request"]["action"] == "Approve"
     assert "_execution_source" not in out
+
+
+@pytest.mark.parametrize("owner", [
+    {"gateway": "REMOTE-GW", "owner_profile": "remote-profile"},
+    {"gateway": "REMOTE-GW"},
+    {"owner_profile": "remote-profile"},
+    {},
+    {"gateway": "REMOTE-GW", "owner_profile": None, "profile": "not-the-owner"},
+    {"gateway": "REMOTE-GW", "profile": "legacy-remote-profile"},
+])
+@pytest.mark.parametrize("fault", ["card", "source"])
+@pytest.mark.parametrize("execution_source", [None, {"gateway": "wrong-source", "profile": "wrong-profile"}])
+def test_remote_session_tasks_adapter_failure_preserves_exact_owner(
+        kanban_root, monkeypatch, owner, fault, execution_source):
+    monkeypatch.setattr(observations, "local_scope", lambda: ("LOCAL-GW", "local-profile"))
+    row = {"id": "remote-card", "key": "remote/board/card", "board": "remote-board", "remote": True,
+           "session": "remote-session", "status": "blocked", "human_request": json.dumps(REQUEST),
+           "_execution_source": execution_source, **owner}
+    if fault == "card":
+        monkeypatch.setattr(observations, "card", lambda *a, **kw: (_ for _ in ()).throw(ValueError("fixture")))
+    else:
+        row["_execution_error"] = True
+    monkeypatch.setattr(activity, "_remote_cards", lambda *a: [dict(row)])
+    [out] = activity.session_tasks(["remote-session"])
+    [value] = out["execution_observations"]
+    for key, expected in (("gateway", owner.get("gateway")),
+                          ("profile", owner.get("owner_profile", owner.get("profile")))):
+        assert value["identity"].get(key) == expected
+        assert value["owner"].get(key) == expected
+    assert value["identity"]["work_id"] == "remote-card"
+    assert value["identity"]["board"] == "remote-board"
+    assert value["state"] == "unknown" and value["unknown_reason"] == "adapter_error"
+    assert value["observed_at"] is None and value["valid_until"] is None
+    assert value["human_request"]["action"] == "Approve"
+    assert "resolved_check" not in value["human_request"]
 
 
 @contextmanager

@@ -208,27 +208,24 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
         conn.close()
 
 
-def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
-    if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STATUSES, *, tasks=None) -> dict[str, int]:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    if "session_id" not in cols:
         return {}  # explicitly supported pre-session schema, not a failed read
     match, params = _status_filter(conn, statuses)
-    pairs: set[tuple[str, str]] = {
-        (str(sid), str(tid)) for sid, tid in conn.execute(
-            f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL "
-            f"AND session_id != '' AND {match}",
-            params,
-        )
-    }
+    request = "t.human_request" if "human_request" in cols else "NULL"
+    rows = list(conn.execute(
+        f"SELECT session_id, id, {request} FROM tasks t WHERE session_id IS NOT NULL "
+        f"AND session_id != '' AND {match}", params))
     try:
-        pairs.update(
-            (str(sid), str(tid)) for sid, tid in conn.execute(
-                f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
-                params,
-            )
-        )
+        rows.extend(conn.execute(
+            f"SELECT s.chat_id, t.id, {request} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+            f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}", params))
     except sqlite3.Error:  # board predates notify subscriptions
         pass
+    pairs = {(str(sid), str(tid)) for sid, tid, _ in rows}
+    if tasks is not None:
+        tasks.update({str(tid): {"id": str(tid), "human_request": request} for _, tid, request in rows})
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
@@ -1367,9 +1364,10 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 complete = False
             outer, _pairs_sink = _pairs_sink, set()
             try:
-                reads["active"] = _counts_on(conn, ACTIVE_STATUSES)
+                tasks = {}
+                reads["active"] = _counts_on(conn, ACTIVE_STATUSES, tasks=tasks)
                 reads["active_pairs"], _pairs_sink = _pairs_sink, set()
-                reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES)
+                reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES, tasks=tasks)
                 reads["blocked_pairs"] = _pairs_sink
                 reads["pairs"] = reads["active_pairs"] | reads["blocked_pairs"]
                 from hermes_cli.kanban_execution_source import assemble, safe_raw, unknown_raw
@@ -1382,7 +1380,7 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 except ADAPTER_ERRORS:
                     # Optional evidence only: legacy counts and asks stay; each card is an explicit unknown.
                     _log.debug("kanban execution source failed for %s", path, exc_info=True)
-                    reads["execution"] = {tid: unknown_raw({"id": tid}, gateway=gateway, profile=profile,
+                    reads["execution"] = {tid: unknown_raw(tasks[tid], gateway=gateway, profile=profile,
                                                            board=_board_slug(path))
                                           for _, tid in reads["pairs"]}
             finally:

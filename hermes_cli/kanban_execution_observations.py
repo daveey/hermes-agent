@@ -180,9 +180,13 @@ def failed_card(row, *, gateway=None, profile=None, now=None):
     from hermes_cli.kanban_execution_source import unknown_raw
     source = row.get("_execution_source")
     source = source if isinstance(source, dict) else {}
-    value = unknown_raw(row, {**source, "gateway": source.get("gateway") or gateway,
-                              "profile": source.get("profile") or profile,
-                              "board": source.get("board") or row.get("board")})
+    if row.get("remote"):
+        source = {"gateway": row.get("gateway"), "profile": row.get("owner_profile", row.get("profile")),
+                  "board": row.get("board")}
+    else:
+        source = {**source, "gateway": source.get("gateway") or gateway,
+                  "profile": source.get("profile") or profile, "board": source.get("board") or row.get("board")}
+    value = unknown_raw(row, source)
     return _project(value, now=time.time() if now is None else now, source_class="sidebar")
 
 
