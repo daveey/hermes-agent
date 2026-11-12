@@ -1141,6 +1141,18 @@ class ApplyResult:
     # [daveey] A feed pull or snapshot: task fields with an unanswered local edit keep the local value
     # (``_without_unacked_fields``), checked inside the apply transaction.
     local_pending_wins: bool = False
+    # [daveey] ``kanban_repair_revision`` read right after the apply transaction began and right before it
+    # committed (None: no table or row). The sync client credits a live revision change made only by applies.
+    revision_before: Optional[int] = None
+    revision_after: Optional[int] = None
+
+
+def _repair_revision(conn: sqlite3.Connection) -> Optional[int]:
+    try:
+        row = conn.execute("SELECT revision FROM kanban_repair_revision WHERE id = 1").fetchone()
+    except sqlite3.OperationalError:  # no such table: a board the sync client never repaired
+        return None
+    return None if row is None else row[0]
 
 
 _STATUS_HOOKS = {"running": "kanban_task_claimed", "done": "kanban_task_completed", "blocked": "kanban_task_blocked"}
@@ -1165,6 +1177,7 @@ def apply_remote_changes(
     from hermes_cli.kanban_db_connect import write_txn
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     with write_txn(conn):
+        result.revision_before = _repair_revision(conn)
         # Serialize with set_mode(off): a feed fetched before detach must not
         # overwrite locally held custody after the detach transaction commits.
         if board_mode(conn) == "off":
@@ -1178,6 +1191,7 @@ def apply_remote_changes(
         # the state row at all when both persisted values already match.
         conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0 "
                      "WHERE cursor IS NOT ? OR applying IS NOT 0", (new_cursor, new_cursor))
+        result.revision_after = _repair_revision(conn)
     if observers:
         _after_commit(conn, result, board)
     return result

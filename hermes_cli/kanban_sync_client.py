@@ -45,6 +45,9 @@ from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sy
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
+from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-window state, re-exported
+    _REPAIR_CREDIT, _REPAIR_DEFERRED, _REPAIRED, _REPAIRED_AT, applies_chain, deferred_repairs_due, next_deferred_repair,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -842,10 +845,11 @@ def _child_task(conn: sqlite3.Connection, table: str, uid: str) -> Optional[str]
 
 
 def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
-         partition: Optional[str] = None) -> int:
+         partition: Optional[str] = None, revisions: Optional[list] = None) -> int:
     """Apply every feed page after this file's cursor. Returns the number of changes read. On a board with an
     outbox (primary), fields with an unanswered local edit are not overwritten; ``partition`` (a gateway name)
-    keeps only that gateway's cards."""
+    keeps only that gateway's cards. ``revisions`` gets each apply's (before, after) repair revision, in order
+    (``_defer_repair`` credits a live change made only by these applies). [daveey]"""
     from hermes_cli.kanban_sync_stop import checkpoint
     total = 0
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
@@ -865,8 +869,10 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             return total
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
-        sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
-                                  local_pending_wins=True)
+        applied = sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
+                                            local_pending_wins=True)
+        if revisions is not None:
+            revisions.append((applied.revision_before, applied.revision_after))
         total += len(page.get("changes", []))
         cursor = nxt
         if not page.get("more"):
@@ -987,18 +993,20 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         ensure_identity(live, slug, gateway)
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
+            applies: Optional[list] = []  # (before, after) repair revision of each live apply; None = a rebuild
             if mode == "primary":
                 try:
-                    pull(live, hub, slug, observers=True, partition=gateway)
+                    pull(live, hub, slug, observers=True, partition=gateway, revisions=applies)
                 except Resync:
                     _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
+                    applies = None
                     resync(live, hub, slug, observers=True, partition=gateway)
             from hermes_cli.kanban_sync_repair_revision import ensure_revision
             ensure_revision(live)
             inputs = _repair_inputs(path, replica, mode, gateway)
             key = str(path)
             if inputs is None or _REPAIRED.get(key) != inputs:
-                deferred = not rebuilt and _defer_repair(key, inputs)
+                deferred = not rebuilt and _defer_repair(key, inputs, applies)
                 from hermes_cli.kanban_sync_partition_repair import repair_partition_chat_links, repair_partition_links
                 if not deferred:
                     from hermes_cli import kanban_sync_partition_content as partition_content
@@ -1020,6 +1028,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                     if inputs is not None:
                         _REPAIRED[key] = inputs
                         _REPAIRED_AT[key] = _repair_clock()
+                    _REPAIR_CREDIT.pop(key, None)
             if mode == "primary":
                 heal_clobbered_completions(live)
                 from hermes_cli.kanban_sync_divergence import heal_running_over_ended_run
@@ -1355,11 +1364,6 @@ class _BoardWatch:
 
 
 _WATCH = _BoardWatch()
-# Per board file: the inputs the last completed repair pass saw (see ``_repair_inputs``).
-_REPAIRED: dict[str, tuple] = {}
-# Per board file: when that pass finished (``_repair_clock``), and when a deferred pass is due.
-_REPAIRED_AT: dict[str, float] = {}
-_REPAIR_DEFERRED: dict[str, float] = {}
 # A full repair pass over a large board is expensive (David-MBP default board, 2026-11-02: 0.73 s thread-CPU
 # per pass under cProfile, ~6k rows decoded). The replica's cursor moves on every change any gateway makes to
 # the board, so a busy Board made the pass run nearly every round (29 rounds in 90 s; the sync thread used
@@ -1382,39 +1386,36 @@ def reset_board_watch() -> None:
     _REPAIRED.clear()
     _REPAIRED_AT.clear()
     _REPAIR_DEFERRED.clear()
+    _REPAIR_CREDIT.clear()
     _LINKS_DONE.clear()
 
 
-def _defer_repair(key: str, inputs: Optional[tuple]) -> bool:
-    """True when the only repair input that changed since the last completed pass is the replica's feed cursor
-    (same replica file, live revision, schema, mode, gateway and placement) and that pass finished less than
-    ``REPLICA_REPAIR_MIN_S`` ago; records when the deferred pass is due so the sync loop runs it then. Unknown
-    inputs (None) or no completed pass never defer. A primary board's own cards are applied by its pull before
-    the inputs are read, so a remote change to them arrives as a live revision change, not a deferral."""
+def _defer_repair(key: str, inputs: Optional[tuple], applies: Optional[Iterable[tuple]] = ()) -> bool:
+    """True when the only repair inputs that changed since the last completed pass are the replica's feed cursor
+    and live revisions made by this round's feed applies (same replica file, schema, mode, gateway and
+    placement), and that pass finished less than ``REPLICA_REPAIR_MIN_S`` ago; records when the deferred pass is
+    due so the sync loop runs it then. Unknown inputs (None) or no completed pass never defer.
+
+    A primary board's pull applies other gateways' writes to its own cards (heartbeats, claims) into the live
+    file, which moves the live revision. ``applies`` is each apply's (before, after) revision, read inside its
+    transaction; they must chain from the credited revision (the last pass's, or the last deferring round's) to
+    this round's without a gap. Any gap is a local write the scans exist to find, so it repairs at once; so does
+    a missing pair (None: a rebuild). [daveey]"""
     last = _REPAIRED.get(key)
-    if inputs is None or last is None:
+    if inputs is None or last is None or applies is None:
         return False
-    live_version, (dev, ino, _cursor), *rest = inputs
-    last_version, (last_dev, last_ino, _last_cursor), *last_rest = last
-    if live_version != last_version or (dev, ino) != (last_dev, last_ino) or rest != last_rest:
+    (gen, (revision, schema)), (dev, ino, _cursor), *rest = inputs
+    (last_gen, (last_revision, last_schema)), (last_dev, last_ino, _last_cursor), *last_rest = last
+    if (gen, schema) != (last_gen, last_schema) or (dev, ino) != (last_dev, last_ino) or rest != last_rest:
+        return False
+    if not applies_chain(_REPAIR_CREDIT.get(key, last_revision), applies, revision):
         return False
     due = _REPAIRED_AT.get(key, float("-inf")) + REPLICA_REPAIR_MIN_S
     if _repair_clock() >= due:
         return False
     _REPAIR_DEFERRED[key] = due
+    _REPAIR_CREDIT[key] = revision
     return True
-
-
-def deferred_repairs_due(boards: list[tuple[str, Path]], now: float) -> list[tuple[str, Path]]:
-    """Boards whose deferred repair pass is due at ``now`` (``_repair_clock`` time)."""
-    return [(slug, path) for slug, path in boards
-            if (due := _REPAIR_DEFERRED.get(str(path))) is not None and now >= due]
-
-
-def next_deferred_repair(boards: list[tuple[str, Path]]) -> Optional[float]:
-    """The earliest due time (``_repair_clock``) of a deferred repair pass among ``boards``, or None."""
-    dues = [due for _slug, path in boards if (due := _REPAIR_DEFERRED.get(str(path))) is not None]
-    return min(dues) if dues else None
 
 
 def _repair_inputs(live_path: Path, replica: sqlite3.Connection, mode: str, gateway: str) -> Optional[tuple]:
