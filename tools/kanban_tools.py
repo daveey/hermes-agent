@@ -1497,7 +1497,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         decision = kp.decide(view, machine_ok=machine_ok)
         target = decision["where"]
         if target == "refuse":
-            return _placement_refused(decision["pin"], decision.get("why", "")), None
+            return _placement_refused(decision.get("pin", "hub"), decision.get("why", ""),
+                                      hub_admission=decision.get("hub_admission")), None
         if target == "local":
             local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin)
             stranded = _runstate.stranded_create((local or {}).get("runs_on"))
@@ -1632,7 +1633,7 @@ def _handle_create(args: dict, **kw) -> str:
             runs_on = _runstate.placement_runs_on(conn, args.get("placement"))
             if runs_on is not None:
                 pinned_machine = str(args.get("placement")).strip()
-                args = {**args, "placement": "local"}
+                args = {**args, "placement": "local", "runs_on": runs_on}
         # [daveey] Refuse a second owner: open cards on every board/gateway, not this chat's links.
         refused, after_create = kanban_overlap.check(conn, args, courier=origin_intent is not None,
                                                      title=str(title).strip(), session_id=session_id,
@@ -1660,6 +1661,9 @@ def _handle_create(args: dict, **kw) -> str:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
         marker_placement = _origin_enrollment(args, origin, marker_placement, assignee=assignee,
                                                skills=skills, project_id=project_id)
+        if marker_placement and marker_placement.get("where") == "refuse":
+            return _placement_refused(marker_placement.get("pin", "hub"), marker_placement.get("why", ""),
+                                      hub_admission=marker_placement.get("hub_admission"))
         try:
             new_tid = kb.create_task(
                 conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
@@ -1674,10 +1678,12 @@ def _handle_create(args: dict, **kw) -> str:
                 creator_task_id=self_tid,
                 idempotency_key=args.get("idempotency_key"),
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-                requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
+                requires=(marker_placement or {}).get("requires", args.get("requires")),
+                runs_on=runs_on, max_retries=max_retries,
                 placement_policy=(marker_placement or {}).get("placement_policy"),
                 placement_checked=True,  # this front door already checked pins, origins and portability
-                placement_audit=_creation_audit(args, assignee=str(assignee), skills=skills, project_id=project_id),
+                placement_audit=_creation_audit(args, admission=marker_placement, assignee=str(assignee),
+                                                skills=skills, project_id=project_id),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
@@ -1722,7 +1728,9 @@ def _handle_create(args: dict, **kw) -> str:
             # and a caller that archives and re-creates it makes a duplicate. [daveey]
             extra["runs_on"] = runs_on
             if pinned_machine:
-                extra["placement"] = _machine_placement(pinned_machine, runs_on)
+                extra["placement"] = {**_machine_placement(pinned_machine, runs_on),
+                                      **({"hub_admission": marker_placement["hub_admission"]}
+                                         if marker_placement and marker_placement.get("hub_admission") else {})}
                 extra["note"] = _pinned_note(conn, new_tid, pinned_machine, runs_on)  # + drain wait [daveey]
         # Every result says where the card runs (a caller that can't tell re-creates it or never learns it is stranded)
         extra.update(runs_where=_runs_where(runs_on, pinned_machine, marker_placement),  # + contract advisory [daveey]

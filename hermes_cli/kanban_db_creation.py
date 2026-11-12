@@ -13,11 +13,14 @@ def default_ready_assignee() -> str:
     return name or "default"
 
 
-def tool_creation_audit(args: dict, **effective) -> dict | None:
+def tool_creation_audit(args: dict, *, admission=None, **effective) -> dict | None:
     """Audit the same normalized fields placement judged, including inherited identity/project. [daveey]"""
     from hermes_cli.kanban_worker_placement import creation_audit
 
-    return creation_audit({**args, **effective})
+    audit = creation_audit({**args, **effective})
+    if admission and admission.get("hub_admission"):
+        audit = {**(audit or {}), "hub_admission": admission["hub_admission"]}
+    return audit
 
 
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
@@ -46,6 +49,8 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         # Final insertion policy, not a later assignment or a caller's diagnostic override.
         "placement_policy": placement_policy,
     })
+    if isinstance(placement_audit, dict) and placement_audit.get("hub_admission"):
+        kb._append_event(conn, task_id, "hub_admission", placement_audit["hub_admission"])
     if status == "blocked":
         # A creation-time human ask is a decision wait: validate_human_request
         # already refuses dependency/transient/time alongside one, and create

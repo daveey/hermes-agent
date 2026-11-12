@@ -21,9 +21,12 @@ def _origin_enrollment(args, origin, marker, **effective):
     from hermes_cli import kanban_placement as kp
     from hermes_cli.kanban_worker_placement import creation_decision
     cfg, gateway = kp.config(), kp.reg.self_gateway()
-    return creation_decision({**args, **effective}, cfg, gateway,
-                             kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None,
-                             queue=False)  # [daveey] origin-bound: the worker queue is not applied here
+    from hermes_cli.kanban_hub_admission_placement import apply
+    view = {**args, **effective}
+    decision = creation_decision(view, cfg, gateway,
+                                 kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None,
+                                 queue=False)  # [daveey] origin-bound: the worker queue is not applied here
+    return apply(view, decision or {"where": "local", "why": "origin-bound storage"}, gateway, cfg)
 
 
 def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
@@ -78,13 +81,14 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
     return {"session_id": session_id, "origin_profile": None}
 
 
-def _placement_refused(pin: str, why: str) -> str:
+def _placement_refused(pin: str, why: str, *, hub_admission=None) -> str:
     """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here."""
     return tool_error(
         f"placement={pin!r} was not honoured and no card was created: {why}. A pinned gateway is never "
         "silently replaced by a local card. Use placement='local' (or omit it) to create the card on this "
         "gateway, or create it on the target with `hermes-hub create-task <gateway> ...`.",
-        code="placement_unavailable", placement=pin, created=False)
+        code="placement_unavailable", placement=pin, created=False,
+        **({"hub_admission": hub_admission} if hub_admission else {}))
 
 
 def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_pin: bool) -> dict:
@@ -135,7 +139,8 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
                 "note": (f"Created here as {new_tid} so it can wait on its parents; it runs on "
                          f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
                          f"forwards it there and this card completes when that one does.")}
-    if marker_placement.get("runs_on") or marker_placement.get("placement_policy"):
+    if (marker_placement.get("runs_on") or marker_placement.get("placement_policy")
+            or marker_placement.get("hub_admission")):
         return {"placement": dict(marker_placement)}
     out: dict = {"placement": {"where": marker_placement["where"], "why": marker_placement["why"]}}
     if marker_placement.get("remedy"):
