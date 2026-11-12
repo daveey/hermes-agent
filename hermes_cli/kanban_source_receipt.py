@@ -11,7 +11,7 @@ import contextlib
 import contextvars
 import json
 import sqlite3
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 TABLE = "kanban_source_receipt_pending"
 DDL = (f"CREATE TABLE IF NOT EXISTS {TABLE} (task_id TEXT PRIMARY KEY, run_id INTEGER NOT NULL, "
@@ -52,10 +52,24 @@ def _text(receipt: Any) -> str:
     return receipt if isinstance(receipt, str) else json.dumps(receipt, sort_keys=True, separators=(",", ":"))
 
 
-def stage_pending(conn: sqlite3.Connection, task_id: str) -> None:
-    """Plan v4 §2.1 as written: the first statement of the ending's write transaction."""
-    run_id = _current_run_id(conn, task_id)
-    receipt = staged_receipt(task_id, run_id)
-    if receipt is not None:
-        conn.execute(f"INSERT OR REPLACE INTO {TABLE} (task_id, run_id, receipt) VALUES (?, ?, ?)",
-                     (task_id, run_id, _text(receipt)))
+def with_source_receipt(conn: sqlite3.Connection, task_id: str, do_update: Callable[[], Any], *,
+                        run_id: Optional[int] = None, receipt: Any = None) -> Any:
+    """Run ``do_update`` (the ONE status-leaving UPDATE of an ending) with the pending receipt alive for exactly
+    that statement: INSERT immediately before it, unconditional DELETE immediately after it, whatever its rowcount
+    and even if it raises. ``receipt`` defaults to the staged preflight receipt for the card's current run. With no
+    receipt the DELETE still runs first, so a leftover row can never ride this ending."""
+    run_id = _current_run_id(conn, task_id) if run_id is None else run_id
+    receipt = staged_receipt(task_id, run_id) if receipt is None else receipt
+    if receipt is None:
+        purge(conn, task_id)
+        return do_update()
+    conn.execute(f"INSERT OR REPLACE INTO {TABLE} (task_id, run_id, receipt) VALUES (?, ?, ?)",
+                 (task_id, run_id, _text(receipt)))
+    try:
+        return do_update()
+    finally:
+        purge(conn, task_id)
+
+
+def purge(conn: sqlite3.Connection, task_id: str) -> None:
+    conn.execute(f"DELETE FROM {TABLE} WHERE task_id = ?", (task_id,))

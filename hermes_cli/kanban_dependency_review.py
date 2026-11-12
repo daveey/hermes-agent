@@ -79,7 +79,8 @@ def apply_block_update(conn, task_id, expected_run_id, kind, new_status, set_sql
     if expected_run_id is not None:
         sql += " AND current_run_id = ?"
         params = (*params, int(expected_run_id))
-    return conn.execute(sql, params).rowcount == 1
+    from hermes_cli.kanban_source_receipt import with_source_receipt
+    return with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) == 1
 
 
 def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
