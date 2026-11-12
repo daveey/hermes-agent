@@ -340,6 +340,79 @@ def test_park_keeps_work_pushed_by_url_on_the_pool_even_after_the_remote_branch_
     assert _placement_events(conn, tid)[-1][1]["unpushed_state"] == f"unpushed commits in {tree.resolve()}"
 
 
+@pytest.mark.parametrize("rebased", [False, True])
+def test_url_push_moved_tip_without_ancestral_tracking(w2, tmp_path, monkeypatch, rebased):
+    from tools import kanban_tools as kt
+    tree = _pushed_clone(tmp_path, tmp_path / "url-tip")
+    remote = str(tmp_path / "url-tip-remote.git")
+    if rebased:
+        _git(tree, "commit", "--amend", "-qm", "rewritten root")
+    else:
+        _commit(tree, "new.txt")
+    branch = "wt/x" if rebased else "wt/new"
+    _git(tree, "push", "-q", "--force", remote, f"HEAD:refs/heads/{branch}")
+    other = tmp_path / "other-tip"
+    _git(tmp_path, "clone", "-q", "-b", branch, remote, str(other))
+    _commit(other, "advanced.txt")
+    _git(other, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+    tid = kb.create_task(w2.conn, title="URL pushed tip", assignee="default", runs_on=[POOL])
+    _run(w2, monkeypatch, tid)
+    out = json.loads(kt._handle_continue({"checkpoint": f"Pushed work in {tree}"}))
+    assert out.get("ok"), out
+    assert _runs_on(w2.conn, tid) == [POOL]
+
+
+@pytest.mark.parametrize("failure", ["bad-url", "timeout"])
+def test_remote_failure_pins_without_reading_stdin(w2, tmp_path, monkeypatch, failure):
+    from hermes_cli import worktree_ops
+    from tools import kanban_tools as kt
+    tree = _pushed_clone(tmp_path, tmp_path / "unreachable")
+    _commit(tree, "local.txt")
+    _git(tree, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+    original = worktree_ops._git_out
+    calls = []
+
+    def observe(args, cwd, **kwargs):
+        if args[0] == "ls-remote":
+            calls.append(kwargs)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, 20)
+        return original(args, cwd, **kwargs)
+
+    monkeypatch.setattr(worktree_ops, "_git_out", observe)
+    tid = kb.create_task(w2.conn, title="unreachable remote", assignee="default", runs_on=[POOL])
+    _run(w2, monkeypatch, tid)
+    out = json.loads(kt._handle_continue({"checkpoint": f"Local work in {tree}"}))
+    assert out.get("ok"), out
+    assert _runs_on(w2.conn, tid) == ["machine:worker-2"]
+    assert calls and all(call.get("stdin") == subprocess.DEVNULL for call in calls)
+    assert all("env" not in call for call in calls)  # retain private HTTPS credential helpers
+
+
+def test_remote_refresh_caps_and_stdin(monkeypatch):
+    from hermes_cli import kanban_move_pool as kmp, worktree_ops
+    calls = []
+
+    def git_out(args, cwd, **kwargs):
+        calls.append((args, kwargs))
+        if args[0] == "rev-parse":
+            return "head"
+        if args[0] == "remote":
+            return "origin"
+        if args[0] == "ls-remote":
+            return "\n".join(f"new{i}\trefs/heads/b{i}" for i in range(60))
+        if args[0] == "for-each-ref":
+            return "\n".join(f"old{i} refs/remotes/origin/b{i}" for i in range(60))
+        return None  # unrelated old tips and failed fetches must not prove publication
+
+    monkeypatch.setattr(worktree_ops, "_git_out", git_out)
+    monkeypatch.setattr(worktree_ops, "_worktree_has_unpushed_commits", lambda tree: True)
+    assert not kmp.pushed_on_remote("unused")
+    assert sum(args[0] == "merge-base" for args, _ in calls) == 50
+    assert sum(args[0] == "fetch" for args, _ in calls) == 5
+    assert all(kw.get("stdin") == subprocess.DEVNULL and "env" not in kw for _, kw in calls)
+
+
 def test_a_head_that_is_a_remote_branch_tip_counts_as_pushed(tmp_path):
     from hermes_cli import kanban_move_pool as kmp
     tree = _pushed_clone(tmp_path, tmp_path / "tip")

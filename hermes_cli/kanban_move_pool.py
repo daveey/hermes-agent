@@ -117,19 +117,23 @@ def pushed_on_remote(tree: str) -> bool:
     its worker (11-12: t_01a1d0a1eaa00371 sat ready on ``machine:worker-2`` while worker-2 was on a Board hold).
     So ask the remote: HEAD is a remote branch tip, or a stale tracking ref HEAD builds on, once refreshed from
     the remote, contains HEAD."""
+    from functools import partial
     from hermes_cli.worktree_ops import _git_out, _worktree_has_unpushed_commits
+    # Keep credential helpers for private remotes, but never consume the caller's stdin.
+    git_out = partial(_git_out, stdin=subprocess.DEVNULL)
     try:
-        head = _git_out(["rev-parse", "HEAD"], tree)
-        remotes = (_git_out(["remote"], tree) or "").split()
+        head = git_out(["rev-parse", "HEAD"], tree)
+        remotes = (git_out(["remote"], tree) or "").split()
         if not head or not remotes:
             return False
         stale: list[tuple[str, str, str]] = []
+        fallback: list[tuple[str, str, str]] = []
         checks = 0
         for remote in remotes:
-            listing = _git_out(["ls-remote", "--heads", remote], tree, timeout=_REMOTE_TIMEOUT)
+            listing = git_out(["ls-remote", "--heads", remote], tree, timeout=_REMOTE_TIMEOUT)
             if not listing:
                 continue
-            tracked = dict(line.split(" ", 1)[::-1] for line in (_git_out(
+            tracked = dict(line.split(" ", 1)[::-1] for line in (git_out(
                 ["for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}"], tree) or ""
             ).splitlines() if " " in line)
             for line in listing.splitlines():
@@ -138,14 +142,21 @@ def pushed_on_remote(tree: str) -> bool:
                     return True
                 tracking = f"refs/remotes/{remote}/{ref[len('refs/heads/'):]}"
                 local = tracked.get(tracking)
-                if not local or local == sha or checks >= _MAX_ANCESTRY_CHECKS:
+                if local == sha:
                     continue
-                checks += 1
-                if _git_out(["merge-base", "--is-ancestor", local, "HEAD"], tree) is not None:
-                    stale.append((remote, ref, tracking))
-        for remote, ref, tracking in stale[:_MAX_REFRESHES]:
-            _git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=_REMOTE_TIMEOUT)
-        return bool(stale) and not _worktree_has_unpushed_commits(tree)
+                candidate = (remote, ref, tracking)
+                if local and checks < _MAX_ANCESTRY_CHECKS:
+                    checks += 1
+                    if git_out(["merge-base", "--is-ancestor", local, "HEAD"], tree) is not None:
+                        stale.append(candidate)
+                        continue
+                # New URL-pushed branches have no tracking ref; rebased URL pushes
+                # can leave a tracking tip unrelated to HEAD. Both need a refresh.
+                fallback.append(candidate)
+        refresh = (stale + fallback)[:_MAX_REFRESHES]
+        for remote, ref, tracking in refresh:
+            git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=_REMOTE_TIMEOUT)
+        return bool(refresh) and not _worktree_has_unpushed_commits(tree)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
 
