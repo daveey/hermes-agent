@@ -115,13 +115,26 @@ def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
+# A killed orphan lingers as a zombie until init reaps it, and reads as ``X (dead)`` while the reap
+# is under way, so neither state is alive; a starved reaper can sit in that window for a while.
+_GONE = frozenset({psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD})
+
+
 def _alive(identity: dict) -> bool:
-    """Zombie-aware: a killed orphan lingers as a zombie until init reaps it."""
     try:
         proc = psutil.Process(identity["pid"])
-        return proc.create_time() == identity["created"] and proc.status() != psutil.STATUS_ZOMBIE
+        return proc.create_time() == identity["created"] and proc.status() not in _GONE
     except psutil.NoSuchProcess:
         return False
+
+
+def _kill(identity: dict) -> None:
+    """Cleanup: SIGKILL the recorded process if it is still that process. It can finish exiting (and
+    be reaped) between any check and the kill, so a vanished process is already the wanted outcome."""
+    with contextlib.suppress(psutil.NoSuchProcess):
+        proc = psutil.Process(identity["pid"])
+        if proc.create_time() == identity["created"]:
+            proc.kill()
 
 
 def _start_owner(tmp_path: Path, name: str, site: str) -> tuple[subprocess.Popen, Path]:
@@ -161,8 +174,7 @@ def test_a_sigkilled_owner_takes_its_child_tree_and_spares_a_live_owners(tmp_pat
     finally:
         for tree in ids.values():
             for identity in tree.values():
-                if _alive(identity):
-                    psutil.Process(identity["pid"]).kill()
+                _kill(identity)
         for owner in owners.values():
             if owner.poll() is None:
                 owner.kill()
