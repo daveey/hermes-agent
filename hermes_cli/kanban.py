@@ -553,6 +553,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             from hermes_cli.kanban_capability_routing import preflight
             placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
+    from hermes_cli.kanban_placement_diagnostics import cli_creation, cli_json_fields, print_cli_creation
+    creation_placement = cli_creation(args, body, ws_kind, ws_path, board, task, skip=idem_hit)
     contract_extra = _contract_cli.create_warning_fields(task, skip=idem_hit, stderr=True)
     unlinked_warning = None
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
@@ -567,6 +569,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         print(f"⚠  {unlinked_warning}", file=sys.stderr)
     if getattr(args, "json", False):
         out = _task_to_dict(task)
+        out.update(cli_json_fields(creation_placement))
         if unlinked_warning:  # also in the payload: run_slash returns only stdout for --json
             out["warning"] = unlinked_warning
         out.update(contract_extra)
@@ -577,6 +580,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         _print_json(out)
     else:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
+        print_cli_creation(creation_placement)
         for r in (placement or {}).get("routes") or []:
             print(f"Pre-routed {r['need']}: owner card requested on {r['gateway']} "
                   f"(hermes-hub request {r['request_id']}); {task_id} waits on it")

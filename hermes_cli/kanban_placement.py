@@ -417,57 +417,8 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     Keep the conservative legacy routeless-heavy boundary, excluding only its heavy-marker
     requirement. Worker profile/tool/skill attestations and capacity are Board admission checks.
     """
-    c = _Cfg(config() if cfg is None else cfg)
-    if args.get("needs"):
-        return "gateway-scoped need"
-    if (args.get("workspace_kind") or "scratch") != "scratch":
-        return "host workspace"
-    board = args.get("board")
-    if board and board != "default":
-        return "non-default board"
-    if (args.get("assignee") or "default") not in c.assignees():
-        return "assignee not allowlisted"
-    # Explicit tool defaults are equivalent to omission, as on the CLI path.
-    # A blocked initial status still needs origin-side human-request handling.
-    if any(args.get(k) not in (None, "", [], False)
-           for k in UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
-        return "uncarried option"
-    reqs = args.get("requires") or []
-    reqs = [reqs] if isinstance(reqs, str) else list(reqs)
-    from hermes_cli import kanban_placement_coordination as coordination
-    ordinary = [r for r in reqs if r not in coordination.ACCESS_LABELS]
-    if any(reg.is_gateway_need(r) for r in ordinary):
-        return "gateway-scoped requirement"
-    if any(str(r) not in c.carried_requires() for r in ordinary):
-        return "uncarried requirement"
-    title, body = args.get("title") or "", without_evidence(without_placement_note(args.get("body") or ""))
-    if _local_marker(title, body, args.get("skills"), c):
-        return "local marker"
-    from hermes_cli import kanban_placement_coordination as coordination
-    from hermes_cli.kanban_carried_evidence import without_carried_inputs
-    from hermes_cli.kanban_published_worktree import without_published_worktrees
-
-    full = without_carried_inputs(f"{title}\n{body}", c.raw)
-    if refusal := coordination.check(full, c.raw, skills=args.get("skills"), requires=reqs):
-        return refusal
-    marker_full = coordination.access_text(coordination.marker_text(full), c.raw, requires=reqs)
-    extra = c.raw.get("extra_home_markers")
-    exemptible = (HUB_CLI_COMMAND, r"\btoken-broker\b", r"\bssh\b", r"\bon the hub\b", r"\bthe hub's\b",
-                  r"\bjournalctl\b", r"\bkanban\.db\b")  # coordination.check() proved the worker attests each
-    pats = [(p, marker_full if p in exemptible else full)
-            for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
-    pats += [(p, full) for p in extra] if isinstance(extra, list) else []
-    for p, text in pats:
-        try:
-            if re.search(p, text, re.IGNORECASE):
-                return "home gateway marker"
-        except re.error:
-            continue
-    # Avoid filesystem/network probes when a cheap marker already pins the card.
-    if re.search(HOST_WORKTREE_PATH, full, re.IGNORECASE):
-        if re.search(HOST_WORKTREE_PATH, without_published_worktrees(full), re.IGNORECASE):
-            return "home gateway marker"
-    return None
+    from hermes_cli.kanban_placement_diagnostics import portability
+    return portability(args, cfg)[0]
 
 
 def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
@@ -749,8 +700,9 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             target = pin
         if not target:
             # A gateway with no ``route`` entry (the hub) can still send portable heavy work to a worker node.
+            from hermes_cli.kanban_placement_diagnostics import routeless_why
             return (_routeless_heavy(args, c, self_gw, machine_ok, skip=explicit or origin_intent is not None)
-                    or {"where": "local", "why": "no placement route for this gateway"})
+                    or {"where": "local", "why": routeless_why(args, c.raw, origin_intent)})
         if origin_intent is not None:
             return {"where": "local", "why": "courier creation for another gateway"}
         # Parents are local links, so the card is created here; with ``defer_parents`` (default on) it
