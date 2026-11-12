@@ -7,6 +7,7 @@ import logging
 import contextvars
 import json
 import os
+import tempfile
 import threading
 import time
 from tools.delegation_redaction import redact_child_result, redact_child_text
@@ -797,6 +798,7 @@ class _ChildRun:
     heartbeat: Any = None
     child_start: float = field(default_factory=time.monotonic)
     worktree_info: Optional[dict[str, str]] = None
+    private_scratch: Optional[str] = None
     child_task_id: str = ""
     parent_task_id: Optional[str] = None
     wall_start: float = 0.0
@@ -838,6 +840,7 @@ class _ChildRun:
         # The parent's record is read in the parent's scope; the child's is written in the child's (cwd records
         # are keyed by the active profile, and a profile-routed child looks its own up as that profile).
         from tools.delegate_tool_routes import child_profile_scope
+        parent_cwd: Optional[str] = None
         with _quiet("Child cwd seed failed: %s"):
             from tools.terminal_tool import get_session_cwd, record_session_cwd, register_container_alias
             parent_cwd = get_session_cwd(self.parent_task_id)
@@ -854,8 +857,30 @@ class _ChildRun:
             # the goal message instead (same turn, no system-prompt mutation).
             from tools.subagent_worktree import build_worktree_context_note
             self.goal = self.goal + build_worktree_context_note(self.worktree_info)
+        else:
+            self.attach_private_scratch(parent_cwd)
         self.wall_start = time.time()
         self.parent_reads_snapshot = list(file_state.known_reads(self.parent_task_id)) if self.parent_task_id else []
+
+    def attach_private_scratch(self, parent_cwd: Optional[str]) -> None:
+        """Without git isolation the child shares its parent's cwd with the parent and its siblings: give it a
+        private folder under TMPDIR (pruned with the rest of scratch) and name both in its system prompt. The session
+        cwd stays the parent's, since brief paths are relative to it. The ephemeral prompt is injected at API-call
+        time, so setting it before ``run_conversation`` reaches the first call. Local backend only: a host folder is
+        invisible to a docker/ssh child's tools."""
+        from tools import subagent_worktree
+        from tools.delegate_tool_progress import _build_private_scratch_block, _resolve_workspace_hint
+        if not subagent_worktree.local_backend_active():
+            return
+        with _quiet("private scratch setup failed: %s"):
+            self.private_scratch = tempfile.mkdtemp(
+                prefix=f"subagent-{self.subagent_id or self.child_task_id}-",
+                dir=os.environ.get("TMPDIR") or tempfile.gettempdir(),
+            )
+            shared = parent_cwd or _resolve_workspace_hint(self.parent_agent)
+            block = _build_private_scratch_block(self.private_scratch, shared)
+            base = getattr(self.child, "ephemeral_system_prompt", None) or ""
+            self.child.ephemeral_system_prompt = "\n\n".join(filter(None, (base, block)))
 
     def finish_failed(
         self, entry: dict[str, Any], late_steer: Optional[str], *, preview: str, summary: str = "", status: Optional[str] = None,
