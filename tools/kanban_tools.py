@@ -1355,27 +1355,25 @@ def _handle_comment(args: dict, **kw) -> str:
             "dispatcher-assigned task to default to. Discover task ids with "
             "kanban_list, or pass the task id you mean.")
     body = _redact(_require_text(args, "body"))
-    # Author comes from the worker's runtime identity (``_persisted_identity``), never
-    # caller args: comments are injected into future workers' system prompts, so an
-    # args["author"] override could forge a directive from ``hermes-system``.
-    # Cross-task commenting stays unrestricted — it is the handoff channel between tasks.
-    # Comments are injected into the next worker's system prompt by ``build_worker_context`` as
-    # ``**{author}** (timestamp): {body}`` — accepting an ``args["author"]`` override let a worker forge a
-    # comment from an authoritative-looking name like ``hermes-system`` and poison the future-worker context
-    # with what reads as a system directive. See #19713.
+    # Author comes from the worker's runtime identity (``_persisted_identity``), never caller args: comments are
+    # injected into future workers' system prompts (``build_worker_context``), so an ``args["author"]`` override
+    # could forge a directive from ``hermes-system``. Cross-task commenting stays unrestricted. See #19713.
     author = _persisted_identity()
     with _board(args.get("board")) as (kb, conn):
         from hermes_cli import kanban_foreign_card as _kfc
+        from hermes_cli import kanban_relayed_human as _krh
         foreign = _kfc.refusal(conn, str(tid))  # [daveey] only a replica copy here: name the owner
         if foreign:
             raise _Reject(foreign, _kfc.REJECTION)
         # [daveey] This tool is always an agent: record it, so no reader guesses (agent-261aa31f49).
         from gateway.session_context import get_session_env
+        writer_session = get_session_env("HERMES_SESSION_ID", "") or None
+        relayed = _krh.from_tool_args(conn, str(tid), args, writer_session, reject=_Reject)  # kanban-d1b921f32e
         cid = kb.add_comment(conn, tid, author=author, body=str(body), writer_kind="agent",
-                             writer_session=get_session_env("HERMES_SESSION_ID", "") or None)
+                             writer_session=writer_session, relayed_human=relayed)
         subscribed = _maybe_subscribe_on_touch(conn, str(tid))
         live = kb.live_run_id(conn, str(tid))
-        extra: dict = {"live_run": live is not None}
+        extra: dict = {"live_run": live is not None, **({"relayed_human": relayed} if relayed else {})}
         if live is not None and _worker_run_id(str(tid)) != live:
             extra["delivery"] = (
                 "the card has a live worker run: it gets this note at its next model call "

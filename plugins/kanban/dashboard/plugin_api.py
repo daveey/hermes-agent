@@ -44,7 +44,7 @@ from plugins.kanban.dashboard import board_read
 from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the documented column list
     BOARD_COLUMNS, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
-from plugins.kanban.dashboard.plugin_api_comment_actor import CommentBody, comment_writer
+from plugins.kanban.dashboard.plugin_api_comment_actor import CommentBody, comment_relay, comment_writer
 from hermes_cli.kanban_db_attachment_names import _collision_free_path, _safe_attachment_name
 
 log = logging.getLogger(__name__)
@@ -926,11 +926,12 @@ def add_comment(task_id: str, payload: CommentBody, request: Request, board: Opt
     if not payload.body.strip():
         raise HTTPException(status_code=400, detail="body is required")
     writer_kind, writer_session = comment_writer(payload, request.scope)
+    relayed_human = comment_relay(payload, writer_kind)
     with _board_conn(board) as (board, conn):
         _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)
         kanban_db.add_comment(conn, task_id, author=payload.author or "dashboard", body=payload.body,
-                              writer_kind=writer_kind, writer_session=writer_session)
+                              writer_kind=writer_kind, writer_session=writer_session, relayed_human=relayed_human)
         return {"ok": True}
 
 

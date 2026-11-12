@@ -25,6 +25,22 @@ class CommentBody(BaseModel):
     # Set only by an agent courier (session-mentions serving ``cross_task``), never by the GUI.
     writer_kind: Optional[str] = None
     writer_session: Optional[str] = None
+    # A chat's relay of the user's reply, verified by its origin (``cross_task`` relays_user_message);
+    # stored as sent, and only beside writer_kind='agent' (kanban-d1b921f32e). [daveey]
+    relayed_human: Optional[dict] = None
+
+
+def comment_relay(payload: CommentBody, writer_kind: Optional[str]) -> Optional[dict]:
+    """The normalized ``relayed_human`` to store for ``payload``; HTTP 400 when it is malformed or not an agent's."""
+    if payload.relayed_human is None:
+        return None
+    from hermes_cli.kanban_relayed_human import from_remote
+
+    relay = from_remote(payload.relayed_human)
+    if writer_kind != "agent" or relay is None:
+        raise HTTPException(status_code=400, detail=(
+            "relayed_human needs writer_kind='agent' and {session, message_id, at} from the relaying chat"))
+    return relay
 
 
 def comment_writer(payload: CommentBody, scope: Optional[dict] = None) -> tuple[str, Optional[str]]:

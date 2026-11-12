@@ -639,6 +639,11 @@ KANBAN_COMMENT_SCHEMA = _schema(
                 "kanban_list to discover ids."
         )),
         "body": _prop("string", "Markdown-supported comment body."),
+        "relays_user_message": _prop("boolean", (
+                "Set true when this comment passes on the user's reply from this chat to a card that asked "
+                "(e.g. a needs_input block). Counts as a human answer for the card's no-progress budget; "
+                "the comment stays attributed to the agent. Only an interactive chat may set it, once per "
+                "user message per card, and only for a message sent after the card's latest ask.")),
     },
     ["task_id", "body"],
 )
