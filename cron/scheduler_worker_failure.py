@@ -39,6 +39,9 @@ def record_unknown_worker_outcome(
                 error,
                 delivery_error=delivery_error,
                 expected_fire_owner=owner,
+                # The run's own bookkeeping may book this execution too (e.g. "fire ownership
+                # was lost" once it notices): the id makes the second booking a no-op.
+                execution_id=str(job["execution_id"]),
                 # A ladder re-run's occurrence already counted toward repeat.
                 **({"ladder_rung": True} if is_retry_run(job) else {}),
             )

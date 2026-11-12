@@ -3117,6 +3117,7 @@ def run_one_job(
                     False,
                     error,
                     delivery_error=delivery_error,
+                    execution_id=execution_id,
                     **({"expected_fire_owner": owner} if owner else {}),
                     # A ladder re-run's occurrence already counted toward repeat.
                     **({"ladder_rung": True} if is_retry_run(job) else {}),
@@ -3184,6 +3185,7 @@ def _record_fire_ownership_lost(
     if fire_owner is not None and heartbeat_fire_claim(job_id, expected_owner=fire_owner):
         mark_job_run(
             job_id, False, _OWNERSHIP_LOST_INTERRUPTED, expected_fire_owner=fire_owner,
+            execution_id=execution_id,
             **({"ladder_rung": True} if is_retry_run(job) else {}),
         )
         finish_execution(execution_id, success=False, error=_OWNERSHIP_LOST_INTERRUPTED)
@@ -3721,7 +3723,8 @@ def _run_one_job_body(
                 not _consume_interrupted_flag(job["id"], execution_token)
                 and not self_removal_delivery_allowed(job["id"])  # no record left to mark
             ):
-                mark_kwargs = {}
+                # One execution books one outcome, whichever terminal path sees it first.
+                mark_kwargs = {"execution_id": execution_id}
                 if fire_owner is not None:
                     mark_kwargs["expected_fire_owner"] = fire_owner
                 if contained:
