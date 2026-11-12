@@ -290,8 +290,11 @@ class SSHEnvironment(BaseEnvironment):
         client's env carries the values, so secrets never enter the remote ``bash -c`` argv. The
         remote sshd must ``AcceptEnv`` them (#14091). Profile-scoped names missing from the active
         scope are unset remotely so a shared host cannot serve another profile's value."""
+        from hermes_cli.proof_home import remote_origin_prefix  # sshd drops the tool-call origin stamp
+
         values, unset_names = resolve_passthrough_env(hermes_env_loader=_load_hermes_env_vars)
-        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(prepend_unset(cmd_string, unset_names)), login)
+        remote = remote_origin_prefix() + prepend_unset(cmd_string, unset_names)
+        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(remote), login)
         client_env = client_env_with(values)
         return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
 

@@ -635,5 +635,11 @@ if not _pm_repair:
         if command_argv(sys.argv[1:])[:1] != ["pm"]:
             print(f"hermes: {exc}; run `hermes pm repair`", file=sys.stderr)
             raise SystemExit(1) from None
+if {"serve", "dashboard"} & set(sys.argv[1:]):
+    # Select or refuse a proof backend's home before scratch export, config or recovery read it.
+    # After the repair above, so a torn tree is mended before this module is needed.
+    from hermes_cli.proof_home import prepare_backend_argv
+
+    prepare_backend_argv()
 install_happy_eyeballs_socket_connect()
 export_scratch_tmp_env()

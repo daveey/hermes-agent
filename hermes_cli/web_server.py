@@ -1673,6 +1673,8 @@ def _start_server_runtime(
     until the ready sentinel is written so its SDK import can't hold the GIL
     against the pre-bind path.
     """
+    from hermes_cli.proof_home import assert_backend_home
+    assert_backend_home(isolated=isolated)  # before the server, config consumers and lifespan start
     from hermes_cli.update_proxy_env import restore_user_proxy_env
     restore_user_proxy_env()  # a backend an update replayed keeps the user's proxy env, not the update's
     _apply_ssh_session_token(ssh_session_token or "")

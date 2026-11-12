@@ -39,6 +39,9 @@ def test_native_essentials_and_passthrough_priority(windows, passthrough):
               "RANDOM_UNKNOWN_VAR": "unknown"}
     result = _scrub_child_env({**essentials, **safe, **secret}, is_windows=windows,
                              is_passthrough=lambda k: passthrough and k == "TENOR_API_KEY")
+    # Provenance stamps (hermes_cli.proof_home.stamp_tool_child), not inherited values.
+    assert result.pop("HERMES_AGENT_TOOL_CALL") == "1" and result.pop("HERMES_AGENT_ORIGIN")
+    result.pop("HERMES_AGENT_HOME", None)
     assert result == {**safe, **(essentials if windows else {}),
                       **({"TENOR_API_KEY": "fake-third-party"} if passthrough else {})}
 

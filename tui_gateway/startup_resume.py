@@ -173,9 +173,13 @@ def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
 
 def start_startup_resume_sweep() -> threading.Thread | None:
     """Backend boot hook: run the sweep on a daemon thread after a short settle delay (no-op unless enabled)."""
+    from hermes_cli.proof_home import recovery_home_allowed
+    from hermes_constants import get_hermes_home
+    if not recovery_home_allowed(get_hermes_home()):
+        logger.warning("startup resume: skipped, a proof backend never adopts production chats")
+        return None
     try:
         from hermes_cli.config import load_config
-        from hermes_constants import get_hermes_home
         cfg = load_config()
     except Exception:
         logger.debug("startup resume: config unavailable", exc_info=True)

@@ -342,7 +342,8 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
         # [daveey] bare python3 -> the Developer-ID Hermes Python.app, so macOS TCC uses its grants.
         from hermes_cli._launchers import prefer_signed_python_on_path
         out[path_key] = prefer_signed_python_on_path(out[path_key])
-    return _finalize_child_env(out)
+    from hermes_cli.proof_home import stamp_tool_child
+    return stamp_tool_child(_finalize_child_env(out))
 
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
