@@ -257,6 +257,7 @@ def _fold_queued(admission_id, session_id, replaced, skip=()):
         payload = json.loads(row[1])
         payload['text'] = _FOLDED_TEXT
         _descriptor(payload).pop('identities', None)
+        _descriptor(payload).pop('kanban_cards', None)
         conn.execute('UPDATE session_admissions SET payload_json=? WHERE admission_id=?',
                      (json.dumps(payload, separators=(',', ':'), ensure_ascii=False), admission_id))
     return guard
@@ -429,7 +430,7 @@ def automation_display_metadata(metadata):
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
     'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick',
-    'completion_wakes_parent'})
+    'completion_wakes_parent', 'kanban_cards'})
 
 
 def admission_display(payload):
@@ -466,8 +467,9 @@ def snapshot_automation(authority, adapter, event, identity):
             or event.media_urls or event.prompt_response or event.source.platform == Platform.API_SERVER
             or set(event.metadata) - _AUTOMATION_METADATA):
         raise RuntimeStoreError('invalid_params')
+    from gateway.kanban_wake_fold import card_metadata
     notification = (automation_notification_metadata(event.metadata) | automation_display_metadata(event.metadata)
-                    | _tick_metadata(event.metadata))
+                    | _tick_metadata(event.metadata) | card_metadata(event.metadata))
     entry = _owner(runner, event, authority)
     from gateway.session_detached import detached_route_of
     if event.source.platform == Platform.LOCAL or detached_route_of(event.source):
@@ -554,6 +556,8 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
     descriptor.update(automation_notification_metadata(event.metadata))
     descriptor.update(automation_display_metadata(event.metadata))
     descriptor.update(_tick_metadata(event.metadata))
+    from gateway.kanban_wake_fold import card_metadata
+    descriptor.update(card_metadata(event.metadata))
     if 'completion_wakes_parent' in event.metadata:
         # A failed async delegation: the parent must act on it, so it runs as a turn even when no viewer
         # is attached (gateway/session_completion_notes.py). Only ``True`` is stored, so an older
@@ -880,7 +884,7 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
                              message_id=identity, metadata={'gateway_session_key': key,
                                                             'gateway_session_id': entry.session_id,
                                                             **(metadata or {})})
-        await authority.admit_automation(adapter, event, identity)
+        await _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer)
         return True
     from gateway.session_envelope import restore_native
     envelope = committed_route_envelope(authority, entry)
@@ -893,5 +897,30 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
                          message_id=identity, metadata={'gateway_session_key': key,
                                                         'gateway_session_id': entry.session_id,
                                                         **(metadata or {})})
-    await authority.admit_automation(adapter, event, identity)
+    await _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer)
     return True
+
+
+async def _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer):
+    """A Kanban wake carrying its cards folds into a Kanban wake still waiting at the FIFO tail
+    (``gateway.kanban_wake_fold``), so a busy chat runs ONE turn for every card event that piled up.
+    The waiting row is cancelled in this admission's own transaction (``_fold_queued``); when it was
+    claimed first, or a prompt landed behind it meanwhile, this wake queues alone."""
+    from gateway import kanban_wake_fold
+    if producer != kanban_wake_fold.PRODUCER or not event.metadata.get('kanban_cards'):
+        return await authority.admit_automation(adapter, event, identity)
+    import asyncio
+    async with kanban_wake_fold.wake_lock(runner):
+        waiting = await asyncio.to_thread(
+            kanban_wake_fold.waiting_wake, authority, _route_owner(authority, entry), entry.session_key)
+        if waiting is not None:
+            unfolded = event.text, dict(event.metadata)
+            await asyncio.to_thread(kanban_wake_fold.fold_into, event, waiting, identity)
+            try:
+                return await authority.admit_automation(adapter, event, identity,
+                                                        replaces=waiting['admission_id'], fold=())
+            except RuntimeStoreError as exc:
+                if exc.reason != 'stale_generation':
+                    raise
+                event.text, event.metadata = unfolded
+        return await authority.admit_automation(adapter, event, identity)

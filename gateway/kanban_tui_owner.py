@@ -185,7 +185,10 @@ async def deliver(notification: Any) -> None:
         return
     from gateway.session_automation import admit_route_wake
     from hermes_state_runtime import RuntimeStoreError
-    metadata = {"notification_category": "diagnostic"} if diagnostic else {}
+    metadata: dict[str, Any] = {"notification_category": "diagnostic"} if diagnostic else {}
+    # What a later wake for this chat folds from while this one still waits (kanban_wake_fold).
+    metadata["kanban_cards"] = [{"task_id": notification.task_id, "board": notification.board_slug or "",
+                                 "kinds": sorted({ev.kind for ev in d["events"]}), "text": "\n".join(texts)}]
     try:
         admitted = await admit_route_wake(runner, adapter, live.source, "\n".join(texts), "kanban-wake", metadata)
     except Exception as exc:  # health: allow BLE001 -- delivery boundary: any admission failure rewinds the claim (logged with traceback) so no notice is lost

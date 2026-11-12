@@ -125,12 +125,15 @@ def _runner_draining(adapter: Any) -> bool:
 
 
 async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source: Any = None,
-                       notification_category: str = "result", profile: Optional[str] = None) -> None:
+                       notification_category: str = "result", profile: Optional[str] = None,
+                       kanban_card: Optional[dict] = None) -> None:
     """Deliver a wake turn to the session behind ``adapter``. ``session_id`` is the RAW session id
     (``X-Hermes-Session-Id`` / state.db key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` for the synthetic event — required for push-capable adapters. ``profile``
     names the served profile that canonically owns a non-push destination; a non-default value is
     delivered in-process under the caller's profile scope (see ``_self_post_chat_completion``).
+    ``kanban_card`` (``{task_id, board, kinds, text}``) rides a FIFO wake so a later wake for the same
+    route folds into it while it waits (``gateway.kanban_wake_fold``).
     Raises on failure so the caller can rewind/retry."""
     if adapter_supports_push(adapter):
         if source is None:
@@ -140,7 +143,9 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
         if runner is not None:
             from gateway.session_automation import admit_route_wake
             from hermes_state_runtime import RuntimeStoreError
-            category = {"notification_category": notification_category} if notification_category != "result" else {}
+            category: dict[str, Any] = {"notification_category": notification_category} if notification_category != "result" else {}
+            if kanban_card:
+                category["kanban_cards"] = [{**kanban_card, "text": str(kanban_card.get("text") or "")[:32000]}]
             try:
                 if await admit_route_wake(runner, adapter, source, text, "kanban-wake", category):
                     return  # committed to the session FIFO: never interrupts the admitted turn

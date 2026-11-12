@@ -605,6 +605,7 @@ class _KanbanNotification:
         self.adapter: Any = None
         self.is_push_adapter = True
         self.wake_kinds: set = set()
+        self.wake_card: Optional[dict] = None
 
     # -- cursor / subscription ops (blocking, run in a fresh-context thread) --
 
@@ -695,6 +696,9 @@ class _KanbanNotification:
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
+        # What a later wake for the same chat folds from while this one still waits (kanban_wake_fold).
+        self.wake_card = {"task_id": sub["task_id"], "board": self.board_slug or "",
+                          "kinds": [k for k in _WAKE_KINDS if k in self.wake_kinds], "text": synth}
 
     def _log_woke(self) -> None:
         logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
@@ -764,7 +768,8 @@ class _KanbanNotification:
                 raise RuntimeError(f"Kanban wake profile {self.sub_profile!r} no longer exists")
         async with _async_profile_runtime_scope(self.runner._resolve_profile_home_for_source(_source)):
             await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key, source=_source,
-                               notification_category="diagnostic" if self.wake_diagnostic else "result")
+                               notification_category="diagnostic" if self.wake_diagnostic else "result",
+                               kanban_card=self.wake_card)
         self._log_woke()
 
     async def _send_event(self, ev: Any, msg: str) -> bool:
