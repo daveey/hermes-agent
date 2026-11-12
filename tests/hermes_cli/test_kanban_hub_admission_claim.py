@@ -277,12 +277,35 @@ def test_unjudged_claims_is_empty_before_the_gate_and_ignores_later_verdicts(gws
     assert hac.unjudged_claims(hub.conn, HUB) == []  # no verdict on this board yet: the gate is not live
     with kb.write_txn(hub.conn):  # a verdict recorded after the claim does not make that claim judged
         kb._append_event(hub.conn, early, "hub_admission", {"admit": True, "entry": "move"})
+        # Same second as the claim: the gate opens no later than the claim (else the claim predates the gate
+        # and is rightly ignored), but the verdict still follows it by event id.
+        hub.conn.execute(
+            "UPDATE task_events SET created_at = (SELECT MAX(created_at) FROM task_events WHERE task_id = ? "
+            "AND kind = 'claimed') WHERE task_id = ? AND kind = 'hub_admission'", (early, early))
     assert [tid for tid, _at in hac.unjudged_claims(hub.conn, HUB)] == [early]
     audited = _hub_card(hub, title="admitted at creation",
                         placement_audit={"hub_admission": {"admit": True, "entry": "create", "why": "ok"}})
     _tick(hub)
     hub.round()
     assert audited not in [tid for tid, _at in hac.unjudged_claims(hub.conn, HUB)]
+
+
+def test_unjudged_claims_accepts_a_creation_time_verdict_without_an_admission_event(gws):
+    """A card whose only verdict rides its ``created`` payload (no ``hub_admission`` event) was judged."""
+    hub, _worker, _svc = gws
+    gate = _hub_card(hub, title="gate card")
+    audited = _hub_card(hub, title="admitted at creation")
+    bare = _hub_card(hub, title="never judged")
+    with kb.write_txn(hub.conn):  # a synced creation: the audit rides the payload, no admission event
+        hub.conn.execute(
+            "UPDATE task_events SET payload = json_set(COALESCE(payload, '{}'), '$.hub_admission', json(?)) "
+            "WHERE task_id = ? AND kind = 'created'",
+            (json.dumps({"admit": True, "entry": "create", "why": "ok"}), audited))
+        kb._append_event(hub.conn, gate, "hub_admission", {"admit": True, "entry": "move"})
+        for tid in (audited, bare):
+            kb._append_event(hub.conn, tid, "claimed", {"holder": HUB})
+    assert _events(hub.conn, audited, "hub_admission") == []
+    assert [tid for tid, _at in hac.unjudged_claims(hub.conn, HUB)] == [bare]
 
 
 def test_unjudged_claims_counts_hub_claims_without_a_prior_verdict(gws, hub_judge, monkeypatch):
