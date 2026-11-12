@@ -498,14 +498,34 @@ class TestBoundedExit:
     def test_escort_stands_down_when_fire_completes(self, exit_capture, monkeypatch):
         """When forensics complete normally the escort must NOT double-exit:
         it observes _fire_done and returns."""
-        monkeypatch.setattr(
-            StartupWatchdogHandle, "_sleep", staticmethod(lambda s: time.sleep(0.5))
-        )
+        release_escort = threading.Event()
+        escort_started = threading.Event()
+        escorts = []
+
+        def _hold_escort(seconds):
+            escorts.append(threading.current_thread())
+            escort_started.set()
+            release_escort.wait(timeout=30)
+
+        monkeypatch.setattr(StartupWatchdogHandle, "_sleep", staticmethod(_hold_escort))
         handle = arm_startup_watchdog(timeout_s=0.1)
         assert handle is not None
-        assert exit_capture.fired.wait(timeout=5)
-        # Give the escort time to wake and observe _fire_done.
-        time.sleep(0.8)
+        try:
+            assert escort_started.wait(timeout=10)
+            # Establish the completed-fire precondition, rather than racing
+            # real logging/filesystem/ledger work against a 0.5s escort.
+            assert exit_capture.fired.wait(timeout=10)
+            handle.join(timeout=10)
+            assert not handle.is_alive()
+        finally:
+            release_escort.set()
+            handle.join(timeout=10)
+            for escort in escorts:
+                escort.join(timeout=10)
+        # A sleep cannot prove the escort ran its post-wakeup check. Join it
+        # before inspecting exits, and before restoring the real os._exit.
+        assert len(escorts) == 1
+        assert not escorts[0].is_alive()
         assert exit_capture.codes == [SERVICE_RESTART_EXIT_CODE]
 
 
