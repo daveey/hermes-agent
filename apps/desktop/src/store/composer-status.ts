@@ -1,12 +1,14 @@
 import { atom, computed } from 'nanostores'
 
 import { translateNow } from '@/i18n'
+import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import { stableArray } from '@/lib/stable-array'
 import { type TodoItem, type TodoStatus, todoTree } from '@/lib/todos'
 
 import { $gateway } from './gateway'
 import { $goalsBySession, type GoalStatus } from './goals'
-import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle } from './live-work-roster'
+import { $kanbanObservationTick } from './kanban-observation'
+import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle, selectWorkObservations } from './live-work-roster'
 import { dispatchNativeNotification } from './native-notifications'
 import { notifyError } from './notifications'
 import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone, noteRuntimeAlive } from './runtime-gone'
@@ -28,6 +30,7 @@ export type StatusItemState = 'done' | 'failed' | 'running'
 export type StatusItemType = 'background' | 'goal' | 'subagent' | 'todo'
 
 export interface ComposerStatusItem {
+  executionObservations?: unknown[]
   /** background: non-zero exit shown inline when failed. */
   exitCode?: number
   /** subagent: active tool label shown on the right. */
@@ -71,7 +74,7 @@ const backgroundWrittenAt = new WeakMap<readonly ComposerStatusItem[], number>()
 // reference when unchanged so rows reading this don't re-render per token.
 let backgroundRunningIds: readonly string[] = []
 export const $backgroundRunningSessionIds = computed(
-  [$backgroundStatusBySession, $sessionStates, $sessions, $liveWorkRoster],
+  [$backgroundStatusBySession, $sessionStates, $sessions, $liveWorkRoster, $kanbanObservationTick],
   (bg, states, sessions, roster) => {
     const ids = new Set<string>()
     const eventFedAt = new Map<string, number>()
@@ -87,7 +90,9 @@ export const $backgroundRunningSessionIds = computed(
       const writtenAt = backgroundWrittenAt.get(items) ?? -Infinity
       noteEventFed(eventFedAt, aliases, writtenAt)
 
-      if (items.some(i => i.state === 'running') && !rosterSaysIdle(roster, 'background', aliases, writtenAt)) {
+      const evidence = items.filter(i => i.state === 'running').flatMap(i => i.executionObservations ?? [])
+
+      if (summarizeExecutionObservations(selectWorkObservations(evidence, Date.now() / 1000), Date.now() / 1000, 'sidebar').counts.running > 0 && !rosterSaysIdle(roster, 'background', aliases, writtenAt)) {
         for (const alias of aliases) {
           ids.add(alias)
         }
@@ -364,6 +369,7 @@ function dropRunningRows(sid: string) {
 
 // `tui_gateway` process.list entry (tools/process_registry.list_sessions + output_tail).
 interface GatewayProcessEntry {
+  execution_observations?: unknown[]
   command?: string
   exit_code?: number
   output_tail?: string
@@ -376,6 +382,7 @@ const toBackgroundItem = (proc: GatewayProcessEntry): ComposerStatusItem => {
   const exitCode = typeof proc.exit_code === 'number' ? proc.exit_code : undefined
 
   return {
+    executionObservations: proc.execution_observations,
     exitCode,
     id: proc.session_id ?? '',
     output: proc.output_tail || undefined,
@@ -386,7 +393,8 @@ const toBackgroundItem = (proc: GatewayProcessEntry): ComposerStatusItem => {
 }
 
 const sameItem = (a: ComposerStatusItem, b: ComposerStatusItem) =>
-  a.state === b.state && a.title === b.title && a.output === b.output && a.exitCode === b.exitCode
+  a.state === b.state && a.title === b.title && a.output === b.output && a.exitCode === b.exitCode &&
+  JSON.stringify(a.executionObservations) === JSON.stringify(b.executionObservations)
 
 /**
  * Layout-stable sync of the registry snapshot into the store: existing rows

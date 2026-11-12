@@ -113,6 +113,8 @@ class ProcessEntry(_Open):
     started_epoch: float | None = None
     completion_reason: str | None = None
     detached: bool | None = None
+    #: Optional v1 execution observations (``hermes_cli.execution_observations``), absent from older gateways.
+    execution_observations: list[dict[str, JsonValue]] | None = None
 
 
 class ProcessListResult(Result):

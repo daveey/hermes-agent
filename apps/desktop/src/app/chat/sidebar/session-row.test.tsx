@@ -1098,6 +1098,32 @@ describe('SidebarSessionRow stored outcome', () => {
     expect(settled.container.querySelector('[data-working="true"]')).toBeNull()
   })
 
+  it('renders initial partial roster uncertainty beside live work and repaints clock-only expiry', async () => {
+    const { $liveWorkRoster, setLiveWorkRosterSource } = await import('@/store/live-work-roster')
+    const { gatewayRouteState } = await import('@/store/gateway')
+    const { $kanbanObservationTick } = await import('@/store/kanban-observation')
+    const fixture = await import('../../../../../../schemas/fixtures/execution-observations-v1.json')
+    vi.useFakeTimers()
+    vi.setSystemTime(1001000)
+    const session = makeSession({ id: 'roster-row', title: 'Roster', message_count: 2 })
+    const source = gatewayRouteState(null, 'default').key
+    const record = { ...fixture.base, identity: { ...fixture.base.identity, kind: 'process', session: 'roster-row' }, valid_until: 1010 }
+    setLiveWorkRosterSource(source, [{ session_id: session.id, background: 1, subagents: 1, execution_observations: [record] }], 1001000, [session.id])
+
+    try {
+      const { container } = renderRow(session)
+      expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
+      await act(async () => {
+        vi.setSystemTime(1011000)
+        $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
+      })
+      expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('2')
+    } finally {
+      $liveWorkRoster.set({})
+      vi.useRealTimers()
+    }
+  })
+
   it('reads the park from row.muted', () => {
     const { container } = renderRow(
       makeSession({ message_count: 4, muted: true, title: 'Parked' } as Partial<SessionInfo> & { title: string })

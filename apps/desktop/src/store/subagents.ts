@@ -13,6 +13,7 @@ export interface SubagentStreamEntry {
 }
 
 export interface SubagentProgress {
+  executionObservations?: unknown[]
   id: string
   parentId: null | string
   goal: string
@@ -86,6 +87,7 @@ const isStr = (v: unknown): v is string => typeof v === 'string'
 const str = (v: unknown) => (isStr(v) ? v : '')
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
 const strList = (v: unknown) => (Array.isArray(v) ? v.filter(isStr) : [])
+const observationList = (v: unknown): unknown[] | undefined => Array.isArray(v) ? v : undefined
 
 const asStatus = (v: unknown, terminalEvent = false): SubagentStatus => {
   if (v === 'completed' || v === 'failed' || v === 'interrupted') {
@@ -217,6 +219,7 @@ function toProgress(payload: SubagentPayload, prev: SubagentProgress | undefined
   const filesWritten = strList(payload.files_written)
 
   return {
+    executionObservations: prev?.executionObservations,
     id: prev?.id ?? idOf(payload),
     parentId: str(payload.parent_id) || prev?.parentId || null,
     goal: str(payload.goal) || prev?.goal || 'Subagent',
@@ -272,6 +275,7 @@ export function reconcileSubagentSnapshot(
     }
 
     const projected = toProgress(payload, prev)
+    projected.executionObservations = observationList(payload.execution_observations)
     projected.startedAt = (num(payload.started_at) ?? 0) * 1000 || prev?.startedAt || projected.startedAt
     projected.updatedAt = prev?.updatedAt ?? projected.startedAt
 

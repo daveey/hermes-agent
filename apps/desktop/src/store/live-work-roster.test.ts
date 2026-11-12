@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import fixture from '../../../../schemas/fixtures/execution-observations-v1.json'
+
 import {
   $backgroundRunningSessionIds,
   $backgroundStatusBySession,
@@ -11,7 +13,14 @@ import { $delegatingSessionIds } from './session-dot-state'
 import { $subagentsBySession, type SubagentProgress } from './subagents'
 
 const child = (status: SubagentProgress['status'], updatedAt: number) =>
-  ({ id: 'c1', index: 0, status, updatedAt }) as unknown as SubagentProgress
+  ({ id: 'c1', index: 0, status, updatedAt, executionObservations: status === 'running' ? [evidence('subagent')] : [] }) as unknown as SubagentProgress
+
+const evidence = (kind: string) => ({ ...fixture.base, identity: { ...fixture.base.identity, kind, session: 'owner' }, last_activity: Date.now() / 1000, observed_at: Date.now() / 1000, valid_until: Date.now() / 1000 + 180 })
+
+const rosterEntry = (session_id: string, subagents: number, background: number) => ({
+  session_id, subagents, background,
+  execution_observations: [...(subagents ? [evidence('subagent')] : []), ...(background ? [evidence('process')] : [])]
+})
 
 afterEach(() => {
   vi.clearAllTimers()
@@ -23,7 +32,7 @@ afterEach(() => {
 
 describe('backend roster feeds rows no mounted tile speaks for', () => {
   it('lights a conversation the roster reports with running children', () => {
-    setLiveWorkRosterSource('ambient', [{ session_id: 'off-screen', subagents: 2, background: 0 }])
+    setLiveWorkRosterSource('ambient', [rosterEntry('off-screen', 2, 0)])
 
     expect($delegatingSessionIds.get()).toContain('off-screen')
   })
@@ -37,14 +46,14 @@ describe('backend roster feeds rows no mounted tile speaks for', () => {
 
   it('never lets retained child history hide work a newer roster read saw', () => {
     $subagentsBySession.set({ 'old-pane': [child('completed', 1_000)] })
-    setLiveWorkRosterSource('ambient', [{ session_id: 'old-pane', subagents: 1, background: 0 }], 2_000)
+    setLiveWorkRosterSource('ambient', [rosterEntry('old-pane', 1, 0)], 2_000)
 
     expect($delegatingSessionIds.get()).toContain('old-pane')
   })
 
   it('never lets a retained background list hide a process a newer roster read saw', () => {
     $backgroundStatusBySession.set({ 'old-pane': [{ id: 'p1', state: 'done', title: 'sleep', type: 'background' }] })
-    setLiveWorkRosterSource('ambient', [{ session_id: 'old-pane', subagents: 0, background: 1 }])
+    setLiveWorkRosterSource('ambient', [rosterEntry('old-pane', 0, 1)])
 
     expect($backgroundRunningSessionIds.get()).toContain('old-pane')
   })
@@ -52,7 +61,7 @@ describe('backend roster feeds rows no mounted tile speaks for', () => {
   it('a newer read from the source covering a row ends a running entry its hidden pane stopped updating', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000)
-    reconcileBackgroundProcesses('pane', [{ command: 'sleep', session_id: 'p1', status: 'running' }])
+    reconcileBackgroundProcesses('pane', [{ command: 'sleep', session_id: 'p1', status: 'running', execution_observations: [evidence('process')] }])
     $subagentsBySession.set({ pane: [child('running', 1_000)] })
     expect($backgroundRunningSessionIds.get()).toContain('pane')
     expect($delegatingSessionIds.get()).toContain('pane')
@@ -66,7 +75,7 @@ describe('backend roster feeds rows no mounted tile speaks for', () => {
   it('a read from a source that does not cover the row never ends its running entry', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000)
-    reconcileBackgroundProcesses('pane', [{ command: 'sleep', session_id: 'p1', status: 'running' }])
+    reconcileBackgroundProcesses('pane', [{ command: 'sleep', session_id: 'p1', status: 'running', execution_observations: [evidence('process')] }])
 
     setLiveWorkRosterSource('other-profile', [], 2_000, ['someone-else'])
 
@@ -80,7 +89,7 @@ describe('backend roster feeds rows no mounted tile speaks for', () => {
       { command: 'a', exit_code: 0, session_id: 'p1', status: 'exited' },
       { command: 'b', exit_code: 0, session_id: 'p2', status: 'exited' }
     ])
-    setLiveWorkRosterSource('ambient', [{ session_id: 'pane', subagents: 0, background: 1 }], 2_000)
+    setLiveWorkRosterSource('ambient', [rosterEntry('pane', 0, 1)], 2_000)
 
     vi.setSystemTime(3_000)
     dismissBackgroundProcess('pane', 'p1')

@@ -25,15 +25,16 @@
 
 import { computed } from 'nanostores'
 
+import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import { outcomeStripe } from '@/lib/session-outcome'
 import { stableArray, stableRecord } from '@/lib/stable-array'
 import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
 import type { SessionOutcome } from '@/types/session-outcome'
 
-import { $backgroundRunningSessionIds } from './composer-status'
+import { $backgroundRunningSessionIds, $backgroundStatusBySession } from './composer-status'
 import { executionHoldsRow, executionKey, rowExecution } from './execution-observation-row'
 import { $kanbanObservationTick, hasFreshKanbanObservation } from './kanban-observation'
-import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle } from './live-work-roster'
+import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle, selectWorkObservations } from './live-work-roster'
 import { $pausedQueueSessionIds } from './owner-queue-reconcile'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
 import {
@@ -44,7 +45,7 @@ import {
   $workingSessionIds
 } from './session-states'
 import { $unreadWriteGuard, UNREAD_WRITE_GUARD_MS } from './session-unread-remote'
-import { $subagentsBySession, activeSubagentCount } from './subagents'
+import { $subagentsBySession } from './subagents'
 
 // Sessions parked in async delegation: the parent turn has ended (busy=false —
 // delegate_task(background=true) returns its handle the moment the children
@@ -56,7 +57,7 @@ import { $subagentsBySession, activeSubagentCount } from './subagents'
 // lineageAliases covers whichever tip of the conversation a surface holds.
 let delegatingIds: readonly string[] = []
 export const $delegatingSessionIds = computed(
-  [$subagentsBySession, $sessionStates, $sessions, $liveWorkRoster],
+  [$subagentsBySession, $sessionStates, $sessions, $liveWorkRoster, $kanbanObservationTick],
   (bySession, states, sessions, roster) => {
     const ids = new Set<string>()
     const eventFedAt = new Map<string, number>()
@@ -70,7 +71,9 @@ export const $delegatingSessionIds = computed(
       const heardAt = Math.max(...items.map(item => item.updatedAt || 0))
       noteEventFed(eventFedAt, aliases, heardAt)
 
-      if (activeSubagentCount(items) > 0 && !rosterSaysIdle(roster, 'subagents', aliases, heardAt)) {
+      const evidence = items.filter(i => i.status === 'running').flatMap(i => i.executionObservations ?? [])
+
+      if (summarizeExecutionObservations(selectWorkObservations(evidence, Date.now() / 1000), Date.now() / 1000, 'sidebar').counts.running > 0 && !rosterSaysIdle(roster, 'subagents', aliases, heardAt)) {
         for (const alias of aliases) {
           ids.add(alias)
         }
@@ -92,7 +95,7 @@ export const $delegatingSessionIds = computed(
 // the session as done (green stripe) while its workers were still going. The
 // backend stamps `kanban_active` on every list row (summed over the lineage).
 let kanbanBusyIds: readonly string[] = []
-export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $kanbanObservationTick], (sessions, messaging) => {
+export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $kanbanObservationTick, $liveWorkRoster, $subagentsBySession], (sessions, messaging) => {
   const ids: string[] = []
 
   for (const rows of [sessions, messaging]) {
@@ -119,7 +122,7 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $k
  *  expiry, no fetch); the reference changes only when some row's verdict does, so subscribers re-render on
  *  transitions, not on every tick. Rows without observations are absent. */
 let executionKeys: Readonly<Record<string, string>> = {}
-export const $executionRowKeys = computed([$sessions, $messagingSessions, $kanbanObservationTick], (sessions, messaging) => {
+export const $executionRowKeys = computed([$sessions, $messagingSessions, $kanbanObservationTick, $liveWorkRoster, $backgroundStatusBySession, $subagentsBySession], (sessions, messaging) => {
   const next: Record<string, string> = {}
 
   for (const rows of [sessions, messaging]) {

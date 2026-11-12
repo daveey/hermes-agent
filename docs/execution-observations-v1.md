@@ -17,7 +17,16 @@ example its durable event), not merely the adapter build.
 All execution-envelope timestamps are finite nonnegative epoch **seconds**.
 Capacity-event fields named `*_ms` are milliseconds and must be explicitly converted.
 `observed_at` and `valid_until` belong to the producer. Consumer age is derived;
-fetch, copy and file mtime never renew validity. Apply separate existing upper
+fetch, copy and file mtime never renew validity. An actual successful read transaction
+of a local-authority board (sync mode `off` or `shadow`) is the producer's observation.
+API fetches, annotation copies, disk snapshots, memo hits and sync-`primary` mirrors
+are not. Unchanged local boards are re-read through the existing counts path at its
+30-second maximum-age cadence, not on each warm poll. Failed/busy reads retain the
+original evidence clock. This renews knowledge of queued/waiting state, not its
+phase/generation, activity or progress; running observations still use the joined
+run's original heartbeat. PRIMARY mirror reads have no authoritative local source
+clock and remain unknown on counts, task lists and detail; `pulled_at` never supplies
+one. Frozen snapshots still expire without a new authoritative read. Apply separate existing upper
 bounds: sidebar 180 seconds, imported-owner 600 seconds. Validity cannot exceed
 any required source's validity. Each required source may specify its original
 `source_class`; absent that field it inherits the envelope's class, never the

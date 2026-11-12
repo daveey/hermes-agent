@@ -50,6 +50,26 @@ def _visible_subagent_records(session_id, transport, owner):
             or _owns_subagent_record(r, agent)]
 
 
+def _subagent_observation(record, profile):
+    """One v1 observation for a registry record (own activity clock, else spawn time); None on adapter failure."""
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
+    from hermes_cli.turn_process_execution_observations import subagent
+
+    try:
+        gateway, local_profile = local_scope()
+        return subagent(record, gateway=gateway, profile=profile or local_profile, now=time.time())
+    except ADAPTER_ERRORS:
+        logger.debug("subagent execution observation unavailable", exc_info=True)
+        return None
+
+
+def _profile_label(home):
+    if not home:
+        return None
+    from gateway.session_authorities import served_profile_name
+    return served_profile_name(home)
+
+
 @method("subagent.list")
 def _(rid, params):
     session_id = _str_param(params, "session_id")
@@ -57,9 +77,15 @@ def _(rid, params):
     if transport is None or owner is None:
         return _err(rid, 4001, "session not found or not owned by this transport")
     live = _visible_subagent_records(session_id, transport, owner)
+    profile = _profile_label(owner.get("profile_home"))
+    rows = []
+    for r in live:
+        row = {**{key: r.get(key) for key in _SUBAGENT_SNAPSHOT_FIELDS}, "child_session_id": _child_session_id(r)}
+        if (obs := _subagent_observation(r, profile)) is not None:
+            row["execution_observations"] = [obs]
+        rows.append(row)
     return _ok(rid, {
-        "subagents": [{**{key: r.get(key) for key in _SUBAGENT_SNAPSHOT_FIELDS},
-                       "child_session_id": _child_session_id(r)} for r in live],
+        "subagents": rows,
         "delegations": _failed_delegations(session_id, owner),
     })
 
@@ -71,7 +97,7 @@ def _child_session_id(record):
 
 
 def _live_work_owners():
-    """``(kind, owner candidates)`` for every live top-level child and running background process in this
+    """``(kind, owner candidates, work)`` (the child's registry record / the process id) for every live top-level child and running background process in this
     process. A child names its durable conversation (``owner_agent_session_id``, the spine completion delivery
     routes by). A process names the conversation that spawned it (``parent_session_id``, from
     ``HERMES_SESSION_ID``) and its routing ``session_key``, which on the gateway path is a route
@@ -80,13 +106,13 @@ def _live_work_owners():
     from tools.process_registry import process_registry
 
     with _active_subagents_lock:
-        owners = [("subagents", (str(r.get("owner_agent_session_id") or ""), ""))
+        owners = [("subagents", (str(r.get("owner_agent_session_id") or ""), ""), dict(r))
                   for r in _active_subagents.values() if not r.get("depth")]
     for entry in process_registry.list_sessions():
         proc = process_registry.get(entry.get("session_id"))
         if proc is not None and not getattr(proc, "exited", True):
             owners.append(("background", (str(getattr(proc, "parent_session_id", "") or ""),
-                                          str(getattr(proc, "session_key", "") or ""))))
+                                          str(getattr(proc, "session_key", "") or "")), entry.get("session_id")))
     return owners
 
 
@@ -135,14 +161,35 @@ def _(rid, params):
         if home := connection_profile_home():
             scope = {"profile": Path(home).name}
     counts = {}
-    namespaces = _route_namespaces(_profile_home(scope.get("profile")))
+    work = {}
+    profile_home = _profile_home(scope.get("profile"))
+    namespaces = _route_namespaces(profile_home)
     with _profile_db(scope) as db:
         if db is None:
             return _ok(rid, {"sessions": []})
-        for kind, owner_ids in owners:
+        for kind, owner_ids, item in owners:
             if sid := _stored_owner(db, owner_ids, namespaces):
                 counts.setdefault(sid, {"subagents": 0, "background": 0})[kind] += 1
-    return _ok(rid, {"sessions": [{"session_id": sid, **c} for sid, c in counts.items()]})
+                work.setdefault(sid, []).append((kind, item))
+    profile = _profile_label(profile_home)
+    sessions = []
+    for sid, c in counts.items():
+        row = {"session_id": sid, **c}
+        if observations := _roster_observations(sid, work[sid], profile):
+            row["execution_observations"] = observations
+        sessions.append(row)
+    return _ok(rid, {"sessions": sessions})
+
+
+def _roster_observations(sid, items, profile):
+    """Observations for one conversation's counted children and processes (same projector as ``subagent.list``)."""
+    from hermes_cli.process_session_activity import process_observations
+
+    observations = [o for kind, item in items if kind == "subagents"
+                    if (o := _subagent_observation(item, profile)) is not None]
+    procs = [item for kind, item in items if kind == "background"]
+    observations += process_observations(procs, owner=sid, profile=profile, owner_resolved=True).values()
+    return observations
 
 
 def _failed_delegations(session_id, owner):

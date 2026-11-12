@@ -186,6 +186,11 @@ describe('hasLiveTurn', () => {
 
 describe('$delegatingSessionIds', () => {
   const subagent = (status: SubagentProgress['status']): SubagentProgress => ({
+    executionObservations: status === 'running' ? [{
+      version: 1, identity: { gateway: 'edge', profile: 'default', session: 'owner', kind: 'subagent', work_id: 'sub-1', generation: 'delegation=batch:start=1000' },
+      owner: { gateway: 'edge', profile: 'default', session: 'owner' }, state: 'running', source: 'subagent.registry',
+      source_revision: 'sub-1@1000', observed_at: Date.now() / 1000, valid_until: Date.now() / 1000 + 180, evidence_refs: ['sub-1']
+    }] : [],
     id: 'sub-1',
     parentId: null,
     goal: 'do a thing',
@@ -221,7 +226,7 @@ describe('$delegatingSessionIds', () => {
   })
 
   it('falls back to the runtime id for a not-yet-persisted conversation', () => {
-    $subagentsBySession.set({ 'runtime-fresh': [subagent('queued')] })
+    $subagentsBySession.set({ 'runtime-fresh': [subagent('running')] })
 
     expect($delegatingSessionIds.get()).toContain('runtime-fresh')
   })

@@ -8,12 +8,18 @@ an identity, and nothing here names an owner the producer did not record.
 from __future__ import annotations
 
 import hashlib
+import logging
+import math
 
 from hermes_cli.execution_observations import SOURCE_TTLS, ident, project
 
+_log = logging.getLogger(__name__)
+
 TURN_SOURCE = "turn.lease"
 PROCESS_SOURCES = frozenset({"process.registry", "process.checkpoint"})
-OWNED_SOURCES = frozenset({TURN_SOURCE}) | PROCESS_SOURCES
+SUBAGENT_SOURCE = "subagent.registry"
+SUBAGENT_SOURCES = frozenset({SUBAGENT_SOURCE})
+OWNED_SOURCES = frozenset({TURN_SOURCE}) | PROCESS_SOURCES | SUBAGENT_SOURCES
 
 
 def profile_for_state_path(path):
@@ -77,7 +83,10 @@ def process(entry, *, gateway, profile, session, now):
     """Process evidence: ``id``, ``pid``, ``host_start_time`` (kernel birth), ``observed_at`` (probe time),
     ``source``. Identity is the registry process id plus its birth-qualified host process."""
     pid, start = entry.get("pid"), entry.get("host_start_time")
-    generation = (f"pid={pid}:start={start}" if type(pid) is int and pid > 0
+    # Only a probed host pid matches a kernel birth. A sandbox/container pid lives in another pid
+    # namespace, so a start tick it carries proves nothing here: no generation, hence unknown.
+    host = entry.get("pid_scope", "host") == "host"
+    generation = (f"pid={pid}:start={start}" if host and type(pid) is int and pid > 0
                   and type(start) is int and start > 0 else None)
     work_id = entry.get("id")
     reference = f"{entry.get('source')}/{work_id}"
@@ -89,6 +98,56 @@ def process(entry, *, gateway, profile, session, now):
            "valid_until": observed + SOURCE_TTLS["sidebar"] if isinstance(observed, (int, float)) else None,
            "last_activity": None, "last_progress": None, "last_progress_kind": None,
            "last_progress_ref": None, "wait": None}
+    return project(raw, now=now, source_class="sidebar")
+
+
+def _finite(value):
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def activity_clock(record):
+    """The live child's own ``last_activity_ts`` (``get_activity_summary``), or None when unavailable."""
+    agent = record.get("agent")
+    try:
+        summary = agent.get_activity_summary()
+        value = summary.get("last_activity_ts", summary.get("last_activity_at")) if isinstance(summary, dict) else None
+    except (AttributeError, LookupError, OSError, RuntimeError, TypeError, ValueError):
+        # a test double or half-built child: no clock, never an error
+        _log.debug("child activity summary unavailable", exc_info=True)
+        return None
+    return value if _finite(value) else None
+
+
+def subagent(record, *, gateway, profile, now):
+    """Delegate registry record: ``subagent_id, delegation_id, started_at, status, owner_agent_session_id``
+    (+ the live ``agent``). Identity is the subagent id qualified by delegation and spawn time; the
+    owner is the durable conversation that commissioned it.
+
+    A running child is dated by its OWN activity clock (``last_activity_ts``: finite, not future, not before
+    spawn); a wedged child's clock stops and the observation expires with no fetch. Without a usable clock the
+    spawn time dates it and it expires. Request time never dates it. Activity, ``tool_count`` and ``last_tool``
+    are never progress.
+    """
+    work_id, delegation = record.get("subagent_id"), record.get("delegation_id")
+    owner, started = record.get("owner_agent_session_id"), record.get("started_at")
+    generation = f"delegation={delegation}:start={started}" if ident(delegation) and _finite(started) else None
+    reference = f"{SUBAGENT_SOURCE}/{work_id}"
+    activity = activity_clock(record)
+    if not (activity is not None and _finite(started) and started <= activity <= now):
+        activity = None
+    observed = activity if activity is not None else (started if _finite(started) else None)
+    raw = {"version": 1, "identity": _identity("subagent", work_id, gateway, profile,
+                                               owner if ident(owner) else None, generation),
+           "owner": _owner(gateway, profile, owner if ident(owner) else None), "state": "running",
+           "source": SUBAGENT_SOURCE, "source_revision": f"{reference}@{observed}", "evidence_refs": [reference],
+           "observed_at": observed,
+           "valid_until": observed + SOURCE_TTLS["sidebar"] if observed is not None else None,
+           "last_activity": activity, "last_progress": None, "last_progress_kind": None,
+           "last_progress_ref": None, "wait": None}
+    if record.get("status") != "running":
+        raw.update(state="unknown", unknown_reason="subagent_not_running")
+    elif not (ident(owner) and ident(delegation)):
+        raw.update(state="unknown", unknown_reason="missing_subagent_owner_or_delegation")
     return project(raw, now=now, source_class="sidebar")
 
 

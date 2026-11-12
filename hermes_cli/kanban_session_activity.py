@@ -41,6 +41,7 @@ from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 from hermes_cli.kanban_links_refresh import ScopeRefresher
 from hermes_cli import kanban_links_narrow as _links_narrow
+from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows, _stored_needs_human
 import contextlib
 import json
 import logging
@@ -150,18 +151,6 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
     return f"((t.status IN ({ph}) OR ({parked} AND NOT {human})) AND {_not_watch(conn)})", statuses  # [daveey]
 
 
-def _stored_needs_human(value, kind) -> bool:
-    """Decode the DB's JSON text before applying the shared evidence contract."""
-    from hermes_cli.kanban_human_request import needs_human
-
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return False
-    return needs_human(value, kind=kind)
-
-
 # Set while ``_all_counts`` reads local boards: collects the (session, task) pairs behind the counts, so the
 # open card ids per session (``waiting_on_task_ids``) cost no extra queries. [daveey]
 _pairs_sink: set[tuple[str, str]] | None = None
@@ -240,70 +229,6 @@ def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STAT
 # unfinished parent. "Held" is the subset of those queued cards whose chain waits on a human ask upstream.
 PARKED_STATUSES = ("scheduled",) + BLOCKED_STATUSES
 _FINISHED_STATUSES = ("done", "archived")
-
-
-def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: float | None = None,
-                     ) -> dict[str, dict[str, Any]]:
-    """[daveey] ``{task_id: wait info}`` (``kanban_wait_info.describe``) for the parked cards among ``task_ids``: what
-    each waits on, since when, and whether only an agent can end it. One query for the cards, one for their newest
-    park events. Missing columns/tables degrade to status-only info."""
-    return _describe_waits(*_local_wait_rows(conn, task_ids), now=now)
-
-
-def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str]) -> tuple[dict[str, tuple], dict[str, tuple]]:
-    """``(parked, events)``: the stored rows ``_describe_waits`` turns into wait info. Separate so a board memo can
-    keep the rows and re-judge their age at each read (the stall cut-off moves with the clock, the rows do not)."""
-    from hermes_cli import kanban_wait_info as kwi
-
-    ids = [str(t) for t in dict.fromkeys(task_ids)]
-    if not ids:
-        return {}, {}
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    pick = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in ("id", "status", "block_kind", "human_request",
-                                                                          "awaiting"))
-    parked: dict[str, tuple] = {}
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        ph = ",".join("?" for _ in chunk)
-        for tid, status, kind, request, awaiting in conn.execute(
-                f"SELECT {pick} FROM tasks t WHERE t.id IN ({ph}) AND t.status IN ('scheduled', 'blocked', 'triage')",
-                chunk):
-            parked[str(tid)] = (status, kind, request, awaiting)
-    if not parked:
-        return {}, {}
-    events: dict[str, tuple] = {}
-    keys = list(parked)
-    kph = ",".join("?" for _ in kwi.PARK_EVENT_KINDS)
-    for i in range(0, len(keys), 500):
-        chunk = keys[i:i + 500]
-        ph = ",".join("?" for _ in chunk)
-        try:
-            for tid, kind, payload, at in conn.execute(
-                    f"SELECT e.task_id, e.kind, e.payload, e.created_at FROM task_events e WHERE e.id IN ("
-                    f"SELECT MAX(id) FROM task_events WHERE task_id IN ({ph}) AND kind IN ({kph}) GROUP BY task_id)",
-                    (*chunk, *kwi.PARK_EVENT_KINDS)):
-                events[str(tid)] = (kind, payload, at)
-        except sqlite3.Error:  # board predates task_events
-            break
-    return parked, events
-
-
-def _describe_waits(parked: dict[str, tuple], events: dict[str, tuple], now: float | None = None,
-                    ) -> dict[str, dict[str, Any]]:
-    from hermes_cli import kanban_wait_info as kwi
-
-    out: dict[str, dict[str, Any]] = {}
-    for tid, (status, kind, request, awaiting) in parked.items():
-        ev_kind, payload, at = events.get(tid, (None, None, None))
-        try:
-            human = _stored_needs_human(request, kind)
-        except Exception:
-            human = False
-        info = kwi.describe(status, block_kind=kind, human=human, park=payload, park_kind=ev_kind, since=at,
-                            awaiting=awaiting, now=now)
-        if info is not None:
-            out[tid] = info
-    return out
 
 
 def _read_parked(path: Path) -> tuple[dict[str, int], dict[str, int]]:
@@ -1340,9 +1265,22 @@ def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
 
 # [daveey] Per-board read memo: {board path: (content key, reads)}. A board whose read rows have not changed since
 # its last read (``_board_content_key``: bookkeeping writes do not count) holds the same answer, so a write on one
-# board re-reads that board only; the other boards cost a stat. Only the stall verdict depends on the clock, so the
-# memo keeps its rows and re-judges them on each use. Touched only under ``_pairs_lock``.
+# board re-reads that board only; the other boards cost a stat while warm. Source observation validity also has
+# the existing 30s counts bound: an unchanged authoritative board must actually be read again, never re-dated by
+# a memo hit. The stall verdict is re-judged on each use. Touched only under ``_pairs_lock``.
 _board_memo: dict[str, tuple[tuple, dict[str, Any]]] = {}
+
+
+def _require_local_execution_authority(conn: sqlite3.Connection) -> None:
+    """A read of a PRIMARY mirror is not an owner observation, even with a recent pull.
+
+    Inspect persisted mode: read-only connections need not be in the writer's _SYNCED_PATHS.
+    Missing source clocks stay unknown; callers retain legacy rows and human requests.
+    """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_state'").fetchone():
+        row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+        if row is None or row[0] not in ("off", "shadow"):
+            raise ValueError("local execution authority unavailable for sync mirror")
 
 
 def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, Any], bool]:
@@ -1374,6 +1312,7 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
                 gateway, profile = local_scope()
                 try:
+                    _require_local_execution_authority(conn)
                     sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
                                        gateway=gateway, profile=profile, observed_at=read_at)
                     reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
@@ -1401,6 +1340,7 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                     complete = False
         finally:
             conn.execute("COMMIT")
+    reads["source_read_at"] = read_at
     return reads, complete
 
 
@@ -1426,6 +1366,10 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
         key = _revalidate.board_memo_key(path)
         hit = _board_memo.get(str(path))
         reads = hit[1] if hit is not None and hit[0] == key else None
+        read_at = reads.get("source_read_at") if reads is not None else None
+        if (not isinstance(read_at, (int, float)) or isinstance(read_at, bool)
+                or not 0 <= now - read_at < _COUNTS_MAX_AGE_S):
+            reads = None
         if reads is not None and ((sink is not None and "parked" not in reads)
                                   or (stalled is not None and "stall_rows" not in reads)):
             reads = None
@@ -1621,6 +1565,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
         gateway, profile = local_scope()
         try:
+            _require_local_execution_authority(conn)
             sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
                                observed_at=read_at)
             for tid, source in sources.items():

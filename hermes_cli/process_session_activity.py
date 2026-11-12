@@ -125,7 +125,7 @@ def _collect() -> dict[str, frozenset[str]]:
             pairs.update((sid, s.id) for sid in _owner_ids(item))
             details[s.id] = _detail(s.id, s.command, s.started_at, s.pid)
             evidence[s.id] = {"id": s.id, "pid": s.pid, "host_start_time": s.host_start_time, "profile": None,
-                              "source": "process.registry", "observed_at": time.time(),
+                              "pid_scope": s.pid_scope, "source": "process.registry", "observed_at": time.time(),
                               "owners": frozenset(_owner_ids(item))}
     except Exception:
         _log.debug("in-process registry unavailable", exc_info=True)
@@ -143,7 +143,7 @@ def _collect() -> dict[str, frozenset[str]]:
             if proc_id not in evidence:  # a pid-only checkpoint has no id: its observation stays unknown
                 evidence[proc_id] = {"id": item.get("session_id") or None, "pid": item.get("pid"),
                                      "host_start_time": item.get("host_start_time"),
-                                     "profile": profile_for_state_path(path), "source": "process.checkpoint",
+                                     "pid_scope": "host", "profile": profile_for_state_path(path), "source": "process.checkpoint",
                                      "observed_at": time.time(), "owners": frozenset(_owner_ids(item))}
             pairs.update((sid, proc_id) for sid in _owner_ids(item))
             details.setdefault(proc_id, _detail(proc_id, item.get("command"), item.get("started_at"),
@@ -226,6 +226,59 @@ def annotate_background_activity(rows: list[dict[str, Any]]) -> list[dict[str, A
             row.pop("background_active", None)
             row.pop("background_processes", None)
     return rows
+
+
+def process_observations(proc_ids: Iterable[Any], *, owner: str | None, profile: str | None = None,
+                         exited: Iterable[Any] = (), owner_resolved: bool = False) -> dict[str, dict[str, Any]]:
+    """``{registry process id: v1 observation}`` for exact registry processes an owning stored session names.
+
+    Reuses the sidebar's bounded, three-second-cached collection, so the probe time is the original
+    kernel-birth probe (a request never renews it). A process absent from that evidence (exited, failed
+    probe, not a live host pid) or not owned by ``owner`` gets an explicit unknown observation, never a
+    running one (``owner_resolved``: the caller already derived ``owner`` from this process's own
+    ids, e.g. a route key resolved to its stored conversation); a non-host pid carries no kernel-birth proof. Never raises."""
+    out: dict[str, dict[str, Any]] = {}
+    ids = [str(p) for p in proc_ids if p]
+    if not ids:
+        return out
+    try:
+        _owned_processes()
+        evidence = dict(_evidence)
+    except ADAPTER_ERRORS:
+        _log.debug("process evidence unavailable", exc_info=True)
+        evidence = {}
+    try:
+        from hermes_cli.kanban_execution_observations import local_scope
+        gateway, local_profile = local_scope()
+    except ADAPTER_ERRORS:
+        _log.debug("process gateway identity unavailable", exc_info=True)
+        gateway = local_profile = None
+    now = time.time()
+    done = {str(p) for p in exited}  # a cached probe from before the exit must not date an exited process
+    for proc_id in ids:
+        entry = None if proc_id in done else evidence.get(proc_id)
+        if entry is None or entry.get("source") != "process.registry" or not owner or not (owner_resolved or owner in entry["owners"]):
+            # No probed, owned, live host process: identity only, no source clock.
+            entry = {"id": proc_id, "pid": None, "host_start_time": None, "source": "process.registry",
+                     "observed_at": None, "pid_scope": "unprobed", "profile": None}
+        try:
+            out[proc_id] = process(entry, gateway=gateway, profile=profile or entry.get("profile") or local_profile,
+                                   session=owner or None, now=now)
+        except ADAPTER_ERRORS:
+            _log.debug("process execution observation unavailable", exc_info=True)
+    return out
+
+
+def annotate_registry_entries(entries: list[dict[str, Any]], *, owner: str | None,
+                              profile: str | None = None) -> list[dict[str, Any]]:
+    """Add optional ``execution_observations`` (0/1 items) to each ``process.list`` entry; legacy fields untouched."""
+    found = process_observations((e.get("session_id") for e in entries), owner=owner, profile=profile,
+                                 exited=(e.get("session_id") for e in entries if e.get("status") == "exited"))
+    for entry in entries:
+        obs = found.get(str(entry.get("session_id")))
+        if obs is not None:
+            entry["execution_observations"] = [obs]
+    return entries
 
 
 def _checkpoint_entry(process_id: str) -> dict[str, Any] | None:

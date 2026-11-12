@@ -269,3 +269,78 @@ def test_process_append_preserves_card_observation_and_replaces_own(home, sleepe
     psa._reset_cache_for_tests()
     psa.annotate_background_activity([row])
     assert row["execution_observations"] == [card]
+
+
+def test_process_adapter_gives_a_non_host_pid_no_generation_even_with_a_start_tick():
+    from hermes_cli.turn_process_execution_observations import process
+
+    now = time.time()
+    entry = {"id": "p", "pid": 42, "host_start_time": 123456, "observed_at": now - 1, "source": "process.registry"}
+    host = process(entry, gateway="gw-1", profile="default", session="s", now=now)
+    box = process({**entry, "pid_scope": "sandbox"}, gateway="gw-1", profile="default", session="s", now=now)
+    assert host["state"] == "running" and host["identity"]["generation"] == "pid=42:start=123456"
+    assert box["state"] == "unknown" and "generation" not in box["identity"]
+
+
+def test_in_process_sandbox_registry_entry_is_unknown_in_the_sidebar_but_still_counted(home, sleeper):
+    import tools.process_registry as pr
+
+    live = sleeper()
+    pr.process_registry._running["proc_box"] = ProcessSession(
+        id="proc_box", command="x", task_id="default", session_key="s_box", pid=live.pid, pid_scope="sandbox",
+        host_start_time=ProcessRegistry._safe_host_start_time(live.pid), started_at=time.time())
+    row = psa.annotate_background_activity([{"id": "s_box"}])[0]
+    assert row["background_active"] == 1  # legacy count unchanged
+    assert _only(row, "process.registry")["state"] == "unknown"
+
+
+def _child_record(**extra):
+    return {"subagent_id": "c1", "delegation_id": "d1", "started_at": 1000.0, "status": "running",
+            "owner_agent_session_id": "owner", "agent": None, **extra}
+
+
+class _Agent:
+    def __init__(self, summary):
+        self.summary = summary
+
+    def get_activity_summary(self):
+        if isinstance(self.summary, Exception):
+            raise self.summary
+        return self.summary
+
+
+def test_subagent_adapter_dates_a_running_child_by_its_activity_clock_never_by_request_time():
+    from hermes_cli.turn_process_execution_observations import subagent
+
+    live = _child_record(agent=_Agent({"last_activity_ts": 1900.0}))
+    obs = subagent(live, gateway="gw-1", profile="default", now=1950.0)
+    assert obs["state"] == "running" and obs["observed_at"] == 1900.0 and obs["last_activity"] == 1900.0
+    assert obs["identity"] == {"kind": "subagent", "work_id": "c1", "gateway": "gw-1", "profile": "default",
+                               "session": "owner", "generation": "delegation=d1:start=1000.0"}
+    assert obs["last_progress"] is None
+    # The clock froze (wedged child): it expires on its own while the request clock keeps moving.
+    wedged = subagent(live, gateway="gw-1", profile="default", now=1900.0 + 180)
+    assert wedged["state"] == "unknown" and wedged["unknown_reason"] == "source_expired"
+    assert wedged["last_known_state"] == "running" and wedged["observed_at"] == 1900.0
+
+
+@pytest.mark.parametrize("agent", [None, _Agent(RuntimeError("x")), _Agent({}), _Agent({"last_activity_ts": "9"}),
+                                   _Agent({"last_activity_ts": float("nan")}), _Agent({"last_activity_ts": 500.0}),
+                                   _Agent({"last_activity_ts": 5000.0})])
+def test_subagent_adapter_falls_back_to_spawn_time_for_a_missing_or_invalid_clock(agent):
+    from hermes_cli.turn_process_execution_observations import subagent
+
+    fresh = subagent(_child_record(agent=agent), gateway="gw-1", profile="default", now=1010.0)
+    assert fresh["state"] == "running" and fresh["observed_at"] == 1000.0 and fresh["last_activity"] is None
+    old = subagent(_child_record(agent=agent), gateway="gw-1", profile="default", now=1200.0)
+    assert old["state"] == "unknown" and old["unknown_reason"] == "source_expired"
+
+
+@pytest.mark.parametrize("change", [{"delegation_id": None}, {"owner_agent_session_id": ""}, {"started_at": None},
+                                    {"status": "completed"}, {"subagent_id": ""}])
+def test_subagent_adapter_unknown_without_exact_identity_owner_or_running_status(change):
+    from hermes_cli.turn_process_execution_observations import subagent
+
+    obs = subagent(_child_record(agent=_Agent({"last_activity_ts": 1990.0}), **change),
+                   gateway="gw-1", profile="default", now=2000.0)
+    assert obs["state"] == "unknown"

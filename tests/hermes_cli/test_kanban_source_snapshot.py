@@ -97,6 +97,7 @@ def test_counts_and_detail_use_same_raw_source_snapshot(board, monkeypatch):
     from dataclasses import make_dataclass
     monkeypatch.setattr('hermes_cli.kanban_queue_position.read', lambda *a: None)
     monkeypatch.setattr('hermes_cli.kanban_capacity_evidence.read', lambda *a, **kw: {})
+    monkeypatch.setattr(activity.time, 'monotonic', lambda: 1000)
     rows = [{"id": "session"}]
     activity.annotate_kanban_activity(rows)
     value = rows[0]["execution_observations"][0]
@@ -109,8 +110,14 @@ def test_counts_and_detail_use_same_raw_source_snapshot(board, monkeypatch):
     assert detail['execution_observations'][0]['identity'] == value['identity']
     assert detail['execution_observations'][0]['state'] == 'queued'
     monkeypatch.setattr(activity.time, 'time', lambda: 1180)
+    monkeypatch.setattr(activity.time, 'monotonic', lambda: 1180)
     activity.annotate_kanban_activity(rows)
-    expired = rows[0]['execution_observations'][0]
+    renewed = rows[0]['execution_observations'][0]
+    assert renewed['state'] == 'queued' and renewed['observed_at'] == 1180
+    assert renewed['identity'] == value['identity']
+    assert renewed['phase_since'] == value['phase_since']
+    assert renewed['last_progress'] is None
+    expired = project(value, now=1180)
     assert expired['state'] == 'unknown' and expired['observed_at'] == 1000
 
 
@@ -121,6 +128,32 @@ def test_foreign_replica_row_cannot_use_local_read_or_pull_clock(board):
     value = activity.session_tasks(['session'])[0]['execution_observations'][0]
     assert value['state'] == 'unknown'
     assert value['observed_at'] is None
+
+
+@pytest.mark.parametrize('pulled_at', [1, 1000, 999999])
+def test_primary_mirror_never_observes_authority_on_any_read(board, monkeypatch, pulled_at):
+    from dataclasses import make_dataclass
+    from hermes_cli.kanban_queue_position import detail_fields
+    monkeypatch.setattr('hermes_cli.kanban_queue_position.read', lambda *a: None)
+    monkeypatch.setattr('hermes_cli.kanban_capacity_evidence.read', lambda *a, **kw: {})
+    with sqlite3.connect(board) as conn:
+        # Persisted mode must work even before a writer registers this file in _SYNCED_PATHS.
+        conn.execute('CREATE TABLE kanban_sync_state (mode TEXT, pulled_at REAL)')
+        conn.execute('INSERT INTO kanban_sync_state VALUES (?, ?)', ('primary', pulled_at))
+    for now in (1000, 1031, 1200, 1801):
+        monkeypatch.setattr(activity.time, 'time', lambda: now)
+        monkeypatch.setattr(activity.time, 'monotonic', lambda: now)
+        row = {'id': 'session'}
+        activity.annotate_kanban_activity([row])
+        counted = row['execution_observations'][0]
+        listed = activity.session_tasks(['session'])[0]['execution_observations'][0]
+        with sqlite3.connect(board) as conn:
+            conn.row_factory = sqlite3.Row
+            Task = make_dataclass('Task', [('id', str), ('status', str), ('assignee', str)])
+            detailed = detail_fields(conn, Task('card', 'ready', 'agent'), 'default')['execution_observations'][0]
+        for value in (counted, listed, detailed):
+            assert value['state'] == 'unknown'
+            assert value['observed_at'] is None
 
 
 def test_synced_causal_head_fork_gap_and_uid_remapping(board):
@@ -241,3 +274,102 @@ def test_synced_running_uid_survives_local_id_remapping(board):
     assert first['state'] == second['state'] == 'running'
     assert first['identity'] == second['identity']
     assert first['identity']['run_id'] == 'portable-run'
+
+
+def _phase_clock(board):
+    transition(board, 'scheduled', 'scheduled', {'wake_at': 2000, 'clock_only': True})
+
+
+def _phase_review(board):
+    transition(board, 'review', 'review_requested', {'reviewer': 'agent', 'implementer': 'writer'})
+
+
+def _phase_dependency(board):
+    transition(board, 'todo', 'dependency_wait', {'reason': 'parent_not_done', 'parent': 'parent'})
+    with sqlite3.connect(board) as conn:
+        conn.execute('CREATE TABLE task_links (parent_id TEXT, child_id TEXT)')
+        conn.execute("INSERT INTO tasks(id,title,status,assignee) VALUES ('parent','Parent','ready','agent')")
+        conn.execute("INSERT INTO task_links VALUES ('parent','card')")
+
+
+def _phase_human(board):
+    request = {'action': 'Approve', 'why_human': 'Owner needed', 'interaction': 'approval', 'scope': 'fixture', 'evidence': 'fixture'}
+    with sqlite3.connect(board) as conn:
+        conn.execute('ALTER TABLE tasks ADD COLUMN block_kind TEXT')
+        conn.execute('ALTER TABLE tasks ADD COLUMN human_request TEXT')
+        conn.execute("UPDATE tasks SET block_kind='needs_input',human_request=?", (json.dumps(request),))
+    transition(board, 'blocked', 'blocked', {'kind': 'needs_input', 'human_request': request})
+
+
+def _phase_running(board):
+    with sqlite3.connect(board) as conn:
+        conn.execute('ALTER TABLE task_runs ADD COLUMN last_heartbeat_at INTEGER')
+        conn.execute('ALTER TABLE task_runs ADD COLUMN status TEXT')
+        conn.execute('ALTER TABLE task_runs ADD COLUMN ended_at INTEGER')
+        conn.execute("INSERT INTO task_runs VALUES (7,'card',900,990,'running',NULL)")
+        conn.execute("UPDATE tasks SET status='running',current_run_id=7")
+
+
+@pytest.mark.parametrize('mode', ['off', 'shadow'])
+@pytest.mark.parametrize('phase', ['ready', 'clock', 'dependency', 'review', 'human', 'running'])
+def test_authority_rereads_preserve_phase_progress_and_heartbeat(board, monkeypatch, mode, phase):
+    with sqlite3.connect(board) as conn:
+        conn.execute('CREATE TABLE kanban_sync_state (mode TEXT)')
+        conn.execute('INSERT INTO kanban_sync_state VALUES (?)', (mode,))
+    setup = {'clock': _phase_clock, 'review': _phase_review, 'dependency': _phase_dependency,
+             'human': _phase_human, 'running': _phase_running}.get(phase)
+    if setup:
+        setup(board)
+    original = None
+    for now in range(1000, 1249, 31):
+        monkeypatch.setattr(activity.time, 'time', lambda: now)
+        monkeypatch.setattr(activity.time, 'monotonic', lambda: now)
+        row = {'id': 'session'}
+        activity.annotate_kanban_activity([row])
+        value = row['execution_observations'][0]
+        listed = activity.session_tasks(['session'])[0]['execution_observations'][0]
+        assert value == listed
+        if original is None:
+            original = value
+        for field in ('identity', 'phase_since', 'wait', 'last_progress', 'last_activity'):
+            assert value.get(field) == original.get(field)
+        if phase == 'running':
+            assert value['observed_at'] == 990
+            assert value['state'] == ('running' if now < 1170 else 'unknown')
+        else:
+            assert value['state'] == original['state'] != 'unknown'
+            assert value['observed_at'] == now
+    assert project(original, now=1248)['state'] == 'unknown'
+
+
+@pytest.mark.parametrize('human', [False, True])
+def test_due_busy_reread_keeps_original_clock_and_recovers(board, monkeypatch, human):
+    if human:
+        request = {'action': 'Approve', 'why_human': 'Owner needed', 'interaction': 'approval', 'scope': 'fixture', 'evidence': 'fixture'}
+        with sqlite3.connect(board) as conn:
+            conn.execute('ALTER TABLE tasks ADD COLUMN block_kind TEXT')
+            conn.execute('ALTER TABLE tasks ADD COLUMN human_request TEXT')
+            conn.execute("UPDATE tasks SET block_kind='needs_input',human_request=?", (json.dumps(request),))
+        transition(board, 'blocked', 'blocked', {'kind': 'needs_input', 'human_request': request})
+    row = {'id': 'session'}
+    monkeypatch.setattr(activity.time, 'monotonic', lambda: 1000)
+    activity.annotate_kanban_activity([row])
+    frozen = row['execution_observations'][0]
+    read = activity._read_board
+    def busy(*a, **kw):
+        from hermes_cli.kanban_generation import BoardLifecycleBusy
+        raise BoardLifecycleBusy()
+    monkeypatch.setattr(activity, '_read_board', busy)
+    monkeypatch.setattr(activity.time, 'time', lambda: 1200)
+    monkeypatch.setattr(activity.time, 'monotonic', lambda: 1200)
+    activity.annotate_kanban_activity([row])
+    assert row['execution_observations'][0]['observed_at'] == frozen['observed_at']
+    assert row['execution_observations'][0]['state'] == 'unknown'
+    if human:
+        assert row['execution_observations'][0]['human_request'] == frozen['human_request']
+    monkeypatch.setattr(activity, '_read_board', read)
+    monkeypatch.setattr(activity.time, 'time', lambda: 1204)
+    monkeypatch.setattr(activity.time, 'monotonic', lambda: 1204)
+    activity.annotate_kanban_activity([row])
+    assert row['execution_observations'][0]['state'] == ('needs_user' if human else 'queued')
+    assert row['execution_observations'][0]['observed_at'] == 1204

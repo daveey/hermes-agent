@@ -357,6 +357,8 @@ def _work_observations(conn, task, board):
     try:
         gateway, profile = local_scope()
         with transaction(conn) as read_at:
+            from hermes_cli.kanban_session_activity import _require_local_execution_authority
+            _require_local_execution_authority(conn)
             sources = assemble(conn, [task.id], board=board or "default", gateway=gateway, profile=profile,
                                observed_at=read_at)
         row["_execution_source"] = sources.get(task.id)

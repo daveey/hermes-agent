@@ -1,13 +1,21 @@
 import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import type { SessionInfo } from '@/types/hermes'
 
+import { $backgroundStatusBySession } from './composer-status'
+import { activeGatewayProfileKey, gatewayRouteState, isActivePrimary } from './gateway'
+import { $liveWorkRoster, rosterRowEvidence, selectWorkObservations } from './live-work-roster'
+import { $sessions, lineageAliases } from './session'
+import { isSessionOwnerRoute } from './session-request-router'
+import { $sessionStates, knownOwnerForSession } from './session-states'
+import { $subagentsBySession } from './subagents'
+
 /**
  * Sidebar consumer of the optional per-row `execution_observations` list (pure projector in
  * lib/execution-observations.ts; this module never re-implements its verdicts).
  *
- * Absent or empty list => `null`: the legacy kanban/turn/background stamps decide alone. Nothing here is certainty
- * invented for an older backend, and an empty list is NOT "zero work". Present entries are additive evidence:
- * they can only ADD live/waiting/needs-you/unknown signal on top of the legacy stamps, never erase one.
+ * Merge row observations with the matching owner-route roster and event-fed RPC snapshots. Legacy
+ * counts discover work but missing per-kind evidence is explicit unknown, including on first render.
+ * No observation, discovery or failed source => null (not proof of zero work).
  * Expiry is time-only: the projector is re-run against the render clock, so a cached running/waiting/needs_user entry
  * degrades to unknown with no fetch (the existing 15 s `$kanbanObservationTick` re-evaluates; no new timer).
  */
@@ -25,12 +33,45 @@ export interface RowExecution {
   outstanding: number
 }
 
-type Stamped = Pick<SessionInfo, 'execution_observations'>
+type Stamped = Pick<SessionInfo, 'execution_observations' | 'id' | 'connection_id' | 'profile'>
+
+function ownerSource(owner: ReturnType<typeof knownOwnerForSession>) {
+  if (isSessionOwnerRoute(owner)) {return gatewayRouteState(owner.connectionId, owner.profile).key}
+
+  if (owner) {return gatewayRouteState(null, String(owner)).key}
+
+  return isActivePrimary() ? gatewayRouteState(null, activeGatewayProfileKey()).key : 'ambient'
+}
 
 export function rowExecution(row: Partial<Stamped> | undefined, nowSeconds: number = Date.now() / 1000): null | RowExecution {
-  const list = row?.execution_observations
+  const owner = row?.id ? knownOwnerForSession(row.id, [row as SessionInfo]) : undefined
 
-  if (!Array.isArray(list) || list.length === 0) {
+  const source = ownerSource(owner)
+
+  const roster = row?.id ? rosterRowEvidence($liveWorkRoster.get(), source, lineageAliases(row.id, $sessions.get())) : { records: [], missing: 0 }
+  const list = [...(Array.isArray(row?.execution_observations) ? row.execution_observations : []), ...roster.records]
+  let missing = roster.missing
+
+  if (row?.id) {
+    const aliases = lineageAliases(row.id, $sessions.get())
+
+    const matches = (runtime: string) => aliases.includes($sessionStates.get()[runtime]?.storedSessionId ?? runtime) &&
+      ownerSource(knownOwnerForSession(runtime)) === source
+
+    for (const [kind, store] of [['process', $backgroundStatusBySession.get()], ['subagent', $subagentsBySession.get()]] as const) {
+      const items = Object.entries(store).flatMap(([runtime, entries]) => matches(runtime) ? entries : [])
+      const active = items.filter(item => ('state' in item ? item.state : item.status) === 'running')
+      list.push(...active.flatMap(item => item.executionObservations ?? []))
+
+      // Do not count a missing event copy again when the source's roster/row has its evidence.
+      const supplied = list.filter(record => record && typeof record === 'object' &&
+        (record as { identity?: { kind?: string } }).identity?.kind === kind).length
+
+      if (roster.records.length === 0 && roster.missing === 0) {missing += Math.max(0, active.length - supplied)}
+    }
+  }
+
+  if (list.length === 0 && missing === 0) {
     return null
   }
 
@@ -43,11 +84,11 @@ export function rowExecution(row: Partial<Stamped> | undefined, nowSeconds: numb
     return source !== 'kanban.dispatch' && source !== 'kanban.capacity'
   })
 
-  if (work.length === 0) {
+  if (work.length === 0 && missing === 0) {
     return null
   }
 
-  const summary = summarizeExecutionObservations(work, nowSeconds, 'sidebar')
+  const summary = summarizeExecutionObservations(selectWorkObservations(work, nowSeconds), nowSeconds, 'sidebar')
 
   const { counts } = summary
 
@@ -55,7 +96,7 @@ export function rowExecution(row: Partial<Stamped> | undefined, nowSeconds: numb
     live: counts.running + counts.queued,
     needsUser: counts.needs_user,
     outstanding: summary.outstanding_human_requests,
-    unknown: counts.unknown,
+    unknown: counts.unknown + missing,
     waiting: counts.waiting
   }
 }
