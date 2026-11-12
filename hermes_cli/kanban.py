@@ -462,6 +462,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
+        from hermes_cli.kanban_admission_class import AdmissionMetadataError
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -479,6 +480,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 created_by=args.created_by or _profile_author(),
                 workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
                 project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
+                admission_class=getattr(args, "admission_class", "normal"),
+                admission_frees=getattr(args, "admission_frees", None),
                 parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
                 idempotency_key=idem_key,
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
@@ -504,7 +507,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused,
                 AskFilingRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
-        except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
+        except (PinProviderUnresolvedError, ModelProviderMismatchError, AdmissionMetadataError) as exc:
             return _err(f"kanban: {exc}", 2)
         if not idem_hit:
             after_create(conn, task_id)  # records an accepted --distinct-from override on the new card

@@ -167,6 +167,41 @@ def test_invalid_admission_edit_preserves_task_and_events(board, changes, reason
     assert conn.execute("SELECT count(*) FROM task_events").fetchone()[0] == event_count
 
 
+def test_cli_create_admission_metadata(board, monkeypatch):
+    import argparse
+    from hermes_cli import kanban as cli
+    from hermes_cli import kanban_placement as placement
+
+    conn, home = board
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    monkeypatch.setattr(placement, "config", dict)
+    parser = argparse.ArgumentParser()
+    cli.build_parser(parser.add_subparsers())
+    args = parser.parse_args(["kanban", "create", "Restore disk", "--class", "capacity",
+                              "--frees", "frees: worker disk slots", "--no-requires"])
+    assert cli._cmd_create(args) == 0
+    stored = kb.list_tasks(conn)
+    assert len(stored) == 1
+    assert stored[0].admission_class == "capacity"
+    assert stored[0].admission_frees == "frees: worker disk slots"
+
+
+def test_cli_create_capacity_without_frees_refuses_cleanly(board, monkeypatch, capsys):
+    import argparse
+    from hermes_cli import kanban as cli
+    from hermes_cli import kanban_placement as placement
+
+    conn, home = board
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    monkeypatch.setattr(placement, "config", dict)
+    parser = argparse.ArgumentParser()
+    cli.build_parser(parser.add_subparsers())
+    args = parser.parse_args(["kanban", "create", "Restore disk", "--class", "capacity", "--no-requires"])
+    assert cli._cmd_create(args) == 2
+    assert "capacity requires a one-line frees: claim" in capsys.readouterr().err
+    assert kb.list_tasks(conn) == []
+
+
 def runs(conn):
     return conn.execute("SELECT count(*) FROM task_runs").fetchone()[0]
 

@@ -3,6 +3,14 @@
 Status: approved design, implementation in progress. This document describes the
 full contract, not a claim that the current branch implements it all.
 
+Implemented so far: DB create/readback metadata and transactional postimage
+validation on edit; CLI create/edit `--class` and `--frees`. Admission metadata
+edits may be combined with ordinary title/body/priority edits, but not operator
+fields or completion-contract edits (those currently use separate transactions).
+Tool create/forwarding, Board compatibility, pool accounting/admission, scoring,
+reporting and live activation are still pending. No scheduler behavior is enabled
+by this metadata foundation.
+
 ## Policy and rollout
 
 Ship phase 1 (separate pools) first, then phase 2 (scoring, explanation and effect
