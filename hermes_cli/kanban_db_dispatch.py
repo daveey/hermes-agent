@@ -2150,11 +2150,11 @@ def _tick_spawn_budget(
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
-        total_running = running_count + count_running_tasks_other_boards(board)
-        if total_running >= max_in_progress:
-            result.at_capacity = f"max_in_progress={total_running}/{max_in_progress}"
+        from hermes_cli.kanban_admission_pools import host_remaining
+        remaining = host_remaining(max_in_progress, running_count, board)
+        if remaining <= 0:
+            result.at_capacity = f"max_in_progress={max_in_progress - remaining}/{max_in_progress}"
             return False, None
-        remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
             spawn_budget = remaining
     if spawn_quota is not None:  # this board's share of the host slots, ranked across boards (kanban_board_share)

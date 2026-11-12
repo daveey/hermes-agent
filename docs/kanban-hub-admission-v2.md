@@ -8,12 +8,15 @@ validation on edit; CLI create/edit `--class` and `--frees`; create tool schema,
 pre-placement validation, persistence/readback and remote option encoding.
 Admission metadata edits may be combined with ordinary title/body/priority edits,
 but not operator fields or completion-contract edits (separate transactions).
-Local run pool/class receipts now survive task class edits. The whole-host census
-can count those receipts, and opt-in pre-lease/final CPU gates select the separate
-priority pool. Ready and review claim tests admit urgent work at 70% CPU with seven
-regular slots full. These are claim-path tests, not dispatcher or live proof.
+Local run pool/class/origin receipts now survive task class and chat-release edits.
+The whole-host census uses a consistent read snapshot per board and enforces the
+capacity-origin cap in final admission. Opt-in pre-lease/final CPU gates select the
+separate priority pool. The dispatcher budget can reach the extra pool at regular
+saturation, preserving the shared critical/elevated memory guard. Ready and review
+claim tests admit urgent work at 70% CPU with seven regular slots full. These are
+isolated budget/claim-path tests, not complete dispatcher or live proof.
 
-Still pending: origin receipts/cap, dispatcher budget and queue notes, Board and
+Still pending: composed dispatcher selection and queue notes, Board and
 courier receiver compatibility, full malformed-config/receipt tests, sync replay
 coverage, guard mutations, scoring, reporting and live activation. Do not enable
 this incomplete implementation. `priority_slots` is currently opt-in (absent = 0)

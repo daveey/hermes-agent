@@ -104,6 +104,8 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
             seen.add(identity)
             db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
             try:
+                # Count, own-grant matching and receipt grouping must see one WAL snapshot.
+                db.execute("BEGIN")
                 cols = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
                 own, matched = None, []
                 if "lease_holder" in cols:
@@ -124,7 +126,8 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
                     total += db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
                 if detail is not None and "pools" in detail:
                     from hermes_cli.kanban_admission_pools import board_pools
-                    counts = board_pools(db, own=own[0] if own else None, excluded=matched)
+                    counts = board_pools(db, own=own[0] if own else None, excluded=matched,
+                                         origins=detail.get("capacity_origins"))
                     for pool, count in counts.items():
                         detail["pools"][pool] += count
             finally:

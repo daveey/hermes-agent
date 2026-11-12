@@ -119,8 +119,65 @@ def test_claim_persists_immutable_regular_receipt(board):
                               (task_id,)).fetchone()) == ("regular", "capacity")
 
 
+def test_claim_captures_created_origin_not_mutable_shepherd(board):
+    conn, home = board
+    configure(home, limit=None)
+    tid = task(conn)
+    conn.executescript(sync.SYNC_SCHEMA_SQL)
+    with kb.write_txn(conn):
+        for kind, session in [("created", "original"), ("shepherd", "operator")]:
+            conn.execute("INSERT INTO task_chat_links "
+                         "(uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,created_at) "
+                         "VALUES (?,?, 'source', 'default', ?, ?, 0, 1)", (kind, tid, session, kind))
+    assert kb.claim_task(conn, tid)
+    origin = conn.execute("SELECT admission_origin FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0]
+    assert json.loads(origin) == ["chat", "source", "default", "original"]
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_chat_links SET released=1 WHERE task_id=?", (tid,))
+    assert conn.execute("SELECT admission_origin FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == origin
+
+
+def test_capacity_origin_cap_survives_task_class_edits(board, monkeypatch):
+    conn, home = board
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    advisory(home)
+    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    for index in range(2):
+        tid = task(conn, title=f"capacity {index}")
+        kb.edit_task(conn, tid, admission_class="capacity", admission_frees="frees: worker slots")
+        assert kb.claim_task(conn, tid)
+        kb.edit_task(conn, tid, admission_class="normal")
+    candidate = task(conn)
+    kb.edit_task(conn, candidate, admission_class="capacity", admission_frees="frees: runner slots")
+    assert kb.claim_task(conn, candidate) is None
+    # Incident recovery is not subject to the capacity-origin limit.
+    kb.edit_task(conn, candidate, admission_class="urgent")
+    assert kb.claim_task(conn, candidate)
+
+
+@pytest.mark.parametrize("text", ["[]\n", "kanban: [bad]\n", "kanban:\n  admission: [bad]\n"])
+def test_malformed_pool_config_refuses_cleanly(board, text):
+    from hermes_cli import kanban_admission_pools as pools
+    _conn, home = board
+    (home / "config.yaml").write_text(text)
+    with pytest.raises(ValueError, match="^admission configuration must be mappings$"):
+        pools.root_settings()
+
+
+def test_dispatch_invalid_priority_setting_defers_without_crashing(board):
+    from hermes_cli import kanban_db_dispatch as dispatch
+    conn, home = board
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: wrong\n")
+    assert dispatch._tick_spawn_budget(conn, dispatch.DispatchResult(), max_spawn=None,
+                                       max_in_progress=7, board=None) == (False, None)
+
+
 def test_pool_receipt_is_local_only():
-    fields = {"admission_pool", "admission_class"}
+    fields = {"admission_pool", "admission_class", "admission_origin"}
     assert fields <= sync.LOCAL_COLUMNS["task_runs"]
     assert not fields & sync.SYNCED_COLUMNS["task_runs"]
 
@@ -185,6 +242,46 @@ def test_unknown_pool_receipt_invalidates_census(board, bad):
     with kb.write_txn(conn):
         conn.execute("UPDATE task_runs SET admission_pool=? WHERE task_id=?", (bad, task_id))
     assert mm.active_card_runs(detail={"pools": {"regular": 0, "priority": 0}}) is None
+
+
+@pytest.mark.parametrize("pressure,expected", [("normal", (True, 3)), ("elevated", (True, 1)),
+                                               ("critical", (False, None))])
+def test_dispatch_budget_reaches_extra_pool_at_regular_cap(board, monkeypatch, pressure, expected):
+    from hermes_cli import kanban_db_dispatch as dispatch
+    conn, home = board
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    for index in range(7):
+        tid = task(conn, title=f"regular {index}")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+    monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: pressure)
+    result = dispatch.DispatchResult()
+    assert dispatch._tick_spawn_budget(conn, result, max_spawn=None, max_in_progress=7,
+                                       board=None) == expected
+    if pressure in ("elevated", "critical"):
+        assert result.memory_pressure == pressure
+
+
+def test_pool_census_uses_one_board_snapshot(board, monkeypatch):
+    from hermes_cli import kanban_admission_pools as pools
+    conn, home = board
+    tid = task(conn)
+    original = pools.board_pools
+
+    def concurrent_claim(db, **kwargs):
+        with closing(kbc.connect(home / "kanban.db")) as writer:
+            with kb.write_txn(writer):
+                writer.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+        return original(db, **kwargs)
+
+    monkeypatch.setattr(pools, "board_pools", concurrent_claim)
+    detail = {"pools": {"regular": 0, "priority": 0}}
+    total = mm.active_card_runs(detail=detail)
+    assert total == 0
+    assert detail["pools"] == {"regular": 0, "priority": 0}
+    assert kb.get_task(conn, tid).status == "running"
 
 
 def test_capacity_class_and_frees_claim_survive_task_readback(board):

@@ -91,7 +91,7 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     # ``sync_version``: the Board version of the row this gateway last applied or had acknowledged (the fence that
     # keeps an older copy of a run from the feed off a newer local row).
     "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
-                            "sync_version", "admission_pool", "admission_class"}),
+                            "sync_version", "admission_pool", "admission_class", "admission_origin"}),
     "task_attachments": frozenset({"stored_path"}),
     "task_chat_links": frozenset(),
 }

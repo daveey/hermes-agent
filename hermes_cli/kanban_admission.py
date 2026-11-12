@@ -236,10 +236,11 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
         )
         run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
+    from hermes_cli.kanban_admission_origin import origin_key
     conn.execute(
-        "UPDATE task_runs SET admission_pool=?, "
+        "UPDATE task_runs SET admission_pool=?, admission_origin=?, "
         "admission_class=(SELECT admission_class FROM tasks WHERE id=?) WHERE id=?",
-        (getattr(_decision, "pool", None) or "regular", task_id, run_id),
+        (getattr(_decision, "pool", None) or "regular", origin_key(conn, task_id), task_id, run_id),
     )
     hub_cpu = dict(consumed_hub_cpu() or {})
     admission = hub_cpu.pop("hub_admission", None)
