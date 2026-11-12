@@ -340,16 +340,14 @@ def _notif_unowned_event(sid: str, evt: dict, deferred) -> None:
     else:
         # A durable replay stays pending: hand it back so the orphan sweep re-offers it once its owner
         # is live (#97202), and keep that retry out of WARNING.
-        restored = is_delegation and bool(evt.get("restored"))
         if is_delegation:
-            (logger.debug if restored else logger.warning)(
+            (logger.debug if evt.get("restored") else logger.warning)(
                 "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
                 evt_type, origin, key, sid)
-        else:
-            notification_park.log_drop(evt, f"unowned and not parkable (origin={origin!r}, poller={sid})")
-        if is_delegation:
             from tools.async_delegation import return_completion_offer
             return_completion_offer(evt)
+        else:
+            notification_park.log_drop(evt, f"unowned and not parkable (origin={origin!r}, poller={sid})")
 
 
 # A retried notice the canonical ledger refuses (SESSION_NOT_OWNED persists while a gateway owns the
