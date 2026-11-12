@@ -116,30 +116,36 @@ def _identity(path: str) -> Optional[Identity]:
     return (st.st_dev, st.st_ino)
 
 
-def _own_fds_for(identities: set[Identity]):
-    """Yield ``(fd, identity)`` for every descriptor of this process on one of *identities*
-    (SQLite's own connection descriptors; the cached header-probe fd too, harmless). The per-fd
-    ``fstat`` keeps the GIL (``hermes_state_lockguard_fdscan``): a GIL hand-off per descriptor made
-    this scan take seconds whenever another thread was busy."""
+def own_descriptors() -> Optional[list[tuple[int, Identity]]]:
+    """Every ``(fd, (st_dev, st_ino))`` this process holds; None when the fd table is unreadable.
+    The per-fd ``fstat`` keeps the GIL (``hermes_state_lockguard_fdscan``): a GIL hand-off per
+    descriptor made this scan take seconds whenever another thread was busy."""
     swept = open_fd_identities()
     if swept is not None:
-        for fd, ident in swept:
-            if ident in identities:
-                yield fd, ident
-        return
+        return list(swept)
     for fd_dir in ("/proc/self/fd", "/dev/fd"):
         try:
             names = os.listdir(fd_dir)
         except OSError:
             continue
+        found: list[tuple[int, Identity]] = []
         for name in names:
             if not name.isdigit():
                 continue
             fd = int(name)
             ident = _fd_identity(fd)
-            if ident is not None and ident in identities:
-                yield fd, ident
-        return
+            if ident is not None:
+                found.append((fd, ident))
+        return found
+    return None
+
+
+def _own_fds_for(identities: set[Identity]):
+    """Yield ``(fd, identity)`` for every descriptor of this process on one of *identities*
+    (SQLite's own connection descriptors; the cached header-probe fd too, harmless)."""
+    for fd, ident in own_descriptors() or ():
+        if ident in identities:
+            yield fd, ident
 
 
 def _guard_ranges(db_path) -> Held:

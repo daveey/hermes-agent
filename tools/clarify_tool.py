@@ -234,4 +234,5 @@ registry.register(
                                             tool_call_id=kw.get("tool_call_id") or ""),
     check_fn=check_clarify_requirements,
     emoji="❓",
+    self_checked_args=("questions",),
 )

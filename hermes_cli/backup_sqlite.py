@@ -262,7 +262,7 @@ def preflight_state_db(home: Path, *, busy_timeout_seconds: float = 10.0) -> dic
     try:
         if not _safe_copy_db(source, staged, timeout_seconds=busy_timeout_seconds):
             raise RuntimeError("SQLite safe copy failed; previous emergency snapshots were retained")
-        connection = sqlite3.connect(str(staged))
+        connection = sqlite3.connect(str(staged))  # health: allow HX015 -- staged copy written by this function
         try:
             result = connection.execute("PRAGMA quick_check").fetchall()
             if result != [("ok",)]:

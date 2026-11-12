@@ -1,4 +1,4 @@
-"""HX016: a def/lambda deciding from an exception parameter's status code or text (``py_rules.CHECKERS``)."""
+"""HX014: a def/lambda deciding from an exception parameter's status code or text (``py_rules.CHECKERS``)."""
 
 from __future__ import annotations
 
