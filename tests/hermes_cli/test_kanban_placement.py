@@ -937,7 +937,8 @@ def test_identity_lookup_failure_without_a_pin_still_creates_locally(mac, monkey
 _SIDEBAR_TITLE = (
     "Fix sidebar count vs task strip split under kanban.sync.links_reader=replica (Upkeep 14 vs 9)")
 _SIDEBAR_BODY = (Path(__file__).parent / "fixtures" / "t_01a180aae388e142_body.txt").read_text()
-_MARKER_REMEDY = "if the work doesn't need this machine, archive and re-create with placement='hub'"
+_MARKER_REMEDY = ("if the work doesn't need this machine, archive and re-create without naming the machine in the title "
+                  "or body (placement='auto' overrides only a context skill such as babybear-*)")
 
 
 def test_marker_cases_a_through_e():

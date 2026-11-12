@@ -149,10 +149,11 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
         return {"where": "local", "runs_on": decision["runs_on"], "why": why}
     logger.info("kanban placement: local (%s)", why)
     if why.startswith("local marker"):
-        return {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
+        return {"where": "local", "why": why, "remedy": kp.marker_remedy(why)}
     placement = {"where": "local", "why": why}
     if note_local_pin and why == kp.PINNED_LOCAL_WHY:
-        unpinned = kp.decide({**view, "placement": "auto"}, machine_ok=machine_ok)
+        # Unpinned means placement omitted: an explicit 'auto' would also drop a skill marker (marker_skills).
+        unpinned = kp.decide({k: v for k, v in view.items() if k != "placement"}, machine_ok=machine_ok)
         where = unpinned.get("where")
         elsewhere = (unpinned.get("defer") or ", ".join(unpinned.get("runs_on") or ())) if where == "local" else where
         if elsewhere and where != "refuse":

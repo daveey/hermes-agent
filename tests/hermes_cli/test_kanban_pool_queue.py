@@ -105,6 +105,80 @@ def test_cli_create_queues_a_portable_card_for_the_pool(hub):
     assert _runs_on(hub.conn, json.loads(out)["id"]) == ["machine:worker-2"], out  # an explicit pin wins
 
 
+def test_explicit_auto_beats_a_skill_local_marker_and_the_remedy_names_it(hub, monkeypatch):
+    """11-12: the marker remedy said re-create with placement='hub'; hub admission refuses portable work, so the
+    caller was left with an archived card and no replacement. An explicit 'auto' now queues it for the pool;
+    an omitted placement still keeps it local, and the remedy names 'auto'. [daveey]"""
+    from hermes_cli import kanban_skill_check
+    from tools import kanban_tools
+    monkeypatch.setattr(kanban_skill_check, "check_task_skills", lambda *a, **k: None)  # no skills dir here
+    _registry()
+    card = {"title": "Fix the parser and add unit tests", "assignee": "default", "requires": [],
+            "skills": ["babybear-development"]}
+    out = json.loads(kanban_tools._handle_create({**card, "placement": "auto"}))
+    assert out.get("ok") and out["runs_on"] == [POOL] and "remedy" not in out, out
+    assert _runs_on(hub.conn, out["task_id"]) == [POOL]
+    out = json.loads(kanban_tools._handle_create({**card, "title": "Fix the lexer and add unit tests"}))
+    assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) is None, out
+    placement = out["placement"]
+    assert (placement["where"], placement["why"]) == ("local", "local marker: skill babybear-development"), out
+
+
+def test_explicit_auto_keeps_a_device_skill_local(hub, monkeypatch):
+    """Review of #1441: 'auto' is also the routine default callers spell out, so it must not move a card whose
+    skill drives this machine (apple-*, computer-use, macos-, ios-, a local Chrome). [daveey]"""
+    from hermes_cli import kanban_skill_check
+    from tools import kanban_tools
+    monkeypatch.setattr(kanban_skill_check, "check_task_skills", lambda *a, **k: None)
+    _registry()
+    titles = ("Click through the Settings pane", "Tag the reading list notes", "Reorder the dock icons",
+              "Sign the shortcut bundle")
+    for title, skill in zip(titles, ("computer-use", "apple-notes", "macos-dock-management", "ios-shortcuts-build")):
+        out = json.loads(kanban_tools._handle_create({
+            "title": title, "assignee": "default", "requires": [], "skills": [skill],
+            "placement": "auto"}))
+        assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) is None, out
+        assert out["placement"]["why"] == f"local marker: skill {skill}", out
+    # A device skill beside a context skill still pins: 'auto' drops only the context one.
+    assert kp.marker_skills({"skills": ["babybear-development", "computer-use"], "placement": "auto"},
+                            kp._Cfg(CFG)) == ["computer-use"]
+    assert kp.marker_skills({"skills": ["bb-self-fix"]}, kp._Cfg(CFG)) == ["bb-self-fix"]  # omitted: unchanged
+
+
+def test_marker_remedies_name_the_override_that_works():
+    skill = kp.marker_remedy("local marker: skill babybear-development", {})
+    assert skill == "if the work doesn't need this machine, archive and re-create with placement='auto'"
+    assert kp.marker_remedy("local marker: skill bb-self-fix", {}) == skill
+    assert kp.marker_remedy("local marker: skill computer-use", {}) == kp.DEVICE_SKILL_MARKER_REMEDY
+    text = kp.marker_remedy("local marker: mentions 'macbook'", {})
+    assert text == kp.TEXT_MARKER_REMEDY and "placement='hub'" not in text, text
+    # A replaced overridable list is honoured.
+    assert kp.marker_remedy("local marker: skill computer-use",
+                            {"auto_overridable_skill_markers": ["^computer-use$"]}) == skill
+    cfg, live = {"route": {"macbook": HUB}}, (lambda _t: None)
+    card = {"title": "Fix the parser", "skills": ["babybear-development"]}
+    assert kp.decide(card, cfg=cfg, self_gw="macbook", live=live)["why"] == "local marker: skill babybear-development"
+    assert kp.decide({**card, "placement": "auto"}, cfg=cfg, self_gw="macbook", live=live)["where"] == HUB
+    apple = {"title": "Fix the parser", "skills": ["apple-notes"], "placement": "auto"}
+    assert kp.decide(apple, cfg=cfg, self_gw="macbook", live=live)["why"] == "local marker: skill apple-notes"
+    title = {"title": "Verify 57094b7a60 live on the MacBook", "placement": "auto"}
+    assert kp.decide(title, cfg=cfg, self_gw="macbook", live=live)["why"].startswith("local marker: mentions")
+
+
+def test_a_local_pin_note_simulates_an_omitted_placement_not_an_explicit_auto(hub):
+    """A context-skill card pinned local stays local without the pin too (the skill marker holds when placement is
+    omitted), so it gets no "would run elsewhere" note; the same card without the skill does. [daveey]"""
+    from tools.kanban_tools_placement import _local_placement
+    _registry()
+    pinned = {"where": "local", "why": kp.PINNED_LOCAL_WHY}
+    card = {"title": "summarise the failing CI jobs", "assignee": "default", "requires": [], "placement": "local"}
+    plain = _local_placement(kp, card, pinned, machine_ok=None, note_local_pin=True)
+    assert plain.get("note"), plain  # control: portable work pinned local is told where it would go
+    skilled = _local_placement(kp, {**card, "skills": ["babybear-development"]}, pinned, machine_ok=None,
+                               note_local_pin=True)
+    assert "note" not in skilled, skilled
+
+
 def test_heavy_route_accepts_a_pool_label_and_checks_it_is_live(hub):
     cfg = {"heavy_route": {HUB: POOL}}
     _registry(held=("worker-1",))

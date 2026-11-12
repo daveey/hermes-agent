@@ -155,8 +155,17 @@ APPLE_CONTEXT_MARKERS = (
     r"\bcatalyst\b", r"\bcore ?ml\b", r"\bwatch app\b", r"\bav(foundation|audiosession)\b", r"\bapple\b",
     r"\bmac\b", MACOS_MARKER, r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bkeychain\b", r"\btcc\b",
 )
+# A context skill marker (:data:`DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS`) yields to an explicit placement='auto'
+# (:func:`marker_skills`). A 'hub' pin is refused by hub admission for portable work, so naming it here left callers
+# with an archived card and nothing created. [daveey]
 LOCAL_MARKER_REMEDY = (
-    "if the work doesn't need this machine, archive and re-create with placement='hub'")
+    "if the work doesn't need this machine, archive and re-create with placement='auto'")
+DEVICE_SKILL_MARKER_REMEDY = (
+    "this skill drives this machine and placement='auto' does not override it; if the work doesn't need this "
+    "machine, archive and re-create without it in skills (name it in the body instead)")
+TEXT_MARKER_REMEDY = (
+    "if the work doesn't need this machine, archive and re-create without naming the machine in the title or body "
+    "(placement='auto' overrides only a context skill such as babybear-*)")
 PINNED_LOCAL_WHY = "placement pinned local by the caller"
 
 
@@ -175,6 +184,11 @@ DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
 )
+# Skill markers that only say what a card is about (a Baby Bear repo skill on a Python fix), not that it drives this
+# machine: an explicit placement='auto' drops them from the local-marker scan. Device-bound skills (apple-*, macos-,
+# computer-use, ios-, a local Chrome) stay local even then, since 'auto' is also the routine default callers spell
+# out. Replace with kanban.placement.auto_overridable_skill_markers. [daveey]
+DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS = (r"^babybear", r"^bb-")
 # Phrases that mean the card runs tests, builds or benchmarks (CPU/IO heavy): with ``heavy_route`` set it
 # runs on a worker node rather than the routed target. Case-insensitive, title + body.
 DEFAULT_HEAVY_MARKERS = (
@@ -266,6 +280,18 @@ class _Cfg:
         base = self.raw.get("local_skill_markers")
         pats = list(base) if isinstance(base, list) else list(DEFAULT_LOCAL_SKILL_MARKERS)
         return [re.compile(str(p), re.IGNORECASE) for p in pats]
+
+    def auto_overridable_skill(self, skill) -> bool:
+        """True when an explicit placement='auto' drops ``skill`` from the local-marker scan (a context skill)."""
+        base = self.raw.get("auto_overridable_skill_markers")
+        pats = list(base) if isinstance(base, list) else list(DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS)
+        for p in pats:
+            try:
+                if re.search(str(p), str(skill), re.IGNORECASE):
+                    return True
+            except re.error:
+                continue
+        return False
 
     def creator_session(self, target: str) -> str:
         v = self.raw.get("creator_session")
@@ -734,6 +760,27 @@ def explicit_foreign_pin(args: dict, self_gw: Optional[str], cfg: Optional[dict]
     return pin
 
 
+def marker_skills(args: dict, cfg: _Cfg):
+    """The skills a local-marker scan checks. With placement='auto' passed outright, context skills
+    (:data:`DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS`) are dropped: babybear-development on a Python fix says what the
+    card is about, not that it needs this machine. Device-bound skills (apple-*, computer-use, ...) are kept, and an
+    omitted placement honours every skill. Title and body markers are never overridden: 'auto' is also the routine
+    default callers spell out. [daveey]"""
+    skills = args.get("skills")
+    if not skills or str(args.get("placement") or "").strip().lower() != "auto":
+        return skills
+    return [s for s in skills if not cfg.auto_overridable_skill(s)]
+
+
+def marker_remedy(why: str, cfg: Optional[dict] = None) -> str:
+    """The remedy for a ``local marker: ...`` decision: 'auto' only when it would actually move the card."""
+    if not why.startswith("local marker: skill "):
+        return TEXT_MARKER_REMEDY
+    skill = why[len("local marker: skill "):]
+    overridable = _Cfg(config() if cfg is None else cfg).auto_overridable_skill(skill)
+    return LOCAL_MARKER_REMEDY if overridable else DEVICE_SKILL_MARKER_REMEDY
+
+
 def _raw_explicit_pin(args: dict) -> str:
     """Explicit pin when identity is unknown: not auto/local/here, else ''.
 
@@ -875,8 +922,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             if not on_target:
                 return {"where": "local", "why": f"needs {need}, which {target} does not hold"}
         if not explicit:
-            hit = _local_marker(args.get("title") or "", args.get("body") or "",
-                                args.get("skills"), c)
+            hit = _local_marker(args.get("title") or "", args.get("body") or "", marker_skills(args, c), c)
             if hit:
                 return {"where": "local", "why": f"local marker: {hit}"}
             worker = c.heavy_target(self_gw)

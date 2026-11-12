@@ -24,7 +24,7 @@ def portability(args: dict, cfg=None) -> tuple[str | None, str | None]:
         return refusal, None
     title = args.get("title") or ""
     body = p.without_evidence(p.without_placement_note(args.get("body") or ""))
-    if hit := p._local_marker(title, body, args.get("skills"), c):
+    if hit := p._local_marker(title, body, p.marker_skills(args, c), c):
         return "local marker", hit
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
     if refusal := coordination.check(full, c.raw, skills=args.get("skills"), requires=reqs):
