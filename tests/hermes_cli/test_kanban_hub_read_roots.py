@@ -106,6 +106,20 @@ def test_malformed_roots_clear_nothing(attested, roots):
     "chmod -R 777 ~/.hermes/logs/${D}",
     "chmod -R 777 ~/.hermes/logs/\\..",
     "chmod -R 777 ~/.hermes/logs/[.][.]",
+    # Closing punctuation may not be followed by more than one dot, and a trailing quote must close the quote that
+    # opened right before the prefix (review 5877782890): each of these resolves outside the root.
+    "chmod -R 777 ~/.hermes/logs/''..",
+    'chmod -R 777 ~/.hermes/logs/""..',
+    "chmod -R 777 $(echo ~/.hermes/logs/)..",
+    "chmod -R 777 `echo ~/.hermes/logs/`..",
+    'chmod -R 777 "$(echo ~/.hermes/logs/)"..',
+    'chmod -R 777 $(echo "~/.hermes/logs/")..',
+    "chmod -R 777 ~/.hermes/logs/' '/../../.env",
+    "chmod -R 777 ~/.hermes/logs/x' '/../../state.db",
+    "chmod -R 777 ''/home/ubuntu/.hermes/logs/' x/../../state.db'",
+    "chmod -R 777 $(echo ~/.hermes/logs/x)/../../state.db",
+    "chmod -R 777 ~/.hermes/logs/x(..)",
+    "chmod -R 777 /home/../.hermes/logs/x",
 ])
 def test_controls_still_pin(attested, body):
     cfg, _, _ = attested

@@ -100,12 +100,32 @@ _HUB_READ_SSH = re.compile(r"\bssh[ \t]+hermes-hub[ \t]+(?:" + "|".join(HUB_READ
                            re.IGNORECASE)
 # A Hermes state path (same roots as ``kanban_placement.HERMES_STATE_PATH``). The path is an allow-list of path
 # characters, so a shell operator glued to it (``&&``, ``;``, ``:``, ``|``, ``$(``) ends it and stays in the text.
-# The match must also end the shell word: end of text, whitespace, a shell operator, or closing punctuation that is
-# itself followed by whitespace or the end. Otherwise a quoted, brace, ``$``, ``\`` or glob remainder (``logs/'..'``,
-# ``logs/{..,x}``, ``logs/$(echo ..)``) would hide a ``..`` from :func:`_under_roots` (review 5877418508).
-# ``%`` is literal in shell (``%2e%2e`` is a directory name, not ``..``).
-_STATE_PATH = re.compile(r"(?:~|/home/[^/\s]+)/\.hermes/([\w.@+%~/-]*)"
-                         r"(?=$|[\s&;|<>()]|[`'\",:!?)\]]+\.*(?:\s|$))")
+# The match must also end its shell word (:func:`_ends_word`), or a quoted, brace, ``$``, ``\\`` or glob remainder
+# (``logs/'..'``, ``logs/{..,x}``, ``logs/$(echo ..)``) would hide a ``..`` from :func:`_under_roots`
+# (reviews 5877418508, 5877782890). ``%`` is literal in shell (``%2e%2e`` is a directory name, not ``..``).
+_STATE_PATH = re.compile(r"(?:~|/home/[A-Za-z0-9_][\w.-]*)/\.hermes/([\w.@+%~/-]*)")
+_QUOTES = "'\"`"
+# After the path and its closing quote/paren, if any: at most one sentence mark, then the end or whitespace; or a
+# shell operator, which ends the word.
+_WORD_END = re.compile(r"[.,:;!?]?(?:$|\s)|[&;|<>]")
+
+
+def _ends_word(text, start, end) -> bool:
+    """Whether the state path ``text[start:end]`` is its whole shell word, so no remainder can hide a ``..``.
+
+    A trailing quote counts only when the same quote opened the word right before the prefix (that quote at the
+    start of the text or after whitespace); any other quote may open a new segment (``logs/' '/../../.env``). One
+    ``)`` may close prose or ``$(...)``. Then at most one sentence mark, so ``logs/''..`` and ``$(echo logs/)..``
+    (both resolve to ``~/.hermes``) keep pinning."""
+    q = text[start - 1] if start and text[start - 1] in _QUOTES else ""
+    if q and start >= 2 and not text[start - 2].isspace():
+        q = ""
+    i = end
+    if q and text.startswith(q, i):
+        i += 1
+    if text.startswith(")", i):
+        i += 1
+    return bool(_WORD_END.match(text, i))
 
 
 def hub_read_roots(cfg) -> tuple:
@@ -148,7 +168,9 @@ def without_read_paths(text, cfg, *, target=None, requires=None):
 
 
 def _strip_read_paths(text, roots):
-    return _STATE_PATH.sub(lambda m: "" if _under_roots(m.group(1), roots) else m.group(0), text)
+    return _STATE_PATH.sub(
+        lambda m: "" if _ends_word(text, m.start(), m.end()) and _under_roots(m.group(1), roots) else m.group(0),
+        text)
 
 
 def requirements(text):
