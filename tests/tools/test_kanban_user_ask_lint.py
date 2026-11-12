@@ -61,6 +61,7 @@ def test_recommended_decision_warning_is_nonfatal(worker_env, action, scope, int
     from tools import kanban_tools as kt
     request = {**CLEAR, "action": action + ". Unblock = proceed; archive = skip.",
                "scope": scope, "interaction": interaction,
+               "why_human": "the worker asked instead of applying its pick", "evidence": "fixture timing notes",
                "choices": [{"label": "Postmerge (recommended)" if choices else "Postmerge", "value": "post"},
                            {"label": "Premerge", "value": "pre"}]}
     result = json.loads(kt._handle_block({"reason": "Fixture timing", "kind": "needs_input",
@@ -102,7 +103,8 @@ def test_recommendation_boundary_in_explanations_and_choices(field, text):
 ])
 def test_recommendation_requires_explicit_positive_marker(label, warns):
     from hermes_cli.kanban_block_policy import recommended_choice_warning
-    result = recommended_choice_warning({"interaction": "reply", "choices": [{"label": label}]})
+    result = recommended_choice_warning({"interaction": "reply", "action": "Choose the poller retry backoff",
+                                         "choices": [{"label": label}]})
     assert bool(result) is warns
     if warns:
         assert "reversible" in result["warning"]
@@ -113,8 +115,10 @@ def test_recommendation_requires_explicit_positive_marker(label, warns):
         assert "comment your recommended pick and how to reverse it" in result["warning"]
 
 
-# Asks that really need David which the first vocabulary nudged anyway (review t_01a1ce72aa3e4cb0).
-@pytest.mark.parametrize("action", [
+# Asks that really need David which a denylist nudged anyway: PR1220 reviews t_01a1ce72aa3e4cb0 (round 1)
+# and t_01a1ce964f2521ad (round 2, the 35 recorded misses). Each must stay quiet both on the fail-safe path
+# (neutral scope) and on the veto path (an in-gate scope, which never qualifies an ask on its own). [daveey]
+_DAVID_ONLY_ASKS = [
     "Choose the billing plan for the new GPU pod", "Rent an H100 for 48 hours",
     "Upgrade the subscription to Pro tier", "Charge the card on file",
     "Pick which API key to rotate", "Log in to the App Store Connect account", "Revoke the GitHub app",
@@ -123,21 +127,67 @@ def test_recommendation_requires_explicit_positive_marker(label, warns):
     "Tell David's wife about the schedule", "Ask Alice to review",
     "Remove the old backups from S3", "Wipe the hub database and reseed", "Drop the users table",
     "Force-push main to drop the bad commit", "Merge the PR now without CI",
-])
-def test_recommendation_boundary_synonyms_suppress_nudge(action):
+    "Buy the softmax.ai domain", "Register the new domain name", "Order a replacement Hue bridge",
+    "Book the flight to SF", "Upgrade to the paid plan", "Cancel the AWS reservation",
+    "Terminate the old EC2 instances", "Tear down the staging cluster for good", "Decommission the hub server",
+    "Accept the new terms of service", "Agree to the Apple developer agreement", "Share the doc with Bob",
+    "Reply to the recruiter", "Reply to Bob's PR comment", "Submit the build for App Store review",
+    "Make the repo visible to everyone", "Unlock the front door", "Open the garage door",
+    "Turn off the nursery camera", "Disable the baby monitor", "Disable branch protection on main",
+    "Power-cycle the mini", "Spin up 8 A100s on Lambda", "Renew the domain for 5 years",
+    "Donate to the campaign", "Merge without waiting for checks", "Rewrite main history", "Archive the repo",
+    "Downgrade the database plan", "Restore the database from yesterday's snapshot", "Clear the prod cache",
+    "Turn the thermostat down to 60", "Upgrade the Claude Max plan", "Kill the 3-day training run",
+    "Approve the Discord bot install",
+    # plan-review extras: mixed in-gate + boundary, lowercase names, handles
+    "Disable the feature flag in prod", "Rename the helper and buy the paid plan",
+    "Fix the test, then deploy to production", "Ask david about the port", "Open a PR and then force-push main",
+    "Ping @sam about the retry backoff",
+    # held-out probe (written after the round-3 design; 1 of 27 nudged before this term landed)
+    "Choose whether to merge the PR with failing required checks",
+]
+
+
+@pytest.mark.parametrize("scope", ["this card", "code in this card's PR"])
+@pytest.mark.parametrize("action", _DAVID_ONLY_ASKS)
+def test_recommendation_nudge_stays_quiet_for_david_only_asks(action, scope):
     from hermes_cli.kanban_block_policy import recommended_choice_warning
-    request = {"interaction": "reply", "action": action, "scope": "this card",
+    request = {"interaction": "reply", "action": action, "scope": scope,
                "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert recommended_choice_warning(request) == {}
+
+
+@pytest.mark.parametrize("request_patch", [
+    # neither list: no in-gate signal and no boundary term
+    {"action": "Choose a number"}, {"action": "Pick option A or B"},
+    # in-gate scope alone never qualifies
+    {"action": "Choose a number", "scope": "code in this card's PR"},
+    # substring traps: report/support/export/Portland are not PR/port signals
+    {"action": "Report the support export to Portland"},
+    # a boundary term in a non-recommended choice or in the explanation still vetoes
+    {"action": "Pick the retry backoff", "extra_choice": "Email the vendor instead"},
+    {"action": "Increase the timeout", "why_human": "David owns the AWS bill"},
+])
+def test_recommendation_nudge_is_fail_safe(request_patch):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    patch = dict(request_patch)
+    choices = [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]
+    if "extra_choice" in patch:
+        choices.append({"label": patch.pop("extra_choice"), "value": "c"})
+    request = {"interaction": "reply", "scope": "this card", "choices": choices, **patch}
     assert recommended_choice_warning(request) == {}
 
 
 # In-gate code decisions from the red-sweep evidence (and similar) still get the nudge.
 @pytest.mark.parametrize("action", [
     "Choose fixture timing: premerge or postmerge",
-    "Pick coworld-terraform D1 c and D2 a",
+    "Pick the coworld-terraform module layout: D1 c and D2 a",
     "Use worker Chrome :9333 instead of toggling remote debugging",
     "Pick the retry backoff for the poller",
     "Rename the helper module and keep a shim",
+    "Pick the lint rule severity: error or warn",
+    "Choose the regex for the parser: strict or lenient",
+    "Use a worktree per task instead of a shared checkout",
 ])
 def test_recommendation_nudge_still_fires_for_in_gate_code_decisions(action):
     from hermes_cli.kanban_block_policy import recommended_choice_warning

@@ -98,13 +98,35 @@ def _assignment_routes(task) -> bool:
         return False
 
 
-# Conservative advisory only: these are human boundaries, not an authorization classifier. A miss here
-# nudges a worker to self-apply an ask that needs David, so each category lists common synonyms; the
-# review of PR1220 (t_01a1ce72aa3e4cb0) found 17 realistic such asks the first vocabulary missed. [daveey]
+# Conservative advisory only, not an authorization classifier. The nudge is fail-safe: it fires only on a
+# positive in-gate signal (_RECOMMENDATION_IN_GATE in the action or the recommended choice) and the
+# boundary/person patterns below only veto it. A denylist alone failed open twice in review (PR1220:
+# t_01a1ce72aa3e4cb0 missed 17/17, t_01a1ce964f2521ad 39/52), because the space of David-only asks is
+# open-ended; a missed nudge costs one red-sweep unblock, a wrong one teaches a worker to act. [daveey]
+_RECOMMENDATION_IN_GATE = re.compile(
+    r"\b(?:prs?|pull[ -]requests?|commits?|tests?|testing|unit[ -]tests?|fixtures?|modules?|helpers?|shims?|"
+    r"renam\w*|refactor\w*|timeouts?|retr(?:y|ies)|backoff|configs?|configuration|(?:feature[ -])?flags?|"
+    r"pre-?merge|post-?merge|lint\w*|port\s+\d{2,5}|worktrees?|functions?|code|docs?|docstrings?|schemas?|"
+    r"regex\w*|parsers?|poller|branch(?!\s+protection)|review[ -](?:tier|gate)|code[ -]review)\b"
+    r"|:\d{2,5}\b|\btests?/\S+|\b[\w/-]+\.py\b", re.IGNORECASE)
 _RECOMMENDATION_BOUNDARY = re.compile(
     # money
     r"\b(?:spend\w*|cost\w*|budget\w*|pay\w*|purchas\w*|money|dollars?|bill\w*|charg\w*|rent\w*|"
-    r"subscri\w*|pric\w*|fees?|invoic\w*|refund\w*|"
+    r"subscri\w*|pric\w*|fees?|invoic\w*|refund\w*|paid|buy\w*|bought|order\w*|book\w*|regist\w*|renew\w*|"
+    r"donat\w*|cancel\w*|sell\w*|sold|transfer\w*|wire|plans?|upgrad\w*|downgrad\w*|reserv\w*|"
+    r"terms|agreement\w*|agree\w*|accept(?!ance)\w*|sign|signs|signed|signing|contract\w*|"
+    # infrastructure, production and spend-bearing compute
+    r"prod|production|deploy\w*|releas\w*|ship|shipping|hotfix\w*|terminat\w*|tear\s+down|teardown|"
+    r"decommission\w*|shut\s*down|restor\w*|snapshot\w*|backups?|migrat\w*|rollback|kill\w*|restart\w*|"
+    r"reboot\w*|power\w*|enabl\w*|disabl\w*|turn\s+(?:on|off|up|down)|install\w*|branch\s+protection|"
+    r"visib\w*|rewrite\s+\w*\s*history|history\s+rewrite|merge\s+(?:\w+\s+){0,3}without|"
+    r"spin\w*\s+up|gpus?|[ahb]\d00s?|instances?|clusters?|servers?|vms?|ec2|aws|gcp|lambda|domains?|dns|"
+    r"certs?|certificates?|hub|mini|router|bridge|hue|lights?|locks?|unlock\w*|alarm\w*|speakers?|eo1|"
+    r"doors?|garage|cameras?|thermostat\w*|monitor|nursery|"
+    r"archiv\w*\s+(?:the|a|an|this|that|these|those|all|old|our|my|every|it)\b|"
+    r"post(?:ed|ing|s)?\s+(?:on|to|the|a|it|this|publicly)\b|repl(?:y|ies|ied)|submit\w*|"
+    r"share\w*\s+(?:with|the|it|this|that|a|an|my|our|publicly)\b|"
+    r"dms?|recruit\w*|partner\w*|"
     # permissions and credentials
     r"permission\w*|credential\w*|password\w*|tokens?|secrets?|access|(?:api|ssh|signing|private|deploy)[ -]keys?|"
     r"log[ -]?in\w*|log[ -]?out|sign[ -]?(?:in|out|up)|auth\w*|oauth|accounts?|revok\w*|rotat\w*|grant\w*|admin\w*|"
@@ -114,6 +136,7 @@ _RECOMMENDATION_BOUNDARY = re.compile(
     r"delet\w*|remov\w*|wip\w*|drop\w*|purg\w*|eras\w*|destroy\w*|truncat\w*|overwrit\w*|reset\w*|"
     r"force[- ]?push\w*|irreversibl\w*|destructive|permanent\w*|unrecoverabl\w*|hard[- ]to[- ]reverse|"
     r"bypass\w*|without\s+(?:ci|review|tests?|checks?|approval)|skip\w*\s+(?:ci|review|tests?|checks?)|"
+    r"(?:failing|failed|red|broken)\s+(?:required\s+)?(?:ci|checks?|builds?)|"
     # other people and outward communication
     r"person|people|someone|anyone|Rose|David's|wife|husband|partner|family|friend\w*|landlord|neighbou?r\w*|"
     r"colleague\w*|team\w*|reviewer\w*|customer\w*|client\w*|user\w*|vendor\w*|contractor\w*|recipient\w*|"
@@ -122,9 +145,12 @@ _RECOMMENDATION_BOUNDARY = re.compile(
     r"announc\w*|invit\w*|notify\w*|"
     # physical
     r"physical|press|plug|unplug|touch)\b|[$€£]", re.IGNORECASE)
-# "Ask Alice to review", "tell Sam": a request to a named person (case-sensitive on the name). [daveey]
+# "Ask Alice to review", "Bob's PR", "@sam", "share with Ana", "ask david": a named person. [daveey]
 _RECOMMENDATION_NAMED_PERSON = re.compile(
-    r"\b(?:[Aa]sk|[Tt]ell|[Pp]ing|[Cc]ontact|[Cc]all|[Tt]ext|[Cc]c)\s+[A-Z][a-z]+\b")
+    r"\b(?:[Aa]sk|[Tt]ell|[Pp]ing|[Cc]ontact|[Cc]all|[Tt]ext|[Cc]c)\s+[A-Z][a-z]+\b|\b[A-Z][a-z]+'s\b|@\w+|"
+    r"(?i:\b(?:ask|tell|ping|dm|email|message|invite|share\s+with|reply\s+to|cc)\s+"
+    r"(?!(?:the|a|an|this|that|these|those|me|us|it|them|worker|agent|whether|if|about|for|to|on|in)\b)"
+    r"[a-z]+\b)")
 
 
 def recommended_choice_warning(human_request) -> dict:
@@ -138,8 +164,15 @@ def recommended_choice_warning(human_request) -> dict:
         return {}
     choices = [choice for choice in choices if isinstance(choice, dict)]
     # Explicit positive UI markers only; 'not recommended' is not a recommendation.
-    if not any(re.search(r"\(recommended\)|\[recommended\]", str(choice.get("label") or ""), re.IGNORECASE)
-               for choice in choices):
+    recommended = [choice for choice in choices if re.search(
+        r"\(recommended\)|\[recommended\]", str(choice.get("label") or ""), re.IGNORECASE)]
+    if not recommended:
+        return {}
+    # Fail-safe: a positive in-gate signal in the action or the recommended pick itself. Scope alone is
+    # worker-written boilerplate, so it never qualifies an ask on its own. [daveey]
+    signal = str(human_request.get("action") or "") + " " + " ".join(
+        str(choice.get(key) or "") for choice in recommended for key in ("label", "value"))
+    if not _RECOMMENDATION_IN_GATE.search(signal):
         return {}
     text = " ".join(str(human_request.get(key) or "")
                     for key in ("action", "scope", "why_human", "evidence"))
