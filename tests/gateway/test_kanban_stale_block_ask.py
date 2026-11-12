@@ -343,3 +343,50 @@ def test_user_terminal_hint_goes_with_a_stale_ask_and_stays_with_a_live_one(tmp_
     stale_out = out[:-len("\n" + live_text)]
     assert TERMINAL_HINT not in stale_out and "Next action for the user" not in stale_out
     assert "Since then: unblocked 20:08, completed 20:25 PST. No action needed." in stale_out
+
+
+def test_scope_quoting_another_cards_whole_stale_notice_is_left_alone(tmp_path, monkeypatch):
+    """Review F7: still-blocked B whose scope quotes done C's whole notice (actor line through C's
+    Open task link) stays byte-identical; the quoted ask inside B's scope is not swapped either."""
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    done, stale = _stale_notice(tmp_path, monkeypatch)
+    quoted = stale[stale.index("blocked — actor: "):stale.index(f"Open task: @task:default/{done}")]
+    quoted += f"Open task: @task:default/{done}"
+    for scope in (f"See this old notice:\n{quoted}", f"See this old notice:\n{quoted}\nand nothing else."):
+        tid, task = _card_with_scope(scope)
+        text = _wake_text(tid, task)
+        assert quoted in text
+        assert refresh_stale_ask(text) == text
+
+
+def test_reblock_with_the_same_ask_into_triage_keeps_the_ask(tmp_path, monkeypatch):
+    """Review F8: unblock + re-block with the same ask until the loop breaker sends the card to triage
+    (block_loop_detected, no new blocked event): the ask is still live, so the notice is unchanged."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    tid, task = _blocked_card()
+    text = _wake_text(tid, task)
+    with connect_closing() as conn:
+        for _ in range(10):
+            assert kb.unblock_task(conn, tid)
+            kb.block_task(conn, tid, kind="needs_input", reason="Choose coverage", human_request=dict(REQUEST))
+            if kb.get_task(conn, tid).status == "triage":
+                break
+        assert kb.get_task(conn, tid).status == "triage"
+        assert conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='block_loop_detected'",
+                            (tid,)).fetchone()
+    assert refresh_stale_ask(text) == text
+
+
+def test_many_ask_marks_on_one_long_line_are_fast(tmp_path, monkeypatch):
+    """Review F9: tens of thousands of ask marks on one long line must not cost seconds."""
+    import time
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    _tid, text = _stale_notice(tmp_path, monkeypatch)
+    big = text + "\nblocked — actor: x " + "Next action for the user: y " * 80000
+    start = time.monotonic()
+    out = refresh_stale_ask(big)
+    assert time.monotonic() - start < 0.5
+    assert "Since then: unblocked 20:08, completed 20:25 PST. No action needed." in out

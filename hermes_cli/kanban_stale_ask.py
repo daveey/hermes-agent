@@ -35,11 +35,16 @@ _MAX_LINKS = 32  # more "Open task:" links after one ask than this: leave the te
 logger = logging.getLogger(__name__)
 _PT = "America/Los_Angeles"
 # Transitions worth naming; claims, spawns, heartbeats and comments are noise here.
-_LABELS = {"unblocked": "unblocked", "blocked": "blocked again", "scheduled": "scheduled",
+_LABELS = {"unblocked": "unblocked", "blocked": "blocked again", "block_loop_detected": "blocked again",
+           "scheduled": "scheduled",
            "review_requested": "sent to review", "completed": "completed", "archived": "archived",
            "request_withdrawn": "ask withdrawn", "gave_up": "gave up"}
 _LAST_STATUS = {"completed": "done", "archived": "archived", "request_withdrawn": "archived",
-                "blocked": "blocked", "scheduled": "scheduled", "review_requested": "review"}
+                "blocked": "blocked", "block_loop_detected": "triage", "scheduled": "scheduled",
+                "review_requested": "review"}
+# A re-block at the loop limit records ``block_loop_detected`` (status triage) instead of ``blocked``;
+# both carry the ask, as kanban_block_policy/kanban_block_routing already treat them (review F8).
+_BLOCK_KINDS = frozenset({"blocked", "block_loop_detected"})
 
 
 def _norm(text) -> str:
@@ -54,19 +59,19 @@ def _payload(raw) -> dict:
 
 
 def _read_card(board: str, task_id: str):
-    """``(status, [(id, kind, created_at, payload)])`` from a read-only board connection, else ``None``."""
+    """``(status, [(id, kind, created_at, payload)], current human_request)`` read-only, else ``None``."""
     from hermes_cli.kanban_db import kanban_db_path
     path = kanban_db_path(board=board)
     if not path.exists():
         return None
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
     try:
-        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        row = conn.execute("SELECT status, human_request FROM tasks WHERE id=?", (task_id,)).fetchone()
         if row is None:
             return None
         events = conn.execute("SELECT id, kind, created_at, payload FROM task_events WHERE task_id=? ORDER BY id",
                               (task_id,)).fetchall()
-        return row[0], [(i, k, c, _payload(p)) for i, k, c, p in events]
+        return row[0], [(i, k, c, _payload(p)) for i, k, c, p in events], _payload(row[1])
     finally:
         conn.close()
 
@@ -92,9 +97,9 @@ def _owner_event(events, text: str, pos: int, end: int, board: str, tid: str) ->
 
 
 def _anchor(events, owner: int) -> Optional[int]:
-    """The ``blocked`` event at or before the owner event (a metadata-only amendment is itself a
-    ``blocked`` event, so an amended ask anchors on the amendment)."""
-    return next((j for j in range(owner, -1, -1) if events[j][1] == "blocked"), None)
+    """The ``blocked``/``block_loop_detected`` event at or before the owner event (a metadata-only
+    amendment is itself a ``blocked`` event, so an amended ask anchors on the amendment)."""
+    return next((j for j in range(owner, -1, -1) if events[j][1] in _BLOCK_KINDS), None)
 
 
 def _clock(ts: int, base_day) -> tuple[str, str]:
@@ -120,7 +125,7 @@ def since_line(status: str, events, anchor: int) -> Optional[str]:
     if not later or _LAST_STATUS.get(later[-1][1]) != status:
         text = f"{text}; now {status}" if text else f"now {status}"
     if status in {"blocked", "triage"}:
-        newest = next((ev for ev in reversed(events) if ev[1] == "blocked"), None)
+        newest = next((ev for ev in reversed(events) if ev[1] in _BLOCK_KINDS), None)
         if newest is not None and isinstance(newest[3].get("human_request"), dict):
             return f"Since then: {text}. This ask was replaced by a newer one; answer that, not this."
         return f"Since then: {text}. This ask no longer applies; the card is blocked on something else."
@@ -140,11 +145,11 @@ def _links(text: str, pos: int):
     return out
 
 
-def _stale_swap(text: str, pos: int, read):
-    """``(pos, scope_at, link_end, end, line)`` for the ask at ``pos`` if its card has moved on, else ``None``.
+def _resolve(text: str, pos: int, read):
+    """``(link_end, end, board, tid, card, owner)`` for the ask at ``pos`` if exactly one card owns it, else ``None``.
 
-    ``text[pos:scope_at]`` (the ask and why lines) becomes ``line``; ``text[link_end:end]`` is the
-    user-terminal hint, dropped with the ask."""
+    ``text[pos:link_end]`` is the owned ask (through its Open task link); ``end`` adds the
+    user-terminal hint when one follows."""
     links = _links(text, pos)
     if len(links) > _MAX_LINKS:
         return None
@@ -157,24 +162,45 @@ def _stale_swap(text: str, pos: int, read):
             return None  # unreadable or unknown card: it could be the owner
         owner = _owner_event(card[1], text, pos, end, board, tid)
         if owner is not None:
-            owners.append((end, card, owner))
+            owners.append((end, board, tid, card, owner))
     if len(owners) != 1:
         return None  # no owner, or a field quotes another card's whole ask: ambiguous, leave it
-    link_end, (status, events), owner = owners[0]
+    link_end, board, tid, card, owner = owners[0]
     if text.find(LINK_MARK, pos) != text.rfind(LINK_MARK, pos, link_end):
         return None  # the owner's own fields quote another "Open task:" link: never guess
-    anchor = _anchor(events, owner)
-    line = since_line(status, events, anchor) if anchor is not None else None
-    if line is None:
-        return None
-    request = events[owner][3]["human_request"]
-    scope_at = pos + len(f"{ASK_MARK}{request['action']}\nWhy only the user: {request['why_human']}\n")
     end = link_end + len(TERMINAL_HINT) if text.startswith(TERMINAL_HINT, link_end) else link_end
-    return pos, scope_at, link_end, end, line
+    return link_end, end, board, tid, card, owner
+
+
+def _stale_line(text: str, pos: int, link_end: int, board: str, tid: str, card, owner: int) -> Optional[str]:
+    """The ``Since then:`` line for an owned ask whose card moved on, else ``None``."""
+    status, events, current = card[0], card[1], (card[2] if len(card) > 2 else {})
+    if status in {"blocked", "triage"} and isinstance(current, dict) and current:
+        rendered = _render(current, board, tid)
+        if rendered is not None and len(rendered) == link_end - pos and text.startswith(rendered, pos):
+            return None  # the card's live ask is this very ask (review F8): it stands
+    anchor = _anchor(events, owner)
+    return since_line(status, events, anchor) if anchor is not None else None
+
+
+def _ask_marks(text: str):
+    """Positions of ask marks at a line start directly under a line holding block_notice()'s actor mark."""
+    at = text.find(ASK_MARK)
+    while at != -1:
+        # The cheap line-start test runs first, so a long line of marks costs one pass (review F9).
+        if at > 0 and text[at - 1] == "\n":
+            line_start = text.rfind("\n", 0, at - 1) + 1
+            if text.find(HEAD_MARK, line_start, at - 1) != -1:
+                yield at
+        at = text.find(ASK_MARK, at + 1)
 
 
 def refresh_stale_ask(text):
-    """``text`` with each stale ask swapped for a ``Since then:`` line; unchanged on any doubt."""
+    """``text`` with each stale ask swapped for a ``Since then:`` line; unchanged on any doubt.
+
+    Asks are resolved in text order. An ask inside an earlier owned ask's span is a quotation in that
+    ask's fields and is never touched (review F7). The first ask no card verifiably owns ends the scan:
+    its fields could run anywhere, so nothing after it is trusted."""
     if not isinstance(text, str) or ASK_MARK not in text:
         return text
     cache = {}
@@ -187,21 +213,25 @@ def refresh_stale_ask(text):
                 cache[board, tid] = None
         return cache[board, tid]
 
-    swaps, asks = [], 0
-    at = text.find(ASK_MARK)
-    while at != -1:
-        line_start = text.rfind("\n", 0, at - 1) + 1
-        # The ask mark starts a line directly under block_notice()'s own actor line.
-        if at > 0 and text[at - 1] == "\n" and HEAD_MARK in text[line_start:at - 1]:
-            asks += 1
-            if asks > _MAX_LINKS:
-                return text
-            swap = _stale_swap(text, at, read)
-            if swap is not None:
-                swaps.append(swap)
-        at = text.find(ASK_MARK, at + 1)
+    swaps, asks, covered = [], 0, -1
+    for at in _ask_marks(text):
+        if at < covered:
+            continue  # quoted inside the previous owned ask
+        asks += 1
+        if asks > _MAX_LINKS:
+            return text
+        resolved = _resolve(text, at, read)
+        if resolved is None:
+            break
+        link_end, end, board, tid, card, owner = resolved
+        covered = end
+        line = _stale_line(text, at, link_end, board, tid, card, owner)
+        if line is not None:
+            request = card[1][owner][3]["human_request"]
+            scope_at = at + len(f"{ASK_MARK}{request['action']}\nWhy only the user: {request['why_human']}\n")
+            swaps.append((at, scope_at, link_end, end, line))
     if any(later[0] < earlier[3] for earlier, later in itertools.pairwise(swaps)):
-        return text  # one swap's span holds another ask mark: ambiguous, leave it all
+        return text  # spans overlap: ambiguous, leave it all
     for pos, scope_at, link_end, end, line in reversed(swaps):
         text = text[:pos] + line + "\n" + text[scope_at:link_end] + text[end:]
     return text
