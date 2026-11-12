@@ -63,7 +63,7 @@ def _inventory(hub, board_id: str) -> list[dict]:
     # A final read closes the final-page/return gap at an observed head. Apply
     # still has local CAS; this is not a distributed transaction or a lease.
     final = hub.snapshot_page(board_id, "tasks", limit=1)
-    if final.get("head") != head:
+    if type(final.get("head")) is not int or final.get("head") != head:
         raise ValueError("canonical inventory changed; capture a new manifest")
     return rows
 
