@@ -268,7 +268,11 @@ def latch_stop(authority, cancel):
     what stopped it. The fact is latched at stop time because the run thread reads it up to a poll
     later, after the shutdown's last phase has reset ``runner._draining`` (cron-7c04faf754: the
     run then reported "cron fire ownership was lost" and was booked failed). The first stop wins:
-    a latch already set by another stop (a real takeover's forwarded cancel) keeps its meaning."""
+    a latch already set by another stop (a real takeover's forwarded cancel) keeps its meaning.
+
+    This is permanent for the run, even if the restart-wait drain is aborted and the owner keeps
+    serving. A real lost-claim cancel forwarded during that drain is indistinguishable from a
+    shutdown cancel: prefer the safe-side single restart-cut rerun over booking a failure."""
     if not cancel.is_set() and _owner_draining(authority):
         cancel.owner_shutdown = True
     cancel.set()
@@ -368,12 +372,10 @@ async def execute(authority, ref, row, policy):
             def _stopped_by_own_shutdown():
                 if fire_interrupted_by_shutdown(job_id) or _latched_owner_shutdown(cancel, execution_id):
                     return True
-                runner = getattr(authority, 'runner', None)
                 if cancel_requested(execution_id):
                     return False
                 # The interrupt latch outlives stop()'s ``_draining`` reset (see _restart_cut).
-                return bool(getattr(runner, '_interrupting_remaining_work', False)
-                            or getattr(runner, '_draining', False))
+                return _owner_draining(authority)
 
             stop = _CombinedCancelEvent(
                 CancelRequest(execution_id),

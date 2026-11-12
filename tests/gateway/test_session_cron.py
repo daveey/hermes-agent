@@ -254,8 +254,9 @@ async def test_draining_owner_answers_an_external_firers_cron_observation_over_t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('stop_case', ['shutdown', 'aborted_drain', 'interrupt_only'])
 async def test_forwarded_cancel_during_owner_restart_stays_a_restart_cut_after_the_drain_ends(
-        tmp_path, monkeypatch, caplog):
+        tmp_path, monkeypatch, caplog, stop_case):
     """cron-7c04faf754 round 2: the fire was handed to a restart-safe worker, so this owner's
     process holds no scheduler interrupted mark for it. The stop forwarded while the owner drains
     for its restart must keep meaning "this owner's shutdown" after ``_stop_persist_exit_state``
@@ -286,9 +287,25 @@ async def test_forwarded_cancel_during_owner_restart_stays_a_restart_cut_after_t
     seen = {}
 
     def run_job(job, *, extra_prompt, execution_id, cancel_event):
-        runner._draining = True  # the owner's core-update restart drain begins mid-run
-        asyncio.run_coroutine_threadsafe(session_cron.operation(authority, 'cancel', params, actor), loop).result(10)
-        runner._draining = False  # _stop_persist_exit_state, before the run's next poll
+        if stop_case == 'interrupt_only':
+            # Legacy/raw cancellation has no owner_shutdown latch. Only the sticky interrupt
+            # remains after stop(), so execute's fallback must share _owner_draining's meaning.
+            cancel = authority._cron_cancellations[row['admission_id']]
+            cancel.set()
+            assert not getattr(cancel, 'owner_shutdown', False)
+            runner._interrupting_remaining_work = True
+        else:
+            runner._draining = True  # the owner's restart-wait drain begins mid-run
+            runner._running = True
+            asyncio.run_coroutine_threadsafe(session_cron.operation(authority, 'cancel', params, actor), loop).result(10)
+            runner._draining = False
+            if stop_case == 'aborted_drain':
+                # The forwarded cancel can be a real lost claim: aborting restart-wait keeps
+                # serving, but deliberately does not revoke this run's safe-side rerun latch.
+                assert runner._running and not runner._interrupting_remaining_work
+                assert authority._cron_cancellations[row['admission_id']].owner_shutdown
+            else:
+                runner._running = False  # _stop_persist_exit_state before the next poll
         seen['reason'] = reason = cancel_reason(cancel_event)
         seen['shutdown'] = cancel_is_shutdown(cancel_event)
         error = CronShutdownInterrupted if seen['shutdown'] else RuntimeError
