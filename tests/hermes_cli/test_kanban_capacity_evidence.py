@@ -288,3 +288,30 @@ def test_describe_without_observed_restrictions_never_asserts_availability(board
     text = evidence.describe(evidence.read(board, kb.get_task(board, tid), board="default", now=1001))
     assert text == "current: restriction coverage incomplete; admissible capacity unknown"
     assert "no restriction" not in text
+
+
+def test_describe_names_observing_machine_for_machine_scoped_restrictions(board):
+    """A card pinned to worker-1 seen by worker-4's dispatcher: worker-4's limits are named as worker-4's."""
+    from hermes_cli import kanban_db_sync as sync
+    sync._add_column_if_missing(board, "tasks", "runs_on", "runs_on TEXT")
+    tid = kb.create_task(board, title="pinned", assignee="alice")
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET runs_on=? WHERE id=?", ('["machine:worker-1"]', tid))
+    result = dispatch.DispatchResult(at_capacity="max_in_progress=10/10", memory_pressure="critical",
+                                     skipped_ineligible=[(tid, "labels_mismatch")])
+    evidence.record(board, result, board="default", machine="worker-4", now=1000, update_drain=True)
+    text = evidence.describe(evidence.read(board, kb.get_task(board, tid), board="default", now=1001))
+    assert "at_capacity (max_in_progress=10/10) on worker-4" in text
+    assert "capacity.update_drain (suppress_spawn; pre_claim) on worker-4" in text
+    assert "capacity.memory_pressure (critical; pre_claim) on worker-4" in text
+    # Card-scoped reasons are the card's own and stay unattributed.
+    assert "capacity.placement (labels_mismatch; pre_claim)" in text
+    assert "labels_mismatch; pre_claim) on" not in text
+    assert text.endswith("admissible capacity unknown")
+
+
+@pytest.mark.parametrize("machine", [None, ""])
+def test_describe_without_machine_keeps_plain_reason(machine):
+    value = {"freshness": "current", "machine": machine, "reasons": [],
+             "native_restrictions": [{"source_field": "at_capacity", "native_code": "max_spawn=3/3"}]}
+    assert evidence.describe(value) == "current: at_capacity (max_spawn=3/3); admissible capacity unknown"

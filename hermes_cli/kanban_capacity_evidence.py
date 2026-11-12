@@ -242,10 +242,23 @@ def read(conn, task, *, board=None, now=None):
     return out
 
 
+# Restrictions of the observing dispatcher's machine, not of the card: a card pinned
+# elsewhere waits for another machine, so the note names the one that observed them.
+MACHINE_CODES = frozenset({"capacity.memory_pressure", "capacity.update_drain"})
+MACHINE_FIELDS = frozenset({"at_capacity"})
+
+
 def describe(value):
     """Never turn an incomplete restriction list into an assertion of availability."""
-    codes = ", ".join(r["code"] + " (" + r["native_code"] + "; " + r["phase"] + ")" for r in value.get("reasons", []))
-    native = ", ".join(r.get("source_field", "restriction") + " (" + r["native_code"] + ")"
+    machine = value.get("machine")
+
+    def on(text, scoped):
+        return f"{text} on {machine}" if scoped and isinstance(machine, str) and machine else text
+
+    codes = ", ".join(on(r["code"] + " (" + r["native_code"] + "; " + r["phase"] + ")", r["code"] in MACHINE_CODES)
+                      for r in value.get("reasons", []))
+    native = ", ".join(on(r.get("source_field", "restriction") + " (" + r["native_code"] + ")",
+                          r.get("source_field") in MACHINE_FIELDS)
                        for r in value.get("native_restrictions", []))
     codes = "; ".join(v for v in (codes, native) if v)
     return (f"{value.get('freshness', 'unknown')}: {codes or 'restriction coverage incomplete'}; "
