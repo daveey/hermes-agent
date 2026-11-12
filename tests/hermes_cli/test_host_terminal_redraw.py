@@ -14,6 +14,9 @@ from tests.waiting import async_wait_until
 
 # Programs that, like Node's stdout 'resize' event (Hermes' TUI redraws on it), report a size only
 # when the one they read differs from the last, and read it after a busy event loop gets to it.
+# They print nothing else: any output counts as the answer to a step, so a line written before the
+# step but read after it (the test's reader starved, as on a throttled CI runner) would let the step
+# back go before the program read the size.
 _PYTHON_SIZE_WATCHER = """
 import os, signal, time
 pending = []
@@ -29,12 +32,11 @@ while True:
             last = size
             print('RESIZE', size.lines, flush=True)
         print('WINCH', flush=True)
-    print('TICK', flush=True)
 """
 _NODE_SIZE_WATCHER = (
     "process.stdout.on('resize', () => process.stdout.write('RESIZE ' + process.stdout.rows + '\\n'));"
     "process.on('SIGWINCH', () => process.stdout.write('WINCH\\n'));"
-    "process.stdout.write('READY\\n'); setInterval(() => process.stdout.write('TICK\\n'), 200)"
+    "process.stdout.write('READY\\n'); setInterval(() => {}, 200)"
 )
 
 
@@ -70,12 +72,15 @@ class Tab:
 @pytest.mark.platforms("posix")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("watcher", ["python", "node"])
-async def test_a_resize_back_waits_until_the_program_answered_the_step(tmp_path, watcher):
+async def test_a_resize_back_waits_until_the_program_answered_the_step(tmp_path, watcher, monkeypatch):
     """After a trimmed replay the browser steps the size one row away and back (browser-terminal.ts)
     so the foreground program redraws. Applied back to back, both SIGWINCHes can reach the program
     after the size is back where it was: it sees no change and does not redraw. The step back waits
     until the program has answered the first step, so a real program sees both sizes."""
     from hermes_cli.pty_bridge import PtyBridge
+
+    # The watcher always answers; only a program that never does should meet this bound.
+    monkeypatch.setattr(web_host_terminal_sessions, "_RESIZE_ANSWER_SECONDS", 60)
 
     if watcher == "node":
         node = shutil.which("node")
@@ -101,12 +106,16 @@ async def test_a_resize_back_waits_until_the_program_answered_the_step(tmp_path,
         # The redraw's two frames, arriving together as they leave the browser.
         tab.send("\x1b[RESIZE:80;23]", "\x1b[RESIZE:80;24]")
         pump = asyncio.create_task(_pump_input(tab, SimpleNamespace(remove=remove), "terminal", session, owner))
-        # The program prints TICK five times a second: give it three seconds.
-        await async_wait_until(
-            lambda: b"RESIZE 24" in tab.output[start:] or tab.output[start:].count(b"TICK") >= 15, timeout=10)
+        # Each signal the program handles prints WINCH, after RESIZE when the size it read changed:
+        # done at RESIZE 24, or once a WINCH shows the program missed a size.
+        def decided():
+            out = tab.output[start:]
+            return b"RESIZE 24" in out or out.count(b"WINCH") >= 2 or b"WINCH" in out.split(b"RESIZE", 1)[0]
+
+        await async_wait_until(decided, timeout=60, what="the program to handle both resizes")
         seen = tab.output[start:]
         tab.close_tab()
-        await asyncio.wait_for(pump, 5)
+        await asyncio.wait_for(pump, 60)
     finally:
         if pump is not None:
             pump.cancel()
