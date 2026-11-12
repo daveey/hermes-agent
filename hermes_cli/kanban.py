@@ -155,6 +155,9 @@ def kanban_command(args: argparse.Namespace) -> int:
 
     # Origin obligations are profile-local, not current-board state; do not
     # auto-initialize a board or route by a worker's inherited board override.
+    if action == "chat-tasks":
+        from hermes_cli.kanban_chat_tasks import command
+        return command(args)
     if action == "origin-bind":
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
@@ -547,7 +550,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             print(f"⚠  {placement['warning']}", file=sys.stderr)
         if origin_binding:
             print(f"Bound to {origin_binding['origin']} (readback pending: on the origin gateway run "
-                  f"`{origin_binding['verify_on_origin']}`)")
+                  f"`{origin_binding['verify_visible']}`)")
         # Warn only for ready+assigned tasks that would sit without a dispatcher (triage/todo idle
         # by design, unassigned can't dispatch); skipped under --json so stdout stays parseable.
         if task.status == "ready" and task.assignee:

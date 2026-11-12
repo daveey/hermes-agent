@@ -331,6 +331,10 @@ _SPECS = [
         _arg("--idempotency-key", help="Dedup key for the root card"),
         _json_flag(help="Emit JSON output"),
     ], help="Create a Kanban Swarm v1 graph (parallel workers → verifier → synthesizer)"),
+    _cmd("chat-tasks", [
+        _arg("session_id"), _arg("--expect", help="Expected task, board/task or gateway/board/task"),
+        _json_flag(),
+    ], help="Read the chat's task projection; --expect exits 4 if absent, 1 on read error"),
     _cmd("list", [
         _arg("--mine", action="store_true", help="Filter by $HERMES_PROFILE as assignee"),
         _arg("--assignee"),

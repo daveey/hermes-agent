@@ -834,8 +834,9 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "(@session:<profile>@<gateway>/<id>). Defaults to the "
                 "session's $HERMES_ORIGIN_SESSION. The card (and its "
                 "children) then shows in that chat's task list and keeps "
-                "it unfinished; the result's origin_binding says how to "
-                "read the binding back on the origin gateway."
+                "it unfinished; run origin_binding.verify_visible on the origin gateway "
+                "to verify the card appears in that chat's task projection. "
+                "verify_on_origin is only a replica-link diagnostic, not visibility proof."
         )),
         "runs_on": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:._-]{0,63}$"},
                     "description": "Machine labels the card needs (all of them), on a board that syncs to the "
