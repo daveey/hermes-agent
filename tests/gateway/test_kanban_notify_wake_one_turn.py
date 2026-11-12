@@ -199,3 +199,53 @@ def test_unloaded_sweeper_leaves_a_covered_event_to_the_wake_turn(board, tmp_pat
     assert subs["tui"] == (last, None)
     _wake_leg(runner)
     assert len(adapter.turns) == 1 and NOTICE["completed"].format(tid=tid) in adapter.turns[0]
+
+
+def test_archived_card_after_the_wake_leaves_no_second_notice_turn(board):
+    """t_01a1cfb6db097701 (2026-11-12): the wake delivered at 04:40:25, the card was archived at 04:41:22 (its local
+    row went with it), and the tui row's later claim found no sibling and started a second turn at 04:59:20."""
+    from hermes_cli.kanban_db_archive import archive_task
+
+    runner, adapter = board
+    tid = _card()
+    _event(tid, "completed")
+    _wake_leg(runner)
+    conn = kbc.connect()
+    try:
+        archive_task(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local'", (tid,))
+    finally:
+        conn.close()
+    assert _notice_leg() == []
+    assert len(adapter.turns) == 1
+
+
+def test_a_stuck_tui_claim_rewound_after_the_wake_and_archive_starts_no_second_turn(board):
+    """The live shape (t_01a1cfb6db097701): the tui row was claimed before the wake (04:25:06), the wake delivered
+    (04:40:25), the card was archived (04:41:22), and the stuck claim was rewound for redelivery (04:46:05)."""
+    from hermes_cli.kanban_db_archive import archive_task
+
+    runner, adapter = board
+    tid = _card()
+    _event(tid, "completed")
+    conn = kbc.connect()
+    try:
+        old, cur, events = kbn.claim_unseen_events_for_sub(conn, task_id=tid, platform="tui", chat_id=CHAT,
+                                                           thread_id="", durable=True)
+        assert events and cur > old
+    finally:
+        conn.close()
+    _wake_leg(runner)
+    conn = kbc.connect()
+    try:
+        archive_task(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local'", (tid,))
+            row = conn.execute("SELECT * FROM kanban_notify_subs WHERE task_id = ? AND platform = 'tui'",
+                               (tid,)).fetchone()
+            assert kbn._rewind_orphan(conn, kbn._sub_key(tid, "tui", CHAT, ""), row, why="stopped serving the chat")
+    finally:
+        conn.close()
+    assert _notice_leg() == []
+    assert len(adapter.turns) == 1

@@ -829,6 +829,14 @@ class _KanbanNotification:
                 logger.debug("kanban notifier: artifact delivery for %s failed: %s", self.task_id, art_exc)
         return True
 
+    async def _settle_tui_sibling(self) -> None:
+        """Record this wake on the chat's tui row too (kanban_wake_sibling.settle_tui_sibling); never fails delivery."""
+        from gateway.kanban_wake_sibling import settle_tui_sibling
+        try:
+            await _to_thread_process_service(partial(settle_tui_sibling, self.board_slug, self.sub, int(self.d["cursor"])))
+        except Exception:  # health: allow BLE001 -- the wake is delivered; the tui row's claim-time check still covers it
+            logger.warning("kanban notifier: settling the tui sibling of %s failed", self.task_id, exc_info=True)
+
     async def failure_receipts(self, lane, run_uids=()):
         return await _to_thread_process_service(partial(
             self.runner._kanban_sub_op, self.board_slug, "notify_failure_receipts", self.sub,
@@ -966,6 +974,8 @@ class _KanbanNotification:
                 return
 
         # Delivery complete: advance the cursor (the dedup mechanism).
+        if wake_payloads and self.d.get("tui_notice"):
+            await self._settle_tui_sibling()
         await self.advance()
         if not is_push:
             self.clear_failures()

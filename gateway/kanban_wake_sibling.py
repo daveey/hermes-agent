@@ -61,9 +61,11 @@ def tui_formatter(conn: Any, sub: dict, fmt: Callable) -> Callable:
 
 def has_tui_sibling(conn: Any, sub: dict) -> bool:
     """For a waking ``local`` row: a ``tui`` row for the same card and chat defers its notice to this wake."""
-    if (sub.get("platform") or "").lower() != "local" or (sub.get("delivery_mode") or "notify") not in WAKE_MODES:
-        return False
-    return _sibling(conn, sub, "tui")
+    return _waking_local(sub) and _sibling(conn, sub, "tui")
+
+
+def _waking_local(sub: dict) -> bool:
+    return (sub.get("platform") or "").lower() == "local" and (sub.get("delivery_mode") or "notify") in WAKE_MODES
 
 
 def notice_lines(sub: dict, task: Any, events, board_slug: Optional[str]) -> list[str]:
@@ -74,3 +76,52 @@ def notice_lines(sub: dict, task: Any, events, board_slug: Optional[str]) -> lis
         if covered(ev) and (text := _format_kanban_event_text(sub, task, ev, board_slug or "")):
             lines.append(text)
     return lines
+
+
+def settle_tui_sibling(board: Optional[str], sub: dict, upto: int) -> bool:
+    """After this waking ``local`` row delivered its batch up to event ``upto``: record that on the ``tui`` sibling
+    too, when everything the ``tui`` row would show up to there is covered. True when the row changed.
+
+    The silence in :func:`tui_cover` needs the ``local`` row to still exist when the ``tui`` row is read. An
+    archived card drains and removes the ``local`` row; a ``tui`` claim rewound after that (held 15 min, then
+    "rewound to event 239597 for redelivery") found no sibling and delivered the completion as a second turn
+    (t_01a1cfb6db097701: rows 879522 and 880235, 2026-11-12). So:
+
+    - no claim on the ``tui`` row: its cursor moves to ``upto``;
+    - a claim in flight: its rewind point (``inflight_from``) moves up to ``upto`` (never past the claim's end),
+      so a rewind hands back only what the wake did not carry; the holder's own ack is unchanged.
+    """
+    import contextlib
+    import json
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban_db_connect as kbc
+    from tui_gateway.session_notifications import _KANBAN_EVENT_FORMATTERS
+    if not _waking_local(sub):
+        return False
+    ident = (sub["task_id"], sub["chat_id"], sub.get("thread_id") or "")
+    key = "task_id = ? AND platform = 'tui' AND chat_id = ? AND thread_id = ?"
+    with contextlib.closing(kbc.connect(board=board)) as conn, kbc.write_txn(conn):
+        row = conn.execute(f"SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE {key}", ident).fetchone()
+        if row is None:
+            return False
+        last, held = int(row[0] or 0), row[1]
+        start = last if held is None else int(held)
+        stop = upto if held is None else min(upto, last)
+        if start >= stop:
+            return False
+        for kind, payload in conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? AND id > ? "
+                                          "AND id <= ?", (ident[0], start, stop)):
+            try:
+                data = json.loads(payload) if payload else {}
+            except ValueError:
+                data = {}
+            if kind in _KANBAN_EVENT_FORMATTERS and not covered(SimpleNamespace(kind=kind, payload=data)):
+                return False  # the tui row still owes a notice the wake did not carry
+        if held is None:
+            cur = conn.execute(f"UPDATE kanban_notify_subs SET last_event_id = ? WHERE {key} "
+                               "AND last_event_id = ? AND inflight_from IS NULL", (stop, *ident, last))
+        else:
+            cur = conn.execute(f"UPDATE kanban_notify_subs SET inflight_from = ? WHERE {key} "
+                               "AND inflight_from = ?", (stop, *ident, held))
+        return cur.rowcount == 1
