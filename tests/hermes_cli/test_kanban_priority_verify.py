@@ -47,5 +47,19 @@ def test_verify_refuses_stale_global_inventory(change):
         "exception-reopened": lambda: rows[2].update(status="ready"),
     }
     actions[change]()
+    if change in ('terminal', 'new'):
+        before = copy.deepcopy(rows)
+        result = prepare.verify(Canonical(rows), manifest)
+        if change == 'terminal':
+            assert result['skipped'] == [{'id': 'a', 'status': 'done', 'priority': rows[0]['priority']}]
+            assert result['verified'] == 1
+        else:
+            assert result['arrivals'] == [{'id': 'd', 'origin': 'one', 'priority': 0}]
+            rows[-1]['priority'] = 1001
+            with pytest.raises(ValueError, match='canonical'):
+                prepare.verify(Canonical(rows), manifest)
+            rows[-1]['priority'] = 0
+        assert rows == before
+        return
     with pytest.raises(ValueError, match="canonical"):
         prepare.verify(Canonical(rows), manifest)

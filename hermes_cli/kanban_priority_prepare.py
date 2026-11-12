@@ -20,14 +20,18 @@ def verify(hub, manifest: dict, *, undo: bool = False) -> dict:
     validate(manifest)
     rows = _inventory(hub, manifest["board_id"])
     # Reuse capture's validation of IDs, ownership and integer priorities.
-    observed = validate(plan_global(rows, board_id=manifest["board_id"], exceptions=[]))
-    actual = {r["id"]: (r["origin"], r["old"]) for r in observed["rows"]}
+    validate(plan_global(rows, board_id=manifest["board_id"], exceptions=[]))
+    from hermes_cli.kanban_priority_inventory import classify
+    try:
+        active, report = classify(manifest['rows'], rows)
+    except ValueError as exc:
+        raise ValueError(f'canonical {exc}') from exc
+    actual = {r['id']: (r['created_on'], r['priority']) for r in rows}
     target = "old" if undo else "new"
-    expected = {r["id"]: (r["origin"], r[target]) for r in manifest["rows"]}
-    if actual != expected:
+    if any(actual[r['id']] != (r['origin'], r[target]) for r in active):
         raise ValueError("canonical ownership, membership or priorities differ from manifest")
-    return {"verified": len(expected), "board_id": manifest["board_id"],
-            "direction": "restore" if undo else "apply"}
+    return {"verified": len(active), "board_id": manifest["board_id"],
+            "direction": "restore" if undo else "apply", **report}
 
 
 def _inventory(hub, board_id: str) -> list[dict]:

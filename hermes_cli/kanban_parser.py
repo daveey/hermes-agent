@@ -391,8 +391,10 @@ _SPECS = [
     _cmd("link", [_arg("parent_id"), _arg("child_id")], help="Add a parent->child dependency"),
     _cmd("unlink", [_arg("parent_id"), _arg("child_id")], help="Remove a parent->child dependency"),
     _cmd("supervisor-requests", [
-        _arg("--priority-operation", choices=["prepare", "stage", "apply", "restore", "verify", "verify-restore"],
+        _arg("--priority-operation", choices=["prepare", "stage", "apply", "restore", "verify", "verify-restore", "migrate", "publish"],
              help="Operator-only attached priority migration; never executable by workers"),
+        _arg("--host-map", help="Explicit origin-to-SSH transport/task/backup JSON for migrate"),
+        _arg("--host-map-file", help="File containing the explicit migrate host-map JSON"),
         _arg("--writer", help="Explicit local primary gateway identity"),
         _arg("--manifest", help="Original manifest input file for stage"),
         _arg("--backup", help="New exclusive backup path for prepare/stage"),

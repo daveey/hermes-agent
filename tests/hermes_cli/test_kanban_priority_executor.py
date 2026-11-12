@@ -83,6 +83,13 @@ def test_executor_refuses_whole_origin_atomically(conn, case, reason, undo):
     conn.commit()
     before = helpers.priorities(conn, ids)
     outbox_before = [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")]
+    if case == 'terminal':
+        result = executor.apply_attached(conn, attachment, digest, writer=writer, undo=undo,
+                                         allow_legacy_rollback=True)
+        assert result['skipped'] == [{'id': ids[2], 'status': 'done', 'priority': before[2]}]
+        assert helpers.priorities(conn, ids)[2] == before[2]
+        assert helpers.priorities(conn, ids)[0] == (10000 if undo else 450)
+        return
     with pytest.raises(ValueError, match=reason):
         executor.apply_attached(conn, attachment, digest, writer=writer, undo=undo, allow_legacy_rollback=True)
     assert helpers.priorities(conn, ids) == before

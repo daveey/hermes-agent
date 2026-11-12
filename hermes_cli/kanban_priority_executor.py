@@ -46,12 +46,12 @@ def apply_attached(conn, attachment_id: int, digest: str, *, writer: str,
                                "AND (created_on IS NULL OR created_on='') LIMIT 1").fetchone()
         if unknown is not None:
             raise ValueError("missing origin in live inventory")
-        live = {r["id"]: r["priority"] for r in conn.execute(
-            "SELECT id,priority FROM tasks WHERE created_on=? AND status NOT IN ('done','archived')", (writer,))}
-        if set(live) != {r["id"] for r in rows}:
-            raise ValueError("ownership or membership changed; capture a new manifest")
+        from hermes_cli.kanban_priority_inventory import classify
+        observed = [dict(r) for r in conn.execute("SELECT id,priority,created_on,status FROM tasks")]
+        rows, report = classify(manifest['rows'], observed, writer=writer)
+        live = {r['id']: r['priority'] for r in observed}
         if all(live[r["id"]] == r[target] for r in rows):
-            return {"changed": 0, "writer": writer, "manifest_sha256": digest}
+            return {"changed": 0, "writer": writer, "manifest_sha256": digest, **report}
         if any(live[r["id"]] != r[source] for r in rows):
             raise ValueError("priorities changed; capture a new manifest")
         for row in rows:
@@ -67,4 +67,4 @@ def apply_attached(conn, attachment_id: int, digest: str, *, writer: str,
             changes.append(row["id"])
     for task_id in changes:
         kb.notify_task_updated(conn, task_id, ["priority"])
-    return {"changed": len(changes), "writer": writer, "manifest_sha256": digest}
+    return {"changed": len(changes), "writer": writer, "manifest_sha256": digest, **report}
