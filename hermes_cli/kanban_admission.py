@@ -306,6 +306,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
 
     if conn.in_transaction:
         raise RuntimeError("Kanban claim cannot run inside an existing transaction")
+    _decision.pool = "regular"
     if not SUPPORTED:
         with write_txn(conn):
             if disk_admission_refused(task_id):

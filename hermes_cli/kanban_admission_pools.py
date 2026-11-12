@@ -102,6 +102,22 @@ def host_remaining(regular_cap, running_count, board):
     return remaining
 
 
+def queue_fields(regular_cap, admission_class):
+    """Advisory whole-host census; unknown counts are never rendered as free slots."""
+    from hermes_cli import machine_cpu_metrics as cpu, machine_metrics
+
+    if cpu.root_limit()[0] != cpu.ON:
+        return {}
+    slots, _ceiling = root_settings()
+    if not slots:
+        return {}
+    detail = {"pools": {"regular": 0, "priority": 0}}
+    active = machine_metrics.active_card_runs(detail=detail)
+    counts = detail["pools"] if active is not None else {"regular": None, "priority": None}
+    return {"admission_class": admission_class,
+            "admission_pools": {**counts, "regular_cap": regular_cap, "priority_cap": slots}}
+
+
 def advisory_limit(conn, task_id, regular_limit):
     """Advisory may admit a marked candidate to final arbitration, never grant a slot."""
     slots, ceiling = root_settings()

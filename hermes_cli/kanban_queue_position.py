@@ -23,13 +23,14 @@ def _ahead(conn: sqlite3.Connection, task) -> int:
     """Unclaimed ready cards of the same assignee the dispatcher reaches first, in its own lane order
     (``DISPATCH_ORDER``: effective priority, then cards others wait on, then age). Worker-first cards wait for the
     pool, not a local slot, so they are not ahead."""
-    from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER
+    from hermes_cli.kanban_admission_pools import lane_rows
     from hermes_cli.kanban_worker_placement import POLICY
-    ids = [r[0] for r in conn.execute(
+    eligible = {r[0] for r in conn.execute(
         "SELECT id FROM tasks WHERE status = 'ready' AND claim_lock IS NULL AND assignee IS ? "
-        f"AND (placement_policy IS NOT ? OR id = ?) ORDER BY {DISPATCH_ORDER}",
+        "AND (placement_policy IS NOT ? OR id = ?)",
         (task.assignee, POLICY, task.id),
-    ).fetchall()]
+    ).fetchall()}
+    ids = [r[0] for r in lane_rows(conn, "ready") if r[0] in eligible]
     return ids.index(task.id) if task.id in ids else len(ids)
 
 
@@ -189,13 +190,15 @@ def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Op
     from hermes_cli import kanban_host_counts as khc
     running, limit = _running_and_limit(conn, board)
     from hermes_cli import kanban_board_share as share
+    from hermes_cli.kanban_admission_pools import queue_fields
     try:
         elsewhere = share.ahead_elsewhere(conn, task.id)
     except Exception:  # health: allow BLE001 -- other boards are advisory; an unreadable count is unknown
         _log.debug("kanban queue position: other boards unavailable", exc_info=True)
         elsewhere = None
     place = {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True,
-             "board": khc.board_of(conn) or board, "observed_at": int(time.time())}
+             "board": khc.board_of(conn) or board, "observed_at": int(time.time()),
+             **queue_fields(limit, getattr(task, "admission_class", "normal"))}
     if elsewhere:  # only when other boards' cards rank ahead: the single-board payload keeps its shape
         place["ahead_other_boards"] = elsewhere
     from hermes_cli import kanban_dispatch_skip as skips
@@ -325,6 +328,14 @@ def local_words(place: dict[str, Any]) -> str:
     ahead = place.get("ahead")
     words = (ahead_words(place, "waiting for a local slot: ~{n} ahead") if ahead is not None
              else "waiting for a local slot")
+    pools = place.get("admission_pools")
+    if pools is not None:
+        census = ", ".join(f"{name} {pools[name] if pools[name] is not None else '?'}/"
+                           f"{pools[name + '_cap'] if pools[name + '_cap'] is not None else '?'}"
+                           for name in ("regular", "priority"))
+        return (f"{words}, {census}; class {place['admission_class']}. "
+                "Queued, not stuck: check class/placement and available capacity; priority slots are marked-only. "
+                "Do not run its work outside the dispatcher")
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:

@@ -126,6 +126,88 @@ def test_claim_persists_immutable_regular_receipt(board):
                               (task_id,)).fetchone()) == ("regular", "capacity")
 
 
+def test_queue_note_reports_pools_and_marked_lane_order(board, monkeypatch):
+    from hermes_cli import kanban_queue_position as qp
+    conn, home = board
+    configure(home, limit=None)
+    assert kb.claim_task(conn, task(conn, title="regular running"))
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    advisory(home)
+    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    active = task(conn, title="marked running")
+    kb.edit_task(conn, active, admission_class="urgent")
+    assert kb.claim_task(conn, active)
+    ordinary = task(conn, title="ordinary waiting")
+    kb.edit_task(conn, ordinary, priority=1000)
+    marked = task(conn, title="marked waiting")
+    kb.edit_task(conn, marked, admission_class="capacity", admission_frees="frees: runner slots")
+    monkeypatch.setattr(qp, "_running_and_limit", lambda *a: (2, 7))
+    place = qp.read(conn, kb.get_task(conn, marked))
+    assert place["ahead"] == 0
+    assert place["admission_pools"] == {"regular": 1, "priority": 1, "regular_cap": 7, "priority_cap": 3}
+    note = qp.describe(place)
+    assert "regular 1/7, priority 1/3" in note
+    assert "class capacity" in note
+    assert "bump" not in note
+    assert qp.read(conn, kb.get_task(conn, ordinary))["ahead"] == 1
+
+
+@pytest.mark.parametrize("enabled,slots", [(False, 3), (True, 0)])
+def test_queue_pool_details_do_not_change_legacy_workers(board, monkeypatch, enabled, slots):
+    from hermes_cli import kanban_queue_position as qp
+    conn, home = board
+    configure(home, cap=7, limit=50 if enabled else None)
+    if enabled:
+        with (home / "config.yaml").open("a") as config:
+            config.write(f"    priority_slots: {slots}\n")
+    else:
+        with (home / "config.yaml").open("a") as config:
+            config.write(f"  admission:\n    priority_slots: {slots}\n")
+    ordinary = task(conn)
+    kb.edit_task(conn, ordinary, priority=1000)
+    marked = task(conn)
+    kb.edit_task(conn, marked, admission_class="urgent")
+    monkeypatch.setattr(qp, "_running_and_limit", lambda *a: (0, 7))
+    place = qp.read(conn, kb.get_task(conn, marked))
+    assert place["ahead"] == 1
+    assert "admission_pools" not in place
+
+
+def test_queue_unknown_pool_census_does_not_look_empty(board, monkeypatch):
+    from hermes_cli import kanban_queue_position as qp
+    conn, home = board
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    monkeypatch.setattr(qp, "_running_and_limit", lambda *a: (None, 7))
+    monkeypatch.setattr(mm, "active_card_runs", lambda **kw: None)
+    place = qp.read(conn, kb.get_task(conn, task(conn)))
+    assert place["admission_pools"]["regular"] is None
+    assert place["admission_pools"]["priority"] is None
+    assert "regular ?/7, priority ?/3" in qp.describe(place)
+
+
+def test_unsupported_fence_resets_prior_priority_receipt(board, monkeypatch):
+    conn, home = board
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    advisory(home)
+    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    marked = task(conn)
+    kb.edit_task(conn, marked, admission_class="urgent")
+    assert kb.claim_task(conn, marked)
+    assert conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (marked,)).fetchone()[0] == "priority"
+    # A later unsupported-platform claim must not inherit thread-local evidence.
+    configure(home, limit=None)
+    monkeypatch.setattr(af, "SUPPORTED", False)
+    ordinary = task(conn)
+    assert kb.claim_task(conn, ordinary)
+    assert conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (ordinary,)).fetchone()[0] == "regular"
+
+
 def test_claim_captures_created_origin_not_mutable_shepherd(board):
     conn, home = board
     configure(home, limit=None)
