@@ -84,25 +84,23 @@ def test_remote_links_miss_preserves_rows_with_bounded_fetches(tmp_path, monkeyp
     assert conn.fetched <= 12 + pages
 
 
-def test_warm_observation_identity_scan_is_bounded(tmp_path, monkeypatch):
+def test_warm_observation_identity_scan_is_bounded(tmp_path):
     from tui_gateway import kanban_remote_observations as observations
 
     conn = sqlite3.connect(':memory:', factory=CountingConnection)
     replica = tmp_path / 'replica.db'
     rows = [('remote', f'default/default/t_{i}', i + 1, '{}', 'tasks') for i in range(12000)]
-    monkeypatch.setattr(observations, '_decoded', {
-        (str(replica), owner, key): (seq, {'status': 'done'})
-        for owner, key, seq, _, _ in rows
-    })
+    decoded = {(str(replica), owner, key): (seq, {'status': 'done'}) for owner, key, seq, _, _ in rows}
     try:
         conn.execute('CREATE TABLE replica (gw TEXT, key TEXT, seq INTEGER, data TEXT, coll TEXT)')
         conn.executemany('INSERT INTO replica VALUES (?,?,?,?,?)', rows)
         conn.execute("DELETE FROM replica WHERE key='default/default/t_1'")
         conn.execute("UPDATE replica SET seq=13000, data='{bad' WHERE key='default/default/t_2'")
         conn.fetched = 0
-        result = observations._changed_rows_cards(conn, replica, 'local')
+        result = observations._changed_rows_cards(conn, replica, 'local', decoded)
         assert result == [(owner, key, {'status': 'done'}) for owner, key, seq, _, _ in rows if seq not in (2, 3)]
-        assert (str(replica), 'remote', 'default/default/t_1') not in observations._decoded
+        assert (str(replica), 'remote', 'default/default/t_1') not in decoded
+        assert decoded[(str(replica), 'remote', 'default/default/t_2')] == (13000, None)
         assert conn.fetched <= 3
     finally:
         conn.close()

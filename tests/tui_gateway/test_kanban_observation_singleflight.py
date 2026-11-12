@@ -161,6 +161,116 @@ def test_real_newer_snapshot_wins_over_delayed_ledger_write(tmp_path, monkeypatc
     assert next(iter(obs._memo.values()))[1] == newer
 
 
+class _LaneLock:
+    """A replica lane lock that reports its owner and which threads are blocked on it."""
+
+    def __init__(self, cond):
+        self.lock, self.cond, self.waiting, self.owner = threading.Lock(), cond, set(), None
+
+    def __enter__(self):
+        me = threading.get_ident()
+        if not self.lock.acquire(blocking=False):
+            with self.cond:
+                self.waiting.add(me)
+                self.cond.notify_all()
+            self.lock.acquire()
+        with self.cond:
+            self.waiting.discard(me)
+            self.owner = me
+            self.cond.notify_all()
+        return self
+
+    def __exit__(self, *args):
+        with self.cond:
+            self.owner = None
+            self.lock.release()
+            self.cond.notify_all()
+
+
+class _GatedLock:
+    """``_lock`` stand-in. After its snapshot, the gated poller enters only while it owns the replica lane and the
+    other poller is blocked on that lane, or once the other poller has finished. A lane released before this
+    poller's generation therefore lets the other poller run a whole observe first, without timing."""
+
+    def __init__(self, cond, lane, other_done):
+        self.lock, self.cond, self.lane, self.other_done = threading.Lock(), cond, lane, other_done
+        self.gated: int | None = None
+
+    def _ready(self):
+        me = threading.get_ident()
+        return self.other_done.is_set() or (self.lane.owner == me and bool(self.lane.waiting - {me}))
+
+    def __enter__(self):
+        if self.gated == threading.get_ident():
+            with self.cond:
+                assert self.cond.wait_for(self._ready, timeout=20)
+        self.lock.acquire()
+        return self
+
+    def __exit__(self, *args):
+        self.lock.release()
+
+    def locked(self):
+        return self.lock.locked()
+
+
+class _Generations(dict):
+    def __init__(self, order):
+        super().__init__()
+        self.order = order
+
+    def __setitem__(self, key, value):
+        self.order.append((threading.current_thread().name, value))
+        super().__setitem__(key, value)
+
+
+def test_lane_is_held_through_generation_so_older_snapshot_never_outranks_newer(tmp_path, monkeypatch):
+    replica, ledger, cards = _world(tmp_path)
+    cond, b_done = threading.Condition(), threading.Event()
+    lane = _LaneLock(cond)
+    gate = _GatedLock(cond, lane, b_done)
+    flight = obs._replica_flight(str(replica.resolve()))  # Strong ref: the lane is weakly indexed.
+    monkeypatch.setattr(flight, "lock", lane)
+    order = []
+    monkeypatch.setattr(obs, "_lock", gate)
+    monkeypatch.setattr(obs, "_generation", _Generations(order))
+    real_snapshot, a_read = obs._snapshot, threading.Event()
+
+    def snapshot(*args):
+        got = real_snapshot(*args)
+        if threading.current_thread().name == "old":
+            _move(replica, cards[0], "blocked", NOW + 1)  # A newer replica state lands after the old read.
+            gate.gated = threading.get_ident()
+            a_read.set()
+        return got
+
+    monkeypatch.setattr(obs, "_snapshot", snapshot)
+    results = {}
+
+    def poll(name, now, done=None):
+        try:
+            results[name] = obs.observe(replica, ledger, now)
+        finally:
+            if done is not None:
+                with cond:
+                    done.set()
+                    cond.notify_all()
+
+    old = threading.Thread(target=poll, args=("old", NOW), name="old")
+    old.start()
+    assert a_read.wait(20)
+    new = threading.Thread(target=poll, args=("new", NOW + 2, b_done), name="new")
+    new.start()
+    old.join(20)
+    new.join(20)
+    assert not old.is_alive() and not new.is_alive()
+    assert any(state.startswith("blocked@") for _, _, state in results["new"])
+    assert not any(state.startswith("blocked@") for _, _, state in results["old"])
+    # Generations follow lane (snapshot) order, so the newer snapshot's memo is the one published.
+    assert order == [("old", 1), ("new", 2)]
+    assert [entry[1] for entry in obs._memo.values()] == [results["new"]]
+
+
 def test_failed_snapshot_releases_lane_and_retries(tmp_path, monkeypatch):
     replica, ledger, _ = _world(tmp_path)
     original = obs._snapshot
@@ -195,7 +305,7 @@ def test_signature_reuse_still_supplies_cards_to_a_new_ledger(tmp_path):
     assert obs.observe(replica, tmp_path / "new-ledger.db", NOW) == expected
     flight = obs._replica_flight(str(replica.resolve()))
     assert len(flight.decoded) == 20
-    assert obs._decoded == {}  # Observe never uses the legacy direct-helper cache.
+    assert not hasattr(obs, "_decoded")  # No module-level decode map outlives a replica lane.
 
 
 def test_same_signature_refresh_does_not_repeat_persistence(tmp_path, monkeypatch):

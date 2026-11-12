@@ -15,7 +15,7 @@ _memo: dict[tuple, tuple] = {}
 _generation: dict[tuple, int] = {}  # observe key -> ledger writes started, so only the newest publishes its memo
 
 
-def _snapshot(replica: Path, previous=None, decoded=None) -> tuple[bool, list[tuple] | None, tuple | None]:
+def _snapshot(replica: Path, previous, decoded: dict) -> tuple[bool, list[tuple] | None, tuple | None]:
     """Read readiness and ALL canonical terminal states from the same SQLite snapshot.
 
     The hub client sets gateway before pulling and commits each feed page. Until
@@ -54,14 +54,6 @@ def _snapshot(replica: Path, previous=None, decoded=None) -> tuple[bool, list[tu
     return ready, cards, signature
 
 
-# (replica, owner, key) -> (seq, terminal summary or None). The replica holds thousands of
-# task rows (~30 MB of JSON on a busy fleet) and its signature moves whenever any card does,
-# so decoding every row per change kept the notice pollers busy while Desktop sat idle. A row
-# is re-read only when its seq moved; the summary keeps just the fields _persist reads.
-_decoded: dict[tuple, tuple] = {}
-
-
-
 def _summary(task) -> dict | None:
     from tui_gateway.kanban_remote_notices import drop_mark
 
@@ -88,10 +80,16 @@ def _terminal_states():
     return _TERMINAL
 
 
-def _changed_rows_cards(conn, replica: Path, me, decoded=None) -> list[tuple]:
+def _changed_rows_cards(conn, replica: Path, me, decoded: dict) -> list[tuple]:
+    """``decoded`` is the caller's (replica, owner, key) -> (seq, terminal summary or None) map.
+
+    The replica holds thousands of task rows (~30 MB of JSON on a busy fleet) and its signature moves whenever any
+    card does, so decoding every row per change kept the notice pollers busy while Desktop sat idle. A row is
+    re-read only when its seq moved; the summary keeps just the fields _persist reads. ``observe`` owns one map per
+    replica lane (``_ReplicaFlight.decoded``), so no module-level map outlives a lane.
+    """
     from tui_gateway.kanban_remote_notices import _canonical
 
-    decoded = _decoded if decoded is None else decoded
     # One SQLite result row avoids a GIL reacquisition per task;
     # payload point reads remain proportional to changes.
     sql = "SELECT json_group_array(json_array(gw, key, seq, NULL)) FROM replica WHERE coll = 'tasks'"
@@ -261,8 +259,9 @@ def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
     ledger = Path(ledger) if ledger is not None else ledger_path()
     key = (str(replica.resolve()), str(ledger.resolve()))
     flight = _replica_flight(key[0])
-    # Wait/read/decode on this replica's lane, never on the publication lock.
-    # Keep the lane through generation assignment so snapshot order is preserved.
+    # Wait/read/decode on this replica's lane, never on the publication lock. Keep the lane through generation
+    # assignment: generations then follow snapshot order, so an older snapshot whose ledger write finishes last
+    # cannot publish over a newer one's memo (pinned by test_lane_is_held_through_generation_...).
     with flight.lock:
         stamp = fingerprint(replica)
         ident = file_identity(stamp)
