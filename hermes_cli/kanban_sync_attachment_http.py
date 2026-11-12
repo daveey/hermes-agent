@@ -17,16 +17,25 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _request(hub, method: str, path: str, data: bytes | None, cap: int) -> bytes:
     from hermes_cli.kanban_sync_client import HubError
+    from hermes_cli.kanban_sync_attachment_deadline import Transfer
     headers = {**hub._headers(), "content-type": "application/octet-stream"}
     request = urllib.request.Request(hub.ident.url + path, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=hub._remaining(5.0)) as response:
+    budget = hub._remaining(5.0)
+    transfer = Transfer(budget)
+
+    def read():
+        opener = urllib.request.build_opener(_NoRedirect(), *transfer.handlers())
+        with opener.open(request, timeout=budget) as response:
             body = response.read(cap + 1)
             if len(body) > cap:
                 raise ValueError("attachment response exceeds size limit")
             return body
+
+    try:
+        return transfer.run(read)
     except urllib.error.HTTPError as exc:
         # Do not persist response bodies, URLs or gateway keys in retry diagnostics.
+        exc.close()
         raise HubError(exc.code, "attachment transfer refused") from exc
     except http.client.HTTPException as exc:
         raise OSError("incomplete attachment response") from exc

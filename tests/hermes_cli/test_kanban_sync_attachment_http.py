@@ -3,6 +3,7 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
+import time
 
 import pytest
 
@@ -25,6 +26,25 @@ def server():
 
         def do_GET(self):
             state["calls"].append((self.command, self.path, self.headers["Authorization"]))
+            if state.get("trickle"):
+                try:
+                    if state["trickle"] == "headers":
+                        payload = b"HTTP/1.0 200 OK\r\nX-Slow: " + b"a" * 30 + b"\r\n\r\n"
+                    else:
+                        self.send_response(200)
+                        self.send_header("Content-Length", "30")
+                        self.end_headers()
+                        payload = b"a" * 30
+                    for byte in payload:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        if state["stop"].wait(0.05):
+                            break
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    state["finished"].set()
+                return
             if state.get("truncated"):
                 self.send_response(200)
                 self.send_header("Transfer-Encoding", "chunked")
@@ -51,11 +71,28 @@ def server():
     try:
         yield hub, state
     finally:
+        if "stop" in state:
+            state["stop"].set()
+            assert state["finished"].wait(2)
         hub.close()
         httpd.shutdown()
         httpd.server_close()
         thread.join(5)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_absolute_deadline_cancels_trickling_transfer(server, phase):
+    hub, state = server
+    state.update(trickle=phase, stop=threading.Event(), finished=threading.Event())
+    hub.deadline = time.monotonic() + 0.3
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        hub.get_attachment_blob("board", "uid")
+    assert time.monotonic() - started < 1.0
+    # The server sees connection shutdown, not just an abandoned daemon reader.
+    assert state["finished"].wait(0.8)
+    assert len(state["calls"]) == 1
 
 
 def test_binary_roundtrip_uses_enrolled_key_and_exact_path(server):
@@ -83,6 +120,42 @@ def test_truncated_chunked_response_is_retryable_io_failure(server):
     state["truncated"] = True
     with pytest.raises(OSError):
         hub.get_attachment_blob("board", "uid")
+
+
+def test_connection_finishing_after_expiry_cannot_send():
+    from hermes_cli.kanban_sync_attachment_deadline import Transfer
+    import socket
+
+    transfer = Transfer(0.02)
+    release = threading.Event()
+    connected = threading.Event()
+    closed = threading.Event()
+    left, right = socket.socketpair()
+
+    class SlowConnection:
+        sock = left
+
+        def connect(self):
+            connected.set()
+            assert release.wait(2)
+
+        def close(self):
+            left.close()
+            closed.set()
+
+    connection = transfer.connection(SlowConnection)()
+    try:
+        with pytest.raises(TimeoutError):
+            transfer.run(connection.connect)
+        assert connected.is_set()
+        release.set()
+        assert closed.wait(1)
+        right.settimeout(1)
+        assert right.recv(1) == b""
+    finally:
+        release.set()
+        left.close()
+        right.close()
 
 
 def test_body_size_is_capped_without_content_length(server, monkeypatch):
