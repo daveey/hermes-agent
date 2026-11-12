@@ -60,16 +60,13 @@ def test_reporter_rechecks_policy_after_cpu_sample(monkeypatch, changed):
     settings = {k: v for k, v in EXPECTED.items() if k.startswith("admission_")}
     current = {} if changed == "off" else {**settings, "admission_priority_slots": 4} if changed == "changed" else settings
     monkeypatch.setattr(admission, "policy", lambda: current)
-    monkeypatch.setattr(mm, "record_hub_cpu_sample", lambda sample: None)
     sent, now = [], [1000.0]
     reporter = mm.Reporter(sent.append, collect_fn=lambda: {"active_card_runs": 8, **EXPECTED},
                            clock=lambda: now[0], cpu_limit_fn=lambda: ("on", 50),
-                           cpu_begin_fn=lambda **kw: (now[0], None),
-                           cpu_finish_fn=lambda *a, **kw: {"cpu_busy_pct": 10, "cpu_busy_window_ms": 1000,
-                                                           "cpu_busy_sample_end_ms": 100000})
-    assert reporter.report_due() is False
-    now[0] += 1
-    assert reporter.report_due()
+                           cpu_take_fn=lambda limit: {"cpu_busy_pct": 10, "cpu_busy_window_ms": 1000,
+                                                      "cpu_busy_sample_end_ms": 100000})
+    assert reporter.report_due()  # the sampler thread already measured: one call reports
+    assert sent[0]["cpu_busy_pct"] == 10
     assert ("admission_version" in sent[0]) == (changed == "same")
     assert sent[0]["active_card_runs"] == 8
 
