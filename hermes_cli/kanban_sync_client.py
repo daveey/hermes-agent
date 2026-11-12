@@ -44,6 +44,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
+from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
 
 _log = logging.getLogger(__name__)
 
@@ -153,24 +154,12 @@ def _peer_closed(conn) -> bool:
         return True
 
 
-class _DeadlineRequests(urllib.request.BaseHandler):
-    """urllib invokes request processors again for each redirect, before sending."""
-
-    def __init__(self, remaining: Callable[[float], float]) -> None:
-        self.remaining = remaining
-
-    def http_request(self, request):
-        request.timeout = self.remaining(request.timeout)
-        return request
-
-    https_request = http_request
-
-
 CPU_REPORT_BUDGET_S = 2.0
 _CPU_FIELDS = ("cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms")
 
 
-def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict], budget_s: float) -> dict:
+def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict], budget_s: float,
+                  probe: Optional[dict] = None) -> dict:
     """One request with a hard total wall-clock budget, on a private connection that is closed afterwards.
 
     The request runs on a daemon thread whose own Hub carries the absolute deadline (every attempt's socket timeout
@@ -205,6 +194,8 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
                     if box.get("expired"):
                         cut(conn)
             conn.connect = connect_then_check
+            if probe is not None:  # the metrics sender's per-send line: were request bytes written? [daveey]
+                watch_written(conn, probe)
             with expiry:
                 box["conn"] = conn
             return pair
@@ -218,11 +209,15 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
             box["error"] = exc
         finally:
             hub.close()
+            if probe is not None:
+                probe["worker"] = schedstat()
 
     worker = _hub_threading.Thread(target=run, daemon=True, name="kanban-bounded-call")
     worker.start()
     worker.join(max(0.0, deadline - time.monotonic()))
     if worker.is_alive():
+        if probe is not None:
+            probe["worker"] = schedstat(worker.native_id)
         with expiry:
             box["expired"] = True
             if "conn" in box:
@@ -1510,6 +1505,10 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     sampler = AdvisorySampler()
     metrics.cpu_take_fn = sampler.take
     sampler.start()
+    # While the CPU gate is on, reports go out on their own anchored thread, each send bounded to 2 s. [daveey]
+    from hermes_cli.machine_metrics_sender import MetricsSender, board_post
+    sender = MetricsSender(metrics, board_post(ident))
+    sender.start()
     try:
         while keep_running():
             boards = board_paths()
@@ -1536,13 +1535,14 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             if time.monotonic() >= next_links:
                 reconcile_links(boards, ident.gateway, skip_unchanged=True)
                 next_links = time.monotonic() + LINKS_EVERY_S
-            sync_timing.report(metrics.report_due)
+            sync_timing.report(sender.loop_report)
             remaining = max(0.0, work.deadline - time.monotonic())
             deferred_due = next_deferred_repair(boards)
             if deferred_due is not None:
                 remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
             sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
     finally:
+        sender.close()
         sampler.close()
     runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
 
