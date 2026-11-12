@@ -288,10 +288,10 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
     board = _resolve_board(board)
     done_limit = int(done_limit or 0)
 
-    def build():
+    def build(prev=None):
         with closing(_conn(board=board)) as conn:
             return board_read.materialize(conn, tenant, include_archived, workflow_template_id, current_step_key,
-                                          done_limit, diagnostic_inputs=_diagnostic_inputs)
+                                          done_limit, diagnostic_inputs=_diagnostic_inputs, prev=prev)
 
     try:
         path = str(kanban_db.kanban_db_path(board=board))
@@ -299,7 +299,8 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
         rows = build()
     else:
         rows = board_rows.materialized(
-            (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit), path, build)
+            (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit), path, build,
+            update=build)
     return board_read.project(rows, include_archived, _diagnostics_from_inputs)
 
 

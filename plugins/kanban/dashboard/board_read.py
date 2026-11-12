@@ -25,6 +25,34 @@ def _placeholders(ids: list) -> str:
     return ",".join(["?"] * len(ids))
 
 
+def _rows_by_task(conn: sqlite3.Connection, table: str, row_ids: list) -> dict[str, tuple]:
+    by_task: dict[str, list] = {tid: [] for tid in row_ids}
+    if row_ids:
+        for row in conn.execute(
+                f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
+            by_task.setdefault(row["task_id"], []).append(row)
+    return {tid: tuple(v) for tid, v in by_task.items()}  # sqlite3.Row is immutable
+
+
+def _raw(rows) -> tuple:
+    return tuple(tuple(r) for r in rows)
+
+
+_NO_EVENTS = (0, None)  # _event_marks of a task without events
+
+
+def _event_marks(conn: sqlite3.Connection, row_ids: list) -> dict[str, tuple]:
+    """``{task_id: (event count, max event id)}``: an insert or delete moves it. Events are otherwise
+    immutable: the only in-place UPDATEs (run_id on completion) commit with a task row change and
+    a new event, and the legacy kind rename runs once per DB at migration. Read BEFORE the events
+    it vouches for, so an event committed in between is re-read on the next refresh, never missed."""
+    if not row_ids:
+        return {}
+    return {r[0]: (r[1], r[2]) for r in conn.execute(
+        f"SELECT task_id, COUNT(*), MAX(id) FROM task_events WHERE task_id IN ({_placeholders(row_ids)}) "
+        "GROUP BY task_id", tuple(row_ids))}
+
+
 def fresh(value):
     """New dicts/lists all the way down (scalars shared). Projections hand these out so a
     caller editing a payload can never edit the retained rows."""
@@ -48,16 +76,8 @@ def diagnostic_inputs(conn: sqlite3.Connection, task_ids: Optional[list[str]] = 
     if not rows:
         return None
     row_ids = [r["id"] for r in rows]
-
-    def _rows_by_task(table: str) -> dict[str, tuple]:
-        by_task: dict[str, list] = {tid: [] for tid in row_ids}
-        for row in conn.execute(
-            f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
-            by_task.setdefault(row["task_id"], []).append(row)
-        return {tid: tuple(v) for tid, v in by_task.items()}  # sqlite3.Row is immutable
-
-    events_by_task = _rows_by_task("task_events")
-    runs_by_task = _rows_by_task("task_runs")
+    events_by_task = _rows_by_task(conn, "task_events", row_ids)
+    runs_by_task = _rows_by_task(conn, "task_runs", row_ids)
     graph_by_task = kanban_db.task_graph_contexts(conn, row_ids)
     from hermes_cli import kanban_wake_check as kwc
     wake_by_task = kwc.load_states(conn, row_ids)
@@ -106,13 +126,85 @@ def preview_list_body(task: dict) -> None:
         task["body_truncated"] = True
 
 
+def _done_trim(conn, filters: dict, done_limit) -> tuple[str, list, int]:
+    """``(extra_where, params, done total)`` for list_tasks. Done cards past ``done_limit`` never reach
+    the payload, so they are ranked on a narrow read and never fetched whole (4.2k of the hub's 4.4k
+    rows: parsing them was half of every board read). Same order as the done column below:
+    completed_at DESC NULLS LAST, id DESC, on the values Task.from_row parses."""
+    done = kanban_db.list_task_rows(conn, status="done", columns="rowid AS _rowid, id, completed_at", **filters)
+    done_cap = int(done_limit or 0)
+    if not 0 < done_cap < len(done):
+        return "", [], len(done)
+    epoch = {r["_rowid"]: kanban_db._to_epoch(kanban_db._lossy_text(r["completed_at"])) for r in done}
+    ranked = sorted(sorted(done, key=lambda r: kanban_db._lossy_text(r["id"]), reverse=True),
+                    key=lambda r: (epoch[r["_rowid"]] is None, -(epoch[r["_rowid"]] or 0)))
+    keep = [r["_rowid"] for r in ranked[:done_cap]]
+    return f"status != 'done' OR rowid IN ({_placeholders(keep)})", keep, len(done)
+
+
+def _diag_memo(rows, events_by_task, runs_by_task, marks) -> dict:
+    """Per task: what its diagnostics inputs were read from, to tell a changed task next time."""
+    return {r["id"]: (tuple(r), _raw(runs_by_task.get(r["id"], ())), marks.get(r["id"], _NO_EVENTS),
+                      events_by_task.get(r["id"], ())) for r in rows}
+
+
+def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable) -> tuple:
+    """``(diagnostic inputs, memo)`` re-reading events only for tasks whose row, runs or event
+    count/max id moved. A heartbeat touches one task: its row (``last_heartbeat_at``), its run
+    and one event, so a refresh re-reads that task's events, not the board's ~50k. Runs and the
+    graph/wake contexts are read whole (cheap, and a parent's change moves a child's graph)."""
+    ids = [r["id"] for r in diag_rows]
+    marks = _event_marks(conn, ids)
+    runs = _rows_by_task(conn, "task_runs", ids)
+    changed = {tid for r, tid in zip(diag_rows, ids)
+               if (old := prev.get(tid)) is None or old[2] is None or old[0] != tuple(r)
+               or old[1] != _raw(runs[tid]) or old[2] != marks.get(tid, _NO_EVENTS)}
+    part = diagnostic_inputs(conn, task_ids=[tid for tid in ids if tid in changed]) if changed else None
+    fresh_events = part[1] if part is not None else {}
+    events = {}
+    memo = {}
+    for r, tid in zip(diag_rows, ids):
+        if tid in fresh_events or tid not in changed:
+            events[tid] = fresh_events[tid] if tid in fresh_events else prev[tid][3]
+            memo[tid] = (tuple(r), _raw(runs[tid]), marks.get(tid, _NO_EVENTS), events[tid])
+        else:  # vanished between reads: no events held, so never vouch for a mark
+            events[tid] = ()
+            memo[tid] = (tuple(r), _raw(runs[tid]), None, ())
+    from hermes_cli import kanban_wake_check as kwc
+    inputs = (tuple(diag_rows), events, runs, kanban_db.task_graph_contexts(conn, ids), kwc.load_states(conn, ids))
+    return inputs, memo
+
+
 def materialize(conn, tenant, include_archived, workflow_template_id, current_step_key, done_limit, *,
-                diagnostic_inputs: Callable = diagnostic_inputs) -> dict:
+                diagnostic_inputs: Callable = diagnostic_inputs, prev: Optional[dict] = None) -> dict:
     """Everything the board payload reads from SQL, and nothing that depends on the clock,
-    config, profiles on disk or the replica. Retained across refreshes: never mutate it."""
-    tasks = kanban_db.list_tasks(
-        conn, tenant=tenant, include_archived=include_archived,
-        workflow_template_id=workflow_template_id, current_step_key=current_step_key)
+    config, profiles on disk or the replica. Retained across refreshes: never mutate it.
+
+    ``prev`` (the last rows for the same query) makes it incremental: a task whose row values are
+    unchanged keeps its parsed Task, and only tasks whose row, runs or events moved re-read their
+    events. Every row is still read, so a committed write is never missed; only parsing is saved."""
+    filters = dict(tenant=tenant, include_archived=include_archived,
+                   workflow_template_id=workflow_template_id, current_step_key=current_step_key)
+    extra_where, extra_params, done_total = _done_trim(conn, filters, done_limit)
+    old = (prev or {}).get("_memo")
+    old_tasks = old["tasks"] if old is not None else {}
+    parsed: dict[tuple, tuple] = {}
+    task_rows, fields = [], []
+
+    def parse(r):
+        raw = (tuple(r.keys()), tuple(r))  # column names too: a migration re-parses every row
+        hit = parsed.get(raw) or old_tasks.get(raw)
+        if hit is None:
+            t = kanban_db.Task.from_row(r)
+            hit = (t, asdict(t))
+        parsed[raw] = hit
+        task_rows.append(r)
+        fields.append(hit[1])
+        return hit[0]
+
+    tasks = kanban_db.list_tasks(conn, extra_where=extra_where, extra_params=extra_params, parse=parse, **filters)
+    if len(task_rows) != len(tasks):  # a list_tasks that bypassed ``parse``: nothing to reuse
+        task_rows, fields, parsed, old = [], [asdict(t) for t in tasks], {}, None
     # Link / comment / progress rollups are each one aggregate query rather than N per-task lookups.
     link_counts: dict[str, dict[str, int]] = {}
     for row in conn.execute("SELECT parent_id, child_id FROM task_links").fetchall():
@@ -126,16 +218,16 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
         p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
         p["total"] += 1
         p["done"] += row["cstatus"] == "done"
-    # Done cards past ``done_limit`` never reach the payload: trim them before the per-card
-    # work (diagnostics alone were ~1.2 of the 1.5 s cold read on a 1.2k-card board).
-    # Same order as the done column below: completed_at DESC NULLS LAST, id DESC.
-    done_all = sorted(sorted((t for t in tasks if t.status == "done"), key=lambda t: t.id, reverse=True),
-                      key=lambda t: (t.completed_at is None, -(t.completed_at or 0)))
-    done_total = len(done_all)
-    done_cap = int(done_limit or 0)
-    dropped = {t.id for t in done_all[done_cap:]} if 0 < done_cap < done_total else set()
-    tasks = [t for t in tasks if t.id not in dropped]
-    diag_inputs = diagnostic_inputs(conn, task_ids=[t.id for t in tasks if t.status != "archived"])
+    diag_ids = [t.id for t in tasks if t.status != "archived"]
+    if old is not None and diag_ids:
+        by_id = {r["id"]: r for r in task_rows}
+        diag_rows = [by_id[tid] for tid in diag_ids if tid in by_id]
+        diag_inputs, diag_memo = _incremental_diag_inputs(conn, diag_rows, old["diag"], diagnostic_inputs)
+    else:
+        marks = _event_marks(conn, diag_ids)  # before the events it vouches for
+        diag_inputs = diagnostic_inputs(conn, task_ids=diag_ids)
+        diag_memo = (_diag_memo(diag_inputs[0], diag_inputs[1], diag_inputs[2], marks)
+                     if diag_inputs is not None else {})
     latest_event_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
     # One window-function query for latest summaries (avoids N+1); cards get a
     # truncated preview, the full text comes from /tasks/:id.
@@ -145,9 +237,9 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
     run_start_map = kanban_db.current_run_started_ats(conn, [t.id for t in tasks])
     managers = managing_sessions(conn)
     cards = []
-    for t in tasks:
+    for t, task_fields in zip(tasks, fields):
         full = summary_map.get(t.id)
-        cards.append((t, asdict(t), {
+        cards.append((t, task_fields, {
             "latest_summary": full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None,
             "current_run_started_at": run_start_map.get(t.id),
             "link_counts": link_counts.get(t.id, {"parents": 0, "children": 0}),
@@ -163,6 +255,8 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
         "latest_event_id": int(latest_event_id), "tenants": tuple(tenants),
         # The SQL half of kanban_db.known_assignees; profiles on disk are added per projection.
         "task_assignees": frozenset(kanban_db._counts_by_assignee(conn)),
+        # What the next read of the same query diffs against (``prev``); never part of the payload.
+        "_memo": {"tasks": parsed, "diag": diag_memo},
     }
 
 

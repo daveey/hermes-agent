@@ -30,7 +30,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
@@ -1448,10 +1448,28 @@ def list_tasks(
     tenant: Optional[str] = None, session_id: Optional[str] = None, include_archived: bool = False,
     limit: Optional[int] = None, order_by: Optional[str] = None,
     workflow_template_id: Optional[str] = None, current_step_key: Optional[str] = None,
+    extra_where: str = "", extra_params: Sequence[Any] = (), parse: Optional[Callable[[sqlite3.Row], Task]] = None,
 ) -> list[Task]:
+    """``parse`` (default ``Task.from_row``) lets the board reuse a Task parsed from identical row values."""
+    return [(parse or Task.from_row)(r) for r in list_task_rows(
+        conn, assignee=assignee, status=status, tenant=tenant, session_id=session_id,
+        include_archived=include_archived, limit=limit, order_by=order_by,
+        workflow_template_id=workflow_template_id, current_step_key=current_step_key,
+        extra_where=extra_where, extra_params=extra_params)]
+
+
+def list_task_rows(
+    conn: sqlite3.Connection, *, assignee: Optional[str] = None, status: Optional[str] = None,
+    tenant: Optional[str] = None, session_id: Optional[str] = None, include_archived: bool = False,
+    limit: Optional[int] = None, order_by: Optional[str] = None,
+    workflow_template_id: Optional[str] = None, current_step_key: Optional[str] = None,
+    columns: str = "*", extra_where: str = "", extra_params: Sequence[Any] = (),
+) -> list[sqlite3.Row]:
+    """``list_tasks``'s raw rows (``columns`` selected, ``extra_where`` ANDed in): the board
+    re-parses only rows whose values changed since its last read."""
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
-    query = "SELECT * FROM tasks WHERE 1=1"
+    query = f"SELECT {columns} FROM tasks WHERE 1=1"
     params: list[Any] = []
     for col, val in (
         ("assignee", _canonical_assignee(assignee)), ("status", status), ("tenant", tenant),
@@ -1463,6 +1481,9 @@ def list_tasks(
             params.append(val)
     if not include_archived and status != "archived":
         query += " AND status != 'archived'"
+    if extra_where:
+        query += f" AND ({extra_where})"
+        params.extend(extra_params)
     if order_by is not None:
         order_by = order_by.strip().lower()
         if order_by not in VALID_SORT_ORDERS:
@@ -1472,7 +1493,7 @@ def list_tasks(
         query += f" ORDER BY {DISPATCH_ORDER}"
     if limit:
         query += f" LIMIT {int(limit)}"
-    return [Task.from_row(r) for r in conn.execute(query, params).fetchall()]
+    return conn.execute(query, params).fetchall()
 
 
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
