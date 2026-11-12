@@ -284,6 +284,7 @@ from tests._fixtures.live_system_guard import (
     _LIVE_SYSTEM_GUARD_BYPASS_MARK,
     _live_system_guard,
 )
+from tests._fixtures.authority_cwd import authority_cwd_in_tmp  # opt-in cwd for symbolic profile ids
 from tests._fixtures.fake_dns import public_dns  # opt-in offline resolver for SSRF-guard tests
 from tests._fixtures.model_peer import model_peer  # fixture registers here
 from tests._fixtures.offline_catalogs import (
@@ -1143,16 +1144,6 @@ def _reset_tui_gateway_server_state():
 def tmp_dir(tmp_path):
     """Provide a temporary directory that is cleaned up automatically."""
     return tmp_path
-
-
-@pytest.fixture
-def authority_cwd_in_tmp(tmp_path, monkeypatch):
-    """Run in ``tmp_path`` for tests whose authority has a symbolic ``profile_id`` ('owned',
-    'fixture', ...). Production passes the profile's absolute home; a symbolic id is a RELATIVE
-    path, so the authority's profile-scoped work (an ``on_session_open`` delivery loading config)
-    created ``<cwd>/<id>/`` in the checkout. Opt-in (``usefixtures``), never autouse: most tests rely
-    on the checkout as cwd."""
-    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture()

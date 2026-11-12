@@ -231,8 +231,10 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
                 # Unbind an enclosing secondary's home and terminal, or the launch secrets would
                 # pair with that profile's config. Unset resolves to the process home, which is the
                 # launch home for every caller (``launch_home`` defaults to it; the RPC passes it).
+                # health: allow HX016 -- upstream unbind (None), not a profile bind; no Scope means "unset"
                 stack.callback(reset_hermes_home_override, set_hermes_home_override(None))
                 stack.callback(reset_secret_scope, set_secret_scope(launch_secret_scope(launch)))
+                # health: allow HX016 -- upstream unbind (None) of an enclosing secondary's terminal
                 stack.callback(reset_terminal_scope, set_terminal_scope(None))
         else:
             secrets = build_profile_secret_scope(home)

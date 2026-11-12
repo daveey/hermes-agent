@@ -37,6 +37,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_notify_identity import _caller_identity_for_target
 from hermes_cli.kanban_cli_metadata import ReceiptEditRefused, parse_metadata_flag as _parse_metadata_flag, receipt_refusal
 from hermes_cli.kanban_cli_park import (
     _REASON_FLAG_HINT, _REASON_WORDS_HINT, _cli_awaiting, _cli_wake_check, _commented, _guarded_park, _ids_error,
@@ -1689,23 +1690,6 @@ def _cmd_stats(args: argparse.Namespace) -> int:
             flag = "" if info.get("root") else "  ⚠ not the root gateway: its config's kanban caps apply"
             print(f"  {name:10s}  {describe_holder(info)}{held}{flag}")
     return 0
-
-
-def _caller_identity_for_target(platform: str, chat_id: str, thread_id, user_id, user_id_alt) -> tuple:
-    """``(user_id, user_id_alt)`` for a subscription, the calling gateway session's sender filled
-    in when the target IS that session's chat and no id was given. An agent running this command
-    from a group chat omits ``--user-id``; under ``group_sessions_per_user`` the wake would then key
-    a second, participant-less session (#147522). Another chat's (or topic's) subscription is
-    never stamped with the caller's identity."""
-    if user_id or user_id_alt:  # an explicit recipient is never paired with the caller's other id
-        return user_id, user_id_alt
-    from gateway.session_context import get_session_env
-    if (str(get_session_env("HERMES_SESSION_PLATFORM", "")).lower() != str(platform or "").lower()
-            or str(get_session_env("HERMES_SESSION_CHAT_ID", "")) != str(chat_id or "")
-            or str(get_session_env("HERMES_SESSION_THREAD_ID", "")) != str(thread_id or "")):
-        return user_id, user_id_alt
-    return (get_session_env("HERMES_SESSION_USER_ID", "") or None,
-            get_session_env("HERMES_SESSION_USER_ID_ALT", "") or None)
 
 
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
