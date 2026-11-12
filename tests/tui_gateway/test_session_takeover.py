@@ -402,6 +402,30 @@ def test_take_over_refuses_an_unprovable_writer_at_the_ack_deadline(durable_writ
     assert durable_writer.db.session_turn_lease_owner(KEY)["holder"] == holder
 
 
+def test_take_over_keeps_the_ack_deadline_for_a_foreign_namespace_pid_that_is_live_here(
+        durable_writer, sleeper, rpc, monkeypatch):
+    """A pid number from another pid namespace says nothing about the process with that number here:
+    it must not earn the live-writer wait or an "alive ... pid N" message naming the wrong process."""
+    import os
+    import time
+    _same_ns_holder(0)  # skips off Linux
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", "0.3")
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S", "10")
+    proc = sleeper()  # live here, so only the namespace check can refuse it
+    foreign_ns = os.stat("/proc/self/ns/pid").st_ino + 1
+    holder = f"pid={proc.pid}:pidns={foreign_ns}:turn=x:platform=desktop"
+    durable_writer.hold(holder)
+    started = time.monotonic()
+    resp = rpc()
+    elapsed = time.monotonic() - started
+    assert resp["error"]["code"] == 4090
+    assert resp["error"]["data"] == {"reason": "SESSION_NOT_OWNED"}
+    assert 0.3 <= elapsed < 3
+    assert "alive" not in resp["error"]["message"]
+    assert proc.poll() is None  # never forced out
+    assert durable_writer.db.session_turn_lease_owner(KEY)["holder"] == holder
+
+
 def test_take_over_refuses_a_live_writer_that_never_releases_at_the_live_cap(
         durable_writer, sleeper, rpc, monkeypatch, caplog):
     import logging
