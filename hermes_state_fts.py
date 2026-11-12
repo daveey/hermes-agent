@@ -128,6 +128,22 @@ def base_source_view_is_stale(cursor: sqlite3.Cursor) -> bool:
 _FTS5_SHADOW_SUFFIXES = ("content", "data", "docsize", "idx", "config")
 
 
+def _orphan_fts_shadows(cursor: sqlite3.Cursor, family: str) -> list[str]:
+    """Shadow tables of ``family`` present while its vtable row is absent (empty when the vtable is live)."""
+    vtable_live = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? "
+        "AND sql LIKE 'CREATE VIRTUAL TABLE%'",
+        (family,),
+    ).fetchone()
+    if vtable_live:
+        return []
+    shadows = [f"{family}_{suffix}" for suffix in _FTS5_SHADOW_SUFFIXES]
+    return [row[0] for row in cursor.execute(
+        f"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ({','.join('?' for _ in shadows)})",
+        shadows,
+    ).fetchall()]
+
+
 def _drop_orphan_fts_shadow_tables(cursor: sqlite3.Cursor, families: Sequence[str]) -> list[str]:
     """Drop, per family, shadow tables whose virtual table row is absent from sqlite_master.
 
@@ -135,25 +151,31 @@ def _drop_orphan_fts_shadow_tables(cursor: sqlite3.Cursor, families: Sequence[st
     ``messages_fts_trigram_*``) and leaves a family alone whenever its vtable is live. The
     shadows are derived index state; the caller recreates and rebuilds from ``messages``.
     Returns the families that were repaired.
+
+    In autocommit each probe reads its own snapshot, so a sibling opener's CREATE VIRTUAL TABLE can
+    commit between "no vtable row" and "shadows present"; dropping then strips a live family's shadow
+    tables (``vtable constructor failed`` forever after). A candidate is therefore re-probed and dropped
+    under one write lock; a caller's open transaction already pins one snapshot.
     """
     repaired: list[str] = []
     for family in families:
-        vtable_live = cursor.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? "
-            "AND sql LIKE 'CREATE VIRTUAL TABLE%'",
-            (family,),
-        ).fetchone()
-        if vtable_live:
+        if not _orphan_fts_shadows(cursor, family):
             continue
-        shadows = [f"{family}_{suffix}" for suffix in _FTS5_SHADOW_SUFFIXES]
-        orphans = [row[0] for row in cursor.execute(
-            f"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ({','.join('?' for _ in shadows)})",
-            shadows,
-        ).fetchall()]
+        owns_transaction = not cursor.connection.in_transaction
+        if owns_transaction:
+            cursor.execute("BEGIN IMMEDIATE")
+        try:
+            orphans = _orphan_fts_shadows(cursor, family)
+            for name in orphans:
+                cursor.execute(f'DROP TABLE "{name}"')
+            if owns_transaction:
+                cursor.connection.commit()
+        except BaseException:
+            if owns_transaction:
+                cursor.connection.rollback()
+            raise
         if not orphans:
             continue
-        for name in orphans:
-            cursor.execute(f'DROP TABLE "{name}"')
         logger.warning(
             "Dropped orphan FTS5 shadow tables of %s (%s); the index is recreated from messages",
             family, ", ".join(orphans),
