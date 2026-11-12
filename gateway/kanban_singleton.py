@@ -38,6 +38,9 @@ _YIELD_CACHE_SECONDS = 5.0
 # A root gateway whose claim is posted retries this often: the profile holder yields within ~_YIELD_CACHE_SECONDS plus
 # its loop's next check, and every second the lock sits idle is a second without the hub's sync (and CPU reports).
 ROOT_CLAIM_RETRY_SECONDS = 2.0
+# ...but only this long into one contention episode: a holder that never yields (another root gateway, a wedged
+# profile gateway) would otherwise see a retry and a root-claim rewrite every 2 s forever. After it, retry_seconds.
+ROOT_CLAIM_FAST_RETRY_WINDOW_SECONDS = 30.0
 
 
 def _resolve(path: Path) -> str:
@@ -260,8 +263,11 @@ class SingletonLease:
 
     def retry_interval(self) -> float:
         """Seconds until the next ``try_acquire``: short while this root gateway's claim asks a holder to yield
-        (hermes-hub 2026-11-12: the full 30 s retry made every core-update restart cost 30-31 s of contention)."""
-        if self.root and self.state == "contended":
+        (hermes-hub 2026-11-12: the full 30 s retry made every core-update restart cost 30-31 s of contention), for
+        the first ROOT_CLAIM_FAST_RETRY_WINDOW_SECONDS of the contention; a holder that never yields gets retry_seconds."""
+        if self.root and self.state == "contended" and (
+                self._contended_since is None
+                or self._clock() - self._contended_since < ROOT_CLAIM_FAST_RETRY_WINDOW_SECONDS):
             return min(self.retry_seconds, ROOT_CLAIM_RETRY_SECONDS)
         return self.retry_seconds
 

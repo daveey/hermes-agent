@@ -482,6 +482,9 @@ def test_a_long_blocked_round_still_yields_reports_from_the_sender(tmp_path, mon
         def take(self, _limit):
             return {**SAMPLE, "cpu_busy_sample_end_ms": int(time.time() * 1000)}
 
+        def wait_fresh(self, _timeout):
+            return True  # a sample is always ready
+
         def start(self):
             return None
 
