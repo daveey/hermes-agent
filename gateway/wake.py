@@ -148,7 +148,8 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
             if kanban_card:
                 category["kanban_cards"] = [{**kanban_card, "text": str(kanban_card.get("text") or "")[:32000]}]
             try:
-                producer = "kanban-wake" if core_update_notifier else "background-wake"
+                # A wake carrying its card is a Kanban notifier wake (it folds, kanban_wake_fold) even without the flag.
+                producer = "kanban-wake" if core_update_notifier or kanban_card else "background-wake"
                 if await admit_route_wake(runner, adapter, source, text, producer, category):
                     return  # committed to the session FIFO: never interrupts the admitted turn
             except RuntimeStoreError as exc:

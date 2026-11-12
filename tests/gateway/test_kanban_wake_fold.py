@@ -244,7 +244,7 @@ async def test_a_wake_queued_before_the_upgrade_still_folds(tmp_path, monkeypatc
     try:
         old, new = board('old'), board('new')
         await deliver_wake(adapter, text=f'[kanban] Task {old} completed.\nTitle: old\nBoard: default\n\n{GUIDANCE}',
-                           source=source)
+                           source=source, core_update_notifier=True)  # the old notifier's producer: kanban-wake, no card
         await _wake(adapter, source, new, 'completed')
         [row] = _automation(queued())
         text = row['payload']['text']
