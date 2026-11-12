@@ -49,6 +49,20 @@ def _skill():
     return body, hashlib.sha256(text.encode()).hexdigest()
 
 
+# A card producer's own placement sentence ("Pinned to the gateway that filed it: <why>") is that producer's
+# self-assertion about where its card should run, written before any admission. It is never evidence of an
+# allowlisted hub-only need: t_01a1cf7f8f211403 was admitted `hub_live_process` on exactly that sentence, while a
+# capability:hub-write worker could do every step with ssh and hub-admin. [daveey]
+SELF_ASSERTIONS = ("pinned to the gateway that filed it", "pinned to the machine that filed it")
+SELF_ASSERTION_WHY = "the evidence is the producer's own placement sentence, not a hub-only need"
+
+
+def self_assertion(quote):
+    """True when an admission quote leans on a producer's pin sentence (any case, any surrounding text)."""
+    text = " ".join(str(quote or "").split()).lower()
+    return any(marker in text for marker in SELF_ASSERTIONS)
+
+
 def validated(result, fields, hub_reason, sha):
     """The Verdict for a well-formed, evidence-checked ``{admit, need, evidence, why}`` dict, else None."""
     if not isinstance(result, dict) or set(result) != {"admit", "need", "evidence", "why"}:
@@ -64,6 +78,8 @@ def validated(result, fields, hub_reason, sha):
         inputs = (fields.get("title") or "", fields.get("body") or "", hub_reason or "")
         if need is None or not quote.strip() or not any(quote in item for item in inputs):
             return None
+        if self_assertion(quote):
+            return None  # a producer's self-assertion: invalid as admission evidence (deny), cached copies too
     return Verdict(**result, skill_sha=sha)
 
 
@@ -72,7 +88,12 @@ def _parse(text, fields, hub_reason, sha):
         result = json.loads(text)
     except (ValueError, TypeError):
         result = None
-    return validated(result, fields, hub_reason, sha) or Verdict(why="invalid admission verdict", skill_sha=sha)
+    verdict = validated(result, fields, hub_reason, sha)
+    if verdict is not None:
+        return verdict
+    if isinstance(result, dict) and result.get("admit") is True and self_assertion(result.get("evidence")):
+        return Verdict(why=f"invalid admission verdict: {SELF_ASSERTION_WHY}", skill_sha=sha)
+    return Verdict(why="invalid admission verdict", skill_sha=sha)
 
 
 def _cache(key, verdict=None):

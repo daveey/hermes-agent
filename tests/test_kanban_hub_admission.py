@@ -218,3 +218,54 @@ def test_malformed_json(judge, monkeypatch):
     result = gate.admit({"title": "Use signed-in Chrome"})
     assert result.admit is False
     assert result.why == "invalid admission verdict"
+
+
+# t_01a1cf7f8f211403 (self-heal incident 813792703cb1) was admitted `hub_live_process` quoting its producer's own
+# "Pinned to the gateway that filed it: ..." line. A producer's pin sentence is never hub-only evidence.
+ESCAPE_TITLE = "self-heal: incident 813792703cb1"
+ESCAPE_PIN = ("Pinned to the gateway that filed it: it reads this gateway's own logs, state files and coach store, "
+              "which a worker node does not have.")
+ESCAPE_BODY = ("Self-heal investigation for defect `kanban-310ed068f0`. Nothing here needs a human.\n"
+               f"{ESCAPE_PIN}\n\n## Do this\n1. Reproduce or confirm it LIVE, not from the transcript alone.\n"
+               "- `sqlite3 -readonly ~/.hermes/kanban.db`: the card's `tasks` row.")
+
+
+@pytest.mark.parametrize("quote", [
+    ESCAPE_PIN,
+    "Pinned to the gateway that filed it",
+    "pinned to the gateway that filed it: it reads this gateway's own logs",
+])
+def test_producer_pin_sentence_is_not_admission_evidence(judge, quote):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_live_process", evidence=quote,
+                 why="The card says the investigation needs this gateway's own state files and coach store.")
+    body = ESCAPE_BODY.replace(ESCAPE_PIN, ESCAPE_PIN.lower()) if quote[0] == "p" else ESCAPE_BODY
+    verdict = gate.admit({"title": ESCAPE_TITLE, "body": body})
+    assert verdict.admit is False and verdict.need is None
+    assert gate.SELF_ASSERTION_WHY in verdict.why
+
+
+def test_machine_variant_and_cached_escape_are_denied(judge):
+    gate, _, reply, _ = judge
+    from dataclasses import asdict
+    import sqlite3
+    from hermes_cli.config import get_hermes_home
+    machine = "Pinned to the machine that filed it: the cron output is on this machine."
+    reply.update(admit=True, need="hub_live_process", evidence=machine, why="Local state.")
+    assert gate.admit({"title": "Bluesky notify: repeated cron failures", "body": machine}).admit is False
+    # A verdict cached before this rule (the real escape's) is revalidated on read and denied.
+    fields = {"title": ESCAPE_TITLE, "body": ESCAPE_BODY}
+    reply.update(admit=True, need="hub_chrome", evidence="Reproduce or confirm it LIVE", why="x")
+    gate.admit(fields)
+    escaped = {**asdict(gate.Verdict(admit=True, need="hub_live_process", evidence=ESCAPE_PIN, why="old")),
+               "skill_sha": ""}
+    with sqlite3.connect(get_hermes_home() / "kanban/hub-admission.sqlite") as conn:
+        conn.execute("UPDATE verdicts SET value=?", (json.dumps(escaped),))
+    assert gate.admit(fields).admit is False
+
+
+def test_other_evidence_on_a_card_with_a_pin_sentence_still_admits(judge):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_chrome", evidence="using the hub's signed-in Chrome", why="Browser.")
+    body = f"{ESCAPE_PIN}\nRead the billing page using the hub's signed-in Chrome."
+    assert gate.admit({"title": "billing", "body": body}).admit is True

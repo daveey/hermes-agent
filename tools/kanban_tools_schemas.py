@@ -454,7 +454,10 @@ KANBAN_MOVE_SCHEMA = _schema(
     (
         "Move your current task to another machine and end this run. Use it when the work needs something "
         "this machine lacks (a Mac for Xcode/iOS/simulators, a GPU, a specific host's files or logs) or "
-        "belongs on a less loaded machine. It saves your checkpoint, ends this run as 'continued', sets the "
+        "belongs on a less loaded machine. Never move a card to the hub for hub files, logs, databases, cron, "
+        "config, services, `hermes kanban` or the Board admin key: a worker reads them with `ssh hermes-hub` and "
+        "does every routine hub write with `hub-admin '<command>'` (declare hub:write); a machine:hub move is "
+        "judged by hub admission and denied unless only the hub can do the work. It saves your checkpoint, ends this run as 'continued', sets the "
         "card's runs_on to the labels you give and re-queues it, so ONLY a machine carrying every label claims "
         "the next run (the Board enforces it). Refused when no other active machine matches, after "
         "kanban.move.max_moves moves, when moving back to a machine the card already left (pass force), and "
