@@ -25,6 +25,10 @@ STARTED = 1794505311.363151
 @pytest.fixture()
 def rig(tmp_path, monkeypatch):
     """Local authority + a registry standing in for each gateway process (patched as the module global)."""
+    from tools import process_registry_notifications
+
+    # This fixture verifies durable note delivery, not the optional resumed model turn.
+    monkeypatch.setattr(process_registry_notifications, "completion_resumes_parent", lambda evt: False)
     holder = {}
 
     def restart():

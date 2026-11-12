@@ -863,7 +863,7 @@ class TestOwnerStopWhileDraining:
                 source=SimpleNamespace(user_id="cron-owner"))}, pending_results={},
             runner=SimpleNamespace(_draining=draining, _interrupting_remaining_work=False))
         row = {"admission_id": "adm", "request_id": "req-drain", "principal_id": "cron-owner",
-               "payload": {"text": ""}}
+               "payload": {"text": ""}, "owner_epoch": 1, "generation": 1}
         policy = SimpleNamespace(request_json=json.dumps({
             "cron_job": {"id": "drain-job", "prompt": "x"}, "extra_prompt": None,
             "request_id": "req-drain"}))
