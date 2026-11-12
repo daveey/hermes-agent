@@ -7,6 +7,7 @@ after any commit re-reads exactly the board that changed.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -123,17 +124,38 @@ def test_commit_shows_on_next_poll_and_only_that_board_is_reread(boards, probe):
     assert _counts(_list(mod)) == expected and probe["count_paths"] == []
 
 
-def test_replaced_board_file_reads_fresh_and_removed_board_is_dropped(boards, probe):
-    mod = boards
-    _list(mod)
-    old_ino = Path(_path("delta")).stat().st_ino
+def _replace_delta_and_remove_beta() -> None:
     kb.remove_board("delta", archive=False)
     kb.remove_board("beta", archive=False)
     kb.create_board("delta")
     with closing(kbc.connect(board="delta")) as conn:
         tid = kb.create_task(conn, title="fresh", assignee="w")
         conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
-    assert Path(_path("delta")).stat().st_ino != old_ino
+
+
+def test_replaced_board_file_reads_fresh_and_removed_board_is_dropped(boards, probe):
+    mod = boards
+    _list(mod)
+    # Pin the old inode: once its last fd closes, ext4 may hand the same number to the
+    # recreated file (a CI flake), and this case is about a new file identity.
+    with open(_path("delta"), "rb") as old:
+        old_ino = os.fstat(old.fileno()).st_ino
+        _replace_delta_and_remove_beta()
+        assert Path(_path("delta")).stat().st_ino != old_ino
+    probe["reset"]()
+    counts = _counts(_list(mod))
+    assert "beta" not in counts
+    assert counts["delta"] == {"blocked": 1}
+    assert _path("delta") in probe["count_paths"]
+
+
+def test_replaced_board_file_with_reused_inode_reads_fresh(boards, probe, monkeypatch):
+    """The filesystem may reuse the old (dev, ino) once nothing holds the old file open.
+    Every file then reports the same identity here; the counts must still be fresh."""
+    mod = boards
+    monkeypatch.setattr(board_rows, "_ident", lambda path: (os.stat(path).st_dev, 1))
+    _list(mod)
+    _replace_delta_and_remove_beta()
     probe["reset"]()
     counts = _counts(_list(mod))
     assert "beta" not in counts
