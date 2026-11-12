@@ -60,6 +60,31 @@ def pool_occupancy(pool: Path, owners, active):
     return capacity.occupied_owners(pool, owners, active)
 
 
+def occupied_count_for_host(echo=None) -> int | None:
+    """One census for admission and Board reports; never mutate pressure state."""
+    from hermes_cli import machine_metrics
+    from hermes_cli.worker_account_boards import paths
+    active_owners = set()
+    active = machine_metrics.active_card_runs(exclude=echo, owner_output=active_owners, extra_paths=paths())
+    if active is None:
+        return None
+    owners = {}
+    owner_dir = capacity.policy_root() / 'worker-resources' / 'owners'
+    if owner_dir.exists():
+        for path in owner_dir.iterdir():
+            if path.suffix != '.json':
+                continue
+            owner = json.loads(path.read_text(encoding='utf-8'))
+            if (not isinstance(owner, list) or len(owner) != 2
+                    or not all(isinstance(value, str) and value for value in owner)
+                    or capacity.owner_slice(*owner) != path.stem):
+                raise ValueError('invalid worker owner map')
+            owners[path.stem] = tuple(owner)
+    occupied = pool_occupancy(capacity.pool_path(), owners, active_owners)
+    # Distinct installations can contain copied IDs. Preserve their row count.
+    return len(occupied) + max(0, active - len(active_owners))
+
+
 def refusal(echo=None, *, enabled=None) -> str | None:
     """Pre-lease and final-lock check. Unknown observations fail closed."""
     try:
@@ -68,30 +93,11 @@ def refusal(echo=None, *, enabled=None) -> str | None:
         directory = capacity.policy_root() / 'worker-resources'
         if _pressure(directory):
             return 'worker_load_pressure'
-        from hermes_cli import machine_metrics
+        occupied_count = occupied_count_for_host(echo)
         from hermes_cli.kanban_admission import _root_max_in_progress
-        active_owners = set()
-        from hermes_cli.worker_account_boards import paths
-        active = machine_metrics.active_card_runs(exclude=echo, owner_output=active_owners, extra_paths=paths())
         ok, cap = _root_max_in_progress(root=capacity.policy_root())
-        if active is None or not ok or cap is None:
+        if occupied_count is None or not ok or cap is None:
             return 'worker_resources_unknown'
-        owners = {}
-        owner_dir = directory / 'owners'
-        if owner_dir.exists():
-            for path in owner_dir.iterdir():
-                if path.suffix != '.json':
-                    continue
-                owner = json.loads(path.read_text(encoding='utf-8'))
-                if (not isinstance(owner, list) or len(owner) != 2
-                        or not all(isinstance(value, str) and value for value in owner)
-                        or capacity.owner_slice(*owner) != path.stem):
-                    raise ValueError('invalid worker owner map')
-                owners[path.stem] = tuple(owner)
-        occupied = pool_occupancy(capacity.pool_path(), owners, active_owners)
-        # Distinct installations can contain copied board/task IDs. Until a
-        # cgroup supplies canonical custody, never collapse their running rows.
-        occupied_count = len(occupied) + max(0, active - len(active_owners))
         if occupied_count >= cap:
             return 'worker_capacity_full'
         return None

@@ -154,7 +154,23 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}`` plus the throughput counters
     (``machine_throughput_metrics``); a value that cannot be read is left out."""
     from hermes_cli import machine_admission_metrics, machine_drain_metrics, machine_throughput_metrics
-    out: dict[str, Any] = machine_admission_metrics.collect(active_card_runs)
+    from hermes_cli import worker_compute_capacity as capacity
+    from hermes_cli.worker_resource_admission import occupied_count_for_host
+    out: dict[str, Any]
+    try:
+        worker = capacity.worker_enabled()
+    except Exception:  # health: allow BLE001 -- malformed worker observations must report unknown capacity
+        worker = None
+    if worker is None:
+        out = {"active_card_runs": None}
+    elif worker:
+        # [daveey] Worker occupancy includes parked owners' detached cgroups; hub pool telemetry does not apply.
+        try:
+            out = {"active_card_runs": occupied_count_for_host()}
+        except Exception:  # health: allow BLE001 -- malformed worker observations must report unknown capacity
+            out = {"active_card_runs": None}
+    else:
+        out = machine_admission_metrics.collect(active_card_runs)
     out.update(machine_drain_metrics.collect())
     out.update(machine_throughput_metrics.cached_counters())
     try:

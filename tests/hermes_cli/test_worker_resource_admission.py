@@ -55,6 +55,21 @@ def test_worker_own_grant_echo_does_not_take_extra_slot(worker_rig, lane):
     assert claim(rig.conn, t, lane) is not None
 
 
+def test_reporter_counts_detached_jobs_and_unknowns(worker_rig):
+    from hermes_cli import machine_metrics
+    rig, pool = worker_rig
+    rig.fill(1)
+    group = pool / 'detached.scope'
+    group.mkdir()
+    events = group / 'cgroup.events'
+    events.write_text('populated 1\n')
+    assert machine_metrics.collect(rig.home)['active_card_runs'] == 2
+    events.write_text('populated 0\n')
+    assert machine_metrics.collect(rig.home)['active_card_runs'] == 1
+    events.unlink()
+    assert machine_metrics.collect(rig.home)['active_card_runs'] is None
+
+
 def test_persistent_hysteresis_and_bad_state_refuse(worker_rig, monkeypatch):
     from hermes_cli.worker_resource_admission import refusal
     rig, _ = worker_rig

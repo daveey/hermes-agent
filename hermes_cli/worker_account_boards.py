@@ -6,7 +6,9 @@ jobs vanished. Missing registered DBs are unknown, never silently free capacity.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import sqlite3
 import json
 from pathlib import Path
 import os
@@ -37,6 +39,60 @@ def register(conn) -> None:
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def removing(path: Path):
+    """Fence board removal against claims; retire only a proven idle database.
+
+    Detached jobs remain counted by their cgroups, independently of this record.
+    A failed removal keeps the registration. A missing DB is never proof of idle.
+    The caller already owns the board dispatch lock; admission locks are taken
+    nonblocking, matching claim_transaction's deadlock-avoidance contract.
+    """
+    from hermes_constants import get_default_hermes_root
+    from hermes_cli.admission_fence import AdmissionBusy, SUPPORTED, admission_lock
+
+    path = path.resolve()
+    account = capacity.policy_root().resolve()
+    record = account / 'worker-resources' / 'boards' / (
+        hashlib.sha256(str(path).encode()).hexdigest() + '.json')
+    if not SUPPORTED:
+        if capacity.worker_enabled() or record.exists():
+            raise ValueError('worker board removal requires admission fencing')
+        yield
+        return
+    roots = list(dict.fromkeys([account, Path(get_default_hermes_root()).resolve()]))
+    with contextlib.ExitStack() as stack:
+        try:
+            for root in roots:
+                stack.enter_context(admission_lock(root, timeout=0))
+            registered = record.exists()
+            if registered and json.loads(record.read_text(encoding='utf-8')) != str(path):
+                raise ValueError('invalid registered board')
+            verify = registered or (capacity.worker_enabled() and path.exists())
+            if verify:
+                conn = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=0)
+                try:
+                    # Refuse an in-flight writer, not its uncommitted row.
+                    conn.execute('BEGIN IMMEDIATE')
+                    if conn.execute("SELECT 1 FROM tasks WHERE status = 'running' LIMIT 1").fetchone():
+                        raise ValueError('worker board has running cards; drain before removal')
+                finally:
+                    conn.rollback()
+                    conn.close()
+        except (AdmissionBusy, sqlite3.Error) as exc:
+            raise ValueError(f'board busy or unreadable; retry removal: {exc}') from exc
+        # Claims cannot pass their final gate until after removal and retirement.
+        succeeded = False
+        try:
+            yield
+            succeeded = True
+        finally:
+            # Rename can succeed before a later tombstone write fails. The
+            # fenced idle proof also permits retirement in that partial state.
+            if succeeded or (verify and not path.exists()):
+                record.unlink(missing_ok=True)
 
 
 def paths() -> list[Path]:
