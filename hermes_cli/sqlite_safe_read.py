@@ -362,15 +362,19 @@ def offline_file_access(path: Path | str, *, what: str = "read"):
             with _live_lock:
                 main = _live_main_key(key)
                 if main is not None:
+                    subject = "it" if main == key else f"its main database {main}"
                     raise LiveConnectionError(
-                        f"Refusing to {what} {path}: a connection to {main} is still open "
-                        "in this process, and raw file access would cancel its POSIX locks.")
+                        f"Refusing to {what} {path}: a connection to {subject} is still open "
+                        "in this process, and raw file access would cancel that "
+                        "connection's POSIX advisory locks. Close all database "
+                        "handles (stop the gateway/dashboard) and retry.")
                 pending = offline.conflicts(key, raw=True)
                 if not pending:
                     offline.reserve(key, finished)
                     break
                 if recursive or offline.owns_reservation():
-                    raise LiveConnectionError("nested offline file access would wait on another owner")
+                    raise LiveConnectionError(
+                        f"Refusing to {what} {path}: nested offline file access would wait on another owner")
             pending[0][2].wait()
         yield
     finally:
