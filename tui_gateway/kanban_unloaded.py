@@ -585,10 +585,11 @@ class _RemoteWaker:
                 if verdict == "started":
                     _charge_wake(tip, now)
                     started()
+                    outcome = "turn started"
                 else:
-                    persist()
-                logger.info("remote kanban notice for %s (task=%s): %s", tip, task.get("id"),
-                            "turn started" if verdict == "started" else f"{verdict}, notice row written")
+                    # [daveey] Only a written row says so: persist() hands a busy chat's claim back (False).
+                    outcome = f"{verdict}, notice row written" if persist() else f"{verdict}, deferred"
+                logger.info("remote kanban notice for %s (task=%s): %s", tip, task.get("id"), outcome)
                 return verdict
             except Exception:
                 logger.warning("remote kanban wake job for %s failed", tip, exc_info=True)

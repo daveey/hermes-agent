@@ -33,7 +33,7 @@ _BRACKETED_SILENCE_MARKERS = tuple(
 INTERNAL_NOTIFICATION_DISPLAY_KIND = "internal_notification"
 # Async-result cards the in-process TUI persisted: a producer's internal event naming one (with a
 # display_text) persists as that row kind instead of internal_notification.
-PRODUCER_NOTICE_DISPLAY_KINDS = frozenset({"process_complete", "async_delegation_complete"})
+PRODUCER_NOTICE_DISPLAY_KINDS = frozenset({"process_complete", "async_delegation_complete", "kanban_notice"})
 MACHINERY_DISPLAY_KINDS = frozenset({INTERNAL_NOTIFICATION_DISPLAY_KIND, *PRODUCER_NOTICE_DISPLAY_KINDS})
 # What a gateway producer's card may name (a liveness tick names internal_notification for its CLI
 # receipt). Closed, and kept apart from the silence set above so a kind added there never becomes
@@ -194,7 +194,9 @@ def _producer_card(event: Any) -> dict:
     text = metadata.get("display_text")
     if (getattr(event, "internal", False) and metadata.get("display_kind") in PRODUCER_NOTICE_DISPLAY_KINDS
             and isinstance(text, str) and text.strip()):
-        return {"display_text": text}
+        keys = metadata.get("kanban_event_keys") if metadata.get("display_kind") == "kanban_notice" else None
+        # [daveey] A remote notice's row carries its keys: the ledger claim is acked when they are in the transcript.
+        return {"display_text": text, **({"kanban_event_keys": list(keys)} if isinstance(keys, list) and keys else {})}
     return {}
 
 

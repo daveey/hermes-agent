@@ -53,10 +53,12 @@ _LEGACY_BOARD = re.compile(r'^Board: (\S+)$', re.MULTILINE)
 
 
 def card_metadata(metadata):
-    """Validate a wake's ``kanban_cards`` (what a later wake folds from) for the stored descriptor."""
+    """Validate a wake's ``kanban_cards`` (what a later wake folds from) for the stored descriptor,
+    plus a remote notice's ``kanban_event_keys`` (:func:`event_keys_metadata`)."""
+    keys = event_keys_metadata(metadata)
     cards = metadata.get('kanban_cards')
     if cards is None:
-        return {}
+        return keys
     if not isinstance(cards, list) or not cards or len(cards) > _MAX_CARDS:
         raise RuntimeStoreError('invalid_params')
     for card in cards:
@@ -68,7 +70,20 @@ def card_metadata(metadata):
                 or not isinstance(card.get('notices', []), list)
                 or not all(isinstance(line, str) for line in card.get('notices', []))):
             raise RuntimeStoreError('invalid_params')
-    return {'kanban_cards': [dict(card) for card in cards]}
+    return {'kanban_cards': [dict(card) for card in cards], **keys}
+
+
+def event_keys_metadata(metadata):
+    """A remote Kanban notice's ``kanban_event_keys`` (``gateway.kanban_remote_owner``): its ledger claim
+    is acked only once a transcript row carries them, so the turn's user row must (``kanban_notice``
+    rows are what ``kanban_notice_keys_delivered`` reads). Only allowed on a ``kanban_notice`` card."""
+    keys = metadata.get('kanban_event_keys')
+    if keys is None:
+        return {}
+    if (metadata.get('display_kind') != 'kanban_notice' or not isinstance(keys, list) or not keys
+            or len(keys) > _MAX_CARDS or not all(isinstance(key, str) and key for key in keys)):
+        raise RuntimeStoreError('invalid_params')
+    return {'kanban_event_keys': list(keys)}
 
 
 def wake_lock(runner):

@@ -1080,6 +1080,12 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
             if settled((sid, tip), ref, state):
                 _remember_delivered(memo_key)
                 return
+            from tui_gateway.kanban_remote_fifo import gateway_holds, lineage_ids
+            if gateway_holds(db, lineage_ids(db, sid, tip), event_key):
+                # [daveey] The gateway runs this chat's turns and admits the notice to its FIFO
+                # (gateway.kanban_remote_owner); a claim here would only race it (t_01a1cff0541bf30c).
+                logger.debug("remote Kanban notice %s for chat %s left to the gateway's FIFO", ref, sid)
+                return
             if waker is None:
                 row_id = db.append_kanban_notice(tip, text, metadata)
                 from hermes_state_outcome import refresh_outcomes_quietly

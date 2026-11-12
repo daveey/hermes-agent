@@ -1,0 +1,236 @@
+"""Remote Kanban notices for busy chats the canonical gateway owns ride its FIFO. [daveey]
+
+A card placed on another gateway notifies its chat here through the hermes-hub replica
+(``tui_gateway.kanban_remote_notices``). Only the Desktop backend's sweep delivered it: it writes
+the passive row or wakes the chat, and a chat mid-turn refuses both (``SessionTurnLeaseLostError``),
+so the claim went back for the next pass. A chat the gateway runs turn after turn (its FIFO starts
+the next queued local notice within seconds; the sweep runs every 30-120 s) was never idle at a
+pass: on 2026-11-12 four done notices reached chat 20261026_235722_bef6c6 3-63 min late, one 45
+passes after it was first seen (t_01a1cff0541bf30c). PR #1250 closed the same gap for local-board
+``tui`` rows (``gateway.kanban_tui_owner``); this is its remote leg.
+
+Each pass, for every live LOCAL session of this gateway whose ledger holds work or whose turn lease
+this process holds (``kanban_tui_owner.owned_live_session``'s test), the chat's pending remote
+notices are claimed with ``kanban_remote_notices.collect`` and admitted in arrival order to its FIFO
+(``admit_route_wake``, producer ``kanban-wake``) as a ``kanban_notice`` card carrying the notice's
+``kanban_event_keys``. The turn's user row carries them, so custody matches the sweep's:
+
+- the ledger claim stays in flight (this process's pid + start) until a row with its key is in the
+  transcript (``notice_in_transcript``), then it is acked;
+- a refused admission releases the claim, and the notice is offered again next pass;
+- an admission that ended without the row (cancelled, failed) is released and offered again;
+- a successor after a restart finds a dead holder's claim: acked when the row is there, adopted
+  without a second admission while the FIFO still holds its key (``kanban_remote_fifo``), else
+  offered again.
+
+The sweep stands aside while a live gateway admission holds the notice's key
+(``kanban_remote_fifo.gateway_holds``), so the two never deliver it twice; a dropped admission hands it back. Idle owned chats and chats with no gateway owner keep the sweep's path.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+import time
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+INTERVAL_S = 10.0
+PRODUCER = "kanban-wake"
+_DISPLAY_LIMIT = 2000  # session_automation._DISPLAY_TEXT_LIMIT
+
+_lock = threading.Lock()
+# (ledger session, ref, state) -> {"claim", "key", "ids", "tip"} for claims this process admitted or adopted.
+_admitted: dict[tuple, dict] = {}
+_next_at = 0.0
+
+
+def _reset_for_tests() -> None:
+    global _next_at
+    with _lock:
+        _admitted.clear()
+    _next_at = 0.0
+
+
+def _claim_id(claim: dict) -> tuple:
+    return (claim["session"], claim["ref"], claim["state"])
+
+
+def _children(item: dict) -> list[dict]:
+    return list(item.get("children") or [item])
+
+
+def _profile(runner: Any, authority: Any) -> str:
+    registry = getattr(runner, "session_authorities", None)
+    name = registry.profile_name(authority) if registry is not None else None
+    return (name or getattr(runner, "_kanban_notifier_profile", None)
+            or getattr(runner, "_primary_profile_name", None) or "default")
+
+
+def _owned_lives(runner: Any, authority: Any) -> list[tuple[str, Any]]:
+    """``(logical id, live session)`` of this gateway's live LOCAL chats. Runs on the event loop, the
+    authority's thread (``kanban_tui_owner`` never iterates the sessions from a worker thread)."""
+    from gateway.config import Platform
+    out = []
+    for logical, live in list((getattr(authority, "sessions", None) or {}).items()):
+        source = getattr(live, "source", None)
+        if getattr(source, "platform", None) != Platform.LOCAL or getattr(source, "thread_id", None):
+            continue
+        if getattr(live, "route", None) != runner._session_key_for_source(source):
+            continue
+        out.append((str(logical), live))
+    return out
+
+
+def _tip(authority: Any, live: Any) -> Optional[str]:
+    try:
+        from gateway.session_detached import route_entry
+        entry = route_entry(authority, live.route)
+    except Exception:  # health: allow BLE001 -- a lookup failure falls back to the chat id; never costs the pass
+        logger.debug("remote kanban owner: route entry lookup failed", exc_info=True)
+        return None
+    return getattr(entry, "session_id", None) if entry is not None else None
+
+
+def _track(claim: dict, ids: frozenset, tip: str) -> None:
+    with _lock:
+        _admitted[_claim_id(claim)] = {"claim": claim, "key": claim.get("event_key") or claim.get("notice_key"),
+                                       "ids": ids, "tip": tip}
+
+
+def _reconcile(db: Any) -> None:
+    """Settle claims this process admitted: ack once the row is in the transcript, keep while the FIFO holds
+    the key, else release (the admission was dropped without the row). The FIFO is read BEFORE the
+    transcript, so a row written between the two reads is seen, never released."""
+    from tui_gateway import kanban_remote_notices as krn
+    from tui_gateway.kanban_remote_fifo import pending_keys
+    from tui_gateway.kanban_remote_late import release_undelivered
+    with _lock:
+        tracked = list(_admitted.items())
+    pending: dict[frozenset, set] = {}
+    for claim_id, entry in tracked:
+        ids, key, claim = entry["ids"], entry["key"], entry["claim"]
+        if ids not in pending:
+            pending[ids] = pending_keys(db, ids)
+        in_fifo = key in pending[ids]
+        if krn.notice_in_transcript(db, entry["tip"], key, ""):
+            krn.ack(claim)
+            logger.info("remote Kanban notice %s for chat %s is in the transcript; acked", claim["ref"],
+                        claim["session"])
+        elif in_fifo:
+            continue
+        else:  # dropped undelivered (cancelled, failed, refused): never acked, offered again
+            release_undelivered([claim], None)
+            logger.info("remote Kanban notice %s for chat %s: its admission ended without the row; offered again",
+                        claim["ref"], claim["session"])
+        with _lock:
+            _admitted.pop(claim_id, None)
+
+
+def _adopt_pending(item: dict, pending: set, ids: frozenset, tip: str) -> Optional[dict]:
+    """``item`` minus members the FIFO already holds (a predecessor admitted them before it died): those
+    are adopted (tracked, no second admission). A partly held group releases the rest for the next pass."""
+    from tui_gateway.kanban_remote_late import release_undelivered
+    held = [child for child in _children(item) if child["event_key"] in pending]
+    if not held:
+        return item
+    for child in held:
+        _track(child, ids, tip)
+        logger.info("remote Kanban notice %s for chat %s is already in the gateway FIFO; adopted",
+                    child["ref"], child["session"])
+    rest = [child for child in _children(item) if child["event_key"] not in pending]
+    if rest:
+        release_undelivered(rest, None)
+    return None
+
+
+def _collect(runner: Any, authority: Any, lives: list) -> list[tuple]:
+    """``[(live, ids, tip, items)]``: claimed notices of busy owned chats, in arrival order. Worker thread."""
+    from gateway.kanban_tui_owner import _gateway_holds_work
+    from tui_gateway import kanban_remote_notices as krn
+    from tui_gateway.kanban_remote_fifo import lineage_ids, pending_keys
+    db = getattr(authority, "db", None)
+    _reconcile(db)
+    if not krn.hub_db_path().is_file():
+        return []
+    profile = _profile(runner, authority)
+    out = []
+    for logical, live in lives:
+        chat = str(live.source.chat_id)
+        if not _gateway_holds_work(authority, {chat, logical}):
+            continue  # idle: the Desktop backend's sweep wakes it or writes the row
+        tip = _tip(authority, live) or chat
+        ids = frozenset(lineage_ids(db, chat, logical, tip))
+        pending = pending_keys(db, ids)
+
+        def has(key: str, task_id: str, _tip: str = tip) -> bool:
+            return krn.notice_in_transcript(db, _tip, key, task_id)
+
+        items = []
+        try:
+            # One claim per notice under the chat id, as the sweep claims it under the link's session.
+            items = krn.collect(chat, profile, lineage=tuple(sorted(ids - {chat})), transcript_has=has)
+            items = [kept for item in items if (kept := _adopt_pending(item, pending, ids, tip)) is not None]
+        except Exception:  # health: allow BLE001 -- claims taken before the error go back, so none waits for an exit
+            logger.warning("remote kanban owner: collecting chat %s failed; releasing its claims", chat, exc_info=True)
+            from tui_gateway.kanban_remote_late import release_undelivered
+            release_undelivered([c for item in items for c in _children(item) if _claim_id(c) not in _admitted], None)
+            continue
+        if items:
+            out.append((live, ids, tip, items))
+    return out
+
+
+def _metadata(item: dict) -> dict:
+    text = item["text"]
+    shown = text if len(text) <= _DISPLAY_LIMIT else text[:_DISPLAY_LIMIT - 1] + "…"
+    keys = [child["event_key"] for child in _children(item)]
+    return {"display_kind": "kanban_notice", "display_text": shown, "kanban_event_keys": keys}
+
+
+async def _admit(runner: Any, adapter: Any, live: Any, ids: frozenset, tip: str, item: dict) -> bool:
+    from gateway.session_automation import admit_route_wake
+    from hermes_state_runtime import RuntimeStoreError
+    from tui_gateway import kanban_remote_notices as krn
+    chat = live.source.chat_id
+    try:
+        admitted = await admit_route_wake(runner, adapter, live.source, item["text"], PRODUCER, _metadata(item))
+    except Exception as exc:  # health: allow BLE001 -- delivery boundary: any refusal releases the claim (logged) so no notice is lost
+        logger.warning("remote Kanban notice %s for chat %s refused by the local FIFO (%s); released for retry",
+                       item["ref"], chat, exc, exc_info=not isinstance(exc, RuntimeStoreError))
+        admitted = False
+    if not admitted:
+        await asyncio.to_thread(krn.release, item)
+        logger.info("remote Kanban notice %s for chat %s not admitted; released for the next pass", item["ref"], chat)
+        return False
+    for child in _children(item):
+        _track(child, ids, tip)
+    logger.info("remote Kanban notice %s for chat %s admitted to the local FIFO (%d key(s)); claim in flight "
+                "until its row is written", item["ref"], chat, len(_children(item)))
+    return True
+
+
+async def tick(runner: Any, *, force: bool = False) -> list[dict]:
+    """One pass (at most every ``INTERVAL_S``); the admitted notices. Never raises."""
+    global _next_at
+    if not force and time.monotonic() < _next_at:
+        return []
+    _next_at = time.monotonic() + INTERVAL_S
+    try:
+        from gateway.config import Platform
+        from gateway.kanban_tui_owner import _launch_authority
+        adapter = (getattr(runner, "adapters", None) or {}).get(Platform.LOCAL)
+        authority = _launch_authority(runner, None)
+        if adapter is None or authority is None:
+            return []
+        plan = await asyncio.to_thread(_collect, runner, authority, _owned_lives(runner, authority))
+        out = []
+        for live, ids, tip, items in plan:
+            for item in items:
+                if await _admit(runner, adapter, live, ids, tip, item):
+                    out.append(item)
+        return out
+    except Exception:  # health: allow BLE001 -- a failed pass never stops the notifier loop; the next pass retries
+        logger.warning("remote kanban owner pass failed", exc_info=True)
+        return []
