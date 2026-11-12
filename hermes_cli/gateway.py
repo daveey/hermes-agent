@@ -7,6 +7,8 @@ import asyncio
 import contextlib
 from hermes_cli.cli_output import line_input
 from hermes_cli.gateway_host_record import _discard_dead_host_record, _forget_host_gateway_probe
+from hermes_cli.gateway_service_members import gateway_descendant_pids
+from hermes_cli.gateway_process_listing import _iter_windows_list_processes, _parse_ps_line
 import json
 import logging
 import os
@@ -171,6 +173,7 @@ def _get_service_pids(all_profiles: bool = False) -> set:
                         pid = int(show.stdout.strip())
                         if pid > 0:
                             pids.add(pid)
+                            pids |= gateway_descendant_pids(pid)  # [daveey] its `gateway run` child behind a wrapper
                     except (ValueError, subprocess.TimeoutExpired):
                         pass
             except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -683,34 +686,6 @@ def _scan_gateway_pids(
         pids = _filter_venv_launcher_stubs(pids)
 
     return pids
-
-
-def _parse_ps_line(line: str) -> tuple[int, str] | None:
-    """``(pid, command)`` from one ``ps -o pid=,command=`` line; also accepts ``ps aux`` rows."""
-    stripped = line.strip()
-    if not stripped or "grep" in stripped:
-        return None
-    parts = stripped.split(None, 1)
-    if len(parts) == 2:
-        with contextlib.suppress(ValueError):
-            return int(parts[0]), parts[1]
-    aux_parts = stripped.split()
-    if len(aux_parts) > 10 and aux_parts[1].isdigit():
-        return int(aux_parts[1]), " ".join(aux_parts[10:])
-    return None
-
-
-def _iter_windows_list_processes(listing: str):
-    """Yield ``(pid, command_line)`` from wmic/CIM ``/FORMAT:LIST`` output."""
-    current_cmd = ""
-    for line in listing.split("\n"):
-        line = line.strip()
-        if line.startswith("CommandLine="):
-            current_cmd = line[len("CommandLine=") :]
-        elif line.startswith("ProcessId="):
-            with contextlib.suppress(ValueError):
-                yield int(line[len("ProcessId=") :]), current_cmd
-            current_cmd = ""
 
 
 def _windows_process_listing() -> str | None:
