@@ -73,6 +73,21 @@ def _log(agent: Any, outcome: str) -> None:
                    getattr(agent, "log_prefix", ""), outcome)
 
 
+def _with_current_once(compressed: list, current: Any) -> list:
+    """End the retry request with the current message exactly once: drop trailing user rows that only
+    repeat its text (a head that already carries it, possibly folded onto itself as ``"U\\n\\nU"``), then
+    append it. Appending to such a head sent the message three times."""
+    text = current.get("content") if isinstance(current, dict) else None
+    while (isinstance(text, str) and text.strip() and compressed and isinstance(compressed[-1], dict)
+           and compressed[-1].get("role") == "user" and isinstance(compressed[-1].get("content"), str)
+           and text in compressed[-1]["content"] and not compressed[-1]["content"].replace(text, "").strip()):
+        compressed.pop()
+    last = compressed[-1] if compressed else None
+    if not (isinstance(last, dict) and last.get("role") == "user" and last.get("content") == text):
+        compressed.append(current)
+    return compressed
+
+
 def history_refusal_step(
     agent: Any, *, messages: Any, current_turn_user_idx: Any, turn_id: Any, system_message: Any,
     effective_task_id: Any,
@@ -85,7 +100,12 @@ def history_refusal_step(
     if not is_history_triggered(messages, current_turn_user_idx):
         # Checked first: a refusal after this turn's retry ran a tool round keeps the tool-round copy.
         return None
-    if getattr(agent, "_history_refusal_retry_turn", None) == turn_id and turn_id is not None:
+    turn_key = turn_id or getattr(agent, "_current_turn_id", None)
+    if not turn_key:
+        # No turn identity: the one-retry cap could not tell a refused retry from a new turn and
+        # would compact + retry forever. Keep the drop-and-notice path.
+        return None
+    if getattr(agent, "_history_refusal_retry_turn", None) == turn_key:
         _log(agent, "refused")
         return HistoryRefusalStep("refused")
     head = list(messages[:current_turn_user_idx])
@@ -108,13 +128,9 @@ def history_refusal_step(
         # The summary over the earlier history alone did not commit (the summarizer refused or aborted).
         _log(agent, "summary_refused")
         return HistoryRefusalStep("summary_refused")
-    compressed = list(compressed)
-    last = compressed[-1] if compressed else None
-    if not (isinstance(last, dict) and last.get("role") == "user"
-            and last.get("content") == current.get("content")):
-        compressed.append(current)
+    compressed = _with_current_once(list(compressed), current)
     idx = len(compressed) - 1
-    agent._history_refusal_retry_turn = turn_id  # one compaction + retry per turn
+    agent._history_refusal_retry_turn = turn_key  # one compaction + retry per turn
     # "retried": the compacted request is resent; a refusal of it logs outcome=refused next.
     _log(agent, "retried")
     return HistoryRefusalStep("retry", compressed, compressed[:idx], prompt)

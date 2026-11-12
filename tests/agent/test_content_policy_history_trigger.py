@@ -60,12 +60,12 @@ def _messages():
     ]
 
 
-def _call(agent, messages, idx=2, history=None, retry=None):
+def _call(agent, messages, idx=2, history=None, retry=None, turn_id: "str | None" = "turn-1"):
     return handle_content_policy_refusal(
         agent, _refusal_response(), retry or TurnRetryState(), thinking_spinner=None, messages=messages,
         api_messages=list(messages), api_kwargs={}, active_system_prompt=None,
         conversation_history=history if history is not None else messages[:idx],
-        api_call_count=1, effective_task_id="t", turn_id="turn-1", api_request_id="r",
+        api_call_count=1, effective_task_id="t", turn_id=turn_id, api_request_id="r",
         api_start_time=0.0, retry_count=0, max_retries=3, current_turn_user_idx=idx,
     )
 
@@ -116,6 +116,28 @@ def test_retry_refused_again_does_not_compact_twice(caplog):
     assert "/new" in second.result["final_response"]
     assert "ask something else" not in second.result["final_response"]
     assert "outcome=refused" in caplog.text
+
+
+def test_head_already_ending_in_current_message_sends_it_once():
+    """A head that already carries the current message, folded onto itself ("U\\n\\nU"), must not get it
+    appended a third time (legacy compression.in_place: false, review of PR #1300)."""
+    agent = _agent()
+    current = "should we do it on the mini or the hub?"
+    summary = {"role": "assistant", "content": "[CONTEXT COMPACTION] earlier discussion"}
+    agent._compress_context.side_effect = lambda m, s, **kw: (
+        [summary, {"role": "user", "content": f"{current}\n\n{current}"}], "sys")
+    verdict = _call(agent, _messages())
+    assert verdict.action == "break"
+    assert [m["content"] for m in verdict.messages] == [summary["content"], current]
+
+
+def test_no_turn_identity_keeps_drop_and_notice_path():
+    """Without a turn id the one-retry cap cannot tell a refused retry from a new turn."""
+    agent = _agent()
+    agent._current_turn_id = None
+    verdict = _call(agent, _messages(), turn_id=None)
+    assert verdict.action == "return"
+    agent._compress_context.assert_not_called()
 
 
 def test_caller_system_message_passes_through_and_returned_prompt_is_adopted():

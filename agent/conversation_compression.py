@@ -48,6 +48,7 @@ from agent.session_activity import ActivityProvenance, normalize_activity_proven
 from agent.usage_anchor import set_usage_anchor
 from hermes_state_ids import new_session_id as mint_session_id
 from hermes_state_pidns import holder_namespace_token
+from agent.conversation_compression_adopt import adopt_grown_durable_parent as _adopt_grown_durable_parent
 from agent.conversation_compression_watermark import held_archive_watermark
 
 logger = logging.getLogger(__name__)
@@ -2802,57 +2803,6 @@ def _adopt_if_parent_rotated(
     return messages, _existing_sp
 
 
-def _adopt_grown_durable_parent(agent: Any, lease: _CompressionLease, messages: list) -> Optional[list]:
-    """Return the durable parent transcript when it outgrew the in-memory snapshot.
-    Rotation only (in-place never loses rows). The snapshot predates the lease: if durable grew, a writer
-    committed a turn — ADOPT it (aborting wedged busy sessions forever). Length check only: in-memory edits of
-    past turns are legal. Adoption advances ``lease.watermark`` to the snapshot's newest row, so publication
-    clones only rows the snapshot does not already carry."""
-    if lease.db is None or not lease.sid:
-        return None
-    durable_loader = getattr(type(lease.db), "get_messages_as_conversation", None)
-    if not callable(durable_loader):
-        return None
-    durable_parent = durable_loader(lease.db, lease.sid)
-    if not (isinstance(durable_parent, list) and len(durable_parent) > len(messages)):
-        return None
-    # In-memory carries this turn's un-persisted user tail; flush it via the normal
-    # rotation-boundary path before adopting, else skip adoption (would drop input).
-    # The in-memory transcript carries the CURRENT turn's un-persisted user tail (anchored by
-    # _persist_user_message_idx) that the durable snapshot read above does not contain yet. Flush that tail
-    # through the normal rotation-boundary path (conversation_history = the already-durable prefix, #68196
-    # boundary) BEFORE adopting, then re-read the durable parent so the adopted snapshot includes the live
-    # input. If the flush fails (or the anchor is unknown), skip adoption entirely: replacing the in-memory
-    # transcript with a snapshot that lacks the user's input would silently drop it from the summarized and
-    # rotated history (#adopt-live-tail).
-    _preflush_idx = getattr(agent, "_persist_user_message_idx", None)
-    # No un-persisted tail means the transcript is fully durable: adopting the longer parent cannot drop input.
-    _preflush_ok = True
-    if isinstance(_preflush_idx, int) and 0 <= _preflush_idx < len(messages):
-        _preflush_ok = False
-        with contextlib.suppress(Exception):
-            _preflush_ok = agent._flush_messages_to_session_db(messages, conversation_history=messages[:_preflush_idx])
-    if not _preflush_ok:
-        logger.warning(
-            "compression: session=%s grew before lease (%d → %d msgs) but the pre-adoption flush of the "
-            "live tail failed; skipping durable-snapshot adoption so un-persisted user input is kept",
-            lease.sid, len(messages), len(durable_parent),
-        )
-        return None
-    # Re-read after the flush so the adopted snapshot carries the just-persisted tail.
-    durable_parent = durable_loader(lease.db, lease.sid, include_row_ids=True)
-    if not (isinstance(durable_parent, list) and len(durable_parent) > len(messages)):
-        return None
-    adopted_row_ids = [rid for m in durable_parent if isinstance(rid := m.pop("_row_id", None), int)]
-    if lease.watermark is not None and adopted_row_ids:
-        lease.watermark = max(lease.watermark, *adopted_row_ids)
-    logger.info(
-        "compression: session=%s grew before lease (%d → %d msgs); adopting durable snapshot", lease.sid, len(messages),
-        len(durable_parent),
-    )
-    return durable_parent
-
-
 def _pre_compress_memory_context(agent: Any, messages: list, checkpoint_required: bool) -> str:
     """Provider ``on_pre_compress()`` insights to surface in the summary ("" if none).
     Raw messages stay the API v1 provider contract; normalized evidence goes only to API v2+ checkpoint
@@ -3735,7 +3685,7 @@ def _run_summary_phase(
     agent: Any, messages: list, *, lease: _CompressionLease, in_place: bool, checkpoint_required: bool,
     approx_tokens: Optional[int], focus_topic: Optional[str], force: bool, bypass_cooldown: bool,
     commit_fence: Optional[CompressionCommitFence], hard_cancel_event: Any, system_message: str,
-    attempt: _Attempt,
+    attempt: _Attempt, verbatim_tail: Optional[list] = None,
 ) -> _SummaryPhase:
     """Adopt a grown durable parent, gather memory context and run the summarizer.
     A hard cancel restores the compressor snapshot + live list, records a stall backoff while the lease is
@@ -3753,7 +3703,7 @@ def _run_summary_phase(
     try:
         lease.start_refresher()
         if not in_place:
-            _adopted_parent = _adopt_grown_durable_parent(agent, lease, messages)
+            _adopted_parent = _adopt_grown_durable_parent(agent, lease, messages, verbatim_tail)
             if _adopted_parent is not None:
                 messages = _adopted_parent
                 pre_msg_count = len(messages)
@@ -4092,6 +4042,7 @@ def compress_context(
         agent, messages, lease=lease, in_place=in_place, checkpoint_required=checkpoint_required,
         approx_tokens=approx_tokens, focus_topic=focus_topic, force=force, bypass_cooldown=bypass_cooldown,
         commit_fence=commit_fence, hard_cancel_event=_hard_cancel_event, system_message=system_message, attempt=attempt,
+        verbatim_tail=verbatim_tail,
     )
     if phase.abort_prompt is not None:
         return phase.messages, phase.abort_prompt
