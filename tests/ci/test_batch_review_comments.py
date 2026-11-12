@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,7 +57,8 @@ class Fake:
             n = int(url.rsplit("/", 1)[1])
             return self.fresh[n]
 
-        def collect(token, repo, run_id, watch=None):
+        def collect(token, repo, run_id, watch=None, *, strict=False):
+            assert strict
             self.collected.append(run_id)
             if run_id in self.fail_collect:
                 raise RuntimeError("boom")
@@ -159,11 +161,48 @@ def test_incomplete_run_never_overwrites_comment(monkeypatch, conclusion):
 
 
 def test_final_snapshot_preserves_ship_footer_contract(monkeypatch):
-    prs = [_pr(1, "a")]
-    run = _run(1, "a", "t") | {"status": "completed", "conclusion": "success"}
-    f = Fake(monkeypatch, prs, {"a": [run]}, fresh=_fresh(prs))
+    sha = "a" * 40
+    prs = [_pr(1, sha)]
+    run = _run(1, sha, "t") | {"status": "completed", "conclusion": "success"}
+    f = Fake(monkeypatch, prs, {sha: [run]}, fresh=_fresh(prs))
     assert b.run_batch("t", REPO, NOW) == 0
-    assert "ran on [a]" in f.posted["1"]
+    # Consumer contract from hermes-core-wt-land's BOT_HEAD parser.
+    match = re.search(r"<sub>(running|ran) on \[[0-9a-f]+\]\([^)]*/commits/([0-9a-f]{40})\)", f.posted["1"])
+    assert match and match.groups() == ("ran", sha)
+
+
+@pytest.mark.parametrize("cancelled_id", [1, 2])
+@pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "action_required", None])
+def test_collection_time_incomplete_run_cannot_publish(monkeypatch, cancelled_id, conclusion):
+    sha = "a" * 40
+    pr = _pr(1, sha)
+    initial = _run(1, sha, "t") | {"status": "in_progress", "conclusion": None}
+    primary = initial | {"status": "completed", "conclusion": "success"}
+    sibling = _run(2, sha, "t", name=b.DEFAULT_WATCH_WORKFLOWS[0]) | {
+        "status": "completed", "conclusion": "success"}
+    (primary if cancelled_id == 1 else sibling)["conclusion"] = conclusion
+    posted = []
+
+    def request(url, token):
+        if "/pulls/" in url:
+            return pr
+        return primary
+
+    def pages(url, token, list_key=None):
+        if "/pulls?" in url:
+            return [pr]
+        if "event=pull_request" in url:
+            return [initial]
+        if url.endswith("/jobs"):
+            return [{"name": "test", "status": "completed", "conclusion": "cancelled"}]
+        return [sibling]
+
+    monkeypatch.setattr(b.lc, "_api_request", request)
+    monkeypatch.setattr(b.lc, "_api_get_paginated", pages)
+    monkeypatch.setattr(b.lc, "fetch_all_review_statuses", lambda *a, **k: [])
+    monkeypatch.setattr(b.lc, "upsert_comment", lambda *a: posted.append(a) or 1)
+    assert b.run_batch("t", REPO, NOW) == 1
+    assert posted == []
 
 
 def test_artifact_listing_error_is_not_clean_snapshot(monkeypatch):

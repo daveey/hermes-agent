@@ -84,14 +84,14 @@ def snapshot_commit_info(pr: dict, run: dict, repo: str, now: datetime, *, compl
     stamp = now.strftime("%Y-%m-%d %H:%M UTC")
     phase = "ran on" if completed else "running on"
     return (
-        f"<sub>snapshot of CI; {phase} [{sha[:7]}]({url}){tail} · taken {stamp}; "
+        f"<sub>{phase} [{sha[:7]}]({url}){tail} · snapshot of CI taken {stamp}; "
         f"refreshed hourly, not live</sub>"
     )
 
 
 def build_snapshot(token: str, repo: str, pr: dict, run: dict, now: datetime) -> str:
     watch = lc.parse_watch_workflows(os.environ.get("WATCH_WORKFLOWS", "")) or DEFAULT_WATCH_WORKFLOWS
-    jobs, runs_completed = lc.collect_run_jobs(token, repo, str(run["id"]), watch)
+    jobs, runs_completed = lc.collect_run_jobs(token, repo, str(run["id"]), watch, strict=True)
     completed, pending, job_urls = lc.classify_jobs(jobs)
     by_check, check_urls = lc.split_failed_steps(jobs, completed, job_urls)
     statuses = lc.fetch_all_review_statuses(token, repo, str(run["id"]), strict=True)

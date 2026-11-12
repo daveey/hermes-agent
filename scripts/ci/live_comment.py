@@ -260,8 +260,15 @@ def runs_all_completed(runs: list[dict]) -> bool:
     return bool(runs) and all(str(r.get("status", "")) == "completed" for r in runs)
 
 
+def validate_snapshot_run(run: dict) -> None:
+    """Do not turn a cancelled or indeterminate run into a clean snapshot."""
+    if run.get("status") == "completed" and run.get("conclusion") not in {"success", "failure"}:
+        raise RuntimeError(f"Run {run.get('id')} has incomplete conclusion: {run.get('conclusion')}")
+
+
 def collect_run_jobs(
     token: str, repo: str, run_id: str, watch_workflows: list[str] | None = None,
+    *, strict: bool = False,
 ) -> tuple[list[dict], bool]:
     """Collect all jobs in the CI run + any watched sibling runs.
 
@@ -278,6 +285,8 @@ def collect_run_jobs(
     """
     owner, repo_name = repo.split("/")
     run_info = _api_request(f"{API_BASE}/repos/{owner}/{repo_name}/actions/runs/{run_id}", token)
+    if strict:
+        validate_snapshot_run(run_info)
     head_sha = run_info.get("head_sha", "")
 
     # CI run jobs (includes every reusable-workflow job).
@@ -307,6 +316,8 @@ def collect_run_jobs(
     )
     relevant_runs = [run_info]
     for watched in select_watched_runs(sibling_runs, watch_workflows, exclude_run_id=run_id):
+        if strict:
+            validate_snapshot_run(watched)
         relevant_runs.append(watched)
         watched_jobs = _api_get_paginated(
             f"{API_BASE}/repos/{owner}/{repo_name}/actions/runs/{watched['id']}/jobs",
