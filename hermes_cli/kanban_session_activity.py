@@ -27,6 +27,8 @@ from hermes_cli import kanban_session_activity_recent_done as _recent_done
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
+from hermes_cli import kanban_replica_projection as _replica_projection
+from hermes_cli import kanban_replica_rows as _replica_rows
 from hermes_cli.kanban_session_activity_release import TERMINAL_STATUSES
 from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
 from hermes_cli.kanban_db_sync import sync_enabled as _board_sync_enabled
@@ -611,7 +613,6 @@ HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync
 # owner's collector publishes (floor 450 s, the window every owner gets when it publishes none). A fixed 450 s
 # against a loaded hub's ~440 s cycle flapped closed cards between released and "never released". [daveey]
 SCOPE_HEARTBEAT_FRESH_S = _scope_hb.SCOPE_HEARTBEAT_FLOOR_S
-_REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
 _remote_scope: tuple[str, ...] | None = None
 _snapshot_saved: tuple[tuple[str, ...], list[dict[str, Any]]] | None = None  # last (scope, cards) written to disk
@@ -676,6 +677,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
 
     live = now is None
     now = time.time() if now is None else now
+    ident = _replica_rows.file_ident(path) if live else None
     conn = _open_ro(path)
     try:
         conn.execute("BEGIN")  # one snapshot: the memo key must describe the rows it maps to
@@ -687,7 +689,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         version_column = 'version' if 'version' in columns else 'NULL'
         info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
-        key = None
+        key = view = rows = probe = None
         stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
         if live and {'seq', 'version'} <= columns:
             probe = conn.execute(_REPLICA_PROBE).fetchone()
@@ -709,11 +711,14 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                 if moved_out is not None:
                     moved_out.update(memo[9])
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
-        # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
-        # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
-        packed = conn.execute(f"SELECT json_group_array(json_array(gw, key, data, updated_at, {version_column})) "
-                              "FROM replica WHERE coll = 'tasks'").fetchone()[0]
-        rows = [tuple(row) for row in json.loads(packed)]
+        if key is not None:  # [daveey] a miss reads and re-projects only the rows whose seq moved
+            view = _replica_rows.read(conn, path, version_column, probe, ident)
+        else:
+            # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
+            # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
+            packed = conn.execute(f"SELECT json_group_array(json_array(gw, key, data, updated_at, {version_column})) "
+                                  "FROM replica WHERE coll = 'tasks'").fetchone()[0]
+            rows = [tuple(row) for row in json.loads(packed)]
     finally:
         conn.close()
     if key is None:
@@ -723,8 +728,9 @@ def _read_remote_links(path: Path, now: float | None = None, *,
     owners: set = set()
     moved: dict = {}
     seen_at: dict[str, float] = {}
-    cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                             qualified_out=qualified, owners_out=owners, seen_out=seen_at, moved_out=moved)
+    cards = _replica_projection.project(view, now, me, info_rows, last_ok, offline, fresh=key[3],
+                                        qualified_out=qualified, owners_out=owners, seen_out=seen_at,
+                                        moved_out=moved)
     # Heartbeat cut-offs are the live verdicts in ``key``, hub staleness the ``stale`` check; a clock step back rereads.
     _remote_read_memo = (key, now, None, list(cards),
                          frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
@@ -768,7 +774,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
     legacy_records: dict[tuple, dict] = {}
     global _replica_decoded
     previous_decoded, decoded = _replica_decoded, {}
-    for gw, record_key, data, updated, version in rows:
+    # (gw, key) order, which ``kanban_replica_rows`` also keeps: the answer's order never depends on the scan.
+    for gw, record_key, data, updated, version in sorted(rows, key=lambda r: (str(r[0]), str(r[1]))):
         memo_key = (str(path), str(gw), str(record_key))
         hit = previous_decoded.get(memo_key)
         row = hit[1] if hit is not None and hit[0] == data else _decode_replica_task(record_key, data)
@@ -815,6 +822,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         qualified_out.update((gw, board, tid) for gw, _, board, tid in blank_before - set(tasks))
     from hermes_cli.profiles import get_active_profile_name
 
+    card_rows = _replica_projection.card_rows
+    historical_fields, linked_sessions = _replica_projection.historical_fields, _replica_projection.linked_sessions
     origin_profile = get_active_profile_name()
     found: dict[tuple[str, str], dict[str, Any]] = {}
     for (gw, owner_profile, board, tid), t in tasks.items():
@@ -822,43 +831,16 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         # Other profiles on this gateway, and unqualified legacy owners, are not.
         if gw == me and owner_profile == origin_profile:
             continue
-        links = t.get("sessions") if isinstance(t.get("sessions"), list) else []
-        sids = {str(link['session']) for link in links
-                if isinstance(link, dict) and link.get('session') and link.get('gw') == me
-                and link.get('profile') == origin_profile
-                and link.get('rel') in ('shepherd', 'cross_task', 'create-task', 'adopt-task')}
+        sids = linked_sessions(t, me, origin_profile)
         if not sids:
             continue
         owner_seen = seen_at.get(gw) or None
         synced = min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)
         # Observation scope: the linked card only, never its dependency descendants.
-        closed = (gw, owner_profile, board, tid) in released
-        prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
-        ref = f'{prefix}/{tid}'
-        from hermes_cli.kanban_completion_receipt_projection import remote_fields
-        historical = remote_fields(raw[(gw, owner_profile, board, tid)], gateway=gw,
-                                   profile=owner_profile, board=board, task_id=tid)
-        for sid in sids:
-            found[(sid, ref)] = {
-                **historical,
-                **{f: t.get(f) for f in _REMOTE_FIELDS},
-                "id": tid, "board": board, "gateway": gw, "key": ref, "session": sid,
-                "via": "shepherd", "root": ref, "remote": True,
-                "profile": owner_profile, "owner_profile": owner_profile,
-                "origin_gateway": me, "origin_profile": origin_profile,
-                "ownership_state": 'unknown' if owner_profile is None else 'qualified',
-                "unfinished": not closed and (t.get("status") in LISTED_STATUSES or bool(t.get("unfinished"))),
-                "released": closed,
-                **({"closed_uncompleted": True} if closed and t.get("status") == "archived"
-                   and _owner_evidence_of(t).get("verified") is not True else {}),
-                "reported_status": t.get('reported_status', t.get('status')),
-                "synced_at": synced, "stale": stale,
-                "legacy_record": legacy_records.get((gw, owner_profile, board, tid)),
-                "legacy_key": t.get('_legacy_key'),
-                # [daveey] What the card waits on is recomputed at read time from these (``_remote_wait``).
-                "park": _park_of(t),
-                **{k: t[k] for k in ("awaiting", "wake_check") if t.get(k)},
-            }
+        key = (gw, owner_profile, board, tid)
+        found.update(card_rows(key, t, sids=sids, closed=key in released, synced=synced, stale=stale, me=me,
+                               origin_profile=origin_profile, legacy_record=legacy_records.get(key),
+                               historical=historical_fields(raw[key], key)))
     return list(found.values())
 
 
@@ -1933,6 +1915,8 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     global _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
     _remote_read_memo = None
     _hub_signature.reset()
+    _replica_rows.reset()
+    _replica_projection.reset()
     _annotate_flight_scope = None
     _annotate_flight_result = None
     _annotate_waiters = 0

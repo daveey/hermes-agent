@@ -37,7 +37,7 @@ def hub(tmp_path, monkeypatch):
                          ' updated_at INTEGER, PRIMARY KEY (gw, coll, key));'
                          'CREATE TABLE outbox(id INTEGER PRIMARY KEY, data TEXT);')
         db.executemany('INSERT INTO meta VALUES (?,?)', [('gateway', 'origin'), ('last_ok', '1000'), ('cursor', '0')])
-    seq = {'n': 0}
+    seq = {'n': 100}  # above every hand-placed seq: the hub feed's seq only grows
 
     def put(tid, **extra):
         seq['n'] += 1

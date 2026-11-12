@@ -27,7 +27,17 @@ def owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | N
     cards had no other release path, so every one of them stayed open forever. ``evidence`` is the task's
     ``_owner_evidence`` (``_decode_replica_task``). [daveey]
     """
-    if stale or owner_profile is None or task.get('status') not in TERMINAL_STATUSES:
+    if stale or owner_profile is None or not record_attests_terminal(task, gw, owner_profile, board, evidence):
+        return False
+    beat = heartbeats.get((gw, owner_profile, board))
+    return beat is not None and _scope_hb.fresh(beat[0], now, beat[1])
+
+
+def record_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,
+                            evidence: dict[str, Any]) -> bool:
+    """The part of ``owner_attests_terminal`` that is a pure function of the record (no clock, no hub state), so an
+    incremental projection can decide it once per row text. [daveey]"""
+    if owner_profile is None or task.get('status') not in TERMINAL_STATUSES:
         return False
     if task.get('profile') != owner_profile or task.get('board') != board or task.get('gateway') != gw:
         return False
@@ -37,7 +47,5 @@ def owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | N
     # have verified the completion (lifecycle event, run, contract and goal receipts), not just closed it.
     # An archive is the exception: it produces nothing, so it closes the link without counting as completed
     # (``closed_uncompleted`` on the row). [daveey]
-    if task.get('origin_bindings') and evidence.get('verified') is not True and task.get('status') != 'archived':
-        return False
-    beat = heartbeats.get((gw, owner_profile, board))
-    return beat is not None and _scope_hb.fresh(beat[0], now, beat[1])
+    return not (task.get('origin_bindings') and evidence.get('verified') is not True
+                and task.get('status') != 'archived')
