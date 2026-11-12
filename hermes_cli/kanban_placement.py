@@ -215,7 +215,8 @@ CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provid
                    "distinct_from", "distinct_reason", "admission_class", "admission_frees")
 IDENTITY_OPTIONS = ("idempotency_key", "distinct_from", "distinct_reason")
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
-LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", *IDENTITY_OPTIONS)
+LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", *IDENTITY_OPTIONS,
+                    "admission_class", "admission_frees")
 HELP_CACHE_SECONDS = 600
 # Profile tools (``requires`` entries) a target can satisfy when it does not publish its profiles'
 # tools: what the hub's default profile has. host_repo never travels: it means a checkout on THIS host.

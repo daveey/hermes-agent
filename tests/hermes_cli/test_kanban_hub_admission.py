@@ -106,6 +106,13 @@ def test_admission_metadata_survives_remote_option_encoding():
     assert placement.carried_options(args) == args
 
 
+@pytest.mark.parametrize("field,value", [("admission_class", "capacity"),
+                                         ("admission_frees", "frees: worker slots")])
+def test_legacy_courier_cannot_silently_drop_admission_metadata(field, value):
+    from hermes_cli import kanban_placement as placement
+    assert placement._uncarried({field: value}, placement._Cfg({}), False) == [field]
+
+
 def test_claim_persists_immutable_regular_receipt(board):
     conn, home = board
     configure(home, limit=None)
