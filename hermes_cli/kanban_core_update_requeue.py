@@ -11,6 +11,10 @@ Only an exact manual reclaim with that reason, whose run ended ``reclaimed`` and
 crash or timeout evidence, qualifies. Any other reclaim, crash or timeout still consumes the
 handoff (fail closed). A PR the requeued run reported is a newer PR comment and re-arms the
 guard on its own. Keep the reason in sync with hermes-sync.
+
+Residual: "restart-safe" is a host property, not per-worker quiescence, so a requeued run may
+have opened a PR it had not yet reported. The next run sees the requeued run's transcript tail
+(kanban_worker_recovery); the risk matches the continued/scheduled handoffs.
 """
 from __future__ import annotations
 
