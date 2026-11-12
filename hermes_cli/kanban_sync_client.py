@@ -733,10 +733,10 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     out.rejected += 1
                     _log.warning("kanban sync: %s %s %s rejected (%s)", board, row["table_name"], row["row_uid"], reason)
                     if res.get("reason") == "forbidden_field":
-                        from hermes_cli.kanban_sync_compat import enqueue_retry, record_rejection
+                        from hermes_cli.kanban_sync_compat import VIRTUAL_DROPPED, enqueue_retry, record_rejection
                         sent_op = next(op for op in wire if op["client_op_id"] == op_id)
-                        enqueue_retry(conn, row, sent_op, res)
-                        record_rejection(conn, row, reason)
+                        if enqueue_retry(conn, row, sent_op, res) != VIRTUAL_DROPPED:
+                            record_rejection(conn, row, reason)
                     elif row["table_name"] == "tasks" and res.get("reason") == "live_claim":
                         _record_live_claim_rejection(conn, row, reason)
                     if primary and res.get("row"):
