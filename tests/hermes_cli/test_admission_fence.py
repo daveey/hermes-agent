@@ -396,29 +396,44 @@ def test_standalone_capability_uses_only_stdlib():
 
 
 
-def test_reserve_and_extend_default_to_one_short_try_and_accept_a_longer_timeout(tmp_path):
-    """[daveey] N3: callers holding the session-map lock keep the 50 ms default; lock-free callers (cron) may wait."""
+def test_reserve_and_extend_default_to_one_short_try_and_accept_a_longer_timeout(tmp_path, monkeypatch):
+    """[daveey] N3: callers holding the session-map lock keep the 50 ms default; lock-free callers (cron) may wait.
+
+    Each leg contends for a lock another process still holds: the holder releases only once the long-timeout
+    call has kept waiting well past the 50 ms default, so a ``reserve``/``extend`` that ignores ``timeout=``
+    raises AdmissionBusy instead of finding the lock free."""
     import time
 
-    # Held until ``finish`` is set, not for a fixed time: a CPU-starved runner must not see the lock
-    # drop before the short tries run, nor have the short tries measured against a sub-second bound.
+    released_after_s = 1.0  # far past the 50 ms default: a timeout-ignoring call has given up long before
     ctx = multiprocessing.get_context("spawn")
-    ready, finish = ctx.Event(), ctx.Event()
-    child = ctx.Process(target=_lock_child, args=(tmp_path, ready, finish))
-    child.start()
-    release = threading.Timer(0.3, finish.set)
-    try:
-        assert ready.wait(20)
-        for fn in (af.reserve, af.extend):
+    for fn in (af.reserve, af.extend):
+        ready, finish = ctx.Event(), ctx.Event()
+        child = ctx.Process(target=_lock_child, args=(tmp_path, ready, finish))
+        child.start()
+        try:
+            assert ready.wait(20)
             started = time.monotonic()
             with pytest.raises(af.AdmissionBusy):
                 fn(tmp_path)
             # One short try, not admission_lock's 10 s wait (the holder keeps the lock up to 20 s).
-            assert time.monotonic() - started < 5
-        release.start()  # the holder lets go while the longer-timeout caller waits
-        af.reserve(tmp_path, timeout=60).close()
-        af.extend(tmp_path, timeout=60).close()
-    finally:
-        release.cancel()
-        finish.set()
-        _reap(child)
+            assert time.monotonic() - started < 5, fn.__name__
+
+            class _ReleaseWhileWaiting:
+                """af's clock: its retry pause frees the holder once the caller has outwaited the default."""
+
+                def __getattr__(self, name):
+                    return getattr(time, name)
+
+                def sleep(self, seconds):
+                    if time.monotonic() - started >= released_after_s:
+                        finish.set()
+                    time.sleep(seconds)  # health: allow HX013 -- af's own retry pause, delegated unchanged
+
+            started = time.monotonic()
+            with monkeypatch.context() as m:
+                m.setattr(af, "time", _ReleaseWhileWaiting())
+                fn(tmp_path, timeout=60).close()
+            assert finish.is_set(), f"{fn.__name__} got the lock without waiting out the holder"
+        finally:
+            finish.set()
+            _reap(child)
