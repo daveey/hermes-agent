@@ -114,6 +114,13 @@ def test_legacy_courier_cannot_silently_drop_admission_metadata(field, value):
     assert placement._uncarried({field: value}, placement._Cfg({}), False) == [field]
 
 
+def test_explicit_normal_class_is_the_default_and_needs_no_courier_probe(monkeypatch):
+    from hermes_cli import kanban_placement as placement
+    monkeypatch.setattr(placement, "hub_carries_options", lambda *a: pytest.fail("probed for a default class"))
+    assert placement.carried_options({"admission_class": "normal"}) == {}
+    assert placement._uncarried({"admission_class": "normal"}, placement._Cfg({}), None) == []
+
+
 def test_claim_persists_immutable_regular_receipt(board):
     conn, home = board
     configure(home, limit=None)
@@ -509,6 +516,110 @@ def test_dispatch_full_regular_pool_claims_marked_with_shared_memory_budget(
     detail = {"pools": {"regular": 0, "priority": 0}}
     assert mm.active_card_runs(detail=detail) == 7 + expected
     assert detail["pools"] == {"regular": 7, "priority": expected}
+
+
+def _saturate(conn, home, monkeypatch, regular_active):
+    """``regular_active`` real regular claims, then opt the hub in (cap 7 + 3 priority) with an idle CPU."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    configure(home, limit=None)
+    for index in range(regular_active):
+        assert kb.claim_task(conn, task(conn, title=f"active {index}"))
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    advisory(home)
+    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
+    attempts, spawned = [], []
+    original = dispatch._dispatch_lane_task
+
+    def attempt(conn, row, *args, **kwargs):
+        attempts.append(row["id"])
+        return original(conn, row, *args, **kwargs)
+
+    monkeypatch.setattr(dispatch, "_dispatch_lane_task", attempt)
+    return attempts, spawned, lambda candidate, workspace, board=None: spawned.append(candidate.id)
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_full_regular_pool_never_attempts_normal_claims(board, monkeypatch, all_assignees_spawnable, review):
+    """Regular 7/7 + priority 0/3: normal rows get no claim attempt (no lease, no locked census) and the
+    tick still reports the regular pool as full; an idle priority pool is marked-only."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli import kanban_queue_position as kqp
+    conn, home = board
+    attempts, spawned, spawn = _saturate(conn, home, monkeypatch, 7)
+    normal = [task(conn, review=review, title=f"normal {index}") for index in range(3)]
+    result = dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=20, max_in_progress=7, reconcile_orphans=False)
+    assert attempts == [] and spawned == []
+    assert result.at_capacity == "regular pool max_in_progress=7/7 (priority 0/3 is marked-only)"
+    for tid in normal:
+        assert kb.get_task(conn, tid).status == ("review" if review else "ready")
+        assert conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 0
+    if not review:
+        note = kqp.fields(kqp.position(conn, kb.get_task(conn, normal[0])))["queue_note"]
+        assert "regular pool full (7/7)" in note, note
+
+
+def test_partly_free_regular_pool_attempts_only_admissible_normal_rows(board, monkeypatch, all_assignees_spawnable):
+    """Regular 6/7: the marked row takes a priority slot, ONE normal row the last regular slot; the other normal
+    rows are not attempted although the combined budget (1 + 3) would cover them."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    conn, home = board
+    attempts, spawned, spawn = _saturate(conn, home, monkeypatch, 6)
+    normal = [task(conn, title=f"normal {index}") for index in range(3)]
+    marked = task(conn, title="restore capacity")
+    kb.edit_task(conn, marked, admission_class="urgent")
+    dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=20, max_in_progress=7, reconcile_orphans=False)
+    assert len(attempts) == 2 and attempts[0] == marked and attempts[1] in normal
+    assert spawned == attempts
+    detail = {"pools": {"regular": 0, "priority": 0}}
+    assert mm.active_card_runs(detail=detail) == 8
+    assert detail["pools"] == {"regular": 7, "priority": 1}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_worker_pickup_gets_pool_aware_budget(board, monkeypatch, all_assignees_spawnable, enabled):
+    from hermes_cli import kanban_admission_pools as pools
+    from hermes_cli import kanban_db_dispatch as dispatch
+    conn, home = board
+    if enabled:
+        _saturate(conn, home, monkeypatch, 7)
+    else:
+        configure(home, limit=None, cap=7)
+        monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
+    budgets = []
+    monkeypatch.setattr(dispatch._kb._sync, "worker_pickup", lambda conn, budget, *rest: budgets.append(budget))
+    # max_spawn is a per-board in-progress ceiling: 7 running + 2 more when enabled, 2 on the idle worker.
+    dispatch.dispatch_once(conn, spawn_fn=lambda *a, **k: None, max_spawn=9 if enabled else 2, max_in_progress=7,
+                           reconcile_orphans=False)
+    if not enabled:
+        assert budgets == [2]
+        return
+    [budget] = budgets
+    assert isinstance(budget, pools.PoolBudget)
+    assert not budget.admits("normal")
+    assert budget.admits("capacity") and budget.admits("urgent")
+    budget.take("capacity")
+    budget.take("urgent")
+    assert not budget.admits("capacity"), "max_spawn=2 still caps the total"
+
+
+def test_pool_budget_charges_marked_to_priority_then_regular():
+    from hermes_cli.kanban_admission_pools import PoolBudget
+    budget = PoolBudget(1, 1)
+    assert budget.admits("normal")
+    budget.take("capacity")  # priority first
+    assert budget.admits("normal")
+    budget.take("urgent")  # priority full: falls to regular
+    assert not budget.admits("normal") and not budget.admits("urgent")
+    assert PoolBudget(0, 0, limit=None).admits("urgent") is False
+    plain = PoolBudget(2, 0)
+    plain.take("normal")
+    assert plain.admits("normal")
+    plain.take("normal")
+    assert not plain.admits("capacity")
 
 
 def test_pool_census_uses_one_board_snapshot(board, monkeypatch):

@@ -553,9 +553,12 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
-    free = 0
+    free = 0  # guard-held copies take no budget: they `continue` before room.take
+    from hermes_cli.kanban_admission_pools import PoolBudget, row_class
+    room = PoolBudget(limit.regular, limit.priority, limit.limit) if isinstance(limit, PoolBudget) else \
+        PoolBudget(limit, 0)  # an int is a classless budget; a hub's pool budget never copies unstartable work
     for card in listed:
-        full = len(picked) - free >= limit
+        full = not room.admits(row_class(card))
         if full and card["id"] not in mine:
             continue
         reason = _skip_reason(conn, card, own, reg["machines"], mode=mode, review_enabled=review_enabled,
@@ -574,6 +577,7 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
             reason = ("budget_exhausted", full_detail)
         if reason is None:
             picked.append(card["id"])
+            room.take(row_class(card))
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
@@ -635,7 +639,7 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     evict(conn)
     _refill_copies(conn)
     limit = DEFAULT_PICKUP_BATCH if budget is None else budget
-    if limit <= 0:
+    if getattr(limit, "total", limit) <= 0:
         note_capped(conn, profile_exists)
         return []
     replica = open_replica(conn)

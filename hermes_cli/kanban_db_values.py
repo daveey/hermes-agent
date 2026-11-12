@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 
@@ -33,3 +34,10 @@ def _opt_int(value: Any) -> Optional[int]:
 def _json_or_null(obj: Any) -> Optional[str]:
     """JSON text for a payload/metadata column; falsy -> NULL."""
     return json.dumps(obj, ensure_ascii=False) if obj else None
+
+
+def error_fingerprint(error_text: str) -> str:
+    """Normalize an error message (strip PIDs, timestamps) so same-root-cause errors group."""
+    fp = re.sub(r'\bpid \d+\b', 'pid N', error_text[:80])
+    fp = re.sub(r'\b\d{10,}\b', '<TS>', fp)
+    return fp.lower().strip()

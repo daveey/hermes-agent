@@ -713,7 +713,8 @@ def carried_options(args: dict) -> dict:
             vals = [str(x) for x in ([v] if isinstance(v, str) else v) if str(x).strip()]
             if vals:
                 out[k] = vals
-        elif k == "completion_contract" and str(v).strip() == "local-only":
+        elif (k == "completion_contract" and str(v).strip() == "local-only") or (
+                k == "admission_class" and str(v).strip() == "normal"):
             continue
         else:
             out[k] = str(v)
@@ -726,7 +727,8 @@ def _uncarried(args: dict, c: _Cfg, carries: Optional[bool]) -> list[str]:
     used = [k for k in UNCARRIED_OPTIONS if args.get(k) not in (None, "", False, [])]
     if args.get("runs_on") is not None and "runs_on" not in used:
         used.append("runs_on")  # an explicit [] ("any machine") is a placement too: never dropped
-    legacy = [k for k in LEGACY_UNCARRIED if args.get(k) not in (None, "", False, [])]
+    legacy = [k for k in LEGACY_UNCARRIED if args.get(k) not in (None, "", False, [])
+              and not (k == "admission_class" and args.get(k) == "normal")]  # the default class carries as absent
     if (args.get("completion_contract") or "local-only") != "local-only":
         legacy.append("completion_contract")
     if used or not legacy:

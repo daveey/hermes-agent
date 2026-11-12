@@ -101,8 +101,62 @@ def lane_rows(conn, status):
     return ranked
 
 
-def dispatch_remaining(regular_cap):
-    """Upper bound for candidate attempts; final locked claims enforce each pool."""
+class PoolBudget:
+    """One tick's per-pool candidate budget on an opted-in hub. A normal row only ever fits a regular slot, so
+    it is never attempted (no Board lease, no locked census) once the regular slots this tick saw are spent;
+    a marked row is charged to a priority slot first. ``limit`` caps the total (max_spawn, memory, share).
+    Advisory only: the locked claim recount stays the authority."""
+
+    def __init__(self, regular, priority, limit=None):
+        self.regular, self.priority, self.limit = max(0, regular), max(0, priority), limit
+
+    @property
+    def total(self):
+        free = self.regular + self.priority
+        return free if self.limit is None else min(free, self.limit)
+
+    def admits(self, admission_class):
+        if self.limit is not None and self.limit <= 0:
+            return False
+        return self.regular > 0 or (admission_class in MARKED and self.priority > 0)
+
+    def take(self, admission_class):
+        if admission_class in MARKED and self.priority > 0:
+            self.priority -= 1
+        else:
+            self.regular -= 1
+        if self.limit is not None:
+            self.limit -= 1
+
+
+def row_class(row):
+    """A row's admission class; a schema without the column (older replica) reads as normal."""
+    return (row["admission_class"] if "admission_class" in row.keys() else None) or "normal"
+
+
+def pool_admits(result, row):
+    budget = getattr(result, "admission_budget", None)
+    return budget is None or budget.admits(row_class(row))
+
+
+def pool_take(result, row):
+    """Charge a spawned row to its pool; returns 1 so the caller's spawn count stays one expression."""
+    budget = getattr(result, "admission_budget", None)
+    if budget is not None:
+        budget.take(row_class(row))
+    return 1
+
+
+def pickup_budget(result, spawn_budget):
+    """Foreign pickup budget: the scalar on workers, a pool-aware budget capped to the tick's total on a hub."""
+    budget = getattr(result, "admission_budget", None)
+    if budget is None:
+        return spawn_budget
+    return PoolBudget(budget.regular, budget.priority, spawn_budget)
+
+
+def dispatch_pools(regular_cap):
+    """``(regular_free, priority_free, regular_used, priority_used)``; None when the extra pool is off."""
     from hermes_cli import machine_cpu_metrics as cpu, machine_metrics
 
     if cpu.root_limit()[0] != cpu.ON:
@@ -113,21 +167,32 @@ def dispatch_remaining(regular_cap):
     detail = {"pools": {"regular": 0, "priority": 0}}
     active = machine_metrics.active_card_runs(detail=detail)
     if active is None:
-        return 0
+        return 0, 0, None, None
     counts = detail["pools"]
-    return max(0, regular_cap - counts["regular"]) + max(0, slots - counts["priority"])
+    return (max(0, regular_cap - counts["regular"]), max(0, slots - counts["priority"]),
+            counts["regular"], counts["priority"])
 
 
-def host_remaining(regular_cap, running_count, board):
-    """Keep the legacy scalar budget when the extra hub pool is not enabled."""
+def host_remaining(regular_cap, running_count, board, result=None):
+    """Keep the legacy scalar budget when the extra hub pool is not enabled. When it is, record the per-pool
+    budget on ``result`` and report a full regular pool as ``at_capacity`` even while marked-only priority
+    slots stay free (an idle priority pool never admits normal work)."""
     from hermes_cli.kanban_db_dispatch import count_running_tasks_other_boards
     try:
-        remaining = dispatch_remaining(regular_cap)
+        free = dispatch_pools(regular_cap)
     except (OSError, ValueError, TypeError):
         return 0
-    if remaining is None:
+    if free is None:
         return regular_cap - running_count - count_running_tasks_other_boards(board)
-    return remaining
+    regular, priority, used, priority_used = free
+    if result is not None:
+        result.admission_budget = PoolBudget(regular, priority)
+        if regular <= 0:
+            slots = root_settings()[0]
+            result.at_capacity = (f"regular pool max_in_progress={'?' if used is None else used}/{regular_cap} "
+                                  f"(priority {'?' if priority_used is None else priority_used}/{slots} "
+                                  "is marked-only)")
+    return regular + priority
 
 
 def queue_fields(regular_cap, admission_class, conn=None, task_id=None):

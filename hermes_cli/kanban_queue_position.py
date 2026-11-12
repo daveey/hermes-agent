@@ -337,6 +337,9 @@ def local_words(place: dict[str, Any]) -> str:
         if scored:
             from hermes_cli.kanban_admission_score import summary
             census += "; " + summary(scored)
+        if (place.get("admission_class") not in ("capacity", "urgent") and pools["regular"] is not None
+                and pools["regular_cap"] is not None and pools["regular"] >= pools["regular_cap"]):
+            census += f"; regular pool full ({pools['regular']}/{pools['regular_cap']}), a normal card waits for it"
         return (f"{words}, {census}; class {place['admission_class']}. "
                 "Queued, not stuck: check class/placement and available capacity; priority slots are marked-only. "
                 "Do not run its work outside the dispatcher")
