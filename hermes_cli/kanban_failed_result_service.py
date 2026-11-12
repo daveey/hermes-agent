@@ -16,6 +16,8 @@ OBSERVER_MODULE = 'hermes_cli.kanban_failed_result_observer'
 # and ``--collect`` removes it. Committed results stay queued for crash recovery.
 START_LIMIT_BURST = 10
 START_LIMIT_INTERVAL_SECONDS = 300
+READY_ENV = 'HERMES_FAILED_RESULT_READY'
+READY_DIR_ENV = 'HERMES_FAILED_RESULT_READY_DIR'
 
 
 def observer_argv_env(env, context):
@@ -31,6 +33,24 @@ def observer_argv_env(env, context):
 
     env = pin_hermes_tree_on_pythonpath(env, Path(project_root_str()))
     return [*hermes_module_argv(sys.executable, OBSERVER_MODULE), json.dumps(context)], env
+
+
+def _ready_cleanup_args(ready):
+    """[daveey] Manager-side release of the readiness tempdir after every stop.
+
+    A unit that retires (exit 78) or exhausts ``StartLimitBurst`` never reaches the
+    observer's own cleanup. ``ExecStopPost`` runs after each stop, so a restarted
+    observer recreates the directory before acknowledging. Paths travel as
+    environment values, expanded by ``${...}`` as one word: no specifier or quoting
+    rules apply to board paths. ``-`` keeps a failed cleanup from changing the
+    unit's result. Without ``rm``/``rmdir`` the unit keeps its previous behavior.
+    """
+    rm, rmdir = locate_command('rm').command, locate_command('rmdir').command
+    if not rm or not rmdir:
+        return []
+    return [f'--setenv={READY_ENV}={ready}', f'--setenv={READY_DIR_ENV}={ready.parent}',
+            f'--property=ExecStopPost=-{rm[0]} -f -- ${{{READY_ENV}}}',
+            f'--property=ExecStopPost=-{rmdir[0]} -- ${{{READY_DIR_ENV}}}']
 
 
 def arm_service(context, *, startup_seconds=5.0):
@@ -65,6 +85,7 @@ def arm_service(context, *, startup_seconds=5.0):
                f'--property=StartLimitIntervalSec={START_LIMIT_INTERVAL_SECONDS}s',
                f'--property=StartLimitBurst={START_LIMIT_BURST}',
                f'--working-directory={project_root_str()}']
+    command += _ready_cleanup_args(ready)
     # A manager-created service does not inherit its submitter's environment.
     # Keep profile/path resolution, without forwarding secrets or worker pins.
     for key in ('PATH', 'PYTHONPATH', 'HERMES_HOME', 'HERMES_KANBAN_HOME', 'HERMES_KANBAN_BOARD',

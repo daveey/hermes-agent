@@ -165,7 +165,10 @@ def observe(context):
         # The acknowledgement precedes the writer's result transaction.
         conn.execute('PRAGMA busy_timeout=250')
         if context.get('ready_path'):
-            Path(context['ready_path']).write_text(context['observer_unit'], encoding='utf-8')
+            ready = Path(context['ready_path'])
+            # The unit's ExecStopPost released the directory before this restart.
+            ready.parent.mkdir(exist_ok=True)
+            ready.write_text(context['observer_unit'], encoding='utf-8')
         else:
             sys.stdout.buffer.write(READY)
             sys.stdout.buffer.flush()
@@ -202,6 +205,22 @@ def observe(context):
             time.sleep(POLL_SECONDS)
 
 
+def _release_ready(context):
+    """Best-effort removal of the ``failed-result-*/ready`` acknowledgment tempdir.
+
+    Only that exact shape is touched, so a malformed context cannot aim this at
+    another path. Errors are swallowed: cleanup never changes the exit status.
+    """
+    try:
+        ready = Path(context['ready_path'])
+        if ready.name != 'ready' or not ready.parent.name.startswith('failed-result-'):
+            return
+        ready.unlink(missing_ok=True)
+        ready.parent.rmdir()
+    except (KeyError, TypeError, ValueError, OSError):
+        pass
+
+
 def main(argv):
     """Run one observation; returns the process exit status.
 
@@ -210,28 +229,27 @@ def main(argv):
     forever. Exit ``STARTUP_FAILURE_EXIT``, which the service lists in
     ``RestartPreventExitStatus``, so the manager retires the unit instead.
     A missing or malformed context argument is equally deterministic.
+    Retiring releases the readiness tempdir, as success does.
     """
+    context = None
     try:
         context = json.loads(argv[1])
         if not isinstance(context, dict) or not context.get('db') or any(key not in context for key in CONTEXT_KEYS):
             raise ValueError(f'context lacks {CONTEXT_KEYS}')
     except (IndexError, TypeError, ValueError) as exc:
         print(f'failed-result observer has no usable context, retiring: {exc!r}', file=sys.stderr)
+        if isinstance(context, dict):
+            _release_ready(context)
         return STARTUP_FAILURE_EXIT
     try:
         observe(context)
     except ImportError as exc:
         print(f'failed-result observer cannot import its code, retiring: {exc!r}', file=sys.stderr)
+        _release_ready(context)
         return STARTUP_FAILURE_EXIT
-    # Only a successful terminal observation releases the readiness artifact.
-    # Unexpected errors retain it and exit nonzero for manager restart.
-    if context.get('ready_path'):
-        ready = Path(context['ready_path'])
-        ready.unlink(missing_ok=True)
-        try:
-            ready.parent.rmdir()
-        except FileNotFoundError:
-            pass
+    # Unexpected errors exit nonzero for manager restart; the unit's ExecStopPost
+    # releases the tempdir after each stop and the restart recreates it.
+    _release_ready(context)
     return 0
 
 
