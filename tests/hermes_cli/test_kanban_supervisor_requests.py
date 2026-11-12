@@ -437,6 +437,23 @@ def test_archived_requester_is_rejected_at_execution(board, monkeypatch):
         assert (board["qa119"], board["dev116"]) in _edges(conn)
 
 
+def test_unlink_applies_after_requester_completes(board, monkeypatch):
+    """Completing the card does not cancel a filed request; the receipt does not reopen the card."""
+    out = _tool({"ops": _reorder(board)})
+    with kbc.connect() as conn:
+        assert kb.complete_task(conn, board["requester"], summary="filed", expected_run_id=board["run_id"])
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        assert ksr.drain(conn)["processed"] == [(out["request_id"], "done")]
+        assert (board["qa119"], board["dev116"]) not in _edges(conn)
+        assert (board["dev67"], board["dev81"]) not in _edges(conn)
+        req = ksr.get_request(conn, out["request_id"])
+        assert req["error"] is None and req["requester_woken"] == 1
+        kinds = [k for k, _ in _events(conn, board["requester"])]
+        assert kinds[-2:] == ["supervisor_request_accepted", "supervisor_request_done"]
+        assert kb.get_task(conn, board["requester"]).status == "done"
+
+
 def test_a_request_that_keeps_crashing_executors_is_failed_not_redelivered_forever(board, monkeypatch):
     out = _tool({"ops": _reorder(board)})
     _as_executor(monkeypatch)

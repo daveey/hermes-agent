@@ -236,10 +236,13 @@ def endpoint_scope(conn: sqlite3.Connection, requester: str, task_id: str) -> Op
 
 
 def requester_refusal(conn: sqlite3.Connection, requester: str) -> Optional[str]:
+    """Only a missing or archived requester voids its queued requests. A ``done`` requester's request still
+    runs: ``submit`` proved a live run, filing a comment is naturally a worker's last act, and each executor
+    re-checks the op's scope against the board as it is now."""
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (requester,)).fetchone()
     if row is None:
         return f"requester {requester} no longer exists"
-    if row[0] in ("archived", "done"):
+    if row[0] == "archived":
         return f"requester {requester} is {row[0]}"
     return None
 
