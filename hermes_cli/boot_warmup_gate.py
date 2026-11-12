@@ -33,8 +33,10 @@ log = logging.getLogger(__name__)
 ALWAYS_ON_WARMUP_BUDGET_S = 6.0
 # ...and ends this many seconds after process start, whichever comes first. Boot to bind on hermes-hub measured
 # 11.4-18.4 s (median ~14 s) over 30 restarts on 2026-11-12, so a fixed 6 s on top of a slow boot would bind past
-# Desktop's 20 s always-on attach window (``ALWAYS_ON_RESTART_WAIT_MS``). That window opens when Desktop sees the old
-# process gone, before the supervisor has started this one, so the deadline keeps ~3 s of slack for the restart.
+# Desktop's 20 s always-on attach window (``ALWAYS_ON_RESTART_WAIT_MS``). That window is not measured from the old
+# process's exit: it starts in ``connectAlwaysOn``, after Desktop has noticed the drop and run its SSH preflight.
+# Under core's systemd unit (``RestartSec=5``) a capped bind can land 5 + 17 = 22 s after the old process exits, so
+# the fit relies on that detection + preflight time, not on slack inside this deadline.
 ALWAYS_ON_BIND_DEADLINE_S = 17.0
 # A process older than this at the gate is not a fresh boot (or its start time is wrong): use the plain budget.
 _MAX_PLAUSIBLE_BOOT_S = 300.0
@@ -124,12 +126,15 @@ def hold_bind_for_prewarm(budget_s: Optional[float] = None) -> Optional[tuple[fl
         threads = boot_prewarm_threads()
         age = process_age_s()
         budget = warmup_budget_s(age) if budget_s is None else budget_s
-        elapsed, running = join_within(threads, budget)
+        elapsed, _ = join_within(threads, budget)
         age_note = "?" if age is None else f"{age:.1f}s"
+        # Count and names from one is_alive pass, so a prewarm finishing after the join can't skew the line.
+        names = running_prewarm_names(threads)
+        running = len(names)
         if running:
             log.info("always-on dashboard: boot prewarm budget spent after %.2fs of %.2fs (process age %s at gate; "
                      "%d thread(s), %d still running: %s); binding", elapsed, budget, age_note, len(threads),
-                     running, ", ".join(running_prewarm_names(threads)))
+                     running, ", ".join(names))
         else:
             log.info("always-on dashboard: boot prewarm finished after %.2fs of %.2fs (process age %s at gate; "
                      "%d thread(s)); binding", elapsed, budget, age_note, len(threads))

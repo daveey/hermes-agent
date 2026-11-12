@@ -130,6 +130,41 @@ def test_budget_spent_line_names_the_prewarms_still_running(monkeypatch, caplog)
     assert "2 still running: board, project tree); binding" in line, line
 
 
+def test_budget_spent_count_matches_the_names_it_lists(monkeypatch, caplog):
+    # A prewarm that finishes between the join and the naming pass must not leave "2 still running: board".
+    monkeypatch.setenv(ENV_FLAG, "1")
+    release = threading.Event()
+    board = threading.Thread(target=release.wait, args=(10,), daemon=True, name="kanban-board-prewarm")
+    finished = threading.Thread(target=lambda: None, name="kanban-annotation-prewarm")
+    for thread in (board, finished):
+        thread.start()
+    finished.join(5)
+    monkeypatch.setattr(gate, "boot_prewarm_threads", lambda: [board, finished])
+    monkeypatch.setattr(gate, "join_within", lambda threads, budget_s: (budget_s, 2))  # both alive at the join
+    try:
+        with caplog.at_level("INFO", logger=gate.log.name):
+            result = gate.hold_bind_for_prewarm(budget_s=0.1)
+        assert result is not None and result[1] == 1
+    finally:
+        release.set()
+    line = next(r.getMessage() for r in caplog.records if "binding" in r.getMessage())
+    assert "1 still running: board); binding" in line, line
+
+
+def test_all_prewarms_done_by_the_naming_pass_logs_finished(monkeypatch, caplog):
+    monkeypatch.setenv(ENV_FLAG, "1")
+    finished = threading.Thread(target=lambda: None, name="kanban-board-prewarm")
+    finished.start()
+    finished.join(5)
+    monkeypatch.setattr(gate, "boot_prewarm_threads", lambda: [finished])
+    monkeypatch.setattr(gate, "join_within", lambda threads, budget_s: (budget_s, 1))
+    with caplog.at_level("INFO", logger=gate.log.name):
+        result = gate.hold_bind_for_prewarm(budget_s=0.1)
+    assert result is not None and result[1] == 0
+    line = next(r.getMessage() for r in caplog.records if "binding" in r.getMessage())
+    assert "boot prewarm finished after" in line and "still running" not in line, line
+
+
 def test_annotation_boot_thread_reports_its_current_step(monkeypatch):
     from hermes_cli import projects_tree_prewarm
 
