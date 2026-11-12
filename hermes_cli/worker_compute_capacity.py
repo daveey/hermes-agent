@@ -91,22 +91,35 @@ def owner_slice(board: str, task: str) -> str:
     return f"hermes-kanban-{digest}.slice"
 
 
-def occupied_owners(root: Path, owners: dict[str, Owner], active: set[Owner]) -> set[Owner]:
+def occupied_owners(root: Path, owners: dict[str, Owner], active: set[Owner], *,
+                    legacy_resolver=None) -> set[Owner]:
     """Union active cards with populated child units, including unknown legacy jobs.
 
     Read errors propagate: an incomplete inventory cannot prove free capacity.
     cgroup.events populated includes descendants, unlike cgroup.procs.
     """
+    import stat
     occupied = set(active)
     for child in root.iterdir():
-        if not child.is_dir():
+        before = child.lstat()
+        if not stat.S_ISDIR(before.st_mode):
             continue
+        owner = owners.get(child.name)
+        # Resolve against this sample's identity, never an earlier name census.
+        if owner is None and legacy_resolver is not None:
+            owner = legacy_resolver(root, child.name)
         events = dict(line.split() for line in (child / 'cgroup.events').read_text(encoding='utf-8').splitlines())
+        try:
+            after = child.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError(f'worker scope changed during census: {child.name}') from exc
+        if (before.st_dev, before.st_ino, before.st_mode) != (after.st_dev, after.st_ino, after.st_mode):
+            raise ValueError(f'worker scope changed during census: {child.name}')
         populated = events.get('populated')
         if populated not in {'0', '1'}:
             raise ValueError(f'invalid populated observation for {child.name}')
         if populated == '1':
-            occupied.add(owners.get(child.name, ('unknown-cgroup', child.name)))
+            occupied.add(owner if owner is not None else ('unknown-cgroup', child.name))
     return occupied
 
 

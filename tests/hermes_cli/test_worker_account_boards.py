@@ -25,7 +25,7 @@ def test_registered_foreign_board_counts_after_installation_changes(monkeypatch,
         monkeypatch.setattr('hermes_cli.kanban_db_boards.named_board_db_files', list)
         owners = set()
         assert machine_metrics.active_card_runs(extra_paths=inventory.paths(), owner_output=owners) == 1
-        assert owners == {('default', 't_foreign')}
+        assert owners == {(str(foreign.resolve()), 't_foreign')}
         assert machine_metrics.active_card_runs(extra_paths=[foreign, foreign]) == 1
     finally:
         conn.close()
@@ -42,6 +42,24 @@ def test_corrupt_inventory_fails_closed(monkeypatch, tmp_path, raw):
     (records / 'bad.json').write_text(raw)
     with pytest.raises(ValueError):
         inventory.paths()
+
+
+def test_register_directory_fsync_failure_propagates(monkeypatch, tmp_path):
+    import os
+    import stat
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
+    real_fsync = os.fsync
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError('directory fsync failed')
+        real_fsync(fd)
+    monkeypatch.setattr(os, 'fsync', fsync)
+    conn = sqlite3.connect(tmp_path / 'board.db')
+    try:
+        with pytest.raises(OSError, match='directory fsync failed'):
+            inventory.register(conn)
+    finally:
+        conn.close()
 
 
 def test_unregistered_account_boards_count(monkeypatch, tmp_path):

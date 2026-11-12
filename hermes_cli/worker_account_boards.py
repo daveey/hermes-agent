@@ -42,6 +42,11 @@ def register(conn) -> None:
         os.fsync(handle.fileno())
     try:
         os.replace(temporary, destination)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     finally:
         temporary.unlink(missing_ok=True)
 

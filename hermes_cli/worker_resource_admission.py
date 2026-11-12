@@ -60,7 +60,7 @@ def _pressure(directory: Path) -> bool:
         return held
 
 
-def pool_occupancy(pool: Path, owners, active):
+def pool_occupancy(pool: Path, owners, active, *, legacy_resolver=None):
     """A not-yet-started slice is empty, but a missing hierarchy is unknown.
 
     Inspect the manager first after ENOENT, then retry the slice inventory;
@@ -76,7 +76,7 @@ def pool_occupancy(pool: Path, owners, active):
             pool.stat()
         except FileNotFoundError:
             return set(active)
-    return capacity.occupied_owners(pool, owners, active)
+    return capacity.occupied_owners(pool, owners, active, legacy_resolver=legacy_resolver)
 
 
 def occupied_count_for_host(echo=None, *, claimant=None) -> int | None:
@@ -99,7 +99,9 @@ def occupied_count_for_host(echo=None, *, claimant=None) -> int | None:
                     or capacity.owner_slice(*owner) != path.stem):
                 raise ValueError('invalid worker owner map')
             owners[path.stem] = tuple(owner)
-    occupied = pool_occupancy(capacity.pool_path(), owners, active_owners)
+    from hermes_cli import worker_legacy_scopes
+    occupied = pool_occupancy(capacity.pool_path(), owners, active_owners,
+                              legacy_resolver=worker_legacy_scopes.lookup)
     # A prospective resume in a populated slice does not take a second slot.
     if claimant is not None:
         occupied.add(claimant)
