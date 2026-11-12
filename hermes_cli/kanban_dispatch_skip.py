@@ -79,13 +79,17 @@ def record(conn: sqlite3.Connection, task_id: str, reason: str, *, detail: Any =
         if row is None or row["status"] not in ("ready", "review"):
             return False  # it left the lane this tick (no-progress park, claimed): nothing waits any more
         skips = episode_skips(conn, task_id)
-        if skips and (skips[0].get("reason"), skips[0].get("detail")) == (reason, detail):
+        until = None if until is None else int(until)
+        # A moved reset is news for a quota hold (the notice names it); other reasons key on reason + detail.
+        key = (reason, detail, until if reason == PINNED_QUOTA_WALL else None)
+        if skips and (skips[0].get("reason"), skips[0].get("detail"),
+                      skips[0].get("until") if reason == PINNED_QUOTA_WALL else None) == key:
             return False
         if len(skips) >= MAX_PER_EPISODE:
             return False
         payload: dict[str, Any] = {"reason": reason, "detail": detail, **(extra or {})}
         if until is not None:
-            payload["until"] = int(until)
+            payload["until"] = until
         kb._append_event(conn, task_id, EVENT, payload)
     return True
 
@@ -120,24 +124,28 @@ def record_tick(conn: sqlite3.Connection, result: Any, *, dry_run: bool = False)
 
 
 def pinned_quota_hold(conn: sqlite3.Connection, task_id: str) -> Optional[tuple[str, str, float]]:
-    """``(model, provider, reset)`` when ``task_id`` has no run yet, an explicit concrete pin, and that pin's
-    provider pool is quota-walled for the model right now; else None.
+    """``(model, provider, reset)`` when ``task_id`` has no run yet, an explicit concrete pin, that pin's
+    provider pool is quota-walled for the model right now, and no same-class reroute applies; else None.
 
-    Only a fresh card: once a run hit the wall its quota episode (``kanban_quota_episode``) and the in-class
-    reroute (``kanban_pin_reroute``) decide. A fresh pinned card is routed straight to its pin
-    (``kanban_model_tier.resolve_dispatch_tier``), so claiming it would only spawn a worker into the wall."""
+    Only a fresh card: once a run hit the wall its quota episode (``kanban_quota_episode``) decides. A fresh
+    card the in-class reroute can move (non-mandatory pin, far wall, a free peer: ``kanban_pin_reroute``,
+    which reads the same live wall for a fresh card) is left to the claim, which routes it to the peer.
+    Any other fresh pin would only spawn a worker into the wall."""
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_pin_reroute import pin
-    from hermes_cli.kanban_provider_walls import live_quota_wall
-    if conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,)).fetchone() is not None:
+    from hermes_cli.kanban_pin_reroute import fresh_live_wall, pin, pinned_route
+    task = kb.get_task(conn, task_id)
+    pinned = pin(task) if task is not None and getattr(task, "current_run_id", None) is None else None
+    if pinned is None or not (walls := fresh_live_wall(conn, task, pinned=pinned)):
         return None
-    pinned = pin(kb.get_task(conn, task_id))
-    if pinned is None:
-        return None
-    until = live_quota_wall(pinned[1], pinned[0])
-    if until is None or until <= time.time():
-        return None
-    return pinned[0], pinned[1], float(until)
+    try:
+        from hermes_cli.kanban_model_tier import load_tier_config
+        if pinned_route(conn, task, lane="ready", now=time.time(), cfg=load_tier_config(), current=walls):
+            return None
+    except sqlite3.Error:
+        raise
+    except Exception:  # health: allow BLE001 -- like the quota episode, an unreadable policy holds, never guesses
+        _log.warning("kanban dispatch: pin reroute probe failed for %s; holding on the wall", task_id, exc_info=True)
+    return pinned[0], pinned[1], walls[pinned[1]]
 
 
 def hold_pinned_quota(conn: sqlite3.Connection, task_id: str, result: Any, *, lane: str) -> bool:
@@ -186,8 +194,10 @@ def words(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
 
 
 def is_ordering(skip: Optional[dict[str, Any]]) -> bool:
-    """True when the skip is about queue order or slots, where priority is a fair question."""
-    return bool(skip) and skip.get("reason") == "claim_deferred" and skip.get("detail") == "capacity"
+    """True when the skip is about queue order or slots, where priority is a fair question: a Board capacity
+    deferral, or the assignee's per-profile cap (a slot wait among that profile's own cards)."""
+    return bool(skip) and ((skip.get("reason") == "claim_deferred" and skip.get("detail") == "capacity")
+                           or skip.get("reason") == "per_profile_capped")
 
 
 def advice(skip: dict[str, Any]) -> str:

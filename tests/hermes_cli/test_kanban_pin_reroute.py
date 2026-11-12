@@ -295,6 +295,65 @@ def test_failed_record_keeps_the_pin(board, monkeypatch, all_assignees_spawnable
         assert _events(conn, tid, 'model_tier')[-1]['reason'] != 'pinned+pin_quota_reroute:openai-codex'
 
 
+# --- a fresh card on a live-pool wall (kanban-dd62aef001) -----------------------------------------
+
+def _live_codex_wall(monkeypatch, until):
+    monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: until[0] if (m, p) == PIN else None)
+
+
+def test_fresh_pin_on_a_far_live_wall_reroutes_on_its_first_run(board, monkeypatch, all_assignees_spawnable):
+    """Review 5871917933: a fresh pin has no run to put the wall in its episode, so a pre-claim hold on the
+    live wall used to wait the whole wall out. The live wall now stands in for rule 1 on a fresh card."""
+    clock = _clock(monkeypatch)
+    _deep(monkeypatch)
+    until = [float(clock[0] + 55 * 3600)]
+    _live_codex_wall(monkeypatch, until)
+    with kbc.connect() as conn:
+        tid = _pinned_card(conn)
+        assert _tick(conn) == [PEER]  # no exit-75 run into the wall first
+        assert _events(conn, tid, 'dispatch_skipped') == []
+        task = kb.get_task(conn, tid)
+        assert (task.model_override, task.provider_override) == PIN
+        [event] = _events(conn, tid, 'model_reroute')
+        assert (event['walled_provider'], event['resets_at'], event['episode_id']) == ('openai-codex', until[0], None)
+        [comment] = _comments(conn, tid)
+        assert 'gpt-6-astra (openai-codex) is out until' in comment
+        # Its rerouted run ends: the card is no longer fresh, and its own reroute keeps it off the wall.
+        kb.reclaim_task(conn, tid, reason='test')
+        clock[0] += 3600
+        assert _tick(conn) == [PEER]
+        assert len(_events(conn, tid, 'model_reroute')) == 2 and len(_comments(conn, tid)) == 1
+        # After the reset the pin is back, even though the card still carries the reroute history.
+        kb.reclaim_task(conn, tid, reason='test')
+        clock[0] = int(until[0]) + 1
+        until[0] = None
+        assert _tick(conn) == [PIN]
+
+
+@pytest.mark.parametrize('case', ['mandatory', 'near_wall', 'no_peer'])
+def test_fresh_pin_with_no_reroute_is_held_on_its_live_wall(board, monkeypatch, all_assignees_spawnable, case):
+    from hermes_cli.kanban_diagnostics import compute_task_diagnostics
+    clock = _clock(monkeypatch)
+    config, _ = _deep(monkeypatch)
+    if case == 'no_peer':
+        _block_peer('disabled', monkeypatch, config, clock)
+    until = [float(clock[0] + (4 if case == 'near_wall' else 55) * 3600)]
+    _live_codex_wall(monkeypatch, until)
+    with kbc.connect() as conn:
+        tid = _pinned_card(conn, mandatory=case == 'mandatory')
+        for _ in range(4):
+            assert _tick(conn) == []
+            clock[0] += 1800
+        [skip] = _events(conn, tid, 'dispatch_skipped')
+        assert (skip['reason'], skip['until']) == ('pinned_quota_wall', int(until[0]))
+        assert _events(conn, tid, 'model_reroute') == []
+        # Board diagnostics read the deliberate hold as held_in_ready (warning), never stranded_in_ready.
+        diags = compute_task_diagnostics(kb.get_task(conn, tid), kb.list_events(conn, tid),
+                                         kb.list_runs(conn, tid), now=clock[0])
+        assert [(d.kind, d.severity) for d in diags] == [('held_in_ready', 'warning')]
+        assert diags[0].data['hold_reason'] == 'pinned_quota_wall' and diags[0].data['hold_until'] == int(until[0])
+
+
 # --- the mandatory mark: create, set-model, tool, sync ---------------------------------------------
 
 def test_create_flag_requires_a_pin_and_persists(board):

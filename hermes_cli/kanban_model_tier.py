@@ -310,8 +310,10 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
         if not route and not active(conn, task.id):
             # The episode is closed (a rerouted run ended) but the pin's wall may still be up.
             import time
+            from hermes_cli.kanban_pin_reroute import fresh_live_wall
             try:
-                route = pinned_route(conn, task, lane=lane, now=time.time(),
+                now = time.time()  # a fresh card's live-pool wall stands in for its own run's (kanban-dd62aef001)
+                route = pinned_route(conn, task, lane=lane, now=now, current=fresh_live_wall(conn, task, now),
                                      cfg=load_tier_config() if cfg is None else cfg)
             except sqlite3.Error:
                 raise

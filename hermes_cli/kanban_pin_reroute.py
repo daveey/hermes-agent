@@ -7,8 +7,10 @@ an explicit pin had no fallback, and workers cannot re-pin a card. David, 11-11 
 
 Rule (:func:`pinned_route`); every condition must hold, anything else keeps the pin as before:
 
-1. one of the card's own runs hit a wall on the pin's provider (its ``quota_episode`` receipts, or the
-   live episode), and that wall is still up;
+1. one of the card's own runs hit a wall on the pin's provider (its ``quota_episode`` receipts, an
+   earlier ``model_reroute``, or the live episode), and that wall is still up; or the card has no earlier
+   run and the live pool is quota-walled for the pinned model right now (:func:`fresh_live_wall`): its
+   first run would only exit 75 into that wall to learn it (kanban-dd62aef001);
 2. it resets ``kanban.pin_quota_reroute_min_hours`` (default 6) or more from now;
 3. the pin is not mandatory: neither ``tasks.model_pin_mandatory`` nor the ``require_model`` marker;
 4. the lane is ready, not review;
@@ -79,8 +81,8 @@ def own_walls(conn: Any, task_id: str, now: float,
               current: Optional[dict[str, float]] = None) -> dict[str, tuple[float, Any]]:
     """``provider -> (until, episode_id)`` for every wall this card's own runs hit that is still up.
 
-    Read from the card's ``quota_episode`` receipts; ``current`` adds the live episode's walls (its
-    receipt may not carry them yet)."""
+    Read from the card's ``quota_episode`` receipts and earlier ``model_reroute`` events (a fresh card's
+    reroute has no episode); ``current`` adds the live episode's walls (its receipt may not carry them yet)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_quota_episode import _providers, episode
     out: dict[str, tuple[float, Any]] = {}
@@ -92,11 +94,33 @@ def own_walls(conn: Any, task_id: str, now: float,
         state = kb._json_dict(row[0])
         for name in _providers(state):
             add(name, state.get("until"), state.get("episode_id"))
+    for row in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?", (task_id, EVENT)):
+        moved = kb._json_dict(row[0])
+        if isinstance(moved.get("walled_provider"), str):
+            add(moved["walled_provider"], moved.get("resets_at"), moved.get("episode_id"))
     if current:
         live = episode(conn, task_id) or {}
         for name, until in current.items():
             add(name, until, live.get("episode_id"))
     return out
+
+
+def fresh_live_wall(conn: Any, task: Any, now: Optional[float] = None,
+                    pinned: Optional[tuple[str, str]] = None) -> Optional[dict[str, float]]:
+    """``{provider: reset}`` when ``task`` has no run before its current one and the live pool is quota-walled
+    for its concrete pin (``pinned``, default :func:`pin`) right now; else None.
+
+    The same evidence the worker's startup resolver exits 75 on (``kanban_provider_walls.live_quota_wall``),
+    so it stands in for rule 1's own-run wall on a card that has had no run to hit it."""
+    from hermes_cli.kanban_provider_walls import live_quota_wall
+    pinned = pinned or pin(task)
+    if pinned is None or conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND id IS NOT ? LIMIT 1",
+                                      (task.id, getattr(task, "current_run_id", None))).fetchone() is not None:
+        return None
+    until = live_quota_wall(pinned[1], pinned[0])
+    if until is None or until <= (time.time() if now is None else now):
+        return None
+    return {pinned[1]: float(until)}
 
 
 def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[dict],
@@ -157,6 +181,8 @@ def record(conn: Any, task: Any, origin: tuple[str, str], target: tuple[str, str
     for wall in (_outstanding(conn, task.id, state, now) if state else []):
         if origin[1] in _providers(wall):
             current[origin[1]] = max(current.get(origin[1], 0), wall["until"])
+    if not current:
+        current = fresh_live_wall(conn, task, now, pinned=origin) or {}
     resets_at, episode_id = own_walls(conn, task.id, now, current).get(origin[1], (None, None))
     payload = {"from_model": origin[0], "from_provider": origin[1], "to_model": target[0],
                "to_provider": target[1], "walled_provider": origin[1], "resets_at": resets_at,

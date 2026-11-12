@@ -200,6 +200,31 @@ def test_ordering_skip_keeps_the_capacity_advice(board, monkeypatch):
         assert "relative priority bump" in qp.describe(place)
 
 
+def test_per_profile_cap_is_an_ordering_skip(board, monkeypatch):
+    _clock(monkeypatch)
+    monkeypatch.setattr(qp, "_running_and_limit", lambda *_a: (4, 7))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="capped", assignee="a")
+        assert skips.record(conn, tid, "per_profile_capped", detail="a")
+        payload = skips.notice_fields(qp.position(conn, kb.get_task(conn, tid)), 3600)
+        assert skips.is_ordering(payload["dispatch_skip"]) and skips.notice_advice(payload) is None
+        assert not skips.is_ordering({"reason": "claim_deferred", "detail": "labels"})
+
+
+def test_a_moved_quota_reset_appends_other_reasons_ignore_until(board, monkeypatch):
+    _clock(monkeypatch)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="walled", assignee="a")
+        detail = "claude-opus-5-5 (anthropic)"
+        assert skips.record(conn, tid, skips.PINNED_QUOTA_WALL, detail=detail, until=RESET)
+        assert not skips.record(conn, tid, skips.PINNED_QUOTA_WALL, detail=detail, until=RESET + 0.4)
+        assert skips.record(conn, tid, skips.PINNED_QUOTA_WALL, detail=detail, until=RESET + 3600)
+        assert skips.latest(conn, tid)["until"] == RESET + 3600  # the notice names the new reset
+        assert skips.record(conn, tid, "owner_down", detail="x", until=RESET)
+        assert not skips.record(conn, tid, "owner_down", detail="x", until=RESET + 60)
+        assert [p.get("until") for p in _skips(conn, tid)] == [RESET, RESET + 3600, RESET]
+
+
 def test_review_lane_is_never_pin_held(board, monkeypatch):
     _clock(monkeypatch)
     _walled(monkeypatch)

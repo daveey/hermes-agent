@@ -777,7 +777,23 @@ def _foreign_machines(task, cfg) -> list[str]:
             if str(l).startswith("machine:") and str(l).split(":", 1)[1] != own]
 
 
-def _ready_hold_reason(task, events, cfg) -> Optional[str]:
+def _pinned_quota_hold_until(events, now) -> Optional[int]:
+    """Reset time when the current ready episode's latest ``dispatch_skipped`` is a ``pinned_quota_wall``
+    hold still in the future (``kanban_dispatch_skip``); else None. Same episode bounds as its reader."""
+    from hermes_cli.kanban_dispatch_skip import EVENT, PINNED_QUOTA_WALL, _episode_kinds
+    bounds = _episode_kinds() | {EVENT}
+    for ev in sorted(events or [], key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0), reverse=True):
+        if _event_kind(ev) not in bounds:
+            continue
+        payload = _parse_payload(ev) if _event_kind(ev) == EVENT else {}
+        until = payload.get("until")
+        if payload.get("reason") == PINNED_QUOTA_WALL and isinstance(until, (int, float)) and until > now:
+            return int(until)
+        return None
+    return None
+
+
+def _ready_hold_reason(task, events, cfg, now=None) -> Optional[str]:
     """Last observed guard or current foreign-machine pin, not a live admission verdict.
 
     Capacity checks can precede pickup/guard evaluation, leaving old guard history on a
@@ -789,6 +805,8 @@ def _ready_hold_reason(task, events, cfg) -> Optional[str]:
         return "respawn_guarded"
     if _foreign_machines(task, cfg):
         return "foreign_runs_on"
+    if _pinned_quota_hold_until(events, time.time() if now is None else now):
+        return "pinned_quota_wall"  # a fresh pin held on its live quota wall (kanban-dd62aef001)
     return None
 
 
@@ -808,7 +826,7 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     if not assignee.strip():
         return []
     # A deliberate hold is reported by _rule_held_in_ready, not as a stranded card.
-    if _ready_hold_reason(task, events, cfg):
+    if _ready_hold_reason(task, events, cfg, now):
         return []
 
     # Most recent event that put the task into ready; with none (old task /
@@ -864,7 +882,7 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         return []
     if not (_task_field(task, "assignee") or "").strip():
         return []
-    reason = _ready_hold_reason(task, events, cfg)
+    reason = _ready_hold_reason(task, events, cfg, now)
     if not reason:
         return []
     since = _last_ready_entry_ts(events, runs) or int(_task_field(task, "created_at", 0) or 0)
@@ -872,6 +890,8 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     if not since or age < float(cfg.get("stranded_threshold_seconds", 30 * 60)):
         return []
     guard_reason, hold_until = _guard_clock(events, runs, cfg, since) if reason == "respawn_guarded" else (None, None)
+    if reason == "pinned_quota_wall":
+        hold_until = _pinned_quota_hold_until(events, now)
     hold = f"{reason}: {guard_reason}" if guard_reason else reason
     if hold_until:
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(hold_until))
@@ -879,11 +899,13 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     return [Diagnostic(
         kind="held_in_ready", severity="warning",
         title=(f"Ready {int(age / 60)}m, last observed hold ({hold})" if reason == "respawn_guarded"
-               else f"Ready {int(age / 60)}m, held ({reason})"),
+               else f"Ready {int(age / 60)}m, held ({hold})"),
         detail=("The last recorded dispatch decision was a guard hold; the current hold is not verified. "
                 "A cleared blocker, capacity limit, or missing pickup can leave this historical event "
                 "unchanged. Check the execution machine's current dispatcher verdict."
                 if reason == "respawn_guarded" else
+                "Its explicit model pin is quota-walled and no same-class reroute applies; it starts when "
+                "the wall resets." if reason == "pinned_quota_wall" else
                 "A foreign machine:* pin waits for that machine (or a re-file)."),
         actions=[_cli_hint("Check dispatcher status", "hermes kanban diagnostics")],
         first_seen_at=since, last_seen_at=since, count=1,

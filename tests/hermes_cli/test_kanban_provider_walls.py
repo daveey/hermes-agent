@@ -137,7 +137,9 @@ def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch)
                             provider_override=CODEX)
     seen = _dispatch(conn)
     assert seen[tid][:2] == (OPUS, "anthropic")
-    # Exact pins keep their tuple: never rewritten, and a fresh one on a live wall is held (kanban_dispatch_skip).
+    # Exact pins keep their tuple: never rewritten. This fresh one has no same-class peer ("default" has no
+    # routing policy), so it is held on the live wall (kanban_dispatch_skip); with a free class peer it is
+    # rerouted instead (test_kanban_pin_reroute::test_fresh_pin_on_a_far_live_wall_reroutes_on_its_first_run).
     assert pinned not in seen
     assert [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ? AND kind = 'dispatch_skipped'",
                                        (pinned,))] == ["dispatch_skipped"]
