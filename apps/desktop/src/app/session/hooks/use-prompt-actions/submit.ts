@@ -1,4 +1,4 @@
-import { type PromptSubmitResult, randomUuid } from '@hermes/shared'
+import { JsonRpcGatewayError, type PromptSubmitResult, randomUuid } from '@hermes/shared'
 import { type MutableRefObject, useCallback } from 'react'
 
 import { getSession, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
@@ -70,6 +70,7 @@ import {
 } from './submission-identity-support'
 import {
   acquireSubmitInFlight,
+  gatewayReason,
   type GatewayRequest,
   inlineErrorMessage,
   isAdmittedSubmissionConflict,
@@ -221,6 +222,24 @@ function isPreAdmissionRefusal(error: unknown): boolean {
   const { code, message } = error as { code?: unknown; message?: unknown }
 
   return code === 4094 || (code === 4000 && typeof message === 'string' && /submission_id/.test(message))
+}
+
+/** The server answered that it admitted nothing: session busy (4009), an ownership refusal (4090)
+ *  other than an unconfirmed owner hand-off (SESSION_OWNER_UNCONFIRMED: the owner may already hold
+ *  the send), or a pre-admission capability refusal. Resending it cannot run a second copy.
+ *  Timeouts, disconnects and malformed ACKs are not answers and never match. */
+function isDefiniteSubmitRefusal(error: unknown): boolean {
+  if (error instanceof JsonRpcGatewayError) {
+    if (error.code === 4009) {
+      return true
+    }
+
+    if (error.code === 4090 && gatewayReason(error) !== 'SESSION_OWNER_UNCONFIRMED') {
+      return true
+    }
+  }
+
+  return isPreAdmissionRefusal(error)
 }
 
 export function useSubmitPrompt(deps: SubmitPromptDeps) {
@@ -1191,11 +1210,24 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                   await writePreparedSubmission(retryKey, prepared)
                   const { submission_id: _id, ...legacyParams } = params
 
-                  const result = await requestGateway<SubmitReceipt>(
-                    'prompt.submit',
-                    legacyParams,
-                    PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
-                  )
+                  let result: SubmitReceipt
+
+                  try {
+                    result = await requestGateway<SubmitReceipt>(
+                      'prompt.submit',
+                      legacyParams,
+                      PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
+                    )
+                  } catch (error) {
+                    // A definite refusal means this send never ran: an explicit retry (Take over's)
+                    // may send it again. Every other failure keeps the send unconfirmed.
+                    if (isDefiniteSubmitRefusal(error)) {
+                      prepared.legacyAttempted = false
+                      await writePreparedSubmission(retryKey, prepared)
+                    }
+
+                    throw error
+                  }
 
                   legacyAccepted = true
 

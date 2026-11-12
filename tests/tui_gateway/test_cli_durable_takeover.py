@@ -140,6 +140,8 @@ def test_older_cli_is_bounded_refusal_and_never_forced_out(setup, monkeypatch):
     _home, db, sid, _session, spawn = setup
     proc, ready = spawn('old')
     monkeypatch.setenv('HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S', '0.5')
+    # The old CLI is alive in this pid namespace, so take_over waits out the live-writer cap first.
+    monkeypatch.setenv('HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S', '0.5')
     start = time.monotonic()
     result = server._methods['session.take_over']('take', {'session_id': sid})
     assert time.monotonic() - start < 5

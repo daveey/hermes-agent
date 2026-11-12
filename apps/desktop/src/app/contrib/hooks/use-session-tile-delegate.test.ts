@@ -968,6 +968,35 @@ describe('useSessionTileDelegate interruptSession', () => {
   })
 })
 
+describe('useSessionTileDelegate takeOverSession', () => {
+  beforeEach(() => {
+    setSessions([])
+    vi.mocked(requestGatewayForProfile).mockReset()
+  })
+
+  afterEach(() => {
+    setSessions([])
+  })
+
+  // session.take_over waits up to 60 s for a live writer to let go (HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S);
+  // the 30 s default request timeout would cut that wait off on both routes.
+  it('gives session.take_over a request timeout that outlasts the backend live-writer wait', async () => {
+    const requestGateway = vi.fn(async (..._args: unknown[]) => ({ status: 'taken_over', acknowledged: true }) as never)
+    renderTile(requestGateway)
+    await sessionTileDelegate()!.takeOverSession!('runtime-unrouted')
+    expect(requestGateway).toHaveBeenCalledWith('session.take_over', { session_id: 'runtime-unrouted' }, expect.any(Number))
+    expect(requestGateway.mock.calls[0][2]).toBeGreaterThanOrEqual(75_000)
+
+    setSessions([row({ id: 'stored-takeover', profile: 'ai-engineer' })])
+    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({ status: 'taken_over', acknowledged: true } as never)
+    renderTile(requestGateway, { runtimeIdByStoredSessionIdRef: { current: new Map([['stored-takeover', 'runtime-routed']]) } })
+    await sessionTileDelegate()!.takeOverSession!('runtime-routed')
+    const routed = vi.mocked(requestGatewayForProfile).mock.calls.find(call => call[1] === 'session.take_over')
+    expect(routed?.[0]).toBe('ai-engineer')
+    expect(routed?.[3]).toBeGreaterThanOrEqual(75_000)
+  })
+})
+
 describe('useSessionTileDelegate send from a tile behind the stored transcript', () => {
   const storedId = 'stored-tile-peer'
   const runtimeId = 'rt-tile-peer'

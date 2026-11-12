@@ -178,6 +178,34 @@ def _takeover_previous_owner(entry: dict | None) -> dict | None:
             "started_at": float(started) if isinstance(started, (int, float)) else None}
 
 
+def _live_local_writer_pid(holder: str) -> int | None:
+    """The pid of a ``pid=<n>:pidns=<ns>:...`` writer provably alive here (same pid namespace and
+    ``kill(n, 0)`` succeeds), else None: unstamped, foreign, dead or unprobeable holders."""
+    parts = dict(p.split("=", 1) for p in (holder or "").split(":") if "=" in p)
+    pid, ns = parts.get("pid", ""), parts.get("pidns", "")
+    if not (holder.startswith("pid=") and pid.isdigit() and ns.isdigit()):
+        return None
+    try:
+        if int(ns) != os.stat("/proc/self/ns/pid").st_ino:
+            return None
+        os.kill(int(pid), 0)  # windows-footgun: ok — the /proc stat above raises off Linux first
+    except (OSError, OverflowError):  # PermissionError included: alive is not proven
+        return None
+    return int(pid)
+
+
+def _unreleased_writer_message(surface: str, live_pid: int | None, waited_s: float) -> str:
+    cli = surface == "cli"
+    if live_pid is not None:
+        return (f"The Hermes {surface} process (pid {live_pid}) running this chat is alive but did not let go "
+                f"within {waited_s:.0f} s; it may be overloaded. Retry Take over here in a minute. "
+                + ("If it is an older Hermes CLI, stop its turn in that terminal. " if cli else "")
+                + "No writer was forced out.")
+    return ("The other writer has not released this chat. "
+            + ("It may be an older Hermes CLI. Stop its turn in that terminal" if cli else "Stop its turn there")
+            + ", then retry Take over here. No writer was forced out.")
+
+
 def _take_over_durable_writer(rid, sid: str, session: dict, owner: dict):
     from pathlib import Path
     from hermes_cli.active_sessions import (
@@ -200,25 +228,31 @@ def _take_over_durable_writer(rid, sid: str, session: dict, owner: dict):
     if not request_turn_handoff(lease, owner["holder"]):
         return _err(rid, 4090, _SESSION_OWNERSHIP_UNAVAILABLE,
                     {"reason": "SESSION_COORDINATION_UNAVAILABLE"})
-    deadline = time.monotonic() + max(0.0, env_float("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", 8.0))
+    holder = owner["holder"]
+    surface = holder.rsplit(":platform=", 1)[-1] if ":platform=" in holder else "unknown"
+    # A writer provably alive here may just be slow (a GIL-starved backend acted 22.8 s after the
+    # request): wait it out up to the live cap. Anything else keeps the ACK deadline.
+    ack_s = max(0.0, env_float("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", 8.0))
+    live_s = max(ack_s, env_float("HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S", 60.0))
+    started = time.monotonic()
     while True:
         current = _foreign_turn_owner(session)
         if (session.get("active_session_lease") is not lease
-                or not turn_handoff_is_current(lease, owner["holder"])
-                or (current is not None and current["holder"] != owner["holder"])):
+                or not turn_handoff_is_current(lease, holder)
+                or (current is not None and current["holder"] != holder)):
             return _err(rid, 4090, "Ownership changed during handoff. Retry Take over here.",
                         {"reason": "SESSION_NOT_OWNED"})
         if current is None:
             break
-        if time.monotonic() >= deadline:
-            return _err(rid, 4090,
-                        "The other writer has not released this chat. It may be an older Hermes CLI. "
-                        "Stop its turn in that terminal, then retry Take over here. No writer was forced out.",
+        live_pid = _live_local_writer_pid(holder)  # re-checked every poll: a writer that dies gets ack_s
+        limit = live_s if live_pid is not None else ack_s
+        if time.monotonic() - started >= limit:
+            logger.warning("session.take_over: writer %s did not release %s within %.0fs (alive=%s)",
+                           holder, session.get("session_key"), limit, live_pid is not None)
+            return _err(rid, 4090, _unreleased_writer_message(surface, live_pid, limit),
                         {"reason": "SESSION_NOT_OWNED"})
         time.sleep(_TAKEOVER_ACK_POLL_S)
     _reload_history_after_takeover(session)
-    holder = owner["holder"]
-    surface = holder.rsplit(":platform=", 1)[-1] if ":platform=" in holder else "unknown"
     return _ok(rid, {"status": "taken_over", "acknowledged": True,
                      "previous_owner": {"surface": surface,
                                         "pid": int(holder.split(":", 1)[0][4:])

@@ -310,3 +310,118 @@ def test_take_over_with_take_over_active_session_contract(env, sleeper):
         session_id=KEY, surface="desktop", metadata={"live_session_id": SID}, track_liveness=True)
     assert refusal is None and [e["lease_id"] for e in removed] == ["foreign-lease"]
     lease.release()
+
+
+# ── (e) durable writer handoff: a live-but-slow writer ──────────────────────────────────────────
+# Chat 20261112_052539_8d8534: a GIL-starved Desktop backend let go 22.8 s after Take over, but the
+# fixed 8 s ACK deadline had already refused it twice. A writer provably alive here (same pid
+# namespace, pid alive) is waited out up to HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S.
+
+
+@pytest.fixture
+def durable_writer(env):
+    """A Desktop session on a real state.db whose turn lease another writer holds."""
+    from hermes_state import SessionDB
+
+    home = Path(os.environ["HERMES_HOME"])
+    db = SessionDB(home / "state.db")
+    db.create_session(KEY, source="desktop")
+    session = _session(profile_home=str(home))
+    env.sessions.append(session)
+    server._sessions[SID] = session
+    held: list[str] = []
+    timers: list[threading.Timer] = []
+
+    def hold(holder: str) -> None:
+        assert db.try_acquire_session_turn_lease(KEY, holder)
+        held.append(holder)
+
+    def release_after(holder: str, delay_s: float) -> threading.Timer:
+        timer = threading.Timer(delay_s, db.release_session_turn_lease, args=(KEY, holder))
+        timers.append(timer)
+        timer.start()
+        return timer
+
+    yield types.SimpleNamespace(db=db, session=session, hold=hold, release_after=release_after)
+    for timer in timers:
+        timer.cancel()
+        timer.join(5)
+    for holder in held:
+        db.release_session_turn_lease(KEY, holder)
+    db.close()
+
+
+def _same_ns_holder(pid: int, platform: str = "desktop") -> str:
+    from hermes_state_pidns import holder_namespace_token
+    token = holder_namespace_token()
+    if not token:
+        pytest.skip("needs a Linux pid namespace")
+    return f"pid={pid}{token}:turn=slow:platform={platform}"
+
+
+def test_take_over_waits_out_a_live_writer_that_releases_after_the_ack_deadline(
+        durable_writer, sleeper, rpc, monkeypatch):
+    import time
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", "0.3")
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S", "10")
+    proc = sleeper()
+    holder = _same_ns_holder(proc.pid)
+    durable_writer.hold(holder)
+    releaser = durable_writer.release_after(holder, 1.2)  # well past the 0.3 s ACK deadline
+    started = time.monotonic()
+    resp = rpc()
+    elapsed = time.monotonic() - started
+    releaser.join(5)
+    assert resp.get("result", {}).get("status") == "taken_over", resp
+    assert resp["result"]["acknowledged"] is True
+    assert resp["result"]["previous_owner"]["pid"] == proc.pid
+    assert 1.0 <= elapsed < 8
+    assert durable_writer.db.session_turn_lease_owner(KEY) is None
+
+
+def test_take_over_refuses_an_unprovable_writer_at_the_ack_deadline(durable_writer, rpc, monkeypatch):
+    import time
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", "0.3")
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S", "10")
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    # A dead pid this process cannot probe (foreign namespace stamp): the lease defers to its TTL and
+    # nothing proves the writer alive, so the ACK deadline applies as before.
+    holder = f"pid={gone.pid}:pidns=1:turn=gone:platform=desktop"
+    durable_writer.hold(holder)
+    started = time.monotonic()
+    resp = rpc()
+    elapsed = time.monotonic() - started
+    assert resp["error"]["code"] == 4090
+    assert resp["error"]["data"] == {"reason": "SESSION_NOT_OWNED"}
+    assert 0.3 <= elapsed < 3
+    message = resp["error"]["message"]
+    assert "alive" not in message
+    assert "older Hermes CLI" not in message  # the holder is a Desktop backend, not a CLI
+    assert message.endswith("No writer was forced out.")
+    assert durable_writer.db.session_turn_lease_owner(KEY)["holder"] == holder
+
+
+def test_take_over_refuses_a_live_writer_that_never_releases_at_the_live_cap(
+        durable_writer, sleeper, rpc, monkeypatch, caplog):
+    import logging
+    import time
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", "0.2")
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S", "1")
+    proc = sleeper()
+    holder = _same_ns_holder(proc.pid)
+    durable_writer.hold(holder)
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING):
+        resp = rpc()
+    elapsed = time.monotonic() - started
+    assert resp["error"]["code"] == 4090
+    assert resp["error"]["data"] == {"reason": "SESSION_NOT_OWNED"}
+    assert 1.0 <= elapsed < 5
+    assert resp["error"]["message"] == (
+        f"The Hermes desktop process (pid {proc.pid}) running this chat is alive but did not let go within 1 s; "
+        "it may be overloaded. Retry Take over here in a minute. No writer was forced out.")
+    assert any("session.take_over: writer" in r.getMessage() and "alive=True" in r.getMessage()
+               for r in caplog.records)
+    assert proc.poll() is None  # never forced out
+    assert durable_writer.db.session_turn_lease_owner(KEY)["holder"] == holder

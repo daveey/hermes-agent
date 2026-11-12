@@ -1,9 +1,12 @@
+import { JsonRpcGatewayError } from '@hermes/shared'
 import { cleanup } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getLatestSessionMessages } from '@/hermes'
+import { en } from '@/i18n/en'
+import { $notifications, clearNotifications } from '@/store/notifications'
 
-import { actRender, Harness, type HarnessHandle } from './index-test-utils'
+import { actRender, Harness, type HarnessHandle, RUNTIME_SESSION_ID } from './index-test-utils'
 import { clearStoredJournal } from './prepared-submissions-test-utils'
 import { clearSingleFlightSessionResumeState } from './single-flight-resume'
 import { resetSubmissionIdSupportForTests } from './submission-identity-support'
@@ -125,5 +128,73 @@ describe('a backend that refuses submission_id', () => {
     const before = submits.length
     expect(await handle!.submitText('maybe admitted', { submission_id: 'uncertain-1' })).toBe(true)
     expect(submits[before]).toMatchObject({ submission_id: 'uncertain-1', text: 'maybe admitted' })
+  })
+})
+
+describe('a refused identityless send', () => {
+  const legacySends = (submits: Array<Record<string, unknown>>) => submits.filter(p => !('submission_id' in p)).length
+
+  // A backend whose PromptSubmitParams forbids submission_id refuses it before admission (4094),
+  // so every send goes identityless; `refusal` answers the first identityless one.
+  function refusingGateway(refusal: Error, submits: Array<Record<string, unknown>>) {
+    return vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {return { session_id: RUNTIME_SESSION_ID } as never}
+
+      if (method !== 'prompt.submit') {return {} as never}
+      submits.push(params!)
+
+      if (params?.submission_id) {throw Object.assign(new Error('capability refused'), { code: 4094 })}
+
+      if (legacySends(submits) === 1) {throw refusal}
+
+      return { ok: true } as never
+    })
+  }
+
+  // Chat 20261112_052539_8d8534: Take over's retry of a send the owner check refused before
+  // admission showed legacySendUnconfirmed, though that send never ran. A definite refusal is not
+  // an unconfirmed send; an unconfirmed owner hand-off (SESSION_OWNER_UNCONFIRMED) still is.
+  it.each([
+    ['SESSION_NOT_OWNED', true],
+    ['SESSION_OWNER_UNCONFIRMED', false]
+  ])('an explicit retry after a legacy send refused 4090 %s resends it: %s', async (reason, resent) => {
+    const submits: Array<Record<string, unknown>> = []
+    clearNotifications()
+
+    const refusal = new JsonRpcGatewayError('This chat is active in another Hermes window/terminal.', {
+      code: 4090,
+      data: { reason }
+    })
+
+    const requestGateway = refusingGateway(refusal, submits)
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+    expect(await handle!.submitText('take me over', { submission_id: 'refused-legacy' })).toBe(false)
+    expect(legacySends(submits)).toBe(1)
+    clearNotifications()
+    // Take over's explicit retry names the refused send's identity.
+    expect(await handle!.submitText('take me over', { submission_id: 'refused-legacy' })).toBe(resent)
+    const shown = $notifications.get().map(n => n.message)
+
+    if (resent) {
+      expect(legacySends(submits)).toBe(2)
+      expect(shown).not.toContain(en.promptNotices.legacySendUnconfirmed)
+    } else {
+      expect(legacySends(submits)).toBe(1)
+      expect(shown).toContain(en.promptNotices.legacySendUnconfirmed)
+    }
+  })
+
+  it('a legacy send refused session busy (4009) is retried by the busy loop instead of failing as unconfirmed', async () => {
+    const submits: Array<Record<string, unknown>> = []
+    const requestGateway = refusingGateway(new JsonRpcGatewayError('session busy', { code: 4009 }), submits)
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+    expect(await handle!.submitText('wait for the turn', { submission_id: 'busy-legacy' })).toBe(true)
+    expect(legacySends(submits)).toBe(2)
   })
 })

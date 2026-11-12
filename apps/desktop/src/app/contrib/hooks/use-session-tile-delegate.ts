@@ -78,6 +78,10 @@ import {
 
 type SessionStateCache = ReturnType<typeof useSessionStateCache>
 
+/** session.take_over waits up to 60 s for a live-but-slow writer to let go
+ *  (HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S); the 30 s default request timeout would cut it off. */
+const SESSION_TAKE_OVER_TIMEOUT_MS = 75_000
+
 /** Runtime a stored session is bound to: the primary reverse lookup, else a retained tile. */
 function boundTileRuntimeId(
   runtimeIdByStoredSessionIdRef: SessionStateCache['runtimeIdByStoredSessionIdRef'],
@@ -410,12 +414,16 @@ export function useSessionTileDelegate({
       takeOverSession: async runtimeId => {
         // Same profile routing as interrupt: the lease lives in the owning profile's registry.
         const storedSessionId = storedSessionIdForRuntime(runtimeId)
+        const params = { session_id: runtimeId }
 
         return storedSessionId
-          ? await requestForStoredSession<SessionTakeOverResult>(storedSessionId, 'session.take_over', {
-              session_id: runtimeId
-            })
-          : await requestGateway<SessionTakeOverResult>('session.take_over', { session_id: runtimeId })
+          ? await requestForStoredSession<SessionTakeOverResult>(
+              storedSessionId,
+              'session.take_over',
+              params,
+              SESSION_TAKE_OVER_TIMEOUT_MS
+            )
+          : await requestGateway<SessionTakeOverResult>('session.take_over', params, SESSION_TAKE_OVER_TIMEOUT_MS)
       },
       resumeTile: async (storedSessionId, options) => {
         // A retained tile can still own its runtime after the primary view drops

@@ -339,7 +339,7 @@ export function refusalDroppedImages(error: unknown): boolean {
   )
 }
 
-function gatewayReason(error: unknown): unknown {
+export function gatewayReason(error: unknown): unknown {
   return error instanceof JsonRpcGatewayError ? (error.data as { reason?: unknown } | undefined)?.reason : undefined
 }
 
