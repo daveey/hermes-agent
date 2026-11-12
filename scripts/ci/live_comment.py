@@ -508,7 +508,7 @@ def fetch_all_review_statuses(
                 raise RuntimeError("review-status artifact download failed")
             continue
         if strict:
-            content = status_file.read_text().strip().removeprefix("review_status=")
+            content = status_file.read_text(encoding="utf-8-sig").strip().removeprefix("review_status=")
             statuses = json.loads(content)
             if not isinstance(statuses, list) or not all(isinstance(s, dict) for s in statuses):
                 raise ValueError("invalid review-status artifact")
