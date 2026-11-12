@@ -125,3 +125,21 @@ def test_concurrent_polls_agree_on_every_first_seen(tmp_path):
     for t in threads:
         t.join()
     assert len(results) == 4 and all(r == results[0] for r in results) and len(results[0]) == 200
+
+
+def test_a_busy_wal_switch_is_retried_not_raised(tmp_path, monkeypatch):
+    """SQLite answers ``journal_mode=WAL`` with SQLITE_BUSY, skipping the busy handler, while a concurrent first
+    opener holds the fresh ledger: one poller then raised ``database is locked`` (CI flake, 3 of 4 polls answered)."""
+    real = sqlite3.connect
+    busy = []
+
+    class Racing(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql == "PRAGMA journal_mode=WAL" and len(busy) < 3:
+                busy.append(sql)
+                raise sqlite3.OperationalError("database is locked")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(krn.sqlite3, "connect", lambda *a, **kw: real(*a, factory=Racing, **kw))
+    replica, ledger, _cards = _world(tmp_path)
+    assert len(obs.observe(replica, ledger, NOW)) == 20 and len(busy) == 3

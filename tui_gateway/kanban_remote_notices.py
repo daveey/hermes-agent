@@ -211,12 +211,25 @@ def _released(link: dict) -> bool:
     return link_released(link)
 
 
+def _wal(conn: sqlite3.Connection, deadline: float) -> None:
+    """[daveey] ``journal_mode=WAL`` answers SQLITE_BUSY without calling the busy handler while another opener of a
+    fresh ledger holds it, so concurrent first polls raised ``database is locked``. Retry until the connect timeout."""
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
+
+
 def _ledger(path: Optional[Path] = None) -> sqlite3.Connection:
     path = path or ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    _wal(conn, deadline=time.monotonic() + 5.0)
     conn.execute("CREATE TABLE IF NOT EXISTS notices (session TEXT NOT NULL, ref TEXT NOT NULL, state TEXT NOT NULL, "
                  "at REAL NOT NULL, delivered INTEGER NOT NULL, PRIMARY KEY (session, ref, state))")
     cols = {row[1] for row in conn.execute("PRAGMA table_info(notices)")}
