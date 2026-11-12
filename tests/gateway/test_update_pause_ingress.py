@@ -194,7 +194,9 @@ async def test_native_admission_without_pause_is_unaffected_and_delivers_once(mo
     ({'text': 'x'}, 'local', True),
     ({'text': 'x'}, 'telegram', False),
     ({'text': 'x'}, None, False),
-    ({'native_text_v1': {}, 'finite': True}, 'local', False),
+    ({'text': 'x', 'finite': True}, 'local', True),  # `chat -q` / `-z` (oneshot): its viewer redials
+    ({'text': 'x', 'finite': True, 'unattended': True}, 'local', True),
+    ({'native_text_v1': {}, 'finite': True}, 'telegram', False),
     ({'api_turn_v1': {}}, 'local', False),
     ({'local_automation_v1': {}}, 'local', False),
 ])

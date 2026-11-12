@@ -4,17 +4,23 @@ from dataclasses import replace
 
 
 def supported(authority, row, event, live, *, is_api):
-    """Only a claimed native messaging or local chat turn can be checkpointed. API, finite and
+    """Only a claimed native messaging or local chat turn can be checkpointed. API and
     producer-admitted automation have other result contracts and keep counting as active work.
     Native notices retain their presentation traits on resume, but must pass current ingress
     authorization again; a formerly internal wake is never a license to bypass Stop or policy.
+
+    [daveey] A finite local turn (``chat -q`` / ``-z``: the hub's ``oneshot`` reviewer chats) parks too:
+    its admission keeps the finite flags, so the resumed run is finite again, and its viewer redials
+    the restarted owner for the same admission's settlement (``gateway_chat_view``). Unparkable, it
+    refused every instant checkpoint for as long as it ran (hermes-hub 2026-11-12 15:09-15:40Z).
     """
     payload = row['payload']
-    if is_api or payload.get('finite') is True:
+    local = getattr(getattr(live.source, 'platform', None), 'value', None) == 'local'
+    if is_api or (payload.get('finite') is True and not local):
         return False
     if any(key in payload for key in ('api_turn_v1', 'local_automation_v1')):
         return False
-    return 'native_text_v1' in payload or getattr(live.source.platform, 'value', None) == 'local'
+    return 'native_text_v1' in payload or local
 
 
 @contextmanager

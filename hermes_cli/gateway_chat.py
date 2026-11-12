@@ -169,7 +169,8 @@ async def run_gateway_chat(args, emitter=None):
     # Finite: answer one prompt and exit (-z, --oneshot, -Q, stream-json, or -q off a TTY).
     oneshot = bool(oneshot_prompt or getattr(args, "oneshot_exit", False) or quiet or
                    (query and not (sys.stdin.isatty() and sys.stdout.isatty())))
-    async with connect_gateway() as client:
+    async with contextlib.AsyncExitStack() as connections:
+        client = await connections.enter_async_context(connect_gateway())
         description = await client.rpc("runtime.describe")
         title = continue_title(args)
         create_if_missing = bool(title and getattr(args, "create_if_missing", False))
@@ -235,6 +236,9 @@ async def run_gateway_chat(args, emitter=None):
         view.launch_api_key = getattr(args, "api_key", None)  # /new keeps this launch's key
         view.unattended = isinstance(oneshot_prompt, str)
         view.resume_footer = oneshot and not quiet
+        # [daveey] A core update restarting the owner parks a finite turn and continues it on the next owner:
+        # the one-shot wait redials it (``GatewayChatView._redial``). Each dial is closed on exit.
+        view.reconnect = lambda: connections.enter_async_context(connect_gateway())
         if (getattr(args, "resume", None) or title or latest) and not quiet:
             from agent.context_compressor import MODEL_ONLY_DISPLAY_METADATA_KEY
             for row in snapshot.get("messages", []):
