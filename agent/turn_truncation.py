@@ -738,6 +738,10 @@ class RefusalVerdict:
     action: str
     result: Optional[dict[str, Any]]
     active_system_prompt: Any
+    # History-triggered refusal (compacted; ``_retry.restart_with_compressed_messages`` armed): the
+    # request to resend.
+    messages: Any = None
+    conversation_history: Any = None
 
 
 def handle_content_policy_refusal(
@@ -745,7 +749,7 @@ def handle_content_policy_refusal(
     messages: list[dict[str, Any]], api_messages: Any, api_kwargs: Any, active_system_prompt: Any,
     conversation_history: Any, api_call_count: int, effective_task_id: Any, turn_id: Any,
     api_request_id: Any, api_start_time: float, retry_count: int, max_retries: int,
-    current_turn_user_idx: Any = None,
+    current_turn_user_idx: Any = None, system_message: Any = None,
 ) -> RefusalVerdict:
     """HTTP-200 refusal (``finish_reason`` ``content_filter`` / ``guardrail_intervened``).
     Deterministic for the unchanged prompt — never retried: one configured-fallback try,
@@ -794,9 +798,25 @@ def handle_content_policy_refusal(
         active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
         return RefusalVerdict("break", None, active_system_prompt)
 
+    # A refusal before any model round judged only history + this message: compact the history once
+    # and resend the same message (agent/turn_refusal_history.py).
+    from agent.turn_refusal_history import HISTORY_REFUSAL_COPY, history_refusal_step
+    _step = history_refusal_step(
+        agent, messages=messages, current_turn_user_idx=current_turn_user_idx, turn_id=turn_id,
+        system_message=system_message if system_message is not None else active_system_prompt,
+        effective_task_id=effective_task_id,
+    )
+    if _step is not None and _step.outcome == "retry":
+        agent._buffer_diagnostic_status(
+            "⚠️ The safety filter refused this chat's earlier history — compacting it and retrying once...")
+        _retry.restart_with_compressed_messages = True
+        return RefusalVerdict("break", None, active_system_prompt, messages=_step.messages,
+                              conversation_history=_step.conversation_history)
+
     agent._flush_status_buffer()
     agent._emit_diagnostic_status("⚠️ The model declined to respond to this request (safety refusal).")
-    _refusal_response = "⚠️ " + content_policy_copy(
+    _copy = HISTORY_REFUSAL_COPY.format if _step is not None else content_policy_copy
+    _refusal_response = "⚠️ " + _copy(
         label=provider_label_for(agent.provider),
         summary=_refusal_text or "the model returned no explanation",
     )
