@@ -6,6 +6,8 @@ referenced scripts and ``sh -c`` payloads on the raw command, so a >1 MiB data p
 inside the Python body failed closed as an oversized "script".
 """
 
+from pathlib import Path
+
 import pytest
 
 from cron.lifecycle_guard import contains_gateway_lifecycle_command_or_referenced_script as guard
@@ -116,3 +118,191 @@ def test_unscannable_own_cron_script_raises_named_refusal(tmp_path, shape):
     message = str(excinfo.value)
     assert "could not scan" in message and str(script) in message
     assert "contains a gateway lifecycle command" not in message
+
+
+# --- wrapped, function-body and nested data consumers (t_01a1d0ea6db6c158) --------------------
+# Each shape below opened a >1 MiB SQLite file read-only and was refused as an "executed script":
+# the consumer was only recognized as a bare top-level `python3 - <<'PY'`.
+
+_FIXTURES = Path(__file__).parent / "fixtures" / "lifecycle_guard_heredoc"
+
+
+def _big_sqlite(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"SQLite format 3\0" + b"\0" * (2 * 1024 * 1024 - 16))
+    return path
+
+
+def _bodies(db):
+    # one-line (the probe table) and a wrapped call whose path line starts a shell segment
+    return {
+        "one-line": f"import sqlite3\nsqlite3.connect('{db}')\n",
+        "multi-line": f"import sqlite3\nc = sqlite3.connect(\n    '{db}')\n",
+    }
+
+
+_CONSUMER_SHAPES = {
+    "wrapper": "timeout 20 python3 - <<'PY'\n{body}PY",
+    "wrapper-args": "nice -n 5 env A=1 timeout 20 python3 - \"$T\" x <<'PY'\n{body}PY",
+    "nested-in-ssh": "ssh -o BatchMode=yes h \"bash -s\" <<'R'\npython3 - <<'PY'\n{body}PY\nR",
+    "nested-$SSH": "SSH='ssh -o BatchMode=yes'\n$SSH h \"bash -s\" <<'R' 2>&1 | grep -v x\n"
+                   "python3 - <<'PY'\n{body}PY\nR",
+    "function-args": "q() {{ python3 - \"$1\" <<'PY'\n{body}PY\n}}\nq x",
+    "function-no-args": "q() {{ python3 - <<'PY'\n{body}PY\n}}\nq x",
+    "function-keyword": "function q {{ timeout 20 python3 - \"$1\" <<'PY'\n{body}PY\n}}\nq x",
+    "nested-function-wrapper": "ssh h \"bash -s\" <<'R'\nq() {{ timeout 20 python3 - \"$1\" <<'PY'\n"
+                               "{body}PY\n}}\nq x\nR",
+}
+
+
+@pytest.mark.parametrize("body_kind", ["one-line", "multi-line"])
+@pytest.mark.parametrize("shape", sorted(_CONSUMER_SHAPES))
+def test_data_consumer_heredoc_mention_is_not_refused(tmp_path, shape, body_kind):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    db = _big_sqlite(tmp_path / "big.db")
+    command = _CONSUMER_SHAPES[shape].format(body=_bodies(db)[body_kind])
+    masked = strip_inert_heredoc_bodies(command)
+    assert str(db) not in masked, masked  # the consumer body is masked, wherever it sits
+    assert masked.count("\n") == command.count("\n")
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+
+
+@pytest.mark.parametrize("command", [
+    # su's operand is a USER and its shell reads stdin; env -S hands a string to a shell
+    "su python3 - <<'EOF'\nhermes gateway restart\nEOF",
+    "env -S 'bash -s' python3 <<'EOF'\nhermes gateway restart\nEOF",
+    "sudo -s python3 <<'EOF'\nhermes gateway restart\nEOF",
+    # an unquoted outer body expands `$(…)` locally before the remote shell sees it
+    "bash <<EOF\npython3 - <<'PY'\n$(hermes gateway restart)\nPY\nEOF",
+    # a function header must open the line; other braces/parens keep the opener visible
+    "x; q() { python3 - <<'PY'\nhermes gateway restart\nPY\n}",
+    # an outer `bash -s` body's own lines are still commands
+    "ssh h \"bash -s\" <<'R'\nhermes gateway restart\nR",
+    "ssh h \"bash -s\" <<'R'\npython3 - <<'PY'\nprint(1)\nPY\nhermes gateway restart\nR",
+    # a function or alias that shadows a consumer/wrapper name is never a data consumer
+    "python3() { bash; }\npython3 - <<'PY'\nhermes gateway restart\nPY",
+    "python3() { bash; }; q() { python3 - <<'PY'\nhermes gateway restart\nPY\n}; q",
+    "function python3 { bash; }\npython3 - <<'PY'\nhermes gateway restart\nPY",
+    "timeout() { bash; }\ntimeout 5 python3 - <<'PY'\nhermes gateway restart\nPY",
+    "shopt -s expand_aliases; alias python3=bash\npython3 - <<'PY'\nhermes gateway restart\nPY",
+    "python3() { bash; }\nssh h \"bash -s\" <<'R'\nhermes gateway restart\nR",
+])
+def test_shell_consumers_and_outer_bodies_stay_visible(tmp_path, command):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (True, None)
+
+
+def test_deeply_nested_heredocs_stay_bounded(tmp_path):
+    """Nesting past the bound keeps the innermost body visible (fail closed), and never recurses
+    without limit."""
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    db = _big_sqlite(tmp_path / "big.db")
+    command = f"python3 - <<'PY'\nimport sqlite3\nc = sqlite3.connect(\n    '{db}')\nPY"
+    for level in range(6):
+        command = f"ssh h{level} \"bash -s\" <<'R{level}'\n{command}\nR{level}"
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe is True and str(db) in refusal
+
+
+@pytest.mark.parametrize("shape", ["wrapper", "nested-in-ssh", "function-args"])
+def test_masked_consumer_mentions_are_still_read(tmp_path, shape):
+    """A wrapped/nested/function consumer's mentions are still read: a lifecycle script handed to
+    os.system() from the masked body still blocks."""
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    script = tmp_path / "restart.sh"
+    script.write_text("#!/bin/sh\nhermes gateway restart\n", encoding="utf-8")
+    body = f"import os\nos.system('{script}')\n"
+    command = _CONSUMER_SHAPES[shape].format(body=body)
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (True, None)
+
+
+@pytest.mark.parametrize("template", [
+    "python3 - <<'PY'\nimport sqlite3\nsqlite3.connect('{db}')\nPY",
+    "ssh -o BatchMode=yes h \"bash -s\" <<'R'\nsqlite3 {db} 'select 1'\nR",
+    "X='import sqlite3; sqlite3.connect(\"{db}\")'\nssh h \"python3 -c '$X'\"",
+])
+def test_probe_table_plain_rows_stay_allowed(tmp_path, template):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    db = _big_sqlite(tmp_path / "big.db")
+    assert scan_gateway_lifecycle(template.format(db=db), cwd=str(tmp_path)) == (False, None)
+
+
+@pytest.mark.parametrize("make", [
+    lambda d: (f"bash {d / 'big.sh'}", "scan cap"),
+    lambda d: ("X='hermes gateway restart'; eval \"$X\"", None),
+    lambda d: (f"cd {d} && source ./restart.sh", None),
+    lambda d: (f"timeout 20 python3 - <<'PY'\nimport os\nos.system('{d / 'restart.sh'}')\nPY", None),
+])
+def test_probe_table_controls_still_refused(tmp_path, make):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    (tmp_path / "big.sh").write_text("echo hi\n" * 220000, encoding="utf-8")
+    (tmp_path / "restart.sh").write_text("#!/bin/sh\nhermes gateway restart\n", encoding="utf-8")
+    command, refusal_part = make(tmp_path)
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe is True
+    assert (refusal_part in refusal) if refusal_part else refusal is None
+
+
+# --- interpreter call syntax tokenized as shell is a mention, not a subshell -------------------
+
+@pytest.mark.parametrize("command", [
+    # script B's isolated trigger shapes: the Python is shell-tokenized, and
+    # `expanduser("~/x")` reads as a word followed by a subshell `("~/x")`
+    "REMOTE=$(cat <<'PY'\nimport os\np = os.path.expanduser(\"{db}\")\nPY\n)\n"
+    "ssh h \"python3 -c '$REMOTE'\"",
+    "ssh h python3 - <<'PY' | sed 's/^/hub /'\nimport os, sqlite3\n"
+    "c = sqlite3.connect(os.path.expanduser(\"{db}\"))\nPY",
+    "cat > /tmp/x.py <<EOF\nfrom pathlib import Path\nprint(Path('{db}').stat())\nEOF",
+])
+def test_path_in_interpreter_call_is_a_mention(tmp_path, command):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    db = _big_sqlite(tmp_path / "big.db")
+    assert scan_gateway_lifecycle(command.format(db=db), cwd=str(tmp_path)) == (False, None)
+
+
+def test_call_argument_mentions_are_still_read(tmp_path):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    script = tmp_path / "restart.sh"
+    script.write_text("#!/bin/sh\nhermes gateway restart\n", encoding="utf-8")
+    command = f"ssh h python3 - <<'PY' | sed 's/^/x /'\nimport os\nos.system('{script}')\nPY"
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (True, None)
+
+
+@pytest.mark.parametrize("template", [
+    "X=$({big})", "diff <({big}) /dev/null", "tee >({big})", "if ({big}); then :; fi",
+    "while ({big}); do :; done", "! ({big})", "time ({big})", "arr=({big})",
+])
+def test_subshell_and_substitution_parens_still_execute(tmp_path, template):
+    """`(` only stops meaning \"runs a command\" after an ordinary word: substitutions, keywords
+    and assignments keep the executed fail-closed verdict."""
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    big = tmp_path / "big.sh"
+    big.write_text("echo hi\n" * 220000, encoding="utf-8")
+    unsafe, refusal = scan_gateway_lifecycle(template.format(big=big), cwd=str(tmp_path))
+    assert unsafe is True and "scan cap" in refusal
+
+
+# --- the refused scripts, verbatim ---------------------------------------------------------------
+
+@pytest.mark.parametrize("script, db_rel", [
+    ("wcomment2.sh", ".hermes/kanban.db"),
+    ("core_split_0923.sh", ".hermes/logs/github-quota/audit.sqlite"),
+])
+def test_refused_scripts_verbatim_are_not_refused(tmp_path, monkeypatch, script, db_rel):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    home = tmp_path / "home"
+    _big_sqlite(home / db_rel)
+    monkeypatch.setenv("HOME", str(home))  # the scripts' `~/` paths point into tmp_path
+    command = f"bash {_FIXTURES / script} 1.2.3.4 t_x f.txt"
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)

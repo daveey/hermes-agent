@@ -2,21 +2,68 @@
 cron lifecycle_guard) that false-positive on heredoc *bodies*. Stripping every body is unsafe the
 other way (a fake ``<<`` in quotes can swallow an operator; unquoted bodies expand; ``bash <<'EOF'``
 executes), so a body is masked ONLY when every delimiter is quoted, every heredoc has an exact
-terminator line, the owning simple command is an allowlisted non-shell interpreter, and no list
-operator follows the heredoc. Otherwise the command is returned untouched: a false positive is
-acceptable, hiding shell syntax from a guard is not.
+terminator line, the owning simple command (after transparent wrappers such as ``timeout 20`` are
+peeled; optionally the first command of a ``name() {`` body) is an allowlisted non-shell
+interpreter, and no list operator follows the heredoc. Otherwise the command is returned
+untouched: a false positive is acceptable, hiding shell syntax from a guard is not. A quoted body
+that stays visible (``ssh h 'bash -s' <<'R'``) is literal text, so data-consumer heredocs nested in
+it are judged by the same rules.
 Masked bodies keep their newline count (re.MULTILINE)."""
 
 from __future__ import annotations
 
 import re
 
-# Non-shell interpreters whose quoted heredoc bodies are data for THAT interpreter; optional
-# VAR=... assignments, ``env`` and a path prefix allowed. Narrow on purpose: unmatched = visible.
-_INERT_HEREDOC_CONSUMER_RE = re.compile(
-    r"^\s*(?:[A-Z_][A-Z0-9_]*=\S+\s+)*(?:env\s+)?(?:[A-Za-z0-9_./-]+/)?"
-    r"(?:python(?:3(?:\.\d+)*)?|osascript|cat)(?=\s|$)",
+# Non-shell interpreters whose quoted heredoc bodies are data for THAT interpreter, judged on the
+# command the owner actually runs: VAR=... assignments and transparent wrappers (``timeout 20``,
+# ``nice``, ``env VAR=1``, ``command``) are peeled, a path prefix is allowed, positional arguments
+# may follow. Narrow on purpose: unmatched = visible.
+_INERT_HEREDOC_CONSUMER_RE = re.compile(r"^(?:python(?:3(?:\.\d+)*)?|osascript|cat)$", re.IGNORECASE)
+# Wrappers that run their operand with the heredoc on its stdin. Excluded: ``su``/``runuser`` (the
+# operand is a USER and a shell reads stdin) and every other privilege/namespace wrapper.
+_INERT_HEREDOC_WRAPPERS = frozenset({
+    "timeout", "nice", "ionice", "nohup", "setsid", "stdbuf", "env", "command", "exec",
+    "eatmydata", "sudo", "doas",
+})
+# A wrapper option that hands a STRING to a shell (``env -S 'bash -s'``) or starts one (``sudo
+# -s``) makes the peeled word unreliable: keep the body visible.
+_SHELL_STARTING_WRAPPER_OPTIONS = frozenset({
+    "-S", "--split-string", "-c", "--command", "-s", "--shell", "-i", "--login",
+})
+_ASSIGNMENT_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# ``name() {`` / ``function name {`` opening a function body on the heredoc's own line.
+_FUNCTION_HEADER_RE = re.compile(
+    r"\s*(?:function\s+[A-Za-z_][\w.:-]*\s*(?:\(\s*\))?|[A-Za-z_][\w.:-]*\s*\(\s*\))\s*\{\s+")
+# Nested heredocs inside a quoted outer body are classified recursively, this deep at most.
+_MAX_NESTED_HEREDOC_DEPTH = 4
+# A command that (re)defines a consumer or wrapper name as a function or alias anywhere
+# (``python3() { bash; }``) may run a shell where the peeled word says "python": mask nothing.
+_CONSUMER_SHADOW_RE = re.compile(
+    r"(?:^|[\s;&|(){{}}])(?:(?:function\s+)?{names}\s*\(\s*\)|function\s+{names}\s+\{{"
+    r"|alias\s+{names}=)".format(
+        names=r"(?:python[\d.]*|osascript|cat|timeout|nice|ionice|nohup|setsid|stdbuf|env|command"
+              r"|exec|eatmydata|sudo|doas)"),
     re.IGNORECASE)
+
+
+def _runs_inert_consumer(owner_words: list[str]) -> bool:
+    """Whether the simple command *owner_words* (quotes masked, heredoc operators removed) runs
+    an allowlisted data consumer, after the same wrapper peeling as the lifecycle guard."""
+    from cron.lifecycle_guard import _TRANSPARENT_COMMAND_PREFIXES, _peel_transparent_prefixes
+
+    index = next((i for i, word in enumerate(owner_words) if not _ASSIGNMENT_WORD_RE.match(word)), None)
+    if index is None:
+        return False
+    peeled = _peel_transparent_prefixes(owner_words, index)
+    if peeled >= len(owner_words):
+        return False
+    for word in owner_words[index:peeled]:
+        name = word.rsplit("/", 1)[-1]
+        if word in _SHELL_STARTING_WRAPPER_OPTIONS or (
+            name in _TRANSPARENT_COMMAND_PREFIXES and name not in _INERT_HEREDOC_WRAPPERS
+        ):
+            return False
+    return bool(_INERT_HEREDOC_CONSUMER_RE.match(owner_words[peeled].rsplit("/", 1)[-1]))
 
 
 def _span_end(command: str, cursor: int, closer: str) -> int:
@@ -162,8 +209,8 @@ def _scan_heredoc_command_unit(command: str, start: int):
 
 
 def _find_heredoc_close(
-        command: str, body_start: int, delimiter: str, strip_tabs: bool) -> int | None:
-    """Return the position after an exact shell heredoc terminator line."""
+        command: str, body_start: int, delimiter: str, strip_tabs: bool) -> tuple[int, int] | None:
+    """Return ``(terminator_line_start, position_after_it)`` for the exact terminator line."""
     cursor = body_start
     while True:
         newline = command.find("\n", cursor)
@@ -171,19 +218,36 @@ def _find_heredoc_close(
         line = command[cursor:after].removesuffix("\n").removesuffix("\r")
         candidate = line.lstrip("\t") if strip_tabs else line
         if candidate == delimiter:
-            return after
+            return cursor, after
         if newline == -1:
             return None
         cursor = after
 
 
-def strip_inert_heredoc_bodies(command: str) -> str:
-    """Mask heredoc bodies that are provably inert data (see module docstring)."""
+def _owner_runs_inert_consumer(
+        command: str, command_start: int, command_end: int, owner_start: int) -> bool:
+    """Whether the heredoc opener line is a plain simple command (optionally the first command of
+    a ``name() {`` function body) whose peeled command is an allowlisted data consumer."""
+    header = _FUNCTION_HEADER_RE.match(command, command_start, command_end)
+    opener_start = header.end() if header else command_start
+    masked_opener = _mask_simple_quotes(command[opener_start:command_end])
+    if any(marker in masked_opener for marker in ("$(", "`", "<(", ">(", "(", ")", "{", "}")):
+        return False
+    owner = command[max(owner_start, opener_start):command_end]
+    return _runs_inert_consumer(_mask_simple_quotes(owner).split())
+
+
+def strip_inert_heredoc_bodies(command: str, *, _depth: int = 0) -> str:
+    """Mask heredoc bodies that are provably inert data (see module docstring). The body of a
+    quoted-delimiter heredoc that is NOT masked (``ssh h 'bash -s' <<'R'``) stays visible, but
+    data-consumer heredocs nested inside it are classified and masked the same way."""
     # Runs on every terminal call: skip the state machine when no '<<' exists; stop past the last.
     if "<<" not in command:
         return command
+    if _CONSUMER_SHADOW_RE.search(command):
+        return command
     last_opener_index = command.rfind("<<")
-    ranges: list[tuple[int, int]] = []
+    replacements: list[tuple[int, int, str]] = []
     command_start = 0
     while command_start <= last_opener_index:
         (
@@ -203,29 +267,35 @@ def strip_inert_heredoc_bodies(command: str) -> str:
         if command_end >= len(command):
             return command  # opener with no body line: unterminated — leave visible
         body_cursor = command_end + 1
-        body_ranges: list[tuple[int, int]] = []
+        bodies: list[tuple[int, int, int]] = []
         for delimiter, strip_tabs, _quoted in specs:
-            close_end = _find_heredoc_close(command, body_cursor, delimiter, strip_tabs)
-            if close_end is None:
+            closed = _find_heredoc_close(command, body_cursor, delimiter, strip_tabs)
+            if closed is None:
                 return command  # unterminated
-            body_ranges.append((body_cursor, close_end))
-            body_cursor = close_end
+            bodies.append((body_cursor, *closed))
+            body_cursor = closed[1]
+        quoted = [spec_quoted for _delimiter, _strip_tabs, spec_quoted in specs]
         if (
-            all(quoted for _delimiter, _strip_tabs, quoted in specs)
+            all(quoted)
             and not post_heredoc_list_operator
+            and _owner_runs_inert_consumer(command, command_start, command_end, owner_start)
         ):
-            masked_opener = _mask_simple_quotes(command[command_start:command_end])
-            masked_owner = _mask_simple_quotes(command[owner_start:command_end])
-            if not any(
-                marker in masked_opener
-                for marker in ("$(", "`", "<(", ">(", "(", ")", "{", "}")
-            ) and _INERT_HEREDOC_CONSUMER_RE.search(masked_owner):
-                ranges.extend(body_ranges)
+            replacements += [(start, end, "\n" * command.count("\n", start, end))
+                             for start, _terminator, end in bodies]
+        elif _depth < _MAX_NESTED_HEREDOC_DEPTH:
+            # An unquoted outer body expands locally first (`$(…)` runs here), so only a quoted
+            # one is literal text whose nested heredocs can be judged on their own.
+            for (start, terminator, _end), body_quoted in zip(bodies, quoted):
+                inner = command[start:terminator]
+                if body_quoted and "<<" in inner:
+                    masked = strip_inert_heredoc_bodies(inner, _depth=_depth + 1)
+                    if masked != inner:
+                        replacements.append((start, terminator, masked))
         command_start = body_cursor
-    # Single-pass rebuild (ranges are sorted and non-overlapping), bodies -> their newlines only.
+    # Single-pass rebuild (replacements are sorted and non-overlapping).
     parts: list[str] = []
     previous = 0
-    for start, end in ranges:
-        parts += [command[previous:start], "\n" * command.count("\n", start, end)]
+    for start, end, replacement in replacements:
+        parts += [command[previous:start], replacement]
         previous = end
     return "".join(parts) + command[previous:]

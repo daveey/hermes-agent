@@ -705,20 +705,60 @@ def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterat
         yield segment
 
 
-def _iter_command_segments(command: str) -> Iterator[list[str]]:
-    """Yield shell-tokenized command segments per logical line; a line shlex rejects (unbalanced
-    quotes) falls back to per-physical-line tokenization."""
+def _iter_command_token_lists(command: str) -> Iterator[list[str]]:
+    """Yield the shell tokens of each logical line; a line shlex rejects (unbalanced quotes) falls
+    back to per-physical-line tokenization."""
     for line in _split_logical_lines(command.replace("\\\n", "")):
         try:
             tokens = _shlex_tokens(line)
         except ValueError:
             for physical_line in line.splitlines():
                 try:
-                    yield from _split_segments(_shlex_tokens(physical_line))
+                    yield _shlex_tokens(physical_line)
                 except ValueError:
                     continue
             continue
+        yield tokens
+
+
+def _iter_command_segments(command: str) -> Iterator[list[str]]:
+    """Yield shell-tokenized command segments per logical line (see ``_iter_command_token_lists``)."""
+    for tokens in _iter_command_token_lists(command):
         yield from _split_segments(tokens)
+
+
+# Words after which `(` still opens a command list (`if (cd x && ./y)`, `! (…)`, `time (…)`).
+_SUBSHELL_OPENING_WORDS = frozenset({
+    "if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc", "in", "{",
+})
+
+
+def _opens_call_arguments(previous: str) -> bool:
+    """Whether a bare ``(`` after the word *previous* is interpreter call syntax, not a subshell.
+
+    In the shell a subshell ``(`` only starts a command, so ``word (`` is a syntax error there;
+    it is how interpreter code tokenized as shell looks (``expanduser("~/x")``, ``Path('/d')``).
+    ``$(``, ``<(``, ``>(`` and ``x=(`` keep today's executed treatment."""
+    return previous not in _SUBSHELL_OPENING_WORDS and not previous.endswith(("$", "<", ">", "="))
+
+
+def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
+    """``_iter_command_segments`` plus whether each segment is the argument list of a call
+    (``True``): the segment right after a ``(`` that follows an ordinary word."""
+    for tokens in _iter_command_token_lists(command):
+        segment: list[str] = []
+        call_argument = False
+        for token in tokens:
+            if token and set(token) <= _CONTROL_CHARS:
+                next_is_call = token == "(" and bool(segment) and _opens_call_arguments(segment[-1])
+                if segment:
+                    yield segment, call_argument
+                    segment = []
+                call_argument = next_is_call
+                continue
+            segment.append(token)
+        if segment:
+            yield segment, call_argument
 
 
 def _executable_name(token: str) -> str:
@@ -989,11 +1029,17 @@ def _references_at(segment: list[str], index: int, cwd: Optional[str]) -> Iterat
         yield from _resolved_or_nothing(executable, cwd)
 
 
-def _iter_referenced_shell_scripts(command: str, *, cwd: Optional[str] = None) -> Iterator[Path]:
+def _iter_referenced_shell_scripts(
+    command: str, *, cwd: Optional[str] = None, call_arguments: bool = False,
+) -> Iterator[Path]:
     """Yield scripts executed directly or through a POSIX shell. Each segment is read at the
     original token AND at the peeled wrapper target — additive on purpose: peeling must never REMOVE
-    a reference (a local ``./timeout`` is a script, not the coreutils wrapper)."""
-    for segment in _iter_command_segments(command):
+    a reference (a local ``./timeout`` is a script, not the coreutils wrapper). With
+    *call_arguments* the same discovery runs over call-argument segments instead
+    (``expanduser("~/x")``): paths there are interpreter string literals, i.e. mentions."""
+    for segment, is_call_argument in _iter_positioned_command_segments(command):
+        if is_call_argument != call_arguments:
+            continue
         index = _command_token_index(segment)
         if index is None:
             continue
@@ -1199,10 +1245,21 @@ def _contains_unsafe_gateway_action(
     # Paths named only inside a masked body are still READ: an interpreter body that hands
     # `/x/restart.sh` to os.system() executes it. Only the fail-closed verdicts (cloud placeholder,
     # oversized/binary, budget) stay restricted to the executed view — a mere data mention must not
-    # trip them. Executed candidates come first so a mention never starves a real script's budget.
+    # trip them. Executed candidates come first so a mention never starves a real script's budget. A
+    # path in interpreter call syntax (`expanduser("~/x")`, `connect('/d/x.db')`) is a string
+    # literal the shell never runs: a mention too, read and scanned but never a fail-closed verdict.
     candidates = [(path, executed) for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd)]
+    candidates += [
+        (path, False)
+        for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd, call_arguments=True)
+    ]
     if walk_command != command:
-        candidates += [(path, False) for path in _iter_referenced_shell_scripts(command, cwd=cwd)]
+        candidates += [
+            (path, False)
+            for call_arguments in (False, True)
+            for path in _iter_referenced_shell_scripts(
+                command, cwd=cwd, call_arguments=call_arguments)
+        ]
 
     for script_path, candidate_executed in candidates:
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
