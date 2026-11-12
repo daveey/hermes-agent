@@ -106,17 +106,21 @@ def _latest_user_message(session_id: str, db_path: Optional[str] = None) -> Opti
            "AND COALESCE(_compressed_summary, 0) = 0 ORDER BY id DESC")
     prefixes = _synthetic_prefixes()
     try:
-        with sqlite3.connect(uri, uri=True, timeout=5) as sdb:
-            tick_row = None
+        with sqlite3.connect(uri, uri=True, timeout=5) as sdb:  # noqa: kanban-lockguard (state.db, read-only)
+            tick_id = None
             if (loop_since := _slash_loop_tick_since(sdb, session_id)) is not None:
-                tick_row = sdb.execute(  # the oldest untyped row at/after the fire: the tick's own prompt
-                    "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
-                    "AND COALESCE(display_kind, '') = '' AND timestamp >= ? ORDER BY id ASC LIMIT 1",
-                    (session_id, loop_since - 1)).fetchone()
+                # the oldest untyped, uncompressed, non-synthetic row at/after the fire: the tick's own prompt
+                for row_id, row_content in sdb.execute(
+                        "SELECT id, content FROM messages WHERE session_id = ? AND role = 'user' "
+                        "AND COALESCE(display_kind, '') = '' AND COALESCE(_compressed_summary, 0) = 0 "
+                        "AND timestamp >= ? ORDER BY id ASC", (session_id, loop_since - 1)):
+                    if not str(row_content or "").lstrip().startswith(prefixes):
+                        tick_id = int(row_id)
+                        break
             for message_id, at, content, _kind in sdb.execute(sql, (session_id, *_TYPED_KINDS)):
                 if str(content or "").lstrip().startswith(prefixes):
                     continue
-                if tick_row is not None and int(message_id) == int(tick_row[0]):
+                if tick_id is not None and int(message_id) == tick_id:
                     continue
                 return int(message_id), float(at)
     except sqlite3.Error:

@@ -199,6 +199,24 @@ def test_a_reply_after_an_interrupted_loop_tick_is_the_reply(kanban_home, prompt
         assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
 
 
+@pytest.mark.parametrize("early", [
+    {"content": "[System: the stream was cut; retry the tool call]"},
+    {"content": "summary of earlier turns", "compressed": 1},
+])
+def test_a_synthetic_row_before_the_tick_row_is_not_taken_as_the_tick(kanban_home, early):
+    """Review 5879581646 nit: the tick-row lookup filters like the reply scan. A synthetic or compressed untyped
+    row landing between the fire and the tick's own row must not be taken as the tick, or the real tick row
+    would pass as the person's reply."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        reply = _state_db(kanban_home, "chat-1", now - 50)
+        _loop_state(kanban_home, "chat-1", awaiting=True, fired_at=now - 10)
+        _state_db(kanban_home, "chat-1", now - 10, **early)
+        _state_db(kanban_home, "chat-1", now - 9, content="Run the recap skill now")
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
+
+
 def test_an_untyped_row_of_a_wakeup_framed_loop_is_never_skipped_as_the_tick(kanban_home):
     """The tick-row rule covers slash loops only: a wakeup-framed tick is caught by its frame, so the person's
     reply right after the fire is never mistaken for the tick."""
