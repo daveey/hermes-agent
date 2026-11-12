@@ -738,6 +738,16 @@ def requeue_admitted_completion(delegation_id: str, target_queue) -> bool:
                            "marking terminally dropped (result remains queryable).",
                            delegation_id, _MAX_DELIVERY_ATTEMPTS)
             return False
+        aged = conn.execute("""UPDATE async_delegations SET delivery_state='dropped', updated_at=?
+               WHERE delegation_id=? AND delivery_state='delivered'
+                 AND COALESCE(NULLIF(completed_at, 0), dispatched_at) > 0
+                 AND COALESCE(NULLIF(completed_at, 0), dispatched_at) < ?""",
+            (now, delegation_id, now - _MAX_COMPLETION_REPLAY_AGE_S))
+        if aged.rowcount == 1:
+            # Never offered past the replay cap (``_replay_pending`` would skip it silently): say so.
+            logger.warning("Async delegation %s: replay age expired before it could be offered again; "
+                           "terminally dropped (result remains queryable).", delegation_id)
+            return False
         reopened = conn.execute("""UPDATE async_delegations SET delivery_state='pending',
                       delivered_at=NULL, updated_at=?
                WHERE delegation_id=? AND delivery_state='delivered' AND event_json IS NOT NULL""",
