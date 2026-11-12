@@ -135,6 +135,10 @@ def test_controls_still_pin(attested, body):
     "chmod -R 777 `echo ~/.hermes/logs/`..",
     "chmod -R 777 `~/.hermes/state/x`",
     "read `~/.hermes/logs/x.log` then chmod -R 777 ~/.hermes/state/x",
+    # Removing a whole path must not merge its delimiters into a new backtick run.
+    "Read `~/.hermes/logs/x.log` then chmod -R 777 ~/.hermes/state/x with ``foo``",
+    "Read `~/.hermes/logs/x.log` then restart the gateway; see ``foo``",
+    "``a`` then `~/.hermes/logs/x.log` then systemctl restart hermes ``b``",
 ])
 def test_backtick_spans_follow_main_with_or_without_hub_read(attested, body):
     cfg, _, _ = attested

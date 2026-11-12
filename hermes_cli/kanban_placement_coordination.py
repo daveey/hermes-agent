@@ -168,8 +168,9 @@ def without_read_paths(text, cfg, *, target=None, requires=None):
 
 
 def _strip_read_paths(text, roots):
+    # Keep a separator so surrounding backtick runs cannot merge and hide later markers.
     return _STATE_PATH.sub(
-        lambda m: "" if _ends_word(text, m.start(), m.end()) and _under_roots(m.group(1), roots) else m.group(0),
+        lambda m: " " if _ends_word(text, m.start(), m.end()) and _under_roots(m.group(1), roots) else m.group(0),
         text)
 
 
