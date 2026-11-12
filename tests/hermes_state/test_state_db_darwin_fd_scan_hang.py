@@ -133,7 +133,7 @@ def test_healthy_scan_still_reports_holder(monkeypatch, tmp_path, caplog):
     ), "a successful scan must not log a timeout warning"
 
 
-def test_clean_verdict_is_reused_and_scans_are_single_flight(monkeypatch, tmp_path):
+def test_clean_verdict_is_reused_and_scans_are_single_flight(monkeypatch, tmp_path, settled_clean_keys):
     """Every SessionDB open used to walk all fds of all processes; a clean pass is now cached."""
     calls = []
 
@@ -157,7 +157,7 @@ def test_clean_verdict_is_reused_and_scans_are_single_flight(monkeypatch, tmp_pa
     assert len(calls) == 2
 
 
-def test_caller_arriving_after_pass_but_before_cache_write_reuses_it(monkeypatch, tmp_path):
+def test_caller_arriving_after_pass_but_before_cache_write_reuses_it(monkeypatch, tmp_path, settled_clean_keys):
     """A caller that missed the cache and then found no pass in flight used to start another
     pass, because the finished pass's clean verdict was only cached after its waiters woke. Here
     the second caller arrives in exactly that gap, so the old code made two passes every time."""

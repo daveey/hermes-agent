@@ -48,7 +48,7 @@ def test_revalidation_is_bounded_and_does_not_cache_timeout(tmp_path, monkeypatc
 
 
 @pytest.mark.platforms("macos")
-def test_native_scan_does_not_refuse_after_normal_sidecar_close(tmp_path, monkeypatch):
+def test_native_scan_does_not_refuse_after_normal_sidecar_close(tmp_path, monkeypatch, settled_clean_keys):
     wal = tmp_path / "state.db-wal"
     wal.write_bytes(b"linked sidecar")
     held = wal.open("rb")
@@ -74,7 +74,7 @@ def test_native_scan_does_not_refuse_after_normal_sidecar_close(tmp_path, monkey
         held.close()
 
 
-def test_descriptor_closing_during_path_comparison_is_not_a_holder(tmp_path, monkeypatch):
+def test_descriptor_closing_during_path_comparison_is_not_a_holder(tmp_path, monkeypatch, settled_clean_keys):
     wal = str(tmp_path / "state.db-wal")
     closed = False
 

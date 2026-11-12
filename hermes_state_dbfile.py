@@ -352,20 +352,109 @@ def _iter_darwin_fd_targets():
                 yield pid, fd, *current
 
 
-def _darwin_clean_key(base: str) -> tuple:
-    """What a clean verdict for *base* depends on: the directory's mtime and the sidecars' identity.
+_STATX_BTIME = 0x800
+_AT_FDCWD = -100
+_LINUX_STATX = None  # libc statx, False when unavailable; loaded once per process
 
-    A retired generation needs a sidecar path unlinked or replaced, and any create, unlink or
-    rename in the directory moves its mtime, so an unchanged key means no generation can have been
-    retired since the clean pass. WAL writes touch neither, so a busy database keeps its cache."""
+
+def _linux_statx():
+    global _LINUX_STATX
+    if _LINUX_STATX is None:
+        _LINUX_STATX = False
+        try:
+            import ctypes
+            fn = ctypes.CDLL(None, use_errno=True).statx
+            fn.restype = ctypes.c_int
+            fn.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p)
+            _LINUX_STATX = fn
+        except (ImportError, OSError, AttributeError):
+            pass
+    return _LINUX_STATX
+
+
+def _sidecar_birth_ns(path: str, st: os.stat_result):
+    """[daveey] The birth time of the inode *st* describes at *path*, or None when it is unknown.
+
+    A sidecar inode freed when the last connection unlinks it gets its number handed out again on
+    ext4/xfs, so ``(st_dev, st_ino)`` alone can name a different file than at verdict time. The birth
+    time is set at allocation and never touched by WAL writes, so a reused number allocated in a later
+    timestamp tick carries a new one (same tick: see :func:`_clean_key_settled`). Darwin reports it
+    in ``st_birthtime``; Linux needs ``statx(STATX_BTIME)``, absent from ``os``."""
+    if sys.platform == "darwin":
+        birth_ns = getattr(st, "st_birthtime_ns", None)  # Python >= 3.12: no float round-trip
+        if birth_ns is not None:
+            return birth_ns
+        birth = getattr(st, "st_birthtime", None)
+        return None if birth is None else int(birth * 1_000_000_000)
+    if not sys.platform.startswith("linux"):
+        return None
+    statx = _linux_statx()
+    if not statx:
+        return None
+    import ctypes
+    buf = ctypes.create_string_buffer(256)  # struct statx
+    if statx(_AT_FDCWD, os.fsencode(path), 0, _STATX_BTIME, buf) != 0:
+        return None
+    mask, = struct.unpack_from("=I", buf, 0)
+    ino, = struct.unpack_from("=Q", buf, 32)
+    sec, nsec = struct.unpack_from("=qI", buf, 80)  # stx_btime
+    if not mask & _STATX_BTIME or ino != st.st_ino:  # no btime on this fs, or the path moved meanwhile
+        return None
+    return sec * 1_000_000_000 + nsec
+
+
+# [daveey] A clean verdict is only stored once every timestamp in its key is older than this.
+_CLEAN_KEY_SETTLE_NS = 2_000_000_000
+_wall_clock_ns = time.time_ns  # the clock inode timestamps are stamped from; tests age keys through it
+
+
+def _clean_key_settled(key: tuple, taken_ns: int) -> bool:
+    """[daveey] Whether every timestamp in a :func:`_darwin_clean_key` key predates the settle window.
+
+    Inode timestamps come from a coarse clock (one jiffy on many kernels, a second or two on some
+    filesystems). ext4 hands a freed inode number straight back to the next create in the directory,
+    so a sidecar unlinked and recreated within the tick of its verdict-time birth repeats
+    ``(st_dev, st_ino, birth)``, and an entry added within the tick of the directory's mtime leaves
+    it unchanged (Blacksmith CI kernel, review of PR #1304). Any change made after a verdict whose
+    timestamps are all older than the window lands in a later tick and moves the key. A busy
+    database's sidecars are old, so its cache still hits; a fresh pair is re-walked for ~2 s only.
+    A timestamp in the future (clock skew) counts as unsettled.
+
+    The window is measured back from *taken_ns*, the wall clock read just before the key was taken,
+    never from when the verdict is stored: a /proc or libproc walk longer than the window would
+    otherwise let a key stamped in its own key-take tick through (review of PR #1304)."""
+    horizon = taken_ns - _CLEAN_KEY_SETTLE_NS
+    return all(slot is None or not slot[2] or slot[2] <= horizon for slot in key)
+
+
+def _darwin_clean_key(base: str) -> tuple:
+    """What a clean verdict for *base* depends on: the identity of the directory and of each sidecar.
+
+    A retired generation needs a sidecar path unlinked, renamed away or replaced while some process
+    still holds the old inode; a held inode is never freed, so the path then names nothing or another
+    inode. The verdict-time inode itself is not held, though: SQLite unlinks it on the last close and
+    ext4/xfs hand its number out again, so a later fresh sidecar can repeat ``(st_dev, st_ino)`` while
+    a retired generation is still held. A sidecar's identity is therefore ``(st_dev, st_ino, birth
+    time)``. WAL writes touch none of these, so a busy database keeps its cache. [daveey] While both
+    sidecars exist with a known birth time the directory's mtime is not part of the key: it moves with
+    every unrelated entry (on hermes-hub ``~/.hermes`` gets one every ~2 s), so the clean verdict never
+    hit and every SessionDB writer open walked every fd of every process. A missing sidecar or an
+    unknown birth time keeps the mtime: a sidecar created after the verdict and retired again leaves
+    its slot ``None``, a reused number looks unchanged, and only the directory change shows either."""
     key = []
-    for path, with_mtime in ((os.path.dirname(base), True), (base + "-wal", False), (base + "-shm", False)):
+    for path in (base + "-wal", base + "-shm"):
         try:
             st = os.stat(path)
         except OSError:
             key.append(None)
             continue
-        key.append((st.st_dev, st.st_ino, st.st_mtime_ns if with_mtime else 0))
+        key.append((st.st_dev, st.st_ino, _sidecar_birth_ns(path, st)))
+    weak = any(slot is None or slot[2] is None for slot in key)
+    try:
+        st = os.stat(os.path.dirname(base))
+        key.append((st.st_dev, st.st_ino, st.st_mtime_ns if weak else 0))
+    except OSError:
+        key.append(None)
     return tuple(key)
 
 
@@ -389,8 +478,10 @@ class _DarwinFdScan:
         self.expired = False
         self.waiters = 0
         # ``base -> (key, watched)`` of every caller that joined; a clean verdict for each is
-        # recorded before this pass stops being in flight (see :meth:`run`).
+        # recorded before this pass stops being in flight (see :meth:`run`). ``taken`` is the
+        # wall clock each caller read just before taking its key (:func:`_clean_key_settled`).
         self.watchers: dict[str, tuple[tuple, dict[str, str]]] = {}
+        self.taken: dict[str, int] = {}
         self.verdicts: dict[str, list[tuple[int, str]]] = {}
 
     def run(self) -> None:
@@ -425,7 +516,7 @@ class _DarwinFdScan:
                     # Publish caches and retire the flight atomically: every caller
                     # that joined this pass has a verdict, including late joiners.
                     for base, (key, _watched) in self.watchers.items():
-                        if not self.verdicts[base]:
+                        if not self.verdicts[base] and _clean_key_settled(key, self.taken[base]):
                             _darwin_clean_until[base] = (
                                 time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
                     if _DARWIN_SCAN_IN_FLIGHT is self:
@@ -455,7 +546,8 @@ _DARWIN_SCAN_CACHED = _DarwinFdScan(0.0)  # sentinel, never run: a clean verdict
 
 
 def _join_darwin_fd_scan(base: str | None = None, key: tuple | None = None,
-                         watched: dict[str, str] | None = None) -> _DarwinFdScan | None:
+                         watched: dict[str, str] | None = None,
+                         taken_ns: int = 0) -> _DarwinFdScan | None:
     """Wait for the in-flight pass, starting one only if none is alive; ``None`` on timeout.
 
     With *base*/*key*/*watched*, returns ``_DARWIN_SCAN_CACHED`` when a pass that just finished
@@ -479,7 +571,9 @@ def _join_darwin_fd_scan(base: str | None = None, key: tuple | None = None,
                 raise
         scan.waiters += 1
         if base is not None and key is not None and watched is not None:
-            scan.watchers.setdefault(base, (key, watched))
+            if base not in scan.watchers:
+                scan.watchers[base] = (key, watched)
+                scan.taken[base] = taken_ns  # 0 (none given): nothing settles, nothing is cached
     try:
         # ponytail: a kernel-blocked proc_pidfdinfo cannot be interrupted, so that one thread
         # may outlive us; it is the only one, and it dies with the process.
@@ -501,10 +595,11 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     # APFS/HFS+ are case-insensitive by default and libproc reports the pathname as the opener
     # spelled it; ``os.path.normcase`` is the identity on darwin, so fold case here.
     watched = {path.casefold(): path for path in (base + "-wal", base + "-shm")}
+    taken_ns = _wall_clock_ns()  # before the key: the settle window counts back from here
     key = _darwin_clean_key(base)  # taken before the pass, so a change during it invalidates
     if _darwin_clean_cached(base, key):
         return []
-    scan = _join_darwin_fd_scan(base, key, watched)
+    scan = _join_darwin_fd_scan(base, key, watched, taken_ns)
     if scan is _DARWIN_SCAN_CACHED:
         return []
     if scan is None:
@@ -522,7 +617,7 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
 
 # Same contract as the Darwin clean-verdict cache, for the Linux /proc walk.
 # Positive verdicts are never stored. ``_darwin_clean_key`` is the invalidation
-# (directory mtime + sidecar identity): a WAL write touches neither.
+# (sidecar identity incl. birth time; directory mtime as the fallback): a WAL write touches neither.
 _LINUX_FD_CLEAN_TTL_SECONDS = 30.0
 _linux_clean_until: dict[str, tuple[float, tuple]] = {}
 
@@ -558,6 +653,7 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
             holders = _iter_darwin_sidecar_holders(db_path)
         elif sys.platform.startswith("linux"):
             base = os.path.realpath(os.path.abspath(os.fspath(db_path)))
+            taken_ns = _wall_clock_ns()  # before the key: the settle window counts back from here
             key = _darwin_clean_key(base)
             if _linux_clean_cached(base, key):
                 return []
@@ -568,8 +664,9 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
                         and _fd_is_truly_unlinked(fd_path, watched[canonical])):
                     holders.append((pid, target))
             # Key taken before the walk: a sidecar retired during it must not be published
-            # as clean under the new key. A positive verdict is never cached.
-            if not holders and _darwin_clean_key(base) == key:
+            # as clean under the new key. A positive verdict is never cached, nor one whose key
+            # timestamps are too recent to tell a same-tick recreate apart.
+            if not holders and _darwin_clean_key(base) == key and _clean_key_settled(key, taken_ns):
                 _linux_clean_until[base] = (
                     time.monotonic() + _LINUX_FD_CLEAN_TTL_SECONDS, key)
     except Exception as exc:

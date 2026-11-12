@@ -1,5 +1,18 @@
 """Shared fixtures for tests/hermes_state."""
+import time
+
 import pytest
+
+
+@pytest.fixture
+def settled_clean_keys(monkeypatch):
+    """[daveey] Judge deleted-WAL clean-verdict keys as if taken an hour after the test's files were made.
+
+    A clean verdict is only cached once every timestamp in its key is older than
+    ``_CLEAN_KEY_SETTLE_NS`` (a same-tick recreate is indistinguishable), and a test's sidecars are
+    seconds old. Tests about the cache itself age them through the module's wall clock."""
+    import hermes_state_dbfile
+    monkeypatch.setattr(hermes_state_dbfile, "_wall_clock_ns", lambda: time.time_ns() + 3600 * 10**9)
 
 
 @pytest.fixture
