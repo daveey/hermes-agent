@@ -715,6 +715,7 @@ def clear_record(role: str) -> None:
 
 # Roles this process must clean up on the way out, and the signal handlers we prepended.
 _cleanup_roles: list[str] = []
+_extra_cleanups: list[Any] = []
 _prev_signal_handlers: dict[int, Any] = {}
 
 
@@ -731,6 +732,9 @@ def _handle_terminating_signal(signum, frame) -> None:
 
     for role in tuple(_cleanup_roles):
         _cleanup_role(role)
+    for callback in tuple(_extra_cleanups):
+        with contextlib.suppress(Exception):
+            callback()
     prev = _prev_signal_handlers.get(signum)
     if callable(prev):
         prev(signum, frame)
@@ -757,13 +761,30 @@ def cleanup_on_exit(role: str) -> None:
     unchanged.
     """
     import atexit
-    import signal as _signal
-    import threading
 
     role = _validated_role(role)
     if role not in _cleanup_roles:
         _cleanup_roles.append(role)
         atexit.register(_cleanup_role, role)
+    _install_terminating_signal_cleanup()
+
+
+def register_exit_cleanup(callback) -> None:
+    """Run ``callback`` (no args, must not raise) on exit, SIGTERM included, like a role cleanup.
+
+    For files that are not a role record, e.g. :mod:`gateway.host_backends` entries."""
+    import atexit
+
+    if callback not in _extra_cleanups:
+        _extra_cleanups.append(callback)
+        atexit.register(callback)
+    _install_terminating_signal_cleanup()
+
+
+def _install_terminating_signal_cleanup() -> None:
+    import signal as _signal
+    import threading
+
     if threading.current_thread() is not threading.main_thread():
         return
     for name in ("SIGTERM", "SIGBREAK"):
