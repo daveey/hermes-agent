@@ -160,7 +160,7 @@ def test_day_row_reports_each_profiles_peak_of_chats_running_at_once(tmp_path, m
     monkeypatch.setattr(engagement, "_now", lambda: clock["now"])
     a, b = tmp_path / "a", tmp_path / "b"
     running: list[str] = []
-    runner = SimpleNamespace(_active_work_count=lambda: len(running),
+    runner = SimpleNamespace(_active_work_count=lambda: len(running), _describe_parked_work=list,
                              _running_agent_items=lambda: [(key, object()) for key in running])
 
     def turn_boundary(home, keys):

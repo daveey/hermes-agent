@@ -270,7 +270,7 @@ def test_active_work_verb_scoped_to_a_profile_names_only_its_turns(monkeypatch):
     monkeypatch.setattr(async_delegation, "list_async_delegations", list)
     units = [{"kind": "chat", "session": "agent:coder:telegram:dm:7", "pid": 1},
              {"kind": "chat", "session": "agent:main:telegram:dm:8", "pid": 1}]
-    runner = SimpleNamespace(_describe_active_work=lambda: units, _active_work_count=lambda: 2,
+    runner = SimpleNamespace(_describe_active_work=lambda: units, _describe_parked_work=list, _active_work_count=lambda: 2,
                              _served_profile_homes={}, session_authorities=None)
     loop = SimpleNamespace(call_soon_threadsafe=lambda fn: fn())
     handler = active_work_verb(runner, loop)
@@ -292,7 +292,7 @@ def test_active_work_verb_counts_a_profiles_side_agent_and_reads_it_on_the_loop(
                                 _side_agents={object(): [object()]})
     reads = []
     registry = SimpleNamespace(for_home=lambda home: reads.append(on_loop[-1]) or authority)
-    runner = SimpleNamespace(_describe_active_work=list, _active_work_count=lambda: 1,
+    runner = SimpleNamespace(_describe_active_work=list, _describe_parked_work=list, _active_work_count=lambda: 1,
                              _served_profile_homes={"coder": "/h/coder"}, session_authorities=registry)
 
     def _call_soon(fn):

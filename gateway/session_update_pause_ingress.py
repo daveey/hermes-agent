@@ -14,7 +14,7 @@ def supported(authority, row, event, live, *, is_api):
         return False
     if any(key in payload for key in ('api_turn_v1', 'local_automation_v1')):
         return False
-    return 'native_text_v1' in payload or live.source.platform.value == 'local'
+    return 'native_text_v1' in payload or getattr(live.source.platform, 'value', None) == 'local'
 
 
 @contextmanager

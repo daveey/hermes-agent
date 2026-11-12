@@ -193,6 +193,7 @@ async def test_native_admission_without_pause_is_unaffected_and_delivers_once(mo
     ({'native_text_v1': {}}, 'telegram', True),
     ({'text': 'x'}, 'local', True),
     ({'text': 'x'}, 'telegram', False),
+    ({'text': 'x'}, None, False),
     ({'native_text_v1': {}, 'finite': True}, 'local', False),
     ({'api_turn_v1': {}}, 'local', False),
     ({'local_automation_v1': {}}, 'local', False),
@@ -200,7 +201,8 @@ async def test_native_admission_without_pause_is_unaffected_and_delivers_once(mo
 def test_only_native_or_local_chat_admissions_are_pause_eligible(payload, platform, expected):
     from types import SimpleNamespace
     from gateway.session_update_pause_ingress import supported
-    live = SimpleNamespace(source=SimpleNamespace(platform=SimpleNamespace(value=platform)))
+    live = SimpleNamespace(source=SimpleNamespace(
+        platform=SimpleNamespace(value=platform) if platform is not None else None))
     assert supported(None, {'payload': payload}, None, live, is_api=False) is expected
     assert supported(None, {'payload': payload}, None, live, is_api=True) is False
 

@@ -155,7 +155,7 @@ def test_stamp_claim_publishes_the_card_and_an_ordinary_claim_stays_empty():
     published = []
     stream = SessionEvents()
     stream.publish = lambda sid, payload, *, event_type: published.append((event_type, payload))
-    authority = SimpleNamespace(epoch=3, executing={}, _publish_pending=lambda ref: None)
+    authority = SimpleNamespace(epoch=3, executing={}, update_claims={}, update_stops=set(), _publish_pending=lambda ref: None)
     live = SimpleNamespace(event_stream=stream)
     ref = SessionRef("p", SID)
     automation = {"text": MODEL_TEXT, "local_automation_v1": {
