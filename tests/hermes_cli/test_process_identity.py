@@ -542,9 +542,11 @@ def test_a_stalled_ledger_lock_holder_never_blocks_register_child(tmp_path, monk
         assert not ledger.exists(), "a write past the lock replaced the ledger under its holder"
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "spawn ledger lock" in r.getMessage()]
     assert len(warnings) == 1, f"{len(warnings)} warnings for two writes past a stalled lock"
-    deadline = time.monotonic() + 10
-    while not ledger.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
+    # Publishing the ledger precedes deleting the queued rows. Wait for the
+    # whole fold, not just publication, before checking its results or tearing down mocks.
+    folder = pi._pending_folders[ledger]
+    folder.join(timeout=30)
+    assert not folder.is_alive(), "the pending ledger folder did not finish"
     rows = json.loads(ledger.read_text(encoding="utf-8"))
     assert [r.get("purpose") for r in rows] == ["stalled-again"], "the queued row was not folded into the ledger"
     assert not list(pi._pending_dir(ledger).glob("*.json")), "a folded row was left queued"
