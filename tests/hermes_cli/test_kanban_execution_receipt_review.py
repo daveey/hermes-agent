@@ -13,9 +13,12 @@ from hermes_cli.kanban_completion_inputs import read_completions, read_verdicts
 from hermes_cli.kanban_completion_receipt_projection import read_completed, read_completed_many
 from hermes_cli.kanban_execution_receipt import done_raw
 from hermes_cli.kanban_goal_receipt import GoalVerification
+from tests.hermes_cli import test_kanban_execution_receipt as base
 from tests.hermes_cli.test_kanban_execution_receipt import (
-    GATEWAY, annotate, board, card, done_listing, finish, observation, owner_verdict)
+    GATEWAY, annotate, card, done_listing, finish, observation, owner_verdict)
 from tests.hermes_state.test_completion_receipt import receipt
+
+board = base.board
 
 
 def goal_finish(conn, *, body="small body", handoff="Finished"):

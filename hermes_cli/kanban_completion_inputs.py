@@ -8,11 +8,13 @@ archived card is present), plus the board's cached receipt epoch. It adds no sto
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import NamedTuple
 
 from hermes_cli.kanban_origin_ledger import _receipt_epoch, completion_verdict
 
+logger = logging.getLogger(__name__)
 CHUNK = 500
 
 
@@ -131,6 +133,7 @@ def _completion(conn, tid, task, event, run, archived, bound, epoch):
             tid, row, event_t, run_t, archived_t, bound_event=bound_event,
             current_task=lambda: (task["title"], task["body"]), receipt_epoch=receipt_epoch)
     except Exception:  # any one card's bad evidence is unverified, never a failed batch
+        logger.debug("completion verdict input unreadable for %s; treated as unverified", tid, exc_info=True)
         verified = legacy = False
     return Completion(task["status"], verified, legacy, None if event is None else event["id"],
                       None if event is None else event["run_id"], None if run is None else run["id"],
