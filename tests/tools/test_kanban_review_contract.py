@@ -44,7 +44,9 @@ def test_states_contract(body):
     # Another repository's review keeps its own contract (babybear accepts APPROVE).
     SHIP_BODY.replace("softmax-universe/daveey-hermes", "softmax-universe/babybear"),
     SHIP_BODY.replace("daveey-hermes", "daveey-hermes-mods"),
-    # A core PR without a reviewed head key, or without reviewed_pr, is not the ship contract.
+    # A core PR without a reviewed head key, or without reviewed_pr, does not spell out the ship contract. Since
+    # PR1462's `pr`-keyed brief, refusal() still gates such a body when the completion is a review result (it names a
+    # core-fork pull); the wording alone never makes a non-review completion refusable.
     SHIP_BODY.replace("reviewed_sha", "head"),
     SHIP_BODY.replace("reviewed_pr", "pr"),
 ])
@@ -190,6 +192,76 @@ def test_tool_accepts_exact_review(board, monkeypatch):
     tid = _claim(board, monkeypatch, SHIP_BODY)
     out = _complete(dict(GOOD))
     assert not out.get("error"), out
+    assert _status(board, tid) == "done"
+
+
+# --- a core-fork review whose brief asked for the wrong key -------------------------------------------------
+# PR1462's land-lane review brief (t_01a1d004070d3361, by t_01a1cfa4fc605bbd) asked for `pr`, not `reviewed_pr`.
+# The reviewer wrote what it was asked for and ship refused the approval. The gate keys on the core-fork pull the
+# body names, not on the body spelling the contract keys out.
+PR_KEY_PULL = "https://github.com/softmax-universe/daveey-hermes/pull/1462"
+PR_KEY_BODY = ("Complete with `kanban_complete`, `metadata` holding `verdict` (`approve` or `request_changes`), "
+               "`reviewed_sha` (the 40-hex sha above, only if reviewed), `pr` (the URL) and `findings`.\n"
+               f"{PR_KEY_PULL}\n")
+PR_KEY_MD = {"verdict": "approve", "reviewed_sha": SHA, "pr": PR_KEY_PULL, "findings": ["none blocking"]}
+
+
+def test_body_asking_for_pr_key_is_still_gated():  # T1: fails on 2e870e8f71
+    msg = krc.refusal(PR_KEY_BODY, dict(PR_KEY_MD))
+    assert msg and "reviewed_pr: metadata.reviewed_pr is None" in msg
+    assert [p.split(":")[0] for p in krc.problems(PR_KEY_MD)] == ["reviewed_pr"]
+
+
+def test_body_asking_for_pr_key_accepts_reviewed_pr():  # T2
+    assert krc.refusal(PR_KEY_BODY, {**PR_KEY_MD, "reviewed_pr": PR_KEY_PULL}) is None
+
+
+@pytest.mark.parametrize("body", [  # T3: the same review on a card that names no core-fork pull
+    PR_KEY_BODY.replace(PR_KEY_PULL, "https://github.com/daveey/babybear/pull/3730"),
+    PR_KEY_BODY.replace(PR_KEY_PULL, "https://github.com/softmax-universe/daveey-hermes-mods/pull/12"),
+    PR_KEY_BODY.replace(PR_KEY_PULL, "PR #1462"),  # a bare number names no pull
+])
+def test_body_without_core_pull_is_not_gated(body):
+    assert krc.refusal(body, dict(PR_KEY_MD)) is None
+
+
+def test_landing_handoff_on_core_pull_card_is_not_gated():  # T4
+    assert krc.refusal(PR_KEY_BODY, {"published_pr": PR_KEY_PULL, "verdict": "approve", "pr": PR_KEY_PULL}) is None
+
+
+@pytest.mark.parametrize("md", [{"pr": PR_KEY_PULL, "findings": ["x"]}, {"changed_files": ["a.py"]}, {}, None])
+def test_no_review_keys_on_core_pull_card_is_not_gated(md):  # T5
+    assert krc.refusal(PR_KEY_BODY, md) is None
+
+
+# Real landing/cleanup handoffs on core-pull cards record the reviewed head without a verdict and without
+# published_pr (t_01a1ce4e6eb94bb2, t_01a1ce18d01255fc, t_01a1cd83c4d14ff7): they are not reviews.
+LANDING_MDS = [
+    {"pr": PR_KEY_PULL, "reviewed_sha": SHA, "landed_sha": SHA, "review_task": "t_x", "pr_state": "MERGED"},
+    {"pr": PR_KEY_PULL, "reviewed_head": SHA, "landed_sha": SHA, "impl_task": "t_y"},
+    {"merge_commit": SHA, "pr": PR_KEY_PULL, "reviewed_head": SHA, "worktree": "/x"},
+    {"new_head": SHA, "review_task": "t_x", "reviewed_pr": PR_KEY_PULL},
+]
+
+
+@pytest.mark.parametrize("md", LANDING_MDS)
+def test_verdictless_handoff_on_core_pull_card_is_not_gated(md):
+    assert krc.refusal(PR_KEY_BODY, md) is None
+
+
+@pytest.mark.parametrize("md", LANDING_MDS)
+def test_verdictless_handoff_on_contract_card_is_still_gated(md):
+    assert krc.refusal(SHIP_BODY, md)
+
+
+def test_tool_refuses_pr_key_review_then_accepts_reviewed_pr(board, monkeypatch):
+    tid = _claim(board, monkeypatch, PR_KEY_BODY)
+    out = _complete(dict(PR_KEY_MD))
+    assert out.get("error") and out["rejection"] == "review_contract", out
+    assert "metadata.reviewed_pr" in out["error"]
+    assert _status(board, tid) == "running"
+    ok = _complete({**PR_KEY_MD, "reviewed_pr": PR_KEY_PULL})
+    assert not ok.get("error"), ok
     assert _status(board, tid) == "done"
 
 

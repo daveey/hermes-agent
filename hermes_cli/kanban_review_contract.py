@@ -7,11 +7,12 @@ and approved, ship refused it later and a whole new review card was filed for th
 
 This module catches that gap at completion time, while the reviewer can still fix it in the same run:
 
-- A card *states the contract* when its body names a pull request of the core fork, ``reviewed_pr`` and the
-  head key (``reviewed_sha``, or the ``reviewed_head`` some briefs misnamed it). Ship-filed and re-issued review
-  cards do; so do hand-filed ones whose brief misnamed a key (``review_verdict``, ``reviewed_head``), which is
-  exactly the case to fix. A verdict word is not required: one reviewer-lane brief asked for none and the reviewer
-  wrote ``review_outcome``.
+- The gate applies to a card whose body names a pull request of the core fork (``names_core_pull``). It does not
+  require the body to spell out ``reviewed_pr`` or ``reviewed_sha``: a hand-written brief that asked for the wrong
+  key (``pr`` for the URL, PR #1462's land-lane review) turned the earlier wording rule off exactly when the
+  reviewer was about to write a completion ship cannot read. When the body does not spell the contract out
+  (``states_contract``), the completion must also carry a verdict key: landing and cleanup handoffs on core-pull
+  cards record ``reviewed_sha``/``reviewed_pr`` without one (replayed over the real boards) and are not reviews.
 - On such a card, a completion whose metadata looks like a review result (any review key) must carry exactly
   ``verdict`` in {approve, request_changes}, a lowercase 40-hex ``reviewed_sha`` and ``reviewed_pr`` naming the
   pull. A landing/implementation handoff (``published_pr``) and a completion with no review key at all (a card
@@ -36,6 +37,9 @@ _PR_REF = re.compile(r"(?:https://github\.com/[\w.-]+/[\w.-]+/pull/\d+|[\w.-]+/[
 # Keys a reviewer uses for its verdict or the reviewed head: their presence makes the completion a review result.
 _REVIEW_KEYS = ("verdict", "review_verdict", "review_outcome", "reviewed_sha", "reviewed_head", "reviewed_pr",
                 "approved", "approval")
+# The subset that carries a verdict. On a core-pull card whose body does not spell the contract out, only these
+# make a completion a review: landing and cleanup handoffs record `reviewed_sha`/`reviewed_pr` without a verdict.
+_VERDICT_KEYS = ("verdict", "review_verdict", "review_outcome", "approved", "approval")
 
 
 def states_contract(body: Optional[str]) -> bool:
@@ -46,6 +50,11 @@ def states_contract(body: Optional[str]) -> bool:
     if "reviewed_sha" not in text and "reviewed_head" not in text:
         return False
     return any(m.group("repo").lower() in CORE_REPOS for m in _PULL.finditer(text))
+
+
+def names_core_pull(body: Optional[str]) -> bool:
+    """True when ``body`` names a pull request of the core fork: the cards whose review ship lands from."""
+    return any(m.group("repo").lower() in CORE_REPOS for m in _PULL.finditer(body or ""))
 
 
 def is_review_result(metadata: Any) -> bool:
@@ -78,9 +87,14 @@ def problems(metadata: Any) -> list[str]:
 
 
 def refusal(body: Optional[str], metadata: Any) -> Optional[str]:
-    """The refusal text for a contract card's unreadable review completion, else None."""
-    if not states_contract(body) or not is_review_result(metadata):
+    """The refusal text for a review result on a core-fork pull card that ship cannot read, else None."""
+    if not is_review_result(metadata):
         return None
+    if not states_contract(body):
+        # The body does not spell the contract out: a core-fork pull card still gates a review that carries a
+        # verdict (PR1462's brief asked for `pr`); a verdictless landing/cleanup handoff is not a review.
+        if not names_core_pull(body) or not any(key in metadata for key in _VERDICT_KEYS):
+            return None
     found = problems(metadata)
     if not found:
         return None
