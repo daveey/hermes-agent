@@ -377,17 +377,21 @@ export const sessionStatusStripe = (
   kanbanAttention = 0,
   kanbanWaiting = 0,
   kanbanStalled = 0,
-  outcome: null | SessionOutcome | undefined = null
+  outcome: null | SessionOutcome | undefined = null,
+  sourceUnavailable = false
 ): null | SessionStatusStripe => {
   if (outcomePaintsStripe(state, userBlocked)) {
     const fromOutcome = outcomeStripe(outcome)
+    // Completion is historical intent, not permission to hide current unfinished/unknown work.
+    // Decisions and unresolved outcomes retain their stronger attention semantics.
+    const completionHeld = sourceUnavailable || state === 'background' || kanbanBlocked > 0 || kanbanWaiting > 0
 
-    if (fromOutcome) {
+    if (fromOutcome && (fromOutcome !== 'done' || !completionHeld)) {
       return fromOutcome
     }
   }
 
-  return derivedStatusStripe(
+  const derived = derivedStatusStripe(
     state,
     hasTurns,
     userBlocked,
@@ -398,6 +402,12 @@ export const sessionStatusStripe = (
     kanbanWaiting,
     kanbanStalled
   )
+
+  if (sourceUnavailable && !userBlocked && !hasOwnLiveTurn(state) && hasTurns && (derived === null || derived === 'done')) {
+    return 'waiting'
+  }
+
+  return derived
 }
 
 type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'> &

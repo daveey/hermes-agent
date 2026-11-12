@@ -10,6 +10,7 @@ import { outcomeHasCrons, outcomeHasWatches, outcomeStripe, outcomeTooltip } fro
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useSessionParked } from '@/lib/use-session-parked'
+import { useWorkSourceUnavailable } from '@/lib/use-work-source-unavailable'
 import { cn } from '@/lib/utils'
 import { stuckOnPausedQueue } from '@/store/owner-queue-landed'
 import { $pausedQueueSessionIds } from '@/store/owner-queue-reconcile'
@@ -54,6 +55,7 @@ export function useSessionRowStripe(
   // Make time an explicit input so React Compiler cannot cache counts across evidence expiry.
   const nowSeconds = useExecutionObservationClock(session)
   const counts = kanbanStripeCounts(session, nowSeconds)
+  const sourceUnavailable = useWorkSourceUnavailable(session)
 
   const statusStripe = live
     ? sessionStatusStripe(
@@ -66,7 +68,8 @@ export function useSessionRowStripe(
         session.kanban_attention,
         counts.waiting,
         counts.stalled,
-        session.outcome
+        session.outcome,
+        sourceUnavailable
       )
     : null
 
@@ -81,7 +84,7 @@ export function useSessionRowStripe(
     recordStripeTransition(session, statusStripe, dotState)
   }, [session, statusStripe, dotState, promptInputsKey])
 
-  return { outcomePainted: outcomePaintsStripe(dotState, userBlocked), statusStripe, userBlocked }
+  return { outcomePainted: outcomePaintsStripe(dotState, userBlocked) && statusStripe === outcomeStripe(session.outcome), statusStripe, userBlocked }
 }
 
 /** [daveey] Stripes drawn as a small glyph in the stripe's place: a cron loop, or the card glyph for kanban waits. */

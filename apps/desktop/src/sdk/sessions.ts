@@ -9,6 +9,7 @@ import {
 } from '@/store/layout'
 import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
 import { setSessionColorOverride } from '@/store/session-color'
+import { reportWorkSourceRead } from '@/store/session-work-source'
 
 /** Pins and colours are keyed by the DURABLE (lineage-root) id so they survive
  *  compression's session-id rotation; a row's live id resolves through
@@ -40,6 +41,9 @@ function liveSessionId(storedSessionId: string): string {
  *  session ids as a sidebar row slot carries them; a live id is resolved to
  *  the same row through the app's lineage matcher. */
 export const sessionsHost = {
+  /** Report the result of a qualified authoritative work-source read. Failure vetoes completion;
+   * success only clears that source's veto. It never changes tasks or stored outcomes. */
+  reportWorkSourceRead,
   /** Loaded sidebar rows, retaining each row's gateway/profile ownership. */
   rows: $sessions as ReadableAtom<ReturnType<typeof $sessions.get>>,
   /** Pin or unpin a session — the row's ⇧-click / context-menu action. A

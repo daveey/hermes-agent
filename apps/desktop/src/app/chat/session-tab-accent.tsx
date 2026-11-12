@@ -4,6 +4,7 @@ import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
 import { useSessionParked } from '@/lib/use-session-parked'
+import { useWorkSourceUnavailable } from '@/lib/use-work-source-unavailable'
 import { kanbanStripeCounts, sessionStatusStripe } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -22,6 +23,7 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
 
   const nowSeconds = useExecutionObservationClock(session)
   const counts = kanbanStripeCounts(session ?? {}, nowSeconds)
+  const sourceUnavailable = useWorkSourceUnavailable(session)
 
   const stripe = session?.archived
     ? null
@@ -35,7 +37,8 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
         session?.kanban_attention,
         counts.waiting,
         counts.stalled,
-        session?.outcome
+        session?.outcome,
+        sourceUnavailable
       )
 
 

@@ -12,6 +12,7 @@ import type * as ChatRuntime from '@/lib/chat-runtime'
 import { SESSION_ROW_AREAS, type SessionRowSlotProps } from '@/lib/session-row-slots'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import type * as Time from '@/lib/time'
+import { sessionsHost } from '@/sdk/sessions'
 import type * as ComposerStatusStore from '@/store/composer-status'
 import { $sidebarRowMeta } from '@/store/layout'
 import { $projectTree } from '@/store/project-tree'
@@ -20,6 +21,7 @@ import { $unreadFinishedSessionIds } from '@/store/session'
 import type * as SessionStore from '@/store/session'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as SessionStatesStore from '@/store/session-states'
+import { $unavailableWorkSources } from '@/store/session-work-source'
 import type * as WindowsStore from '@/store/windows'
 
 import { ReorderableList, useSortableBindings } from './reorderable-list'
@@ -199,6 +201,28 @@ const renderRow = (session: SessionInfo, extra?: { card?: boolean; onResume?: ()
       unread={false}
     />
   )
+
+describe('idle sidebar authoritative source failures', () => {
+  afterEach(() => $unavailableWorkSources.set({}))
+
+  it.each(['tasks', 'process', 'subagent'] as const)('repaints an idle stored-done row after a real %s read failure, and recovers', source => {
+    const session = makeSession({ title: 'Completed', connection_id: 'edge', message_count: 2,
+      outcome: { kind: 'done', source: 'derived', at: 1000 } })
+
+    const { container } = renderRow(session)
+    const row = () => container.querySelector('[data-sidebar-session-id="s1"]')
+    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('done')
+    const read = { connectionId: 'edge', profile: 'default', storedSessionId: 's1', source }
+    act(() => sessionsHost.reportWorkSourceRead({ ...read, available: false }))
+    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('waiting')
+    expect(container.querySelector('[data-slot="session-status-stripe"]')?.getAttribute('data-outcome')).toBeNull()
+    act(() => sessionsHost.reportWorkSourceRead({ ...read, connectionId: 'other', available: true }))
+    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('waiting')
+    act(() => sessionsHost.reportWorkSourceRead({ ...read, available: true }))
+    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('done')
+    expect(session.outcome?.kind).toBe('done')
+  })
+})
 
 // The arc marks the SELECTED row — the one the pane shows — not a working
 // one. Working state stays on the status dot; the sidebar's busiest rows used
