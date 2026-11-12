@@ -2112,11 +2112,8 @@ def _run_reclaim_phase(
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
     from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
     sweep_shared_blockers(conn, result)
-    try:
-        from hermes_cli import kanban_provider_walls as _walls
-        _walls.alert_on_storm(conn, board=board)
-    except Exception:
-        _kb._log.warning("kanban: rate-limit storm alert failed", exc_info=True)
+    from hermes_cli.kanban_provider_walls import tick_upkeep
+    tick_upkeep(conn, board=board, dry_run=dry_run)
     try:
         result.quota_block_released = _kbq.release_recovered_quota_blocks(conn)
     except Exception:

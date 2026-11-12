@@ -59,16 +59,17 @@ def _false_wall(conn, tid, model):
 
 @pytest.mark.parametrize('model', [MODEL, 'class:deep'])
 @pytest.mark.parametrize('kind,provider_wall,held', [
-    ('serving', False, False),  # worker-3: the provider-wide file held only openai-codex
-    ('serving', True, True),    # a standing provider-wide wall is independent evidence
-    ('walled', False, True),
-    ('empty', False, True),     # an empty or unreadable pool proves nothing
+    ('serving', 'reaped', False),       # the file exactly as this host's own reap left it
+    ('serving', 'independent', True),   # a later provider-wide wall from another source still holds
+    ('walled', 'reaped', True),
+    ('empty', 'reaped', True),          # an empty or unreadable pool proves nothing
 ])
 def test_hinted_episode_wall_holds_only_while_the_live_pool_confirms_it(
         board, tmp_path, monkeypatch, model, kind, provider_wall, held):
     from hermes_cli import kanban_provider_walls as pw
 
     monkeypatch.setattr(kb.time, 'time', lambda: NOW)
+    monkeypatch.setattr(pw.time, 'time', lambda: NOW)
     monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '300')
     _pool(tmp_path, monkeypatch, kind)
     with kbc.connect() as conn:
@@ -77,8 +78,11 @@ def test_hinted_episode_wall_holds_only_while_the_live_pool_confirms_it(
         state = quota.episode(conn, tid)
         assert state is not None
         assert state['hinted'] and state['providers'] == ['anthropic'] and state['until'] == reset
-        pw.walls_path().write_text(json.dumps({'openai-codex': NOW + 6 * 86400,
-                                               **({'anthropic': reset} if provider_wall else {})}))
+        if kind == 'serving':
+            # The reap never mirrors a hint the live pool disproves into the provider-wide file.
+            assert 'anthropic' not in pw.active_walls(now=NOW)
+        if provider_wall == 'independent':
+            pw.record_wall('anthropic', reset + 86400 - NOW, now=NOW)
         if held:
             assert quota.hold_until(conn, tid) == reset
             assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
@@ -136,3 +140,27 @@ def test_a_disproved_short_hint_keeps_the_doubling_backoff(board, tmp_path, monk
         # Held on the backoff, not on the rejected hint.
         assert dispatch.check_respawn_guard(conn, tid) == 'rate_limit_cooldown'
         assert quota.hold_until(conn, tid, NOW + 2401) is None
+
+
+@pytest.mark.parametrize('kind,anthropic_in,anthropic_kept', [
+    ('serving', 5 * 86400, False),  # a days-long mirror of a false hint: the pool serves, so it goes
+    ('serving', 600, True),         # within the backoff cap: a rate-limit wall, left to expire
+    ('walled', 5 * 86400, True),    # the pool confirms the wall
+    ('empty', 5 * 86400, True),     # an empty pool proves nothing
+])
+def test_reclaim_phase_prunes_a_provider_wall_the_live_pool_disproves(
+        board, tmp_path, monkeypatch, kind, anthropic_in, anthropic_kept):
+    """A false hint already mirrored into provider_walls.json (an older reap, another card) keeps every
+    card on the host retiering around anthropic; the dispatcher drops it once the live pool serves."""
+    from hermes_cli import kanban_provider_walls as pw
+
+    monkeypatch.setattr(kb.time, 'time', lambda: NOW)
+    monkeypatch.setattr(pw.time, 'time', lambda: NOW)
+    _pool(tmp_path, monkeypatch, kind)
+    pw.walls_path().write_text(json.dumps({'openai-codex': NOW + 6 * 86400, 'anthropic': NOW + anthropic_in}))
+    with kbc.connect() as conn:
+        dispatch._run_reclaim_phase(conn, dispatch.DispatchResult(), stale_timeout_seconds=3600,
+                                    failure_limit=2, reconcile_orphans=False)
+    walls = pw.active_walls(now=NOW)
+    assert walls.get('openai-codex') == NOW + 6 * 86400  # no codex OAuth pool here: nothing disproves it
+    assert ('anthropic' in walls) is anthropic_kept

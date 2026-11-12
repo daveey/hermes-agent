@@ -84,9 +84,10 @@ def _providers(state):
 
 def _disproved(wall, now, memo):
     """True for a hinted wall the live OAuth pool now contradicts: every provider it names serves its
-    model (any model for a class route) and no provider-wide wall stands. A transient auth bench once
-    made ``quota_unavailable`` report a days-long false wall; the stored deadline must not outlive it.
-    *memo* caches the pool reads for one ``_outstanding`` call (walls of an episode share providers)."""
+    model (any model for a class route) and no later provider-wide wall stands. A transient auth bench
+    once made ``quota_unavailable`` report a days-long false wall; the stored deadline must not outlive it.
+    A file wall ending no later than this one may be its own mirror (``record_wall_for_run``), so only a
+    later one is independent evidence. *memo* caches the pool reads for one ``_outstanding`` call."""
     from agent.model_routing import is_class_selector
     from hermes_cli import kanban_provider_walls as pw
     names = _providers(wall)
@@ -99,8 +100,8 @@ def _disproved(wall, now, memo):
         memo['walls'] = pw.active_walls(now=now)
     for name in names:
         if (name, model) not in memo:
-            memo[name, model] = memo['walls'].get(name) is None and pw.live_pool_serving(name, model)
-    return all(memo[name, model] for name in names)
+            memo[name, model] = pw.live_pool_serving(name, model)
+    return all(memo['walls'].get(name, 0) <= wall['until'] and memo[name, model] for name in names)
 
 
 def _unhinted(conn, task_id, wall):

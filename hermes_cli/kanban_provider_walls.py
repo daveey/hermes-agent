@@ -106,11 +106,14 @@ def record_wall(provider: str, retry_after: Optional[int], *, now: Optional[floa
 def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
                         log_path: Optional[Path]) -> Optional[float]:
     """Wall bookkeeping for a rate-limited exit: provider from the run's ``model_tier`` event."""
-    from hermes_cli.kanban_quota_episode import episode
+    from hermes_cli.kanban_quota_episode import _disproved, _unhinted, episode
     state = episode(conn, task_id)
     if state and state['run_id'] == run_id:
         # Exact-run receipt/backoff owns the deadline; never extend it with an
-        # unscoped log tail or the legacy provider-wide default.
+        # unscoped log tail or the legacy provider-wide default. A hint the live
+        # pool already disproves is mirrored as its backoff only.
+        if _disproved(state, time.time(), {}):
+            state = _unhinted(conn, task_id, state)
         return record_wall(state.get('provider'), max(0, state['until'] - time.time()))
     provider = ""
     try:
@@ -225,6 +228,29 @@ def live_pool_serving(provider: str, model: Optional[str] = None) -> bool:
         return False
 
 
+def prune_disproved_walls(*, now: Optional[float] = None, path: Optional[Path] = None) -> list[str]:
+    """Drop provider-wide walls longer than the backoff cap that the live OAuth pool disproves.
+
+    Only a quota hint sets a wall past ``MAX_BACKOFF_SECONDS``; a pool that serves (any model, judged
+    conservatively) proves it false, e.g. a mirror of a hint born of a transient auth bench. Returns the
+    providers dropped. [daveey]"""
+    from hermes_cli.kanban_quota_episode import MAX_BACKOFF_SECONDS
+    now = time.time() if now is None else now
+    p = path or walls_path()
+    walls = active_walls(now=now, path=p)
+    dropped = [name for name, until in walls.items()
+               if until - now > MAX_BACKOFF_SECONDS and live_pool_serving(name, None)]
+    if dropped:
+        current = active_walls(now=now, path=p)
+        for name in dropped:
+            current.pop(name, None)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(current), encoding="utf-8")
+        tmp.replace(p)
+        logger.info("kanban walls: dropped %s (live OAuth pool serving)", ", ".join(sorted(dropped)))
+    return dropped
+
+
 def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None, prefix: Optional[str] = None) -> int:
     """``rate_limited`` runs in the last hour claimed by this host (claim ``prefix``, default this host's).
 
@@ -264,3 +290,13 @@ def alert_on_storm(conn: sqlite3.Connection, *, board: Optional[str] = None, now
         assignee="default", created_by="rate-limit-alert", priority=80, idempotency_key=f"rate_limit_storm:{host}:{day}",
         board=board,
     )
+
+
+def tick_upkeep(conn: sqlite3.Connection, *, board: Optional[str] = None, dry_run: bool = False) -> None:
+    """Per-tick wall upkeep: drop walls the live pool disproves, then alert on a rate-limit storm."""
+    try:
+        if not dry_run:
+            prune_disproved_walls()
+        alert_on_storm(conn, board=board)
+    except Exception:  # health: allow BLE001 -- wall upkeep never strands the reclaim phase; traceback logged
+        logger.warning("kanban: provider wall pruning / rate-limit storm alert failed", exc_info=True)
