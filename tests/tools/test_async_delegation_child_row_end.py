@@ -201,3 +201,112 @@ def test_startup_sweep_closes_subagent_of_ended_parent_despite_live_heartbeat(db
 
     assert server._sweep_orphaned_session_rows() == []  # nothing for the heartbeat-gated orphan sweep
     assert db.get_session("child")["end_reason"] == "parent_ended_reap"
+
+
+# ── compression continuations, pinned rows, stale task_session_ids (review 5878780845) ──
+
+
+def _compressed_child(db, *, delegator_ended: bool, pinned: bool = False):
+    """A delegate child that compressed once: segment ``child`` (ended ``compression``) and its open, idle
+    continuation ``child-2``. The continuation inherits the root's ``_delegate_from``; its parent row is the
+    compressed segment, not the delegator."""
+    stale = time.time() - 8 * 3600
+    cfg = {"_delegate_from": "parent"}
+    db.create_session("parent", source="desktop")
+    db.create_session("child", source="subagent", parent_session_id="parent", model_config=cfg)
+    db.end_session("child", "compression")
+    db.create_session("child-2", source="subagent", parent_session_id="child", model_config=cfg)
+    for sid in ("parent", "child", "child-2"):
+        _backdate(db, sid, stale)
+    if delegator_ended:
+        db.end_session("parent", "agent_close")
+    if pinned:
+        db.set_session_pinned("child", True)
+
+
+def test_compressed_continuation_of_an_open_delegator_is_left_alone(db):
+    """S1: the continuation's parent row is its own compressed segment; the owner is the delegator."""
+    _compressed_child(db, delegator_ended=False)
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S) == []
+    assert db.get_session("child-2")["ended_at"] is None
+
+
+def test_compressed_continuation_of_an_ended_delegator_is_closed(db):
+    _compressed_child(db, delegator_ended=True)
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S) == ["child-2"]
+    assert db.get_session("child-2")["end_reason"] == "parent_ended_reap"
+
+
+def test_pinned_subagent_is_spared_when_asked(db):
+    """S2: like ``sweep_orphaned_sessions(exclude_pinned=True)``, a pin covers the row and its continuations."""
+    _hub_like(db, parent_ended=True)
+    db.set_session_pinned("child", True)
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S, exclude_pinned=True) == []
+    assert db.get_session("child")["ended_at"] is None
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S) == ["child"]
+
+
+def test_pinned_segment_spares_its_unpinned_continuation(db):
+    _compressed_child(db, delegator_ended=True, pinned=True)
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S, exclude_pinned=True) == []
+    assert db.get_session("child-2")["ended_at"] is None
+
+
+def test_startup_sweep_spares_pinned_subagent(db, monkeypatch):
+    from tui_gateway import server
+    _hub_like(db, parent_ended=True)
+    db.set_session_pinned("child", True)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_SESSION_TTL_S", float(IDLE_S))
+    monkeypatch.setattr(server, "_sessions", {})
+
+    server._sweep_orphaned_session_rows()
+    assert db.get_session("child")["ended_at"] is None
+
+
+def _seed_compressed_unit_child(home):
+    """``child-1`` (the id dispatch persisted) compressed into ``child-1b``, which compressed into the open tip
+    ``child-1c``. ``grandchild`` is a delegate child of a segment, not a continuation, so it is not the unit's."""
+    db = SessionDB(home / "state.db")
+    try:
+        cfg = {"_delegate_from": "parent-1"}
+        db.create_session("parent-1", source="desktop")
+        db.create_session("child-1", source="subagent", parent_session_id="parent-1", model_config=cfg)
+        db.end_session("child-1", "compression")
+        db.create_session("child-1b", source="subagent", parent_session_id="child-1", model_config=cfg)
+        db.end_session("child-1b", "compression")
+        db.create_session("child-1c", source="subagent", parent_session_id="child-1b", model_config=cfg)
+        db.create_session("grandchild", source="subagent", parent_session_id="child-1b",
+                          model_config={"_delegate_from": "child-1b"})
+    finally:
+        db.close()
+
+
+def test_recovery_ends_the_open_tip_of_a_compressed_child(home, monkeypatch):
+    """S3: ``task_session_ids`` names the row at dispatch; after compression the open row is its tip."""
+    _seed_compressed_unit_child(home)
+    _dead_owner_unit({"0": "child-1"})
+    monkeypatch.setattr(ad, "_owner_liveness", lambda: (lambda pid, started: False))
+
+    assert ad.recover_abandoned_delegations() == 1
+
+    assert _session_row(home, "child-1c")["end_reason"] == "delegation_unknown"
+    assert _session_row(home, "child-1")["end_reason"] == "compression"
+    assert _session_row(home, "child-1b")["end_reason"] == "compression"
+    assert _session_row(home, "grandchild")["ended_at"] is None
+
+
+def test_stall_force_finalize_ends_the_open_tip_of_a_compressed_child(home):
+    _seed_compressed_unit_child(home)
+    record = {"delegation_id": "deleg-s", "status": "stalling", "parent_session_id": "parent-1", "goal": "g",
+              "is_batch": True, "goals": ["g"], "task_session_ids": {"0": "child-1"}, "dispatched_at": time.time(),
+              "_interrupted_at": time.time(), "_stall_quiet_seconds": 500.0, "_stall_threshold_seconds": 450.0,
+              "_stall_in_tool": False}
+    ad._persist_dispatch(record)
+    with ad._records_lock:
+        ad._records["deleg-s"] = record
+
+    ad._finalize("deleg-s", lambda rec: ad._stalled_result("deleg-s", rec), "stalled")
+
+    assert _session_row(home, "child-1c")["end_reason"] == "delegation_stalled"
+    assert _session_row(home, "grandchild")["ended_at"] is None

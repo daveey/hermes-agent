@@ -354,18 +354,32 @@ def recover_abandoned_delegations() -> int:
 CHILD_END_REASONS = {"unknown": "delegation_unknown", "stalled": "delegation_stalled"}
 
 
+def _child_lineage_open_rows_sql(n_ids: int) -> str:
+    """Open rows of the unit's children: each persisted id that really is the parent's ``subagent`` child, plus every
+    compression continuation of it (a compressed child keeps working in a new row whose parent is its previous
+    segment, so the id persisted at dispatch is stale). A delegate child of a segment is not a continuation."""
+    from hermes_state_common import _non_continuation_child_sql
+    return ("WITH RECURSIVE lineage(id) AS ("
+            f" SELECT id FROM sessions WHERE id IN ({','.join('?' * n_ids)}) AND parent_session_id=?"
+            " AND source='subagent'"
+            " UNION SELECT c.id FROM lineage l JOIN sessions p ON p.id = l.id"
+            " JOIN sessions c ON c.parent_session_id = p.id"
+            " WHERE c.source='subagent' AND p.end_reason = 'compression'\n"
+            + _non_continuation_child_sql("c.", "p.id") +
+            ") SELECT s.id FROM sessions s JOIN lineage l ON l.id = s.id WHERE s.ended_at IS NULL")
+
+
 def _end_child_session_rows(conn, parent_session_id, task_session_ids, end_reason: str, now: float) -> list[str]:
-    """End the still-open session rows of a terminal unit's children inside the caller's transaction. Only rows that
-    really are this parent's ``subagent`` children are touched, so a stale or foreign id cannot end another chat.
+    """End the still-open session rows of a terminal unit's children inside the caller's transaction, including the
+    open tip of a child that compressed after dispatch. Only rows that really are this parent's ``subagent``
+    children (or their continuations) are touched, so a stale or foreign id cannot end another chat.
     Without this a child killed with its owner stayed open until a startup sweep proved no live backend could own it,
     which on a host whose backends restart many times a day can be never. Never raises."""
     ids = [str(v) for v in task_session_ids.values() if v] if isinstance(task_session_ids, dict) else []
     if not ids or not parent_session_id:
         return []
     try:
-        open_ids = [r[0] for r in conn.execute(
-            f"SELECT id FROM sessions WHERE id IN ({','.join('?' * len(ids))}) AND parent_session_id=?"
-            " AND source='subagent' AND ended_at IS NULL", (*ids, parent_session_id)).fetchall()]
+        open_ids = [r[0] for r in conn.execute(_child_lineage_open_rows_sql(len(ids)), (*ids, parent_session_id))]
         if open_ids:
             conn.execute(
                 f"UPDATE sessions SET ended_at=?, end_reason=? WHERE id IN ({','.join('?' * len(open_ids))})"
@@ -389,7 +403,11 @@ def _refresh_ended_child_outcomes(ended: list[str]) -> None:
 
 def end_terminal_unit_children(record: dict[str, Any], status: str) -> list[str]:
     """End the open child rows of a unit this process finalized as ``status`` without its runner returning
-    (``stalled``). A worker process has no ledger access; its owner's recovery covers it. Never raises."""
+    (``stalled``). Never raises. A worker process (no state.db access) ends nothing here, and nothing ends its
+    units' rows on its behalf: its dispatch does not forward ``task_session_ids`` and the owner's
+    ``recover_abandoned_delegations`` only visits units still ``running`` under a dead owner pid. Such rows close
+    only once their parent row ends (``SessionDB.end_subagents_of_ended_parents``) or the heartbeat-gated orphan
+    sweep proves no backend owns them."""
     end_reason = CHILD_END_REASONS.get(status)
     if not end_reason or not record.get("task_session_ids"):
         return []

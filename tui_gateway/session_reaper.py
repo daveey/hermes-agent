@@ -467,7 +467,7 @@ def _sweep_orphaned_session_rows() -> list[str]:
     # heartbeat predates it; end it without the heartbeat guess (and without the killed-subagent notice).
     try:
         children = db.end_subagents_of_ended_parents(
-            max_idle_seconds=_SESSION_TTL_S, exclude_ids=tuple(sorted(live_ids)))
+            max_idle_seconds=_SESSION_TTL_S, exclude_ids=tuple(sorted(live_ids)), exclude_pinned=True)
     except Exception:
         logger.debug("ended-parent subagent sweep failed", exc_info=True)
         children = []
