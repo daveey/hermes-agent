@@ -145,7 +145,8 @@ function railCondensed(profileCount: number, restGroups: readonly FleetGroup[]):
 // [daveey] Its unread state stays the plain emerald unread class, not an outcome tone (unlike a session row's
 // unread dot): it is a rollup of N unread sessions, some only persisted markers with no loaded row and so no
 // stored outcome, with mixed outcomes no single tone describes. Its label is the unread count, never "Finished",
-// and each session's own row dot below carries that session's outcome tone.
+// and session row dots carry per-session outcome tones only where those rows are shown for the active profile.
+// A background profile's square has no session rows below it until that profile is selected.
 function ProfileStatusDot({ summary }: { summary: ProfileDotSummary }) {
   return <span aria-hidden="true" className={sessionDotClassName(summary.state)} data-slot="profile-status-dot" />
 }

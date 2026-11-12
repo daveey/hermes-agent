@@ -271,7 +271,9 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
                 [daveey] No `session` prop, so an unread dot here stays emerald whatever the chat's stored
                 outcome: the canonical Bot Chat is hidden from session listings and the roster's
                 canonical_session summary carries no outcome. Painting the outcome tone here means adding
-                `outcome` to that summary (gateway/session_group_controls.py) and passing it through. */}
+                `outcome` to both summary builders (gateway/session_group_controls.py::_bot_sessions and
+                tui_gateway/methods_profiles.py::_canonical_session_row), to ProfileCanonicalSession in
+                tui_gateway/contracts, and passing it through. */}
             <SidebarRowLead>
               <SessionStatusDot storedSessionId={canonicalSessionId} />
             </SidebarRowLead>
