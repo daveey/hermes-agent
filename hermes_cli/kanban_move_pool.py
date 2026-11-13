@@ -10,6 +10,7 @@ stays on the pool. The park itself pins on unpushed state (:mod:`hermes_cli.kanb
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import subprocess
@@ -73,12 +74,23 @@ def _owner(tree: Path) -> Optional[str]:
     return data.get("task_id") if isinstance(data, dict) else None
 
 
+def _per_card(path: Path) -> bool:
+    """Whether ``path`` sits where per-card trees live (one of :data:`_WORKTREE_GLOBS` under the trees home)."""
+    try:
+        rel = path.resolve().relative_to(_trees_home().resolve())
+    except (OSError, ValueError):
+        return False
+    return any(len(rel.parts) == len(Path(g).parts) and fnmatch.fnmatchcase(rel.as_posix(), g)
+               for g in _WORKTREE_GLOBS)
+
+
 def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] = "",
                extra: Iterable[str] = (), *, linked_text_only: bool = False) -> list[str]:
     """Git trees on this host that hold the card's work: the workspace and its direct children, linked worktrees
     whose worktree-owner marker names the card, trees the park text names (``~/code/_wt/<slug>``), and ``extra``.
-    ``linked_text_only`` keeps only linked worktrees (a ``.git`` file) among the text-named trees: a shared main
-    checkout a card body merely mentions (``~/code/babybear``) is not the card's work."""
+    ``linked_text_only`` keeps, among the text-named trees and ``extra``, only linked worktrees (a ``.git`` file) and
+    clones at a per-card location (``~/code/_wt/<slug>``): a shared main checkout a card body merely mentions
+    (``~/code/babybear``, the gateway's live ``~/.hermes/hermes-agent``) is not the card's work."""
     found: list[Path] = []
     root = Path(path).expanduser() if path else None
     if root is not None and root.is_dir():
@@ -93,7 +105,7 @@ def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] 
             found += [p for p in sorted(home.glob(pattern)) if p.is_dir() and _owner(p) == task_id]
     for raw in [*_PATH.findall(text or ""), *extra]:
         p = Path(raw.rstrip(".,;:)]'\"")).expanduser()
-        if p.is_dir() and _is_tree(p) and not (linked_text_only and (p / ".git").is_dir()):
+        if p.is_dir() and _is_tree(p) and not (linked_text_only and (p / ".git").is_dir() and not _per_card(p)):
             found.append(p)
     out: list[str] = []
     for p in found:
@@ -103,7 +115,7 @@ def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] 
     return out[:_MAX_TREES]
 
 
-_REMOTE_TIMEOUT = 20
+_REMOTE_TIMEOUT = 10
 _MAX_ANCESTRY_CHECKS = 50
 _MAX_REFRESHES = 5
 
@@ -172,6 +184,17 @@ def pushed_on_remote(tree: str) -> bool:
         return False
 
 
+_DIRTY, _UNPUSHED = "dirty worktree ", "unpushed commits in "
+
+
+def state_parts(state: str) -> tuple[str, str]:
+    """``(check, tree)`` of a :func:`tree_state` string: ``("dirty", <p>)`` or ``("unpushed", <p>)``."""
+    for check, prefix in (("dirty", _DIRTY), ("unpushed", _UNPUSHED)):
+        if state.startswith(prefix):
+            return check, state[len(prefix):]
+    return "", state
+
+
 def tree_state(trees: Iterable[str]) -> Optional[str]:
     """``dirty worktree <p>`` / ``unpushed commits in <p>`` for the first tree with state, else None."""
     from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
@@ -179,9 +202,9 @@ def tree_state(trees: Iterable[str]) -> Optional[str]:
         if not Path(tree).is_dir():
             continue
         if _worktree_is_dirty(tree, tree):
-            return f"dirty worktree {tree}"
+            return f"{_DIRTY}{tree}"
         if _worktree_has_unpushed_commits(tree) and not pushed_on_remote(tree):
-            return f"unpushed commits in {tree}"
+            return f"{_UNPUSHED}{tree}"
     return None
 
 

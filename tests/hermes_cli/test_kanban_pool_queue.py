@@ -392,7 +392,8 @@ def test_url_push_refresh_prioritizes_branch_over_earlier_heads(tmp_path, destin
 def test_remote_failure_pins_without_reading_stdin(w2, tmp_path, monkeypatch, failure):
     from hermes_cli import worktree_ops
     from tools import kanban_tools as kt
-    tree = _pushed_clone(tmp_path, tmp_path / "unreachable")
+    (tmp_path / "code" / "_wt").mkdir(parents=True, exist_ok=True)
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "unreachable")  # a per-card tree location
     _commit(tree, "local.txt")
     _git(tree, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
     original = worktree_ops._git_out
@@ -464,6 +465,152 @@ def test_park_pins_a_dirty_tree_found_by_its_owner_marker(w2, tmp_path, monkeypa
     assert out.get("ok"), out
     assert _runs_on(conn, tid) == ["machine:worker-2"]
     assert _placement_events(conn, tid)[-1][1]["unpushed_state"] == f"dirty worktree {tree.resolve()}"
+
+
+# --- false park pins (t_01a1d145c441f2bd) -----------------------------------------------------------------------
+# 11-12 18:45Z: 7 of 9 park pins were false. 5 core cards were pinned to worker-2 over "dirty worktree
+# ~/.hermes/hermes-agent" (one stray untracked file in the gateway's live core checkout, which every core card names),
+# and 2 to worker-6 over "unpushed commits" in clones that track only origin/state while HEAD was on another branch.
+
+def _owned_worktree(main, tree, tid, branch):
+    """A linked worktree of ``main`` at ``tree``, marked for ``tid`` by the worktree-owner plugin, pushed."""
+    _git(main, "worktree", "add", "-q", "-b", branch, str(tree))
+    gitdir = (tree / ".git").read_text().split(":", 1)[1].strip()
+    (Path(gitdir) / "hermes-owner.json").write_text(json.dumps({"task_id": tid}))
+    _commit(tree, "fix.txt")
+    _git(tree, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+    return tree
+
+
+def _park(kt, tree, extra=""):
+    return json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+        f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI for {tree}{extra}")}))
+
+
+def test_park_ignores_a_dirty_shared_core_checkout_the_card_text_names(w2, tmp_path, monkeypatch):
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="core card", assignee="default", runs_on=[POOL],
+                         body="Build in a hermes-core-wt worktree, never in the live ~/.hermes/hermes-agent.")
+    live = _pushed_clone(tmp_path, tmp_path / ".hermes" / "hermes-agent")  # the gateway's shared main checkout
+    (live / "cache-sizes.txt").write_text("a stray diagnostic listing\n")
+    tree = _owned_worktree(live, tmp_path / "code" / "_wt" / "core-fix", tid, "wt/core-fix")
+    _run(w2, monkeypatch, tid)
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+        f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI for {tree}; deploys to {live} via hermes update")}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == [POOL] and _placement_events(conn, tid) == []
+
+
+def test_a_false_pin_on_a_shared_checkout_is_lifted_at_the_next_park(w2, tmp_path, monkeypatch):
+    """The 11-12 pins recorded the live checkout in ``trees``: the next park of such a card puts it back."""
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="core card", assignee="default", runs_on=[POOL])
+    live = _pushed_clone(tmp_path, tmp_path / ".hermes" / "hermes-agent")
+    (live / "cache-sizes.txt").write_text("a stray diagnostic listing\n")
+    tree = _owned_worktree(live, tmp_path / "code" / "_wt" / "core-fix", tid, "wt/core-fix")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET runs_on = ? WHERE id = ?", (json.dumps(["machine:worker-2"]), tid))
+        kb._append_event(conn, tid, "pool_pinned", {
+            "from_machine": "worker-2", "runs_on": ["machine:worker-2"], "previous_runs_on": [POOL],
+            "unpushed_state": f"dirty worktree {live.resolve()}", "trees": [str(live.resolve()), str(tree.resolve())]})
+    _run(w2, monkeypatch, tid)
+    assert _park(kt, tree).get("ok")
+    assert _runs_on(conn, tid) == [POOL]
+    assert [k for k, _ in _placement_events(conn, tid)] == ["pool_pinned", "pool_unpinned"]
+
+
+def test_a_dirty_linked_worktree_the_text_names_still_pins_and_the_event_names_the_check(w2, tmp_path, monkeypatch):
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="core card", assignee="default", runs_on=[POOL])
+    main = _pushed_clone(tmp_path, tmp_path / "main")
+    tree = tmp_path / "code" / "_wt" / "named"
+    _git(main, "worktree", "add", "-q", "-b", "wt/named", str(tree))  # no owner marker: only the text names it
+    (tree / "wip.txt").write_text("not committed\n")
+    _run(w2, monkeypatch, tid)
+    assert _park(kt, tree, "\nUNPUBLISHED_WORK_REASON=half-written wip.txt").get("ok")
+    assert _runs_on(conn, tid) == ["machine:worker-2"]
+    ev = _placement_events(conn, tid)[-1][1]
+    assert (ev["check"], ev["tree"]) == ("dirty", str(tree.resolve())), ev
+
+
+def _single_branch_clone(tmp_path, name):
+    """worker-6's workspace clone: tracks only ``origin/state``; HEAD, one commit ahead, pushed as ``wt/x``."""
+    remote = tmp_path / f"{name}-remote.git"
+    seed = tmp_path / f"{name}-seed"
+    _git(tmp_path, "init", "--bare", "-q", str(remote))
+    _git(tmp_path, "clone", "-q", str(remote), str(seed))
+    _commit(seed, "base.txt")
+    _git(seed, "push", "-q", "origin", "HEAD:refs/heads/state")
+    tree = tmp_path / "ws" / name
+    _git(tmp_path, "clone", "-q", "--single-branch", "-b", "state", str(remote), str(tree))
+    _commit(tree, "fix.txt")
+    _git(tree, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
+    return tree, remote
+
+
+def test_a_single_branch_clone_whose_head_is_on_another_remote_branch_is_pushed(tmp_path):
+    from hermes_cli import kanban_move_pool as kmp
+    tree, remote = _single_branch_clone(tmp_path, "tip")
+    assert kmp.tree_state([str(tree)]) is None  # HEAD equals refs/heads/wt/x
+    # The branch then moves past HEAD on the remote (GitHub update-branch) and no tracking ref exists for it; a
+    # fetch of that branch alone (FETCH_HEAD) brings its tip here.
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", "-b", "wt/x", str(remote), str(other))
+    _commit(other, "merge-from-base.txt")
+    _git(other, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
+    _git(tree, "fetch", "-q", "origin", "wt/x")
+    assert kmp.tree_state([str(tree)]) is None
+
+
+def test_park_and_move_keep_a_pushed_single_branch_clone_on_the_pool(w2, tmp_path, monkeypatch):
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="state card", assignee="default", runs_on=[POOL])
+    tree, remote = _single_branch_clone(tmp_path, "state-clone")
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", "-b", "wt/x", str(remote), str(other))
+    _commit(other, "merge-from-base.txt")
+    _git(other, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
+    _git(tree, "fetch", "-q", "origin", "wt/x")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET workspace_path = ? WHERE id = ?", (str(tree.parent), tid))
+    _run(w2, monkeypatch, tid)
+    assert _park(kt, tree).get("ok")
+    assert _runs_on(conn, tid) == [POOL] and _placement_events(conn, tid) == []
+    _registry()
+    res = km.move_queued(conn, tid, runs_on=["machine:worker-2"], reason="resume here", host_reason="my tree is here",
+                         me="worker-2", machines=_machines())
+    assert not res["ok"] and res["reason_code"] == "pool_keeps_pushed", res
+
+
+def test_a_head_no_remote_holds_and_an_unreachable_remote_still_pin(tmp_path, monkeypatch):
+    from hermes_cli import kanban_move_pool as kmp
+    from hermes_cli import worktree_ops
+    tree, remote = _single_branch_clone(tmp_path, "fail-safe")
+    _commit(tree, "only-here.txt")
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+    _git(tree, "reset", "-q", "--hard", "HEAD~1")  # back to the pushed wt/x tip
+    assert kmp.tree_state([str(tree)]) is None
+    # That check may refresh wt/x into a tracking ref; drop it so the failure cases below still need the remote.
+    _git(tree, "update-ref", "-d", "refs/remotes/origin/wt/x")
+    _git(tree, "remote", "set-url", "origin", str(tmp_path / "gone.git"))  # ls-remote fails
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+    _git(tree, "remote", "set-url", "origin", str(remote))
+    real = worktree_ops._git_out
+    timeouts = []
+
+    def slow_remote(args, cwd, timeout=10, **kw):
+        if args[:1] == ["ls-remote"]:
+            timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(["git", *args], timeout)
+        return real(args, cwd, timeout=timeout, **kw)
+
+    monkeypatch.setattr(worktree_ops, "_git_out", slow_remote)
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+    assert timeouts and max(timeouts) <= 10, timeouts
 
 
 # --- worker-origin cards ----------------------------------------------------------------------------------------

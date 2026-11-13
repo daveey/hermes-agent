@@ -43,12 +43,15 @@ def plan(conn: sqlite3.Connection, task_id: str, text: Optional[str] = "") -> Op
     label = kmp.pool_label()
     base = {"task_id": task_id, "run_id": int(row["current_run_id"]), "me": me, "runs_on": labels}
     if label in labels:
-        trees, state = kmp.card_trees_state(task_id, row["workspace_path"], text)
+        trees, state = kmp.card_trees_state(task_id, row["workspace_path"], text, linked_text_only=True)
         return {**base, "op": "pin", "state": state, "trees": trees} if state else None
     pinned = _last_pin(conn, task_id)
     if labels != [f"machine:{me}"] or pinned is None or pinned.get("runs_on") != labels:
         return None
-    trees, state = kmp.card_trees_state(task_id, row["workspace_path"], text, extra=pinned.get("trees") or [])
+    # A text-named shared main checkout (the gateway's live ~/.hermes/hermes-agent) is not the card's: an older pin
+    # that recorded one in ``trees`` lifts once the card's own trees are clean and pushed.
+    trees, state = kmp.card_trees_state(task_id, row["workspace_path"], text, extra=pinned.get("trees") or [],
+                                        linked_text_only=True)
     return None if state else {**base, "op": "unpin", "restore": pinned.get("previous_runs_on") or [label],
                                "trees": trees}
 
@@ -71,6 +74,7 @@ def apply(conn: sqlite3.Connection, task_id: str, step: Optional[dict[str, Any]]
     if not step:
         return False
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_move_pool as kmp
     from hermes_cli import kanban_worker_node as wn
     row = conn.execute("SELECT current_run_id, runs_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None or row["current_run_id"] != step["run_id"] or (wn._parse(row["runs_on"]) or []) != step["runs_on"]:
@@ -78,8 +82,9 @@ def apply(conn: sqlite3.Connection, task_id: str, step: Optional[dict[str, Any]]
     me = step["me"]
     if step["op"] == "pin":
         target = [f"machine:{me}"]
+        check, tree = kmp.state_parts(step["state"])
         payload = {"from_machine": me, "runs_on": target, "previous_runs_on": step["runs_on"],
-                   "unpushed_state": step["state"], "trees": step["trees"],
+                   "unpushed_state": step["state"], "trees": step["trees"], "check": check, "tree": tree,
                    "host_reason": f"parked with unpushed state on {me}",
                    "reason": f"{step['state']}: another worker would resume without it"}
         kind = PINNED_EVENT
