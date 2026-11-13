@@ -13,7 +13,9 @@ The pause lets that run's lineage continue exactly once, and only when every fac
 * that run ended as a core-update requeue (no crash, timeout or other reclaim);
 * its profile is the card's current assignee;
 * a holding PR comment from before that claim (and after the card's first run) was handed to
-  it: a recorded handoff (:data:`_HANDOFF_KINDS`) falls after that comment, after every earlier
+  it: either an earlier requeued publisher of the same profile wrote it and every run from that
+  writer up to the claim is skipped (this grant's own chain: that hand-over records no event),
+  or a recorded handoff (:data:`_HANDOFF_KINDS`) falls after that comment, after every earlier
   real run ended, and no later than the claim. The claim itself records no proof that the
   respawn guard let it through, and a direct ``claim_task`` bypasses the guard, so without this
   an earlier crashed publisher's PR would ride along once the claimed run restated it;
@@ -30,7 +32,9 @@ import sqlite3
 from typing import Iterable, Optional
 
 # Events that hand an earlier PR to the next claim (the kinds ``_handed_off_after`` in
-# :mod:`kanban_db_dispatch_pr_state` honours); each is re-checked by :func:`_is_handoff`.
+# :mod:`kanban_db_dispatch_pr_state` honours). :func:`_is_handoff` screens out link-only and
+# dispatcher writes only; it does not repeat the guard's full per-kind predicates (merge
+# authorization, PR-url scope, park/run match, review checkpoint), so it is the looser test.
 _HANDOFF_KINDS = ("assigned", "changes_requested", "review_reopened", "unblocked", "continued", "scheduled",
                   "dependency_wait", "reopened", "hold_released", "operator_resumed")
 
@@ -75,6 +79,23 @@ def _is_handoff(event) -> bool:
         via = "owner-wake-hold-release" if kind == "hold_released" else "operator-resume"
         return data.get("via") == via and data.get("scope") == "one_continuation"
     return is_handoff_event(kind, event["payload"])
+
+
+def _requeued_chain(conn: sqlite3.Connection, task_id: str, writer, run, requeued: set[int]) -> bool:
+    """``writer`` is an earlier requeued publisher whose one continuation reached ``run``'s claim.
+
+    Same profile, a core-update requeue, and every run from it up to ``run`` skipped: the
+    continuation it was granted is ``run``, and that hand-over records no event of its own.
+    """
+    from hermes_cli.kanban_core_update_requeue import _skipped
+
+    if writer is None or writer["id"] not in requeued or writer["id"] >= run["id"]:
+        return False
+    if writer["profile"] != run["profile"]:
+        return False
+    between = conn.execute("SELECT * FROM task_runs WHERE task_id = ? AND id >= ? AND id < ?",
+                           (task_id, writer["id"], run["id"]))
+    return all(_skipped(conn, r) for r in between)
 
 
 def _handed_to_claim(conn: sqlite3.Connection, task_id: str, run, started: int, newest_earlier: int) -> bool:
@@ -151,7 +172,8 @@ def continues(conn: sqlite3.Connection, task_id: str, holding: Iterable[tuple[in
     earlier: list[int] = []
     for t, cid in holding:
         if t < started:
-            earlier.append(t)
+            if not _requeued_chain(conn, task_id, writer(cid), run, requeued):
+                earlier.append(t)  # not this grant's own chain: it needs a recorded handoff
             continue
         other = writer(cid)
         if other is None or other["id"] != run["id"]:

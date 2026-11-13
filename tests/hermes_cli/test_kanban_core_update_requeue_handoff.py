@@ -417,6 +417,77 @@ def test_earlier_pr_needs_a_handoff_before_the_requeued_claim(board, handoff, co
     assert dispatch.check_respawn_guard(board, task) == held
 
 
+def _age(board, task, seconds=60):
+    board.execute("UPDATE task_runs SET started_at = started_at - ?, ended_at = ended_at - ? WHERE task_id = ?",
+                  (seconds, seconds, task))
+    for table in ("task_events", "task_comments"):
+        board.execute(f"UPDATE {table} SET created_at = created_at - ? WHERE task_id = ?", (seconds, task))
+
+
+def _restate_and_requeue(board, task, *, between=None):
+    """Age the card, optionally reclaim a run with ``between``, then a claim restates the PR and is requeued."""
+    from tests.hermes_cli.kanban_guard_helpers import worker_comment
+
+    _age(board, task)
+    if between:
+        _reclaim(board, task, between)
+        _age(board, task, 30)
+    assert kb.claim_task(board, task) is not None
+    runs = board.execute("SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (task,)).fetchone()[0]
+    # A distinct length per run: equal (author, len) rows within the event skew are indistinguishable.
+    worker_comment(board, task, "dev", "Still on " + PR + " " + "." * runs)
+    assert kb.reclaim_task(board, task, reason=CORE_UPDATE_REQUEUE_REASON, signal_fn=lambda *_: None)
+
+
+def test_granted_continuation_that_restates_its_pr_and_is_requeued_again_resumes(board):
+    """Review 5885494823 (PR #1839): the grant hands the publisher's PR to its continuation with no event."""
+    task = _publisher(board)
+    _restate_and_requeue(board, task)
+    assert dispatch.check_respawn_guard(board, task) is None
+    _restate_and_requeue(board, task)  # a third run in the same chain: still one grant at a time
+    assert dispatch.check_respawn_guard(board, task) is None
+    assert kb.claim_task(board, task) is not None  # the next real run consumes it
+    assert kb.reclaim_task(board, task, reason=CRASH, signal_fn=lambda *_: None)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("between", [CRASH, CORE_UPDATE_REQUEUE_REASON], ids=["real_run_between", "pause_between"])
+def test_requeued_chain_breaks_at_a_real_run(board, between):
+    """A real run between the requeued publisher and the claim consumed that grant: held. A pause keeps it."""
+    task = _publisher(board)
+    _restate_and_requeue(board, task, between=between)
+    assert dispatch.check_respawn_guard(board, task) == ("active_pr" if between == CRASH else None)
+
+
+def test_requeued_chain_needs_the_same_profile(board):
+    from hermes_cli import kanban_requeued_publisher as publisher
+
+    task = _publisher(board)
+    _restate_and_requeue(board, task)
+    rows = board.execute("SELECT id, created_at FROM task_comments WHERE task_id = ? ORDER BY id", (task,))
+    holding = [(int(at), row) for row, at in rows]
+    assert publisher.continues(board, task, holding, holding[-1][1])
+    board.execute("UPDATE task_runs SET profile = 'ops' WHERE id = (SELECT MIN(id) FROM task_runs WHERE task_id = ?)",
+                  (task,))
+    assert not publisher.continues(board, task, holding, holding[-1][1])
+
+
+def test_requeued_chain_does_not_carry_an_earlier_crashed_publisher(board):
+    """A crashed run's PR before the chain still needs a recorded handoff, though the chain itself is clean."""
+    from tests.hermes_cli.kanban_guard_helpers import worker_comment
+
+    task = kb.create_task(board, title="implementation", assignee="dev")
+    assert kb.claim_task(board, task) is not None
+    worker_comment(board, task, "dev", "Opened " + PR + "9")
+    assert kb.reclaim_task(board, task, reason=CRASH, signal_fn=lambda *_: None)
+    _age(board, task, 30)
+    assert kb.claim_task(board, task) is not None  # direct claim: the respawn guard never ran
+    worker_comment(board, task, "dev", "Opened " + PR)
+    assert kb.reclaim_task(board, task, reason=CORE_UPDATE_REQUEUE_REASON, signal_fn=lambda *_: None)
+    _restate_and_requeue(board, task)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
 @pytest.mark.parametrize("handoff,granted", [
     (("unblocked", {"by": "operator"}, False, -5), False),  # after the claim: it handed nothing to it
     (("dependency_wait", {"reason": "parent_not_done"}, False, 20), False),  # a bare link
