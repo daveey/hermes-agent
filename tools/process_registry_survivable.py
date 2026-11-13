@@ -282,8 +282,9 @@ class ProcessForegroundHoldMixin:
             locked = self._enter_checkpoint_lock(stack)
             with self._lock:
                 dropped = self._holds().pop(session_id, None)
-            # Without the lock a read-merge-write could clobber a concurrent writer's entries; the
-            # cross-profile drop below (under each file's own lock) removes the entry instead. [daveey]
+            # Without the lock a read-merge-write could clobber a concurrent writer's entries. The
+            # cross-profile drop below tries to remove the entry under each file's own lock, but that is
+            # this same .lock, so it likely fails too; a later writer or recovery then settles it. [daveey]
             if dropped is not None and locked:
                 try:
                     # drop_ids: the entry's child is still alive, so without it the merge keeps it as
