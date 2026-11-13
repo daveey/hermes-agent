@@ -126,12 +126,70 @@ def test_an_uppercase_cd_does_not_end_the_span(body):
     assert d["where"] == "local" and "runs_on" not in d, d
 
 
+# PR #2649 review 5898066605 nit: a cd nested in a subshell, ``$( )`` or a backtick substitution changes no cwd of
+# this shell, however many cds the nested command chains; ``pushd -n`` only edits the stack.
+@pytest.mark.parametrize("body", [
+    "Run pytest, then cd ~ && (cd repo && cd sub && make) && cat .hermes/.env",
+    "Run pytest, then cd ~ && x=$(cd a && cd b && pwd) && cat .hermes/.env",
+    "Run pytest, then cd ~\n(\n  cd repo\n  cd sub; make\n)\ncat .hermes/.env",
+    "Run pytest, then cd ~ && x=$(cd a && y=$(cd b; cd c) && cd d) && cat .hermes/.env",
+    "Run pytest, then cd ~ && x=`cd repo && pwd` && cat .hermes/.env",
+    'Run pytest, then cd ~ && echo "`cd repo; cd sub; pwd`" && cat .hermes/.env',
+    "Run pytest, then cd ~ && pushd -n repo && cat .hermes/.env",
+    # The state path inside the nesting still names home state, as before.
+    "Run pytest, then cd ~ && (x=$(cat .hermes/.env))",
+    "Run pytest, then cd ~ && x=$(cd a && y=$(cat .hermes/.env))",
+])
+def test_a_nested_cd_never_ends_the_span(body):
+    from hermes_cli import kanban_placement as kp
+    assert re.search(kp.HERMES_STATE_PATH, body, re.IGNORECASE)  # raw text too: here backtick spans are not stripped
+    d = helpers._hub({"title": "Maintenance", "body": body})
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
 @pytest.mark.parametrize("body", [
     "Run pytest, then label the backup CD; then cat .hermes/notes.md in the repo",
     "Run pytest, then label the backup CD ~/.hermes; it holds the hermes-agent tree",
 ])
 def test_an_uppercase_cd_is_no_home_marker(body):
     assert helpers._hub({"title": "Maintenance", "body": body})["runs_on"] == ["machine:worker-1"]
+
+
+@pytest.mark.parametrize("body", [
+    "Run pytest, then cd ~ && (cd repo && make) && cd repo && cat .hermes/notes.md",
+    "Run pytest, then cd ~ && x=$(cd a && cd b) && cd repo && cat .hermes/notes.md",
+    "Run pytest, then cd ~ && x=`cd a && pwd` && cd repo && cat .hermes/notes.md",
+    "Run pytest, then cd ~ && pushd -n x && pushd repo && cat .hermes/notes.md",
+    "Run pytest, then cd ~ && echo :( && cd repo && cat .hermes/notes.md",  # an unclosed paren is no subshell
+    "Run pytest, then cd ~ && x=`cd a && cd repo && cat .hermes/notes.md",  # nor an unclosed backtick
+    "Run pytest, then cd ~ and run `make` then `cd repo && cat .hermes/notes.md`",  # markdown code spans
+])
+def test_a_top_level_cd_after_the_nesting_still_ends_the_span(body):
+    from hermes_cli import kanban_placement as kp
+    assert re.search(kp.HERMES_STATE_PATH, body, re.IGNORECASE) is None
+    assert helpers._hub({"title": "Maintenance", "body": body})["runs_on"] == ["machine:worker-1"]
+
+
+@pytest.mark.parametrize("body", [
+    "cd ~ && x=$(cd a && y=`cat .hermes/.env`)",   # marker_work_text strips backtick spans; the raw regex reads them
+    "cd ~ && x=`cd a; cd b` && cat .hermes/.env",
+])
+def test_the_raw_pattern_reads_backtick_substitution(body):
+    from hermes_cli import kanban_placement as kp
+    assert re.search(kp.HERMES_STATE_PATH, body, re.IGNORECASE)
+
+
+@pytest.mark.parametrize("unit", [
+    "(cd ~) x=$(cd a && (cd b) && `cd c`) step {i} padded out to a realistic length ",
+    "cd ~ && (( ( ( x=` step {i} padded out to a realistic length\n",
+    "cd ~ && x=`cd a` y=$(cd b) (cd c (cd d (cd e))) && cd f step {i}\n",
+])
+def test_a_large_no_match_nested_body_is_linear(unit):
+    from hermes_cli import kanban_placement as kp
+    body = "Run pytest, then " + "".join(unit.format(i=i) for i in range(5000))
+    start = time.monotonic()
+    assert re.search(kp.HERMES_STATE_PATH, body, re.IGNORECASE) is None
+    assert time.monotonic() - start < 1.0
 
 
 def test_a_large_no_match_prose_cd_body_is_linear():

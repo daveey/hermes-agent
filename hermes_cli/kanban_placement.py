@@ -602,8 +602,25 @@ _REDIR = (r"(?:[ \t]*&?>|[ \t]+\d+>)[>|]?[ \t]*(?:&[ \t]*)?"
 _CMD_END = r"(?=(?:" + _REDIR + r")*(?:[ \t]*(?:$|[\n;|)]|&(?!>))|[ \t]+#))"
 _CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)" + _CMD_END)
 _CHDIR = (r"(?:" + _CD_HOME + r"|(?:(?<=\n)|&&|\|\||;|`|\{)[ \t]*"
-          r"(?-i:cd(?![\w.-])(?![ \t]+-" + _CMD_END + r")|pushd(?![\w.-])(?![ \t]+[+-]\d+" + _CMD_END + r")(?!"
-          + _CMD_END + r"))(?![ \t]+[\"']?(?:\./)?\.hermes(?![\w.-])))")
+          r"(?-i:cd(?![\w.-])(?![ \t]+-" + _CMD_END + r")|pushd(?![\w.-])(?![ \t]+[+-]\d+" + _CMD_END + r")"
+          r"(?![ \t]+-n(?![\w-]))(?!" + _CMD_END + r"))(?![ \t]+[\"']?(?:\./)?\.hermes(?![\w.-])))")
+# PR #2649 review 5898066605 nit: a cd nested in a subshell ``( )``, ``$( )`` or a backtick substitution (one
+# opened after ``=`` or ``"``; a markdown code span is not one) never ends the span, however many cds it chains.
+# A balanced group up to _NEST_DEPTH deep is one atomic span step; past that, or unclosed, its chars are plain
+# text again (today's behaviour). A cd home inside still stops it, so spans stay disjoint and the scan linear.
+# The state path may sit inside the nesting (``cd ~ && (x=$(cat .hermes/.env))``): _NEST_PREFIX opens groups
+# before the tail, and a chained cd inside an opened group ends that prefix as it would a span (it changes the
+# group's own cwd), so an unclosed ``(``/backtick reads as before.
+_NEST_DEPTH = 3
+_NO_HOME = r"(?!" + _CD_HOME + r")"
+_TICK = r"(?<=[=\"])`"
+_TICK_GROUP = _TICK + r"(?:" + _NO_HOME + r"[^`])*+`"
+_PARENS = r"\((?>" + _TICK_GROUP + r"|" + _NO_HOME + r"[^()])*+\)"
+for _level in range(_NEST_DEPTH - 1):
+    _PARENS = r"\((?>" + _PARENS + r"|" + _TICK_GROUP + r"|" + _NO_HOME + r"[^()])*+\)"
+_NESTED = r"(?:" + _PARENS + r"|" + _TICK_GROUP + r")"
+_NEST_PREFIX = (r"(?:\((?:(?>" + _NESTED + r"|(?!" + _CHDIR + r")[^()]))*?|" + _TICK + r"(?:(?!" + _CHDIR
+                + r")[^`])*?){0," + str(_NEST_DEPTH) + r"}")
 _CD_INTO = r"(?<![\w./-])(?-i:cd|pushd)[ \t]+[\"']?"
 _CODE_TREE = r"(?:hermes-agent|repos|bin)"
 _STATE_SUB = r"\.hermes/(?!" + _CODE_TREE + r"(?:/|\b))[\w.-]"
@@ -613,7 +630,7 @@ _STATE_DIR = (r"\.hermes/?[\"']?" + _CMD_END + r"(?!(?:" + _REDIR + r")*[ \t]*(?
               r"(?-i:cd|pushd)[ \t]+[\"']?(?:\./)?"
               + _CODE_TREE + r"(?![\w.-]))")
 HERMES_STATE_PATH = (r"(?:" + HOME_PREFIX + r"/" + _STATE_SUB + r"|" + _CD_INTO + HOME_PREFIX + r"/" + _STATE_DIR +
-                     r"|" + _CD_HOME + r"(?:(?!" + _CHDIR + r")[\s\S])*?"
+                     r"|" + _CD_HOME + r"(?>" + _NESTED + r"|(?!" + _CHDIR + r")[\s\S])*?" + _NEST_PREFIX +
                      r"(?:(?<![\w./~$}-])(?:\./)?" + _STATE_SUB + r"|" + _CD_INTO + r"(?:\./)?" + _STATE_DIR + r"))")
 HOST_WORKTREE_PATH = r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?(?:/|\b)"
 # Any home-rooted ``<dir>/.worktrees`` (``~/code/<repo>/.worktrees/t_*``, ``~/.hermes/hermes-agent/.worktrees``):
