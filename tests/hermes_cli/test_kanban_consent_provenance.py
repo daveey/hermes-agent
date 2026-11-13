@@ -272,6 +272,27 @@ def test_home_executor_refuses_when_creation_provenance_never_syncs(fleet, monke
     assert not f.h.execute("SELECT 1 FROM task_comments WHERE task_id=?", (f.target,)).fetchone()
 
 
+def test_unsynced_caller_defers_only_its_own_call(fleet, monkeypatch, tmp_path):
+    """One caller's sync lag must not hold back a later call on the board; its own call still fails closed."""
+    from hermes_cli import kanban_consent as consent
+    f = fleet
+    caller, rid = _stopped_home_call(f, monkeypatch, tmp_path, "lagging")
+    _hide_created(f, monkeypatch, caller)
+    later = helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "second"})
+    helpers._round(f)
+    bodies = [r[0] for r in f.h.execute("SELECT body FROM task_comments WHERE task_id=?", (f.target,))]
+    assert bodies == ["second"], "the synced caller's call waited behind the unsynced one"
+    assert requests.get_request(f.w, later["request_id"])["result"][0]["outcome"] == "applied"
+    assert requests.get_request(f.w, rid)["status"] != "done", "the unsynced call was not deferred"
+    # The deferred call is retried on a later tick (same watermark) and refused once the grace has passed.
+    monkeypatch.setattr(consent, "CREATION_SYNC_GRACE_S", -1)
+    helpers._round(f)
+    request = requests.get_request(f.w, rid)
+    assert request["result"][0]["outcome"] == "refused", request
+    assert "consent_unproven" in request["result"][0]["detail"]
+    assert [r[0] for r in f.h.execute("SELECT body FROM task_comments WHERE task_id=?", (f.target,))] == ["second"]
+
+
 def test_submitting_session_stop_is_enforced_and_inherited(fleet, monkeypatch, tmp_path):
     """A worker run's own timed-out approval binds its submissions and the cards it creates."""
     from gateway.session_context import scoped_current_session_id

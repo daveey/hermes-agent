@@ -227,8 +227,9 @@ CREATION_SYNC_GRACE_S = 600
 def home_refusal(rep, payload, target):
     """``(refusal, retry)`` for the home executor, from the caller's created event in the replica.
 
-    A missing created event (sync lag) is retried like an unreachable Board, then
-    refused after ``CREATION_SYNC_GRACE_S``: the stops cannot be checked, so the
+    A missing created event (sync lag) defers only this call (the executor keeps
+    going with the rest and retries it next tick), then it is refused after
+    ``CREATION_SYNC_GRACE_S``: the stops cannot be checked, so the
     call is never applied on an empty read. Known limit: the submitting session's
     host-local stops are checked only at submission (``enforce``), never here.
     """

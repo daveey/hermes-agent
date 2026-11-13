@@ -269,6 +269,15 @@ def test_negation_outside_the_claim_verb_still_needs_a_receipt(fleet, summary):
     ("No probes were found, so nothing was commented on t_0123456789abcdef.", False),
     ("Ship filed no card, so I posted both IDs on t_0123456789abcdef.", True),
     ("Posted to t_0123456789abcdef; no errors.", True),
+    # ':' / dashes / '(' end the governing span like a comma does.
+    ("No longer pending: posted to t_0123456789abcdef.", True),
+    ("No longer pending — posted to t_0123456789abcdef.", True),
+    ("No longer pending – posted to t_0123456789abcdef.", True),
+    ("Was pending (posted to t_0123456789abcdef since).", True),
+    ("Comment to t_0123456789abcdef: not posted.", False),
+    ("Comment to t_0123456789abcdef: queued.", False),
+    ("Comment to t_0123456789abcdef — failed and was not sent.", False),
+    ("Comment to t_0123456789abcdef (not posted).", False),
 ])
 def test_claimed_targets_scopes_negation_to_the_verb(text, claimed):
     from hermes_cli.kanban_operator_delivery import claimed_targets

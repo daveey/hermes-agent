@@ -17,9 +17,11 @@ _NOT_CLAIM = frozenset({"not", "never", "no", "nothing", "none", "neither", "nor
                         "failed", "refused", "rejected", "unable", "will", "would", "could", "should", "may",
                         "might", "if", "once", "until", "awaiting", "waiting", "yet"})
 _GOVERN_WINDOW = 3  # words before the verb: "has not yet been posted", "will later be sent"
-# A comma or conjunction ends the governing span: "filed no card, so I posted ..." is a claim.
-_BOUNDARY = frozenset({",", "so", "and", "but", "then", "after", "before", "because", "which", "while", "that"})
-_WORD = re.compile(r"[\w’']+|,")
+# A comma, ':', a dash, '(' or a conjunction ends the governing span: "filed no card, so I posted ..." and
+# "No longer pending: posted to ..." are claims.
+_BOUNDARY = frozenset({",", ":", "—", "–", "(", "so", "and", "but", "then", "after", "before", "because", "which",
+                       "while", "that"})
+_WORD = re.compile(r"[\w’']+|[,:—–(]")
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{8}(?:[0-9a-f]{8})?\b")
 
 
