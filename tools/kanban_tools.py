@@ -235,6 +235,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 if tool_name in _RUN_LIFECYCLE_TOOLS and isinstance(out, str) and out.startswith('{"ok": true'):
                     from tools import kanban_tools_run_end as kre
                     out = kre.annotate_success(_board, args, out)
+                if isinstance(out, str):  # [daveey] a write the stopped Board sync keeps local says so
+                    from tools import kanban_tools_board_delivery as kbd_
+                    out = kbd_.annotate(_board, tool_name, args, out)
                 if classify_rejections and isinstance(out, str) and out.startswith('{"error"'):
                     out = _tag_rejection(out, "invalid_args")
                 return out

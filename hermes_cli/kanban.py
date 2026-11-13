@@ -1003,7 +1003,9 @@ def _cmd_link(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         gated = kb.link_tasks(conn, args.parent_id, args.child_id,
                               expected_child_run_id=expected_child_run_id)
-    print(f"Linked {args.parent_id} -> {args.child_id}")
+        from hermes_cli.kanban_board_delivery import cli_lines
+        queued = cli_lines(conn)  # [daveey] the stopped Board sync keeps it here
+    print(f"Linked {args.parent_id} -> {args.child_id}", *queued, sep="\n")
     if gated:
         print(
             f"Note: {args.child_id} was ready and is now todo — parent "
@@ -1069,10 +1071,15 @@ def _cmd_comment(args: argparse.Namespace) -> int:
         except ValueError as exc:
             return _err(f"kanban comment: {exc}", 2)
         live = kb.live_run_id(conn, args.task_id)
+        from hermes_cli.kanban_board_delivery import cli_lines, remote_runner
+        queued = cli_lines(conn, args.task_id)  # [daveey] the stopped Board sync keeps it here
+        remote = bool(queued) and remote_runner(conn, args.task_id) is not None
     print(f"Comment added to {args.task_id}")
     own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id
-    if live is not None and not own_run:
+    if live is not None and not own_run and not remote:
         print("The card has a live worker run: it gets this note at its next model call.")
+    for line in queued:
+        print(line)
     return 0
 
 
@@ -1287,7 +1294,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                     fail_msg[tid] = _contract_cli.complete_refusal(conn, tid) or fail_msg[tid]
             return done
 
-        return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
+        return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__, conn=conn)
 
 
 _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id", "review_required")
@@ -1447,7 +1454,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 human_request=request, awaiting=awaiting, comment=comment, actor=cli_actor(),
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
             awaiting=awaiting, reason=reason, kind=kind)
-        return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
+        return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}", conn=conn)
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
@@ -1476,7 +1483,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_reason_comment import human_answer_refusal
         return _bulk_apply(ids, op, _parked_msg(conn, "Scheduled", suffix),
                            lambda tid: (refused.get(tid) or human_answer_refusal(conn, tid, "schedule")
-                                        or f"cannot schedule {tid}"))
+                                        or f"cannot schedule {tid}"), conn=conn)
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
@@ -1495,7 +1502,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
             return rc
         op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
+                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)", conn=conn)
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
