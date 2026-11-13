@@ -357,5 +357,8 @@ def class_routed_async(callback):
 
 
 def _close_pair(aux, client, sync_client) -> None:
-    aux._close_cached_client(client, close_async=True)
+    # AsyncGeminiNativeClient wraps the sync leaf itself: its coroutine close() would, on an abandoned to_thread
+    # worker (no running loop), asyncio.run a to_thread close on yet another thread. Close the leaf here instead.
+    if getattr(client, "_real_client", None) is not sync_client:
+        aux._close_cached_client(client, close_async=True)
     aux._close_cached_client(sync_client, close_async=True)

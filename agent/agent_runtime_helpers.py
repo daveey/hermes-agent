@@ -3504,8 +3504,8 @@ def _iter_pool_sockets(client: Any):
     walks mount transports and in-flight ``PoolRequest.connection`` objects (``_connections``
     is empty during checkout)."""
     try:
-        # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs.
-        http_client = getattr(client, "_client", None)
+        # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs. ``_http``: Gemini.
+        http_client = getattr(client, "_client", None) or getattr(client, "_http", None)
         pools = list(_iter_httpx_pools_with_owner(client if http_client is None else http_client))
     except Exception:
         return

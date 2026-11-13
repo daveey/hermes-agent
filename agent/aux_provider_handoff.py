@@ -75,6 +75,11 @@ async def run_in_thread(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> 
     ``client_scope`` on the loop thread. The worker is then recorded as abandoned there, so the scope only
     shuts the sockets down and the worker closes the client once ``fn`` returns. A worker cancelled before
     it started never touches the socket and is not recorded.
+
+    ``force_close_tcp_sockets`` walks httpx pools only, so it cannot reach Bedrock's boto3/urllib3 sockets: a
+    cancelled Bedrock worker logs ``tcp_shutdown=0``. Its fd stays safe (``BedrockAuxiliaryClient.close`` is a
+    no-op, so no thread closes those sockets), but the provider read keeps running, and billing, until its own
+    timeout. The sync twin (``_run_protected_sync_provider_call``) behaves the same way.
     """
     attempt, lock, state = ProviderAttempt(), threading.Lock(), ["pending"]
 

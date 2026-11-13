@@ -4,9 +4,9 @@ The hub incident (a TLS alert written into ``inbox.db``'s header) came from one 
 whose socket another thread was still reading: the fd number went to a SQLite file and the reader's next
 ``SSL_read`` took ``SQLit`` from it. Two more paths had the same shape:
 
-1. ``class_routed_async``: adapter clients (Anthropic, Codex, Bedrock) run the sync SDK call on an
-   ``asyncio.to_thread`` worker; a cancelled await leaves that worker reading while the ``finally`` closed
-   the per-call client from the loop thread.
+1. ``class_routed_async``: adapter clients (Anthropic, Codex, Bedrock, Gemini) run the sync SDK call on an
+   ``asyncio.to_thread`` worker (Gemini: the create and each stream step); a cancelled await leaves that
+   worker reading while the ``finally`` closed the per-call client from the loop thread.
 2. ``_store_cached_client`` (Nous 401 refresh): replacing a shared cache entry closed the old client
    although another caller can be mid-request on it.
 """
@@ -16,6 +16,7 @@ import asyncio
 import os
 import sqlite3
 import threading
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -23,6 +24,7 @@ from openai import OpenAI
 
 from agent import auxiliary_class_routing as routing
 from agent import auxiliary_client as aux
+from agent.gemini_native_adapter import GeminiNativeClient
 from tests.agent.test_aux_abandoned_provider_tls_fd import (  # stalling_stream: fixture, resolved by name below
     SQLITE_MAGIC, _fd_is_open, stalling_stream,
 )
@@ -130,6 +132,74 @@ def test_cancelled_async_class_call_never_hands_the_to_thread_workers_tls_fd_to_
     # The loop thread only shut the socket down; the worker that read it closed the client.
     assert sync_client.closed_on == [seen["thread"].name]
     assert "tcp_shutdown=1" in caplog.text
+    assert http.is_closed
+
+
+class _StallingGeminiClient(GeminiNativeClient):
+    """A real ``GeminiNativeClient`` (own ``_http``, real ``close`` and ``_advance_stream_iterator``) whose stream
+    yields one chunk without I/O, then reads the stalled TLS body on the next step."""
+
+    def __init__(self, http: httpx.Client, url: str, seen: dict, reading: threading.Event) -> None:
+        super().__init__(api_key="test", base_url=url, http_client=http)
+        self.closed_on: list[str] = []
+
+        def chunks():
+            yield "first"  # step 1: handed back to the loop, so step 2 is a fresh run_in_thread call
+            _stream_until_stalled(http, url, seen, reading)  # step 2: blocks on the stalled body
+            yield "second"
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **_kwargs: chunks()))
+
+    def close(self) -> None:
+        self.closed_on.append(threading.current_thread().name)
+        super().close()
+
+
+def test_cancelled_gemini_stream_step_is_closed_by_the_worker_reading_it(tls_stream, tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="agent.aux_provider_handoff")
+    http = httpx.Client(verify=tls_stream.ssl_context, timeout=httpx.Timeout(20.0))
+    seen: dict = {"returned": threading.Event()}
+    reading = threading.Event()
+    sync_client = _StallingGeminiClient(http, tls_stream.url, seen, reading)
+
+    monkeypatch.setattr(routing, "_class_request", lambda *args: ("class:deep", "owner", {}, None, "class:deep"))
+    monkeypatch.setattr(routing, "_prepare", lambda *args: (
+        {"provider": "gemini", "model": "deep", "api_mode": "chat_completions", "base_url": ""}, sync_client, {}))
+    received: list = []
+
+    async def relay(client, kwargs, *, create, **_):
+        return await create(kwargs)
+
+    async def acreate(client, kwargs, task=None, **_):  # the real _to_async_client: AsyncGeminiNativeClient
+        async for chunk in await client.chat.completions.create(**kwargs, stream=True):
+            received.append(chunk)
+
+    monkeypatch.setattr(aux, "_relay_async_completion", relay)
+    monkeypatch.setattr(aux, "_acreate_with_progress", acreate)
+
+    async def owner() -> bool:
+        call = asyncio.ensure_future(routing.class_routed_async(lambda *a, **k: None)(task="compression", messages=[]))
+        assert await asyncio.to_thread(reading.wait, 15), "the stream step never started reading"
+        call.cancel()  # mid-stream: the first chunk arrived, the second step's worker is blocked in the read
+        try:
+            await call
+        except asyncio.CancelledError:
+            return True
+        return False
+
+    loop = asyncio.new_event_loop()  # not asyncio.run: its executor shutdown would wait for the stalled worker
+    try:
+        assert loop.run_until_complete(owner())
+        header = _header_after_fd_reuse(tmp_path, seen["fd"], tls_stream, seen["returned"])
+    finally:
+        tls_stream.resume.set()
+        loop.run_until_complete(loop.shutdown_default_executor())
+        loop.close()
+    assert received == ["first"]
+    assert header[:16] == SQLITE_MAGIC, f"TLS bytes landed in the SQLite header: {header!r}"
+    # Closed once, directly, by the stream step's worker: never the loop thread, never another executor thread.
+    assert sync_client.closed_on == [seen["thread"].name]
+    assert "handed to 1 abandoned provider daemon(s) (tcp_shutdown=1)" in caplog.text  # GeminiNativeClient._http
     assert http.is_closed
 
 
