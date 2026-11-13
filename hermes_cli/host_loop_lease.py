@@ -42,7 +42,8 @@ home, so profile processes of one install share one owner.
   fixed block so a shorter record never leaves the old one's tail; lock-free readers (standby probe,
   :func:`holders`) still retry a read once when it does not parse.
 * **Kill switch** ``HERMES_HOST_LOOP_LEASE=0``: ``held()`` is always True (every process runs its own
-  pass, the behaviour before this lease).
+  pass, the behaviour before this lease). ``exclusive()`` is False then and when the lease fails open:
+  a loop that gives its holder more (wake slots, every profile store) gates that on ``exclusive()``.
 * **Unavailable lock** (no ``fcntl``, a directory nobody can create the file in, a filesystem without
   flock): the lease fails OPEN, ``held()`` True, logged once. Duplicated passes are today's safe
   behaviour; failing closed would stop the host loops on every process of that home. An existing lock
@@ -255,6 +256,11 @@ class HostLoopLease:
                 return False
             self._become_holder()
             return True
+
+    def exclusive(self) -> bool:
+        """True only while this process really holds the lock: False under the kill switch and when the lease
+        failed open, where ``held()`` is True in every process. Size per-holder capacity on this, not ``held()``."""
+        return enabled() and self._held
 
     def beat(self) -> None:
         """End of a pass: refresh the heartbeat, then hand off to a live higher-priority ``.want``."""

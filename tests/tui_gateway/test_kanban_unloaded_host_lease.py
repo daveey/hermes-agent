@@ -51,6 +51,9 @@ class _Lease:
     def beat(self) -> None:
         self.beats += 1
 
+    def exclusive(self) -> bool:
+        return self._held
+
 
 def _record_passes(monkeypatch, live: frozenset[str] | set[str] = frozenset()):
     """Stub every pass of the loop; return the list of (pass, kwargs) calls."""
@@ -221,6 +224,67 @@ def test_the_host_pass_retries_killed_notices_in_every_profile_store(monkeypatch
     assert seen == ["default-store", "work-store"]
 
 
+def _killed_notice_stores(monkeypatch) -> list:
+    """Stub every pass but the killed-notice retry; return the stores it retries in."""
+    from tui_gateway import server
+    seen = []
+    monkeypatch.setattr(ku, "live_session_ids", set)
+    monkeypatch.setattr(ku, "sweep_remote_once", lambda ids, **k: [])
+    monkeypatch.setattr(ku, "sweep_once", lambda ids, **k: [])
+    monkeypatch.setattr(du, "sweep_once", lambda **k: [])
+    monkeypatch.setattr(nf, "card_change_pass", lambda **k: [])
+    monkeypatch.setattr(ng, "guarantee_pass", lambda **k: [])
+    monkeypatch.setattr(ng, "_stores", lambda: iter(["default-store", "work-store"]))
+    monkeypatch.setattr(server, "_get_db", lambda: "own-store")
+    monkeypatch.setattr(rn, "retry_pending_killed_notices", lambda store, **k: seen.append(store) or [])
+    return seen
+
+
+def test_the_lease_holder_retries_killed_notices_in_every_store(monkeypatch):
+    seen = _killed_notice_stores(monkeypatch)
+    assert ku.run_pass(_Lease(True)) == "host"
+    assert seen == ["default-store", "work-store"]
+
+
+def test_kill_switch_retries_killed_notices_only_in_its_own_store(monkeypatch, tmp_path):
+    """HERMES_HOST_LOOP_LEASE=0 is an exact rollback: every process retries its own store, as before the lease."""
+    monkeypatch.setenv(hll.KILL_SWITCH_ENV, "0")
+    seen = _killed_notice_stores(monkeypatch)
+    lease = hll.HostLoopLease(ku.LEASE_NAME, "serve", interval=30, home=tmp_path)
+
+    assert ku.run_pass(lease) == "host"
+
+    assert seen == ["own-store"]
+
+
+def test_a_fail_open_lease_retries_killed_notices_only_in_its_own_store(monkeypatch, tmp_path):
+    monkeypatch.setattr(hll, "fcntl", None)
+    seen = _killed_notice_stores(monkeypatch)
+    lease = hll.HostLoopLease(ku.LEASE_NAME, "serve", interval=30, home=tmp_path)
+
+    assert ku.run_pass(lease) == "host"
+
+    assert seen == ["own-store"]
+
+
+# -- a host pass that raises still beats ---------------------------------------------------------------------------
+
+
+def test_a_host_pass_that_raises_still_beats(monkeypatch):
+    """Without the beat the watchdog drops the lease after 3x interval and the .want hand-off is skipped."""
+    _record_passes(monkeypatch)
+
+    def boom(**_k):
+        raise RuntimeError("card change pass failed")
+    monkeypatch.setattr(nf, "card_change_pass", boom)
+    lease = _Lease(True)
+
+    with pytest.raises(RuntimeError):
+        ku.run_pass(lease)
+
+    assert lease.beats == 1
+
+
 # -- wake slots ----------------------------------------------------------------------------------------------------
 
 
@@ -233,6 +297,30 @@ def test_the_holder_gets_eight_wake_slots_and_a_standby_its_base(monkeypatch):
     assert ku._wake_slots.limit == 3
     ku.run_pass(_Lease(False))
     assert ku._wake_slots.limit == ku.MAX_PARALLEL_WAKES and ng._wake_slots.limit == ng.MAX_PARALLEL_WAKES
+
+
+def test_a_fail_open_lease_keeps_the_base_wake_slots(monkeypatch, tmp_path):
+    """No usable lock: held() is True in every process, so none of them may take the holder's 8 slots."""
+    _record_passes(monkeypatch)
+    monkeypatch.setattr(hll, "fcntl", None)
+    a = hll.HostLoopLease(ku.LEASE_NAME, "serve", interval=30, home=tmp_path)
+    b = hll.HostLoopLease(ku.LEASE_NAME, "dashboard", interval=30, home=tmp_path)
+
+    assert ku.run_pass(a) == "host" and ku.run_pass(b) == "host"
+
+    assert ku._wake_slots.limit == ku.MAX_PARALLEL_WAKES and ng._wake_slots.limit == ng.MAX_PARALLEL_WAKES
+    assert not a.exclusive() and not b.exclusive()
+
+
+def test_a_real_lease_holder_gets_the_holder_wake_slots(monkeypatch, tmp_path):
+    _record_passes(monkeypatch)
+    lease = hll.HostLoopLease(ku.LEASE_NAME, "serve", interval=30, home=tmp_path)
+    try:
+        assert ku.run_pass(lease) == "host"
+        assert lease.exclusive() and ku._wake_slots.limit == wake_slots.HOLDER_SLOTS
+    finally:
+        lease.release()
+    assert not lease.exclusive()
 
 
 def test_slot_exhaustion_rewinds_the_claim_and_retries_instead_of_a_passive_row(tmp_path, monkeypatch):
@@ -342,3 +430,32 @@ def test_process_role(monkeypatch, kind, desktop, role):
     monkeypatch.setattr(smp, "current_process_kind", lambda: kind)
     monkeypatch.setattr(process_identity, "is_desktop_owned_backend", lambda argv=None: desktop)
     assert hll.process_role() == role
+
+
+# -- notice_fanout_state: one connection per process ---------------------------------------------------------------
+
+
+def test_notice_fanout_state_opens_its_store_once_per_process(monkeypatch, tmp_path):
+    """Every get/set used to open a connection and rerun PRAGMA journal_mode + the schema script."""
+    import sqlite3
+
+    from tui_gateway import notice_fanout_state as nfs
+    monkeypatch.setattr(nfs, "path", lambda: tmp_path / "kanban" / nfs.FILENAME)
+    nfs.reset_for_tests()
+    opened = []
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(nfs.sqlite3, "connect", lambda *a, **k: opened.append(a) or real_connect(*a, **k))
+    try:
+        for board in ("default", "work", "household"):
+            nfs.set_cursor(board, (nfs.get_cursor(board) or 0) + 1)
+        nfs.seed_remote({"chat": frozenset({("k", "running")})})
+        nfs.ack_remote({"chat": frozenset({("k", "done")})})
+        assert nfs.load_remote() == {"chat": frozenset({("k", "done")})}
+        assert [nfs.get_cursor(b) for b in ("default", "work", "household")] == [1, 1, 1]
+
+        assert len(opened) == 1
+
+        nfs.forget_memory_for_tests()  # a fresh process opens it again and reads the durable state
+        assert nfs.get_cursor("work") == 1 and len(opened) == 2
+    finally:
+        nfs.reset_for_tests()

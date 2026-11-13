@@ -41,7 +41,9 @@ holder starts up to ``wake_slots.HOLDER_SLOTS`` (8) wakes per pass kind instead 
 claim is rewound and the next pass retries (``deferred:slots``) instead of writing a passive row, until the notice
 is ``OVERDUE_S`` old (then the row is written, as before). The per-chat wake budget
 (``HERMES_KANBAN_UNLOADED_WAKES_PER_HOUR``) is counted by the holder, so it is now in effect host-wide; a hand-off
-starts it afresh. ``HERMES_HOST_LOOP_LEASE=0`` restores the per-process passes (every process its own host pass).
+starts it afresh. ``HERMES_HOST_LOOP_LEASE=0`` restores the per-process passes (every process its own host pass,
+with its base wake slots and the killed-subagent retry over its own store only); a lease that failed open does the
+same, since ``held()`` is then True in every process (``lease.exclusive()`` is False).
 [daveey]
 """
 
@@ -670,8 +672,10 @@ def sweep_remote_once(live_ids: set[str], *, grace_s: float = GRACE_S, **kwargs)
     return sweep_remote_notices(live_ids=live_ids, waker=_RemoteWaker(wake_turn, _spawn_thread, grace_s), **kwargs)
 
 
-def host_pass(grace: float = GRACE_S) -> None:
-    """Everything this loop does for the whole install; run by the ``kanban-unloaded`` lease holder only."""
+def host_pass(grace: float = GRACE_S, *, every_store: bool = True) -> None:
+    """Everything this loop does for the whole install; run by the ``kanban-unloaded`` lease holder only.
+    ``every_store=False`` (kill switch, lease failed open: every process runs this) retries killed-subagent
+    notices in this process's own store only."""
     try:
         sweep_remote_once(live_session_ids(), grace_s=grace)
         sweep_once(live_session_ids(), grace_s=grace)
@@ -690,9 +694,15 @@ def host_pass(grace: float = GRACE_S) -> None:
     card_change_pass()
     # [daveey] A parent that was mid-turn when the orphan reap killed its subagent refused that notice: re-offer
     # it before the guarantee pass, so the same tick can wake the parent on it (desktop-ac1b365935). Every
-    # profile store, since one holder now retries for the whole install.
-    from tui_gateway.reap_notices import retry_pending_killed_notices_all
-    retry_pending_killed_notices_all()
+    # profile store, since one holder now retries for the whole install; without a real lease each process
+    # retries its own store, as before the lease.
+    if every_store:
+        from tui_gateway.reap_notices import retry_pending_killed_notices_all
+        retry_pending_killed_notices_all()
+    else:
+        from tui_gateway import server
+        from tui_gateway.reap_notices import retry_pending_killed_notices
+        retry_pending_killed_notices(server._get_db())
     guarantee_pass()
 
 
@@ -719,20 +729,23 @@ def make_lease():
 
 
 def run_pass(lease, grace: float = GRACE_S) -> str:
-    """One tick: the host pass while ``lease`` is held (then ``beat()``), else the residual pass. Returns which."""
+    """One tick: the host pass while ``lease`` is held (then ``beat()``, also when the pass raises, so the
+    watchdog keeps the lease and a ``.want`` hand-off still happens), else the residual pass. Returns which.
+
+    Only a lease really held (``exclusive()``: not the kill switch, not failed open) gets the holder's wake
+    slots and retries killed-subagent notices in every profile store; a process that runs the host pass only
+    because every process does keeps its base slots and its own store, as before the lease."""
     holder = lease.held()
-    wake_slots.set_holder(holder and _lease_on())
+    exclusive = holder and lease.exclusive()
+    wake_slots.set_holder(exclusive)
     if holder:
-        host_pass(grace)
-        lease.beat()
+        try:
+            host_pass(grace, every_store=exclusive)
+        finally:
+            lease.beat()
         return "host"
     residual_pass()
     return "residual"
-
-
-def _lease_on() -> bool:
-    from hermes_cli.host_loop_lease import enabled
-    return enabled()
 
 
 def _loop(stop: threading.Event) -> None:

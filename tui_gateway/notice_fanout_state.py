@@ -5,7 +5,8 @@ The card-change pass keeps, per board, the last ``task_events`` id it read and, 
 the changes of one interval were never fanned out. Under the host loop lease (design t_01a1d45d75851804 §2b, R3) the
 pass moves between processes on every hand-off (gateway restart, a Desktop backend taking over), so each hand-off
 would drop an interval. Both now live in ``<kanban home>/kanban/notice-fanout.db``, shared by every process of the
-install; the next holder resumes where the last one stopped.
+install; the next holder resumes where the last one stopped. Each process opens the store once (one connection per
+path and pid, PRAGMA + schema at open) and reuses it; a failed statement drops it so the next call reopens.
 
 Writes are last-writer-wins: with the lease off every process runs the pass, and two passes over the same
 interval write the same (idempotent) refreshes. A store that cannot be opened (read-only home, disk error) falls
@@ -17,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -36,6 +38,9 @@ _mu = threading.Lock()
 # Fallback when the durable store is unavailable (per path, so a test home or HERMES_KANBAN_HOME switch is apart).
 _memory: dict[str, dict] = {}
 _warned: set[str] = set()
+# One connection per (path, pid), opened (PRAGMA + schema) once: the pass reads and writes a cursor per board per
+# tick. Keyed by pid so a forked child never shares its parent's connection; used only under ``_mu``.
+_conns: dict[tuple[str, int], sqlite3.Connection] = {}
 
 Snapshot = dict[str, frozenset[tuple[str, str]]]
 
@@ -51,23 +56,41 @@ def _mem(where: Path) -> dict:
 
 @contextlib.contextmanager
 def _open() -> Iterator[Optional[sqlite3.Connection]]:
+    """This process's connection to the store (caller holds ``_mu``), or None when it cannot be opened."""
     where = path()
-    conn: Optional[sqlite3.Connection] = None
-    try:
-        where.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(where), timeout=5.0, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA)
-    except (OSError, sqlite3.Error) as exc:
-        if conn is not None:
+    key = (str(where), os.getpid())
+    conn = _conns.get(key)
+    if conn is None:
+        try:
+            where.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(where), timeout=5.0, isolation_level=None, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(_SCHEMA)
+        except (OSError, sqlite3.Error) as exc:
+            if conn is not None:
+                conn.close()
+                conn = None
+            _warn_once(where, exc)
+        else:
+            _conns[key] = conn
+    yield conn
+
+
+def _failed(exc: BaseException) -> None:
+    """A statement failed: warn once and drop the cached connection, so the next call opens a fresh one."""
+    where = path()
+    _warn_once(where, exc)
+    conn = _conns.pop((str(where), os.getpid()), None)
+    if conn is not None:
+        with contextlib.suppress(sqlite3.Error):
             conn.close()
-            conn = None
-        _warn_once(where, exc)
-    try:
-        yield conn
-    finally:
-        if conn is not None:
-            conn.close()
+
+
+def _close_all() -> None:
+    for key in [k for k in _conns if k[1] == os.getpid()]:
+        with contextlib.suppress(sqlite3.Error):
+            _conns.pop(key).close()
+    _conns.clear()
 
 
 def _warn_once(where: Path, exc: BaseException) -> None:
@@ -84,7 +107,7 @@ def get_cursor(ident: str) -> Optional[int]:
         try:
             row = conn.execute("SELECT cursor FROM cursors WHERE ident = ?", (ident,)).fetchone()
         except sqlite3.Error as exc:
-            _warn_once(path(), exc)
+            _failed(exc)
             return _mem(path())["cursors"].get(ident)
         return int(row[0]) if row else None
 
@@ -98,7 +121,7 @@ def set_cursor(ident: str, cursor: int) -> None:
             conn.execute("INSERT INTO cursors (ident, cursor) VALUES (?, ?) "
                          "ON CONFLICT(ident) DO UPDATE SET cursor = excluded.cursor", (ident, int(cursor)))
         except sqlite3.Error as exc:
-            _warn_once(path(), exc)
+            _failed(exc)
 
 
 def _decode(raw: str) -> frozenset[tuple[str, str]]:
@@ -122,7 +145,7 @@ def load_remote() -> Optional[Snapshot]:
                 return None
             return {str(chat): _decode(cards) for chat, cards in conn.execute("SELECT chat, cards FROM remote_snapshot")}
         except sqlite3.Error as exc:
-            _warn_once(path(), exc)
+            _failed(exc)
             return _mem(path())["remote"]
 
 
@@ -142,7 +165,7 @@ def seed_remote(snapshot: Snapshot) -> None:
         except sqlite3.Error as exc:
             with contextlib.suppress(sqlite3.Error):
                 conn.execute("ROLLBACK")
-            _warn_once(path(), exc)
+            _failed(exc)
 
 
 def ack_remote(acked: dict[str, Optional[frozenset[tuple[str, str]]]]) -> None:
@@ -171,13 +194,14 @@ def ack_remote(acked: dict[str, Optional[frozenset[tuple[str, str]]]]) -> None:
         except sqlite3.Error as exc:
             with contextlib.suppress(sqlite3.Error):
                 conn.execute("ROLLBACK")
-            _warn_once(path(), exc)
+            _failed(exc)
 
 
 def forget_memory_for_tests() -> None:
-    """Drop this process's memory only (a hand-off to a fresh process keeps the durable state)."""
+    """Drop this process's memory and connection only (a hand-off to a fresh process keeps the durable state)."""
     with _mu:
         _memory.clear()
+        _close_all()
 
 
 def reset_for_tests() -> None:
@@ -185,6 +209,7 @@ def reset_for_tests() -> None:
     with _mu:
         _memory.clear()
         _warned.clear()
+        _close_all()
         with contextlib.suppress(OSError):
             for suffix in ("", "-wal", "-shm"):
                 Path(str(path()) + suffix).unlink(missing_ok=True)
