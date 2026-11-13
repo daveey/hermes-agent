@@ -61,7 +61,12 @@ def defer_owned_job_cleanup(task_id: str, path: Path | str) -> bool:
 
     A bounded incomplete scan fails closed. No cached verdict: a stale tag or
     exited PID cannot retain a directory on the next successful GC pass.
+    An explicit ``kanban.scratch_gc_preserve`` pin vetoes first. [daveey]
     """
+    from hermes_cli.kanban_scratch_preserve import preserved
+    if preserved(task_id, path):
+        log.info('Deferring scratch cleanup for %s: pinned by kanban.scratch_gc_preserve', task_id)
+        return True
     path = Path(path)
     try:
         if not stat.S_ISDIR(path.lstat().st_mode):

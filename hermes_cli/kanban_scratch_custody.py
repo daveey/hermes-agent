@@ -38,11 +38,17 @@ def receipts(conn):
 
 
 def retain(conn, task_id):
-    """Inside eviction's transaction: only explicit scratch paths, never defaults."""
+    """Inside eviction's transaction: explicit scratch paths, or the default ``<root>/<id>`` tree when the
+    row's path is NULL and that tree exists (it is the only place the task's scratch can be)."""
     row = conn.execute("SELECT workspace_kind, workspace_path FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if not row or row["workspace_kind"] != "scratch" or not row["workspace_path"]:
+    if not row or row["workspace_kind"] != "scratch":
         return
-    path = Path(row["workspace_path"]).expanduser()
+    if row["workspace_path"]:
+        path = Path(row["workspace_path"]).expanduser()
+    else:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_worktree_gc import _board_slug
+        path = kb.workspaces_root(board=_board_slug(conn)) / task_id
     # A missing or non-directory path has nothing to retain: skip rather than record it.
     if not path.is_absolute() or path.is_symlink() or not path.is_dir() or not ws._is_managed_scratch_path(path):
         return
@@ -154,19 +160,35 @@ def discover_legacy(conn, board):
                          (task_id, str(path), json.dumps(evidence, sort_keys=True)))
 
 
-def _terminal(hub, board, task_id):
+def _num(value):
+    return type(value) in (int, float) and value > 0
+
+
+def _terminal(hub, board, task_id, runs=()):
+    """Fresh Board terminal evidence, or None. The returned row carries ``retention_at``: its
+    ``completed_at``, or for an ``archived`` row the Board never completed (``completed_at`` null) the
+    newest of the row's ``updated_at`` (ms) and the latest ended run in *runs*."""
     evidence = hub.row_evidence(board, "tasks", task_id)
     row = evidence.get("row")
     if (evidence.get("table") != "tasks" or evidence.get("uid") != task_id
             or type(evidence.get("head")) is not int or evidence.get("state") != "live"
             or not isinstance(row, dict) or row.get("uid") != task_id
             or row.get("status") not in ("done", "archived")
-            or type(row.get("completed_at")) not in (int, float) or row["completed_at"] <= 0
             or "lease_holder" not in row or "lease_expires" not in row):
+        return None
+    if _num(row.get("completed_at")):
+        retention_at = row["completed_at"]
+    elif row["status"] == "archived" and row.get("completed_at") is None:
+        clocks = [row["updated_at"] / 1000] if _num(row.get("updated_at")) else []
+        clocks += [r["ended_at"] for r in runs if _num(r.get("ended_at"))]
+        if not clocks:
+            return None
+        retention_at = max(clocks)
+    else:
         return None
     if row["lease_holder"] is not None and (not row["lease_expires"] or row["lease_expires"] > time.time() * 1000):
         return None
-    return row
+    return dict(row, retention_at=retention_at)
 
 
 def _legacy_unchanged(receipt):
@@ -263,7 +285,7 @@ def terminal_owner(hub, board, receipt):
             return None
     except (ValueError, KeyError, TypeError):
         return None
-    return _terminal(hub, board, receipt["task_id"])
+    return _terminal(hub, board, receipt["task_id"], runs=json.loads(receipt["evidence"])["runs"])
 
 
 def removal_guard(conn, receipt):
@@ -309,7 +331,8 @@ def _remove(conn, receipt, owner, days, board, refusals=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_scratch_archive as sa
     tid, path = receipt["task_id"], Path(receipt["workspace_path"])
-    eligible_at = owner["completed_at"] + days * 86400
+    since = owner["retention_at"]  # completed_at, or the archived-without-completion clock (_terminal)
+    eligible_at = since + days * 86400
     log.info("Scratch custody: task=%s path=%s verified_terminal=%s eligible_at=%s",
              tid, path, owner["status"], eligible_at)
     if days <= 0 or eligible_at > time.time() or not _safe(conn, receipt, path):
@@ -320,14 +343,14 @@ def _remove(conn, receipt, owner, days, board, refusals=None):
         key = f"custody:{tid}"
         if refusals is not None:
             from hermes_cli.kanban_scratch_backoff import skip_logged
-            if skip_logged(refusals, key, path, owner["completed_at"], tid):
+            if skip_logged(refusals, key, path, since, tid):
                 return 0
         try:
             archive = sa.archive_workspace(path, kb.kanban_home() / "archive" / "scratch" / board / tid,
-                                           task_id=tid, completed_at=owner["completed_at"])
+                                           task_id=tid, completed_at=since)
         except (OSError, ValueError, sa.ArchiveRefused, subprocess.SubprocessError) as exc:
             if refusals is not None:
-                refusals.record(key, path, owner["completed_at"], str(exc))
+                refusals.record(key, path, since, str(exc))
             raise
         if refusals is not None:
             refusals.clear(key)
@@ -376,18 +399,33 @@ def gc_custody(conn, days, *, budget=None, refusals=None):
     from hermes_cli import kanban_sync_client as client
     from hermes_cli.kanban_worktree_gc import _board_slug
     from hermes_cli.kanban_scratch_archive import ArchiveRefused
+    from hermes_cli.kanban_scratch_preserve import preserved
     if conn.in_transaction:
         return 0
     board = _board_slug(conn)
     removed = 0
     try:
         discover_legacy(conn, board)
+        from hermes_cli import kanban_scratch_custody_discovery as discovery
+        unowned = discovery.candidates(conn, board)
         rows = receipts(conn)
-        if not rows:
+        if not rows and not unowned:
             return 0
         hub = client.Hub(client.load_identity())
+        if unowned:
+            try:
+                discovery.discover(conn, board, hub, unowned)
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, client.HubError,
+                    client.SyncUnavailable, client.Resync) as exc:
+                # Fail closed: undiscovered trees stay owner_unverified; existing receipts still run.
+                log.warning("Scratch custody discovery stopped: board evidence unavailable (%s)", exc)
+            rows = receipts(conn)
         for receipt in rows:
             try:
+                if preserved(receipt["task_id"], receipt["workspace_path"]):
+                    log.info("Scratch custody preserved: task=%s path=%s reason=scratch_gc_preserve",
+                             receipt["task_id"], receipt["workspace_path"])
+                    continue
                 if not Path(receipt["workspace_path"]).is_dir():
                     # Nothing to reclaim: skip before any Board call; the receipt stays as evidence.
                     log.info("Scratch custody skipped: task=%s path=%s reason=path_unavailable",
@@ -401,7 +439,8 @@ def gc_custody(conn, days, *, budget=None, refusals=None):
                     budget.defer()
                     continue
                 try:
-                    owner = _terminal(hub, board, receipt["task_id"])
+                    owner = _terminal(hub, board, receipt["task_id"],
+                                      runs=json.loads(receipt["evidence"])["runs"])
                 except (OSError, client.SyncUnavailable, client.Resync) as exc:
                     # Unavailable authority: stop rather than repeat the failure for every receipt.
                     log.warning("Scratch custody preserved: task=%s path=%s reason=board_unavailable "
