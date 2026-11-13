@@ -223,3 +223,63 @@ def test_a_worker_node_does_not_copy_a_ready_card_whose_parent_is_open(kanban_ho
         assert {r["id"] for r in wn.candidates(replica, OTHER)} == {"t_c", "t_free"}
     finally:
         replica.close()
+
+
+# --- synced board: the mirror's silence counts only when its replica is at the feed head ----------------------
+# 2026-11-12, David-MBP: a sync round stuck for hours in a long pull never refreshed the remote-parent mirror, so two
+# rework cards whose parents were done on the Board were blocked "parent ... missing" and two repair cards filed.
+
+def _stamp_replica(at):
+    replica = kbc.connect(ksc.shadow_path(BOARD))
+    try:
+        with kbc.write_txn(replica):
+            replica.execute("UPDATE kanban_sync_state SET pulled_at = ?", (at,))
+    finally:
+        replica.close()
+
+
+def _repairs(conn, child):
+    return conn.execute("SELECT id FROM tasks WHERE created_by = 'missing-parent-detector' AND title LIKE ?",
+                        (f"%{child}",)).fetchall()
+
+
+def _age_streak(conn, child):
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE task_events SET created_at = created_at - ? WHERE task_id = ? AND kind = 'parent_missing'",
+                     (kb.PARENT_MISSING_BLOCK_SECONDS + 1, child))
+
+
+def test_a_stale_replica_never_starts_or_expires_a_missing_parent_streak(live, svc, kanban_home):
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)  # the replica exists and holds the Board
+    _link_raw(live, "t_after_offline", child)  # a foreign parent the stalled round never mirrored
+    _stamp_replica(time.time() - kb.PARENT_MISSING_BLOCK_SECONDS - 1)  # last reached the feed head > 10 min ago
+    assert kb.parent_states(live, child) == [("t_after_offline", None)]
+    kb.recompute_ready(live)
+    assert not _events(live, child, "parent_missing")  # before the fix: the streak started from stale evidence
+    assert kb.get_task(live, child).status == "todo"  # an unknown parent still gates
+    # A streak begun while the replica was fresh is not expired by a replica that has since gone stale.
+    with kbc.write_txn(live):
+        kb._append_event(live, child, "parent_missing", {"parents": ["t_after_offline"]})
+    _age_streak(live, child)
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "todo" and not _events(live, child, "blocked")
+    assert not _repairs(live, child)
+
+
+def test_a_fresh_replica_that_lacks_the_parent_still_blocks_and_files_one_repair(live, svc, kanban_home):
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    _link_raw(live, "t_ghost", child)
+    _stamp_replica(time.time())  # at the feed head now: the Board really has no t_ghost
+    kb.recompute_ready(live)
+    assert len(_events(live, child, "parent_missing")) == 1
+    assert kb.get_task(live, child).status == "todo"
+    _age_streak(live, child)
+    kb.recompute_ready(live)
+    t = kb.get_task(live, child)
+    assert (t.status, t.block_kind) == ("blocked", "transient")
+    [(payload, _at)] = _events(live, child, "blocked")
+    assert "parent t_ghost missing from this board" in payload
+    kb.recompute_ready(live)
+    assert len(_repairs(live, child)) == 1

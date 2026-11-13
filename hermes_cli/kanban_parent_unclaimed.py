@@ -154,9 +154,13 @@ _CANDIDATES = (
 def sweep(conn, *, now: Optional[float] = None) -> int:
     """Append the once-per-wait notice for every qualifying (child, parent); returns how many were appended."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_replica_freshness import local_copy_stale
     now = time.time() if now is None else now
     posted = 0
-    for row in conn.execute(_CANDIDATES).fetchall():
+    rows = conn.execute(_CANDIDATES).fetchall()
+    if rows and local_copy_stale(conn, "parent-unclaimed notice"):  # a stale copy's "unclaimed" proves nothing
+        return 0
+    for row in rows:
         wait = conn.execute(
             "SELECT id, created_at FROM task_events WHERE task_id = ? AND kind = 'dependency_wait' "
             "ORDER BY id DESC LIMIT 1", (row["child"],)).fetchone()

@@ -1931,7 +1931,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     remote = _sync.has_remote_parents(conn)
     releases = kanban_review_release.prepare(conn, failure_limit)
     with write_txn(conn):
-        copies = foreign_ids(conn)
+        copies, fresh = foreign_ids(conn), {}  # fresh: the mirror-freshness verdict, read once per pass
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked') OR ("
@@ -1951,7 +1951,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             if recovery_held(conn, row, failure_limit):
                 continue
             states = parent_states(conn, task_id, remote=remote)
-            if cur_status == "todo" and _note_missing_parents(conn, task_id, states):
+            if cur_status == "todo" and _note_missing_parents(conn, task_id, states, remote=remote, fresh=fresh):
                 continue
             if all(st in ("done", "archived") for _pid, st in states):
                 resume_status = _resume_status_from_events(conn, task_id)
@@ -2005,13 +2005,13 @@ def parent_states(
 
 
 def _note_missing_parents(
-    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]],
+    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]], *, remote=False, fresh=None,
 ) -> bool:
     """Inside :func:`recompute_ready`'s txn, for a ``todo`` child: record when a parent goes missing
     (``parent_missing`` event, once per streak), clear the streak when it comes back (``parent_found``), and block
-    the child after :data:`PARENT_MISSING_BLOCK_SECONDS`. True when the child was blocked here."""
+    the child after :data:`PARENT_MISSING_BLOCK_SECONDS` (synced: fresh mirror only). True when blocked here."""
     from hermes_cli.kanban_db_graph import note_missing_parents
-    return note_missing_parents(conn, task_id, states)
+    return note_missing_parents(conn, task_id, states, remote=remote, fresh=fresh)
 
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:

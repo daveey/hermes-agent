@@ -18,6 +18,14 @@ without bound; on an ``off``/disabled board the replica stays on disk while pull
   stalled sync loop stops both copies, so the row gap alone cannot see it).
 - :func:`newer_rows`: the replica's rows of some cards where they carry a newer Board revision (``sync_version``)
   than the live rows.
+
+Absence judgements read the replica's own freshness instead (t_01a1d36dcde2b6ed, 2026-11-12, David-MBP: a sync round
+stuck in a ~75k-change pull left the remote-parent mirror old, and the missing-parent detector blocked two rework
+cards whose parents were done on the Board and filed repair cards):
+
+- :func:`replica_at_head`: the replica last pulled to the feed head within :data:`FRESH_SECONDS` on the same board.
+  The missing-parent detector (``kanban_db_graph.note_missing_parents``) fails closed on it: no proof, no block.
+- :func:`local_copy_stale`: the parent-unclaimed notice waits while a synced board's replica shows lag.
 """
 from __future__ import annotations
 
@@ -142,3 +150,55 @@ def moved_past(row: Optional[dict[str, Any]]) -> Optional[str]:
     if row.get("ready_since") and row.get("live_ready_since") and row["ready_since"] != row["live_ready_since"]:
         return f"replica has a later ready episode (revision {row['sync_version']})"
     return None
+
+
+# --- absence judgements: is the replica itself at the feed head? (t_01a1d36dcde2b6ed) ---------------------------
+
+# The last pull must have reached the feed head this recently.
+FRESH_SECONDS = REPLICA_STALE_SECONDS
+
+
+def replica_at_head(conn: sqlite3.Connection) -> bool:
+    """Whether the replica of ``conn``'s synced board last pulled to the feed head within :data:`FRESH_SECONDS`, on
+    the same board. A missing, unreadable, other-board, unstamped or future-stamped replica is not at head."""
+    return _replica_at_head(conn) is True
+
+
+def _replica_at_head(conn: sqlite3.Connection):
+    """True/False as :func:`replica_at_head`; None when there is no readable replica to judge by."""
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from hermes_cli.kanban_foreign_card import open_replica
+
+    try:
+        local = conn.execute("SELECT board_id FROM kanban_sync_state LIMIT 1").fetchone()
+        if local is None:
+            return None
+        with open_replica(_main_db_file(conn)) as replica:
+            if replica is None:
+                return None
+            state = replica.execute("SELECT board_id, pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    if state is None or state["board_id"] != local["board_id"]:
+        return False
+    pulled = state["pulled_at"]
+    return type(pulled) in (int, float) and 0 <= time.time() - pulled <= FRESH_SECONDS
+
+
+def synced(conn: sqlite3.Connection) -> bool:
+    """Whether ``conn`` is a board the Board service syncs (mode ``primary`` or ``shadow``)."""
+    try:
+        row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None and row["mode"] in ("primary", "shadow")
+
+
+def local_copy_stale(conn: sqlite3.Connection, what: str) -> bool:
+    """True (and one DEBUG line naming ``what``) when ``conn`` is a synced board whose replica shows it is not at
+    the feed head. An unsynced board is its own authority, and with no readable replica there is no evidence of
+    lag: both are never stale here (a notice is a report, unlike the missing-parent block, which needs proof)."""
+    if not synced(conn) or _replica_at_head(conn) is not False:
+        return False
+    _log.debug("%s: local copy not at the feed head; deferring to the next tick", what)
+    return True

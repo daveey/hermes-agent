@@ -1,19 +1,37 @@
 """Task graph initialization and atomic decomposition persistence."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from typing import Any, Optional
 
+_log = logging.getLogger(__name__)
+
+
 def note_missing_parents(
-    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]],
+    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]], *,
+    remote: bool = False, fresh: Optional[dict] = None,
 ) -> bool:
-    """Track a missing-parent streak inside the home gateway's readiness transaction."""
+    """Track a missing-parent streak inside the home gateway's readiness transaction.
+
+    On a synced board (``remote``) a parent with no status is unknown, not missing, unless the mirror's replica is
+    at the feed head (``kanban_replica_freshness.replica_at_head``, read once per readiness pass into ``fresh``):
+    otherwise no streak event is recorded and nothing is blocked. The child still waits: an unknown parent gates."""
     from hermes_cli import kanban_db as kb
 
     if not states:
         return False
     missing = [pid for pid, st in states if st is None]
+    if missing and remote:
+        from hermes_cli.kanban_replica_freshness import replica_at_head
+        cache = {} if fresh is None else fresh
+        if "fresh" not in cache:
+            cache["fresh"] = replica_at_head(conn)
+            if not cache["fresh"]:
+                _log.debug("parent status unknown: replica not at head")
+        if not cache["fresh"]:
+            return False
     last = conn.execute(
         "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN ('parent_missing', 'parent_found') "
         "ORDER BY id DESC LIMIT 1", (task_id,),
