@@ -142,12 +142,13 @@ class GatewaySessionStore:
         return sid
 
     def set_current(self, snapshot):
-        """Open ``snapshot`` (``None``: none); a move off the current one runs the switch listeners."""
-        if snapshot is not self.current:
+        """Open ``snapshot`` (``None``: none); a move off the current one runs the switch listeners. The
+        new session is current before they run, so a pump-thread settle racing them sees the move."""
+        moved, self.current = snapshot is not self.current, snapshot
+        if moved:
             listeners, self.switch_listeners = self.switch_listeners, []
             for listener in listeners:
                 listener()
-        self.current = snapshot
 
     def attach(self, session_id, *, typed=False):
         """``session.resume`` once per session id this viewer uses (idempotent), carrying this CLI's launch

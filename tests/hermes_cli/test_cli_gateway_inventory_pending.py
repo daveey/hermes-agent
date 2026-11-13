@@ -107,6 +107,20 @@ def test_a_switch_while_pending_never_prints_the_left_sessions_notices(pending_s
     assert host.enabled_toolsets is None  # nor is the left session's toolset list adopted
 
 
+def test_a_settle_racing_the_switch_listeners_sees_the_new_session(pending_store, monkeypatch):
+    """The pump thread can apply the left session's late settled frame while ``set_current`` is still
+    running the switch listeners, before ``left`` claims the wait: the switch must already show the new
+    session as current, so that settle prints nothing and adopts nothing."""
+    db, client = pending_store
+    host, printed = _launch(monkeypatch, db)
+    db.switch_listeners.insert(0, lambda: _settle_after_switch(db, client))  # runs before ``left``
+    db.attach("local-old")
+    assert printed == [], printed
+    assert host.enabled_toolsets is None
+    assert db.connection.state("local-new").info_listeners == []
+    assert db.switch_listeners == []
+
+
 def test_the_wait_is_dropped_when_the_cli_switches_session(pending_store, monkeypatch):
     db, _client = pending_store
     _launch(monkeypatch, db)
