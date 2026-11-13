@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 SCHEMA = 1
 START, SNAPSHOT, END = QUIET_BOOKKEEPING_VERBS
 UPDATE_WINDOW_MAX_AGE_S = 120  # stricter than hermes_cli.kanban_deploy_window.FRESH_SECONDS (1200)
+# quiet-hold's preflight wants this much freshness left for the observer's spawn + handshake.
+START_PREFLIGHT_MARGIN_S = 30
 _MAX_TEXT = 256
 _ENDED_KEPT = 8
 
@@ -165,6 +167,49 @@ def _digest(token: str) -> bytes:
     return hashlib.sha256(token.encode("utf-8")).digest()
 
 
+# ---- host-file update markers (shared with the lease-free preflight) -------------------------
+
+def _hold_reasons() -> list[str]:
+    try:
+        from gateway.session_notifier_drain import held
+        return ["update_hold"] if held() else []
+    except Exception:  # health: allow BLE001 -- unreadable marker is unknown, never idle
+        return ["update_hold_unreadable"]
+
+
+def _window_status(now: int) -> tuple[dict[str, Any], list[str]]:
+    status: dict[str, Any] = {"collision": False, "window_state": None, "window_age_s": None}
+    try:
+        from hermes_cli import kanban_deploy_window as window
+        record = window.read_window(now)
+    except Exception:  # health: allow BLE001 -- unreadable deploy window is reported as update_window_unavailable (not idle)
+        record = None
+    if record is None:
+        return status, ["update_window_unavailable"]
+    status["window_state"] = record["state"]
+    status["window_age_s"] = now - record["observed_at"]
+    return status, ([] if record["state"] == "idle" else [f"update_window_{record['state']}"])
+
+
+def start_preflight_reasons(*, now: int | None = None, margin_s: int = START_PREFLIGHT_MARGIN_S) -> list[str]:
+    """``quiet-observe-start`` refusals readable from host files alone, before any lease exists.
+
+    The same readers and spellings as :meth:`QuietControl.start` (``update:<reason>``, then
+    ``update_window_stale``), with the freshness bound tightened by ``margin_s`` so a window that
+    would go stale while the observer starts is refused here. Runner-only state (attestation,
+    coverage, drain/restart flags, registry unknowns) is not exposed by any read-only control verb
+    and stays the gateway's own refusal. Advisory: the gateway's start remains authoritative.
+    """
+    now = int(time.time()) if now is None else now
+    status, window_reasons = _window_status(now)
+    reasons = [f"update:{r}" for r in _hold_reasons() + window_reasons]
+    if reasons:
+        return reasons
+    if status["window_age_s"] is None or status["window_age_s"] > UPDATE_WINDOW_MAX_AGE_S - margin_s:
+        return ["update_window_stale"]
+    return []
+
+
 # ---- the handlers --------------------------------------------------------------------------
 
 class QuietControl:
@@ -278,30 +323,13 @@ class QuietControl:
     def _update_status(self) -> tuple[dict[str, Any], list[str]]:
         """Collision with a core update, from the existing typed markers (never English parsing)."""
         runner = self._runner
-        reasons: list[str] = []
-        status: dict[str, Any] = {"collision": False, "window_state": None, "window_age_s": None}
-        try:
-            from gateway.session_notifier_drain import held
-            if held():
-                reasons.append("update_hold")
-        except Exception:  # health: allow BLE001 -- unreadable marker is unknown, never idle
-            reasons.append("update_hold_unreadable")
+        reasons = _hold_reasons()
         if getattr(runner, "_draining", False):
             reasons.append("runner_draining")
         if getattr(runner, "_restart_requested", False):
             reasons.append("restart_requested")
-        try:
-            from hermes_cli import kanban_deploy_window as window
-            record = window.read_window(int(time.time()))
-        except Exception:  # health: allow BLE001 -- unreadable deploy window is reported as update_window_unavailable (not idle)
-            record = None
-        if record is None:
-            reasons.append("update_window_unavailable")
-        else:
-            status["window_state"] = record["state"]
-            status["window_age_s"] = int(time.time()) - record["observed_at"]
-            if record["state"] != "idle":
-                reasons.append(f"update_window_{record['state']}")
+        status, window_reasons = _window_status(int(time.time()))
+        reasons += window_reasons
         status["collision"] = bool(reasons)
         status["reasons"] = reasons
         return status, reasons

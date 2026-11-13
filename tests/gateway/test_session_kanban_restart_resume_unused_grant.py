@@ -302,13 +302,15 @@ def _crash_run(env, svc, tid):
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE run_id=? AND kind='crashed'",
                             (run_id,)).fetchone()[0] == 1
         assert not list(conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE op='release'"))
-        # Feed rows deliberately preserve host-local claim columns. The next dispatcher
-        # sweep clears the dead claim before admission; do not bypass it with SQL.
+        # The feed applying our own queued release clears the dead local claim in the same
+        # transaction (kanban_release_claim), so the leftover sweep has nothing left to release.
+        claim = conn.execute('SELECT claim_lock, worker_pid FROM tasks WHERE id=?', (tid,)).fetchone()
+        assert tuple(claim) == (None, None)
         from hermes_cli import kanban_db_dispatch_claims as claims
         after_grace = time.time() + claims.ORPHAN_CLAIM_GRACE_SECONDS + 1
         with env.monkeypatch.context() as patch:
             patch.setattr(claims, 'time', SimpleNamespace(time=lambda: after_grace))
-            assert claims.release_leftover_local_claims(conn) == [tid]
+            assert claims.release_leftover_local_claims(conn) == []
     assert tid not in svc.board(BOARD)['leases']
     return run_id
 

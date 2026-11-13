@@ -11,6 +11,8 @@ import itertools
 import json
 import sqlite3
 
+import pytest
+
 from hermes_cli import kanban_pickup_stall as kps
 from hermes_cli import kanban_queue_reason as qr
 from hermes_cli import kanban_worker_node as wn
@@ -62,6 +64,29 @@ def test_twenty_minutes_of_flaps_still_post_at_most_three_comments(conn, clock):
     print(f"20 min of same-worker volatile flaps: {comments} comments, {events} events")
     assert comments <= 3 and events <= 5
     assert comments >= 2  # sightings do not hold back the REFRESH_MS comment: its clock runs from the last comment
+
+
+@pytest.mark.parametrize("comment_table", ["kept", "absent (events written before the hold)"])
+def test_a_chain_of_uncommented_events_keeps_the_refresh_clock_at_the_last_comment(conn, clock, comment_table):
+    """Two uncommented events in a row (reservation flips) each carry the comment's time, not the previous event's,
+    so a different volatile picture ``REFRESH_MS`` after the comment is still commented. Without the comment table
+    (a card queued by pre-hold code) the carried ``commented_at_ms`` on the last event is the only record of it."""
+    tid = fixtures.acknowledged(conn)
+    commented_ms = int(clock[0] * 1000)
+    qr.record_reply(conn, tid, "hub", flaps.assigned(commented_ms, flaps.flap(0)))
+    assert flaps.counts(conn, tid) == (1, 1)
+    for minutes, machine in ((2, "worker-3"), (4, WORKER)):  # the Board hands the reservation over and back
+        clock[0] = flaps.T0 + 60 * minutes
+        assert qr.record_reply(conn, tid, "hub", flaps.assigned(int(clock[0] * 1000), flaps.flap(0), machine=machine))
+    assert flaps.counts(conn, tid) == (1, 3)
+    chain = [json.loads(r[0]) for r in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind=? ORDER BY id", (tid, qr.EVENT)).fetchall()[1:]]
+    assert [e[qr.COMMENTED_KEY] for e in chain] == [commented_ms, commented_ms]
+    if comment_table != "kept":
+        conn.execute(f"DROP TABLE {qr.COMMENT_TABLE}")
+    clock[0] = flaps.T0 + qr.REFRESH_MS / 1000  # 6 min after the last event, 10 min after the comment
+    assert qr.record_reply(conn, tid, "hub", flaps.assigned(int(clock[0] * 1000), flaps.flap(1), machine=WORKER))
+    assert flaps.counts(conn, tid) == (2, 4)  # the refresh comment, not only a sighting
 
 
 def test_the_reserved_worker_raises_no_alarm_at_any_tick(conn, clock, gws):

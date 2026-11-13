@@ -238,7 +238,8 @@ def _commit_less(tree: str, budget: Callable[[float], float]) -> bool:
     """Whether a clean ``tree`` has no commits at all: HEAD is unborn and the repo has no ref. A scratch fixture
     (``git init``, nothing committed) then holds nothing another worker would miss, though the unpushed check's
     fail-safe reads its unborn HEAD as unpushed (11-13: it pinned t_01a1d5e41b24e463 to worker-6). Any other
-    answer, a git error included, is False: the unpushed check and its fail-safe decide. Timeouts come from
+    answer, a git error or a ref listing with any stderr (a skipped broken ref) included, is False: the unpushed
+    check and its fail-safe decide. Timeouts come from
     ``budget``, whose end raises ``GitUnchecked``."""
     from hermes_cli.git_budget import timeout_for
     from hermes_cli.worktree_ops import _git
@@ -248,7 +249,8 @@ def _commit_less(tree: str, budget: Callable[[float], float]) -> bool:
         if head.returncode != 1:
             return False
         refs = _git(["for-each-ref", "--count=1"], tree, timeout=timeout_for(budget, 10), stdin=subprocess.DEVNULL)
-        return refs.returncode == 0 and not refs.stdout.strip()
+        # A broken ref is skipped with only a stderr warning (exit 0, no stdout): that is no proof of an empty repo.
+        return refs.returncode == 0 and not refs.stdout.strip() and not refs.stderr.strip()
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
 

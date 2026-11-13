@@ -88,6 +88,47 @@ def test_a_failing_ref_listing_keeps_the_fail_safe(tmp_path, monkeypatch):
     assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
 
 
+def _commit_behind_a_broken_ref(tmp_path, ref_text):
+    """A clean repo holding commit c1 whose only ref is broken: index and file gone, so status reads clean, HEAD
+    does not resolve, and ``for-each-ref`` skips the ref with a stderr warning, exit 0 and no output."""
+    tree = _init(tmp_path / "core-fixture")
+    pq._commit(tree, "f")
+    (tree / ".git" / "index").unlink()
+    (tree / "f").unlink()
+    branch = subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=tree, check=True, capture_output=True,
+                            text=True).stdout.strip()
+    (tree / ".git" / branch).write_text(ref_text)
+    return tree
+
+
+def test_a_clean_repo_whose_only_ref_is_garbage_keeps_the_fail_safe(tmp_path):
+    """11-13 hub repro: c1 is in the object store, so the tree is not commit-less."""
+    tree = _commit_behind_a_broken_ref(tmp_path, "garbage-not-a-sha\n")
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+
+
+def test_a_clean_repo_whose_only_ref_file_is_empty_keeps_the_fail_safe(tmp_path):
+    """A zero-length ref file (a crash mid-write): git 2.43/2.55 skip it as broken just like garbage."""
+    tree = _commit_behind_a_broken_ref(tmp_path, "")
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+
+
+def test_a_head_probe_git_error_keeps_the_fail_safe_even_with_no_refs_listed(tmp_path, monkeypatch):
+    """Only rev-parse exit 1 means unborn: exit 128 (a git error) is no proof, however empty the ref list."""
+    from hermes_cli import worktree_ops
+    real = worktree_ops._git
+
+    def git(args, cwd, *a, **kw):
+        if args[:2] == ["rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(["git", *args], 128, "", "fatal: broken\n")
+        if args and args[0] == "for-each-ref" and "refs/remotes" not in args:
+            return subprocess.CompletedProcess(["git", *args], 0, "", "")
+        return real(args, cwd, *a, **kw)
+    monkeypatch.setattr(worktree_ops, "_git", git)
+    tree = _init(tmp_path / "core-fixture")
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+
+
 def test_a_head_probe_that_times_out_keeps_the_fail_safe(tmp_path, monkeypatch):
     from hermes_cli import worktree_ops
     real = worktree_ops._git

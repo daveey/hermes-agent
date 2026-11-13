@@ -575,18 +575,26 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # ``requires: [host_repo]`` or a ``dir``/``worktree`` workspace. On the hub these markers only nominate a
 # card for the hub admission judge (see the module docstring): a denied card goes to the worker pool with
 # ``requires: [hub:write]``, so a mention of a hub path no longer holds a hub slot by itself.
-# The home prefix also takes ``$HOME``/``${HOME}``, bare or double-quoted, and a relative ``.hermes/`` path counts after
-# a ``cd`` to home (``cd``, ``cd ~``, ``cd $HOME``, ``cd /home/<u>``) anywhere earlier in the text (PR #2405 review
-# 5894942332 nit). A later cd elsewhere is not tracked: such text still pins (fails toward the home gateway).
-# ``pushd <home>`` counts too, and the cd may end in a shell comment; ``cd``/``pushd`` are lowercase words (a prose
-# "CD" is not one) and a bare ``pushd`` only swaps the stack (review 5895876398). The scan from a cd home stops at
-# the next cd home (that one starts its own scan), so a transcript of N ``cd ~`` lines costs O(length), not
-# O(N x length): 20000 such lines took 37 s per search before.
+# The home prefix also takes ``$HOME``/``${HOME}``, bare or double-quoted, and a relative ``.hermes`` path (``./``
+# optional) counts after a ``cd`` to home (``cd``, ``cd ~``, ``cd $HOME``, ``cd /home/<u>``) (PR #2405 review
+# 5894942332 nit). ``pushd <home>`` counts too, and the cd may end in a shell comment or redirect; ``cd``/``pushd``
+# are lowercase words (a prose "CD" is not one) and a bare ``pushd`` only swaps the stack (review 5895876398).
+# The relative span ends at the next ``cd``/``pushd``/``popd`` (one into ``.hermes`` itself excepted), so
+# ``cd ~ && cd repo && cat .hermes/x`` names the repo's own dir (PR #2463 review 5895947424). That also keeps the
+# scan linear: each start reads only to the next directory change (20000 ``cd ~`` lines took 37 s per search when
+# the span ran to the end of the text). A cd/pushd into the state directory itself (``cd ~/.hermes && cat .env``,
+# or ``cd .hermes`` after a cd home) counts too (review 5895947424). A bare ``~/.hermes`` anywhere else does not:
+# "the hermes-agent tree under ~/.hermes" is ordinary repo work and must reach the worker pool (9328cbc2d9b).
 HOME_PREFIX = r"(?:~|/home/[^/\s]+|\$HOME\b|\$\{HOME\}|\"\$HOME\"|\"\$\{HOME\}\")"
-_CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)"
-            r"(?=[ \t]*(?:$|[\n;&|)>])|[ \t]+#)")
-HERMES_STATE_PATH = (r"(?:" + HOME_PREFIX + r"/|" + _CD_HOME + r"(?:(?!" + _CD_HOME + r")[\s\S])*?(?<![\w./~$}-]))"
-                     r"\.hermes/(?!(?:hermes-agent|repos|bin)(?:/|\b))[\w.-]")
+_CMD_END = r"(?=[ \t]*(?:$|[\n;&|)>])|[ \t]+#)"
+_CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)" + _CMD_END)
+_CHDIR = r"(?<![\w./-])(?-i:cd|pushd|popd)(?![\w.-])(?![ \t]+[\"']?(?:\./)?\.hermes(?![\w.-]))"
+_CD_INTO = r"(?<![\w./-])(?-i:cd|pushd)[ \t]+[\"']?"
+_STATE_SUB = r"\.hermes/(?!(?:hermes-agent|repos|bin)(?:/|\b))[\w.-]"
+_STATE_DIR = r"\.hermes/?[\"']?" + _CMD_END
+HERMES_STATE_PATH = (r"(?:" + HOME_PREFIX + r"/" + _STATE_SUB + r"|" + _CD_INTO + HOME_PREFIX + r"/" + _STATE_DIR +
+                     r"|" + _CD_HOME + r"(?:(?!" + _CHDIR + r")[\s\S])*?"
+                     r"(?:(?<![\w./~$}-])(?:\./)?" + _STATE_SUB + r"|" + _CD_INTO + r"(?:\./)?" + _STATE_DIR + r"))")
 HOST_WORKTREE_PATH = r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?(?:/|\b)"
 # Any home-rooted ``<dir>/.worktrees`` (``~/code/<repo>/.worktrees/t_*``, ``~/.hermes/hermes-agent/.worktrees``):
 # kanban worktrees there hold host-only commits and dirty files. ``.worktrees-notes.md`` and ``/tmp/.../.worktrees``

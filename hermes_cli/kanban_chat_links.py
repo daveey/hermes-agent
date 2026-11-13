@@ -896,7 +896,19 @@ def _unlinked_chats(gateway: str, profiles: dict[str, set[Any]]) -> set[str]:
     return out | {str(s) for name, s in rows if str(s or "") in machine[(type(name), name)]}
 
 
-def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
+def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES, *, settle_s: float = 0.0,
+               poll_s: Optional[float] = None) -> dict[str, Any]:
+    """:func:`_links_snapshot`, re-read for up to ``settle_s`` so that only differences every read lists count
+    (``kanban_chat_links_settle``: the two stores propagate asynchronously, so a card created a moment ago is in
+    one only; such entries go to ``in_flight``). ``settle_s=0`` is one raw snapshot."""
+    if settle_s <= 0:
+        return _links_snapshot(gateway, statuses)
+    from hermes_cli import kanban_chat_links_settle as settle
+    return settle.settle(lambda: _links_snapshot(gateway, statuses), settle_s,
+                         settle.default_poll_s() if poll_s is None else poll_s)
+
+
+def _links_snapshot(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
     """Per chat, the remote obligations the origin ledger lists against the ones the replicas list, including
     ``unknown`` unfinished rows (done cards without a verified release). Clean when the two answers match for
     every chat either side knows.

@@ -1351,6 +1351,39 @@ def test_a_worker_keeps_a_card_naming_its_own_artifact(on_w2, tmp_path, home):
     assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-artifact"
 
 
+@pytest.mark.parametrize("title", [
+    "read $HOME/.hermes/kanban/workspaces/t_0000000000000003/log.txt",
+    'read "${HOME}"/.hermes/kanban/workspaces/t_0000000000000003/log.txt',
+    "cd ~ && cat .hermes/kanban/workspaces/t_0000000000000003/log.txt",
+])
+def test_a_worker_keeps_a_card_naming_its_own_artifact_by_a_home_spelling(on_w2, tmp_path, title):
+    """``$HOME`` and a home-relative path after a cd home probe the same artifact (review 5894942332 nit)."""
+    log = tmp_path / ".hermes" / "kanban" / "workspaces" / "t_0000000000000003" / "log.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("x\n")
+    out = _kept(on_w2.conn, _create(title=title))
+    assert "exists only on this worker" in out["note"], out
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-artifact"
+
+
+def test_a_repo_relative_hermes_after_a_later_cd_is_no_home_marker(on_w2, tmp_path):
+    """A later cd elsewhere ends the home-relative span (PR #2463 review 5895947424 nit): the repo's own
+    ``.hermes/kanban/...`` is not read as this worker's ``~/.hermes/kanban/...`` artifact."""
+    log = tmp_path / ".hermes" / "kanban" / "workspaces" / "t_0000000000000004" / "log.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("x\n")
+    out = _create(title="cd ~ && git clone x repo && cd repo && cat .hermes/kanban/workspaces/t_0000000000000004/log")
+    assert out.get("ok"), out
+    assert _home_marker(on_w2.conn, out["task_id"]) is None, out
+
+
+@pytest.mark.parametrize("title", ['pushd "$HOME/.hermes" && cat .env', "cd $HOME/.hermes && cat .env"])
+def test_the_state_directory_itself_joins_the_pool_with_hub_write(on_w2, title):
+    """A cd into ``~/.hermes`` names hub state (PR #2463 review 5895947424 nit)."""
+    out = _queued(on_w2.conn, _create(title=title), [HUB_WRITE])
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "b", out
+
+
 def test_a_worker_keeps_a_this_host_card(on_w2):
     out = _kept(on_w2.conn, _create(title="apply the next hermes update on this host"))
     assert "'this host' names this worker" in out["note"], out

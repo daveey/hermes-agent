@@ -74,6 +74,9 @@ class SessionState:
         # Called (loop thread) with each ``session.usage`` payload; GatewayAgent maps it onto main's
         # agent attributes, so a frame landing between turns is never dropped with the turn queue.
         self.usage_listeners: list = []
+        # Called (loop thread) with each ``session.info`` payload after it is merged into ``info``: the
+        # classic CLI prints the gateway's startup notices when a late inventory settles a pending reply.
+        self.info_listeners: list = []
         # Called (loop thread) with each ``request.cancel`` payload: the agent thread may be parked in a
         # modal answering that very request (another viewer settled it), so it cannot read the queue.
         self.request_listeners: list = []
@@ -130,6 +133,9 @@ class SessionState:
                 self.pending_seq += 1
             if payload.get("title"):
                 self.title = payload["title"]
+            if kind == "session.info":
+                for listener in list(self.info_listeners):
+                    listener(payload)
         elif kind == "todo.updated" and isinstance(payload, dict):
             self.todo_state = {"todos": list(payload.get("todos") or []), "revision": payload.get("revision")}
         elif kind == "session.usage" and isinstance(payload, dict):

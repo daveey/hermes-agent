@@ -15,8 +15,8 @@ from .method_ctx import bind_module
 # and let the partial transcript speak.
 # If the interruption is fresh, re-submit the interrupted prompt automatically (the messaging gateway has
 # done this for restart-interrupted sessions since #27856); if it's stale, clear the marker and let the
-# recovered partial transcript speak for itself — the user can ask to continue manually.
-_AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
+# recovered partial transcript speak for itself — the user can ask to continue manually. The bounds (15 min and
+# 2 attempts by default, ``desktop.auto_continue``) are parsed by turn_marker.auto_continue_bounds.
 # [daveey] Waits before each replay of a turn refused for a retryable reason (a stale ownership lease during a core
 # update, a rate limit). One per attempt; ``desktop.auto_continue.max_attempts`` can only lower the count.
 _REFUSED_RETRY_DELAYS_S = (45.0, 180.0)
@@ -58,15 +58,8 @@ def _resume_reuse_live_locked(ctx, sid: str, session: dict) -> dict:
 
 def _auto_continue_config() -> tuple[bool, float, int]:
     """(enabled, freshness window in seconds, max attempts) from ``desktop.auto_continue`` in config.yaml."""
-    desktop = _load_cfg().get("desktop")
-    cfg = desktop.get("auto_continue") if isinstance(desktop, dict) else None
-    cfg = cfg if isinstance(cfg, dict) else {}
-    try:
-        minutes = float(cfg.get("freshness_minutes", _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT))
-    except (TypeError, ValueError):
-        minutes = float(_AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT)
-    return (is_truthy_value(cfg.get("enabled"), default=True), max(0.0, minutes) * 60.0,
-            _coerce_int_config_value(cfg.get("max_attempts"), 2, min_value=0))
+    from tui_gateway.turn_marker import auto_continue_bounds
+    return auto_continue_bounds(_load_cfg())
 
 
 def _session_home(session: dict) -> Path:

@@ -76,7 +76,7 @@ def test_dispatch_tick_releases_it_with_nothing_running(conn):
     assert _claim_cols(conn, tid)[0] is None
 
 
-@pytest.mark.parametrize("status", ["todo", "review", "blocked", "scheduled", "done"])
+@pytest.mark.parametrize("status", ["todo", "review", "blocked", "scheduled", "done", "triage"])
 def test_every_non_running_status_is_covered(conn, status):
     tid = _feed_requeued(conn, status=status)
     assert kbd.release_leftover_local_claims(conn) == [tid]

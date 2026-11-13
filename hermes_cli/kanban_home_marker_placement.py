@@ -120,12 +120,18 @@ def _worktree(pattern, match, gateway, probe):
 
 def _state_path(pattern, match, gateway, probe):
     from hermes_cli import kanban_placement as kp
-    # ``$HOME``/``${HOME}`` prefixes too (kp.HOME_PREFIX). A relative path after a cd home is named as its ``~/``
-    # path, not the whole cd..path span the hit covers (review 5895876398).
+    # ``$HOME``/``${HOME}`` prefixes too (kp.HOME_PREFIX). Every relative ``.hermes/<p>`` after a cd home reads as
+    # ``~/.hermes/<p>``, so a worker's own artifact named that way still keeps the card; a fallback hit is named as
+    # its ``~/`` path, not the whole cd..path span it covers (review 5895876398).
+    text = match.string
     state = re.compile(kp.HOME_PREFIX + _STATE.pattern[len(_HOME):])
-    paths = [p for p in (_clean(m.group(0)) for m in state.finditer(match.string))
-             if re.match(kp.HERMES_STATE_PATH, p)]
-    rel = _REL_STATE.match(match.string, match.start() + match.group(0).lower().rfind(".hermes/"))
+    found = [m.group(0) for m in state.finditer(text)]
+    for m in re.finditer(kp.HERMES_STATE_PATH, text, re.IGNORECASE):
+        if re.match(kp._CD_HOME, m.group(0)) and (rel := _REL_STATE.match(
+                text, m.start() + m.group(0).lower().rfind(".hermes/"))):
+            found.append("~/" + rel.group(0))
+    paths = [p for p in map(_clean, found) if re.match(kp.HERMES_STATE_PATH, p)]
+    rel = _REL_STATE.match(text, match.start() + match.group(0).lower().rfind(".hermes/"))
     for raw in dict.fromkeys(paths) or [_clean("~/" + rel.group(0)) if rel else match.group(0)]:
         if art := _ARTIFACT.search(raw):
             # health: allow HX001 -- the card text names ~/.hermes literally; probe that same path on this worker

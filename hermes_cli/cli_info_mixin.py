@@ -932,19 +932,19 @@ class CLIInfoMixin:
     def _reload_gateway_mcp(self, connection):
         """``/reload-mcp`` on the shared gateway: the gateway owns the MCP servers and the session's
         agent, so it reconciles them with config and refreshes its agents (``reload.mcp``); main's
-        "Agent updated" line then counts the tools the gateway session now loads."""
+        "Agent updated" line then counts the tools the gateway session now loads, read with the full
+        ``session.info`` (a resume reply on a loaded gateway can be the pending shape: 0 tools)."""
         from hermes_cli.gateway_client import GatewayClientError
         if not self._command_running:
             print(t("cli.reload_mcp.reloading"))
         try:
             result = connection.call("reload.mcp", session_id=self.session_id, confirm=True)
-            snapshot = connection.call("session.resume", session_id=self.session_id) or {}
+            info = connection.call("session.info", session_id=self.session_id) or {}
         except GatewayClientError as e:
             print(f"  {t('gateway.reload_mcp.failed', error=str(e))}")
             return
         print(f"  {result.get('message') or ''}".rstrip())
-        connection.state(self.session_id).adopt_snapshot(snapshot)
-        info = snapshot.get("info") or {}
+        connection.state(self.session_id).apply_event("session.info", info)
         count = info.get("tool_count")
         if not isinstance(count, int):
             count = sum(len(names or []) for names in (info.get("tools") or {}).values())

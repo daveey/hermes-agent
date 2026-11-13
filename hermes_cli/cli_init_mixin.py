@@ -28,14 +28,46 @@ _ROUTE_FLAGS = ("model", "provider", "api_key", "base_url")
 def _adopt_gateway_toolsets(cli, store):
     """The profile default the gateway resolved for the opened session, when this process has no list to
     show (display only), and main's "Unknown toolsets" warning as the gateway judged it against its own
-    plugins."""
-    info = (store.current or {}).get("info") or {}
+    plugins. A loaded gateway may answer before its inventory is built (``inventory_pending``): these,
+    and the tool availability warnings the banner had no inventory for, then print when it arrives."""
+    snapshot = store.current or {}
+    info = snapshot.get("info") or {}
+    if info.get("inventory_pending"):
+        _await_gateway_inventory(cli, store, snapshot)
+        return
+    _adopt_inventory(cli, info)
+
+
+def _adopt_inventory(cli, info, *, warnings=False):
     if getattr(cli, "enabled_toolsets", None) is None and isinstance(info.get("enabled_toolsets"), list):
         cli.enabled_toolsets = list(info["enabled_toolsets"])
     if info.get("unknown_toolsets"):
         from agent.i18n import t as _t
         names = ", ".join(info["unknown_toolsets"])
         cli._console_print(f"[bold red]{_t('cli.startup.unknown_toolsets', names=names)}[/]")
+    lines = info.get("tool_availability_warnings") if warnings else None
+    if isinstance(lines, list) and lines:  # main's ``_show_tool_availability_warnings`` (the banner's own path)
+        cli._console_print("")
+        for line in lines:
+            cli._console_print(line)
+
+
+def _await_gateway_inventory(cli, store, snapshot):
+    """Print the startup notices once the late ``session.info`` (``inventory_pending: false``) settles the
+    pending reply, and keep it as the snapshot's banner info. Registered before the check, so a frame the
+    pump applied before this runs is not missed; printed once."""
+    state = store.connection.state(snapshot["stored_session_id"])
+    printed = threading.Lock()
+
+    def settled(payload):
+        if payload.get("inventory_pending") is not False or not printed.acquire(blocking=False):
+            return
+        state.info_listeners.remove(settled)  # appended before the first call; the lock runs this once
+        if store.current is snapshot:
+            snapshot["info"] = {**(snapshot.get("info") or {}), **payload}
+        _adopt_inventory(cli, payload, warnings=True)
+    state.info_listeners.append(settled)
+    settled(dict(state.info))
 
 
 def _gateway_launch(cli):

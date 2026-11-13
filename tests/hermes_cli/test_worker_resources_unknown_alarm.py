@@ -43,7 +43,32 @@ def _leak_a_board(tmp_path):
     return board
 
 
-def test_refusal_records_the_streak_and_names_the_record(tmp_path):
+def _host_load(monkeypatch, load1):
+    """Pin the load seam ``_pressure`` reads (16 cores; held from 1.5 load/core): real host load is never asked."""
+    monkeypatch.setattr(capacity, "effective_cores", lambda: 16)
+    monkeypatch.setattr("os.getloadavg", lambda: (load1, load1, load1))
+
+
+def test_load_pressure_answers_before_the_leaked_board_and_records_no_streak(tmp_path, monkeypatch):
+    """t_01a1d65fceb2dd81: ``_refusal`` checks pressure before occupancy, so a loaded host answers
+    ``worker_load_pressure`` even with a leaked board, and that answer is not an unknown streak."""
+    _leak_a_board(tmp_path)
+    _host_load(monkeypatch, 24)
+    assert admission._pressure(capacity.policy_root() / "worker-resources") is True
+    assert admission.refusal(enabled=True) == "worker_load_pressure"
+    assert alarm.read() is None
+
+
+def test_without_load_pressure_the_leaked_board_answers_unknown(tmp_path, monkeypatch):
+    _leak_a_board(tmp_path)
+    _host_load(monkeypatch, 1)
+    assert admission._pressure(capacity.policy_root() / "worker-resources") is False
+    assert admission.refusal(enabled=True) == "worker_resources_unknown"
+    assert alarm.read() is not None
+
+
+def test_refusal_records_the_streak_and_names_the_record(tmp_path, monkeypatch):
+    _host_load(monkeypatch, 1)  # t_01a1d65fceb2dd81: real load >= 1.5/core answered worker_load_pressure first
     board = _leak_a_board(tmp_path)
     assert admission.refusal(enabled=True) == "worker_resources_unknown"
     state = alarm.read()

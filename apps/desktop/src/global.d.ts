@@ -52,6 +52,13 @@ declare global {
         connectionId?: null | string
         profile?: null | string
       }) => Promise<GatewayWsUrlResult>
+      // [daveey] Connect limit (ms) for one chat WebSocket dial: 15 s, up to 60 s while that SSH link is slow.
+      gatewayConnectLimit?: (wsUrl: string) => number
+      // How that dial ended: an open is an answer, a timeout a slow-link strike (electron/slow-link.ts).
+      noteGatewayConnect?: (
+        wsUrl: string,
+        outcome: { elapsedMs: number; kind: 'opened' } | { kind: 'timed-out' }
+      ) => void
       // One-use plugin socket URL for a local gateway (its native grant rides
       // a header main attaches to that dial); null for every other backend;
       // { refused: 'permission' } when main refused the grant mint for a

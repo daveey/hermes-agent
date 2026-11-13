@@ -90,14 +90,13 @@ def _holder_dead(holder: str) -> bool:
 
 # [daveey] A turn a Hermes core update paused at a step boundary holds no lease while it waits, yet it
 # continues automatically: the row must keep reading as working, not paint its stored outcome (a red
-# decision) for the minute or two the update takes. The freshness bounds match the auto-continue
-# defaults (agent.gateway_auto_continue_freshness 1 h; desktop.auto_continue 15 min, 2 attempts) so a
-# pause nobody will continue stops counting.
+# decision) for the minute or two the update takes. A Desktop/TUI pause counts only within the bounds its
+# producer applies (the home's configured ``desktop.auto_continue``: enabled, freshness_minutes,
+# max_attempts), so a pause nobody will continue stops counting. The gateway bound (1 h) is this reader's
+# own fail-closed cap on a checkpoint, not a mirrored producer setting.
 _GATEWAY_CHECKPOINT_PREFIX = "gateway.update_checkpoint.v1."
 _GATEWAY_PAUSE_FRESH_S = 3600.0
 _TUI_PAUSE_REASON = "core_update_pause"
-_TUI_PAUSE_FRESH_S = 15 * 60.0
-_TUI_PAUSE_MAX_ATTEMPTS = 2
 
 
 def _update_paused_gateway_turns(conn: sqlite3.Connection, now: float) -> set[str]:
@@ -131,6 +130,7 @@ def _update_paused_tui_turns(home: Path, now: float) -> set[str]:
     except (OSError, ValueError):
         return set()
     out: set[str] = set()
+    bounds: tuple[bool, float, int] | None = None
     for key, entry in (data.items() if isinstance(data, dict) else ()):
         if not (key and isinstance(entry, dict) and entry.get("reason") == _TUI_PAUSE_REASON
                 and entry.get("auto_continue", True)):
@@ -140,9 +140,26 @@ def _update_paused_tui_turns(home: Path, now: float) -> set[str]:
             attempts = int(entry.get("attempts") or 0)
         except (TypeError, ValueError):
             continue
-        if now - since <= _TUI_PAUSE_FRESH_S and attempts < _TUI_PAUSE_MAX_ATTEMPTS:
+        if bounds is None:
+            bounds = _auto_continue_bounds(home)
+        enabled, fresh_s, max_attempts = bounds
+        if enabled and now - since <= fresh_s and attempts < max_attempts:
             out.add(str(key))
     return out
+
+
+def _auto_continue_bounds(home: Path) -> tuple[bool, float, int]:
+    """The home's configured ``desktop.auto_continue`` bounds, parsed as the producer parses them. The
+    home's own config (``load_profile_config_effective``), never this process's: each profile's backend
+    continues its own pauses."""
+    from hermes_cli.config_effective import load_profile_config_effective
+    from tui_gateway.turn_marker import auto_continue_bounds
+    try:
+        cfg = load_profile_config_effective(home / "config.yaml")
+    except Exception:  # health: allow BLE001 -- the producer's _load_cfg also falls open to {} (defaults)
+        _log.debug("auto-continue config unreadable in %s", home, exc_info=True)
+        cfg = {}
+    return auto_continue_bounds(cfg)
 
 
 def _collect(now: float) -> frozenset[str]:

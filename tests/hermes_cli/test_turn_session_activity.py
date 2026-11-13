@@ -1,5 +1,6 @@
 """turn_live stamping on session-list rows: a turn running in any process keeps the row live. [daveey]"""
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -177,7 +178,6 @@ def _checkpointed_db(home, sid, *, status="started", message_age=30.0, receipt_o
         " payload_json, payload_digest, intent, status, owner_epoch, generation)"
         " VALUES ('adm1', 'r1', 'p', ?, '[]', '{}', 'd', 'queue', ?, 1, 1)", (sid, status))
     receipt = {"max_message_id": mid} if receipt_ok else {"other": 1}
-    import json
     conn.execute("INSERT INTO state_meta(key, value) VALUES (?, ?)",
                  ("gateway.update_checkpoint.v1.adm1", json.dumps(receipt)))
     conn.commit()
@@ -202,7 +202,6 @@ def test_gateway_checkpoint_that_cannot_continue_does_not_count(home, kwargs):
 
 
 def _marker(home, key, **entry):
-    import json
     (home / "desktop").mkdir(parents=True, exist_ok=True)
     (home / "desktop" / "interrupted_turns.json").write_text(json.dumps({key: entry}), encoding="utf-8")
 
@@ -235,3 +234,52 @@ def test_profile_tui_marker_is_read(home):
     _marker(home / "profiles" / "work", "w_chat", reason="core_update_pause", auto_continue=True, attempts=0,
             started_at=now - 30)
     assert tsa.annotate_turn_activity([{"id": "w_chat"}])[0].get("turn_live") is True
+
+
+def _auto_continue_config(home, **auto_continue):
+    lines = "".join(f"    {k}: {json.dumps(v)}\n" for k, v in auto_continue.items())
+    (home / "config.yaml").write_text(f"desktop:\n  auto_continue:\n{lines}", encoding="utf-8")
+
+
+@pytest.mark.parametrize(("config", "age_s", "attempts"), [
+    ({"enabled": False}, 60, 0),           # auto-continue off: the producer never continues it
+    ({"freshness_minutes": 5}, 600, 0),    # a 10-min-old pause is past a 5-min window
+    ({"max_attempts": 1}, 60, 1),          # attempts exhausted under a lowered cap
+])
+def test_tui_pause_outside_configured_auto_continue_bounds_does_not_count(home, config, age_s, attempts):
+    now = time.time()
+    _leases(home / "state.db", [])
+    _auto_continue_config(home, **config)
+    _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=attempts,
+            started_at=now - 7200, paused_at=now - age_s)
+    assert "turn_live" not in tsa.annotate_turn_activity([{"id": "tui_chat"}])[0]
+
+
+def test_tui_pause_within_a_raised_configured_window_counts(home):
+    now = time.time()
+    _leases(home / "state.db", [])
+    _auto_continue_config(home, freshness_minutes=60, max_attempts=3)
+    _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=2,
+            started_at=now - 7200, paused_at=now - 1800)
+    assert tsa.annotate_turn_activity([{"id": "tui_chat"}])[0].get("turn_live") is True
+
+
+def test_profile_tui_pause_uses_that_profiles_auto_continue_config(home):
+    now = time.time()
+    work = home / "profiles" / "work"
+    _leases(home / "state.db", [])
+    _leases(work / "state.db", [])
+    _auto_continue_config(work, enabled=False)  # the root home keeps the defaults (enabled)
+    for h, key in ((home, "root_chat"), (work, "w_chat")):
+        _marker(h, key, reason="core_update_pause", auto_continue=True, attempts=0, started_at=now - 30)
+    rows = tsa.annotate_turn_activity([{"id": "root_chat"}, {"id": "w_chat"}])
+    assert [r.get("turn_live") for r in rows] == [True, None]
+
+
+def test_producer_and_reader_parse_auto_continue_bounds_alike():
+    from tui_gateway.turn_marker import auto_continue_bounds
+    assert auto_continue_bounds({}) == (True, 900.0, 2)
+    assert auto_continue_bounds({"desktop": {"auto_continue": {
+        "enabled": "off", "freshness_minutes": "5", "max_attempts": -1}}}) == (False, 300.0, 2)
+    assert auto_continue_bounds({"desktop": {"auto_continue": {"freshness_minutes": "x", "max_attempts": 0}}}) \
+        == (True, 900.0, 0)

@@ -137,6 +137,9 @@ def test_lookup_and_save_share_key_and_path_and_never_fail_the_gate():
     assert workflow("ci.yaml")["jobs"]["detect"]["outputs"]["hermes_state_reuse_key"] == \
         "${{ steps.state-reuse-key.outputs.key }}"
     assert all(step.get("continue-on-error") is True for step in (lookup, record, save))
+    # A stalled cache endpoint must not hold detect (5 min) or the required check (10 min) until
+    # its job timeout: both cache steps give up after 2 min, and a timed-out lookup is a miss.
+    assert lookup.get("timeout-minutes") == 2 and save.get("timeout-minutes") == 2
     assert lookup["uses"].split("@")[1] == save["uses"].split("@")[1]
 
 

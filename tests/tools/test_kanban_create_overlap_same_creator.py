@@ -220,3 +220,16 @@ def test_a_replaced_span_with_a_marker_on_one_side_only_is_not_an_enumeration(mi
     card = {"title": theirs, "assignee": "default"}
     assert own.enumerated(mine, theirs) is None
     assert own.own_distinct(mine, "default", card) is None
+
+
+@pytest.mark.parametrize("mine, theirs", [
+    ("w1-01 Fix guard w1-02 tests", "Fix guard tests w1-01"),
+    ("Fix guard tests w1-01", "w1-01 Fix guard w1-02 tests"),
+])
+def test_a_moved_marker_beside_a_one_sided_marker_is_not_an_enumeration(mine, theirs):
+    """A moved marker counts only when both titles carry a different one of its shape: ``w1-01`` moved and
+    ``w1-02`` exists on one side only, so this is a re-issue of the same work, not a leg."""
+    from hermes_cli import kanban_overlap_own as own
+    card = {"title": theirs, "assignee": "default"}
+    assert own.enumerated(mine, theirs) is None
+    assert own.own_distinct(mine, "default", card) is None

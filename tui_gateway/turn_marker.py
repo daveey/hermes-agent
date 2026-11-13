@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from utils import atomic_json_write
+from utils import atomic_json_write, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,30 @@ def _cross_process_lock(path: Path):
     from hermes_cli.auth import _file_lock
     return _file_lock(path.with_name(f"{path.name}.lock"), _file_lock_holder, 5.0,
                       f"Timed out waiting for the turn-marker lock ({path})")
+
+
+AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
+AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT = 2
+
+
+def auto_continue_bounds(config: Any) -> tuple[bool, float, int]:
+    """[daveey] (enabled, freshness window in seconds, max attempts) from a config mapping's
+    ``desktop.auto_continue``. The one parse of those bounds: the producer (``_auto_continue_config``)
+    and the sidebar's paused-turn reader (``hermes_cli.turn_session_activity``) must agree, or a pause
+    that will never continue reads as a live turn."""
+    desktop = config.get("desktop") if isinstance(config, dict) else None
+    cfg = desktop.get("auto_continue") if isinstance(desktop, dict) else None
+    cfg = cfg if isinstance(cfg, dict) else {}
+    try:
+        minutes = float(cfg.get("freshness_minutes", AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT))
+    except (TypeError, ValueError):
+        minutes = float(AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT)
+    try:
+        attempts = int(cfg.get("max_attempts", AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT))
+    except (TypeError, ValueError):
+        attempts = AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT
+    return (is_truthy_value(cfg.get("enabled"), default=True), max(0.0, minutes) * 60.0,
+            attempts if attempts >= 0 else AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT)
 
 
 def _started_at(entry: dict) -> float:

@@ -260,6 +260,7 @@ export class SlowLinkTracker {
   }
 
   forgetScope(scope: string): void {
+    remoteTransports.forgetScope(scope)
     this.forget(this.#scopes.get(scope))
     this.#scopes.delete(scope)
     deltaBodyStore.unbindScope(scope) // the tunnel is going away: its port must stop being asked for deltas
@@ -355,8 +356,19 @@ export function thinnedPoll(
 // new descriptor serves, per scope, as `[remote-timing]` lines in desktop.log.
 const remoteFirstRequestPending = new Map<string, { scope: string; startedAt: number }>()
 
-export function noteRemoteConnect(baseUrl: string, scope: string, startedAt: number): void {
+export function noteRemoteConnect(
+  baseUrl: string,
+  scope: string,
+  startedAt: number,
+  masterAlive?: () => Promise<boolean> | undefined
+): void {
   remoteFirstRequestPending.set(baseUrl, { scope, startedAt })
+  slowLinkTracker.bind(scope, baseUrl)
+
+  if (masterAlive) {
+    remoteTransports.remember(baseUrl, scope, masterAlive)
+  }
+
   deltaBodyStore.bindRemote(baseUrl, scope) // delta-reads.ts: this tunnel's reads may come back as deltas
 }
 
@@ -371,4 +383,142 @@ export function noteRemoteAnswer(baseUrl: string, path: string, elapsedMs: numbe
     remoteFirstRequestPending.delete(baseUrl)
     log(`[remote-timing] ${pending.scope} first-request ${path} served +${Date.now() - pending.startedAt} ms`)
   }
+}
+
+// --- Chat WebSocket connect limit (the renderer's JsonRpcGatewayClient dial) ---
+//
+// The chat socket gave up after a fixed 15 s while slow-link mode kept the HTTP side of the same tunnel alive, so a
+// slow link showed "Reconnecting to Hermes" in chat. The renderer asks main for the limit right before each dial
+// (hermes:gateway:connect-limit, sync) and reports how the dial ended (hermes:gateway:connect-outcome):
+// - a dial to an SSH-forwarded backend gets 15 s, stretched x4 (capped 60 s) while that link is in slow mode;
+// - a socket that opened counts as an answer for the tracker (as a request answer does);
+// - a dial that hit its limit while the SSH master is alive counts as a strike, the same way a dispatch probe does.
+//   When those strikes reach SLOW_LINK_STRIKE_LIMIT the link leaves slow mode (logged as down); retiring the backend
+//   stays with the dispatch probe, which runs again before the renderer's next dial (hermes:gateway:ws-url-for).
+// Every other backend (local, cloud, a URL main does not know) keeps the 15 s default.
+
+export const GATEWAY_CONNECT_LIMIT_MS = 15_000
+export const GATEWAY_CONNECT_LIMIT_CHANNEL = 'hermes:gateway:connect-limit'
+export const GATEWAY_CONNECT_OUTCOME_CHANNEL = 'hermes:gateway:connect-outcome'
+
+export type GatewayConnectOutcome = { elapsedMs: number; kind: 'opened' } | { kind: 'timed-out' }
+
+interface RemoteTransport {
+  baseUrl: string
+  masterAlive: () => Promise<boolean> | undefined
+  scope: string
+}
+
+const originOf = (url: string, wsToHttp = false): null | string => {
+  try {
+    const parsed = new URL(url)
+    const protocol = wsToHttp ? parsed.protocol.replace(/^ws(s?):$/, 'http$1:') : parsed.protocol
+
+    return `${protocol}//${parsed.host}`
+  } catch {
+    return null
+  }
+}
+
+/** SSH-forwarded backends by origin, so a chat ws:// URL can be traced to its tunnel and its slow-link state. */
+export class RemoteTransports {
+  readonly #byOrigin = new Map<string, RemoteTransport>()
+
+  remember(baseUrl: string, scope: string, masterAlive: () => Promise<boolean> | undefined): void {
+    const origin = originOf(baseUrl)
+
+    if (origin) {
+      this.#byOrigin.set(origin, { baseUrl, masterAlive, scope })
+    }
+  }
+
+  forgetScope(scope: string): void {
+    for (const [origin, transport] of this.#byOrigin) {
+      if (transport.scope === scope) {
+        this.#byOrigin.delete(origin)
+      }
+    }
+  }
+
+  forWsUrl(wsUrl: unknown): RemoteTransport | undefined {
+    const origin = typeof wsUrl === 'string' ? originOf(wsUrl, true) : null
+
+    return origin ? this.#byOrigin.get(origin) : undefined
+  }
+}
+
+export const remoteTransports = new RemoteTransports()
+
+/** The connect limit for one chat WebSocket dial: stretched only for an SSH-forwarded backend in slow mode. */
+export function gatewayConnectLimitMs(
+  wsUrl: unknown,
+  tracker: SlowLinkTracker = slowLinkTracker,
+  transports: RemoteTransports = remoteTransports
+): number {
+  const transport = transports.forWsUrl(wsUrl)
+
+  return transport ? tracker.scaleTimeout(transport.baseUrl, GATEWAY_CONNECT_LIMIT_MS) : GATEWAY_CONNECT_LIMIT_MS
+}
+
+/** How a chat WebSocket dial ended: an open is an answer, a timeout with the SSH master alive is a strike. */
+export async function noteGatewayConnectOutcome(
+  wsUrl: unknown,
+  outcome: GatewayConnectOutcome | null | undefined,
+  log: (line: string) => void,
+  tracker: SlowLinkTracker = slowLinkTracker,
+  transports: RemoteTransports = remoteTransports
+): Promise<void> {
+  const transport = transports.forWsUrl(wsUrl)
+
+  if (!transport || !outcome) {
+    return
+  }
+
+  if (outcome.kind === 'opened') {
+    if (Number.isFinite(outcome.elapsedMs) && outcome.elapsedMs >= 0) {
+      remoteAnswerLedger.recordAnswer(transport.baseUrl)
+      tracker.noteAnswer(transport.baseUrl, outcome.elapsedMs)
+    }
+
+    return
+  }
+
+  if (outcome.kind !== 'timed-out') {
+    return
+  }
+
+  let alive = false
+
+  try {
+    alive = (await transport.masterAlive()) === true
+  } catch {
+    alive = false
+  }
+
+  if (!alive) {
+    return // a dead transport is never slow; the dispatch probe retires it
+  }
+
+  tracker.setLog(log)
+  tracker.bind(transport.scope, transport.baseUrl)
+  const { giveUp, strikes } = tracker.noteTimeoutWhileAlive(transport.baseUrl)
+
+  log(
+    `[slow-link] ${transport.scope} chat WebSocket did not open within its limit with the SSH connection alive ` +
+      `(strike ${strikes}${giveUp ? ', giving up on slow mode' : ''})`
+  )
+}
+
+interface IpcMainLike {
+  on(channel: string, listener: (event: { returnValue?: unknown }, ...args: any[]) => void): unknown
+}
+
+/** main.ts calls this once: the renderer's chat dial reads its limit and reports its outcome over these channels. */
+export function registerGatewayConnectIpc(ipcMain: IpcMainLike, log: (line: string) => void): void {
+  ipcMain.on(GATEWAY_CONNECT_LIMIT_CHANNEL, (event, wsUrl) => {
+    event.returnValue = gatewayConnectLimitMs(wsUrl)
+  })
+  ipcMain.on(GATEWAY_CONNECT_OUTCOME_CHANNEL, (_event, wsUrl, outcome) => {
+    void noteGatewayConnectOutcome(wsUrl, outcome, log)
+  })
 }

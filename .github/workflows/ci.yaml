@@ -142,6 +142,7 @@ jobs:
         id: state-reuse
         if: steps.state-reuse-key.outputs.key != ''
         continue-on-error: true
+        timeout-minutes: 2
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/hermes-state-macos-pass
@@ -684,6 +685,7 @@ jobs:
       - name: Save the mini lane pass
         if: steps.state-pass.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 2
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/hermes-state-macos-pass

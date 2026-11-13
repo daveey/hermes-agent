@@ -12,6 +12,7 @@ import type { HermesApiRequest } from '@/global'
 
 import { CanonicalDesktopProtocol, canonicalProfile, canonicalPromptParams, canonicalSessionKey, openGatewaySocket, recordCanonicalOwner, splitRewindSubmit } from './canonical-protocol'
 import { DialReadiness, GATEWAY_NOT_CONNECTED_MESSAGE, remainingRequestBudget } from './dial-readiness'
+import { dialWithLinkLimit } from './gateway-link-dial'
 
 // Desktop startup fires a burst of read-only data calls (config, profiles,
 // model info/options, cron) the moment the backend passes readiness. On a
@@ -370,7 +371,7 @@ export class HermesGateway extends JsonRpcGatewayClient {
     try {
       // The transport's own rejection names a dial that never opened (#41566); readiness only
       // speaks for a socket that did.
-      await super.connect(wsUrl)
+      await dialWithLinkLimit(wsUrl, dial => super.connect(wsUrl, dial)) // [daveey] slow-link connect limit
       await ready
     } catch (error) {
       this.readiness.failDial(ready, error instanceof Error ? error : new Error(GATEWAY_NOT_CONNECTED_MESSAGE))

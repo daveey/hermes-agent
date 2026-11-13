@@ -18,7 +18,9 @@ of every changed file that routes the lane plus the lane workflow itself. So any
 routing file, a routing file added to or dropped from the diff, a main change to one of those files
 or a lane workflow change gives a new key. Main changes to other surface files do not: the routing
 contract already leaves those to their own PRs and the 4-hourly main schedule
-(classify_changes.py). An empty or capped file list (the lane runs whatever it touched) has no key.
+(classify_changes.py). For the same reason ``.github/workflows/ci.yaml`` is in the key only when this
+PR changes it (it then routes the lane as ``HERMES_STATE_WIRING``): a main edit to ci.yaml alone keeps
+the key, deliberately. An empty or capped file list (the lane runs whatever it touched) has no key.
 """
 from __future__ import annotations
 

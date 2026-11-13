@@ -306,6 +306,28 @@ def test_corrected_future_wall_time_does_not_wedge_cooldown_on_same_boot(home):
     cq.acquire(max_s=30, reason="second", clock=clock).close()
 
 
+def test_future_wall_record_from_before_a_reboot_does_not_wedge_starts(home):
+    """Cross-boot only the wall age exists. A record written while the wall clock was ahead (then a
+    reboot with a corrected clock) gives a negative age; refusing it would wedge every start until
+    real time catches up, so a negative cross-boot age counts as elapsed (start-permissive).
+    RED on dd75da236b: refused as "cooldown clocks are incoherent"."""
+    clock = FakeClock()
+    clock.now_wall += 10 * 24 * 3600  # wall clock 10 days ahead at the first start
+    cq.acquire(max_s=30, reason="first", clock=clock).close()
+    clock.now_wall -= 10 * 24 * 3600  # corrected after a reboot
+    clock.boot, clock.now_ns = "boot-b", 5 * NS
+    cq.acquire(max_s=30, reason="second", clock=clock).close()
+
+
+def test_cross_boot_zero_wall_age_is_a_full_cooldown_not_elapsed(home):
+    clock = FakeClock()
+    cq.acquire(max_s=30, reason="first", clock=clock).close()
+    clock.boot, clock.now_ns = "boot-b", 5 * NS  # rebooted, wall unchanged: age exactly 0
+    with pytest.raises(cq.QuietCooldownError) as err:
+        cq.acquire(max_s=30, reason="second", clock=clock)
+    assert err.value.remaining_s == records.COOLDOWN_S
+
+
 @pytest.mark.parametrize("payload", [b"{", b"[]", b'{"schema": 1}', b"\xff\xfe", b""])
 def test_malformed_cooldown_refuses_it_is_never_erased_to_bypass_two_hours(home, payload):
     clock = FakeClock()
