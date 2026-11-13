@@ -621,18 +621,33 @@ def test_unblock_refusal_of_an_archived_copy_names_no_reopen_and_the_dashboard_e
 # PR #2271 review 5893184151: reopen's stale-copy branch nulled ``current_run_id`` without closing the run it pointed
 # at (``unblock_task`` reclaims it on the same statuses), and the CLI's archived-copy refusal still named unblock.
 
-def test_reopen_of_a_stale_copy_with_a_live_run_pointer_ends_that_run(board):
+# PR #2381 post-merge mutants C4a/C4b: reopen accepts a stale copy in every ``_UNBLOCKABLE`` status, so each one's
+# dangling run must be reclaimed, not only the ``scheduled`` one.
+@pytest.mark.parametrize("stale", ["blocked", "scheduled", "triage"])
+def test_reopen_of_a_stale_copy_with_a_live_run_pointer_ends_that_run(board, stale):
     from hermes_cli.kanban_db_operator import reopen_done_task
     tid = _parked(board)
     _stale_scheduled_copy_of_a_done_card(board, tid)
     with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status = ? WHERE id = ?", (stale, tid))
         run_id = board.execute("INSERT INTO task_runs (task_id, profile, status, started_at) "
                                "VALUES (?, 'worker', 'running', ?)", (tid, int(time.time()))).lastrowid
         board.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, tid))
+    assert ktg.stale_hold(board, tid)["status"] == "done"
     assert reopen_done_task(board, tid, reason="more work", actor="david") == "ready"
     run = board.execute("SELECT status, ended_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()
     assert run["ended_at"] is not None and run["status"] == "reclaimed"
     assert board.execute("SELECT current_run_id FROM tasks WHERE id = ?", (tid,)).fetchone()[0] is None
+
+
+def test_reopen_refusal_text_is_none_for_a_done_held_copy(board):
+    """PR #2381 post-merge mutant C5: reopen revives a done-held stale copy, so its refusal text is None while
+    unblock's still points at reopen. ``_cmd_reopen`` never reaches this branch today (it accepts the done hold
+    first), so only a direct assertion pins it."""
+    tid = _parked(board)
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    assert ktg.unblock_refusal(board, tid, verb="reopen") is None
+    assert ktg.unblock_refusal(board, tid).startswith(f"cannot unblock {tid}: its completed event holds it done")
 
 
 def test_cli_reopen_of_an_archived_stale_copy_says_nothing_revives_it(board, human, capsys):
