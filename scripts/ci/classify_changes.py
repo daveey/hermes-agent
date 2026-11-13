@@ -57,7 +57,8 @@ Lanes:
   (hermes-state-macos.yml): the state modules, their tests, the shared pytest
   harness and the dependency manifests. An empty diff, a ``.github/`` change or
   a list at the compare API's 300-file cap runs it. ci.yaml's ``detect`` turns
-  it off on a non-release main push: the standalone workflow already runs main.
+  it off on a non-release main push: the standalone workflow's 4-hourly
+  schedule tests main.
 * ``native_memory`` — the Darwin memory reader's ABI and no-fork tests on the
   real macOS mini (native-memory-macos.yml). Those tests are
   ``platforms("macos")`` and skip on every Linux lane, so a PR that touches one

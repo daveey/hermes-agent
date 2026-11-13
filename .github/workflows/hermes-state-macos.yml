@@ -12,47 +12,23 @@ name: hermes_state (macOS)
 #
 # ci.yaml calls this for selected same-repository PRs and release/dispatch runs.
 # Its macOS state required (v1) consumer requires success when selected.
-# Main pushes run here directly; CI masks its duplicate call only on main pushes.
 #
-# Main pushes start this lane only when they touch the surface ci.yaml's
-# classifier selects it for (scripts/ci/classify_changes.py: _HERMES_STATE_PATHS,
-# .github/ and _CI_CONFIG_FILES; tests/ci/test_macos_state_routing.py holds the
-# paths list equal to it). Running it on every main push (~1 in 12 touches that
-# surface) kept the single mini runner busy with main and queued required PR jobs
-# 90+ min. The 4-hourly schedule tests main HEAD anyway: a change outside the
-# surface that still breaks the suite (or a push whose diff GitHub cannot fully
-# evaluate: past 3,000 changed files a match beyond them is missed) surfaces
-# within 4 h instead of on its own push.
+# Main pushes do not run this lane: neither a push trigger here nor CI's call
+# (detect masks it on a non-release main push). A PR that touches the lane's
+# surface already ran it on CI's merge of the PR into main, and the 4-hourly
+# schedule tests main HEAD, so a break from two PRs landing close together (or
+# from a change outside the surface) surfaces within 4 h. A main-push run held
+# the one mini runner ~10 min and put required PR jobs 18-20 min behind it; of
+# its 5 failures in the 16 days before it was dropped, none was a confirmed code
+# regression (disk, runner loss, host timeouts; t_01a1d37abf5db0ae). ci-probe/**
+# branches keep an unfiltered push trigger for probing the runner.
 #
 # HERMES_HOME points at a throwaway temp dir so the lane can never touch the
 # live ~/.hermes of anything else running on the mini.
 
 on:
   push:
-    branches: [main, 'ci-probe/**']
-    paths:
-      - 'hermes_state*'
-      - 'hermes_state*/**'
-      - 'tests/hermes_state/**'
-      - 'tests/conftest.py'
-      - 'tests/_fixtures/**'
-      - 'tests/fakes/**'
-      - 'tests/e2e/conftest.py'
-      - 'tests/e2e/core/_*'
-      - 'tests/e2e/core/_*/**'
-      - 'scripts/run_tests.sh'
-      - 'scripts/run_tests_parallel.py'
-      - 'scripts/run_tests_host_slots.py'
-      - 'scripts/worker_test_budget.py'
-      - 'scripts/run_tests_parallel_rss.py'
-      - 'scripts/run_tests_launch.py'
-      - 'scripts/run_tests_fork_child.py'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - 'setup.py'
-      - '.github/**'
-      - 'justfile'
-      - 'scripts/hermes-python'
+    branches: ['ci-probe/**']
   schedule:
     - cron: '23 */4 * * *'
   workflow_dispatch:
@@ -67,8 +43,8 @@ permissions:
   contents: read
 
 concurrency:
-  # Collapse queued standalone pushes and scheduled main runs, but never
-  # supersede a required caller.
+  # Collapse queued scheduled main runs (and ci-probe pushes, per branch), but
+  # never supersede a required caller.
   group: ${{ github.workflow == 'hermes_state (macOS)' && (github.event_name == 'push' || github.event_name == 'schedule') && format('hermes-state-macos-push-{0}', github.ref) || format('hermes-state-macos-{0}-{1}-{2}', github.run_id, github.run_attempt, inputs.commit || github.sha) }}
   cancel-in-progress: false
 
