@@ -5074,7 +5074,7 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
         from hermes_logging import drain_log_queue
         drain_log_queue(timeout=1.0)
 
-    exit_deadline.disarm()  # here and only here: the exit deadline covers everything up to os._exit
+    exit_deadline.enter_exit_funnel()  # here and only here: the exit deadline covers everything up to os._exit
     for _step in (_release_locks, _mark_exited, _flush_metrics, _write_cpu_profile, _drain_logs):
         _best_effort(_step)
     os._exit(exit_code)
