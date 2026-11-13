@@ -244,3 +244,55 @@ def test_unreachable_board_refuses_delivery_proof_cleanly(fleet, monkeypatch):
     with pytest.raises(ValueError, match="canonical Board evidence unavailable"):
         kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
     assert kb.get_task(f.w, f.caller).status == "running"
+
+
+@pytest.mark.parametrize("summary", [
+    "Delivered the note to {t} with no errors.", "Posted the findings to {t} once the review finished.",
+    "Sent the summary to {t} so it may be closed.", "Relayed the findings to {t}, if anyone asks.",
+])
+def test_negation_outside_the_claim_verb_still_needs_a_receipt(fleet, summary):
+    """A negation/intent word elsewhere in the clause does not govern the delivery verb (fail closed)."""
+    f = fleet
+    helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "pending"})
+    with pytest.raises(ValueError, match="exact operator delivery receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=summary.format(t=f.target))
+    assert kb.get_task(f.w, f.caller).status == "running"
+
+
+@pytest.mark.parametrize("text,claimed", [
+    ("Delivered the note to t_0123456789abcdef with no errors.", True),
+    ("The note to t_0123456789abcdef was not posted.", False),
+    ("Comment to t_0123456789abcdef queued, not yet posted.", False),
+    ("The comment to t_0123456789abcdef failed and was not sent.", False),
+    ("The comment to t_0123456789abcdef is queued and will be posted later.", False),
+    ("Never actually got delivered to t_0123456789abcdef.", False),
+    ("No probes were found, so nothing was commented on t_0123456789abcdef.", False),
+    ("Ship filed no card, so I posted both IDs on t_0123456789abcdef.", True),
+    ("Posted to t_0123456789abcdef; no errors.", True),
+])
+def test_claimed_targets_scopes_negation_to_the_verb(text, claimed):
+    from hermes_cli.kanban_operator_delivery import claimed_targets
+    assert claimed_targets(text) == ({"t_0123456789abcdef"} if claimed else set())
+
+
+def test_summary_edit_cannot_add_an_unproved_delivery_claim(fleet):
+    """kanban edit rewrites a done run's summary: a new gated claim needs the same receipt."""
+    from hermes_cli.kanban_completion_receipt import ReceiptEditRefused
+    f = fleet
+    helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "pending"})
+    assert kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=f"Queued a note for {f.target}.")
+    with pytest.raises(ReceiptEditRefused, match="exact operator delivery receipt"):
+        kb.edit_task(f.w, f.caller, result="r", summary=f"Posted the findings to {f.target}.")
+    run = f.w.execute("SELECT summary FROM task_runs WHERE task_id=? AND outcome='completed'",
+                      (f.caller,)).fetchone()
+    assert run[0] == f"Queued a note for {f.target}."
+    # Controls: non-claim wording still edits.
+    assert kb.edit_task(f.w, f.caller, result="r", summary=f"The note to {f.target} is queued, not yet posted.")
+
+
+def test_summary_edit_keeps_a_claim_the_admitted_receipt_proves(fleet):
+    f = fleet
+    proof = _delivered(f)
+    assert kb.complete_task(f.w, f.caller, expected_run_id=f.run_id,
+                            summary=f"Posted the findings to {f.target}.", metadata=_receipt(proof))
+    assert kb.edit_task(f.w, f.caller, result="r", summary=f"Posted the corrected findings to {f.target}.")

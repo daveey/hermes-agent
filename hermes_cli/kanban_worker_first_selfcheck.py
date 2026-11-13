@@ -11,6 +11,9 @@ and no lease, ready for :data:`STALE_S` while this gateway has a worker queue la
 the card's labels, gets the same Board repin ``hermes kanban move --pool`` makes (``[<pool label>, *coordination
 labels]``, so ``requires: [hub:write]`` keeps ``capability:hub-write``). :func:`hermes_cli.kanban_worker_placement.
 reevaluate` makes the repin in place of a reserve; the card's ``moved`` event records why.
+
+:func:`denied_target` is the same backstop for a card hub admission denied at claim time (not worker-first, so its
+``runs_on`` is written locally and pushed like any field, by the hub's claim screen).
 """
 from __future__ import annotations
 
@@ -53,4 +56,54 @@ def pool_target(conn, row, gateway, cfg, *, now=None):
 
 
 def log_repin(task_id, labels, reason):
-    logger.warning("kanban worker-first self-check: repinned %s to %s (%s)", task_id, labels, reason)
+    logger.warning("kanban dispatcher self-check: repinned %s to %s (%s)", task_id, labels, reason)
+
+
+DENIED_REASON = ("dispatcher self-check: ready {minutes} min here after hub admission denied it ({why}); queued for "
+                 "the worker pool (what `hermes kanban move --pool` does)")
+
+
+def denied_target(conn, row, gateway, cfg, *, board, now=None):
+    """``(labels, reason)`` for a ready card hub admission denied that still waits here with no ``runs_on``, else
+    None. Read-only (cached, fresh machine registry only).
+
+    Incident (11-13, hermes-hub): the claim screen denied t_01a184cee94603eb at 01:40Z but kept it, because its
+    wake_check named a fleet probe under ``~/.hermes/bin`` that every worker also installs; the verdict was never
+    revisited, so the hub claimed and released it for ~3 h while workers had free slots. The kept rule is fixed in
+    :func:`hermes_cli.kanban_hub_admission_claim.keep_reason`; this backstop covers the rest: a ready, label-less
+    (``placement_policy`` NULL) card created here, with no claim or lease, whose latest ``hub_admission`` event is a
+    non-forced deny, ready for :data:`STALE_S`, that no keep reason holds for *now* (a recorded ``kept`` that still
+    holds, e.g. a dir workspace, ``host_repo`` or a hub-local wake_check, keeps it), and whose worker-queue labels a
+    live machine other than this one carries. The caller writes the same ``runs_on`` the claim-time deny route
+    writes (``hermes kanban move --pool``'s labels) and a ``moved`` event with the reason."""
+    from hermes_cli import kanban_hub_admission_claim as claim
+    from hermes_cli import kanban_hub_admission_pickup as pickup
+    from hermes_cli import kanban_move as km
+    from hermes_cli import kanban_worker_node as node
+    from hermes_cli.kanban_hub_admission_placement import latest_verdict
+    from hermes_cli.kanban_parent_unclaimed import ready_since
+
+    # created_on NULL is this gateway's own card the Board has not stamped yet (kanban_sync_client "mine").
+    if (row["placement_policy"] is not None or row["runs_on"] not in (None, "", "[]") or row["status"] != "ready"
+            or row["created_on"] not in (None, gateway) or row["claim_lock"] is not None
+            or row["lease_holder"] is not None):
+        return None
+    verdict = latest_verdict(conn, row["id"])
+    if not verdict or verdict.get("admit") is not False or verdict.get("forced"):
+        return None
+    waited = (time.time() if now is None else now) - ready_since(conn, row["id"], row["created_at"])
+    if waited < STALE_S:
+        return None
+    fields = pickup._fields(row, board)
+    if claim.keep_reason(conn, row, fields, cfg):
+        return None
+    labels = pickup._target(fields, gateway, cfg, dict(verdict))
+    if not labels:
+        return None
+    registry = node.registry(require_fresh=True)
+    if registry is None or not km.matching_machines(labels, registry.get("machines") or {}, me=gateway):
+        return None
+    why = str(verdict.get("why") or "no reason recorded")[:200]
+    if verdict.get("kept"):
+        why = f"{why}; kept for '{verdict['kept']}', which no longer holds"
+    return labels, DENIED_REASON.format(minutes=int(waited // 60), why=why)

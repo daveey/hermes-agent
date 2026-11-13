@@ -427,6 +427,7 @@ def test_the_sync_loop_skips_unchanged_links_passes(live, ledger, svc, kanban_ho
 
     def wait(*args):
         iterations["n"] += 1
+        assert ksc._LINKS_RUNNER is not None and ksc._LINKS_RUNNER.wait_idle(30), "links pass did not finish"
         per_iteration.append(spies["reconcile"])
 
     monkeypatch.setattr(ksc, "wait_for_work", wait)

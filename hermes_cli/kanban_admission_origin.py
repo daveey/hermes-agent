@@ -17,7 +17,8 @@ def record_pickup_origins(conn, replica, task_ids):
 def origin_key(conn, task_id):
     """Use the pickup-time origin, else the original created chat (released links included), else creating
     gateway/creator."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+    from hermes_cli.machine_metrics import table_columns
+    cols = table_columns(conn, "tasks")  # runs under admission.lock: one row step, not one per column
     if "admission_origin" in cols:
         row = conn.execute("SELECT admission_origin FROM tasks WHERE id=?", (task_id,)).fetchone()
         if row and row[0]:

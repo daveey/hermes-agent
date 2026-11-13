@@ -187,14 +187,20 @@ def test_an_overrun_names_its_stage_and_hold_in_the_refusal(board, monkeypatch, 
     assert clock.handoffs > 0
 
 
-@pytest.mark.parametrize("stage,setup", [
+def _expires_during_census(mp):
+    calls = iter([False, True])  # live at the first check, past due at the one after the census
+    mp.setattr(ka, "_expired", lambda gate: next(calls, True))
+
+
+@pytest.mark.parametrize("reason,stage,setup", [
     # The pre-lease advisory passes a max age; only the locked gate's re-read (no argument) finds the sample gone.
-    ("sample_stale_or_missing", lambda mp: mp.setattr(
+    (ka.HUB_CPU_SAMPLE_STALE, "sample_stale_or_missing", lambda mp: mp.setattr(
         ka, "sampler_sample", lambda max_age_ms=None, _real=ka.sampler_sample:
         _real(max_age_ms) if max_age_ms is not None else None)),
-    ("lease_expired_before_census", lambda mp: mp.setattr(ka, "_expired", lambda gate: True)),
+    (ka.HUB_CPU_GATE_EXPIRED, "lease_expired_before_census", lambda mp: mp.setattr(ka, "_expired", lambda gate: True)),
+    (ka.HUB_CPU_GATE_EXPIRED_COUNTING, "lease_expired_after_census", _expires_during_census),
 ])
-def test_each_unknown_branch_names_its_stage(board, monkeypatch, caplog, stage, setup):
+def test_each_refusal_branch_names_its_reason_and_stage(board, monkeypatch, caplog, reason, stage, setup):
     conn, home = board
     (home / "config.yaml").write_text("kanban:\n  admission:\n    cpu_busy_below_pct: 50\n")
     advisory(home)
@@ -203,6 +209,6 @@ def test_each_unknown_branch_names_its_stage(board, monkeypatch, caplog, stage, 
     t = task(conn)
     with caplog.at_level(logging.INFO, logger="hermes_cli.kanban_admission"):
         assert kb.claim_task(conn, t) is None
-    refused(conn, t, False, "hub_cpu_unknown")
+    refused(conn, t, False, reason)
     line = next(r.getMessage() for r in caplog.records if "Hub admission refused" in r.getMessage())
     assert f"'stage': '{stage}'" in line, line

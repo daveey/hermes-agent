@@ -1,7 +1,8 @@
 """Capture/verify replay the feed from the FIRST snapshot head, never a later one.
 
 Busy-style fixtures whose relevant task changes land between the first page
-head and a later page head (seq 2/3) must refuse; a page head that regresses
+head and a later page head (seq 2/3) must refuse, or for an open<->terminal
+flip be replayed into the inventory; a page head that regresses
 below the first head is a malformed snapshot. The real ``check_interval`` feed
 reconciliation runs in every case: only the hub's ``changes`` calls are recorded.
 """
@@ -37,10 +38,23 @@ class Between(Busy):
 RELEVANT = [
     pytest.param({'table': 'tasks', 'uid': 'a', 'fields': {'priority': 2}}, id='priority'),
     pytest.param({'table': 'tasks', 'uid': 'a', 'fields': {'created_on': 'other'}}, id='origin'),
-    pytest.param({'table': 'tasks', 'uid': 'a', 'fields': {'status': 'done'}}, id='terminal'),
     pytest.param({'table': 'tasks', 'uid': 'a', 'op': 'delete'}, id='delete'),
     pytest.param({'table': 'tasks', 'uid': 'new'}, id='insert'),
 ]
+
+
+@pytest.mark.parametrize('seq', [2, 3])
+def test_terminal_change_between_first_and_last_page_head_is_replayed(seq):
+    # A terminal flip is replayed onto the rows, not refused: a replay that
+    # started after the first head would miss seq 2 and keep 'a' open.
+    terminal = _change(seq, table='tasks', uid='a', fields={'status': 'done'})
+    hub = Between(terminal)
+    manifest = prepare.capture(hub, board_id='board', exceptions=['b'])
+    assert manifest['rows'] == [] and hub.since[0] == 1
+    before = prepare.capture(Between(), board_id='board', exceptions=['b'])
+    verifier = Between(terminal)
+    assert prepare.verify(verifier, before, undo=True)['verified'] == 0
+    assert verifier.since[0] == 1
 
 
 def _relevant(seq, spec):

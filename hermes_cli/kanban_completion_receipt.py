@@ -203,6 +203,32 @@ class ReceiptEditRefused(ValueError):
     """``kanban edit`` tried to change a completion receipt; only completion admits one."""
 
 
+def check_summary_edit(conn, task_id, run_id, summary):
+    """Refuse an edited done-run summary that adds a delivery claim completion would refuse.
+
+    ``complete_task`` gates claims in ``prepare``; ``kanban edit`` rewrites the
+    same summary later. A gated claim is allowed only if the run's prior summary
+    already made it or its admitted receipt proves that target.
+    """
+    import json
+
+    from hermes_cli.kanban_operator_delivery import claimed_targets, gated_claims
+    claims = gated_claims(conn, task_id, summary)
+    if not claims:
+        return
+    row = None if run_id is None else conn.execute(
+        "SELECT summary, metadata FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+    try:
+        receipt = (json.loads(row[1]) if row and row[1] else {}).get("completion_receipt") or {}
+    except (TypeError, ValueError, AttributeError):
+        receipt = {}
+    proved = {e["operator_delivery"].get("target_task_id") for item in receipt.get("items") or []
+              for e in item.get("evidence") or [] if isinstance(e.get("operator_delivery"), dict)}
+    rest = claims - claimed_targets(row[0] if row else "") - proved
+    if rest:
+        raise ReceiptEditRefused(_unproved(rest))
+
+
 def keep_admitted_receipt(conn, run_id, metadata):
     """Edited handoff metadata for ``run_id`` with the run's admitted receipt kept verbatim.
 

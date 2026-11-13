@@ -63,7 +63,7 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None
-    reason = "hub_cpu_unknown"
+    reason = "hub_cpu_unknown" if state == cpu.ON else HUB_CPU_LIMIT_UNKNOWN
     if state == cpu.ON:
         if conn is not None:
             from hermes_cli.kanban_admission_pools import advisory_limit
@@ -152,6 +152,16 @@ def _cap_full(echo=None, *, conn=None, task_id=None):
 
 COMMIT_RESERVE_S = 0.25  # lock time left for the SQL commit after the gate admits
 
+# [daveey] One reason per final-gate refusal branch (hub 2026-11-13: the branches shared ``hub_cpu_unknown``, so the
+# skip event and the queue line could not say which fired). The lock-free advisory keeps ``hub_cpu_unknown`` for its
+# own missing/stale/malformed sample or unreadable pool limit; a hold overrun is ``OVERRUN``.
+HUB_CPU_LIMIT_UNKNOWN = "hub_cpu_limit_unknown"  # root kanban.admission.cpu_busy_below_pct unreadable/invalid
+HUB_CPU_GATE_EXPIRED = "hub_cpu_gate_expired"  # the claim/lease deadline had passed before the census
+HUB_CPU_SAMPLE_STALE = "hub_cpu_sample_stale"  # the sampler's sample is missing, stale or malformed at the lock
+HUB_CPU_GATE_EXPIRED_COUNTING = "hub_cpu_gate_expired_counting"  # the deadline passed during the census
+FINAL_GATE_REASONS = (HUB_CPU_LIMIT_UNKNOWN, HUB_CPU_GATE_EXPIRED, HUB_CPU_SAMPLE_STALE, HUB_CPU_GATE_EXPIRED_COUNTING,
+                      OVERRUN)
+
 
 def _hold_budget_s():
     from hermes_cli.admission_fence import CLAIM_MAX_HOLD_S
@@ -162,12 +172,13 @@ def _over_budget(started, needed_s=0.0):
     return started is not None and time.monotonic() - started + needed_s > _hold_budget_s()
 
 
-def _unknown(stage, started, **extra):
-    """``hub_cpu_unknown`` with the branch that refused and the hold so far, so the refusal log tells a hold overrun
-    from an invalid sample, an expired lease or an unreadable limit (they all fail closed the same way)."""
+def _gate_refusal(reason, stage, started, **extra):
+    """A final-gate refusal: its own reason code per branch (one shared ``hub_cpu_unknown`` hid which branch
+    fired), plus evidence naming the stage and the hold so far, so the refusal log tells a hold overrun from an
+    invalid sample, an expired lease or an unreadable limit (they all fail closed the same way)."""
     hold = {"hold_ms": round((time.monotonic() - started) * 1000), "budget_ms": round(_hold_budget_s() * 1000)} \
         if started is not None else {}
-    return "hub_cpu_unknown", {"stage": stage, **hold, **extra}
+    return reason, {"stage": stage, **hold, **extra}
 
 
 def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=None):
@@ -199,21 +210,23 @@ def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=Non
     if state == cpu.OFF:
         return None, None
     if state != cpu.ON:
-        return _unknown("limit_unknown", started)
+        return _gate_refusal(HUB_CPU_LIMIT_UNKNOWN, "limit_unknown", started)
     if _expired(gate):
-        return _unknown("lease_expired_before_census", started)  # the claim/lease deadline already passed
+        # the claim/lease deadline already passed
+        return _gate_refusal(HUB_CPU_GATE_EXPIRED, "lease_expired_before_census", started)
     if _cap_full(echo, conn=conn, task_id=task_id):
         return "hub_capacity_full", None
     limit = getattr(_decision, "pool_limit", None) or limit
     measured = sampler_sample()
     if measured is None:
-        return _unknown("sample_stale_or_missing", started)
+        return _gate_refusal(HUB_CPU_SAMPLE_STALE, "sample_stale_or_missing", started)
     if not cpu.below(measured["cpu_busy_pct"], limit):
         return "hub_cpu_at_or_above_limit", None
     if _expired(gate):
-        return _unknown("lease_expired_after_census", started)  # the deadline passed while counting: never start
+        # the deadline passed while counting: never start
+        return _gate_refusal(HUB_CPU_GATE_EXPIRED_COUNTING, "lease_expired_after_census", started)
     if _over_budget(started):
-        return OVERRUN, _unknown("hold_after_census", started)[1]  # refuse rather than outlast waiting turns
+        return _gate_refusal(OVERRUN, "hold_after_census", started)  # refuse rather than outlast waiting turns
     counts = getattr(_decision, "counts", None) or {}
     admission = {k: counts[k] for k in ("active_before", "active_after", "excluded_run_uid")} \
         if counts.get("excluded_run_uid") else None
@@ -431,7 +444,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
             finally:
                 _decision.worker_fenced = previous_fenced
             if reason is not None:
-                # ``evidence`` on a refusal names the gate stage and hold (hub_cpu_unknown), never a sample.
+                # ``evidence`` on a final-gate refusal names its stage and the hold so far, never a sample.
                 logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s %s", task_id, reason,
                                                  getattr(_decision, "counts", None) or {}, evidence or {})
                 _defer(task_id, reason)

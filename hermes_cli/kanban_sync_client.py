@@ -1183,6 +1183,10 @@ def _links_clock() -> float:
     return time.monotonic()
 
 
+# The running loop's links pass (tests wait on it to observe a pass deterministically).
+_LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop runs
+
+
 def _ledger_slices(cards: Iterable[Mapping[str, Any]], gateway: str) -> dict[str, frozenset]:
     """Per board, every field of this gateway's origin-ledger rows that a links pass reads (``ledger_boards``,
     ``kanban_chat_links._ledger_links``). Compared by value: a re-projection with the same rows is no change."""
@@ -1467,6 +1471,9 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     work = SyncWork(period)
     watchers: dict[str, threading.Thread] = {}
     next_links = 0.0
+    global _LINKS_RUNNER
+    from hermes_cli.kanban_sync_links_pass import LinksPass
+    links = _LINKS_RUNNER = LinksPass(ident.gateway)
     from hermes_cli.machine_metrics import Reporter
     metrics = Reporter(hub.report_metrics)
     # Hub CPU advisory: measured on its own thread, so a slow sync round can neither void nor delay it. [daveey]
@@ -1502,8 +1509,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 if r.push and (r.push.sent or r.push.rejected):
                     _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                               r.push.sent, r.push.rejected)
-            if time.monotonic() >= next_links:
-                reconcile_links(boards, ident.gateway, skip_unchanged=True)
+            if time.monotonic() >= next_links and links.request(boards):  # busy: ask again next iteration
                 next_links = time.monotonic() + LINKS_EVERY_S
             sync_timing.report(sender.loop_report)
             remaining = max(0.0, work.deadline - time.monotonic())
@@ -1512,6 +1518,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
             sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
     finally:
+        links.stop()
         sender.close()
         sampler.close()
     runstate.record_down(runstate.STOPPED)

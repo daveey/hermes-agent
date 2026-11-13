@@ -118,7 +118,7 @@ def test_home_executor_enforces_creation_stop_from_old_worker(fleet, monkeypatch
     f.board()
     # Model an older submitting worker: the home must enforce independently.
     with monkeypatch.context() as old_worker:
-        old_worker.setattr(consent, "enforce", lambda *args: None)
+        old_worker.setattr(consent, "enforce", lambda *args, **kw: None)
         result = requests.submit(f.w, env_task=caller, env_run=str(run), ops=[{
             "op": "operator", "action": "comment", "task_id": f.target, "text": "probe payload"}])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home-without-chat"))
@@ -206,3 +206,172 @@ def test_store_failure_fails_closed_without_blocking_an_approved_command(monkeyp
             _decide("t_" + "2" * 16, choice)
     else:
         _decide("t_" + "2" * 16, choice)
+
+
+def _stopped_home_call(f, monkeypatch, tmp_path, name):
+    from hermes_cli import kanban_consent as consent
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / f"{name}-origin"))
+    approval_context._fire_approval_hook(
+        "post_approval_response", session_id=f"{name}-chat",
+        command=f"hermes kanban comment {f.target} 'probe payload'", choice="timeout", surface="gateway")
+    caller = f.card(f.w, f"{name} child", session_id=f"{name}-chat")
+    kb.claim_task(f.w, caller)
+    run = kb._current_run_id(f.w, caller)
+    f.run_uid(f.w, caller)
+    f.board()
+    with monkeypatch.context() as old_worker:
+        old_worker.setattr(consent, "enforce", lambda *args, **kw: None)
+        result = requests.submit(f.w, env_task=caller, env_run=str(run), ops=[{
+            "op": "operator", "action": "comment", "task_id": f.target, "text": "probe payload"}])
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / f"{name}-home"))
+    return caller, result["request_id"]
+
+
+def _hide_created(f, monkeypatch, caller):
+    """Model replica sync lag: the caller's created event has not reached the home's replica."""
+    real = f.board
+
+    def lagging():
+        real()
+        with kb.write_txn(f.rep):
+            f.rep.execute("DELETE FROM task_events WHERE task_id=? AND kind='created'", (caller,))
+    monkeypatch.setattr(f, "board", lagging)
+    lagging()
+    return real
+
+
+def test_home_executor_retries_while_creation_provenance_is_unsynced(fleet, monkeypatch, tmp_path):
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    caller, rid = _stopped_home_call(f, monkeypatch, tmp_path, "lag")
+    real = _hide_created(f, monkeypatch, caller)
+    helpers._round(f)
+    assert not f.h.execute("SELECT 1 FROM operator_calls WHERE side='execute'").fetchone(), \
+        "the home applied a call whose consent provenance it could not read"
+    assert not f.h.execute("SELECT 1 FROM task_comments WHERE task_id=?", (f.target,)).fetchone()
+    # Once the created event syncs, the home sees the stop and refuses.
+    monkeypatch.setattr(f, "board", real)
+    kox._MARK.clear()
+    helpers._round(f)
+    request = requests.get_request(f.w, rid)
+    assert request["result"][0]["outcome"] == "refused", request
+    assert "consent_stop" in request["result"][0]["detail"]
+    assert not f.h.execute("SELECT 1 FROM task_comments WHERE task_id=?", (f.target,)).fetchone()
+
+
+def test_home_executor_refuses_when_creation_provenance_never_syncs(fleet, monkeypatch, tmp_path):
+    from hermes_cli import kanban_consent as consent
+    f = fleet
+    caller, rid = _stopped_home_call(f, monkeypatch, tmp_path, "never")
+    _hide_created(f, monkeypatch, caller)
+    monkeypatch.setattr(consent, "CREATION_SYNC_GRACE_S", -1)
+    helpers._round(f)
+    request = requests.get_request(f.w, rid)
+    assert request["result"][0]["outcome"] == "refused", request
+    assert "consent_unproven" in request["result"][0]["detail"]
+    assert not f.h.execute("SELECT 1 FROM task_comments WHERE task_id=?", (f.target,)).fetchone()
+
+
+def test_submitting_session_stop_is_enforced_and_inherited(fleet, monkeypatch, tmp_path):
+    """A worker run's own timed-out approval binds its submissions and the cards it creates."""
+    from gateway.session_context import scoped_current_session_id
+    f = fleet
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "worker-run-home"))
+    approval_context._fire_approval_hook(
+        "post_approval_response", session_id="worker-run-session",
+        command=f"hermes kanban comment {f.target} 'probe payload'", choice="timeout", surface="gateway")
+    op = {"op": "operator", "action": "comment", "task_id": f.target, "text": "probe payload"}
+    with scoped_current_session_id("worker-run-session"):
+        with pytest.raises(requests.SupervisorRequestError, match="consent_stop"):
+            requests.submit(f.w, env_task=f.caller, env_run=str(f.run_id), ops=[op])
+        child = f.card(f.w, "child of the stopped run", creator_task_id=f.caller, session_id="origin-chat")
+    from hermes_cli import kanban_consent as consent
+    with pytest.raises(requests.SupervisorRequestError, match="consent_stop"):
+        consent.enforce(f.w, child, [{"op": "operator", "action": "comment", "task_id": f.target}])
+    # Control: another session's submission is not bound by this run's stop.
+    with scoped_current_session_id("other-session"):
+        assert requests.submit(f.w, env_task=f.caller, env_run=str(f.run_id), ops=[op])["status"] == "pending"
+
+
+def test_snapshot_uses_request_scoped_session_not_process_env(fleet, monkeypatch, tmp_path):
+    """Two chats in one gateway: os.environ holds whichever bound last; the card follows its own request."""
+    import contextvars
+    from gateway.session_context import scoped_current_session_id
+    from hermes_cli import kanban_consent as consent
+    f = fleet
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "multi-chat-home"))
+    _decide(f.target, "deny", session="chat-a")
+    monkeypatch.setenv("HERMES_SESSION_ID", "chat-a")  # chat A set the process env last
+
+    def create(session):
+        with scoped_current_session_id(session):
+            return f.card(f.w, f"card from {session}")
+    from_b = contextvars.copy_context().run(create, "chat-b")
+    from_a = contextvars.copy_context().run(create, "chat-a")
+    op = [{"op": "operator", "action": "comment", "task_id": f.target}]
+    consent.enforce(f.w, from_b, op)
+    with pytest.raises(requests.SupervisorRequestError, match="consent_stop"):
+        consent.enforce(f.w, from_a, op)
+
+
+def _sessions(home, *chain):
+    """Compression lineage root -> ... -> tip in the throwaway state.db."""
+    from hermes_state import SessionDB
+    db = SessionDB(home / "state.db")
+    try:
+        parent = None
+        for sid in chain:
+            db.create_session(session_id=sid, source="cli", model="test", parent_session_id=parent)
+            parent = sid
+    finally:
+        db.close()
+
+
+def test_stop_survives_compression_rotation(fleet, monkeypatch, tmp_path):
+    """Compression rebinds the conversation to a child session id; its stops come along."""
+    from hermes_cli import kanban_consent as consent
+    f = fleet
+    home = tmp_path / "compressed-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _decide(f.target, "timeout", session="pre-compression")
+    _sessions(home, "pre-compression", "after-first", "after-second")
+    assert [s["targets"] for s in consent.session_stops("after-second")] == [[f.target]]
+    card = f.card(f.w, "created after compression", session_id="after-second")
+    with pytest.raises(requests.SupervisorRequestError, match="consent_stop"):
+        consent.enforce(f.w, card, [{"op": "operator", "action": "comment", "task_id": f.target}])
+    # An explicit approval later in the lineage still supersedes the inherited stop.
+    _decide(f.target, "once", session="after-second")
+    assert consent.session_stops("after-second") == []
+    # Control: a sibling lineage is not bound by this conversation's stop.
+    _sessions(home, "unrelated-root", "unrelated-tip")
+    assert consent.session_stops("unrelated-tip") == []
+
+
+def test_worker_kanban_comment_tool_honours_creation_stop(fleet, monkeypatch, tmp_path):
+    """A same-board child cannot comment the stopped target directly through kanban_comment."""
+    import json as _json
+    from hermes_cli import kanban_consent as consent
+    f = fleet
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "local-comment-home"))
+    sibling = f.card(f.w, "stopped same-board target")
+    _decide(sibling, "deny", session="local-chat")
+    child = f.card(f.w, "child of the stopped chat", session_id="local-chat")
+    assert consent.comment_refusal(f.w, child, None, sibling)
+    assert consent.comment_refusal(f.w, child, None, f.target) is None  # other target: no stop
+    assert consent.comment_refusal(f.w, None, "local-chat", sibling)    # the stopped session itself
+
+    import tools.kanban_tools as kt
+    from contextlib import contextmanager
+
+    @contextmanager
+    def board(_slug=None):
+        yield kb, f.w
+    monkeypatch.setattr(kt, "_board", board)
+    monkeypatch.setattr(kt, "_is_dispatcher_owned_worker", lambda: True)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", child)
+    out = _json.loads(kt._handle_comment({"task_id": sibling, "body": "must not land"}))
+    assert out.get("ok") is not True and "consent_stop" in _json.dumps(out), out
+    assert not f.w.execute("SELECT 1 FROM task_comments WHERE task_id=?", (sibling,)).fetchone()
+    # Control: the same worker may still comment an unstopped card.
+    other = f.card(f.w, "unstopped sibling")
+    assert _json.loads(kt._handle_comment({"task_id": other, "body": "fine"}))["ok"] is True

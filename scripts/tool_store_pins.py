@@ -1,10 +1,16 @@
-"""Exit 0 only when a tool store already holds this checkout's pins.
+"""Exit 0 only when this run borrows a tool store that already holds this checkout's pins.
 
 Usage: python -I -B scripts/tool_store_pins.py REPO STORE
 (on success prints the pinned Python major.minor)
 
 scripts/run_tests.sh asks this before sharing the account's tool store with a
-faked HOME. facts.json selects ONE entry per package, not one per version:
+run whose Hermes root is not the account's: a faked HOME, or a HERMES_HOME
+outside the account root (a card's fake home, a probe home). Such a root holds
+no store of its own, so without sharing setup-hermes.sh downloads the whole
+toolchain (~1.5 GB) into it. The root is the one PM resolves for this process
+(HERMES_HOME's root, else HOME's). It borrows only when it is not STORE's own
+root and holds no store: the owner provisions its own store, and a root with a
+store keeps it. facts.json selects ONE entry per package, not one per version:
 provisioning a checkout with other pins re-points the account's own runtime at
 them and pulls the selection from under a concurrent run on the store's pins.
 So share only when every tool `pm install` would provision here (cmd_install's
@@ -15,6 +21,13 @@ and a missing or non-executable binary (setup-hermes.sh's uv copy included)
 sends setup or `pm install` into a re-stage whose unlocked remove + publish
 races other runs on the shared store. Read-only: no lock, no install, no
 bytecode; any unreadable record or error means "do not share".
+
+One exception to "every tool": an optional default (Chromium, cua-driver) the
+store records at no version at all, because the owner declined it or it failed
+to install (cua-driver on a headless Linux worker lacks libXi). The borrower
+declines it too, so its own `pm install` never stages it into the shared store.
+That decline, written only once every check passed, is this script's one write,
+and it lands in the borrower's install state, never in STORE.
 """
 import os
 import sys
@@ -27,9 +40,24 @@ def _setup_uv(store: Path, target: str, version: str) -> Path:
     return store / f"uv-{version}-{os_arch}" / ("uv.exe" if os_arch.startswith("win32") else "uv")
 
 
+def borrows(store: Path) -> bool:
+    """Is this process's Hermes root another root than STORE's, with no store of its own?"""
+    from hermes_constants import get_default_hermes_root
+
+    root = get_default_hermes_root()
+    try:
+        if root.resolve() == store.resolve().parent:
+            return False
+    except (OSError, RuntimeError):
+        return False
+    return not (root / "tools" / "facts.json").exists()
+
+
 def main(repo: str, store: Path) -> int:
     sys.path.insert(0, repo)
-    from pm.defaults import default_packages
+    if not borrows(store):
+        return 1
+    from pm.defaults import default_packages, record_declined
     from pm.install import _installed_location
     from pm.lock import Facts, Lockfile
     from pm.package import StatePackage
@@ -39,9 +67,12 @@ def main(repo: str, store: Path) -> int:
 
     lock = Lockfile(Path(repo, "pm", "lock.json"))
     # Strict first: PM's lenient read would quarantine an unparsable file as .corrupt.
-    Facts(store / "facts.json", strict=True)
+    store_facts = Facts(store / "facts.json", strict=True)
     names, target = lock.names(), current_target()
-    for package in walk(tool_roots(names) + developer_tools(names) + default_packages(names) + ["venv"]):
+    defaults = default_packages(names)
+    absent = [name for name in defaults if store_facts.get(name) is None]
+    carried = [name for name in defaults if name not in absent]
+    for package in walk(tool_roots(names) + developer_tools(names) + carried + ["venv"]):
         if isinstance(package, StatePackage):
             continue
         location = _installed_location(package, lock, target, roots=(store,), heal=False)
@@ -54,6 +85,8 @@ def main(repo: str, store: Path) -> int:
     uv = _setup_uv(store, target, lock.version("uv"))
     if not uv.is_file() or not (os.name == "nt" or os.access(uv, os.X_OK)):
         return 1
+    if absent:
+        record_declined(add=absent, project_root=Path(repo))
     # The runner reuses uv's interpreter cache only when it already holds this minor.
     print(".".join(lock.version("python").split("+")[0].split(".")[:2]))
     return 0

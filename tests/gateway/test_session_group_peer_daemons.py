@@ -67,16 +67,19 @@ def _model(reply, *markers, handler=Model):
     return server
 
 
-def _write_config(home, model, *, api_port=None, link_port=None):
+def _write_config(home, model, *, api_port=None, link_port=None, overrides=None):
     base = f'http://127.0.0.1:{model.server_port}/v1'
     gateway = {'multiplex_profiles': False}
     if api_port is not None:
         gateway |= {'room_link_url': f'http://127.0.0.1:{link_port or api_port}',
                     'platforms': {'api_server': {'enabled': True, 'port': api_port, 'host': '127.0.0.1'}}}
-    (home / 'config.yaml').write_text(json.dumps({
+    config = {
         'model': {'provider': 'custom', 'default': 'room-model', 'base_url': base},
         'gateway': gateway, 'platform_toolsets': {'gui': [], 'bot_room': [], 'api_server': []},
-        'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)}}))
+        'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)}}
+    for key, value in (overrides or {}).items():
+        config[key] = config[key] | value if isinstance(config.get(key), dict) else value
+    (home / 'config.yaml').write_text(json.dumps(config))
 
 
 def _gateway(tmp_path, name, model, root, *, api_server=False):
@@ -99,7 +102,9 @@ def gateways(tmp_path):
     """Isolated models and gateway environments; tests own every daemon/restart boundary."""
     models, relays = [], []
 
-    def create(*markers, lossy=False, handler=Model):
+    def create(*markers, lossy=False, handler=Model, target_config=None):
+        """``target_config`` overrides top-level member config keys (dicts merge one level deep). The
+        member's config.yaml is written only at its first boot (``_member``), so edit it through this."""
         root = Path(__file__).resolve().parents[2]
         home_model, target_model = _model('HOME_REPLY'), _model('PEER_REPLY', *markers, handler=handler)
         models.extend((home_model, target_model))
@@ -115,7 +120,8 @@ def gateways(tmp_path):
             g.api_port, g.target_env['API_SERVER_PORT'] = port, str(port)
             if relay:
                 relay.target_port = port
-            _write_config(target, target_model, api_port=port, link_port=relay.port if relay else None)
+            _write_config(target, target_model, api_port=port, link_port=relay.port if relay else None,
+                          overrides=target_config)
         g.write_target_config = write_target_config
         return g
     yield create

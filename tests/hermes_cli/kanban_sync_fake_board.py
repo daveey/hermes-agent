@@ -273,27 +273,58 @@ class FakeHub:
             if self.svc.lease_runs and card is not None:
                 retry = self.svc.retry_status_for_run(b, card.get("current_run_uid"))
                 if run in runs and runs[run].get("ended_at") is None:
-                    unused = bool(body.get("unused_grant"))
-                    # As the Board's releaseTask with ``unused_grant: true`` (live t_01a1a1dea9c64d6a run 164239):
-                    # the run's metadata and the ``released`` event both say the grant never started anything.
-                    self.svc._put(b, "task_runs", run, {"status": "released", "outcome": "released", "ended_at": 2,
-                                                        **({"metadata": json.dumps({"unused_grant": True},
-                                                                                   separators=(",", ":"))}
-                                                           if unused else {})},
-                                  gw, op_id, hlc)
-                    if unused:
-                        self.svc._put(b, "task_events", f"ev-rel-{run}",
-                                      {"task_id": task, "run_uid": run, "kind": "released",
-                                       "payload": json.dumps({"error": None, "retry_status": retry,
-                                                              "unused_grant": True}, separators=(",", ":")),
-                                       "created_at": int(time.time())}, gw, op_id, hlc)
-                # clearLease drops the lease mirror; a still-running card goes back to retryStatusForRun; endRun
-                # clears current_run_uid even when the holder already ended its run row.
-                self.svc._put(b, "tasks", task, {**({"status": retry} if card.get("status") == "running" else {}),
-                                                 "current_run_uid": None, "lease_holder": None,
-                                                 "lease_run_uid": None, "lease_expires": None}, gw, op_id, hlc)
+                    self._release_run(b, task, run, body, retry, op_id, hlc)
+                else:
+                    # clearLease drops the lease mirror; a still-running card goes back to retryStatusForRun; endRun
+                    # clears current_run_uid even when the holder already ended its run row.
+                    self.svc._put(b, "tasks", task, {**({"status": retry} if card.get("status") == "running" else {}),
+                                                     "current_run_uid": None, "lease_holder": None,
+                                                     "lease_run_uid": None, "lease_expires": None}, gw, op_id, hlc)
             return {"status": "applied", "lease": None}
         return {"status": "applied", "lease": b["leases"][task], "version": version}
+
+    def _release_run(self, b: dict, task: str, run: str, body: dict, retry: str, op_id: Optional[str],
+                     hlc: str) -> None:
+        """As transitions.ts releaseTask (via board.ts ``leases`` release) for the holder's live run: the run ends,
+        a running card goes back to ``retry`` (retryStatusForRun) and the run-outcome event always carries it as
+        ``retry_status``.
+
+        A neutral outcome (``FakeService.NEUTRAL`` = NEUTRAL_RELEASES) ends the run as its mapped outcome and emits
+        its mapped event; anything else ends as ``outcome`` (``terminal_provider`` -> ``crashed``) and emits that
+        kind. Failure accounting (recordTaskFailure for crashed/timed_out/spawn_failed) is not modelled on this
+        path; :meth:`FakeService.release_op` covers it for the ops path. ``unused_grant`` (live t_01a1a1dea9c64d6a
+        run 164239) marks the run metadata and the event only for a plain ``released`` outcome."""
+        gw, svc = self.gateway, self.svc
+        outcome = str(body.get("outcome") or "released")
+        error = str(body.get("error") or outcome)[:500]
+        card = b["rows"]["tasks"][task]
+        running = card.get("status") == "running"
+        neutral = svc.NEUTRAL.get(outcome)
+        if neutral:
+            ended, kind = neutral
+            meta = {"owner_restart": True} if outcome == "owner_restart" else {}
+            run_fields = {"error": error, "metadata": json.dumps(meta, separators=(",", ":")) if meta else None}
+            payload: dict = {**meta, "error": error, "retry_status": retry}
+            task_fields = {"status": retry, "last_failure_error": error} if running else {}
+        else:
+            ended = kind = "crashed" if outcome == "terminal_provider" else outcome
+            unused = bool(body.get("unused_grant")) and outcome == "released" and running
+            canonical = outcome in ("crashed", "timed_out", "terminal_provider")
+            err = None if outcome == "released" else error
+            run_fields = {"error": err, **({"metadata": json.dumps({"unused_grant": True}, separators=(",", ":"))}
+                                           if unused else {})}
+            payload = {**({"failure_notice": "canonical"} if canonical else {}), "error": err, "retry_status": retry,
+                       **({"terminal_provider": True} if outcome == "terminal_provider" else {}),
+                       **({"unused_grant": True} if unused else {})}
+            task_fields = {"status": retry, **({"last_failure_error": error} if outcome == "rate_limited" else {})} \
+                if running else {}
+        svc._put(b, "task_runs", run, {"status": ended, "outcome": ended, "ended_at": 2, **run_fields}, gw, op_id, hlc)
+        svc._put(b, "task_events", f"ev-rel-{run}",
+                 {"task_id": task, "run_uid": run, "kind": kind,
+                  "payload": json.dumps(payload, separators=(",", ":")), "created_at": int(time.time())},
+                 gw, op_id, hlc)
+        svc._put(b, "tasks", task, {**task_fields, "current_run_uid": None, "lease_holder": None,
+                                    "lease_run_uid": None, "lease_expires": None}, gw, op_id, hlc)
 
     def sessions(self, board: str, body: dict) -> dict:
         """As board.ts ``sessions``: ``get`` -> {owners}; ``move`` is a CAS signed by the current owner. The target

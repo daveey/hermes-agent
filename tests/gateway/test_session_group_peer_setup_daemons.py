@@ -6,7 +6,7 @@ import pytest
 
 from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
 from tests.gateway.test_session_group_peer_daemons import (
-    Model, _create, _events, _grant_status, _invite, _last_user_text, _revoked, _room_link, _send, _wait_rpc, gateways as gateways_fixture)
+    Model, _create, _events, _grant_status, _invite, _last_user_text, _revoked, _room_link, _member, _send, _wait_rpc, gateways as gateways_fixture)
 
 gateways = gateways_fixture
 
@@ -56,10 +56,7 @@ class _ToolModel(Model):
 
 
 def test_a_setup_stopped_between_its_steps_leaves_a_visible_member_that_running_it_again_seats(gateways):
-    g = gateways('tool', handler=_ToolModel)
-    config = json.loads((g.target / 'config.yaml').read_text())
-    config['platform_toolsets']['api_server'] = ['terminal']
-    (g.target / 'config.yaml').write_text(json.dumps(config))
+    g = gateways('tool', handler=_ToolModel, target_config={'platform_toolsets': {'api_server': ['terminal']}})
     setup = {}
 
     def register(home_ws, grant):
@@ -129,11 +126,11 @@ def test_a_setup_stopped_between_its_steps_leaves_a_visible_member_that_running_
             for grant in (setup['orphan'], setup['grant']):
                 await _revoked(setup['url'], grant)
 
-    with daemon(g.root, g.target, g.target_env, barrier=False) as (target_proc, target_desc):
+    with _member(g) as (target_proc, target_desc):
         with daemon(g.root, g.home, g.home_env, barrier=False) as (home_proc, home_desc):
             asyncio.run(create_then_invite(home_desc, target_desc))
             home_proc.kill()
         with daemon(g.root, g.home, g.home_env, barrier=False) as (_, home_desc):
             asyncio.run(run_again_with_the_member_gateway_away(home_desc, target_desc, target_proc))
-            with daemon(g.root, g.target, g.target_env, barrier=False):
+            with _member(g):
                 asyncio.run(register_after_the_member_gateway_restarts(home_desc))

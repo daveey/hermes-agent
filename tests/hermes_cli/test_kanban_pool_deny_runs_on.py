@@ -143,8 +143,8 @@ def test_a_crash_or_start_refusal_record_still_waits_for_a_completed_round(hub):
 # --- dispatcher self-check -------------------------------------------------------------------------------------
 
 class RecordingHub:
-    def __init__(self):
-        self.reserves, self.repins = [], []
+    def __init__(self, *, refuse_repin=None):
+        self.reserves, self.repins, self.refuse_repin = [], [], refuse_repin
 
     def reserve(self, board, **body):
         self.reserves.append(body)
@@ -152,6 +152,8 @@ class RecordingHub:
 
     def repin(self, board, **body):
         self.repins.append(body)
+        if self.refuse_repin:
+            raise ksc.HubError(403, json.dumps({"error": self.refuse_repin}))
         return {"version": 9, "runs_on": body["runs_on"], "placement_policy": None}
 
 
@@ -160,9 +162,11 @@ def no_pull(monkeypatch):
     monkeypatch.setattr(ksc, "pull", lambda *a, **kw: None)
     wp._refused.clear()
     wp._queued.clear()
+    wp._selfcheck_refused.clear()
     yield
     wp._refused.clear()
     wp._queued.clear()
+    wp._selfcheck_refused.clear()
 
 
 def _stranded(conn, *, age, requires=("terminal", "file", "git", "hub:write")):
@@ -213,3 +217,44 @@ def test_self_check_leaves_other_worker_first_cards_to_the_reserve(hub, no_pull,
     wp.reevaluate(conn, board, BOARD, ME, cfg=cfg)
     assert board.repins == []
     assert [r["task_id"] for r in board.reserves] == [tid]
+
+
+def _bump(conn, tid, version):
+    conn.execute("UPDATE kanban_sync_state SET applying=1")
+    conn.execute("UPDATE tasks SET sync_version=? WHERE id=?", (version, tid))
+    conn.execute("UPDATE kanban_sync_state SET applying=0")
+    conn.commit()
+
+
+def test_a_refused_self_check_repin_falls_back_to_the_reserve_until_the_revision_moves(hub, no_pull):
+    """A Board refusal other than not_claimable (e.g. forbidden) must not hold the card on a repin re-asked every
+    tick: at the refused revision it goes back to the reserve, and a new revision asks the repin again."""
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    board = RecordingHub(refuse_repin="forbidden")
+    wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert [r["expected_revision"] for r in board.repins] == [4] and board.reserves == []
+    assert wp.requested_move(conn, tid) is None  # nothing was recorded as applied
+    wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert len(board.repins) == 1, "the refused self-check repin was re-asked at the same revision"
+    assert [(r["task_id"], r["expected_revision"]) for r in board.reserves] == [(tid, 4)]
+    _bump(conn, tid, 5)
+    board.refuse_repin = None
+    wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert [r["expected_revision"] for r in board.repins] == [4, 5]
+    assert len(board.reserves) == 1
+    assert (BOARD, tid) not in wp._selfcheck_refused
+
+
+def test_a_refused_explicit_move_repin_is_not_downgraded_to_a_reserve(hub, no_pull):
+    """Only the self-check falls back: a run's kanban_move must never be handed back to the pool by a reserve."""
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    kb._append_event(conn, tid, km.MOVED_EVENT, {"from_machine": "worker-1", "runs_on": ["machine:hub"],
+                                                 "reason": "r", "move_no": 1, "forced": False, "matches": [ME]})
+    conn.commit()
+    board = RecordingHub(refuse_repin="forbidden")
+    for _ in range(2):
+        wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert [r["runs_on"] for r in board.repins] == [["machine:hub"]] * 2
+    assert board.reserves == [] and not wp._selfcheck_refused

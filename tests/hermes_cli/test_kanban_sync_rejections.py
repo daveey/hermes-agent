@@ -362,6 +362,40 @@ def test_fake_lease_release_is_fenced_on_the_holders_run(live, kanban_home, gate
     assert b["rows"]["task_runs"][RUN]["ended_at"] is None
 
 
+@pytest.mark.parametrize("extra,lane,run_outcome,kind,payload,status", [
+    # An ordinary release (no unused_grant) still emits its run-outcome event with retry_status.
+    ({}, "ready", "released", "released", {"error": None, "retry_status": "ready"}, "ready"),
+    ({"unused_grant": True}, "ready", "released", "released",
+     {"error": None, "retry_status": "ready", "unused_grant": True}, "ready"),
+    # retryStatusForRun: a run claimed out of review retries to review.
+    ({}, "review", "released", "released", {"error": None, "retry_status": "review"}, "review"),
+    # NEUTRAL_RELEASES maps the outcome to its run outcome and event kind.
+    ({"outcome": "owner_restart", "error": "gateway restarted"}, "ready", "reclaimed", "owner_restart_lost",
+     {"owner_restart": True, "error": "gateway restarted", "retry_status": "ready"}, "ready"),
+    ({"outcome": "rate_limited"}, "ready", "rate_limited", "rate_limited",
+     {"error": "rate_limited", "retry_status": "ready"}, "ready"),
+    ({"outcome": "terminal_provider", "error": "bad key"}, "ready", "crashed", "crashed",
+     {"failure_notice": "canonical", "error": "bad key", "retry_status": "ready", "terminal_provider": True}, "ready"),
+])
+def test_fake_lease_release_emits_run_outcome_event(live, kanban_home, extra, lane, run_outcome, kind, payload,
+                                                    status):
+    """As transitions.ts releaseTask: every release of the holder's live run emits its run-outcome event carrying
+    ``retry_status`` (``unused_grant`` only when set), with neutral outcomes mapped through NEUTRAL_RELEASES."""
+    svc = FakeService(lease_runs=True)
+    hub = svc.hub(ME)
+    tid = kb.create_task(live, title="leased", assignee="worker")
+    client.push(live, hub, BOARD, ME, primary=False)
+    grant = {"action": "grant", "task": tid, "run_uid": RUN, "client_op_id": "g", "lane": lane}
+    assert hub.leases(BOARD, grant)["status"] == "applied"
+    release = {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r", **extra}
+    assert hub.leases(BOARD, release)["status"] == "applied"
+    rows = svc.board(BOARD)["rows"]
+    events = [e for e in rows["task_events"].values() if e["run_uid"] == RUN and e["kind"] != "claimed"]
+    assert [(e["kind"], json.loads(e["payload"])) for e in events] == [(kind, payload)]
+    assert (rows["task_runs"][RUN]["outcome"], rows["tasks"][tid]["status"]) == (run_outcome, status)
+    assert rows["tasks"][tid]["lease_run_uid"] is None
+
+
 def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):
     lost_release(live, svc)
     hub = svc.hub(ME)

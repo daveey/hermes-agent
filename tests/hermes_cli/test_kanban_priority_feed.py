@@ -90,7 +90,7 @@ def test_busy_capture_and_verify_ignore_unrelated_changes():
     assert prepare.verify(Busy(), manifest, undo=True)['verified'] == 1
 
 
-@pytest.mark.parametrize('fields', [{'priority': 2}, {'created_on': 'other'}, {'status': 'done'}])
+@pytest.mark.parametrize('fields', [{'priority': 2}, {'created_on': 'other'}])
 def test_relevant_task_change_refuses(fields):
     class Changed(Busy):
         def changes(self, board, since):
@@ -98,6 +98,14 @@ def test_relevant_task_change_refuses(fields):
                     'next': 4, 'more': False}
     with pytest.raises(ValueError, match='changed'):
         prepare.capture(Changed(), board_id='board', exceptions=[])
+
+
+def test_terminal_task_change_is_replayed_to_final_head():
+    class Finished(Busy):
+        def changes(self, board, since):
+            return {'changes': [{'seq': 4, 'table': 'tasks', 'uid': 'a', 'op': 'upsert',
+                                 'fields': {'status': 'done'}}], 'next': 4, 'more': False}
+    assert prepare.capture(Finished(), board_id='board', exceptions=[])['rows'] == []
 
 
 @pytest.mark.parametrize('uid,op', [('a', 'delete'), ('new', 'upsert')])

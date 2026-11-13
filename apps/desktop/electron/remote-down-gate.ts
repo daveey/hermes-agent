@@ -15,6 +15,10 @@
 
 export const REMOTE_DOWN_INITIAL_BACKOFF_MS = 2_000
 export const REMOTE_DOWN_MAX_BACKOFF_MS = 30_000
+// [daveey] A trial (connect, which may redial and probe, plus the request) must settle within this or it is
+// treated as a failed trial: the slot is freed and the backoff escalates. Without it a trial on a slow link held the
+// slot for 3.5 min (2026-11-12) while every other request failed fast with "reconnect in progress".
+export const REMOTE_DOWN_TRIAL_DEADLINE_MS = 20_000
 
 export const REMOTE_BACKEND_DOWN_CODE = 'REMOTE_BACKEND_DOWN'
 
@@ -49,7 +53,8 @@ const TRANSPORT_CODES = new Set([
   'EPIPE'
 ])
 
-const TRANSPORT_MESSAGE_RE = /\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN)\b|socket hang up/i
+const TRANSPORT_MESSAGE_RE =
+  /\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN)\b|socket hang up/i
 const TIMEOUT_MESSAGE_RE = /Timed out connecting to Hermes backend/i
 
 /** The connection itself broke (reset, refused, hung up): the backend behind the tunnel is gone. */
@@ -235,6 +240,8 @@ export interface GatedRemoteDispatchOptions<TConnection extends { baseUrl?: null
   // Drop the "answered recently" mark so the next dispatch re-probes /api/health instead of trusting a dead tunnel.
   forgetAnswer?: (baseUrl: null | string | undefined) => void
   log?: (message: string) => void
+  // Total budget for a trial (connect + request); defaults to REMOTE_DOWN_TRIAL_DEADLINE_MS.
+  trialDeadlineMs?: number
 }
 
 /**
@@ -243,22 +250,56 @@ export interface GatedRemoteDispatchOptions<TConnection extends { baseUrl?: null
  * - known down → RemoteBackendDownError immediately (no dial, no timeout wait);
  * - the connection breaks (connect fails, or the request resets/refuses/hangs up) → mark down;
  * - any answer from the backend, HTTP errors included → mark up;
- * - a request timeout → forget the answer mark (next dispatch re-probes) and, if it was the trial, stay down.
+ * - a request timeout → forget the answer mark (next dispatch re-probes) and, if it was the trial, stay down;
+ * - a trial that has not settled within its deadline → failed trial: mark down (escalates the backoff, frees the
+ *   slot) and reject with a timeout. The abandoned connect/request may still settle later; it no longer owns the
+ *   trial, so only a fresh answer can still reopen the gate.
  */
-export async function dispatchThroughRemoteDownGate<TConnection extends { baseUrl?: null | string }, TResult>({
-  gate,
-  key,
-  connect,
-  request,
-  forgetAnswer,
-  log
-}: GatedRemoteDispatchOptions<TConnection, TResult>): Promise<TResult> {
+export async function dispatchThroughRemoteDownGate<TConnection extends { baseUrl?: null | string }, TResult>(
+  options: GatedRemoteDispatchOptions<TConnection, TResult>
+): Promise<TResult> {
+  const { gate, key, trialDeadlineMs = REMOTE_DOWN_TRIAL_DEADLINE_MS, log } = options
   const admission = gate.admit(key)
+
+  if (!admission.trial) {
+    return runGatedDispatch(options, admission)
+  }
+
+  const state: { connection?: TConnection } = {}
+  const run = runGatedDispatch(options, admission, state)
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const message = `Timed out connecting to Hermes backend after ${trialDeadlineMs}ms (down-gate trial deadline)`
+      options.forgetAnswer?.(state.connection?.baseUrl)
+      gate.markDown(key, message, admission)
+      log?.(`[remote-down] ${key} trial exceeded ${trialDeadlineMs} ms; slot freed, backoff escalated`)
+      reject(new Error(message))
+    }, trialDeadlineMs)
+  })
+
+  // The loser of the race must never surface as an unhandled rejection.
+  run.catch(() => {})
+
+  try {
+    return await Promise.race([run, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function runGatedDispatch<TConnection extends { baseUrl?: null | string }, TResult>(
+  { gate, key, connect, request, forgetAnswer, log }: GatedRemoteDispatchOptions<TConnection, TResult>,
+  admission: RemoteDownAdmission,
+  state: { connection?: TConnection } = {}
+): Promise<TResult> {
   const { trial } = admission
   let connection: TConnection
 
   try {
     connection = await connect()
+    state.connection = connection
   } catch (error) {
     if (isRemoteBackendDownError(error)) {
       throw error
@@ -280,7 +321,9 @@ export async function dispatchThroughRemoteDownGate<TConnection extends { baseUr
     gate.markDown(key, `connect failed: ${message}`, admission)
 
     if (wasUp) {
-      log?.(`[remote-down] ${key} marked down (connect failed: ${message.slice(0, 160)}); failing fast until it answers`)
+      log?.(
+        `[remote-down] ${key} marked down (connect failed: ${message.slice(0, 160)}); failing fast until it answers`
+      )
     }
 
     throw error

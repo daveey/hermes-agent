@@ -1,6 +1,7 @@
 """SSRF-checked, size-capped URL download for ``kanban_attach_url`` (split from kanban_tools). [daveey]"""
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 _MAX_ATTACH_URL_REDIRECTS = 5
@@ -42,3 +43,15 @@ def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[st
                 chunks.append(chunk)
         return b"".join(chunks), content_type
     raise ValueError(f"too many redirects fetching {url}")
+
+
+def _store_attachment(board, tid, filename, data, content_type) -> str:
+    """Store via ``kanban_db.store_attachment_bytes`` (shared size cap, per-task
+    dir, metadata row) so agent, dashboard, and CLI surfaces stay in lockstep.
+    Moved from kanban_tools (its line cap); re-exported there under the same name."""
+    from tools.kanban_tools_board import tool_board
+    with tool_board(board) as (kb, conn):
+        att_id = kb.store_attachment_bytes(
+            conn, tid, str(filename), data,
+            content_type=content_type, uploaded_by="agent", board=board)
+        return json.dumps({"ok": True, "task_id": tid, "attachment_id": att_id, "size": len(data)})

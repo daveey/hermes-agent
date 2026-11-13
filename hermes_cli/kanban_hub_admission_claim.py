@@ -14,6 +14,10 @@ every hub run passes, so before the hub claims a ready, label-less card with no 
   citing the verdict, so it is not claimed here;
 * deny of a card that must stay (structural restriction, ``host_repo``, a hub worktree in the brief, a hub-local
   wake_check, or no worker queue fits): the verdict carries ``kept: <reason>`` and the card is claimed as before;
+  a fleet probe under ``~/.hermes/bin`` in :data:`PORTABLE_WAKE_PROBES` (or ``kanban.placement.
+  portable_wake_probes``) is not hub-local;
+* an earlier deny that left the card here (a ``kept`` that no longer holds, or none) is re-placed on the worker
+  queue once it has waited ready 5 min (``kanban_worker_first_selfcheck.denied_target``), with no new judge call;
 * judge unavailable: claimed as before, warning logged, nothing recorded (judged at its next ready). Failing open
   here keeps a judge outage from freezing the hub; only pre-gate cards reach this path.
 * deferred (``Counts.deferred_ids``, left out of this tick's claims and judged next tick): a card edited while the
@@ -43,6 +47,9 @@ WINDOW_SECONDS = 7 * 86400
 MAX_JUDGED_PER_TICK = 3  # judge calls per dispatcher tick; the rest wait, unclaimed, for the next tick
 # A wake_check that reads hub-local state (Hermes home, a hub worktree) is probed where the card lives.
 _HUB_PATH = r"(?:~|\$HOME|\$\{HOME\}|/home/[^/\s]+)/\.hermes/"
+# Hub wake probes the fleet installs at the same ~/.hermes/bin path on every worker (state repo
+# hosts/hermes-workers/install-core-tools.py HUB_PROBES); kanban.placement.portable_wake_probes overrides.
+PORTABLE_WAKE_PROBES = ("alpha-hub-escalation-check.py",)
 
 
 @dataclass
@@ -54,6 +61,7 @@ class Counts:
     home: int = 0  # of ``kept``: denies the claim gate would refuse on every worker (the home route)
     unavailable: int = 0
     deferred: int = 0
+    repinned: int = 0  # earlier denied cards the self-check re-placed (kanban_worker_first_selfcheck.denied_target)
     deferred_ids: frozenset = field(default_factory=frozenset)  # not claimable this tick: judged next tick
 
     def defer(self, tid: str) -> None:
@@ -62,7 +70,7 @@ class Counts:
 
     def line(self) -> str:
         return ("hub admission: claim screen judged={judged} denied={denied} moved={moved} kept={kept} "
-                "home={home} unavailable={unavailable} deferred={deferred}").format(**asdict(self))
+                "home={home} unavailable={unavailable} deferred={deferred} repinned={repinned}").format(**asdict(self))
 
 
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -96,11 +104,27 @@ def keep_reason(conn: sqlite3.Connection, card: sqlite3.Row, fields: dict, cfg: 
     if re.search(kp.HOST_WORKTREE_PATH, text, re.IGNORECASE) or re.search(kp.LOCAL_WORKTREE_PATH, text,
                                                                            re.IGNORECASE):
         return "hub worktree path in the brief"
-    probe = _latest_wake_check(conn, card["id"])
+    probe = _without_portable_probes(_latest_wake_check(conn, card["id"]), cfg)
     if probe and any(re.search(p, probe, re.IGNORECASE) for p in (_HUB_PATH, kp.HOST_WORKTREE_PATH,
                                                                    kp.LOCAL_WORKTREE_PATH)):
         return "wake_check reads a hub-local path"
     return None
+
+
+def _without_portable_probes(probe: str, cfg: dict) -> str:
+    """``probe`` minus each ``~/.hermes/bin/<name>`` the fleet installs on every worker at the hub's path
+    (``kanban.placement.portable_wake_probes``: basenames; default :data:`PORTABLE_WAKE_PROBES`). Such a probe runs
+    wherever the card parks, delegating to its hub copy through hub-admin, so it does not tie the card to the hub
+    (t_01a184cee94603eb was kept on the hub ~3 h by ``alpha-hub-escalation-check.py``). Any other hub path in the
+    same command still keeps it."""
+    names = (cfg.get("portable_wake_probes") if isinstance(cfg, dict) and "portable_wake_probes" in cfg
+             else PORTABLE_WAKE_PROBES)
+    if not probe or not isinstance(names, (list, tuple)):
+        return probe
+    for name in names:
+        if isinstance(name, str) and name and "/" not in name:
+            probe = re.sub(_HUB_PATH + r"bin/" + re.escape(name) + r"(?![\w.-])", " ", probe, flags=re.IGNORECASE)
+    return probe
 
 
 def _event_head(conn: sqlite3.Connection, tid: str) -> int:
@@ -128,6 +152,7 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
         tid = card["id"]
         event_head = _event_head(conn, tid)
         if pickup.verdict(conn, tid) is not None:
+            _self_check(conn, card, own, cfg, board, event_head, counts)
             continue
         if down:
             counts.unavailable += 1
@@ -192,6 +217,38 @@ def _apply(conn: sqlite3.Connection, own: str, tid: str, audit: dict, target: Op
             "reason": f"hub admission denied at claim: {str(audit.get('why') or '')[:300]}",
             "move_no": len(km.history(conn, tid)) + 1, "forced": False, "matches": [], "queued": True,
             "hub_admission": audit})
+    return True
+
+
+def _self_check(conn: sqlite3.Connection, card: sqlite3.Row, own: str, cfg: dict, board: str, event_head: int,
+                counts: Counts) -> None:
+    """Re-place a judged card an earlier deny left here (``kanban_worker_first_selfcheck.denied_target``). A failure
+    skips only this card: the screen of the unjudged cards behind it must still run."""
+    from hermes_cli.kanban_worker_first_selfcheck import denied_target, log_repin
+    try:
+        found = denied_target(conn, card, own, cfg, board=board)
+        if found and _replace(conn, own, card["id"], *found, expected=card, event_head=event_head):
+            counts.repinned += 1
+            log_repin(card["id"], *found)
+    except Exception:  # health: allow BLE001 -- a backstop; the card is claimed here as before
+        _log.warning("hub admission: denied-card self-check failed for %s", card["id"], exc_info=True)
+
+
+def _replace(conn: sqlite3.Connection, own: str, tid: str, target: list[str], reason: str,
+             *, expected: sqlite3.Row, event_head: int) -> bool:
+    """The self-check's re-placement of an earlier denied card (no new verdict): runs_on + a ``moved`` event."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_move as km
+    from hermes_cli import kanban_worker_node as wn
+    with kb.write_txn(conn):
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        if row is None or dict(row) != dict(expected) or _event_head(conn, tid) != event_head:
+            return False  # changed since the check read it: the next tick decides again
+        wn.set_runs_on(conn, tid, target)
+        kb._append_event(conn, tid, km.MOVED_EVENT, {
+            "from_machine": own, "runs_on": target, "previous_runs_on": wn._parse(row["runs_on"]),
+            "reason": reason, "move_no": len(km.history(conn, tid)) + 1, "forced": False, "matches": [],
+            "queued": True, "self_check": "hub_admission_denied"})
     return True
 
 

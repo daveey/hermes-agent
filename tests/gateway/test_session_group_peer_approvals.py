@@ -7,7 +7,7 @@ import pytest
 
 from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
 from tests.gateway.test_session_group_peer_daemons import (
-    Model, _create, _events, _invite, _register, _room_link, _send, _wait_rpc,
+    Model, _create, _events, _invite, _member, _register, _room_link, _send, _wait_rpc,
     gateways as gateways_fixture,
 )
 
@@ -40,11 +40,8 @@ class _ApprovalModel(Model):
 
 @pytest.mark.platforms('posix')
 def test_lent_bot_approval_survives_reregistration_and_runs_each_command_once(gateways):
-    g = gateways(handler=_ApprovalModel)
-    config = json.loads((g.target / 'config.yaml').read_text())
-    config['platform_toolsets']['api_server'] = ['terminal']
-    config['approvals'] = {'mode': 'manual'}
-    (g.target / 'config.yaml').write_text(json.dumps(config))
+    g = gateways(handler=_ApprovalModel, target_config={
+        'platform_toolsets': {'api_server': ['terminal']}, 'approvals': {'mode': 'manual'}})
     effects = g.target / 'effects'
     g.target_model.command = (
         f'rm -rf {shlex.quote(str(g.target / "disposable"))}; '
@@ -84,6 +81,6 @@ def test_lent_bot_approval_survives_reregistration_and_runs_each_command_once(ga
                 assert effects.read_text().splitlines() == ['ran'] * turn
                 assert (await rpc(home_ws, 'groups.state', room_id='linked'))['result']['driver_status']['pending_actions'] == []
 
-    with daemon(g.root, g.target, g.target_env, barrier=False) as (_, target_desc):
+    with _member(g) as (_, target_desc):
         with daemon(g.root, g.home, g.home_env, barrier=False) as (_, home_desc):
             asyncio.run(exercise(home_desc, target_desc))
