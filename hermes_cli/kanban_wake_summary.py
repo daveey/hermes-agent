@@ -21,15 +21,17 @@ def _stamp(ts: int, fmt: str = "%Y-%m-%d %H:%M") -> str:
 
 def wakes(conn: sqlite3.Connection, task: Any, *, wake_check: Optional[dict] = None,
           check_loaded: bool = False) -> Optional[dict]:
-    """``{"check", "next_probe_at", "backstop_at"}`` for a scheduled card, else None.
+    """``{"check", "next_probe_at", "backstop_at", "blocks_for_human"}`` for a scheduled card, else None.
 
     ``check`` is the armed wake-check command (None for a pure clock park); ``backstop_at`` is
-    the park's deadline. Pass ``wake_check`` with ``check_loaded=True`` when the caller already
-    read ``kanban_wake_check.get_state``."""
+    the park's deadline. The park is read through ``kanban_continuation.park_state``, the same
+    lookup the dispatcher wakes on. ``blocks_for_human``: a legacy park with no timed wake and a
+    human ``block_kind``, which the dispatcher's wake invariant moves to ``blocked`` on its next
+    tick instead of waking (``backstop_at`` is then None). Pass ``wake_check`` with
+    ``check_loaded=True`` when the caller already read ``kanban_wake_check.get_state``."""
     if getattr(task, "status", None) != "scheduled":
         return None
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_continuation import SCHEDULED_ENTRY_EVENTS
+    from hermes_cli.kanban_continuation import blocks_for_human, park_state
     from hermes_cli.kanban_timed_park import implied_wake
 
     if not check_loaded:
@@ -37,27 +39,27 @@ def wakes(conn: sqlite3.Connection, task: Any, *, wake_check: Optional[dict] = N
         wake_check = kwc.get_state(conn, task.id)
     if wake_check and wake_check.get("purpose") == "ask_resolved":
         wake_check = None  # a human ask's resolved_check, not this park's wake
-    marks = ",".join("?" for _ in SCHEDULED_ENTRY_EVENTS)
-    row = conn.execute(
-        f"SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
-        "ORDER BY id DESC LIMIT 1", (task.id, *SCHEDULED_ENTRY_EVENTS)).fetchone()
-    if row is not None:
-        payload, parked_at = kb._json_dict(row[0]), int(row[1])
-    else:
-        last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (task.id,)).fetchone()
-        payload, parked_at = {}, int(last[0]) if last and last[0] else int(time.time())
+    park = park_state(conn, task.id)
+    human = blocks_for_human(park, getattr(task, "block_kind", None))
     return {
         "check": wake_check.get("cmd") if wake_check else None,
         "next_probe_at": int(wake_check["next_at"]) if wake_check and wake_check.get("next_at") is not None else None,
-        "backstop_at": implied_wake(payload, parked_at),
+        "backstop_at": None if human else implied_wake(park["payload"], park["parked_at"]),
+        "blocks_for_human": human,
     }
+
+
+HUMAN_BLOCK_PHRASE = "no timed wake: the dispatcher blocks it for a human on its next tick"
 
 
 def phrase(w: Optional[dict], *, now: Optional[int] = None) -> str:
     """``wakes when `cmd` passes (next probe HH:MM), backstop YYYY-MM-DD HH:MM`` or ``wakes at …``;
-    empty for None. The deadline is called a backstop only when a check can wake the card first."""
+    empty for None. The deadline is called a backstop only when a check can wake the card first.
+    A park the dispatcher will block for a human says so instead of naming a wake."""
     if not w:
         return ""
+    if w.get("blocks_for_human"):
+        return HUMAN_BLOCK_PHRASE
     now = int(time.time()) if now is None else int(now)
     if not w.get("check"):
         return f"wakes at {_stamp(w['backstop_at'])}"
