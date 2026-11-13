@@ -152,3 +152,80 @@ def test_an_incomplete_snapshot_sweeps_nothing(live, svc):
         live.execute("DELETE FROM kanban_sync_outbox")
     assert sweep.sweep_absent(live, {}, BOARD, ME, since=int(time.time()) + 60) == {}
     assert tid in _ids(live)
+
+
+def _acked_card(conn, title):
+    """An own card the Board holds: every outbox op is acked, so only an absent row of it is a sweep candidate."""
+    tid = kb.create_task(conn, title=title)
+    with kbc.write_txn(conn):
+        conn.execute("DELETE FROM kanban_sync_outbox")
+    return tid
+
+
+def _acked_child(conn, table, task_id, uid, created_at):
+    """A child row the Board acked: written with capture off (``applying = 1``), so no outbox op holds it."""
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET applying = 1")
+        if table == "task_events":
+            conn.execute("INSERT INTO task_events (task_id, kind, created_at, uid) VALUES (?, 'note', ?, ?)",
+                         (task_id, created_at, uid))
+        else:
+            conn.execute("INSERT INTO task_comments (task_id, author, body, created_at, uid) "
+                         "VALUES (?, 'me', 'c', ?, ?)", (task_id, created_at, uid))
+        conn.execute("UPDATE kanban_sync_state SET applying = 0")
+    assert not conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE row_uid = ?", (uid,)).fetchone()
+
+
+def _seen_cards(*cards):
+    """A complete snapshot that still holds ``cards`` but none of their child rows."""
+    return {t: (set(cards) if t == "tasks" else set()) for t in ksc.IMPORT_ORDER}
+
+
+def test_an_event_older_than_the_board_event_window_is_kept_and_a_recent_absent_one_is_swept(live, svc):
+    card = _acked_card(live, "card with old and recent events")
+    now = int(time.time())
+    _acked_child(live, "task_events", card, "ev-old", now - ksc.EVENT_IMPORT_WINDOW_S - 3600)
+    _acked_child(live, "task_events", card, "ev-recent", now - 60)
+    sweep.sweep_absent(live, _seen_cards(card), BOARD, ME, since=now + 60)
+    events = _ids(live, "task_events", "uid")
+    assert "ev-old" in events  # the Board dropped it by retention, without a delete: its absence is no deletion
+    assert "ev-recent" not in events
+    assert card in _ids(live)
+
+
+@pytest.mark.parametrize("state", ["pending", "rejected"])
+def test_a_child_row_of_a_card_with_an_outbox_op_is_not_swept(live, svc, state):
+    held = kb.create_task(live, title="card with an unacked or refused write")
+    free = kb.create_task(live, title="acked card")
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox WHERE NOT (table_name = 'tasks' AND row_uid = ?)", (held,))
+        live.execute("UPDATE kanban_sync_outbox SET state = ?", (state,))
+    assert live.execute("SELECT count(*) FROM kanban_sync_outbox WHERE row_uid = ?", (held,)).fetchone()[0] >= 1
+    now = int(time.time())
+    _acked_child(live, "task_comments", held, "c-held", now - 60)
+    _acked_child(live, "task_comments", free, "c-free", now - 60)
+    sweep.sweep_absent(live, _seen_cards(held, free), BOARD, ME, since=now + 60)
+    comments = _ids(live, "task_comments", "uid")
+    assert "c-held" in comments  # its card's outbox op is a local write the Board has not taken: hold its rows
+    assert "c-free" not in comments
+
+
+def test_a_child_row_written_after_the_rebuild_began_is_not_swept(live, svc):
+    card = _acked_card(live, "card with comments around the rebuild start")
+    since = int(time.time()) - 600
+    _acked_child(live, "task_comments", card, "c-before", since)
+    _acked_child(live, "task_comments", card, "c-after", since + 1)
+    sweep.sweep_absent(live, _seen_cards(card), BOARD, ME, since=since)
+    comments = _ids(live, "task_comments", "uid")
+    assert "c-after" in comments  # written after the rebuild began: the snapshot could not hold it
+    assert "c-before" not in comments
+
+
+def test_a_swept_card_sweeps_its_children_first_so_each_child_gets_its_own_tombstone(live, svc):
+    card = _acked_card(live, "card the Board deleted with its comment")
+    _acked_child(live, "task_comments", card, "c-gone", int(time.time()) - 60)
+    swept = sweep.sweep_absent(live, _seen_cards(), BOARD, ME, since=int(time.time()) + 60)
+    assert swept.get("tasks") == 1 and swept.get("task_comments") == 1
+    assert card not in _ids(live) and "c-gone" not in _ids(live, "task_comments", "uid")
+    stones = {(r[0], r[1]) for r in live.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+    assert {("tasks", card), ("task_comments", "c-gone")} <= stones
