@@ -80,6 +80,52 @@ def test_transitive_and_function_level_importers_run(repo):
     assert "tests/pkg/test_other.py" not in _files(repo, ["pkg/core.py"])
 
 
+@pytest.fixture
+def gate_repo(repo):
+    # The gate is copied/spawned, not imported. Consumers only import the fake.
+    _write(repo, {
+        "tests/hermes_cli/upstream_gate_fake.py": "class FakeFork: pass\n",
+        "tests/hermes_cli/gate_adapter.py": "from .upstream_gate_fake import FakeFork\n",
+        "tests/hermes_cli/test_direct.py": "from tests.hermes_cli.upstream_gate_fake import FakeFork\n",
+        "tests/hermes_cli/test_indirect.py": "from tests.hermes_cli.gate_adapter import FakeFork\n",
+        "tests/e2e/test_gate.py": "from tests.hermes_cli.upstream_gate_fake import FakeFork\n",
+    })
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    return repo
+
+
+@pytest.mark.parametrize("changed", [
+    "scripts/ci/upstream_sync.py",
+    "scripts/ci/upstream_sync_identity.py",
+    "scripts/ci/upstream_sync_future.py",  # also covers deleted/untracked gate siblings
+    "scripts/ci/upstream_sync_old.py\tscripts/ci/renamed_gate.py",
+    "scripts/ci/renamed_gate.py\tscripts/ci/upstream_sync_new.py",
+])
+def test_copied_gate_selects_direct_and_transitive_consumers(gate_repo, tmp_path, changed):
+    files_out = tmp_path / "gate-files.txt"
+    assert at.main(["--repo", str(gate_repo), "--changed", changed,
+                    "--files-out", str(files_out)]) == 0
+    assert set(files_out.read_text().splitlines()) == SMOKE | {
+        "tests/hermes_cli/test_direct.py", "tests/hermes_cli/test_indirect.py",
+    }
+
+
+@pytest.mark.parametrize("changed", [
+    "scripts/ci/other.py", "elsewhere/upstream_sync.py",
+    "scripts/ci/upstream_sync.md", "scripts/ci/upstream_sync/nested.py",
+])
+def test_unrelated_changes_do_not_select_gate_consumers(gate_repo, changed):
+    assert _files(gate_repo, [changed]) == SMOKE
+
+
+def test_real_updater_consumers_are_selected_for_gate_change():
+    selected = _files(_PATH.parents[2], ["scripts/ci/upstream_sync_identity.py"])
+    assert {
+        "tests/hermes_cli/test_update_fork_merge_upstream.py",
+        "tests/hermes_cli/test_update_fork_sync_identity.py",
+    } <= selected
+
+
 def test_string_patch_target_runs(repo):
     assert "tests/pkg/test_patch.py" in _files(repo, ["pkg/core.py"])
     assert "tests/pkg/test_patch.py" not in _files(repo, ["pkg/other.py"])
