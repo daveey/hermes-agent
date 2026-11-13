@@ -339,6 +339,35 @@ def test_an_ignored_wake_also_drops_the_cards_wake_episode(board):
         assert board.execute(f"SELECT COUNT(*) FROM {table} WHERE task_id = ?", (tid,)).fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("restored_before", [False, True])
+def test_a_probe_dropped_for_a_held_card_comes_back_when_the_hold_lifts(board, restored_before):
+    """Review of #2187 (nit 3): the held-card skip deletes the probe row and the restore lint skips a held card, so
+    a reopen reaching the log while the local row still reads ``scheduled`` under the same park must not leave the
+    card unwatched until its clock. With no ``RESTORED_EVENT`` after the park the lint re-registers the probe; with
+    one already there (the probe was lost and restored once before) it wakes the card instead."""
+    tid = _parked(board, wake_check="true")
+    if restored_before:
+        with kb.write_txn(board):
+            board.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (tid,))
+        assert kwc.restore_missing_checks(board)["restored"] == [tid]
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    kwc.run_due_wake_checks(board, now=int(time.time()) + 10 ** 6, wait=True)
+    assert board.execute("SELECT COUNT(*) FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()[0] == 0
+    assert kwc.restore_missing_checks(board) == {"restored": [], "woken": []}  # still held: stays gone
+    with kb.write_txn(board):
+        kb._append_event(board, tid, "reopened", {"reason": "the Board reopened it"})
+    assert ktg.terminal_hold(board, tid) is None and _status(board, tid) == "scheduled"
+    out = kwc.restore_missing_checks(board)
+    if restored_before:
+        assert out == {"restored": [], "woken": [tid]}
+        assert _status(board, tid) == "ready"
+        assert kwc.LOST_EVENT in _kinds(board, tid)
+    else:
+        assert out == {"restored": [tid], "woken": []}
+        assert board.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()[0] == "true"
+        assert _status(board, tid) == "scheduled"
+
+
 def test_an_implied_wake_on_a_stale_copy_of_a_completed_card_does_nothing(board):
     """A ``scheduled`` row with no park event (``_enforce_wake_invariant``'s implied wake)."""
     tid = kb.create_task(board, title="t", assignee="worker")

@@ -947,8 +947,10 @@ def _wake(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> O
 
     from hermes_cli.kanban_terminal_guard import skip_wake
     if skip_wake(conn, task_id, kind):  # a stale scheduled copy of a done card: no wake [daveey]
-        # Nor another probe: the held card's probe would rerun every ``check_every`` (holding a probe slot) until
-        # the feed heals the row to done. ``restore_missing_checks`` skips a held card, so it stays gone.
+        # Every producer reaching a held card here (shared-blocker clear, supervisor-request wake, CI progress, dead
+        # ancestry, a lost probe, a probe result) also drops its probe and wake episode: kept, it would rerun every
+        # ``check_every`` (holding a slot) until the feed heals the row to done. ``restore_missing_checks`` skips a
+        # held card, so it stays gone, and re-registers it (or wakes the card) if a reopen lifts the hold.
         conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
         episode.reset(conn, task_id)
         return None
