@@ -23,7 +23,7 @@ def _quiet_shell(monkeypatch):
     from tools.environments.local import _find_bash
 
     monkeypatch.setattr(process_registry_module, 'bg_login_argv',
-                        lambda command: [_find_bash(), '--noprofile', '--norc', '-c', command])
+                        lambda command, *_: [_find_bash(), '--noprofile', '--norc', '-c', command])
 
 
 def test_dock_paints_processes_under_agents_and_retires_finished_rows(monkeypatch):

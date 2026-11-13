@@ -48,11 +48,21 @@ os._exit(0)
         proc.stdout.close()
 
 
+START_MARKER = "__hermes_bg_start_fixture__"
+
+
+@pytest.fixture(autouse=True)
+def fixed_start_marker(monkeypatch):
+    """A known start marker, so the login argv is comparable to ``bg_script()`` (autouse where imported)."""
+    monkeypatch.setattr("tools.process_registry.new_start_marker", lambda: START_MARKER)
+
+
 def bg_script():
-    """Login-shell script spawn_local passes: init, then exec the foreground bash."""
+    """Login-shell script spawn_local passes: init, print the start marker, then exec the foreground bash."""
     import shlex
 
     from tools.process_registry_bg_shell import _find_bash
 
     return ('set +m; _hc=$HERMES_BG_COMMAND; unset HERMES_BG_COMMAND; '
+            f"printf '\\n%s\\n' {START_MARKER}; "
             f'exec {shlex.quote(_find_bash())} -c "$_hc"')

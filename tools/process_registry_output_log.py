@@ -213,6 +213,9 @@ class ProcessOutputLogMixin:
         except OSError as exc:
             logger.warning("Process output log %s unreadable: %s", session.output_log, exc)
         ingest(decoder.decode(b"", final=True), final=True)
+        from tools.process_registry_bg_shell import release_start_output
+        if held := release_start_output(session):  # the shell never reached the command
+            ingest(held, final=True)
         if killed_by := recorded_kill_source(session.output_log):
             # Another Hermes process's process_manage kill ended it (process_registry_foreign): report
             # the kill, as a local kill_process does, not the signal's "status unknown". [daveey]

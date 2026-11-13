@@ -22,7 +22,7 @@ from tools.process_registry import (
 )
 
 
-orphan_pipe = process_registry_fixtures.orphan_pipe
+orphan_pipe, fixed_start_marker = process_registry_fixtures.orphan_pipe, process_registry_fixtures.fixed_start_marker
 
 
 @pytest.fixture()
