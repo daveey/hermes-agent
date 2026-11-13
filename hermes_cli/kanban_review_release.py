@@ -117,11 +117,10 @@ def released(conn, task_id, pr_urls):
     for event in conn.execute("SELECT * FROM task_events WHERE task_id=? "
                               "AND kind='promoted' ORDER BY id DESC LIMIT 1", (task_id,)):
         origin = event["origin_gateway"] if "origin_gateway" in event.keys() else None
-        if origin or foreign_copy(conn, task_id):
-            home = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
-            # A foreign copy always has a truthy home, so a missing origin differs.
-            if origin != home:
-                return False
+        home = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+        # A foreign copy always has a truthy home, so a missing origin differs.
+        if origin != home:
+            return False
         if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? "
                         "AND kind='descendant_invalidated' LIMIT 1", (task_id, event["id"])).fetchone():
             return False
@@ -131,7 +130,7 @@ def released(conn, task_id, pr_urls):
         if (stamp.get("version") != 1 or stamp.get("scope") != "one_continuation"
                 or stamp.get("merge_authorized") is not False
                 or not review._checkpoint_matches_run(stamp.get("park"), run)
-                or (foreign_copy(conn, task_id) and "run_uid" not in stamp["park"])
+                or "run_uid" not in stamp["park"]
                 or stamp.get("parents") != parents
                 or stamp.get("checkpoint") != {k: checkpoint.get(k) for k in ("parents", "awaited", "prs")}
                 or (kb._to_epoch(event["created_at"]) or 0) < parked):
