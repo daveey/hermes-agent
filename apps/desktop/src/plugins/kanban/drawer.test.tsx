@@ -32,8 +32,14 @@ let detail: object
 let client: QueryClient
 let disposeApi: () => void
 let disposeLocales: () => void
+// A GET path whose next read fails once (a dropped first read that React Query then retries).
+let failOnce = new Set<string>()
 
 const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<unknown> => {
+  if (!options?.method && failOnce.delete(path)) {
+    throw new Error(`dropped read: ${path}`)
+  }
+
   if (path === '/tasks/t_example/attachments' && options?.method === 'POST') {
     detail = { ...legacyDetail, attachments: [{ id: 1, filename: options.upload?.filename }] }
 
@@ -74,6 +80,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  failOnce = new Set()
   setApiRequestConnection(null)
   setApiRequestProfile(null)
   clearNotifications()
@@ -293,6 +300,40 @@ describe('task modal dialog', () => {
     openDrawer()
     await waitFor(() => expect(taskReads()).toEqual(['foreground', undefined, 'foreground']))
     await waitFor(() => expect(logReads()).toEqual(['foreground', undefined, 'foreground']))
+  })
+
+  it('keeps a retried first read foreground: a read counts as delivered only once it answered', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    // The shared client retries a failed query (React Query's default retry: 3).
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+    failOnce = new Set(['/tasks/t_example'])
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    openDrawer()
+    await screen.findByText('Keep this description readable.')
+    expect(taskReads()).toEqual(['foreground', 'foreground'])
+  })
+
+  it('sends a foreground read when a task is re-opened while its cache is still fresh', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    // The shared client's staleTime (60 s): without a mount refetch a warm re-open sends nothing, and its first
+    // request is the interval refetch 15-30 s later.
+    client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000 } } })
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    const first = openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground']))
+    first.unmount()
+    openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground']))
   })
 
   it('is a modal dialog named by the task title that Esc dismisses', async () => {

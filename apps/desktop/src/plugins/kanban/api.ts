@@ -862,21 +862,20 @@ export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
   return rememberOwners(board, slug)
 }
 
-/** [daveey] One opening of a task detail view. Its first read of each kind (`kind` names the query) is the user's
- *  and goes out as priority 'foreground', so a slow link's poll thinner never skips it, even when the same task is
- *  re-opened within the thinning gap. Every later read of that kind (interval or socket refetch) is a background
- *  poll again and may be thinned (electron/slow-link.ts). */
-export function userOpenReads(): (kind: string) => PluginRestOptions {
-  const read = new Set<string>()
+/** [daveey] One opening of a task detail view. Its reads of each kind (`kind` names the query) go out as priority
+ *  'foreground' until one has answered, so a slow link's poll thinner never skips the user's read: not on a re-open
+ *  within the thinning gap, and not on React Query's retry of a failed first read (a kind counts as delivered only
+ *  after a successful read). Every later read of that kind (interval or socket refetch) is a background poll again
+ *  and may be thinned (electron/slow-link.ts). */
+export function userOpenReads(): <T>(kind: string, read: (options: PluginRestOptions) => Promise<T>) => Promise<T> {
+  const delivered = new Set<string>()
 
-  return kind => {
-    if (read.has(kind)) {
-      return {}
-    }
+  return async (kind, read) => {
+    const result = await read(delivered.has(kind) ? {} : { priority: 'foreground' })
 
-    read.add(kind)
+    delivered.add(kind)
 
-    return { priority: 'foreground' }
+    return result
   }
 }
 

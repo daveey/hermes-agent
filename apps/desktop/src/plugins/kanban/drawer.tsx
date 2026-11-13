@@ -859,16 +859,19 @@ export function TaskDrawer({
   const qc = useQueryClient()
   const scope = useKanbanScope()
   const slug = useValue($boardSlug)
-  // [daveey] The drawer mounts once per open (keyed by its task): the first task and log read of this open are the
-  // user's (foreground, never thinned on a slow link); the interval and socket refetches after them are polls.
+  // [daveey] The drawer mounts once per open (keyed by its task): the task and log reads of this open are the user's
+  // (foreground, never thinned on a slow link, retries included) until each has answered; the interval and socket
+  // refetches after that are polls. refetchOnMount 'always': the shared staleTime (60 s) would otherwise skip the
+  // mount read of a re-open with warm cache, leaving its first request the interval refetch 3-30 s later.
   const [openRead] = useState(userOpenReads)
 
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => fetchTask(id!, owner, openRead(`task:${id}`)),
+    queryFn: () => openRead(`task:${id}`, read => fetchTask(id!, owner, read)),
     queryKey: taskKey(scope, slug, id ?? '', owner),
-    refetchInterval: 30_000
+    refetchInterval: 30_000,
+    refetchOnMount: 'always'
   })
 
   const task = detail?.task
@@ -877,9 +880,10 @@ export function TaskDrawer({
 
   const { data: log } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => fetchLog(id!, owner, openRead(`log:${id}`)),
+    queryFn: () => openRead(`log:${id}`, read => fetchLog(id!, owner, read)),
     queryKey: logKey(scope, slug, id ?? '', owner),
-    refetchInterval: running ? 3_000 : 15_000
+    refetchInterval: running ? 3_000 : 15_000,
+    refetchOnMount: 'always'
   })
 
   const invalidate = () => {
