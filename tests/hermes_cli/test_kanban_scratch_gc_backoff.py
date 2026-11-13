@@ -146,6 +146,7 @@ def test_malformed_memo_entry_is_dropped_and_the_aged_pass_completes(remote, arc
     {"last_at": "y"}, {"retry_at": float("inf")}, {"retry_at": 1e300}, {"retry_at": None},
     {"fingerprint": "p"}, {"reason": 5}, {"count": 10**10},
     {"retry_at": 9.9e10},  # below 1e11 but past Windows' gmtime limit (~year 3000)
+    {"retry_at": True}, {"last_at": True},  # bool is an int subclass, never an epoch
 ])
 def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     tree = tmp_path / "tree"
