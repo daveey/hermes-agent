@@ -633,18 +633,19 @@ def test_row_without_admission_column_reads_as_normal():
 
 
 def test_pool_census_uses_one_board_snapshot(board, monkeypatch):
+    """A claim landing between the board's running-row read and its pool count is in neither (one snapshot)."""
     from hermes_cli import kanban_admission_pools as pools
     conn, home = board
     tid = task(conn)
-    original = pools.board_pools
+    original = pools.count_pools
 
-    def concurrent_claim(db, **kwargs):
+    def concurrent_claim(*args, **kwargs):
         with closing(kbc.connect(home / "kanban.db")) as writer:
             with kb.write_txn(writer):
                 writer.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
-        return original(db, **kwargs)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(pools, "board_pools", concurrent_claim)
+    monkeypatch.setattr(pools, "count_pools", concurrent_claim)
     detail = {"pools": {"regular": 0, "priority": 0}}
     total = mm.active_card_runs(detail=detail)
     assert total == 0

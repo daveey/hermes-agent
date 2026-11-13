@@ -134,6 +134,14 @@ def _over_budget(started, needed_s=0.0):
     return started is not None and time.monotonic() - started + needed_s > _hold_budget_s()
 
 
+def _unknown(stage, started, **extra):
+    """``hub_cpu_unknown`` with the branch that refused and the hold so far, so the refusal log tells a hold overrun
+    from an invalid sample, an expired lease or an unreadable limit (they all fail closed the same way)."""
+    hold = {"hold_ms": round((time.monotonic() - started) * 1000), "budget_ms": round(_hold_budget_s() * 1000)} \
+        if started is not None else {}
+    return "hub_cpu_unknown", {"stage": stage, **hold, **extra}
+
+
 def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=None):
     """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network.
 
@@ -162,30 +170,30 @@ def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=Non
     if state == cpu.OFF:
         return None, None
     if state != cpu.ON:
-        return "hub_cpu_unknown", None
+        return _unknown("limit_unknown", started)
     if _cap_full(echo, conn=conn, task_id=task_id):
         return "hub_capacity_full", None
     selected_limit = getattr(_decision, "pool_limit", None) or limit
     if _expired(gate):
-        return "hub_cpu_unknown", None
+        return _unknown("lease_expired_before_sample", started)
     if _over_budget(started, cpu.WINDOW_S):
-        return "hub_cpu_unknown", None  # no room left for even a nominal sample inside the designed hold
+        return _unknown("hold_before_sample", started)  # no room left for even a nominal sample inside the hold
     measured = cpu.sample()
     if not measured or not all(k in measured for k in cpu.FIELDS):
-        return "hub_cpu_unknown", None
+        return _unknown("sample_invalid", started)
     if not cpu.MIN_WINDOW_MS <= measured["cpu_busy_window_ms"] <= cpu.MAX_WINDOW_MS:
-        return "hub_cpu_unknown", None
+        return _unknown("sample_window", started, window_ms=measured["cpu_busy_window_ms"])
     if not cpu.below(measured["cpu_busy_pct"], selected_limit):
         return "hub_cpu_at_or_above_limit", None
     if _expired(gate):
-        return "hub_cpu_unknown", None  # the claim/lease deadline passed while sampling: never start
+        return _unknown("lease_expired_after_sample", started)  # the claim/lease deadline passed while sampling
     if _cap_full(echo, conn=conn, task_id=task_id):  # recount immediately before commit
         return "hub_capacity_full", None
     limit = getattr(_decision, "pool_limit", None) or limit
     if not cpu.below(measured["cpu_busy_pct"], limit):
         return "hub_cpu_at_or_above_limit", None
     if _over_budget(started):
-        return "hub_cpu_unknown", None  # the hold overran its budget: refuse rather than outlast waiting turns
+        return _unknown("hold_after_sample", started)  # the hold overran its budget: refuse, never outlast turns
     counts = getattr(_decision, "counts", None) or {}
     admission = {k: counts[k] for k in ("active_before", "active_after", "excluded_run_uid")} \
         if counts.get("excluded_run_uid") else None
@@ -403,8 +411,9 @@ def claim_transaction(conn, *, task_id=None, gate=None):
             finally:
                 _decision.worker_fenced = previous_fenced
             if reason is not None:
-                logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s", task_id, reason,
-                                                 getattr(_decision, "counts", None) or {})
+                # ``evidence`` on a refusal names the gate stage and hold (hub_cpu_unknown), never a sample.
+                logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s %s", task_id, reason,
+                                                 getattr(_decision, "counts", None) or {}, evidence or {})
                 _defer(task_id, reason)
                 yield False
                 return

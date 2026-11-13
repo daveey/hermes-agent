@@ -3,10 +3,10 @@
 Inside the gateway every ``sqlite3`` call releases the GIL and has to win it back from busy Python threads (the Kanban
 sync loop, the event loop); under that contention each handoff costs about one switch interval (5 ms). The final gate
 runs the whole-host census twice under ``admission.lock`` (cap check before the ~1 s sample, recount after it), inside
-a 2.25 s hold. A census that iterates ``PRAGMA table_info`` and row-by-row cursors makes ~100 handoffs per board, so on
-the hub (10 boards) it took ~5 s and every hub claim was refused before sampling as ``hub_cpu_unknown`` from
-2026-11-13 02:03Z. The model below charges one switch interval per sqlite call/row step on a virtual clock, so the
-test is deterministic and fast.
+a 2.25 s hold. A census that iterates ``PRAGMA table_info`` and row-by-row cursors makes ~80 handoffs per board, so on
+the hub (10 boards) it took ~4 s (7 s measured with one busy thread) and every hub claim was refused before sampling
+as ``hub_cpu_unknown`` from 2026-11-13 02:03Z. The model below charges one switch interval per sqlite call/row step
+on a virtual clock, so the test is deterministic and fast.
 """
 import json
 import logging
@@ -91,8 +91,9 @@ def _contended(monkeypatch, handoff_s):
     return clock
 
 
-def _hub_boards(conn, home, *, cap=20):
-    """The hub's shape: pools on (priority slots), the CPU gate on, one running card on each of 10 boards."""
+def _hub_boards(conn, home, *, cap=20, synced=False):
+    """The hub's shape: pools on (priority slots), the CPU gate on, one running card on each of 10 boards. ``synced``
+    boards carry the sync state and lease holders, plus a running row another gateway holds (never counted here)."""
     (home / "config.yaml").write_text(f"kanban:\n  max_in_progress: {cap}\n  admission:\n"
                                       "    cpu_busy_below_pct: 50\n    priority_slots: 3\n")
     advisory(home)
@@ -105,8 +106,16 @@ def _hub_boards(conn, home, *, cap=20):
     for path in paths:
         with closing(kbc.connect(path)) as other:
             busy = kb.create_task(other, title="running elsewhere", assignee="default")
+            foreign = kb.create_task(other, title="leased to a peer", assignee="default")
             with kb.write_txn(other):
                 other.execute("UPDATE tasks SET status='running', claim_lock='peer' WHERE id=?", (busy,))
+                if synced:
+                    if "lease_holder" not in {r[1] for r in other.execute("PRAGMA table_info(tasks)")}:
+                        other.execute("ALTER TABLE tasks ADD COLUMN lease_holder TEXT")
+                    other.execute("CREATE TABLE IF NOT EXISTS kanban_sync_state (gateway_id TEXT NOT NULL)")
+                    other.execute("INSERT INTO kanban_sync_state VALUES ('hermes-hub')")
+                    other.execute("UPDATE tasks SET lease_holder='hermes-hub' WHERE id=?", (busy,))
+                    other.execute("UPDATE tasks SET status='running', lease_holder='worker-9' WHERE id=?", (foreign,))
 
 
 def _sample_taking(clock, window_s=1.0, pct=10.0):
@@ -117,11 +126,12 @@ def _sample_taking(clock, window_s=1.0, pct=10.0):
     return sample
 
 
+@pytest.mark.parametrize("synced", [True, False])
 @pytest.mark.parametrize("review", [False, True])
-def test_contended_census_leaves_the_sample_room_inside_the_hold(board, monkeypatch, review):
-    """RED before the fix: ~100 handoffs per board x 10 boards ~ 5 s refused every claim before sampling."""
+def test_contended_census_leaves_the_sample_room_inside_the_hold(board, monkeypatch, review, synced):
+    """RED before the fix: ~80 handoffs per board x 10 boards ~ 4 s refused every claim before sampling."""
     conn, home = board
-    _hub_boards(conn, home)
+    _hub_boards(conn, home, synced=synced)
     t = task(conn, review)
     clock = _contended(monkeypatch, sys.getswitchinterval())
     monkeypatch.setattr(cm, "sample", _sample_taking(clock))
@@ -134,15 +144,29 @@ def test_contended_census_leaves_the_sample_room_inside_the_hold(board, monkeypa
     assert payload["hub_admission"]["pools"] == {"regular": HUB_BOARDS, "priority": 0}
 
 
-def test_census_counts_are_unchanged_by_the_cheaper_reads(board):
-    """Control: pool receipts, capacity origins and the own-holder filter read exactly as before."""
+@pytest.mark.parametrize("synced", [True, False])
+def test_one_read_census_matches_the_long_way(board, monkeypatch, synced):
+    """Control: counts, pool receipts, capacity origins, the own-holder filter and owners read exactly as the
+    statement-per-column path (still used for boards whose schema predates receipts)."""
     conn, home = board
-    _hub_boards(conn, home)
-    detail = {"pools": {"regular": 0, "priority": 0}, "capacity_origins": {}}
-    assert mm.active_card_runs(detail=detail) == HUB_BOARDS
-    assert detail["pools"] == {"regular": HUB_BOARDS, "priority": 0}
-    assert detail["capacity_origins"] == {} and detail["excluded"] == 0
-    assert mm.active_card_runs() == HUB_BOARDS
+    _hub_boards(conn, home, synced=synced)
+    with kb.write_txn(conn):  # a capacity receipt with an origin, on the priority pool
+        marked = kb.create_task(conn, title="marked", assignee="default")
+        conn.execute("UPDATE tasks SET status='running', claim_lock='x' WHERE id=?", (marked,))
+        run = conn.execute("INSERT INTO task_runs (task_id, profile, status, started_at, admission_pool, "
+                           "admission_class, admission_origin) VALUES (?, 'default', 'running', 1, 'priority', "
+                           "'capacity', 'origin-a')", (marked,)).lastrowid
+        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (run, marked))
+
+    def census():
+        detail, owners = {"pools": {"regular": 0, "priority": 0}, "capacity_origins": {}}, set()
+        return mm.active_card_runs(detail=detail, owner_output=owners), detail, owners, mm.active_card_runs()
+    fast = census()
+    assert fast[0] == HUB_BOARDS + 1 and fast[3] == HUB_BOARDS + 1
+    assert fast[1] == {"pools": {"regular": HUB_BOARDS, "priority": 1}, "capacity_origins": {"origin-a": 1},
+                       "excluded": 0}
+    monkeypatch.setattr(mm, "_running_rows", lambda db: None)
+    assert census() == fast
 
 
 def test_an_overrun_names_its_stage_and_hold_in_the_refusal(board, monkeypatch, caplog):
