@@ -346,9 +346,15 @@ def _finish(run: _Run, clock: tuple[float, int], verdict: Verdict, *, settle_s=N
     _end(run)
     cfg, hooks, e = run.cfg, run.hooks, run.expected
     started_self_cpu, t0 = clock
+    unattested = next((sample.snapshot["unattested_code"] for sample in reversed(samples)
+                       if isinstance(sample.snapshot, dict) and "unattested_code" in sample.snapshot),
+                      None)
     return {
         "schema": SCHEMA, "type": "gateway_quiet_observation", "verdict": verdict.state,
         "reasons": list(verdict.reasons), "episode_id": run.episode_id or None,
+        "unattested_code": unattested,
+        "message": (f"extension code not attested ({unattested['count']} units); its CPU is in the numerator"
+                    if verdict.state == PASS and unattested and unattested.get("count") else None),
         "gateway": None if e is None else {"pid": e.pid, "started_at": e.started_at,
                                            "instance_id": e.instance_id, "code_sha": e.code_sha},
         "thresholds": {"cpu_max_percent": cfg.cpu_max_percent, "capture_min_s": cfg.capture_min_s,

@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import json
 import math
 import os
 import secrets
@@ -25,12 +26,18 @@ import time
 from typing import Any
 
 from gateway.control_dispatch import QUIET_BOOKKEEPING_VERBS
+from agent.claim_quiet_records import MAX_LEASE_S
 
 logger = logging.getLogger(__name__)
 
 SCHEMA = 1
 START, SNAPSHOT, END, CHECK = QUIET_BOOKKEEPING_VERBS
-UPDATE_WINDOW_MAX_AGE_S = 120  # stricter than hermes_cli.kanban_deploy_window.FRESH_SECONDS (1200)
+# Schema 1 has no refresh cadence. Both launchd hermes-sync and the worker
+# core-update timer publish every 600 s; allow 60 s scheduling jitter.
+UPDATE_WINDOW_PUBLISH_INTERVAL_S = 600
+UPDATE_WINDOW_PUBLISH_JITTER_S = 60
+UPDATE_WINDOW_MAX_AGE_S = UPDATE_WINDOW_PUBLISH_INTERVAL_S + UPDATE_WINDOW_PUBLISH_JITTER_S
+UPDATE_WINDOW_SAFETY_MARGIN_S = 120
 # quiet-hold's preflight wants this much freshness left for the observer's spawn + handshake.
 START_PREFLIGHT_MARGIN_S = 30
 _MAX_TEXT = 256
@@ -202,7 +209,10 @@ def _window_status(now: int) -> tuple[dict[str, Any], list[str]]:
         return status, ["update_window_unavailable"]
     status["window_state"] = record["state"]
     status["window_age_s"] = now - record["observed_at"]
-    return status, ([] if record["state"] == "idle" else [f"update_window_{record['state']}"])
+    safe = record["state"] == "idle" or (
+        record["state"] == "batching"
+        and record["window_at"] - now >= MAX_LEASE_S + UPDATE_WINDOW_SAFETY_MARGIN_S)
+    return status, ([] if safe else [f"update_window_{record['state']}"])
 
 
 def start_preflight_reasons(*, now: int | None = None, margin_s: int = START_PREFLIGHT_MARGIN_S) -> list[str]:
@@ -212,7 +222,7 @@ def start_preflight_reasons(*, now: int | None = None, margin_s: int = START_PRE
     ``update_window_stale``), with the freshness bound tightened by ``margin_s`` so a window that
     would go stale while the observer starts is refused here. Runner-only state (attestation,
     coverage, drain/restart flags, registry unknowns) is the gateway's: the read-only bookkeeping
-    verb ``quiet-observe-check`` (:meth:`QuietControl.check`) reports it with start's own 120 s
+    verb ``quiet-observe-check`` (:meth:`QuietControl.check`) reports it with start's own 660 s
     window and no margin, and ``quiet-hold`` asks it after this host-file step, before the lease.
     Advisory: the gateway's start remains authoritative.
     """
@@ -291,27 +301,40 @@ class QuietControl:
             reasons.append("code_attestation_missing")
         return reasons
 
-    def _code_unknowns(self, *, inventory: bool) -> set[str]:
+    def _code_unknowns(self, *, inventory: bool) -> tuple[set[str], dict]:
         """The executed-code ledger's unknowns as ``code:<reason>``. Snapshots read only the latched
         set (no module inventory while the gateway is being measured); start and check inventory
         first. An unreadable ledger is itself an unknown."""
         ledger = getattr(self._runner, "_quiet_code", None)
+        extension = []
+        empty = {"count": 0, "sha256": hashlib.sha256(b"[]").hexdigest(), "entries": []}
         if ledger is None:
-            return set()
+            return set(), empty
         try:
-            found = ledger.unknowns() if inventory else ledger.latched_unknowns()
+            partition = getattr(ledger, "quiet_unknown_partition", None)
+            if callable(partition):
+                found, extension = partition(inventory=inventory)
+            else:
+                found = ledger.unknowns() if inventory else ledger.latched_unknowns()
         except Exception:  # health: allow BLE001 -- an unreadable ledger is unknown, never clean
-            return {"code:unreadable"}
-        return {f"code:{reason}" for reason in found}
+            return {"code:unreadable"}, empty
+        entries = sorted(set(extension))
+        report = {"count": len(entries),
+                  "sha256": hashlib.sha256(json.dumps(entries, ensure_ascii=True,
+                                                       separators=(",", ":")).encode("utf-8")).hexdigest(),
+                  "entries": entries[:20]}
+        return {f"code:{reason}" for reason in found}, report
 
     def _registry_view(self, registry, *, inventory: bool = False) -> tuple[dict[str, Any], list[str]]:
         snap = registry.snapshot()
         gen = None
         if callable(getattr(registry, "membership_generation", None)):
             gen = registry.membership_generation()
+        code_unknowns, unattested = self._code_unknowns(inventory=inventory)
         unknowns = sorted(set(snap.unknowns) | set(getattr(self._runner, "_quiet_local_unknowns", ()))
-                          | self._code_unknowns(inventory=inventory))
+                          | code_unknowns)
         view = {"activity_epoch": snap.epoch, "active_count": snap.active,
+                "unattested_code": unattested,
                 "per_kind": dict(snap.per_kind), "unknowns": unknowns,
                 "membership_generation": gen,
                 "pending_transitions": getattr(snap, "pending_transitions", 0)}
@@ -531,7 +554,11 @@ class QuietControl:
             route = ledger.route_report().get("route") if ledger is not None else None
         except Exception:  # health: allow BLE001 -- an unreadable route is reported as none, never invented
             route = None
+        _, unattested = self._code_unknowns(inventory=False)
+        predicates, predicate_reasons = self._predicates()
         return {"schema": SCHEMA, "phase": "check", "admitted": not reasons, "reasons": reasons,
+                "unattested_code": unattested, "predicates": predicates,
+                "predicate_diagnostics": predicate_reasons,
                 "registry_unknowns": unknowns, "route": route,
                 "activity_epoch": registry.snapshot().epoch if registry is not None else None}
 

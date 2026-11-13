@@ -307,7 +307,7 @@ def test_check_reports_the_route_refusal_and_start_agrees(env, recorded, capsys)
 
 def test_check_and_start_agree_on_a_stale_update_window(env, recorded, capsys):
     _use(env, recorded["relaunch"])
-    write_window(env.root, "idle", age=600)
+    write_window(env.root, "idle", age=700)
     code, doc = _check(env, capsys)
     assert code == 3 and "update_window_stale" in doc["reasons"]
     started = ok(env, "quiet-observe-start", start_params(env))

@@ -43,7 +43,7 @@ def _write_window(state: str, *, age: int = 0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
     path.write_text(json.dumps({"version": 1, "host": window.host_identity(), "observed_at": now - age,
-                                "window_at": now + 600, "state": state, "state_since": now - age - 1,
+                                "window_at": now + 599, "state": state, "state_since": now - age - 1,
                                 "drain_bound_s": 60}))
 
 
@@ -167,7 +167,7 @@ def test_cooldown_refuses_a_second_hold_and_never_starts_the_observer(home, tmp_
 
 
 @pytest.mark.parametrize("state, age, reason", [
-    ("idle", 295, "update_window_stale"),  # worker-2's live record: fresh for read_window, not for start
+    ("idle", 700, "update_window_stale"),  # fresh for read_window, beyond quiet's 660 s bound
     ("batching", 0, "update:update_window_batching"),
     ("draining", 0, "update:update_window_draining"),
 ])
@@ -187,7 +187,7 @@ def test_preflight_refuses_a_doomed_start_without_taking_the_lease_or_spending_t
 def test_preflight_refuses_a_missing_window_and_a_window_about_to_go_stale(home):
     window.window_path().unlink()
     assert kq.hold(30, "r", ["true"]) == kq.EXIT_PREFLIGHT
-    _write_window("idle", age=100)  # inside the gateway's 120 s, but not with the start margin left
+    _write_window("idle", age=650)  # inside the gateway's 660 s, but not with the start margin left
     assert kq.hold(30, "r", ["true"]) == kq.EXIT_PREFLIGHT
     assert cq.inspect().state == "inactive"
     assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists()

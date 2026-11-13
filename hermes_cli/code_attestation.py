@@ -571,6 +571,8 @@ class Attestation:
         self._lock = threading.RLock()
         self._tls = threading.local()
         self._unknown = {"bootstrap-provenance-pending"}
+        self._extension_unknowns = set()
+        self._blocking_unknowns = set()
         self._generation = 0
         self._units = []
         self._known = {}  # identity-keyed strong references: no id recycling
@@ -662,9 +664,45 @@ class Attestation:
 
     def mark_unknown(self, reason):
         with self._lock:
+            self.__dict__.setdefault("_blocking_unknowns", set()).add(reason)
             if reason not in self._unknown:
                 self._unknown.add(reason)
                 self._generation += 1
+
+    def _extension_unknown(self, reason, filename):
+        """Latch provenance at emission, never infer a module's path from its later name.
+
+        Only these four emitters may downgrade an unknown. Core-root paths, including
+        symlink aliases, and unreadable provenance stay blocking. Raw ledger evidence
+        remains unchanged; this partition is only the quiet CPU measurement policy.
+        """
+        if not reason.startswith(("unrooted-exec:", "unrooted-module:",
+                                  "generated-origin-unknown:", "native-load:")):
+            self.mark_unknown(reason)
+            return
+        try:
+            core = (not filename or str(filename).startswith("<")
+                    or Path(filename).resolve().is_relative_to(self.core_root))
+        except (OSError, ValueError, TypeError):
+            core = True
+        with self._lock:
+            if core:
+                self.mark_unknown(reason)
+            else:
+                self._extension_unknowns.add(reason)
+                if reason not in self._unknown:
+                    self._unknown.add(reason)
+                    self._generation += 1
+
+    def quiet_unknown_partition(self, *, inventory=False):
+        """Blocking and informational unknowns, from one locked ledger observation."""
+        with self._lock:
+            if inventory:
+                self.unknowns()
+            else:
+                self.latched_unknowns()
+            extension = self._extension_unknowns - self._blocking_unknowns
+            return sorted(self._unknown - extension), sorted(extension)
 
     def _seed_functions(self, namespace, module, seen=None):
         seen = set() if seen is None else seen
@@ -868,7 +906,7 @@ class Attestation:
                 # unknown, but is distinguishable from a core/plugin escape. Its
                 # receipt is still kept (origin None) so the paired exec is consumed
                 # as already-unknown instead of being misreported as receipt-missing.
-                self.mark_unknown("generated-origin-unknown:" + descriptor.name + ":" + str(unattested))
+                self._extension_unknown("generated-origin-unknown:" + descriptor.name + ":" + str(unattested), unattested)
             if (len(source) > MAX_SOURCE or len(receipts) >= 8 or
                     sum(len(r[2]) for r in receipts) + len(source) > 2 * MAX_SOURCE):
                 self.mark_unknown("generated-receipt-overflow:" + descriptor.name)
@@ -923,7 +961,7 @@ class Attestation:
             return True
         origin, unattested = self._origin(frame)
         if origin is None:
-            self.mark_unknown("generated-origin-unknown:" + descriptor.name + ":" + str(unattested))
+            self._extension_unknown("generated-origin-unknown:" + descriptor.name + ":" + str(unattested), unattested)
             return True
         digest = _sha(arg.encode("utf-8", "surrogatepass"))
         key = (origin, descriptor.name, digest)
@@ -963,7 +1001,7 @@ class Attestation:
             if not str(filename).endswith(".py"):
                 self.mark_unknown("non-source-module:" + name)
             elif owner is None:
-                self.mark_unknown("unrooted-module:" + name)
+                self._extension_unknown("unrooted-module:" + name, filename)
 
     def _inventory_modules(self):
         # Requested snapshots only, never idle scans. Recheck mutable __file__ even
@@ -1147,7 +1185,9 @@ class Attestation:
         except (OSError, ValueError):
             path = None
         if path is None or filename.startswith("<") or not self._deps.indexed(path):
-            self.mark_unknown("unrooted-exec:" + filename)
+            provenance = (producer.f_code.co_filename if filename.startswith("<") and producer is not None
+                          else filename)
+            self._extension_unknown("unrooted-exec:" + filename, provenance)
             if producer is not None and len(self._unknown_detail) < MAX_DEP_REPORT:
                 # Diagnosis only (which code produced it); the unknown stays latched.
                 self._unknown_detail.setdefault("unrooted-exec:" + filename, set()).add(
@@ -1222,10 +1262,12 @@ class Attestation:
         allowed = name in _NATIVE_SONAMES
         if not allowed and isinstance(name, str) and os.path.isabs(name):
             path = Path(name).resolve()
-            allowed = (self._deps.indexed(path) and self._dep_ready()
-                       and self._deps.verify(path) is not None)
+            if self._deps.indexed(path):
+                allowed = self._dep_ready() and self._deps.verify(path) is not None
+                if not allowed:
+                    self.mark_unknown("dependency-unreceipted:" + str(path))
         if caller is None or not allowed:
-            self.mark_unknown("native-load:" + str(name))
+            self._extension_unknown("native-load:" + str(name), name)
             return
         if len(self._native_loads) < MAX_DEP_REPORT:
             self._native_loads.append({"name": name, "caller_component": caller})

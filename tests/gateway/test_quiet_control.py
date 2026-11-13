@@ -91,7 +91,7 @@ def write_window(root, state, *, age=0):
     path.parent.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
     path.write_text(json.dumps({"version": 1, "host": window.host_identity(), "observed_at": now - age,
-                                "window_at": now + 600, "state": state, "state_since": now - age - 1,
+                                "window_at": now + 599, "state": state, "state_since": now - age - 1,
                                 "drain_bound_s": 60}))
 
 
@@ -229,7 +229,7 @@ def test_start_refused_on_update_markers(env):
     write_window(env.root, "draining")
     result = ok(env, "quiet-observe-start", start_params(env))
     assert result["valid"] is False and "update:update_window_draining" in result["reasons"]
-    write_window(env.root, "idle", age=500)  # fresh enough for read_window, stricter than 120 s
+    write_window(env.root, "idle", age=700)  # fresh for read_window, beyond quiet's 660 s bound
     assert "update_window_stale" in ok(env, "quiet-observe-start", start_params(env))["reasons"]
     os.unlink(window.window_path())
     assert "update:update_window_unavailable" in ok(env, "quiet-observe-start", start_params(env))["reasons"]
@@ -246,7 +246,7 @@ def write_update_hold(root, kind):
 
 
 @pytest.mark.parametrize("state, age, hold", [
-    ("draining", 0, None), ("batching", 0, None), ("idle", 500, None), ("idle", 0, None), (None, 0, None),
+    ("draining", 0, None), ("batching", 0, None), ("idle", 700, None), ("idle", 0, None), (None, 0, None),
     # #2591 M2c: a hold alone (fresh idle window) must refuse here too, or quiet-hold spends its cooldown
     # on a start the gateway then refuses; with a draining window the hold reason still comes first.
     ("idle", 0, "admission"), ("idle", 0, "drain"), ("draining", 0, "admission"),
