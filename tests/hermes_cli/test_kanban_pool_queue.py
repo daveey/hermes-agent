@@ -683,15 +683,20 @@ def test_direct_create_task_queues_a_portable_card_like_the_front_doors(hub, mon
     assert _runs_on(hub.conn, tid) is None
 
 
-def test_direct_create_task_keeps_pool_enrollment_when_it_cannot_queue(hub, monkeypatch):
+def test_direct_create_task_keeps_a_queue_miss_home_instead_of_pool_enrollment(hub, monkeypatch):
+    """A worker_queue gateway never falls back to worker-first (MacBook t_01a1d5386cb55abf, 11-13: the fallback
+    reserved one machine at a time from a stale worker_pools list); a queue miss stays home."""
     monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1", "worker-2"]}})
     _registry(held=("worker-1", "worker-2"))  # no unheld machine carries the label
     tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
-    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy is None
     _registry()
-    sync.set_mode(hub.conn, "off")  # runs_on is a Board placement field: off a primary, enroll instead
+    sync.set_mode(hub.conn, "off")  # runs_on is a Board placement field: off a primary nothing queues
     tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
-    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy is None
+    monkeypatch.setattr(kp, "config", lambda: {"worker_pools": {HUB: ["worker-1", "worker-2"]}})  # no queue: enroll
+    tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
+    assert kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"
 
 
 # --- courier and origin-bound creates (t_01a1d0571c2f07d6) ------------------------------------------------------

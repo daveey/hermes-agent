@@ -634,11 +634,21 @@ def without_placement_note(body: str) -> str:
 EVIDENCE_OPEN = "<!-- placement:evidence -->"
 EVIDENCE_CLOSE = "<!-- /placement:evidence -->"
 _EVIDENCE = re.compile(re.escape(EVIDENCE_OPEN) + r".*?" + re.escape(EVIDENCE_CLOSE), re.DOTALL)
+# The "Existing work checked" record ask-gate's superseding_work rule asks every creator to write is evidence too: a
+# past search ("`hermes-hub tasks` (all boards) had no open card ..."), never work the card must do. Scanned as work,
+# its `hermes-hub tasks` read as a home coordination action, so two MacBook cards (t_01a1d5386cb55abf,
+# t_01a1d54acc8c8e54, 11-13) could run nowhere. A heading section runs to the next heading; a bold-label paragraph
+# to the next blank line. [daveey]
+_EXISTING_WORK = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]+Existing work checked\b[^\n]*(?:\n(?![ \t]*#{1,6}[ \t]).*)*"
+    r"|\*\*Existing work checked\b[^\n]*(?:\n(?![ \t]*\n|[ \t]*#{1,6}[ \t]).*)*)",
+    re.IGNORECASE | re.MULTILINE)
 
 
 def without_evidence(body: str) -> str:
-    """``body`` minus every complete fenced evidence block (:data:`EVIDENCE_OPEN` ... :data:`EVIDENCE_CLOSE`)."""
-    return _EVIDENCE.sub("", body or "")
+    """``body`` minus every complete fenced evidence block (:data:`EVIDENCE_OPEN` ... :data:`EVIDENCE_CLOSE`) and
+    every "Existing work checked" section (:data:`_EXISTING_WORK`)."""
+    return _EXISTING_WORK.sub("", _EVIDENCE.sub("", body or ""))
 
 
 def structural_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:

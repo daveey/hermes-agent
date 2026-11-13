@@ -164,9 +164,18 @@ def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, q
     queued = queue_decision(args, cfg, gateway, pin, machine_ok) if queue else None
     if queued is not None:
         return queued
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli import kanban_placement_coordination as coordination
+    if placement._Cfg(cfg).queue_label(gateway):
+        # A worker_queue gateway never falls back to worker-first: a queue miss (no live labelled machine, a
+        # non-primary board) stays home under legacy routing. The fallback reserved one machine at a time from a
+        # stale worker_pools list (MacBook t_01a1d5386cb55abf: worker-2..4 only, 140 reservations). [daveey]
+        return None
     pools = cfg.get("worker_pools")
     if pin not in ("", "auto") or not isinstance(pools, dict) or gateway not in pools:
         return None
+    if coordination.required_labels(args, cfg) is None:
+        return None  # claim_refusal refuses this text on every pool worker: enrolled, it could never run
     if args.get("runs_on") is not None:
         return None  # Preserve legacy routing, including an explicit empty pin.
     if origin_intent is not None:
@@ -222,8 +231,10 @@ def db_placement(fields):
     """``(placement_policy, runs_on)`` for a direct ``create_task`` producer (swarm, triage sweep, alerts, ...).
 
     Same outcome as the front doors: a portable card of a ``worker_queue`` gateway queues for the pool label on a
-    Board primary (``runs_on`` is a Board placement field); elsewhere, or with no live labelled machine, it keeps
-    worker-pool enrollment. Judging the queue but keeping only ``placement_policy`` (11-12) dropped both. [daveey]
+    Board primary (``runs_on`` is a Board placement field); a queue miss there, or off a primary, stays home
+    (:func:`creation_decision` never falls back to worker-first on a queue gateway). Only a gateway without a
+    ``worker_queue`` keeps worker-pool enrollment. Judging the queue but keeping only ``placement_policy`` (11-12)
+    dropped both. [daveey]
     """
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_placement as placement
