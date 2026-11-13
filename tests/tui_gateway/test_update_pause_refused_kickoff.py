@@ -303,3 +303,20 @@ def test_paused_continuation_refused_for_ownership_does_not_rearm(env, monkeypat
     assert env.watchers == []
     assert session["_auto_continue_retry_after"] > time.monotonic() + 20.0
     assert any("owner refusal SESSION_MOVED" in r.getMessage() for r in caplog.records)
+
+
+def test_stale_owner_refusal_from_an_earlier_submit_does_not_block_the_rearm(env, caplog):
+    """``_turn_owner_refusal`` left by an earlier ownership-refused prompt.submit survives a refusal that returns
+    before _admit_prompt_turn clears it (here: the hold re-taken at admission). The kickoff clears it before its
+    own submit, so that refusal re-arms the watcher instead of being misread as an owner refusal."""
+    import logging
+    caplog.set_level(logging.WARNING)
+    record_turn_start(env.home, "session-key", "the prompt")
+    mark_turn_paused(env.home, "session-key", up.PAUSE_REASON)
+    session = _session(_turn_owner_refusal="SESSION_MOVED")  # stale: an earlier user submit was refused
+
+    server._maybe_schedule_auto_continue("sid", session, "session-key")
+
+    assert env.watchers == [("sid", "session-key")]
+    assert session["_auto_continue_retry_after"] < time.monotonic() + 15.0  # the short re-arm backoff
+    assert not any("owner refusal" in r.getMessage() for r in caplog.records)
