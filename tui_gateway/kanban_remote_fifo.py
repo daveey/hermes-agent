@@ -75,28 +75,42 @@ def gateway_holds(db: Any, ids: Iterable[str], event_key: str) -> bool:
     return bool(event_key) and event_key in pending_keys(db, ids)
 
 
-def canonical_gateway_pid(profile: Optional[str]) -> Optional[int]:
-    """The verified live gateway that runs ``profile``'s chats: the gateway of that profile's own home, else
-    the default root's (a multiplexed gateway serves the profile from there). Identity is the start-time and
-    command-line proven pid of ``gateway.status.live_gateway_pid_for_home``, never the control socket's identify
-    call (``discover_owner`` drops the pid and times out under exactly the load this guards). None when unproven."""
-    try:
-        from gateway.status import live_gateway_pid_for_home
-        from hermes_cli.profiles import get_profile_dir
-        pid = live_gateway_pid_for_home(get_profile_dir(profile or "default"))
-        if pid is None:
-            from hermes_cli.gateway_multiplex_served import live_default_gateway_pid
-            pid = live_default_gateway_pid()
-        return int(pid) if pid is not None else None
-    except Exception:  # health: allow BLE001 -- an unproven gateway keeps the sweep's own path
-        logger.debug("remote kanban fifo: gateway pid lookup failed", exc_info=True)
-        return None
+def _profile_gateway_pid(profile: Optional[str]) -> Optional[int]:
+    from gateway.status import live_gateway_pid_for_home
+    from hermes_cli.profiles import get_profile_dir
+    return live_gateway_pid_for_home(get_profile_dir(profile or "default"))
+
+
+def _default_gateway_pid(_profile: Optional[str]) -> Optional[int]:
+    from hermes_cli.gateway_multiplex_served import live_default_gateway_pid
+    return live_default_gateway_pid()
+
+
+def verified_gateway_pids(profile: Optional[str]) -> tuple[int, ...]:
+    """Every verified live gateway that may run ``profile``'s chats, deduplicated, in order: the gateway of that
+    profile's own home, then the default root's (a multiplexed gateway serves the profile from there). Both are
+    candidates because both can be live at once and either may hold the chat's turn (PR #2208 review nit 1:
+    matching only the first left the other's leased chats on the claim/defer loop). Identity is the start-time
+    and command-line proven pid of ``gateway.status.live_gateway_pid_for_home``, never the control socket's
+    identify call (``discover_owner`` drops the pid and times out under exactly the load this guards). A failed
+    lookup drops only its own candidate; empty when none is proven."""
+    pids = []
+    for lookup in (_profile_gateway_pid, _default_gateway_pid):
+        try:
+            pid = lookup(profile)
+        except Exception:  # health: allow BLE001 -- an unproven gateway keeps the sweep's own path
+            logger.debug("remote kanban fifo: gateway pid lookup failed", exc_info=True)
+            continue
+        if pid is not None:
+            pids.append(int(pid))
+    return tuple(dict.fromkeys(pids))
 
 
 def gateway_lease_pid(db: Any, ids: Iterable[str], profile: Optional[str], now: Optional[float] = None,
-                      gateway_pid=None) -> Optional[int]:
-    """The canonical gateway's pid when it holds an UNEXPIRED turn lease on the chat (``ids``: its lineage), else
-    None. The Desktop backend's sweep then leaves the notice alone: no claim, no wake, no passive row.
+                      gateway_pids: Optional[Iterable[int]] = None) -> Optional[int]:
+    """The pid of a verified gateway (:func:`verified_gateway_pids`) that holds an UNEXPIRED turn lease on the
+    chat (``ids``: its lineage), else None. The Desktop backend's sweep then leaves the notice alone: no claim,
+    no wake, no passive row.
 
     Why standing aside gives up nothing (t_01a1cff0541bf30c G3, review t_01a1d4c44f637fff): while another live
     process holds an unexpired lease, the sweep can deliver nothing. Its passive row is refused
@@ -125,8 +139,10 @@ def gateway_lease_pid(db: Any, ids: Iterable[str], profile: Optional[str], now: 
     if not holders:
         return None  # the common case: no running turn, no gateway probe
     from tui_gateway.kanban_leg_custody import gateway_owner
-    pid = canonical_gateway_pid(profile) if gateway_pid is None else gateway_pid
-    if pid is None:
-        return None
-    owner = gateway_owner(tuple(ids), None, tuple(dict.fromkeys(holders)), gateway_pid=pid, launch_profile="")
-    return owner.pid if owner is not None else None
+    pids = verified_gateway_pids(profile) if gateway_pids is None else tuple(gateway_pids)
+    holders = tuple(dict.fromkeys(holders))
+    for pid in pids:
+        owner = gateway_owner(tuple(ids), None, holders, gateway_pid=pid, launch_profile="")
+        if owner is not None:
+            return owner.pid
+    return None
