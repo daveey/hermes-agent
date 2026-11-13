@@ -14,7 +14,8 @@ def note_missing_parents(
     """Track a missing-parent streak inside the home gateway's readiness transaction.
 
     On a synced board (``remote``) a parent with no status is unknown, not missing, unless the mirror's replica is
-    at the feed head (``kanban_replica_freshness.replica_at_head``, read once per readiness pass into ``fresh``):
+    at the feed head and, on a primary board, the mirror was refreshed from that pull
+    (``kanban_replica_freshness.mirror_at_head``, read once per readiness pass into ``fresh``):
     otherwise no streak event is recorded and nothing is blocked. The child still waits: an unknown parent gates.
     Each deferral is counted in ``fresh["deferred"]`` and the pass logs one INFO line per board per stale replica
     stamp (``kanban_replica_freshness.report_deferred``). A replica that never catches up is alarmed in awake time
@@ -28,10 +29,10 @@ def note_missing_parents(
         return False
     missing = [pid for pid, st in states if st is None]
     if missing and remote:
-        from hermes_cli.kanban_replica_freshness import replica_at_head, synced
+        from hermes_cli.kanban_replica_freshness import mirror_at_head, synced
         cache = {} if fresh is None else fresh
         if "fresh" not in cache:  # a detached board (sync off) keeps its mirror table but is its own authority
-            cache["fresh"] = replica_at_head(conn) if synced(conn) else True
+            cache["fresh"] = mirror_at_head(conn) if synced(conn) else True
         if not cache["fresh"]:
             cache["deferred"] = cache.get("deferred", 0) + 1
             return False

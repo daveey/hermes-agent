@@ -169,28 +169,52 @@ def _replica_at_head(conn: sqlite3.Connection):
     return _replica_state(conn)[0]
 
 
+def mirror_at_head(conn: sqlite3.Connection) -> bool:
+    """:func:`replica_at_head`, and on a ``primary`` board the live remote-parent mirror was refreshed from that same
+    pull or a later one (``mirror_pulled_at`` >= ``pulled_at``, stamped by ``kanban_db_sync.mark_mirrored``). The
+    round stamps ``pulled_at`` before its live pull and mirror refresh, so between the two a fresh stamp vouches for
+    a mirror that may still be hours old (review 5888215084 on #1931). Only the missing-parent detector reads the
+    mirror; a ``shadow`` board never refreshes one, so its replica's stamp is enough."""
+    verdict, _board, pulled, mirrored = _replica_state(conn)
+    if verdict is not True:
+        return False
+    return _mode(conn) != "primary" or (type(mirrored) in (int, float) and mirrored >= pulled)
+
+
+def _mode(conn: sqlite3.Connection) -> Optional[str]:
+    try:
+        row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    return None if row is None else row["mode"]
+
+
 def _replica_state(conn: sqlite3.Connection) -> tuple:
-    """``(verdict, board_id, pulled_at)``: the :func:`_replica_at_head` verdict, the live board's id (None when
-    unsynced or unreadable) and the replica's numeric ``pulled_at`` stamp (None when it has none)."""
+    """``(verdict, board_id, pulled_at, mirror_pulled_at)``: the :func:`_replica_at_head` verdict, the live board's
+    id (None when unsynced or unreadable), the replica's numeric ``pulled_at`` stamp (None when it has none) and the
+    ``pulled_at`` the remote-parent mirror was last refreshed from (None when unknown)."""
     from hermes_cli.kanban_db_connect import _main_db_file
     from hermes_cli.kanban_foreign_card import open_replica
 
     try:
         local = conn.execute("SELECT board_id FROM kanban_sync_state LIMIT 1").fetchone()
         if local is None:
-            return None, None, None
+            return None, None, None, None
         with open_replica(_main_db_file(conn)) as replica:
             if replica is None:
-                return None, local["board_id"], None
-            state = replica.execute("SELECT board_id, pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
+                return None, local["board_id"], None, None
+            state = replica.execute("SELECT * FROM kanban_sync_state LIMIT 1").fetchone()
     except (sqlite3.Error, OSError, ValueError):
-        return None, None, None
+        return None, None, None, None
     if state is None or state["board_id"] != local["board_id"]:
-        return False, local["board_id"], None
+        return False, local["board_id"], None, None
+    if "pulled_at" not in state.keys():  # unreadable, as when this was read by name
+        return None, local["board_id"], None, None
     pulled = state["pulled_at"]
+    mirrored = state["mirror_pulled_at"] if "mirror_pulled_at" in state.keys() else None
     if type(pulled) not in (int, float):
-        return False, local["board_id"], None
-    return 0 <= time.time() - pulled <= FRESH_SECONDS, local["board_id"], pulled
+        return False, local["board_id"], None, mirrored
+    return 0 <= time.time() - pulled <= FRESH_SECONDS, local["board_id"], pulled, mirrored
 
 
 def synced(conn: sqlite3.Connection) -> bool:
@@ -212,23 +236,26 @@ def local_copy_stale(conn: sqlite3.Connection, what: str) -> bool:
     return True
 
 
-# Live board file -> the replica stamp its last deferral line named: one INFO line per board per stale stamp.
+# Live board file -> (replica stamps, count) its last deferral line named: one INFO line per board per stale stamp
+# and deferred count.
 _reported: dict[str, object] = {}
 
 
 def report_deferred(conn: sqlite3.Connection, deferred: int) -> None:
     """One INFO line when a readiness pass deferred ``deferred`` missing-parent judgements because the replica is
-    not at the feed head, repeated only when the replica's ``pulled_at`` changes. It names the board, the replica's
-    last time at the head (or "no readable replica") and the count. There is deliberately no wall-clock escalation
+    not at the feed head (or the remote-parent mirror not yet refreshed from it), repeated only when the replica's
+    stamps or the count change: a line keyed on the stamp alone kept the first pass's count while more children
+    joined the wait (review 5888215084 on #1931). It names the board, the replica's last time at the head (or "no
+    readable replica") and the count. There is deliberately no wall-clock escalation
     here: after a laptop sleeps for hours its stamp is hours old on wake, so a bound would fire at once and bring
     back the false blocks this gate removes. A replica that never catches up is alarmed in awake time by the
     sync-freshness check of t_01a1d3df5e5d0757, which files one card per incident."""
     from datetime import UTC, datetime
     from hermes_cli.kanban_db_connect import _main_db_file
 
-    verdict, board, pulled = _replica_state(conn)
+    verdict, board, pulled, mirrored = _replica_state(conn)
     key = str(_main_db_file(conn) or board)
-    stamp = "unreadable" if verdict is None else pulled
+    stamp = "unreadable" if verdict is None else (pulled, mirrored)
     if key in _reported and _reported[key] == stamp:
         return
     _reported[key] = stamp
@@ -239,5 +266,7 @@ def report_deferred(conn: sqlite3.Connection, deferred: int) -> None:
     else:
         last = "replica last at the feed head " + datetime.fromtimestamp(pulled, UTC).isoformat(
             timespec="seconds")
+        if verdict:
+            last += ", remote-parent mirror not refreshed from that pull yet"
     _log.info("missing-parent check deferred on board %s (%s): %s; %d child(ren) wait with parent status unknown",
               board or "?", key, last, deferred)

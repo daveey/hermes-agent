@@ -259,6 +259,8 @@ _SYNC_COLUMN_DDL = (
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
     # Wall time of the last successful feed pull into this file (replicas): readers derive staleness from it. [daveey]
     ("kanban_sync_state", "pulled_at", "pulled_at REAL"),
+    # Replicas: the ``pulled_at`` of the pull the live remote-parent mirror was last refreshed from. [daveey]
+    ("kanban_sync_state", "mirror_pulled_at", "mirror_pulled_at REAL"),
     # Local-only round-robin position; refused revisions must not monopolize bounded batches.
     ("kanban_sync_state", "worker_reserve_cursor", "worker_reserve_cursor TEXT"),
 )
@@ -706,6 +708,20 @@ def mark_pulled(conn: sqlite3.Connection, at: Optional[float] = None) -> None:
     stamp = time.time() if at is None else at
     with write_txn(conn):
         conn.execute("UPDATE kanban_sync_state SET pulled_at = ? WHERE pulled_at IS NOT ?", (stamp, stamp))
+
+
+def mark_mirrored(replica: sqlite3.Connection, board: str = "") -> None:
+    """Record on the replica that the live remote-parent mirror now reflects its last pull (``mirror_pulled_at`` =
+    ``pulled_at``). The round stamps ``pulled_at`` before it refreshes the mirror, so a fresh ``pulled_at`` alone
+    does not prove the mirror is current; the missing-parent detector also needs this one. A failed stamp only
+    leaves the detector deferring (fail closed), so it is logged, not raised. [daveey]"""
+    from hermes_cli.kanban_db_connect import write_txn
+    try:
+        with write_txn(replica):
+            replica.execute("UPDATE kanban_sync_state SET mirror_pulled_at = pulled_at "
+                            "WHERE mirror_pulled_at IS NOT pulled_at")
+    except sqlite3.Error as exc:
+        _log.warning("kanban sync: %s remote-parent mirror not stamped (%s)", board, exc)
 
 
 def new_task_id(conn: sqlite3.Connection) -> str:

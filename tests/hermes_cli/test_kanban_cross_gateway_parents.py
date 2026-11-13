@@ -229,11 +229,14 @@ def test_a_worker_node_does_not_copy_a_ready_card_whose_parent_is_open(kanban_ho
 # 2026-11-12, David-MBP: a sync round stuck for hours in a long pull never refreshed the remote-parent mirror, so two
 # rework cards whose parents were done on the Board were blocked "parent ... missing" and two repair cards filed.
 
-def _stamp_replica(at):
+def _stamp_replica(at, mirrored=...):
+    """Stamp the replica's last pull at ``at``. A whole round also refreshes the remote-parent mirror from that pull,
+    so ``mirror_pulled_at`` follows it unless ``mirrored`` names an older refresh (or None: never refreshed)."""
     replica = kbc.connect(ksc.shadow_path(BOARD))
     try:
         with kbc.write_txn(replica):
-            replica.execute("UPDATE kanban_sync_state SET pulled_at = ?", (at,))
+            replica.execute("UPDATE kanban_sync_state SET pulled_at = ?, mirror_pulled_at = ?",
+                            (at, at if mirrored is ... else mirrored))
     finally:
         replica.close()
 
@@ -333,3 +336,37 @@ def test_a_stalled_replica_is_reported_once_per_stale_stamp_at_info(live, svc, k
     kb.recompute_ready(live)
     assert len(lines()) == 3 and "no readable replica" in lines()[-1]
     assert all(kb.get_task(live, c).status == "todo" and not _events(live, c, "parent_missing") for c in children)
+
+
+def _replica_stamps():
+    replica = kbc.connect(ksc.shadow_path(BOARD))
+    try:
+        row = replica.execute("SELECT pulled_at, mirror_pulled_at FROM kanban_sync_state").fetchone()
+        return row["pulled_at"], row["mirror_pulled_at"]
+    finally:
+        replica.close()
+
+
+def test_a_fresh_pull_does_not_vouch_for_a_mirror_not_yet_refreshed_from_it(live, svc, kanban_home):
+    """Review nit 1 (5888215084) on #1931: the round stamps ``pulled_at`` before its live pull and mirror refresh.
+    A streak that aged through a stall must not block, nor file a repair, in the pass between the two."""
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    pulled, mirrored = _replica_stamps()
+    assert mirrored == pulled  # a whole round stamps the mirror refresh from its own pull
+    _link_raw(live, "t_new_foreign", child)  # linked while the mirror was fresh: the streak starts
+    kb.recompute_ready(live)
+    assert len(_events(live, child, "parent_missing")) == 1
+    _age_streak(live, child)  # ... then the sync stalls for longer than the block window
+    now = time.time()
+    _stamp_replica(now, mirrored=now - 3600)  # caught up to the feed head; mirror still from before the stall
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "todo"  # before the fix: blocked on the stale mirror
+    assert not _events(live, child, "blocked") and not _repairs(live, child)
+    _round(kanban_home, svc)  # the round refreshes the mirror: the Board really lacks the parent
+    pulled, mirrored = _replica_stamps()
+    assert mirrored == pulled
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "blocked"
+    kb.recompute_ready(live)
+    assert len(_repairs(live, child)) == 1

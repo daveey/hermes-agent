@@ -1028,6 +1028,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                     _REPAIR_CREDIT.pop(key, None)
             note_round(slug, outcome, _repair_clock())
             if mode == "primary":
+                # The mirror matches this round's pull (refreshed above, or inputs unchanged since the last refresh)
+                sync.mark_mirrored(replica, slug)  # only then can a parent be missing (kanban_replica_freshness)
                 heal_clobbered_completions(live)
                 from hermes_cli.kanban_sync_divergence import heal_running_over_ended_run
                 heal_running_over_ended_run(live)
