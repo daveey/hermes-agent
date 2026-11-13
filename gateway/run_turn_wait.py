@@ -36,8 +36,7 @@ async def await_turn_worker(runner, worker, turn_ctx, interrupt_detected, interr
             await runner._run_agent_backup_interrupt_check(turn_ctx, interrupt_detected, interrupt_monitor)
         return runner._run_agent_timeout_result(worker, turn_ctx)
     finally:
-        # A queued follow-up shares the handler scope, so an existing receipt may
-        # belong to its predecessor. Only this worker's completion proves that
-        # its frozen receipt is ready and the cached agent must not be reread.
+        # This invocation's own receipt (``begin_run_receipt``): only this worker's completion proves
+        # its frozen receipt is ready; an abandoned worker names only a lease it holds now.
         if not worker.executor_task.done():
-            capture_run_outcome(agent_holder[0])
+            capture_run_outcome(agent_holder[0], abandoned=True)

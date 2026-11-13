@@ -40,7 +40,7 @@ from gateway.session_transcript import TranscriptReadError
 from gateway.run_turn_bubble_cleanup import register_bubble_cleanup, settle_turn_senders
 from gateway.turn_context import TurnContext
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
-from gateway.turn_outcome import finish_gateway_turn_outcome, run_outcome
+from gateway.turn_outcome import finish_gateway_turn_outcome, run_outcome, run_receipt_scope
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -813,9 +813,9 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         self, message: str, context_prompt: str, history: list[dict[str, Any]],
         source: SessionSource, session_id: str, **turn_kwargs,
     ) -> dict[str, Any]:
-        """Profile-scoping wrapper around ``_run_agent_inner`` (same keyword parameters; pass-through
-        when multiplexing is off)."""
-        with self._profile_scope_for_source(source):
+        """Profile-scoping wrapper around ``_run_agent_inner``; each invocation (a queued follow-up's
+        recursion included) owns its outcome receipt (``gateway.turn_outcome.run_receipt_scope``)."""
+        with run_receipt_scope(session_id), self._profile_scope_for_source(source):
             return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
 
     def _run_agent_display_settings(self, source: SessionSource) -> GatewayRunner._RunAgentDisplay:

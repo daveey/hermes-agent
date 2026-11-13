@@ -81,13 +81,11 @@ def gateway_outcome_scope():
 
 
 def _gateway(db, *, token=None, holder=None):
-    """A runner whose session state holds the turn's agent, and the turn's event (it owns the routing token)."""
+    """A runner, its run's frozen receipt (the agent's lease), and the turn's event (it owns the routing token)."""
     agent = SimpleNamespace(_last_session_turn_lease_holder=holder)
     from gateway.turn_outcome import capture_run_outcome
     capture_run_outcome(agent)
-    state = SimpleNamespace(turn=SimpleNamespace(agent=agent))
-    runner = SimpleNamespace(_session_db=db, _session_state=lambda key: state)
-    return runner, SimpleNamespace(_gateway_active_turn_token=token)
+    return SimpleNamespace(_session_db=db), SimpleNamespace(_gateway_active_turn_token=token)
 
 
 def _gate_refresh(monkeypatch):
@@ -196,7 +194,7 @@ def test_the_gateway_never_names_a_concurrent_desktop_turns_marker(db, monkeypat
     db.append_message("chat", role="user", content="tui prompt", timestamp=time.time() + 1)
     record_turn_start(db.db_path.parent, "chat", "tui prompt")  # TUI turn admitted, waiting on the lease
     runner, event = _gateway(db, holder="gateway-turn")
-    assert not any(t.startswith("marker:") for t in gateway_identity(runner, event, "key"))
+    assert not any(t.startswith("marker:") for t in gateway_identity(event))
     entered, release = _gate_refresh(monkeypatch)
     thread = refresh_gateway_turn_outcome(runner, SimpleNamespace(session_id="chat"), event, "key")
     assert entered.wait(10)
@@ -213,13 +211,12 @@ def test_the_gateway_never_names_a_concurrent_desktop_turns_marker(db, monkeypat
 
 
 def test_the_gateway_names_its_agents_lease_and_its_events_token(db):
-    runner, event = _gateway(db, token="tok-x", holder="pid=1:turn=a")
-    assert gateway_identity(runner, event, "key") == {"gateway:tok-x", "lease:pid=1:turn=a"}
+    _, event = _gateway(db, token="tok-x", holder="pid=1:turn=a")
+    assert gateway_identity(event) == {"gateway:tok-x", "lease:pid=1:turn=a"}
     from gateway.turn_outcome import run_outcome
     run_outcome.get().clear()  # no worker-owned receipt: nothing discounted
-    assert gateway_identity(SimpleNamespace(), None, None) == frozenset()
-    broken = SimpleNamespace(_session_state=lambda key: (_ for _ in ()).throw(KeyError(key)))
-    assert gateway_identity(broken, SimpleNamespace(_gateway_active_turn_token="t"), "key") == {"gateway:t"}
+    assert gateway_identity(None) == frozenset()
+    assert gateway_identity(SimpleNamespace(_gateway_active_turn_token="t")) == {"gateway:t"}
 
 
 @pytest.mark.parametrize("kind", KINDS)
