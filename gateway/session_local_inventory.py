@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
@@ -189,21 +190,103 @@ def session_inventory(authority, policy, agent, cwd):
     return info
 
 
+async def _inventory_parts(authority, ref, cwd):
+    """The slow half of :func:`snapshot_info`: the inventory and usage, both off the owner loop."""
+    from gateway.session_policy import policy_for_source
+    from gateway.session_usage import snapshot_usage
+    policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
+    agent = authority.agent(ref)
+    inventory = await asyncio.to_thread(session_inventory, authority, policy, agent, cwd)
+    usage = await asyncio.to_thread(snapshot_usage, authority, ref, agent)
+    return inventory, usage
+
+
+def _compose(info, inventory, usage):
+    if info.get('tool_count') is None:
+        # A lazy session: the tools its first turn loads (the banner's own count).
+        info['tool_count'] = sum(len(names) for names in (inventory.get('tools') or {}).values())
+    if usage is not None:
+        info['usage'] = usage
+    return {**inventory, **info}
+
+
 async def snapshot_info(authority, ref):
     """``local_session_info`` plus main's inventory, the builders run off the owner loop."""
+    from gateway.session_local import local_session_info
+    info = local_session_info(authority, ref)
+    inventory, usage = await _inventory_parts(authority, ref, info.get("cwd"))
+    return _compose(info, inventory, usage)
+
+
+# How long a create/resume reply waits for the inventory. Its builders probe every tool's
+# ``check_fn``, walk the skills tree and run git; under GIL load that took 50-84 s on the mini, past
+# the client's 30 s RPC budget, and every retry paid it again. Past this budget the reply carries
+# the lazy shape and the full inventory follows as a ``session.info`` event.
+REPLY_INVENTORY_BUDGET_S = 2.0
+# Creation labels whose clients never render a banner or status bar (``--oneshot``, ``--source
+# tool``): their reply skips the inventory outright, so a loaded gateway spends nothing on it.
+NO_BANNER_SOURCES = frozenset({'oneshot', 'tool'})
+_pending: dict = {}  # (authority id, session id) -> in-flight inventory task, shared by concurrent opens
+
+
+def _pending_shape(info):
+    """The reply before the inventory is known: main's lazy create shape (``tools: {}``)."""
+    return {'tools': {}, 'skills': {}, 'mcp_servers': [], **info, 'inventory_pending': True}
+
+
+async def reply_info(authority, ref, *, budget=None):
+    """``snapshot_info`` for a create / resume reply, bounded by *budget* seconds.
+
+    A no-banner source gets the pending shape at once and nothing is computed. Otherwise, when the
+    inventory is not ready within the budget, the reply gets the pending shape and the inventory
+    keeps building; when it finishes, the session publishes the full info as ``session.info``
+    (fresh ``local_session_info`` merged at publish time, so a turn started meanwhile is not
+    reported idle). Concurrent opens of one session share one build."""
     from gateway.session_local import local_session_info
     from gateway.session_policy import policy_for_source
     info = local_session_info(authority, ref)
     policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
-    agent = authority.agent(ref)
-    inventory = await asyncio.to_thread(session_inventory, authority, policy, agent, info.get("cwd"))
-    if info.get('tool_count') is None:
-        # A lazy session: the tools its first turn loads (the banner's own count).
-        info['tool_count'] = sum(len(names) for names in (inventory.get('tools') or {}).values())
-    from gateway.session_usage import snapshot_usage
-    if (usage := await asyncio.to_thread(snapshot_usage, authority, ref, agent)) is not None:
-        info['usage'] = usage
-    return {**inventory, **info}
+    if policy is not None and policy.source in NO_BANNER_SOURCES and authority.agent(ref) is None:
+        return _pending_shape(info)
+    key = (id(authority), ref.session_id)
+    entry = _pending.get(key)
+    if entry is None:
+        entry = _pending[key] = SimpleNamespace(
+            task=asyncio.ensure_future(_inventory_parts(authority, ref, info.get("cwd"))), deferred=False)
+        entry.task.add_done_callback(lambda task: _settle(authority, ref, key, entry))
+    task, carried = entry.task, False
+    try:
+        await asyncio.wait({task}, timeout=REPLY_INVENTORY_BUDGET_S if budget is None else budget)
+        # ``done()``, not the wait's done set: a build that finished in the timeout's own loop pass
+        # has not run ``_settle`` yet (done callbacks run on a later pass), so this reply carries it.
+        if task.done() and not task.cancelled() and task.exception() is None:
+            carried = True
+            return _compose(info, *task.result())
+    finally:
+        if not carried and not task.done():
+            entry.deferred = True  # some viewer got the pending shape: publish when it finishes
+    if task.done() and not task.cancelled():
+        logger.warning("session inventory failed for %s", ref.session_id, exc_info=task.exception())
+    return _pending_shape(info)
+
+
+def _settle(authority, ref, key, entry):
+    """Publish a late inventory to the session's viewers when some reply went out without it."""
+    if _pending.get(key) is entry:
+        del _pending[key]
+    task = entry.task
+    if task.cancelled() or not entry.deferred:
+        return
+    if (error := task.exception()) is not None:
+        logger.warning("session inventory failed for %s", ref.session_id, exc_info=error)
+        return
+    try:
+        from gateway.session_local import local_session_info
+        live = authority.sessions[ref.session_id]
+        payload = {**_compose(local_session_info(authority, ref), *task.result()), 'inventory_pending': False}
+        live.event_stream.publish(ref.session_id, payload, event_type='session.info')
+    except Exception:  # health: allow BLE001 -- a closed session or a failed publish leaves the lazy banner
+        logger.debug("late session inventory publish failed for %s", ref.session_id, exc_info=True)
 
 
 def agent_inventory(agent) -> dict:

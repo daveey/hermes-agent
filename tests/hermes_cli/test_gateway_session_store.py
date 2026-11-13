@@ -215,6 +215,17 @@ def test_banner_inventory_comes_from_the_session_snapshot(store):
     assert inv["context_length"] == 128000 and inv["cwd"] == "/w"
 
 
+def test_banner_inventory_is_none_while_the_gateway_still_builds_it(store):
+    """A loaded gateway answers create/resume before its inventory is built (``inventory_pending``):
+    the classic CLI shows its compact banner, never a full banner listing no tools."""
+    db, _ = store
+    db.open_session(cli("local-old", resumed=True))
+    db.current["info"] = {**db.current["info"], "tools": {}, "skills": {}, "inventory_pending": True}
+    assert db.banner_inventory() is None
+    db.current["info"]["inventory_pending"] = False
+    assert db.banner_inventory() is not None
+
+
 def test_store_is_falsy_once_the_gateway_connection_closed(store):
     db, _ = store
     assert db
