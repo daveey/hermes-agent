@@ -113,6 +113,39 @@ def test_a_cold_live_file_reaches_the_head_in_one_round_and_sends_its_run_start(
     assert not live.execute("SELECT 1 FROM tasks WHERE id LIKE 't_other%'").fetchone()
 
 
+class SnapshotFailsOnceHub(PagedHub):
+    """The first snapshot page answers 503 (a Board blip mid-rebuild); later ones succeed."""
+
+    def __init__(self, svc, gateway):
+        super().__init__(svc, gateway)
+        self.failed = False
+
+    def snapshot_page(self, board, table, after="", limit=500):
+        if not self.failed:
+            self.failed = True
+            raise ksc.HubError(503, "snapshot unavailable")
+        return self._inner.snapshot_page(board, table, after)
+
+
+def test_an_interrupted_cold_rebuild_is_retried_as_a_rebuild(live, svc, kanban_home):
+    """A rebuild cut short must leave the file cold: RED at d15019ab5a, where the first feed page was applied before
+    the snapshot, so a failed rebuild left cursor 1 and the next round fell back to the 20-page full replay."""
+    _tid, _run_id, uid = _claimed_on_a_fresh_node(live, kanban_home, svc)
+    hub = SnapshotFailsOnceHub(svc, ME)
+    try:
+        first = _round(kanban_home, hub)
+    except ksc.HubError:
+        first = None
+    assert hub.failed
+    assert first is None or first.error is not None
+    assert _cursor(live) == 0  # still cold: the next round rebuilds again
+    second = _round(kanban_home, hub)
+    assert second.error is None
+    assert not second.behind
+    assert _cursor(live) > BACKLOG_PAGES
+    assert svc.board(BOARD)["rows"]["task_runs"][uid]["status"] == "running"
+
+
 def test_a_warm_live_file_behind_the_head_still_pulls_its_budget(live, svc, kanban_home):
     """Control: only a cursor-0 file rebuilds; a warm file behind the head drains the feed over rounds (its run
     rows held meanwhile, test_kanban_sync_push_starvation)."""

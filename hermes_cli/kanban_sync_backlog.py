@@ -138,19 +138,22 @@ def pull_live(live: sqlite3.Connection, hub: Any, slug: str, gateway: str) -> bo
     including the requeue that ends the Board lease. So a cold file whose first page is not the head rebuilds from
     the partitioned snapshot, as on a 410, and resumes the feed at its head. Upserts only (``resync``), no absent-row
     sweep: a just-attached board's local cards are not on the Board yet and are queued by ``import``, not deleted.
+
+    The first page is only peeked, never applied: the cursor stays 0 until ``resync`` writes the head, so a rebuild
+    cut short (a snapshot HubError, a stop) is retried as a rebuild next round instead of leaving a warm-looking file
+    that falls back to the full replay (review of PR #2657).
     """
+    from hermes_cli import kanban_awaited_card_wake as acw
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_sync_client as ksc
     cold = not int((sync.sync_state(live) or {}).get("cursor") or 0)
+    if cold and acw.changes_page(hub, slug, 0, {}).get("more"):
+        _log.warning("kanban sync: %s live file never pulled and the feed is past one page; rebuilding it from a "
+                     "snapshot instead of replaying the board's history", slug)
+        ksc.resync(live, hub, slug, observers=True, partition=gateway)
+        return None
     with ksc.credited(live):  # the client's name: tests replace it there
-        pulled = ksc.pull(live, hub, slug, observers=True, partition=gateway,
-                          max_pages=1 if cold else PULL_PAGE_BUDGET)
-    if not (cold and pulled.more):
-        return pulled.more
-    _log.warning("kanban sync: %s live file never pulled and the feed is past one page; rebuilding it from a "
-                 "snapshot instead of replaying the board's history", slug)
-    ksc.resync(live, hub, slug, observers=True, partition=gateway)
-    return None
+        return ksc.pull(live, hub, slug, observers=True, partition=gateway, max_pages=PULL_PAGE_BUDGET).more
 
 
 def _expedite(live_path: Path, changed: dict) -> None:
