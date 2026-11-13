@@ -14,14 +14,20 @@ class GhArgvUnavailable(RuntimeError):
     """No ``gh`` argv can be built. The message is fixed text: config errors may carry credentials."""
 
 
+class GhNotInstalled(GhArgvUnavailable):
+    """No ``gh`` executable on PATH, ~/bin or ~/.local/bin: an install problem, not a credential one."""
+
+
 def dispatcher_gh_argv() -> list[str]:
-    """``[*gh_command_prefix, gh]`` for this home. Raises :class:`GhArgvUnavailable` with no config text."""
+    """``[*gh_command_prefix, gh]`` for this home: ``get_hermes_home()``, the bound override else the launch home.
+    A caller on a pool thread binds the board's home first (``kanban_ci_progress._sweep_db``). Raises
+    :class:`GhNotInstalled` with no gh, :class:`GhArgvUnavailable` (no config text) for an unusable prefix."""
     from hermes_cli import kanban_pr_acceptance as kpa
     from hermes_platform.resolver import github as ghres
 
     resolved = ghres.resolve_gh()
     if not resolved.found:
-        raise GhArgvUnavailable("gh not found on PATH, ~/bin or ~/.local/bin")
+        raise GhNotInstalled("gh not installed (not found on PATH, ~/bin or ~/.local/bin)")
     try:
         prefix = kpa._gh_command_prefix(None)
     except (RuntimeError, OSError, ValueError, TypeError, ImportError):

@@ -190,7 +190,7 @@ def no_login(fake_gh, monkeypatch):
     from hermes_cli import kanban_ci_progress as kcp
     monkeypatch.setenv("FAKE_GH_NEEDS_TOKEN", "1")
     monkeypatch.delenv("FAKE_BROKER_TOKEN", raising=False)
-    monkeypatch.setattr(kcp, "_WARNED_AT", None, raising=False)
+    monkeypatch.setattr(kcp, "_WARNED_AT", {}, raising=False)
     return fake_gh
 
 
@@ -239,7 +239,8 @@ def test_no_credential_warns_once_an_hour(kanban_home, no_login, monkeypatch, ca
         assert len(first) == 1, caplog.text
         assert "gh api exit 4" in first[0] and "no credential: CI-run progress check disabled" in first[0], first
         assert _sweep_warnings(caplog, conn) == [], caplog.text
-        monkeypatch.setattr(kcp, "_WARNED_AT", time.monotonic() - kcp.NO_CREDENTIAL_WARN_SECONDS - 1)
+        stale = time.monotonic() - kcp.NO_CREDENTIAL_WARN_SECONDS - 1
+        monkeypatch.setattr(kcp, "_WARNED_AT", {k: stale for k in kcp._WARNED_AT})
         assert len(_sweep_warnings(caplog, conn)) == 1, caplog.text
 
 
@@ -260,14 +261,104 @@ def test_other_github_errors_are_not_credential_errors(kanban_home, fake_gh, mon
     assert p.state == "unknown" and not p.no_credential, p
 
 
-def test_refused_token_and_missing_gh_are_credential_errors(kanban_home, fake_gh, monkeypatch) -> None:
-    import types
+def test_refused_token_is_a_credential_error(kanban_home, fake_gh, monkeypatch) -> None:
     from hermes_cli.kanban_ci_progress import ci_run_progress
-    from hermes_platform.resolver import github as ghres
     fake_gh.serve(age=20 * 60)
     monkeypatch.setenv("FAKE_GH_401", "1")
     p = ci_run_progress(RUN_URL)
     assert p.state == "unknown" and p.no_credential and "HTTP 401" in p.detail, p
+
+
+def _no_gh(monkeypatch) -> None:
+    import types
+    from hermes_platform.resolver import github as ghres
     monkeypatch.setattr(ghres, "resolve_gh", lambda path=None: types.SimpleNamespace(found=False, command=[]))
-    p = ci_run_progress(RUN_URL)
-    assert p.state == "unknown" and p.no_credential and "gh not found" in p.detail, p
+
+
+def test_missing_gh_warns_gh_not_installed_not_a_credential_fix(kanban_home, no_login, monkeypatch, caplog) -> None:
+    """PR #2039 review: a missing gh was a ``NoCredential`` whose WARNING said to set gh_command_prefix or log gh
+    in. Neither helps when there is no gh binary; the operator must install it."""
+    from hermes_cli.kanban_ci_progress import ci_run_progress
+    no_login.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        assert _park_on_run().get("status") == "scheduled"
+        monkeypatch.delenv("HERMES_KANBAN_TASK")
+        _no_gh(monkeypatch)
+        p = ci_run_progress(RUN_URL)
+        assert p.state == "unknown" and p.gh_missing and not p.no_credential, p
+        warned = _sweep_warnings(caplog, conn)
+    assert len(warned) == 1, caplog.text
+    assert "gh not installed" in warned[0], warned
+    assert "gh_command_prefix" not in warned[0] and "log gh in" not in warned[0], warned
+
+
+# --- a multi-home process: each board's sweep uses its own home (PR #2039 review) ---------------------------
+
+def _other_home(tmp_path: Path) -> Path:
+    other = tmp_path / "other-home"
+    other.mkdir()
+    return other
+
+
+def _park_stuck_card_in(home: Path, monkeypatch, gh) -> tuple[str, str]:
+    """Under ``home``'s override: a board in that home with a card parked on RUN, whose run then stops starting.
+    Returns ``(task id, board db path)``."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(home)
+    try:
+        kb.init_db()
+        with kbc.connect_closing() as conn:
+            tid = _running(conn)
+            _as_worker(monkeypatch, conn, tid)
+            gh.serve(age=2 * 60)
+            assert _park_on_run().get("status") == "scheduled"
+            monkeypatch.delenv("HERMES_KANBAN_TASK")
+            db = str(kbc._main_db_file(conn))
+    finally:
+        reset_hermes_home_override(token)
+    gh.serve(age=20 * 60)
+    return tid, db
+
+
+def test_sweep_on_a_pool_thread_uses_the_dispatching_homes_prefix(kanban_home, tmp_path, no_login,
+                                                                    monkeypatch) -> None:
+    """The launch home has no gh_command_prefix; the dispatching home (bound in the dispatcher thread) has the
+    broker. ``submit_sweep`` runs ``_sweep_db`` on a pool thread, where the context-local home override is not
+    inherited, so the read used the launch home's (empty) prefix, failed auth and never woke the card."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from hermes_cli import kanban_ci_progress as kcp
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    other = _other_home(tmp_path)
+    wrapper = tmp_path / "broker-other"
+    wrapper.write_text("#!/bin/sh\n[ \"$1\" = -- ] && shift\nFAKE_BROKER_TOKEN=granted exec \"$@\"\n")
+    wrapper.chmod(0o755)
+    _configure_prefix(other, [str(wrapper), "--"])
+    tid, db = _park_stuck_card_in(other, monkeypatch, no_login)
+    kcp._LAST_CHECK.clear()
+    token = set_hermes_home_override(other)
+    try:
+        with kbc.connect_closing(Path(db)) as conn, ThreadPoolExecutor(1) as pool:
+            fut = kcp.submit_sweep(conn, pool)
+            assert fut is not None
+            assert fut.result(timeout=60) == [tid]
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_no_credential_warning_is_per_home(kanban_home, tmp_path, no_login, monkeypatch, caplog) -> None:
+    """One home's hourly no-credential WARNING must not hide another home's in the same process."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    other = _other_home(tmp_path)
+    warned = []
+    for home in (kanban_home, other):
+        _tid, db = _park_stuck_card_in(home, monkeypatch, no_login)
+        token = set_hermes_home_override(home)
+        try:
+            with kbc.connect_closing(Path(db)) as conn:
+                warned.append(_sweep_warnings(caplog, conn))
+        finally:
+            reset_hermes_home_override(token)
+    assert [len(w) for w in warned] == [1, 1], warned

@@ -23,7 +23,9 @@ check names the repo (``gh run view <id> -R owner/repo``). Anything else (a PR, 
 GitHub is read through the home's ``kanban.pr_acceptance.gh_command_prefix`` (the credential broker), as the
 dispatcher's PR-state read does (:mod:`hermes_cli.kanban_gh_argv`): the hub's ``gh`` has no login, and a bare read
 failed open on every run, so the check never fired there (agent-c2b8fc1abf). A fail-open for want of a credential is
-logged as one WARNING per ``NO_CREDENTIAL_WARN_SECONDS`` per process, so a disabled check is visible, not silent.
+logged as one WARNING per ``NO_CREDENTIAL_WARN_SECONDS`` per home and board, so a disabled check is visible, not
+silent; a missing ``gh`` binary gets its own wording (install gh), since no prefix or login fixes it. The sweep runs
+on a pool thread with the dispatching home rebound, so each board reads its own home's prefix.
 """
 from __future__ import annotations
 
@@ -60,7 +62,11 @@ Fetch = Callable[[str, str], dict]
 
 
 class NoCredential(RuntimeError):
-    """gh has no usable login here (exit 4 / HTTP 401), or no gh argv could be built."""
+    """gh has no usable login here (exit 4 / HTTP 401), or the broker prefix is unusable."""
+
+
+class GhMissing(RuntimeError):
+    """No ``gh`` executable: the fix is installing it, not a credential."""
 
 
 @dataclass
@@ -72,6 +78,7 @@ class Progress:
     queued_seconds: int = 0
     detail: str = ""
     no_credential: bool = False
+    gh_missing: bool = False
 
 
 def run_target(ref: str, hint: str = "") -> Optional[tuple[str, str]]:
@@ -90,10 +97,13 @@ def run_target(ref: str, hint: str = "") -> Optional[tuple[str, str]]:
 
 def _fetch_jobs(repo: str, run_id: str) -> dict:
     """The run's jobs from the GitHub API through the home's broker prefix + ``gh``. Raises on any failure:
-    :class:`NoCredential` when gh has no usable login or no argv can be built (config text never included)."""
-    from hermes_cli.kanban_gh_argv import GhArgvUnavailable, dispatcher_gh_argv
+    :class:`GhMissing` with no gh; :class:`NoCredential` when gh has no usable login or the prefix is unusable
+    (config text never included)."""
+    from hermes_cli.kanban_gh_argv import GhArgvUnavailable, GhNotInstalled, dispatcher_gh_argv
     try:
         gh = dispatcher_gh_argv()
+    except GhNotInstalled as exc:
+        raise GhMissing(str(exc)) from None
     except GhArgvUnavailable as exc:
         raise NoCredential(f"gh unavailable: {exc}") from None
     p = subprocess.run([*gh, "api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"],
@@ -127,6 +137,8 @@ def ci_run_progress(ref: str, *, hint: str = "", fetch: Optional[Fetch] = None,
     repo, run_id = target
     try:
         data = (fetch or _fetch_jobs)(repo, run_id)
+    except GhMissing as exc:
+        return Progress("unknown", repo, run_id, detail=str(exc)[-300:], gh_missing=True)
     except NoCredential as exc:
         return Progress("unknown", repo, run_id, detail=str(exc)[-300:], no_credential=True)
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -183,20 +195,26 @@ def confirm(awaiting: Optional[dict], *, hint: str = "", fetch: Optional[Fetch] 
 _LOCK = threading.Lock()
 _LAST_CHECK: dict[tuple[str, str], float] = {}
 _SWEEPS: dict[str, Future] = {}
-_WARNED_AT: Optional[float] = None
+# (home, board db) -> monotonic time of the last disabled-check WARNING. Keyed like ``_LAST_CHECK`` (and by home,
+# whose gh_command_prefix the read used) so one home's warning never hides another's in a multi-home process.
+_WARNED_AT: dict[tuple[str, str], float] = {}
 
 
-def _warn_no_credential(p: Progress) -> None:
-    """One WARNING per ``NO_CREDENTIAL_WARN_SECONDS`` per process: without a credential every read fails open."""
-    global _WARNED_AT
+def _warn_disabled(p: Progress, key: tuple[str, str]) -> None:
+    """One WARNING per ``NO_CREDENTIAL_WARN_SECONDS`` per ``key``: with no gh or no credential every read fails open."""
     with _LOCK:
         now = time.monotonic()
-        if _WARNED_AT is not None and now - _WARNED_AT < NO_CREDENTIAL_WARN_SECONDS:
+        last = _WARNED_AT.get(key)
+        if last is not None and now - last < NO_CREDENTIAL_WARN_SECONDS:
             return
-        _WARNED_AT = now
-    logger.warning("kanban ci run progress: %s; no credential: CI-run progress check disabled (cards parked on CI "
-                   "runs are neither refused nor woken). Set kanban.pr_acceptance.gh_command_prefix to the "
-                   "credential broker or log gh in.", p.detail)
+        _WARNED_AT[key] = now
+    disabled = "CI-run progress check disabled (cards parked on CI runs are neither refused nor woken)"
+    if p.gh_missing:
+        logger.warning("kanban ci run progress: %s; gh not installed: %s. Install the GitHub CLI (gh) on PATH, "
+                       "~/bin or ~/.local/bin of this host.", p.detail, disabled)
+    else:
+        logger.warning("kanban ci run progress: %s; no credential: %s. Set kanban.pr_acceptance.gh_command_prefix "
+                       "to the credential broker or log gh in.", p.detail, disabled)
 
 
 def _ci_waits(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
@@ -246,10 +264,12 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None) -> list[st
     """Re-read every CI-waiting card's run (at most once per ``RECHECK_SECONDS`` per card) and wake the cards
     whose run is not starting. Network: run it off the dispatcher thread (``submit_sweep``). Never raises."""
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_constants import get_hermes_home
 
     woken: list[str] = []
     try:
         db = str(kbc._main_db_file(conn) or "")
+        warn_key = (str(get_hermes_home()), db)
         for task_id, ref, hint in _ci_waits(conn):
             key = (db, task_id)
             with _LOCK:
@@ -258,8 +278,8 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None) -> list[st
                     continue
                 _LAST_CHECK[key] = time.monotonic()
             p = ci_run_progress(ref, hint=hint, fetch=fetch)
-            if p.no_credential:
-                _warn_no_credential(p)
+            if p.no_credential or p.gh_missing:
+                _warn_disabled(p, warn_key)
             elif p.state == "unknown":
                 logger.warning("ci run progress for %s (%s) unreadable: %s", task_id, ref, p.detail)
             if p.state == NOT_STARTING and apply(conn, task_id, ref, p):
@@ -269,29 +289,36 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None) -> list[st
     return woken
 
 
-def _sweep_db(db_path: str) -> list[str]:
+def _sweep_db(db_path: str, home: str) -> list[str]:
+    """:func:`sweep` on a pool thread with the dispatching ``home`` bound: a pool thread does not inherit the
+    caller's context-local home, so ``dispatcher_gh_argv`` would read the launch home's gh_command_prefix."""
     from pathlib import Path
 
+    from agent.runtime_scope import bind_profile_scope
     from hermes_cli import kanban_db_connect as kbc
-    conn = kbc.connect(Path(db_path))
-    try:
-        return sweep(conn)
-    finally:
-        conn.close()
+    with bind_profile_scope(home, hydrate_secrets=False):
+        conn = kbc.connect(Path(db_path))
+        try:
+            return sweep(conn)
+        finally:
+            conn.close()
 
 
 def submit_sweep(conn: sqlite3.Connection, pool) -> Optional[Future]:
-    """Start one :func:`sweep` of this board on ``pool`` unless one is already running. Never raises."""
+    """Start one :func:`sweep` of this board on ``pool`` unless one is already running. Never raises. The home
+    is resolved here, on the dispatcher thread that has the board's home bound, and rebound on the pool thread."""
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_constants import get_hermes_home
     try:
         db = str(kbc._main_db_file(conn) or "")
         if not db or not _ci_waits(conn):
             return None
+        home = str(get_hermes_home())
         with _LOCK:
             running = _SWEEPS.get(db)
             if running is not None and not running.done():
                 return None
-            fut = pool.submit(_sweep_db, db)
+            fut = pool.submit(_sweep_db, db, home)
             _SWEEPS[db] = fut
         return fut
     except Exception:

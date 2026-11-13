@@ -149,6 +149,16 @@ launch profile's wrapper. `gh` is resolved on the child PATH, then in `~/bin` an
 `~/.local/bin`; a missing CLI or invalid wrapper setting is a `setup` rejection,
 not a transient infrastructure failure.
 
+The dispatcher's own GitHub reads use the same setting from the **dispatcher's
+home** (the home whose dispatcher ticks the board), not the assignee's: the
+PR-state read that releases cards held on an active PR, and the CI-run progress
+sweep that wakes a card parked (`awaiting` kind `ci`) on a GitHub Actions run
+that no runner is picking up. Configure the prefix there too when that home's
+`gh` has no ambient login (a hub or service host), or those reads fail open:
+merged-PR holds wait out their cap, and the CI-run check is disabled with an
+hourly `no credential` WARNING per home and board (`gh not installed` when the
+CLI itself is missing, which no prefix fixes).
+
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
 store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
 instructions; `last_failure_error` surfaces the next step. Fix failures, rerun
