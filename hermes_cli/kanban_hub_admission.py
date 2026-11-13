@@ -66,16 +66,38 @@ def self_assertion(quote):
 
 _PIN = re.compile("|".join(r"\s+".join(map(re.escape, m.split())) for m in SELF_ASSERTIONS), re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n[ \t]*\n")
+# A "." ending one of these words, or a dotted token ("e.g", "U.S"), abbreviates rather than ends the sentence:
+# stopping there let the wrapped rest of a pin escape its span (review 5884663184). [daveey]
+_ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "viz", "approx", "incl", "esp", "al", "no", "mr", "mrs",
+                            "ms", "dr", "st"})
+_LAST_WORD = re.compile(r"[\w.]*$")
+
+
+def _sentence_end(text, pos):
+    """The first sentence terminator (or blank line) at or after ``pos``, skipping abbreviation dots."""
+    for stop in _SENTENCE_END.finditer(text, pos):
+        if text[stop.start()] == ".":
+            last = _LAST_WORD.search(text, max(0, stop.start() - 32), stop.start())
+            word = last.group().lower() if last else ""
+            if word in _ABBREVIATIONS or "." in word:
+                continue
+        return stop
+    return None
 
 
 def _pin_spans(text):
     """``[start, end)`` of every pin line in ``text``: the marker's whole line, run on to the sentence's end
-    when the producer wrapped it (never past a blank line)."""
+    when the producer wrapped it (never past a blank line).
+
+    Deliberately coarse and fail-safe (review 5884663184): the span is the pin's WHOLE line, so other text on that
+    line after the pin sentence counts as pin text, and a pin with no terminator and no blank line runs to the end
+    of the field. A quote found only there is denied as self-assertion; evidence the card also states outside a
+    pin span is still judged on that text (``quotes_pin_sentence``)."""
     spans = []
     for match in _PIN.finditer(text):
         start = text.rfind("\n", 0, match.start()) + 1
         line_end = text.find("\n", match.end())
-        stop = _SENTENCE_END.search(text, match.end())
+        stop = _sentence_end(text, match.end())
         spans.append((start, max(len(text) if line_end < 0 else line_end, stop.end() if stop else len(text))))
     return spans
 

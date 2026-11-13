@@ -274,13 +274,17 @@ def test_other_evidence_on_a_card_with_a_pin_sentence_still_admits(judge):
 ESCAPE_TAIL = "it reads this gateway's own logs, state files and coach store, which a worker node does not have."
 WRAPPED_PIN = ("Pinned to the machine that filed it: the bsky cron output and its counters live\n"
                "only on this machine.\n## Do this\n1. Read the counters.")
+# An abbreviation dot on the pin line is not the sentence's end (review 5884663184).
+ABBREV_PIN = ("Pinned to the machine that filed it: its cron output (e.g. the bsky counters, i.e. the\n"
+              "daily totals) lives only on this machine.\n## Do this\n1. Read the counters.")
 
 
 @pytest.mark.parametrize("body, quote", [
     (ESCAPE_BODY, ESCAPE_TAIL),                       # rationale tail alone (review t_01a1d24d488edbd9)
     (ESCAPE_BODY, "which a worker node does not have"),
     (WRAPPED_PIN, "only on this machine."),            # the wrapped continuation of a pin sentence
-], ids=["tail", "tail-fragment", "wrapped"])
+    (ABBREV_PIN, "daily totals) lives only on this machine."),
+], ids=["tail", "tail-fragment", "wrapped", "wrapped-abbreviation"])
 def test_quote_from_inside_a_pin_line_is_not_admission_evidence(judge, body, quote):
     gate, _, reply, _ = judge
     reply.update(admit=True, need="hub_live_process", evidence=quote, why="Needs local state.")
@@ -314,3 +318,11 @@ def test_stored_owner_verdict_quoting_a_pin_sentence_is_a_final_deny_with_its_wh
     if quote == ESCAPE_TAIL:  # without a pin line around it the same text is ordinary evidence
         moved = stored_owner_verdict(entry, "Capability owner", f"Owner card.\n{quote}")
         assert moved is not None and moved["admit"] is True
+
+
+def test_pin_span_ends_at_the_real_sentence_end_after_an_abbreviation():
+    from hermes_cli.kanban_hub_admission import _pin_spans
+    body = ABBREV_PIN
+    (start, end), = _pin_spans(body)
+    assert body[start:end].endswith("lives only on this machine.")
+    assert "## Do this" not in body[start:end]
