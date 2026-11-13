@@ -126,21 +126,37 @@ def occupied_count_for_host(echo=None, *, claimant=None) -> int | None:
 
 
 def refusal(echo=None, *, enabled=None, claimant=None) -> str | None:
-    """Pre-lease and final-lock check. Unknown observations fail closed."""
+    """Pre-lease and final-lock check. Unknown observations fail closed.
+
+    Every answer of an enabled worker feeds the host-wide unknown-streak alarm
+    (``worker_resources_unknown_alarm``)."""
+    from hermes_cli import worker_resources_unknown_alarm as alarm
     try:
         if not (capacity.worker_enabled() if enabled is None else enabled):
             return None
-        directory = capacity.policy_root() / 'worker-resources'
-        if _pressure(directory):
-            return 'worker_load_pressure'
-        occupied_count = occupied_count_for_host(echo, claimant=claimant)
-        from hermes_cli.kanban_admission import _root_max_in_progress
-        ok, cap = _root_max_in_progress(root=capacity.policy_root())
-        if occupied_count is None or not ok or cap is None:
-            return 'worker_resources_unknown'
-        if occupied_count > cap if claimant is not None else occupied_count >= cap:
-            return 'worker_capacity_full'
-        return None
     except Exception as exc:  # health: allow BLE001 -- any unreadable policy/controller must refuse claims
         _log_unknown(exc)
+        alarm.observe(True, exc)
         return 'worker_resources_unknown'
+    try:
+        answer = _refusal(echo, claimant=claimant)
+    except Exception as exc:  # health: allow BLE001 -- any unreadable policy/controller must refuse claims
+        _log_unknown(exc)
+        alarm.observe(True, exc)
+        return 'worker_resources_unknown'
+    alarm.observe(answer == 'worker_resources_unknown')
+    return answer
+
+
+def _refusal(echo, *, claimant):
+    directory = capacity.policy_root() / 'worker-resources'
+    if _pressure(directory):
+        return 'worker_load_pressure'
+    occupied_count = occupied_count_for_host(echo, claimant=claimant)
+    from hermes_cli.kanban_admission import _root_max_in_progress
+    ok, cap = _root_max_in_progress(root=capacity.policy_root())
+    if occupied_count is None or not ok or cap is None:
+        return 'worker_resources_unknown'
+    if occupied_count > cap if claimant is not None else occupied_count >= cap:
+        return 'worker_capacity_full'
+    return None
