@@ -150,7 +150,8 @@ def model_request_in_flight(agent: Any, messages: Any, *, api_call_count: int) -
     """[daveey] t_01a1d293248f5e12: a model request at a step boundary is in flight like a tool call, so the
     watcher's cancel reaches it after the same grace. Without this a long request (169 s on the hub) held the
     turn's admission reservation unpublished past the instant update's cap: a pause lands only at a step boundary.
-    The turn's first request (no tool result yet) is not tracked: there is no boundary to pause at."""
+    A turn's first request (no tool result yet) is tracked only for a continuation (``first_request_can_pause``):
+    its refunded iteration pauses before any request. Any other turn has no boundary to pause at there."""
     tracked = model_request_can_yield(messages, api_call_count=api_call_count,
                                       first_request_ok=first_request_can_pause(agent))
     if tracked:

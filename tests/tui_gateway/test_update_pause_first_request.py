@@ -56,5 +56,7 @@ def test_a_continuation_turn_may_yield_before_its_first_request(home):
 
 @pytest.mark.parametrize("kind", [None, "kanban_notice", "process_complete"])
 def test_any_other_turn_waits_for_a_real_step_boundary(home, kind):
-    seen, _agent = _submit(home, display_kind=kind)
+    seen, agent = _submit(home, display_kind=kind)
+    assert seen[0][0] is False  # set to a literal False, not left unset (None)
     assert seen == [(False, True)]
+    assert agent.update_pause_first_request is False

@@ -10,6 +10,10 @@ so the update applies. The next backend's startup sweep continues the turn with 
 crash-resume attempt is used. After ``MAX_PAUSES`` checkpoints, a failed window no longer restarts
 the turn while its drainer holds ``cache/core-update/drain.lock``: it stays idle for the next window.
 The threshold bounds no-progress continuations, never the checkpoint needed to let the update apply.
+A continuation's pre-turn and pre-first-request pauses (t_01a1d31bf400d56c) make no progress yet count toward
+``MAX_PAUSES`` like any other: after three windows released without an apply the turn parks between windows
+(``drain_retry_pending``, at most ``PARK_MAX_S``) without having taken a step. That is the intended bound: a
+window that cannot apply should not keep re-running the same request.
 
 A turn the next backend would not auto-continue is never paused. A paused turn whose window ends without
 an update (expired, apply refused) continues in place (``start_in_place_watcher``), unless its pause
