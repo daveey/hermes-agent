@@ -622,18 +622,14 @@ def _agent_block(conn: sqlite3.Connection, target: str, caller_task: Optional[st
     gate = _human_gate(row[1], row[2], target)
     if gate:
         return gate
-    ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
-                      "ORDER BY id DESC LIMIT 1", (target,)).fetchone()
-    try:
-        payload = json.loads(ev[0] or "{}") if ev else {}
-    except ValueError:
-        payload = {}
+    from hermes_cli.kanban_requeue import current_block_payload, missing_parent_repair_grant
     # Positive provenance: only the card's OWN worker run's block counts (kanban_block from that run records actor
     # ``agent (task <target>)``, kanban_cli_actor.tool_actor). A block from a human shell (actor ``user``), the
-    # Desktop or dashboard (no actor), a chat agent or the breaker (no blocked event) is a hold placed by hand or
+    # Desktop or dashboard (no actor), a chat agent or the breaker (no blocked event; an ``unblocked`` or
+    # ``gave_up`` newer than the last ``blocked`` hides it, ``current_block_payload``) is a hold placed by hand or
     # by policy, and only its owner or a human releases it.
+    payload = current_block_payload(conn, target)
     if str(payload.get("actor") or "").strip() != f"agent (task {target})":
-        from hermes_cli.kanban_requeue import missing_parent_repair_grant
         if caller_task and missing_parent_repair_grant(conn, caller_task, target) == caller_task:
             return None
         return (f"{target} was not blocked by its own agent run (a hand, Desktop or policy hold); only its owner "
@@ -673,11 +669,15 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
             return "refused", refusal
         reason = str(args.get("reason") or "").strip()
         from hermes_cli.kanban_requeue import MISSING_PARENT_VIA, missing_parent_repair_grant
-        if missing_parent_repair_grant(conn, caller.get("task_id"), target):
-            extra = {**extra, "repair_task_id": caller.get("task_id"), "via": MISSING_PARENT_VIA}
+        extra = dict(extra)
+
+        def precondition(c):  # runs inside the unblock txn, before unblock_task reads event_extra
+            refusal = _agent_block(c, target, caller.get("task_id"))
+            if refusal is None and missing_parent_repair_grant(c, caller.get("task_id"), target):
+                extra.update(repair_task_id=caller.get("task_id"), via=MISSING_PARENT_VIA)
+            return refusal
         ok = kb.unblock_task(conn, target, comment=(author, f"Unblocked through an operator call: {reason}"),
-                             event_extra=extra,
-                             precondition=lambda c: _agent_block(c, target, caller.get("task_id")))
+                             event_extra=extra, precondition=precondition)
         return ("applied", None) if ok else ("refused", f"cannot unblock {target} (state changed)")
     if action == "move":
         if _marker(conn, target, km.MOVED_EVENT, uid) or _marker(conn, target, MOVE_MARK, uid):

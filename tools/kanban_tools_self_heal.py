@@ -130,8 +130,15 @@ def handle_unblock(args: dict, **kw) -> str:
             if via:
                 def precondition(current):
                     task = kb.get_task(current, tid)
-                    if via == kr.MISSING_PARENT_VIA and kr.missing_parent_repair_grant(current, env_tid, tid) is None:
-                        return "missing-parent repair grant was revoked (the child's newest block changed)"
+                    if via == kr.MISSING_PARENT_VIA:
+                        # The owner-wake path's run check: a reclaimed earlier run of the repair card (its process
+                        # still alive, HERMES_KANBAN_RUN_ID stale) must not act for the live run. [daveey]
+                        repair, run = kb.get_task(current, env_tid), kt._worker_run_id(env_tid)
+                        if not (repair is not None and repair.status == "running" and run is not None
+                                and repair.current_run_id == run):
+                            return "missing-parent repair card no longer owns its current run"
+                        if kr.missing_parent_repair_grant(current, env_tid, tid) is None:
+                            return "missing-parent repair grant was revoked (the child's newest block changed)"
                     if via == "owner-wake-requeue" and (
                             task is None or task.status not in (*OWNER_WAKE_REQUEUE_STATUSES, "ready")):
                         return "owner-wake target must be triage or blocked"

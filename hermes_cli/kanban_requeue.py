@@ -93,7 +93,9 @@ def missing_parent_repair_grant(conn, worker_task_id: Optional[str], target_id: 
     recovery. That repair card (``created_by='missing-parent-detector'``) may unblock exactly the child that
     created it (``creator_task_id``), and only while the child is blocked, has no human request, and its NEWEST
     ``blocked`` event is ``source: parent_missing`` naming this very card as ``repair_task_id``. A later hand
-    block, or a block naming another repair card, revokes it. Both entry paths use it: the ``kanban_unblock``
+    block, a block naming another repair card, or any ``unblocked``/``gave_up`` event after it (the child was
+    released, then re-held by a policy such as the failure breaker; ``current_block_payload``) revokes it.
+    Both entry paths use it: the ``kanban_unblock``
     tool (same gateway) and the operator call's home check (another gateway). [daveey]
     """
     if not worker_task_id or not target_id or worker_task_id == target_id:
@@ -105,15 +107,30 @@ def missing_parent_repair_grant(conn, worker_task_id: Optional[str], target_id: 
     row = conn.execute("SELECT status, human_request FROM tasks WHERE id = ?", (target_id,)).fetchone()
     if row is None or row[0] != "blocked" or row[1]:
         return None
-    ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
-                      "ORDER BY id DESC LIMIT 1", (target_id,)).fetchone()
-    try:
-        payload = json.loads(ev[0] or "{}") if ev else {}
-    except ValueError:
-        return None
-    if not isinstance(payload, dict) or payload.get("source") != "parent_missing":
+    payload = current_block_payload(conn, target_id)
+    if payload.get("source") != "parent_missing":
         return None
     return worker_task_id if payload.get("repair_task_id") == worker_task_id else None
+
+
+def current_block_payload(conn, task_id: str) -> dict:
+    """The payload of the ``blocked`` event that placed the card's current hold, else ``{}``.
+
+    That is the newest ``blocked`` event, unless an ``unblocked`` or ``gave_up`` event is newer: then the card was
+    released after it, and the hold it is in now came from somewhere that writes no ``blocked`` event (the failure
+    breaker writes ``gave_up``). ``{}`` names no source and no actor, so every grant keyed on them refuses. [daveey]
+    """
+    ev = conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                      "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    if ev is None or conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind IN ('unblocked', 'gave_up') AND id > ? LIMIT 1",
+            (task_id, ev[0])).fetchone() is not None:
+        return {}
+    try:
+        payload = json.loads(ev[1] or "{}")
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 _OWNER_WAKE_TITLE = "Owner wake: supervise"

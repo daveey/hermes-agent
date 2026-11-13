@@ -244,3 +244,183 @@ def test_child_on_another_gateway_is_forwarded_as_an_operator_call(board, monkey
     assert args["ops"][0] == {"op": "operator", "action": "unblock", "task_id": foreign,
                               "reason": args["ops"][0]["reason"]}
     assert repair in args["ops"][0]["reason"]
+
+
+def _rehold(conn, kb, child, events):
+    """Release the parent_missing child, then re-hold it with no new ``blocked`` event (e.g. the failure breaker)."""
+    if "unblocked" in events:
+        assert kb.unblock_task(conn, child)
+    with kb.write_txn(conn):
+        if "gave_up" in events:
+            kb._append_event(conn, child, "gave_up", {"kind": "transient", "reason_code": "worker_failures_exhausted",
+                                                      "sticky": True})
+        conn.execute("UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ?", (child,))
+
+
+@pytest.mark.parametrize("events", [("unblocked", "gave_up"), ("unblocked",), ("gave_up",)],
+                         ids=["unblocked-then-breaker", "unblocked-only", "breaker-only"])
+def test_hold_placed_after_the_parent_missing_block_stays_refused(board, monkeypatch, events):
+    """Review 5888194553: an unblock or a breaker trip after the parent_missing block ends the repair card's grant.
+
+    The child was released and is now held by something that writes no ``blocked`` event (the failure breaker
+    writes ``gave_up``), so the newest ``blocked`` event still names the repair card. That hold is a policy hold.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_requeue as kr
+
+    conn = kbc.connect()
+    child, repair = _parent_missing_child(conn, kb)
+    _rehold(conn, kb, child, events)
+    assert kb.get_task(conn, child).status == "blocked"
+    assert kr.missing_parent_repair_grant(conn, repair, child) is None
+    before = len(_unblocked(conn, kb, child))
+    _as_worker(monkeypatch, conn, kb, repair)
+    conn.close()
+
+    assert _unblock(child).get("ok") is not True
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "blocked"
+        assert len(_unblocked(conn, kb, child)) == before
+    finally:
+        conn.close()
+
+
+def test_child_that_later_got_a_human_request_stays_refused(board, monkeypatch):
+    """Review 5887767012 nit 3: a human_request on the child is David's to answer, never the repair card's."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    conn = kbc.connect()
+    child, repair = _parent_missing_child(conn, kb)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
+                     (json.dumps({"action": "Pick A or B. Unblock = build it; archive = drop it."}), child))
+    _as_worker(monkeypatch, conn, kb, repair)
+    conn.close()
+
+    assert _unblock(child).get("ok") is not True
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "blocked"
+        assert not _unblocked(conn, kb, child)
+    finally:
+        conn.close()
+
+
+def _reclaim_and_reclaim(conn, kb, tid):
+    """The dispatcher reclaims the run this worker holds and a fresh run claims the card."""
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'ready', claim_lock = NULL, claim_expires = NULL, "
+                     "current_run_id = NULL WHERE id = ?", (tid,))
+    kb.claim_task(conn, tid)
+
+
+@pytest.mark.parametrize("case", ["reclaimed", "not-running", "unbound"])
+def test_repair_run_that_no_longer_owns_the_card_is_refused(board, monkeypatch, case):
+    """Review 5887767012 nit 1: the tool path needs the owner-wake run check; worker-context checks don't cover it.
+
+    ``_is_dispatcher_owned_worker`` only tells a dispatcher worker from a delegate child or an in-process cron. A
+    reclaimed earlier run of the repair card passes it, so the unblock txn checks the run itself.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    conn = kbc.connect()
+    child, repair = _parent_missing_child(conn, kb)
+    _as_worker(monkeypatch, conn, kb, repair)
+    if case == "reclaimed":
+        old = kb._current_run_id(conn, repair)
+        _reclaim_and_reclaim(conn, kb, repair)
+        assert kb._current_run_id(conn, repair) != old
+        assert kb.get_task(conn, repair).status == "running"
+    elif case == "not-running":  # the run id still matches, but the card left running
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (repair,))
+    else:  # no HERMES_KANBAN_RUN_ID, against a running row whose run id is unset
+        monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (repair,))
+    conn.close()
+    assert kt._is_dispatcher_owned_worker() is True
+
+    out = _unblock(child)
+    assert out.get("ok") is not True, out
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "blocked"
+        assert not _unblocked(conn, kb, child)
+    finally:
+        conn.close()
+
+
+def test_block_naming_this_repair_card_on_another_child_is_refused(board, monkeypatch):
+    """The grant reaches only the repair card's own creator child, even when another block names the card."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    conn = kbc.connect()
+    _child, repair = _parent_missing_child(conn, kb, "mine")
+    other, _ = _parent_missing_child(conn, kb, "someone else's")
+    with kb.write_txn(conn):
+        kb._append_event(conn, other, "blocked", {"reason": "re-detected", "kind": "transient",
+                                                  "source": "parent_missing", "repair_task_id": repair})
+    _as_worker(monkeypatch, conn, kb, repair)
+    conn.close()
+
+    assert _unblock(other).get("ok") is not True
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, other).status == "blocked"
+        assert not _unblocked(conn, kb, other)
+    finally:
+        conn.close()
+
+
+def test_card_the_detector_did_not_file_gets_no_grant(board, monkeypatch):
+    """A card the child created and its block names, but not filed by the missing-parent detector, is refused."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    conn = kbc.connect()
+    child, _repair = _parent_missing_child(conn, kb)
+    lookalike = kb.create_task(conn, title=f"Recover missing dependencies for {child}", assignee="default",
+                               creator_task_id=child)
+    with kb.write_txn(conn):
+        kb._append_event(conn, child, "blocked", {"reason": "re-detected", "kind": "transient",
+                                                  "source": "parent_missing", "repair_task_id": lookalike})
+    _as_worker(monkeypatch, conn, kb, lookalike)
+    conn.close()
+
+    assert _unblock(child).get("ok") is not True
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "blocked"
+        assert not _unblocked(conn, kb, child)
+    finally:
+        conn.close()
+
+
+def test_later_block_naming_the_repair_card_but_not_from_the_detector_is_refused(board, monkeypatch):
+    """Only the detector's own ``source: parent_missing`` block grants; a later hold that merely names the card
+    (a hand block that copied the old payload's fields) is a hand hold."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    conn = kbc.connect()
+    child, repair = _parent_missing_child(conn, kb)
+    with kb.write_txn(conn):
+        kb._append_event(conn, child, "blocked", {"reason": "David holds it", "actor": "user", "kind": "transient",
+                                                  "repair_task_id": repair})
+    _as_worker(monkeypatch, conn, kb, repair)
+    conn.close()
+
+    assert _unblock(child).get("ok") is not True
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "blocked"
+        assert not _unblocked(conn, kb, child)
+    finally:
+        conn.close()

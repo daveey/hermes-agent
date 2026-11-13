@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_supervisor_requests as ksr
 from tests.hermes_cli import test_kanban_operator_call as base
@@ -119,3 +121,64 @@ def test_parent_missing_block_naming_another_repair_card_is_refused(fleet):
     _round(f)
     assert _execute_row(f, child)["outcome"] == "refused"
     assert kb.get_task(f.h, child).status == "blocked"
+
+
+def test_breaker_hold_after_a_release_is_refused_at_home(fleet):
+    """Review 5888194553: released after the parent_missing block, then re-held by the breaker (``gave_up``, no
+    ``blocked`` event). The newest ``blocked`` event still names the repair card, but the hold is a policy hold."""
+    f = fleet
+    child, repair, run_id = _home_repair(f)
+    assert kb.unblock_task(f.h, child)
+    with kb.write_txn(f.h):
+        kb._append_event(f.h, child, "gave_up", {"kind": "transient", "reason_code": "worker_failures_exhausted",
+                                                 "sticky": True})
+        f.h.execute("UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ?", (child,))
+    f.board()
+    _submit_as(f, repair, run_id, child)
+    _round(f)
+    row = _execute_row(f, child)
+    assert row["outcome"] == "refused" and "not blocked by its own agent run" in row["detail"], row
+    assert kb.get_task(f.h, child).status == "blocked"
+    assert len(_unblocked(f, child)) == 1  # only the release before the breaker trip
+
+
+def test_child_that_later_got_a_human_request_is_refused_at_home(fleet):
+    """Review 5887767012 nit 3: a human_request on the parent_missing child is David's to answer."""
+    f = fleet
+    child, repair, run_id = _home_repair(f)
+    with kb.write_txn(f.h):
+        f.h.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
+                    (json.dumps({"action": "Pick A or B. Unblock = build it; archive = drop it."}), child))
+    # The caller's replica has not seen the ask yet, so the call reaches the home, which refuses it.
+    _submit_as(f, repair, run_id, child)
+    _round(f)
+    row = _execute_row(f, child)
+    assert row["outcome"] == "refused" and "waits on a human" in row["detail"], row
+    assert kb.get_task(f.h, child).status == "blocked"
+    assert not _unblocked(f, child)
+    # Once the replica has it, the caller refuses before sending.
+    f.board()
+    with pytest.raises(ksr.SupervisorRequestError, match="waits on a human"):
+        _submit_as(f, repair, run_id, child)
+
+
+def test_breaker_hold_after_releasing_an_own_agent_block_is_refused_at_home(fleet):
+    """The pre-existing own-actor check had the same blind spot: the card's own run blocked it, it was released,
+    then the breaker re-held it (``gave_up``, no ``blocked`` event). That hold is not the agent's own block."""
+    f = fleet
+    held = f.card(f.h, "own block, released, then breaker")
+    with kb.write_txn(f.h):
+        f.h.execute("UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ?", (held,))
+        kb._append_event(f.h, held, "blocked", {"reason": "waiting", "kind": "transient",
+                                                "actor": f"agent (task {held})"})
+    assert kb.unblock_task(f.h, held)
+    with kb.write_txn(f.h):
+        kb._append_event(f.h, held, "gave_up", {"kind": "transient", "reason_code": "worker_failures_exhausted",
+                                                "sticky": True})
+        f.h.execute("UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ?", (held,))
+    f.board()
+    _submit_as(f, f.caller, f.run_id, held)
+    _round(f)
+    row = _execute_row(f, held)
+    assert row["outcome"] == "refused" and "not blocked by its own agent run" in row["detail"], row
+    assert kb.get_task(f.h, held).status == "blocked"
