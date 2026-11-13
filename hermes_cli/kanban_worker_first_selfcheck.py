@@ -75,27 +75,32 @@ def denied_target(conn, row, gateway, cfg, *, board, now=None):
     non-forced deny, ready for :data:`STALE_S`, that no keep reason holds for *now* (a recorded ``kept`` that still
     holds, e.g. a dir workspace, ``host_repo`` or a hub-local wake_check, keeps it), and whose worker-queue labels a
     live machine other than this one carries. The caller writes the same ``runs_on`` the claim-time deny route
-    writes (``hermes kanban move --pool``'s labels) and a ``moved`` event with the reason."""
+    writes (``hermes kanban move --pool``'s labels) and a ``moved`` event with the reason.
+
+    The verdict is :func:`hermes_cli.kanban_hub_admission_pickup.verdict`, the one the claim screen gates on: the
+    latest ``hub_admission`` event, else the ``created`` payload's audit (``record_created`` mirrors that audit as an
+    event, so the fallback only covers a card whose event is missing). The keep reasons (regexes on the card plus
+    one indexed wake_check read) run before :func:`ready_since`, which scans the card's events and runs: this runs
+    every tick for each judged card still here, and a card kept for good never needs its history read."""
     from hermes_cli import kanban_hub_admission_claim as claim
     from hermes_cli import kanban_hub_admission_pickup as pickup
     from hermes_cli import kanban_move as km
+    from hermes_cli import kanban_parent_unclaimed as unclaimed
     from hermes_cli import kanban_worker_node as node
-    from hermes_cli.kanban_hub_admission_placement import latest_verdict
-    from hermes_cli.kanban_parent_unclaimed import ready_since
 
     # created_on NULL is this gateway's own card the Board has not stamped yet (kanban_sync_client "mine").
     if (row["placement_policy"] is not None or row["runs_on"] not in (None, "", "[]") or row["status"] != "ready"
             or row["created_on"] not in (None, gateway) or row["claim_lock"] is not None
             or row["lease_holder"] is not None):
         return None
-    verdict = latest_verdict(conn, row["id"])
+    verdict = pickup.verdict(conn, row["id"])
     if not verdict or verdict.get("admit") is not False or verdict.get("forced"):
-        return None
-    waited = (time.time() if now is None else now) - ready_since(conn, row["id"], row["created_at"])
-    if waited < STALE_S:
         return None
     fields = pickup._fields(row, board)
     if claim.keep_reason(conn, row, fields, cfg):
+        return None
+    waited = (time.time() if now is None else now) - unclaimed.ready_since(conn, row["id"], row["created_at"])
+    if waited < STALE_S:
         return None
     labels = pickup._target(fields, gateway, cfg, dict(verdict))
     if not labels:
