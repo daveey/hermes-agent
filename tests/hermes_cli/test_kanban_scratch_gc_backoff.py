@@ -191,6 +191,33 @@ def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     assert bo.skip_logged(refusals, "ok", tree, 5, "t") is True
 
 
+@pytest.mark.parametrize("field, value, kept", [
+    ("retry_at", 3.26e10, False), ("last_at", 3.26e10, False),  # just past Windows' gmtime limit
+    ("retry_at", 3.19e10, True), ("last_at", 3.19e10, True),    # just below MAX_EPOCH_S
+])
+def test_memo_loader_epoch_bound_sits_below_the_windows_gmtime_limit(tmp_path, field, value, kept):
+    """MAX_EPOCH_S is the fix: a bound above ~3.25e10 lets Windows' gmtime abort the pass."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    now = 1_000_000.0
+    entry = {"fingerprint": bo.fingerprint(tree, 5), "count": 1, "last_at": now, "retry_at": now + 60,
+             "reason": "r", field: value}
+    _write_entries({"e": entry})
+    assert (set(bo.Refusals("default", now=lambda: now).entries) == {"e"}) is kept
+
+
+def test_skip_logged_names_the_retry_time_in_iso_utc(tmp_path, caplog):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    now = 1_000_000.0
+    refusals = bo.Refusals("default", now=lambda: now)
+    refusals.entries["t"] = {"fingerprint": bo.fingerprint(tree, 5), "count": 1, "last_at": now,
+                             "retry_at": now + 60, "reason": "r"}
+    caplog.set_level(logging.INFO, logger="hermes_cli.kanban_scratch_backoff")
+    assert bo.skip_logged(refusals, "t", tree, 5, "t") is True
+    assert "next retry after 1970-01-12T13:47:40Z; last: r" in caplog.text
+
+
 @pytest.mark.parametrize("exc", [OSError, OverflowError, ValueError])
 def test_skip_logged_keeps_the_tree_when_retry_at_cannot_be_formatted(tmp_path, monkeypatch, caplog, exc):
     """Windows ``time.gmtime`` raises past ~year 3000; the INFO line must never abort the GC pass."""
