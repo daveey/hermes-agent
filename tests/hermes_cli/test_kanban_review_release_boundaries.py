@@ -6,6 +6,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_review_release as release
 from tests.hermes_cli import test_kanban_dependency_review as helpers
+from tests.hermes_cli.test_kanban_review_release import as_replica
 
 board = helpers.board
 PR = helpers.PR
@@ -39,6 +40,7 @@ PR = helpers.PR
 def test_corrupt_receipt_is_not_authority(board, section, key, value):
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     event = board.execute("SELECT id,payload FROM task_events WHERE task_id=? "
                           "AND kind='promoted' ORDER BY id DESC LIMIT 1", (task,)).fetchone()
@@ -57,10 +59,9 @@ def test_corrupt_receipt_is_not_authority(board, section, key, value):
 def test_lifecycle_and_scope_boundaries(board, defect):
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     urls = {PR, PR + "9"} if defect == "new_pr" else {PR}
-    board.execute("ALTER TABLE tasks ADD COLUMN created_on TEXT")
-    board.execute("UPDATE tasks SET created_on='home' WHERE id=?", (task,))
     mutations = {
         "reopened": ("UPDATE tasks SET status='todo' WHERE id=?", reviews[0]),
         "origin": ("UPDATE task_events SET origin_gateway='foreign' WHERE task_id=? AND kind='promoted'", task),
@@ -110,6 +111,7 @@ def test_checkpoint_comment_before_park_releases_partial_replica(board, monkeypa
     from hermes_cli import kanban_db_dispatch_pr_state as prs
     task, reviews = helpers.parked(board, park_delay=park_delay)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     board.execute("DELETE FROM task_events WHERE task_id IN (?,?)", reviews)
     board.execute("DELETE FROM task_runs WHERE task_id IN (?,?)", reviews)

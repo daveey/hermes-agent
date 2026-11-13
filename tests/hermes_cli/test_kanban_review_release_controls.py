@@ -11,6 +11,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_review_release as release
 from tests.hermes_cli import test_kanban_dependency_review as helpers
+from tests.hermes_cli.test_kanban_review_release import as_replica
 
 board = helpers.board
 PR = helpers.PR
@@ -109,6 +110,7 @@ def test_parent_without_carryable_result_adds_no_proof(board, monkeypatch):
 def test_partial_replica_checks_proof_fields(board, case):
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     event_id, payload = _promoted(board, task)
     stamp = payload["review_release"]
     stamp["reviews"] = stamp["reviews"][:1]
@@ -153,6 +155,7 @@ def test_foreign_copy_needs_home_origin_and_portable_park(board, monkeypatch, ca
 def test_malformed_checkpoint_scope_is_not_released(board, value):
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     _set_checkpoint_prs(board, task, value)
     event_id, payload = _promoted(board, task)
@@ -165,6 +168,7 @@ def test_malformed_checkpoint_scope_is_not_released(board, value):
 def test_owner_fault_after_park_revokes_receipt(board, fault):
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     kb._append_event(board, task, fault, {})
     board.commit()

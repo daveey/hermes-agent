@@ -97,9 +97,16 @@ def promotion_payload(conn, task_id, status, prepared):
 
 
 def released(conn, task_id, pr_urls):
-    """Use only a still-unconsumed park and unchanged dependency/PR scope."""
+    """Use only a still-unconsumed park and unchanged dependency/PR scope.
+
+    Only a replica (foreign copy) honours the stamp: the home holds every
+    piece of evidence, so it keeps re-evaluating ``resumes_review`` locally and
+    a post-promotion change to that evidence still re-holds the card there.
+    """
     from hermes_cli.kanban_wake_check import foreign_copy
     from hermes_cli.kanban_move_parent_evidence import owner_faulted_since
+    if not foreign_copy(conn, task_id):
+        return False
     try:
         run, checkpoint, parked = _park(conn, task_id)
     except ValueError:

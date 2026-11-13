@@ -11,6 +11,35 @@ PR = helpers.PR
 OLD = PR + "9"
 
 
+def as_replica(conn, task, home="home"):
+    """View ``conn`` as a worker's synced copy of ``task`` (homed on ``home``) after promotion.
+
+    Only a replica honours the home's stamp; the home itself re-evaluates. The
+    synced schema names the park by its portable UID, so the stamp is restated
+    with the UID the home would have carried (unsynced fixtures lack the column).
+    """
+    import json
+    from hermes_cli import kanban_db_sync as sync
+    conn.executescript(sync.SYNC_SCHEMA_SQL)
+    conn.execute("INSERT INTO kanban_sync_state (board_id, gateway_id, hlc_last, mode) "
+                 "SELECT 'board-test', 'worker', '', 'shadow' WHERE NOT EXISTS (SELECT 1 FROM kanban_sync_state)")
+    for table, column in (("tasks", "created_on"), ("task_runs", "uid")):
+        if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+    conn.execute("UPDATE tasks SET created_on=? WHERE id=?", (home, task))
+    conn.execute("UPDATE task_events SET origin_gateway=? WHERE task_id=? AND kind='promoted'", (home, task))
+    for event in conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='promoted'",
+                              (task,)).fetchall():
+        payload = json.loads(event["payload"] or "{}")
+        park = (payload.get("review_release") or {}).get("park") if isinstance(payload, dict) else None
+        if isinstance(park, dict) and "run_id" in park:
+            uid = f"park-{park['run_id']}"
+            conn.execute("UPDATE task_runs SET uid=? WHERE id=?", (uid, park["run_id"]))
+            payload["review_release"]["park"] = {"run_uid": uid}
+            conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), event["id"]))
+    conn.commit()
+
+
 @pytest.mark.parametrize("missing", ["parent", "github"])
 def test_home_promotion_releases_partial_replica(board, monkeypatch, missing):
     task, reviews = helpers.parked(board)
@@ -25,6 +54,7 @@ def test_home_promotion_releases_partial_replica(board, monkeypatch, missing):
     monkeypatch.setattr(prs, "pr_state", lambda url: "CLOSED" if url == OLD else "OPEN")
     helpers.finish_reviews(board, reviews)
     assert dispatch.check_respawn_guard(board, task) is None
+    as_replica(board, task)
     if missing == "parent":
         board.execute("UPDATE task_runs SET metadata=NULL WHERE task_id IN (?,?)", reviews)
         board.commit()
@@ -66,6 +96,7 @@ def test_new_promotion_does_not_rearm_old_receipt(board, monkeypatch):
     from hermes_cli import kanban_review_release as release
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     kb._append_event(board, task, "promoted", {})
     board.commit()
@@ -78,6 +109,7 @@ def test_same_result_contradiction_revokes_receipt(board, field, value):
     from hermes_cli import kanban_review_release as release
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     row = board.execute("SELECT id,metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (reviews[0],)).fetchone()
     metadata = json.loads(row["metadata"])
@@ -91,6 +123,7 @@ def test_lifecycle_retraction_revokes_receipt(board):
     from hermes_cli import kanban_review_release as release
     task, reviews = helpers.parked(board)
     helpers.finish_reviews(board, reviews)
+    as_replica(board, task)
     assert release.released(board, task, {PR})
     kb._append_event(board, task, "descendant_invalidated", {})
     board.commit()
@@ -115,3 +148,18 @@ def test_remote_review_change_during_precompute_drops_stamp(board, monkeypatch):
     monkeypatch.setattr(release, "_build", racing)
     assert task not in release.prepare(board)
     monkeypatch.setattr(release.review, "_completed_review_run", lookup)
+
+
+def test_home_never_honours_its_own_stamp(board):
+    # The home holds the evidence and keeps deciding with resumes_review, so a
+    # later change to that evidence re-holds there; only a replica uses the stamp.
+    import json
+    from hermes_cli import kanban_review_release as release
+    task, reviews = helpers.parked(board)
+    helpers.finish_reviews(board, reviews)
+    payload = board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='promoted' "
+                            "ORDER BY id DESC LIMIT 1", (task,)).fetchone()["payload"]
+    assert "review_release" in json.loads(payload)
+    assert not release.released(board, task, {PR})
+    as_replica(board, task)
+    assert release.released(board, task, {PR})
