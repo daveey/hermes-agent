@@ -143,7 +143,10 @@ def _links(args: argparse.Namespace) -> int:
 
 def _links_diff(args: argparse.Namespace) -> int:
     from hermes_cli import kanban_chat_links
-    report = kanban_chat_links.links_diff(ksc.load_identity().gateway)
+    from hermes_cli.kanban_chat_links_settle import DEFAULT_SETTLE_S
+    settle_s = getattr(args, "settle", None)
+    report = kanban_chat_links.links_diff(ksc.load_identity().gateway,
+                                          settle_s=DEFAULT_SETTLE_S if settle_s is None else settle_s)
     if args.json:
         print(json.dumps(report, indent=2, default=str))
     else:
@@ -152,6 +155,9 @@ def _links_diff(args: argparse.Namespace) -> int:
         for k in ("profile_board", "only_in_ledger", "only_in_replica"):
             items = [(s, c) for s, cards in report[k].items() for c in cards]
             print(f"{k:>16}: {len(items)} {items[:8]}")
+        for k, diff in (report.get("in_flight") or {}).items():
+            items = [(s, c) for s, cards in diff.items() for c in cards]
+            print(f"{'in_flight ' + k.removeprefix('only_in_'):>16}: {len(items)} {items[:8]}")
     return 0 if report["clean"] else 1
 
 

@@ -713,7 +713,9 @@ _SPECS = [
         _cmd("diff", [_json_flag()], help="Compare this gateway's live cards with the shadow copy (exit 1 if not clean)"),
         _cmd("run", [_json_flag()], help="Run one sync round for every synced board now"),
         _cmd("links", help="Reconcile this gateway's chat links (which chats each card belongs to) now"),
-        _cmd("links-diff", [_json_flag()],
+        _cmd("links-diff", [_json_flag(), _arg("--settle", type=float, default=None, metavar="SECONDS",
+                                                help="Re-read for up to SECONDS (default 90); only differences "
+                                                     "every read lists count, the rest are in_flight (0: one read)")],
              help="Compare chat links from the origin ledger with the synced links in the replicas (exit 1 if not clean)"),
         _cmd("machine-links", [_json_flag(), _arg("--release", action="store_true",
                                                   help="Release them now (default: dry run)")],
