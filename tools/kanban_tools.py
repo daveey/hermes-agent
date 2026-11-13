@@ -162,7 +162,7 @@ COMPLETE_REJECTION_CLASSES = frozenset({
     "empty",          # no summary/result, or an evidence-free completion
     "live_claim",     # another live dispatcher worker owns the card
     "stale_run",      # run superseded, card already terminal, or unknown id
-    "not_running",    # card waits (scheduled/todo/ready) with no run: archive it or re-park it as a watch [daveey]
+    "not_running",    # card waits (triage/todo/scheduled/ready) with no run: archive it or re-park it as a watch [daveey]
     "foreign_card",   # card exists here only as a Board replica copy; its owner gateway must write it [daveey]
     "review_contract",  # ship review card completed without metadata ship can read [daveey]
     "review_independence",  # ship review verdict recorded outside the card's dispatched worker run [daveey]
@@ -960,10 +960,10 @@ def _handle_complete(args: dict, **kw) -> str:
                 raise _Reject(
                     f"could not complete {tid}: unsatisfied parent dependencies: "
                     f"{detail}; complete the parents first (done or archived)", "parents")
-            if task and task.status in ("scheduled", "todo", "ready") and not _kc.pr_acceptance_refused(
-                    conn, tid, event_mark):
-                from hermes_cli.kanban_watch import NOT_RUNNING_TEMPLATE  # [daveey] not a vague "stale run"
-                raise _Reject(NOT_RUNNING_TEMPLATE.format(tid=tid, status=task.status), "not_running")
+            from hermes_cli.kanban_watch import not_running_reason  # [daveey] not a vague "stale run"
+            named = task and not_running_reason(tid, task.status)
+            if named and not _kc.pr_acceptance_refused(conn, tid, event_mark):
+                raise _Reject(named, "not_running")
             reason = (task.last_failure_error if task else None) or \
                 f"could not complete {tid} (unknown id, stale run, or already terminal)"
             _check(False, reason, "pr_acceptance" if _kc.pr_acceptance_refused(conn, tid, event_mark)

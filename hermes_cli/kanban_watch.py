@@ -121,3 +121,21 @@ def chat_hold_hint(conn: sqlite3.Connection, task_id: str, *, now: Optional[floa
 NOT_RUNNING_TEMPLATE = (
     "could not complete {tid}: card is {status} with no run; to close it unverified, archive it with a comment; "
     "to keep the check but free the chat, re-park it with watch=true")
+TRIAGE_NOT_RUNNING_TEMPLATE = (
+    "could not complete {tid}: card is triage with no run (not yet specified/promoted); "
+    "promote it to ready or archive it with a comment")
+# Statuses where a refused kanban_complete really is a stale run: the card runs (or waits in
+# blocked/review) under another run, or is already terminal. [daveey]
+STALE_RUN_STATUSES = frozenset({"running", "blocked", "review", "done", "archived"})
+
+
+def not_running_reason(tid: str, status: str) -> Optional[str]:
+    """Refusal text naming ``status`` for a card with no run, or None when the refusal is a
+    stale run. Classified by the stale-run statuses, not a list of waiting ones, so a status
+    added later is named instead of mislabeled "stale run" (triage was, after todo and
+    scheduled). [daveey]"""
+    if status in STALE_RUN_STATUSES:
+        return None
+    if status == "triage":
+        return TRIAGE_NOT_RUNNING_TEMPLATE.format(tid=tid)
+    return NOT_RUNNING_TEMPLATE.format(tid=tid, status=status)
