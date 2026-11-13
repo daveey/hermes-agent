@@ -653,9 +653,9 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 if verdict == "settled" and reason == "expired":
                     _log_dropped(task, ref, state, claim_session, first_seen or 0.0, now)  # expired: observed
                 if verdict == "offer":
-                    _note_wait(claim_session, ref, state, f"claimed by the live poller of backend pid {os.getpid()}")
                     out.append(_notice_item(card, claim_session, me, profile, now))
                     offered.add((ref, state))
+                    _note_wait(claim_session, ref, state, f"{_POLLER_CLAIM}{os.getpid()}")  # after the claim is out
         finally:
             conn.close()
         from tui_gateway.kanban_remote_late import collect_groups, release_undelivered
@@ -739,18 +739,40 @@ _last_stale: dict[str, int] = {}  # replica -> stale count last logged, so the s
 # change of reason. Without it a notice held in flight for 30 min left no line, and the 46 min "discovery lag" on
 # t_01a1d46be379dfd3 was filed against a poller that had seen the card in 63 s.
 _waits: dict[tuple, str] = {}
+_waits_lock = threading.Lock()
 _WAITS_MAX = 5000
+_POLLER_CLAIM = "claimed by the live poller of backend pid "
 
 
 def _note_wait(session: str, ref: str, state: str, why: str) -> None:
-    key = (session, ref, state)
-    if _waits.get(key) == why:
-        return
-    _waits.pop(key, None)
-    _waits[key] = why
-    while len(_waits) > _WAITS_MAX:
-        _waits.pop(next(iter(_waits)))
-    logger.info("remote Kanban notice %s %s for chat %s waits: %s", ref, state, session, why)
+    """Log why a notice waits, once per change of reason. Never raises: collect calls it holding a claim, and an
+    exception there (eviction racing a concurrent sweep) would strand that claim in flight (PR #2116 review)."""
+    try:
+        key = (session, ref, state)
+        with _waits_lock:
+            if _waits.get(key) == why:
+                return
+            _waits.pop(key, None)
+            _waits[key] = why
+            while len(_waits) > _WAITS_MAX:
+                _waits.pop(next(iter(_waits)), None)
+        logger.info("remote Kanban notice %s %s for chat %s waits: %s", ref, state, session, why)
+    except Exception:  # diagnostics only; the caller's claim must not depend on them
+        with contextlib.suppress(Exception):
+            logger.debug("remote kanban: wait log failed", exc_info=True)
+
+
+def _note_open_chat(sid: str, ref: str, state: str, waker, observed_at, now) -> None:
+    """The healthy path: this backend's live poller claims the notice within seconds and logs that claim. Only a
+    notice still unclaimed past the waker's grace window logs the open-chat skip at INFO (PR #2116 review)."""
+    with _waits_lock:
+        last = _waits.get((sid, ref, state), "")
+    grace = waker.grace_s if waker is not None else 0.0
+    if observed_at is not None and now is not None and now - observed_at >= grace and not last.startswith(
+            _POLLER_CLAIM):
+        _note_wait(sid, ref, state, "chat is open in this backend; its live poller claims it")
+    else:
+        logger.debug("remote Kanban notice %s %s for chat %s: chat is open in this backend", ref, state, sid)
 
 
 def _wait_reason(conn, session: str, ref: str, state: str) -> Optional[str]:
@@ -1142,7 +1164,7 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         if memo_key in _delivered:
             return
         if sid in live:
-            _note_wait(sid, ref, state, "chat is open in this backend; its live poller claims it")
+            _note_open_chat(sid, ref, state, waker, observed_at, now)
             return
         if waker is not None and observed_at is not None and now is not None and now - observed_at < waker.grace_s:
             return  # a live poller (any backend) claims within seconds; it owns the chat's turn

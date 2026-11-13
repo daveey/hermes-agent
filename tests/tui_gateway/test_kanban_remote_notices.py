@@ -846,3 +846,126 @@ def test_every_silent_sweep_skip_names_its_reason_once(tmp_path, caplog):
         f"remote Kanban notice {ref} {state} for chat {CHAT} waits: claimed by the live poller of backend pid "
         f"{os.getpid()}",
     ]
+
+
+class _GraceWaker:
+    def __init__(self, grace_s=0.0):
+        self.grace_s, self.woken = grace_s, []
+
+    def deliver(self, tip, text, metadata, task, now, *, persist, started):
+        self.woken.append(task["id"])
+        return "started"
+
+
+@contextlib.contextmanager
+def _chat_db(tmp_path):
+    with SessionDB(tmp_path / "state.db") as db:
+        db.create_session(CHAT, "desktop")
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            yield (db, sid) if sid == CHAT else (None, None)
+
+        yield opener
+
+
+def _wait_lines(caplog, level=None):
+    return [r.getMessage() for r in caplog.records
+            if " waits: " in r.getMessage() and (level is None or r.levelno == level)]
+
+
+def test_collect_still_offers_its_claim_when_the_wait_log_raises(tmp_path, monkeypatch, caplog):
+    """PR #2116 review: the claim log ran between _claim_notice's offer and out.append, so an exception there
+    (eviction racing a concurrent sweep) fell into collect's outer except and stranded the claim in flight
+    under this pid. The log is after the append now and never raises."""
+    import logging
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_card("t_logboom", CHAT, status="done", at=now - 40)])
+    ledger = tmp_path / "ledger.db"
+    krn._reset_for_tests()
+
+    def boom(*a, **k):
+        raise RuntimeError("dictionary changed size during iteration")
+
+    caplog.set_level(logging.INFO, logger=krn.__name__)
+    monkeypatch.setattr(krn.logger, "info", boom)
+    got = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now)
+    assert [g["ref"].rsplit("/", 1)[-1] for g in got] == ["t_logboom"]
+    row = _ledger_row(ledger, CHAT, "hub/default/default/t_logboom")
+    assert row is not None and row["delivered"] == 0 and row["holder_pid"] == os.getpid()  # in flight AND offered
+
+
+def test_open_chat_skip_logs_info_only_when_unclaimed_past_the_grace_window(tmp_path, caplog):
+    """PR #2116 review: the healthy path logged two INFO lines per notice (the sweep's open-chat skip and the
+    poller's claim). Within the grace window, or once this backend's poller claimed it, the skip is DEBUG."""
+    import logging
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_card("t_open", CHAT, status="done", at=now - 40)])
+    ref = "hub/default/default/t_open"
+    caplog.set_level(logging.DEBUG, logger=krn.__name__)
+    with _chat_db(tmp_path) as opener:
+        krn._reset_for_tests()
+        ledger = tmp_path / "healthy.db"
+        sweep = dict(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger,
+                     waker=_GraceWaker(60.0), live_ids={CHAT})
+        sweep_remote_notices(now=now, **sweep)  # inside the grace window
+        assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + 1)
+        sweep_remote_notices(now=now + 120, **sweep)  # past it, but our poller holds the claim
+        info = _wait_lines(caplog, logging.INFO)
+        assert len(info) == 1 and "claimed by the live poller" in info[0], info
+
+        caplog.clear()
+        krn._reset_for_tests()
+        sweep["ledger"] = tmp_path / "stuck.db"
+        sweep_remote_notices(now=now, **sweep)
+        assert _wait_lines(caplog, logging.INFO) == []
+        sweep_remote_notices(now=now + 120, **sweep)  # still unclaimed past the window: worth an INFO line
+        assert [line.split(" waits: ")[1] for line in _wait_lines(caplog, logging.INFO)] == [
+            "chat is open in this backend; its live poller claims it"]
+        assert ref in _wait_lines(caplog, logging.INFO)[0]
+
+
+def test_sweep_names_its_own_in_flight_claim_and_the_gateway_fifo_once(tmp_path, monkeypatch, caplog):
+    """PR #2116 review: _wait_reason's own-holder branch and the FIFO skip had no test."""
+    import logging
+    from tui_gateway import kanban_remote_fifo
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    card = _card("t_mine", CHAT, status="done", at=now - 40)
+    replica = _hub(tmp_path, [card])
+    ref, state = "hub/default/default/t_mine", krn._notice_state(card["task"])
+    caplog.set_level(logging.INFO, logger=krn.__name__)
+    with _chat_db(tmp_path) as opener:
+        krn._reset_for_tests()
+        ledger = tmp_path / "mine.db"
+        krn._ledger(ledger).close()
+        with sqlite3.connect(ledger) as conn:  # this backend claimed it; its turn has not written the row yet
+            conn.execute("INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, "
+                         "notice_key, legacy_seen) VALUES (?,?,?,?,0,?,NULL,?,0)",
+                         (CHAT, ref, state, now - 30, os.getpid(), "k"))
+        waker = _GraceWaker()
+        for _ in range(2):
+            sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger,
+                                 now=now, waker=waker)
+        assert waker.woken == []
+        assert _wait_lines(caplog) == [
+            f"remote Kanban notice {ref} {state} for chat {CHAT} waits: in flight in this backend (pid "
+            f"{os.getpid()}) until its turn's row is written"]
+
+        caplog.clear()
+        krn._reset_for_tests()
+        held = []
+        monkeypatch.setattr(kanban_remote_fifo, "gateway_holds", lambda db, ids, key: held.append(key) or True)
+        waker = _GraceWaker()
+        for _ in range(2):
+            sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                 ledger=tmp_path / "fifo.db", now=now, waker=waker)
+        assert held and waker.woken == []
+        assert _wait_lines(caplog) == [
+            f"remote Kanban notice {ref} {state} for chat {CHAT} waits: left to the gateway's FIFO (the gateway "
+            "runs this chat's turns)"]
