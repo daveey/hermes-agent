@@ -5,6 +5,7 @@ PR #2405 review 5894942332 nit: :data:`hermes_cli.kanban_placement.HERMES_STATE_
 ``hub:read`` must not clear the new forms either: only ``~``/``/home/<u>`` paths under its roots are cleared.
 """
 import re
+import time
 
 import pytest
 
@@ -74,3 +75,46 @@ def test_declared_hub_read_does_not_clear_home_forms(attested, body):
 def test_tilde_root_path_still_clears(attested):
     cfg, _, _ = attested
     assert roots.reason("ssh hermes-hub cat ~/.hermes/logs/x.log", cfg) is None
+
+
+# PR #2460 review 5895876398 nits 1-3: a pushd home and a cd home with a trailing shell comment are cd-home forms
+# too; a prose "CD", a bare pushd (it swaps the stack, it does not go home) and a ``cd ~#x`` word are not.
+@pytest.mark.parametrize("body", [
+    "cd ~ # comment\ncat .hermes/.env",
+    "cd # go home\ncat .hermes/.env",
+    "pushd ~ && cat .hermes/.env",
+    "pushd $HOME >/dev/null; cat .hermes/.env",
+    "pushd /home/ubuntu\ncat .hermes/state.db",
+])
+def test_pushd_and_commented_cd_home_are_state_paths(body):
+    assert _hit(body)
+
+
+@pytest.mark.parametrize("body", [
+    "Burn a CD\ncat .hermes/.env",
+    "CD ~ && cat .hermes/.env",
+    "pushd && cat .hermes/.env",
+    "cd ~#x && cat .hermes/.env",
+    "popd ~ && cat .hermes/.env",
+])
+def test_prose_cd_and_non_home_pushd_stay_portable(body):
+    assert not _hit(body)
+
+
+def test_many_cd_home_lines_without_a_state_path_scan_in_linear_time():
+    # A pasted shell transcript: before the fix each ``cd ~`` scanned to the end of the text (20000 lines: ~37 s).
+    body = "cd ~ && make\n" * 20000
+    start = time.perf_counter()
+    assert not _hit(body)
+    assert not _hit(body + "cat src/.hermes/x\n")
+    assert _hit(body + "cat .hermes/.env\n")
+    assert time.perf_counter() - start < 0.5
+
+
+def test_relative_state_path_hit_is_the_home_path_not_the_cd_span():
+    from hermes_cli import kanban_home_marker_placement as hm
+
+    match = _hit("cd ~ && make all && cat .hermes/logs/x.log")
+    [(decision, cls, hit, labels, note)] = hm._state_path(kp.HERMES_STATE_PATH, match, "worker-2", hm._Probe())
+    assert (decision, cls, hit, labels) == ("queue", "b", "~/.hermes/logs/x.log", ("capability:hub-write",))
+    assert "make all" not in note

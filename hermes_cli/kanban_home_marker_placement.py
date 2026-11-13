@@ -31,6 +31,7 @@ _WT_ROOT = re.compile(_HOME + r"/code/_wt(?:-[\w-]+)?/[\w-]+(?:\.[\w-]+)*")
 _DOT_WT_ROOT = re.compile(_HOME + r"/(?:[^/\s`'\"]+/)*\.worktrees/[\w-]+(?:\.[\w-]+)*")
 _CLAUDE_WT_ROOT = re.compile(r"(?:~|/)[^\s`'\"]*/\.claude/worktrees/[\w-]+(?:\.[\w-]+)*")
 _STATE = re.compile(_HOME + r"/\.hermes/[^\s`'\"<>()\[\]]*")
+_REL_STATE = re.compile(r"\.hermes/[^\s`'\"<>()\[\]]*", re.IGNORECASE)
 # This worker's own unpublished files: a card's workspace, evidence or attachments, or a scratch file.
 _ARTIFACT = re.compile(r"/\.hermes/(kanban/(?:workspaces|evidence|attachments)|cache/scratch)/([^/\s]+)")
 
@@ -119,11 +120,13 @@ def _worktree(pattern, match, gateway, probe):
 
 def _state_path(pattern, match, gateway, probe):
     from hermes_cli import kanban_placement as kp
-    # ``$HOME``/``${HOME}`` prefixes too (kp.HOME_PREFIX); a relative path after a cd home falls back to the hit.
+    # ``$HOME``/``${HOME}`` prefixes too (kp.HOME_PREFIX). A relative path after a cd home is named as its ``~/``
+    # path, not the whole cd..path span the hit covers (review 5895876398).
     state = re.compile(kp.HOME_PREFIX + _STATE.pattern[len(_HOME):])
     paths = [p for p in (_clean(m.group(0)) for m in state.finditer(match.string))
              if re.match(kp.HERMES_STATE_PATH, p)]
-    for raw in dict.fromkeys(paths) or [match.group(0)]:
+    rel = _REL_STATE.match(match.string, match.start() + match.group(0).lower().rfind(".hermes/"))
+    for raw in dict.fromkeys(paths) or [_clean("~/" + rel.group(0)) if rel else match.group(0)]:
         if art := _ARTIFACT.search(raw):
             # health: allow HX001 -- the card text names ~/.hermes literally; probe that same path on this worker
             if (Path.home() / ".hermes" / art.group(1) / art.group(2)).exists():
