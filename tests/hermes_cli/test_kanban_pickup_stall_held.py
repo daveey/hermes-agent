@@ -190,6 +190,24 @@ def test_no_alarm_once_the_card_left_default_placement_or_the_hold_ended(pair):
     assert not _repairs(held.conn)
 
 
+@pytest.mark.parametrize("hold,listed", [("yes", True), ("", False)])
+def test_stranded_reads_the_hold_by_truthiness_like_pickup(pair, hold, listed):
+    """Pickup's ``eligible()`` treats any truthy ``hold`` as held (PR #2526). ``stranded()`` must read it the same
+    way: a ``"yes"`` hold strands the default card (the alarm fires), a falsy ``""`` hold strands nothing. An
+    ``is not True`` read listed nothing for ``"yes"``, so the alarm never fired while pickup held the machine."""
+    held, _free, t0, _reg = pair
+    tid = _own_card(held)
+    held.enter()
+    from hermes_cli import kanban_pickup_stall as kps
+    from hermes_cli import kanban_pickup_stall_held as kpsh
+    machines = _machines(t0)
+    machines[HELD]["hold"] = hold
+    assert (wn.eligible({"runs_on": None, "created_on": HELD}, HELD, machines) is not None) is listed
+    later_ms = int((t0 + kps.stall_seconds() + 60) * 1000)
+    got = kpsh.stranded(held.conn, HELD, machines, now_ms=later_ms, stall_s=kps.stall_seconds())
+    assert [c["id"] for c in got] == ([tid] if listed else [])
+
+
 def test_a_worktree_card_is_never_listed(pair):
     held, _free, t0, _reg = pair
     held.enter()
