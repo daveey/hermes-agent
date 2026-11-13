@@ -594,7 +594,11 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # ~/.hermes/hermes-agent``, not the state directory (nit 2).
 HOME_PREFIX = r"(?:~|/home/[^/\s]+|\$HOME\b|\$\{HOME\}|\"\$HOME\"|\"\$\{HOME\}\")"
 # ``cd ~ 2>/dev/null`` ends the cd too (an fd-numbered redirect); ``cd ~2>x`` is a dir word, not a redirect.
-_CMD_END = r"(?=[ \t]*(?:$|[\n;&|)>])|[ \t]+(?:#|\d+>))"
+# Redirects (``>``, ``>>``, ``&>``, ``N>``, ``N>&M`` plus their target word) are skipped, and the command must
+# then end: ``cd 2>/dev/null repo`` enters ``repo``, not home (PR #2603 review nit 1).
+_REDIR = (r"(?:[ \t]*&?>|[ \t]+\d+>)>?[ \t]*&?"
+          r"(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|()<>\"'])+")
+_CMD_END = r"(?=(?:" + _REDIR + r")*(?:[ \t]*(?:$|[\n;|)]|&(?!>))|[ \t]+#))"
 _CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)" + _CMD_END)
 _CHDIR = (r"(?:" + _CD_HOME + r"|(?:(?<=\n)|&&|\|\||;|`|\{)[ \t]*"
           r"(?-i:cd(?![\w.-])(?![ \t]+-" + _CMD_END + r")|pushd(?![\w.-])(?![ \t]+[+-]\d+" + _CMD_END + r")(?!"
