@@ -381,21 +381,15 @@ class DurableTurnLease:
         except Exception as exc:
             if self.stop.is_set():
                 return False
-            from agent.runtime_session_store import is_retryable_owner_error
             from hermes_state_errors import is_sqlite_lock_error
 
-            lock_error = is_sqlite_lock_error(exc)
-            if lock_error or is_retryable_owner_error(exc):
-                # A worker's owner stall (no receipt in budget, or a closed link) is a missed tick
-                # too: the store re-sends the pending renewal on the next write, and the owner
-                # resolves that exact resend from its receipt row. The scheduler will not try again
-                # until one interval from now. If that attempt could not finish before the row
-                # expiry, stop before a successor can claim it.
+            if is_sqlite_lock_error(exc):
+                # The scheduler will not try again until one interval from now. If that attempt
+                # could not finish before the row expiry, stop before a successor can claim it.
                 if time.time() + self.refresh_interval + _REFRESH_EXPIRY_MARGIN_S >= self._authority_deadline:
                     return self._stop_on_exhausted_authority()
                 logger.warning(
-                    "Session turn lease refresh hit %s; will retry: %s",
-                    "a SQLite lock" if lock_error else f"an owner stall ({exc})",
+                    "Session turn lease refresh hit a SQLite lock; will retry: %s",
                     self._current_session_id(),
                 )
                 return None

@@ -1,11 +1,13 @@
-"""One slow owner reply must not kill a managed worker.
+"""One slow owner reply must not kill a managed worker, and must never commit a write twice.
 
 A ``worker.persist`` with no reply inside the receipt budget (``worker_receipt_timeout``) or a closed
 owner link leaves the outcome unknown, but the owner resolves an exact resend of the same
-(execution, sequence, digest) from its receipt row. So the store keeps the pending entry and the
-next write (or turn-lease refresh) re-sends it, never renumbered; only a bounded run of such
-failures, or any other failure, stays sticky (mini 11-12 20:39 PT: one stall latched the store and
-the next lease refresh stopped a bb-dev worker's turn).
+(execution, sequence, digest) from its receipt row. So the store re-sends the pending entry, never
+renumbered, INSIDE the same call, and the caller gets the real result (mini 11-12 20:39 PT: one stall
+latched the store and the next lease refresh stopped a bb-dev worker's turn). The resend is never
+deferred to a later write: a transcript caller that saw the exception re-collects the same rows, so a
+deferred resend would commit them twice (PR #2490 review). Only a bounded run of unknown outcomes in
+one call, or any other failure, stays sticky.
 """
 import logging
 import time
@@ -13,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.runtime_session_store import RuntimeSessionStore, WorkerPersistenceError
+from agent import runtime_session_store as store_module
+from agent.runtime_session_store import RuntimeSessionStore, WorkerPersistenceError, is_retryable_owner_error
 from agent.turn_facade_lease import LEASE_TTL_SECONDS, DurableTurnLease
 
 
@@ -22,11 +25,14 @@ class FakeOwner:
 
     def __init__(self):
         self.commits = []
+        self.rows = []  # transcript rows in commit order
         self.receipts = {}
+        self.sends = 0
         self.stalls = []  # queued: 'after_commit' | 'before_commit' | 'closed'
 
     def __call__(self, method, **params):
         assert method == 'worker.persist'
+        self.sends += 1
         sequence = params['sequence']
         stall = self.stalls.pop(0) if self.stalls else None
         if stall == 'closed':
@@ -42,7 +48,13 @@ class FakeOwner:
                 failure.data = {'field': 'sequence', 'expected_sequence': expected}
                 raise failure
             self.commits.append((sequence, params['operation']))
-            result = self.receipts[sequence] = {'value': True}
+            if params['operation'] == 'transcript.append':
+                messages = params['payload']['messages']
+                self.rows.extend(message['content'] for message in messages)
+                result = {'count': len(messages), 'annotations': [{'stored': True} for _ in messages]}
+            else:
+                result = {'value': True}
+            self.receipts[sequence] = result
         if stall == 'after_commit':
             raise TimeoutError('worker_receipt_timeout')
         return dict(result)
@@ -59,24 +71,50 @@ def owner_store(tmp_path):
 
 
 @pytest.mark.parametrize('stall', ['after_commit', 'before_commit', 'closed'])
-def test_one_stalled_reply_then_next_write_lands_once_without_a_gap(owner_store, stall, caplog):
+def test_one_stalled_reply_is_resent_inside_the_same_call(owner_store, stall, caplog):
     owner, store = owner_store
     owner.stalls.append(stall)
-    with pytest.raises((TimeoutError, ConnectionError)):
-        store.queue_token_counts('s', input_tokens=1)
     caplog.set_level(logging.WARNING, logger='agent.runtime_session_store')
-    store.queue_token_counts('s', input_tokens=2)
-    assert owner.commits == [(1, 'usage.main'), (2, 'usage.main')]
+    store.queue_token_counts('s', input_tokens=1)
+    assert owner.sends == 2, 'the stalled entry is re-sent once, by the same call'
+    assert owner.commits == [(1, 'usage.main')]
     assert store.journal['pending'] == [] and store.failure is None
-    assert any('worker receipt timeout recovered after' in r.getMessage() and 'op=usage.main' in r.getMessage()
-               for r in caplog.records)
+    store.queue_token_counts('s', input_tokens=2)
+    assert owner.commits == [(1, 'usage.main'), (2, 'usage.main')], 'the next write takes the next sequence'
+    recovered = [r.getMessage() for r in caplog.records if 'worker receipt outcome recovered after' in r.getMessage()]
+    assert len(recovered) == 1 and 'op=usage.main' in recovered[0] and 'sends=2' in recovered[0], \
+        'only the stalled write logs a recovery'
 
 
-def test_close_flush_resends_a_timed_out_entry(owner_store):
+def test_a_stalled_transcript_append_returns_its_real_result_and_commits_once(owner_store):
+    """Review of PR #2490: a deferred resend plus the caller's re-flush committed rows A twice."""
+    owner, store = owner_store
+    owner.stalls.append('after_commit')
+    rows = [{'role': 'user', 'content': 'A'}]
+    assert store.append_messages_batch('s', rows) == 1
+    assert rows[0]['stored'] is True, 'the resend result (row annotations) reaches the caller'
+    assert store.append_messages_batch('s', [{'role': 'user', 'content': 'B'}]) == 1
+    assert owner.rows == ['A', 'B']
+
+
+def test_an_exhausted_transcript_append_latches_and_never_duplicates_on_reflush(owner_store):
+    owner, store = owner_store
+    owner.stalls.extend(['after_commit'] * store_module._RETRYABLE_ATTEMPTS)
+    with pytest.raises(WorkerPersistenceError, match='worker_receipt_timeout'):
+        store.append_messages_batch('s', [{'role': 'user', 'content': 'A'}])
+    assert owner.sends == store_module._RETRYABLE_ATTEMPTS
+    # The caller saw the failure and re-flushes the same unmarked rows plus a new one.
+    sends = owner.sends
+    with pytest.raises(WorkerPersistenceError, match='worker_receipt_timeout'):
+        store.append_messages_batch('s', [{'role': 'user', 'content': 'A'}, {'role': 'user', 'content': 'B'}])
+    assert owner.sends == sends, 'a latched store sends nothing'
+    assert owner.rows == ['A']
+
+
+def test_close_flush_after_a_recovered_stall(owner_store):
     owner, store = owner_store
     owner.stalls.append('before_commit')
-    with pytest.raises(TimeoutError):
-        store.queue_token_counts('s', input_tokens=1)
+    store.queue_token_counts('s', input_tokens=1)
     assert store.flush_token_counts() is True
     assert owner.commits == [(1, 'usage.main')]
 
@@ -88,64 +126,62 @@ def _lease(store, interrupts, *, deadline_in=LEASE_TTL_SECONDS):
     return lease
 
 
-def test_refresh_after_an_earlier_write_timed_out_keeps_the_turn(owner_store):
-    """The incident: an earlier write latched the store, then the refresh raised the latch."""
+def test_refresh_whose_reply_times_out_once_keeps_the_turn(owner_store):
     owner, store = owner_store
-    owner.stalls.append('after_commit')
-    with pytest.raises(TimeoutError):
-        store.queue_token_counts('s', input_tokens=1)
     interrupts = []
     lease = _lease(store, interrupts)
     before = lease._authority_deadline
+    owner.stalls.append('before_commit')
     assert lease.refresh_tick() is None
     assert interrupts == [] and lease.interrupt_message is None
-    assert owner.commits == [(1, 'usage.main'), (2, 'turn.renew')]
+    assert owner.commits == [(1, 'turn.renew')] and owner.sends == 2
     assert lease._authority_deadline >= before
 
 
-def test_refresh_whose_own_reply_times_out_retries_next_tick(owner_store):
-    owner, store = owner_store
-    interrupts = []
-    lease = _lease(store, interrupts)
-    owner.stalls.append('before_commit')
-    assert lease.refresh_tick() is None, 'a retryable owner stall is a missed tick, not a lost lease'
-    assert interrupts == []
-    before = lease._authority_deadline
-    assert lease.refresh_tick() is None
-    assert interrupts == [] and owner.commits == [(1, 'turn.renew'), (2, 'turn.renew')], \
-        'the stalled renewal is re-sent under its own sequence, then this tick renews'
-    assert lease._authority_deadline >= before
-
-
-def test_refresh_timeout_near_the_deadline_still_stops(owner_store):
-    owner, store = owner_store
-    interrupts = []
-    # One refresh interval (60 s default) plus less than the 2 s expiry margin: the next tick is too late.
-    lease = _lease(store, interrupts, deadline_in=61.0)
-    owner.stalls.append('before_commit')
-    assert lease.refresh_tick() is False
-    assert interrupts, 'no renewal can land before expiry: the turn must stop'
-
-
-def test_retryable_failures_are_bounded(owner_store):
+def test_unknown_outcomes_are_bounded_per_call(owner_store, caplog):
     owner, store = owner_store
     owner.stalls.extend(['before_commit'] * 10)
-    raised = 0
-    for _ in range(10):
-        try:
-            store.queue_token_counts('s', input_tokens=1)
-        except WorkerPersistenceError:
-            break
-        except TimeoutError:
-            raised += 1
-    else:
-        pytest.fail('a run of receipt timeouts never latched the store')
-    assert 1 <= raised <= 4
+    caplog.set_level(logging.ERROR, logger='agent.runtime_session_store')
+    with pytest.raises(WorkerPersistenceError, match='worker_receipt_timeout'):
+        store.queue_token_counts('s', input_tokens=1)
+    assert owner.sends == store_module._RETRYABLE_ATTEMPTS == 2
+    assert any('worker receipt outcome still unknown after 2 sends' in r.getMessage() for r in caplog.records)
     owner.stalls.clear()
-    calls = len(owner.commits)
     with pytest.raises(WorkerPersistenceError):
         store.queue_token_counts('s', input_tokens=2)
-    assert len(owner.commits) == calls, 'an exhausted latch sends nothing'
+    assert owner.sends == 2 and owner.commits == [], 'an exhausted latch sends nothing'
+
+
+def test_an_owner_refusal_is_not_resent(owner_store):
+    owner, store = owner_store
+    store.journal['next_sequence'] = 5  # the owner expects 1 and the journal holds no acked entry
+    with pytest.raises(WorkerPersistenceError, match='lost_receipt'):
+        store.queue_token_counts('s', input_tokens=1)
+    assert owner.sends == 1
+
+
+def test_a_timeout_other_than_the_receipt_budget_is_not_resent(owner_store, monkeypatch):
+    owner, store = owner_store
+
+    def stall(**entry):
+        owner.sends += 1
+        raise TimeoutError('socket read timed out')
+
+    monkeypatch.setattr(store, '_persist', lambda entry: stall(**entry))
+    with pytest.raises(TimeoutError, match='socket read'):
+        store.queue_token_counts('s', input_tokens=1)
+    assert owner.sends == 1
+
+
+def test_retryable_classification():
+    from websockets.exceptions import ConnectionClosedError
+
+    assert is_retryable_owner_error(TimeoutError('worker_receipt_timeout'))
+    assert not is_retryable_owner_error(TimeoutError('other'))
+    assert is_retryable_owner_error(ConnectionResetError())
+    assert is_retryable_owner_error(ConnectionClosedError(None, None))
+    assert not is_retryable_owner_error(WorkerPersistenceError('worker_receipt_timeout'))
+    assert not is_retryable_owner_error(ValueError('worker_receipt_timeout'))
 
 
 def test_lost_receipt_stays_sticky(owner_store):
