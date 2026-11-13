@@ -20,6 +20,13 @@ _REPAIR_DEFERRED: dict[str, float] = {}
 _REPAIR_CREDIT: dict[str, int] = {}
 
 
+# A write by another process (a worker heartbeat or claim, the dispatcher) is a repair-revision gap, and each gap
+# ran the full pass at once: hub default board 2026-11-13, 5,428 cards, 80 of 86 full passes in 601 s were
+# ``local_write`` (20% of gateway CPU samples). Such gaps now share one pass per window; an uncaptured edit is
+# found at most this long after the previous pass instead of on the next round.
+LOCAL_WRITE_REPAIR_MIN_S = 30.0
+
+
 def applies_chain(start: Any, applies: Iterable[tuple], end: Any) -> bool:
     """True when the feed applies' (before, after) revisions account for every live revision step from ``start``
     to ``end``: no gap (a local write between them), no unknown (None) revision."""
@@ -31,7 +38,8 @@ def applies_chain(start: Any, applies: Iterable[tuple], end: Any) -> bool:
     return at is not None and at == end
 
 
-def decide(key: str, inputs: Optional[tuple], applies: Optional[Iterable[tuple]], now: float, min_s: float) -> str:
+def decide(key: str, inputs: Optional[tuple], applies: Optional[Iterable[tuple]], now: float, min_s: float,
+           local_min_s: Optional[float] = None) -> str:
     """Why this round's changed repair inputs run the full pass now, or ``deferred``.
 
     ``deferred`` when the only inputs that changed since the last completed pass are the replica's feed cursor and
@@ -40,8 +48,9 @@ def decide(key: str, inputs: Optional[tuple], applies: Optional[Iterable[tuple]]
     loop runs it then. ``applies`` is the credited steps' (before, after) revisions (``kanban_sync_own_writes``:
     feed applies, push acknowledgements, the remote-parent mirror, pool reservations); they must chain from the
     credited revision (the last pass's, or the last deferring round's) to this round's without a gap. Any gap is a
-    write the scans exist to find (another process, or this thread outside those steps), so it repairs at once;
-    so does a missing list (None: a rebuild). Otherwise the reason: ``unknown`` inputs, ``first`` (no completed
+    write the scans exist to find (another process, or this thread outside those steps): it repairs at once when
+    the last pass is older than ``local_min_s`` (default ``LOCAL_WRITE_REPAIR_MIN_S``), else that pass is due when
+    the window ends (``deferred``, nothing credited). A missing list (None: a rebuild) repairs at once. The reason: ``unknown`` inputs, ``first`` (no completed
     pass), ``inputs`` (schema, replica file, mode, gateway or placement), ``local_write`` (a gap) or ``window``
     (the last pass is older than ``min_s``). [daveey]"""
     last = _REPAIRED.get(key)
@@ -56,7 +65,12 @@ def decide(key: str, inputs: Optional[tuple], applies: Optional[Iterable[tuple]]
     if (gen, schema) != (last_gen, last_schema) or (dev, ino) != (last_dev, last_ino) or rest != last_rest:
         return "inputs"
     if not applies_chain(_REPAIR_CREDIT.get(key, last_revision), applies, revision):
-        return "local_write"
+        # Not credited: every later round still sees the gap, so the pass runs when this window ends at the latest.
+        due = _REPAIRED_AT.get(key, float("-inf")) + (LOCAL_WRITE_REPAIR_MIN_S if local_min_s is None else local_min_s)
+        if now >= due:
+            return "local_write"
+        _REPAIR_DEFERRED[key] = due
+        return "deferred"
     due = _REPAIRED_AT.get(key, float("-inf")) + min_s
     if now >= due:
         return "window"
