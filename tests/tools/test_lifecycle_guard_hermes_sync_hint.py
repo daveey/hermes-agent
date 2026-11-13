@@ -56,3 +56,52 @@ def test_other_refusals_keep_the_generic_text(tmp_path, monkeypatch):
 
     assert _ROUTE not in error
     assert "hermes gateway restart" in error
+
+
+_RESTART = "#!/bin/sh\nhermes gateway restart\n"
+
+
+@pytest.mark.parametrize("template", [
+    "sudo -u ubuntu {script} mods-pull",
+    "HERMES_HOME=/x nohup {script} mods-pull",
+    "systemd-run --user --unit sync {script} mods-pull",
+    "bash {script} mods-pull",
+    "bash -c '{script} mods-pull'",
+    "cd /tmp && {script} mods-pull",
+])
+def test_hint_follows_hermes_sync_through_wrappers(tmp_path, monkeypatch, template):
+    script = _script(tmp_path, "hermes-sync", _RESTART)
+
+    error = _refuse(tmp_path, monkeypatch, template.format(script=script))
+
+    assert _ROUTE in error
+
+
+@pytest.mark.parametrize("template", [
+    "grep x hermes-sync; {deploy}",
+    "{deploy} --log ~/.hermes/logs/hermes-sync.log",
+    "echo 'hermes-sync mods-pull' && {deploy}",
+])
+def test_a_mere_mention_of_hermes_sync_gets_no_hint(tmp_path, monkeypatch, template):
+    # The refused script is deploy.sh; hermes-sync only appears as an argument or in data.
+    deploy = _script(tmp_path, "deploy.sh", _RESTART)
+
+    error = _refuse(tmp_path, monkeypatch, template.format(deploy=deploy))
+
+    assert "hermes gateway restart" in error
+    assert _ROUTE not in error
+
+
+def test_hint_names_the_root_sync_log_from_a_profile_gateway(tmp_path, monkeypatch):
+    # hermes-sync logs under its own home (root ~/.hermes), not the gateway profile's home.
+    home = tmp_path / "home"
+    profile = home / ".hermes" / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    script = _script(tmp_path, "hermes-sync", _RESTART)
+
+    error = _refuse(tmp_path, monkeypatch, f"{script} mods-pull")
+
+    assert "~/.hermes/logs/hermes-sync.log" in error
+    assert "profiles" not in error

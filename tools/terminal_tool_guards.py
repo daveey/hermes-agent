@@ -581,20 +581,56 @@ def _session_aliases_for_guard(env: Any) -> Optional[frozenset[str]]:
 # hermes-sync can idle-restart the gateway it runs under, so the guard refuses it inside the
 # gateway (by lifecycle content, or because the script is over the scan budget). The generic
 # "separate shell" advice made agents wrap it in systemd-run/nohup; name the sanctioned route.
-_HERMES_SYNC_WORD = re.compile(r"(?:^|[\s/;&|(`'\"])hermes-sync(?=$|[\s;&|)`'\"])")
+_HERMES_SYNC = "hermes-sync"
+_HERMES_SYNC_PAYLOAD_DEPTH = 4
+
+
+def _runs_hermes_sync(command: str, depth: int = 0) -> bool:
+    """Whether *command* EXECUTES hermes-sync: as a segment's command word (env assignments and
+    wrappers such as sudo/nohup/systemd-run peeled), as the script a shell or Python interpreter
+    runs, or inside an ``sh -c`` payload. A mere mention (``grep x hermes-sync``) does not count."""
+    from cron.lifecycle_guard import (
+        _SHELL_EXECUTABLES,
+        _executable_name,
+        _executed_command_index,
+        _is_interpreter_image,
+        _iter_command_segments,
+        _iter_shell_command_payloads,
+        lifecycle_scan_root_within_budget,
+    )
+
+    if _HERMES_SYNC not in command or not lifecycle_scan_root_within_budget(command):
+        return False
+    for segment in _iter_command_segments(command):
+        index = _executed_command_index(segment)
+        if index is None:
+            continue
+        name = _executable_name(segment[index])
+        if name == _HERMES_SYNC:
+            return True
+        if name in _SHELL_EXECUTABLES or _is_interpreter_image(name):
+            script = next((t for t in segment[index + 1:] if not t.startswith("-")), None)
+            if script is not None and _executable_name(script) == _HERMES_SYNC:
+                return True
+    if depth >= _HERMES_SYNC_PAYLOAD_DEPTH:
+        return False
+    return any(_runs_hermes_sync(p, depth + 1) for p in _iter_shell_command_payloads(command))
 
 
 def _refusal_hint(command: str) -> str:
-    if not _HERMES_SYNC_WORD.search(command):
+    if not _runs_hermes_sync(command):
         return ""
-    from hermes_constants import display_hermes_home
+    from hermes_constants import display_hermes_home, get_default_hermes_root, get_hermes_home
 
+    # hermes-sync logs under its own home (the root ~/.hermes), not a profile gateway's home.
+    root = get_default_hermes_root(home=get_hermes_home())
+    sync_log = f"{display_hermes_home(root)}/logs/hermes-sync.log"
     return (
         " hermes-sync runs only from its scheduled cron/systemd pass, never from a gateway chat. "
         "To deploy a pushed hermes-mods commit from here, run "
         "`git -C ~/code/hermes-mods fetch -q origin && git -C ~/code/hermes-mods merge --ff-only origin/main`, "
         "then wait for the next scheduled "
-        f"sync pass and read its `mods-reload:` line in {display_hermes_home()}/logs/hermes-sync.log. "
+        f"sync pass and read its `mods-reload:` line in {sync_log}. "
         "Do not wrap hermes-sync in systemd-run, nohup, setsid or a background shell to get past "
         "this refusal."
     )
