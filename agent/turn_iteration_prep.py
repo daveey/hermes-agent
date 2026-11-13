@@ -61,8 +61,12 @@ def _maybe_inject_iteration_budget_warning(agent: Any, messages: Any) -> bool:
         and is_dispatcher_owned_worker_context()
         and "kanban_complete" in getattr(agent, "valid_tool_names", ())
     )
-    if ratio is None and kanban_worker:
-        ratio = 0.9
+    from agent.oneshot_footprint import agent_is_oneshot
+    # A headless ``chat -q --max-turns N`` run loses its tools at the cap, so an unwarned
+    # one-shot cannot write its deliverable afterwards (defect 4a4dc075ad).
+    oneshot = not kanban_worker and agent_is_oneshot(agent)
+    if ratio is None and (kanban_worker or oneshot):
+        ratio = 0.9 if kanban_worker else 0.8
     budget = getattr(agent, "iteration_budget", None)
     if (
         ratio is None
@@ -82,6 +86,12 @@ def _maybe_inject_iteration_budget_warning(agent: Any, messages: Any) -> bool:
             "requirements are verified, or kanban_request_review if it is ready for "
             "review; otherwise persist a kanban_comment handoff and "
             "continue. A diff or commit alone is not completion evidence."
+        )
+    elif oneshot:
+        notice += (
+            f" {budget.max_total - budget.used} iterations remain; when they run out, tools are "
+            "removed and only a text reply is possible, so write any files or other "
+            "deliverables now."
         )
     # Only the current tool-result tail is mutable; an older turn may already be cached.
     from agent.context_compressor import _DB_PERSISTED_MARKER

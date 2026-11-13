@@ -14,6 +14,7 @@ import shlex
 import socket
 import threading
 import time
+from pathlib import Path
 
 from agent.thread_scoped_output import thread_scoped_silence
 from tools.registry import tool_error
@@ -58,10 +59,28 @@ def _execute_checked(env, cmd: str, what: str, *, timeout: int, **kwargs) -> dic
     return result
 
 
+def _wire_bytes(text: str) -> bytes:
+    """The UTF-8 bytes an RPC transport ships for a JSON-encoded RPC result *text*, and what
+    a size cap must measure. Tool results can hold lone surrogates (file reads decode
+    undecodable bytes with surrogateescape), which strict UTF-8 refuses: each becomes its
+    ``\\uXXXX`` escape, which inside a JSON string (where ``json.dumps`` puts every one)
+    decodes back to the same text (a lone surrogate exactly; a high+low pair, see below).
+    Only for RPC results: a shipped file (script, env file) stays strict, since there the
+    escape would be literal text."""
+    # Exact for lone surrogates only: a high+low pair held as two code points ships as two
+    # escapes that json.loads joins into one astral char. A file read never holds such a
+    # pair (surrogateescape yields only low surrogates, U+DC80..U+DCFF), but an MCP or
+    # plugin tool result could. The remote str then holds one char where this side held two:
+    # the UTF-16 meaning survives, the code-point sequence (and len) does not.
+    return text.encode("utf-8", "backslashreplace")
+
+
 def _remote_write(env, remote_path: str, content: str, *, atomic: bool = False,
-                  timeout: int = 30, check: bool = False):
+                  timeout: int = 30, check: bool = False, rpc_result: bool = False):
     """Write *content* owner-only to *remote_path*; returns the execute() result
-    (``check=True`` raises on failure via _execute_checked).
+    (``check=True`` raises on failure via _execute_checked). ``rpc_result=True`` (a JSON
+    RPC response) ships lone surrogates as escapes via _wire_bytes; anything else is
+    strict UTF-8, so a lone surrogate in a shipped file raises before anything is written.
 
     The base64 payload always travels as ``stdin_data``: pipe-mode backends
     (ssh, docker, local: the real shared-host ones) deliver it on
@@ -70,7 +89,8 @@ def _remote_write(env, remote_path: str, content: str, *, atomic: bool = False,
     for heredoc-mode backends (modal, daytona, vercel), and managed_modal
     forwards it as ``stdinData``, the same contract ``_write_to_sandbox``
     relies on."""
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    raw = _wire_bytes(content) if rpc_result else content.encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii")
     target = shlex.quote(remote_path)
     write = (f"base64 -d > {target}.tmp && mv -f {target}.tmp {target}"
              if atomic else f"base64 -d > {target}")
@@ -91,9 +111,12 @@ def _rpc_token_ok(request: dict, rpc_token: str) -> bool:
 
 def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_counter: list,
                         max_tool_calls: int, dispatch, tool_call_log: list, call_start: float,
-                        where: str) -> str:
+                        where: str, full_output_cap: int | None = None) -> str:
     """Enforce allow-list + budget, then dispatch one authenticated request. Only a dispatched
-    call consumes budget and is logged; refusals are free."""
+    call consumes budget and is logged; refusals are free. ``full_output_cap`` (the remote
+    file-RPC transport) bounds the shipped bytes of every result: a terminal() result inlines
+    its spill only within it, and any other result over it becomes an error naming its size
+    (default: the local socket, which caps only the spill a terminal() result reads)."""
     tool_name = request.get("tool", "")
     tool_args = request.get("args", {})
     if tool_name not in allowed_tools:
@@ -113,6 +136,22 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
         logger.error("Tool call failed in %s: %s", where, exc, exc_info=True)
         result = tool_error(str(exc))
     tool_call_counter[0] += 1
+    if tool_name == "terminal":
+        result = (_complete_terminal_output(result) if full_output_cap is None else
+                  _complete_terminal_output(result, full_output_cap, encoded_cap=full_output_cap))
+    if full_output_cap is not None and isinstance(result, str):
+        size = len(_wire_bytes(result))
+        if size > full_output_cap:
+            # The call already ran: say so, or a side-effecting tool (patch, write_file) with a
+            # big result reads as failed and invites a retry of a change that landed.
+            result = tool_error(
+                f"{tool_name} ran, but its result is {size:,} bytes, over the "
+                f"{full_output_cap:,}-byte limit of this remote sandbox's tool transport, so "
+                "only its result was dropped: if the call changed anything, that change stands; "
+                "do not repeat it to get the result. To read data, ask for less (read_file "
+                "offset/limit, a narrower search_files pattern or limit, a shorter web_extract "
+                "char_limit)",
+                result_bytes=size, limit_bytes=full_output_cap)
     entry = {"tool": tool_name, "args_preview": str(tool_args)[:80],
              "duration": round(time.monotonic() - call_start, 2)}
     error = _result_error(result)
@@ -120,6 +159,75 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
         entry["error"] = error
     tool_call_log.append(entry)
     return result
+
+
+_FULL_OUTPUT_READ_CAP_BYTES = 20 * 1024 * 1024
+# The file-RPC poller ships each result base64 (+33%) through env.execute stdin: Modal's legacy
+# server path caps one stdin buffer at 2 MB and Daytona/Vercel stage it as an uploaded file. Every
+# remote result stays within 1 MiB of shipped UTF-8 (json escaping can double newline-dense text),
+# so its base64 stays under ~1.4 MB: a terminal() result over it keeps the window, truncated, with
+# its spill path; any other result over it becomes an error naming its size. One cap covers every
+# file-RPC backend, including ssh/docker pipe mode, which has no 2 MB stdin limit but gets no
+# backend-specific branch.
+_REMOTE_FULL_OUTPUT_READ_CAP_BYTES = 1024 * 1024
+_SPILL_CAPPED_MARK = "[spill capped at "
+
+
+def _read_full_output(path, cap: int = _FULL_OUTPUT_READ_CAP_BYTES) -> str | None:
+    """The terminal spill file's text when it holds the WHOLE output, else None (missing,
+    unreadable, over *cap* bytes, or itself capped by the collector)."""
+    try:
+        spill = Path(str(path))
+        if spill.stat().st_size > cap:
+            return None
+        text = spill.read_text(encoding="utf-8-sig", errors="replace")
+    except (OSError, ValueError):
+        return None
+    return None if _SPILL_CAPPED_MARK in text[-200:] else text.strip()
+
+
+def _looks_windowed(body: dict) -> bool:
+    """True when a terminal result's ``output`` is a cut window even though no spill file
+    came with it: it carries the truncation marker, or the reported total exceeds it."""
+    from tools.tool_output_truncate import contains_truncation_notice
+    output = body["output"]
+    total = body.get("output_total_chars")
+    if isinstance(total, int) and not isinstance(total, bool) and total > len(output):
+        return True
+    return bool(body.get("truncation_note")) or contains_truncation_notice(output)
+
+
+def _complete_terminal_output(result, cap: int = _FULL_OUTPUT_READ_CAP_BYTES, *,
+                              encoded_cap: int | None = None):
+    """Give code the complete stdout of a sandbox ``terminal()`` call. The terminal tool
+    renders a head+tail window sized for the chat; a script that writes ``output`` to disk
+    as data must not get that window (defect agent-7ac9c5fa93: a checksum manifest shipped
+    the truncation marker). The spill file is already ANSI-stripped and redacted by the
+    terminal tool. ``truncated`` tells the script whether ``output`` is whole: without a
+    readable spill (managed_modal, artifacts off, a failed spill redaction, a suffix that
+    pushed the text over the limit) a windowed ``output`` still reports ``truncated: True``.
+    When the spill replaces the window, notes the terminal tool appended after collection
+    (timeout/interrupt text, the sudo notice, a transform hook's rewrite) are not carried;
+    ``exit_code`` and ``exit_code_meaning`` still report a timeout or interrupt. With
+    *encoded_cap*, a spill-backed result whose UTF-8 JSON exceeds it keeps the window."""
+    try:
+        body = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(body, dict) or not isinstance(body.get("output"), str):
+        return result
+    if body.get("approval_pending") or body.get("status") == "pending_approval":
+        return result  # the command never ran: keep the approval contract's exact shape
+    spill_path = body.get("full_output_path")
+    full = _read_full_output(spill_path, cap) if spill_path else None
+    if full is not None:
+        whole = dict(body, output=full, truncated=False)
+        whole.pop("truncation_note", None)
+        text = json.dumps(whole, ensure_ascii=False)
+        if encoded_cap is None or len(_wire_bytes(text)) <= encoded_cap:
+            return text
+    body["truncated"] = bool(spill_path) or _looks_windowed(body)
+    return json.dumps(body, ensure_ascii=False)
 
 
 def _result_error(result) -> str:
@@ -188,7 +296,7 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
                         max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
                         call_start=call_start, where="sandbox",
                     ) if _rpc_token_ok(request, rpc_token) else tool_error("Unauthorized RPC request")
-                conn.sendall((resp + "\n").encode())
+                conn.sendall(_wire_bytes(resp + "\n"))
     except TimeoutError:
         logger.debug("RPC listener socket timeout")
     except OSError as e:
@@ -247,11 +355,12 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
                     request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
                     max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
                     call_start=call_start, where="remote sandbox",
+                    full_output_cap=_REMOTE_FULL_OUTPUT_READ_CAP_BYTES,
                 )
                 # Atomic (tmp + rename) and owner-only; results carry tool output
                 # on a shared-host backend.
                 _remote_write(env, f"{rpc_dir}/res_{seq:06d}", tool_result,
-                              atomic=True, timeout=60)
+                              atomic=True, timeout=60, rpc_result=True)
                 env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
         except Exception as e:
             if not stop_event.is_set():

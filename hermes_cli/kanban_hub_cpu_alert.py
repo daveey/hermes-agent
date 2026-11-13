@@ -1,7 +1,9 @@
 """One Kanban card when the hub CPU advisory goes stale while the root CPU limit is on. [daveey]
 
 With ``kanban.admission.cpu_busy_below_pct`` set, every claim on this host first reads the advisory sample
-(``kanban_admission.hub_cpu_advisory``); a sample older than 15 s defers the claim as ``hub_cpu_unknown``. On
+(``kanban_admission.hub_cpu_advisory``); a sample older than 10 s (``PRELEASE_MAX_AGE_MS``) defers the claim as
+``hub_cpu_unknown``, so this alert calls a sample stale at that same age (the locked gate's looser 15 s would let a
+sampler stuck 10-15 s behind defer every claim with no card). On
 2026-11-12 every sample was dropped for four minutes and the hub claimed nothing with all slots free, and the only
 signal was the dispatcher's "stuck" log line. Now the dispatcher calls :func:`check` once per tick: once the
 advisory has been unusable for :data:`STALE_FOR_S` of this process's own observation (a gateway that just started
@@ -61,7 +63,7 @@ def _check(mono, wall, state: _Incident, file_fn) -> Optional[str]:
         state.stale_since, state.filed = None, False
         return None
     age = _sample_age_s(wall())
-    if age is not None and age * 1000 <= ka.ADVISORY_MAX_AGE_MS:
+    if age is not None and age * 1000 <= ka.PRELEASE_MAX_AGE_MS:
         state.stale_since, state.filed = None, False  # fresh: the incident (if any) is over
         return None
     now = mono()

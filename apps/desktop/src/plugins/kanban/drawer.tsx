@@ -51,12 +51,15 @@ import {
   logKey,
   patchTask,
   profilesKey,
+  type ReadFetchContext,
   reassignTask,
   reclaimTask,
+  retryingFetch,
   routedToScope,
   taskKey,
   type TaskOwner,
-  useKanbanScope
+  useKanbanScope,
+  userOpenReads
 } from './api'
 import { uploadFiles, useFileDrop } from './attach-drop'
 import { ModelOverrideField, overridePatch } from './model-override'
@@ -858,13 +861,21 @@ export function TaskDrawer({
   const qc = useQueryClient()
   const scope = useKanbanScope()
   const slug = useValue($boardSlug)
+  // [daveey] The drawer mounts once per open (keyed by its task): the task and log reads of this open are the user's
+  // (foreground, never thinned on a slow link, retries included) until each has settled: answered, or failed with
+  // React Query's retries spent. The interval and socket refetches after that are polls. refetchOnMount 'always': the
+  // shared staleTime (60 s) would otherwise skip the mount read of a re-open with warm cache, leaving its first
+  // request the interval refetch 3-30 s later (log 3-15 s, task 30 s).
+  const [openRead] = useState(userOpenReads)
 
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => fetchTask(id!, owner),
+    queryFn: (context: ReadFetchContext) =>
+      openRead(`task:${id}`, read => fetchTask(id!, owner, read), retryingFetch(context)),
     queryKey: taskKey(scope, slug, id ?? '', owner),
-    refetchInterval: 30_000
+    refetchInterval: 30_000,
+    refetchOnMount: 'always'
   })
 
   const task = detail?.task
@@ -873,9 +884,11 @@ export function TaskDrawer({
 
   const { data: log } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => fetchLog(id!, owner),
+    queryFn: (context: ReadFetchContext) =>
+      openRead(`log:${id}`, read => fetchLog(id!, owner, read), retryingFetch(context)),
     queryKey: logKey(scope, slug, id ?? '', owner),
-    refetchInterval: running ? 3_000 : 15_000
+    refetchInterval: running ? 3_000 : 15_000,
+    refetchOnMount: 'always'
   })
 
   const invalidate = () => {

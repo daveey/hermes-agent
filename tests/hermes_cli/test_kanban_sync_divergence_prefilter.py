@@ -25,6 +25,11 @@ def kanban_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def lease_client():
+    yield from support.lease_client()
+
+
+@pytest.fixture
 def live(kanban_home):
     support.write_sync_config(kanban_home, True)
     conn = kbc.connect(kanban_home / "kanban.db")
@@ -115,6 +120,37 @@ def test_prefilter_skips_unsettled_and_matches_run_refs(live, kanban_home):
         _uncaptured(live, "UPDATE tasks SET title = 'x' WHERE id = ?", (ids[0],))
         assert div._differing_settled(live, replica, ME) == set()
         _uncaptured(live, "UPDATE tasks SET title = 'y' WHERE id = ?", (ids[1],))
+        assert div._differing_settled(live, replica, ME) == {ids[1]}
+    finally:
+        replica.close()
+
+
+def test_prefilter_compares_run_refs_by_uid(live, kanban_home, lease_client):
+    """``current_run_id`` is a per-file local id: the pre-filter compares the run uids it names (review of PR #1882).
+    Equal uids under different local ids are no difference; the same local id naming another uid is one."""
+    svc = FakeService()
+    ids = _settle(live, kanban_home, svc, 3)
+    for tid in ids[:2]:
+        assert kb.claim_task(live, tid) is not None
+    for _ in range(3):
+        ksc.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
+    replica = ksc.open_shadow(BOARD, ME)
+    try:
+        runs = {tid: (live.execute("SELECT current_run_id FROM tasks WHERE id = ?", (tid,)).fetchone()[0],
+                      replica.execute("SELECT r.uid FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+                                      "WHERE t.id = ?", (tid,)).fetchone())
+                for tid in ids[:2]}
+        assert all(run_id is not None and uid is not None for run_id, uid in runs.values()), runs
+        assert div._differing_settled(live, replica, ME) == set()
+        # ids[0]: the same run uid under another local id (raw ids now differ; the uids do not).
+        run_id = runs[ids[0]][0]
+        _uncaptured(live, "UPDATE task_runs SET id = id + 1000 WHERE id = ?", (run_id,))
+        _uncaptured(live, "UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id + 1000, ids[0]))
+        assert live.execute("SELECT current_run_id FROM tasks WHERE id = ?", (ids[0],)).fetchone()[0] != \
+            replica.execute("SELECT current_run_id FROM tasks WHERE id = ?", (ids[0],)).fetchone()[0]
+        assert div._differing_settled(live, replica, ME) == set()
+        # ids[1]: the same local id now names another run uid (only the uid differs).
+        _uncaptured(live, "UPDATE task_runs SET uid = 'other-run-uid' WHERE id = ?", (runs[ids[1]][0],))
         assert div._differing_settled(live, replica, ME) == {ids[1]}
     finally:
         replica.close()

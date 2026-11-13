@@ -84,6 +84,14 @@ export const outcomeEtaLabel = (eta: number): string => {
 export const outcomeHasCrons = (outcome: null | SessionOutcome | undefined): boolean =>
   outcome?.kind === 'done' && Boolean(outcome.crons?.length)
 
+/** [daveey] A finished chat that still watches a card (a later check parked `watch=true`): it keeps the green and
+ *  draws the eye glyph, so it never reads as "all done" while the check is pending (self-heal desktop-e6cce5965c). */
+export const outcomeHasWatches = (outcome: null | SessionOutcome | undefined): boolean =>
+  outcome?.kind === 'done' && Boolean(outcome.watches?.length)
+
+const validEta = (eta: unknown): number | undefined =>
+  typeof eta === 'number' && Number.isFinite(eta) ? eta : undefined
+
 /** One `on[]` entry in words: a card reads `t_… scheduled · 14:00`, anything else `capacity: hub slot`. */
 export const outcomeWaitingLine = (item: SessionOutcomeWaitingOn): string => {
   const head = item.kind === 'card' ? item.id : `${item.kind}: ${item.label || item.id}`
@@ -102,6 +110,7 @@ type RowCopy = Pick<
   | 'outcomeRunning'
   | 'outcomeUnresolved'
   | 'outcomeWaiting'
+  | 'outcomeWatches'
 >
 
 /** Workflow-only text stays independent of historical artifact acceptance. */
@@ -109,9 +118,16 @@ const workflowTooltip = (outcome: null | SessionOutcome | undefined, r: RowCopy)
   switch (outcome?.kind) {
     case 'done': {
       const names = (outcome.crons ?? []).map(job => job.label || job.id)
+
+      const watches = outcomeHasWatches(outcome)
+        ? (outcome.watches ?? []).map(card => ({ id: card.id, eta: validEta(card.eta) }))
+        : []
+
       const summary = outcome.summary?.trim() || r.outcomeDone
 
-      return names.length ? `${summary}\n${r.outcomeCrons(names)}` : summary
+      return [summary, names.length ? r.outcomeCrons(names) : '', watches.length ? r.outcomeWatches(watches) : '']
+        .filter(Boolean)
+        .join('\n')
     }
 
     case 'decision': {

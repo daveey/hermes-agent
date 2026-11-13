@@ -169,6 +169,24 @@ kanban:
 
 将 `hermes kanban daemon` 作为单独进程运行已**弃用**；请使用 gateway。如果你确实无法运行 gateway（无头主机策略禁止长期运行的服务等），`--force` 逃生舱口在一个发布周期内保持旧的独立守护进程可用，但同时运行 gateway 内嵌调度器和针对同一 `kanban.db` 的独立守护进程会导致认领竞争，不受支持。
 
+### 可移植的工作树来源（`kanban.workspace_source`，预览）
+
+同步看板可以在机器之间迁移基于分支的卡片：Board 保存清单（`repository`、`branch`、确切的 `commit`）和保管信息（`source_holder`、`state`），领取卡片的机器在专用的已登记克隆中还原该分支和提交。本版本中客户端部分**不生效**：设置 `enabled: true` 只会记录警告并被忽略，直到发布协议完成。
+
+```yaml
+kanban:
+  workspace_source:
+    enabled: false               # 协议完成前忽略（并警告）
+    clones:                      # GitHub "owner/name" -> 专用克隆的绝对路径
+      acme/widget: /home/me/code/_src/widget
+    publish_on_park: true
+    push_timeout_s: 30
+    preflight_timeout_s: null    # null = push_timeout_s + 30
+    materialize_timeout_s: null  # null = 认领 ttl / 3 - 30 秒
+```
+
+克隆在使用或向 Board 证明前会先被验证：仓库根目录、没有 `pushurl` 或 `url.*` 改写的 GitHub `origin`、可访问的远端，以及与清单一致的 GitHub 仓库 id（每个 home 缓存 6 小时）。无法还原卡片的主机会释放它（不计失败）并跳过该清单版本；来源被移动或丢失时卡片会被阻塞等人处理。这类卡片的 `workspace_kind` 和 `branch_name` 不可修改（`source_fenced`）。
+
 ### 幂等创建（用于自动化 / webhook）
 
 ```bash

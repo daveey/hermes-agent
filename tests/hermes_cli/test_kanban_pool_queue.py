@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_move as km
 from hermes_cli import kanban_placement as kp
 from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli._placement_helpers import seen_now
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gateway
 
@@ -35,7 +37,7 @@ def _machines(*, held=()):
 
 def _registry(*, held=()):
     machines = list(_machines(held=held).values())
-    wn.set_registry_fetch(lambda: {"me": HUB, "machines": machines})
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now(machines)})
 
 
 @pytest.fixture
@@ -433,7 +435,7 @@ def test_remote_refresh_caps_and_stdin(monkeypatch):
         return None  # unrelated old tips and failed fetches must not prove publication
 
     monkeypatch.setattr(worktree_ops, "_git_out", git_out)
-    monkeypatch.setattr(worktree_ops, "_worktree_has_unpushed_commits", lambda tree: True)
+    monkeypatch.setattr(worktree_ops, "_worktree_has_unpushed_commits", lambda tree, **kw: True)
     assert not kmp.pushed_on_remote("unused")
     assert sum(args[0] == "merge-base" for args, _ in calls) == 50
     assert sum(args[0] == "fetch" for args, _ in calls) == 5
@@ -622,7 +624,7 @@ def test_a_worker_created_card_joins_the_pool_and_a_pin_to_the_ship_host_stays(w
     monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: "worker-2")
     monkeypatch.setattr(kp, "config", lambda: {"worker_queue": {"worker-2": POOL}})
     machines = list(_machines().values())
-    wn.set_registry_fetch(lambda: {"me": "worker-2", "machines": machines})
+    wn.set_registry_fetch(lambda: {"me": "worker-2", "machines": seen_now(machines)})
     out = json.loads(kt._handle_create({"title": "summarise the failing CI jobs", "assignee": "default",
                                         "requires": []}))
     assert out.get("ok") and _runs_on(w2.conn, out["task_id"]) == [POOL], out
@@ -720,7 +722,7 @@ def test_courier_create_denied_by_hub_admission_joins_the_pool_queue(hub, judge,
     monkeypatch.setattr(kp, "config", lambda: {**CFG, **({"worker_pools": {HUB: ["worker-1"]}} if pools else {})})
     machines = [{**m, "labels": [*m["labels"], "capability:hub-write"]} if m["name"] == "worker-2" else m
                 for m in _machines(held=("worker-1",)).values()]
-    wn.set_registry_fetch(lambda: {"me": HUB, "machines": machines})  # worker-2 is a hub-write worker
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now(machines)})  # worker-2: hub-write
     judge.admit_next = False
     args = {"title": "Read ~/.hermes/logs/agent.log on the hub", "requires": [], "assignee": "default"}
     out = json.loads(kt._handle_create(dict(args), origin_intent=_intent(f"request-courier-{pools}")))
@@ -865,7 +867,7 @@ def _on(monkeypatch, gateway, cfg, machines):
     monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: gateway)
     monkeypatch.setattr(kp, "config", lambda: cfg)
     monkeypatch.setattr(kanban_skill_check, "check_task_skills", lambda *a, **k: None)  # no skills dir here
-    wn.set_registry_fetch(lambda: {"me": gateway, "machines": list(machines.values())})
+    wn.set_registry_fetch(lambda: {"me": gateway, "machines": seen_now(machines.values())})
 
 
 @pytest.fixture
@@ -949,6 +951,63 @@ def test_pool_worker_keeps_a_mac_marker_card_when_no_live_machine_holds_every_la
     # A group that adds no label still queues: only the unmet label set falls back.
     out = _create(title="read the dashboard in Chrome")
     assert _runs_on(w2.conn, out["task_id"]) == [POOL], out
+
+
+HUB_WRITE = "capability:hub-write"
+# worker_pools names worker-5: portability attests coordination labels on those members, not on the queue's machines.
+POOLS_CFG = {**CFG, "worker_pools": {HUB: ["worker-5"]}}
+
+
+def _hub_write_registry(kind):
+    machines = _machines()  # worker-1/2: linux + pool:worker, no hub-write attestation
+    machines["worker-5"] = {**W1, "name": "worker-5", "labels": ["linux", HUB_WRITE]}  # no queue label
+    if kind == "held":
+        machines["worker-1"] = {**machines["worker-1"], "labels": ["linux", POOL, HUB_WRITE], "hold": True}
+    elif kind == "joint":
+        machines["worker-1"] = {**machines["worker-1"], "labels": ["linux", POOL, HUB_WRITE]}
+    seen = int(time.time() * 1000)  # coordination attestation only counts fresh members
+    listed = [{**m, "last_seen": seen} for m in machines.values()]
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": listed})
+
+
+# 11-13 review nit 3 (t_01a1d38bd571fd44): with no local-marker hit, queue_decision checked only the queue label, so
+# a card whose coordination label the attested pool members hold, but no live queue machine also holds, queued where
+# nobody could claim it.
+@pytest.mark.parametrize("kind", ["none", "held", "joint"])
+def test_no_marker_card_queues_only_when_one_live_machine_holds_queue_and_coordination_labels(hub, kind):
+    from hermes_cli import kanban_worker_placement as wp
+    _hub_write_registry(kind)
+    args = {"title": "summarise CI", "requires": ["hub:write"], "assignee": "default"}
+    assert kp.portable_reason(args, POOLS_CFG) is None  # worker-5 attests hub-write: portable
+    out = wp.queue_decision(args, POOLS_CFG, HUB, "")
+    if kind == "joint":
+        assert out is not None and out["runs_on"] == [POOL, HUB_WRITE], out
+    else:
+        assert out is None, out  # today's local keep (worker-first enrollment) instead of an unclaimable queue
+    # A card with no coordination label still queues on the queue label alone.
+    plain = wp.queue_decision({"title": "summarise CI", "assignee": "default"}, POOLS_CFG, HUB, "")
+    assert plain is not None and plain["runs_on"] == [POOL], plain
+
+
+# Review nit 1: the injected machine_ok seam is the one liveness source for the whole label set, on both paths.
+def test_machine_ok_seam_judges_the_whole_label_set_on_both_paths(w2, monkeypatch):
+    from hermes_cli import kanban_worker_placement as wp
+    seen = []
+
+    def ok(labels):
+        seen.append(labels)
+        return True
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+    _hub_write_registry("none")  # the real registry has no joint holder; the seam says there is one
+    out = wp.queue_decision({"title": "summarise CI", "requires": ["hub:write"]}, POOLS_CFG, HUB, "", machine_ok=ok)
+    assert out is not None and out["runs_on"] == [POOL, HUB_WRITE] and seen == [(POOL, HUB_WRITE)], (out, seen)
+    seen.clear()
+    w2_cfg = {"worker_queue": {"worker-2": POOL}}
+    _on(monkeypatch, "worker-2", w2_cfg, _no_live_tailnet_pool_worker("none"))
+    keychain = {"title": "rotate the CI token in the Keychain"}
+    out = wp.queue_decision(keychain, w2_cfg, "worker-2", "", machine_ok=ok)
+    assert out is not None and out["runs_on"] == [POOL, TAILNET] and seen == [(POOL, TAILNET)], (out, seen)
+    assert wp.queue_decision(keychain, w2_cfg, "worker-2", "", machine_ok=lambda _labels: False) is None
 
 
 def test_every_built_in_local_marker_has_a_group():

@@ -59,15 +59,21 @@ def _err(msg: str, rc: int = 1) -> int:
 
 
 def _bulk_apply(ids: Iterable[str], op: Callable[[str], Any],
-                ok_msg: Callable[[str], str], fail_msg: Callable[[str], str]) -> int:
-    """Run ``op(tid) -> bool`` per id, print ok/fail lines, exit 1 if any failed."""
-    failed = False
+                ok_msg: Callable[[str], str], fail_msg: Callable[[str], str], *, conn: Any = None) -> int:
+    """Run ``op(tid) -> bool`` per id, print ok/fail lines, exit 1 if any failed. With ``conn`` (the board the
+    writes went to), a write the stopped Board sync keeps local says so (``kanban_board_delivery``). [daveey]"""
+    failed = wrote = False
     for tid in ids:
         if op(tid):
+            wrote = True
             print(ok_msg(tid))
         else:
             failed = True
             print(fail_msg(tid), file=sys.stderr)
+    if wrote and conn is not None:
+        from hermes_cli.kanban_board_delivery import cli_lines
+        for line in cli_lines(conn):
+            print(line)
     return 1 if failed else 0
 
 

@@ -89,7 +89,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 from hermes_cli import kanban_capability_registry as reg
 
@@ -274,17 +274,36 @@ def route_labels(dest: str) -> list[str]:
     return [dest] if is_pool_label(dest) else [f"machine:{dest}"]
 
 
-def label_machines(label, machines: Optional[dict] = None) -> list[str]:
-    """Active, unheld registry machines that carry ``label`` (or every label of a list/set) and pick up other
-    gateways' cards (sorted)."""
+def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) -> list[str]:
+    """Active, unheld, fresh registry machines that carry ``label`` (or every label of a list/set) and pick up
+    other gateways' cards (sorted). Fresh is coordination attestation's window (``last_seen`` within
+    ``FRESH_S``, up to ``SKEW_S`` ahead of this clock): a stale entry holding the whole set leases nothing, so it
+    must not make a queue look live. ``labels`` must be a list of str, as coordination's ``_carries`` requires (a
+    missing or null one is empty); any other shape fails closed, so a malformed entry is skipped rather than raising
+    TypeError or matching a str's characters.
+
+    Board outage: ``wn.registry()`` keeps the last good snapshot, so ``FRESH_S`` after the last successful fetch
+    every entry is stale and this returns []. Callers then fail closed: hub-admission deny-route cards go
+    worker-first (:func:`kanban_hub_admission_placement.pool_route`) and portable cards keep their local placement
+    (:func:`kanban_worker_placement.queue_decision`) instead of queueing on a pool label nobody may lease."""
     from hermes_cli import kanban_worker_node as wn
+    from hermes_cli.kanban_placement_coordination import _fresh
     if machines is None:
         machines = (wn.registry() or {}).get("machines") or {}
     wanted = {label} if isinstance(label, str) else set(label)
+    now = time.time()
     return sorted(name for name, entry in machines.items()
                   if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
-                  and ("pickup" not in entry or wn.advertises_pickup(entry))
-                  and wanted <= set(entry.get("labels") or []))
+                  and ("pickup" not in entry or wn.advertises_pickup(entry)) and _fresh(entry, now)
+                  and registry_carries(entry, wanted))
+
+
+def registry_carries(entry: dict, wanted: set) -> bool:
+    """True when registry ``entry`` carries every label in ``wanted``. ``labels`` must be a list of str
+    (coordination's ``_carries``); missing or null is the empty set; any other shape fails closed. [daveey]"""
+    from hermes_cli.kanban_placement_coordination import _carries
+    labels = entry.get("labels")
+    return _carries({"labels": [] if labels is None else labels}, wanted)
 
 
 class _Cfg:
@@ -518,7 +537,7 @@ def markers_unmeetable_here(self_gw: Optional[str], cfg: Optional[dict], machine
         from hermes_cli import kanban_worker_node as wn
         machines = dict((wn.registry() or {}).get("machines") or {})
     entry = machines.get(self_gw)
-    return isinstance(entry, dict) and "linux" in (entry.get("labels") or [])
+    return isinstance(entry, dict) and registry_carries(entry, {"linux"})
 
 
 def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
@@ -649,7 +668,8 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
 
 
 def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
-                     machine_ok: Optional[Callable[[str], bool]], *, skip: bool = False) -> Optional[dict]:
+                     machine_ok: Optional[Callable[[str | tuple[str, ...]], bool]], *,
+                     skip: bool = False) -> Optional[dict]:
     """Legacy heavy routing; worker pools reuse portability without changing this opt-out path."""
     from hermes_cli.kanban_placement_coordination import legacy_refusal
     worker = c.heavy_target(self_gw)
@@ -663,19 +683,20 @@ def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
             "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
 
 
-def _machine_picks_up(name: str) -> bool:
-    """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
+def _machine_picks_up(name: str | Iterable[str]) -> bool:
+    """``name`` is an active, fresh machine in the Board registry that is not held (draining) and has not turned
     pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
     and worker-1 included, though both claim ``runs_on`` cards), so a missing field counts as on:
     ``heavy_route`` naming the worker is the operator saying it picks up. A pool label (:func:`is_pool_label`) is
-    live when some such machine carries it."""
+    live when some fresh such machine carries it; a label collection (queue label + coordination labels) when one
+    carries all (:func:`label_machines`). A named machine uses the same window: one silent past ``FRESH_S`` leases
+    nothing (the Board's selection skips it), so a ``machine:<name>`` pin to it would strand the card."""
     from hermes_cli import kanban_worker_node as wn
-    if is_pool_label(name):
+    if not isinstance(name, str) or is_pool_label(name):
         return bool(label_machines(name))
     entry = ((wn.registry() or {}).get("machines") or {}).get(name)
-    if not entry or entry.get("state", "active") != "active" or entry.get("hold"):
-        return False
-    return "pickup" not in entry or wn.advertises_pickup(entry)
+    # The empty label set: every other rule (active, unheld, pickup, fresh) is label_machines'.
+    return bool(label_machines((), {name: entry}))
 
 
 def target_live(target: str, *, now: float, live_seconds: int,
@@ -908,7 +929,7 @@ def _raw_explicit_pin(args: dict) -> str:
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
-           machine_ok: Optional[Callable[[str], bool]] = None,
+           machine_ok: Optional[Callable[[str | tuple[str, ...]], bool]] = None,
            info: Optional[Callable[[str], dict]] = None) -> dict:
     """``_decide`` plus one rule: a caller who pinned another gateway never gets a silent local card.
 
@@ -950,7 +971,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
 def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
             self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
             locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
-            machine_ok: Optional[Callable[[str], bool]] = None,
+            machine_ok: Optional[Callable[[str | tuple[str, ...]], bool]] = None,
             info: Optional[Callable[[str], dict]] = None) -> dict:
     """``{"where": "local"|<gateway>, "why": str}`` for a ``kanban_create`` call; heavy work bound for a
     worker is ``{"where": "local", "runs_on": [machine:<worker>], "why": ...}``. Never raises."""
@@ -1248,10 +1269,8 @@ def _task_id_in(res) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _owner_card(stdout: str) -> tuple[Optional[str], Optional[str]]:
-    """(task id, status) from ``hermes-hub outcomes --id`` output when the hub already holds the owner's
-    card: an origin-bound create stays ``waiting`` until this gateway's next full sync accepts the
-    binding, but the card exists from the moment the owner posts it."""
+def _owner_result(stdout: str) -> tuple[bool, Optional[dict]]:
+    """(the hub holds the owner's card, the owner's result) from ``hermes-hub outcomes --id`` output."""
     for line in reversed((stdout or "").splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -1262,34 +1281,64 @@ def _owner_card(stdout: str) -> tuple[Optional[str], Optional[str]]:
             continue
         if isinstance(out, dict) and out.get("remote_state") in ("waiting", "done"):
             res = out.get("remote_result")
-            st = res.get("status") if isinstance(res, dict) else None
-            return _task_id_in(res), st if isinstance(st, str) else None
+            return True, res if isinstance(res, dict) else None
+        return False, None
+    return False, None
+
+
+def _owner_card(stdout: str) -> tuple[Optional[str], Optional[str]]:
+    """(task id, status) from ``hermes-hub outcomes --id`` output when the hub already holds the owner's
+    card: an origin-bound create stays ``waiting`` until this gateway's next full sync accepts the
+    binding, but the card exists from the moment the owner posts it."""
+    held, res = _owner_result(stdout)
+    if not held:
         return None, None
-    return None, None
+    st = res.get("status") if isinstance(res, dict) else None
+    return _task_id_in(res), st if isinstance(st, str) else None
+
+
+def owner_chat_link(result: object) -> dict:
+    """``{"chat_link": "owner_written"}`` when the owner's create result says it wrote the origin chat's
+    ``created`` link and its Board sync runs (``kanban_origin_creation.origin_link_fields``), else ``{}``.
+    [daveey] Only the owner knows: an owner on older core or with its sync off writes none, and it writes one for a
+    ``local-<sha256>`` chat an ancestor already proves, so the chat id's shape cannot tell."""
+    from hermes_cli.kanban_origin_creation import OWNER_WRITTEN
+    written = isinstance(result, dict) and result.get("origin_chat_link") == OWNER_WRITTEN
+    return {"chat_link": OWNER_WRITTEN} if written else {}
+
+
+def _done_result(rid: str) -> Optional[dict]:
+    row = _sent_row(rid)
+    try:
+        res = json.loads(row[1] or "{}") if row and row[0] == "done" else None
+    except (TypeError, ValueError):  # a non-JSON result is no answer
+        return None
+    return res if isinstance(res, dict) else None
 
 
 def remote_status(rid: str) -> Optional[str]:
     """The created card's status on the target (``ready``, ``triage``...) when its result names one."""
-    row = _sent_row(rid)
-    try:
-        res = json.loads(row[1] or "{}") if row and row[0] == "done" else {}
-    except Exception:
-        return None
-    st = res.get("status") if isinstance(res, dict) else None
+    res = _done_result(rid) or {}
+    st = res.get("status")
     return st if isinstance(st, str) else None
 
 
 def await_task_id(rid: str, *, hub_cli: str, budget: float, clock: Callable[[], float] = time.monotonic,
-                  sleep: Callable[[float], None] = time.sleep) -> tuple[Optional[str], Optional[str]]:
+                  sleep: Callable[[float], None] = time.sleep,
+                  result_out: Optional[dict] = None) -> tuple[Optional[str], Optional[str]]:
     """Wait up to ``budget`` seconds for the target to make the card of request ``rid``.
 
-    Returns (task id, status on the target), (None, None) while still pending.
+    Returns (task id, status on the target), (None, None) while still pending. ``result_out``, when given, gets
+    the owner's result dict under ``"result"`` once the id is known (``owner_chat_link`` reads it).
 
     The result only reaches this gateway when its hermes-hub client fetches outcomes. A client with
     ``hermes-hub outcomes`` is asked about once a second; an older one gets ONE detached ``sync``
     (it outlives this wait, so a late result is still recorded) while the replica is polled."""
+    out = {} if result_out is None else result_out
     tid = remote_task_id(rid)
     if tid or budget <= 0:
+        if tid:
+            out["result"] = _done_result(rid)
         return tid, remote_status(rid) if tid else None
     deadline = clock() + budget
     fast = hub_has_outcomes(hub_cli)
@@ -1300,13 +1349,15 @@ def await_task_id(rid: str, *, hub_cli: str, budget: float, clock: Callable[[], 
             left = max(1.0, min(5.0, deadline - clock()))
             argv = [hub_cli, "outcomes", "--id", rid, "--wait", f"{left:.1f}"]
             # Bound the call itself too (the client's HTTP timeout is 60 s); a test fake takes argv only.
-            _, out, _ = (hub_runner(argv) if hub_runner is not _default_runner
-                         else _default_runner(argv, timeout=left + 5))
-            tid, st = _owner_card(out)
+            _, stdout, _ = (hub_runner(argv) if hub_runner is not _default_runner
+                            else _default_runner(argv, timeout=left + 5))
+            tid, st = _owner_card(stdout)
             if tid:
+                out["result"] = _owner_result(stdout)[1]
                 return tid, st
         tid = remote_task_id(rid)
         if tid:
+            out["result"] = _done_result(rid)
             return tid, remote_status(rid)
         if clock() >= deadline or remote_state(rid) in FAILED_STATES:  # rejected: it will never come
             return None, None

@@ -25,7 +25,9 @@ NAME = "/home/example/.hermes/kanban/evidence/token-broker-audit/BRIEF.md"
 
 
 def _machine(name, labels, **extra):
-    return {"name": name, "state": "active", "labels": labels, "hold": False, **extra}
+    # Seen now: named-machine and pool liveness both count only members seen within coordination.FRESH_S.
+    return {"name": name, "state": "active", "labels": labels, "hold": False, "last_seen": time.time() * 1000,
+            **extra}
 
 
 @pytest.fixture

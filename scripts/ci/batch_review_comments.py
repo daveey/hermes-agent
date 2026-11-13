@@ -47,10 +47,13 @@ Safety / behaviour:
     re-refresh of that head (a ``workflow_dispatch`` with ``head_sha``) unless
     one is already queued for it (state line ``requeued=``) or the comment
     keeps that head's completed ("ran on") snapshot. The re-refresh itself
-    never queues another; after it, the hourly sweep is next. Why: PR1661's
-    CI-completion refresh (run 43279407344, 2026-11-12 18:24Z) failed one
-    download, went red, and nothing retried; the approved, green PR waited
-    45 min on a "running on" comment.
+    never queues another; after it, the hourly sweep is next. A targeted run
+    whose budget is spent before it can start a PR marks that PR failed too.
+    A re-run of failed CI jobs on the same head finds the earlier attempt's
+    result (or its queued mark) and queues nothing (mark_refresh_failed).
+    Why: PR1661's CI-completion refresh (run 43279407344, 2026-11-12 18:24Z)
+    failed one download, went red, and nothing retried; the approved, green
+    PR waited 45 min on a "running on" comment.
 """
 
 from __future__ import annotations
@@ -75,9 +78,11 @@ WORKFLOW_FILE = "ci-review-comment.yml"
 # is the only writer that runs right after CI completes, so it waits longer (~90 s); the sweep visits every open PR.
 TARGETED_DOWNLOAD_RETRY_DELAYS = (5, 10, 15, 25, 35)
 BATCH_DOWNLOAD_RETRY_DELAYS = (5, 10)
-# The one delayed re-refresh a failed CI-triggered refresh queues, and the cap on any requested delay (job timeout 15m).
+# The one delayed re-refresh a failed CI-triggered refresh queues, and the cap on any requested delay. The cap leaves
+# RUN_BUDGET_S room after the wait for the PR listing, two full download attempts and the PR's reads/write: at 600 a
+# manual dispatch asking for >= 600 s spent the budget before its first attempt (PR #1907 review).
 RE_REFRESH_DELAY_S = 300
-MAX_REFRESH_DELAY_S = 600
+MAX_REFRESH_DELAY_S = 480
 # Wall-clock budget of one run, from the start of main() (a re-refresh's delay included): the job's timeout-minutes
 # less headroom for checkout/setup and the last in-flight write. Download retries stop, and the sweep stops starting
 # PRs, once a full attempt (lc.DOWNLOAD_ATTEMPT_MAX_S: its API and blob timeouts) would not finish inside it, so a
@@ -365,6 +370,12 @@ def mark_refresh_failed(token: str, repo: str, pr: dict, now: datetime, error: s
     marker is skipped (PR closed, head moved, a newer snapshot of the head, or a completed "ran on" snapshot of the
     head kept: that head already has its result), nor when the comment records a re-refresh already queued for this
     head (``requeued=``; CI and Docker each trigger a refresh, PR #1699 review). A successful snapshot drops the mark.
+
+    Known gap (PR #1907 review): a "Re-run failed jobs" of CI on the same head keeps that head's sha, so the comment
+    still holds the earlier attempt's completed ("ran on") snapshot, or its ``requeued=`` mark, and a transient failure
+    of the re-run's own refresh queues nothing: the earlier attempt's result stands until the next hourly sweep (or a
+    manual dispatch with ``head_sha``). The state line records the writing run, not CI's run attempt, so the two cannot
+    be told apart here.
     """
     owner, name = repo.split("/")
     number, sha = pr["number"], pr["head"]["sha"]
@@ -403,6 +414,15 @@ def mark_refresh_failed(token: str, repo: str, pr: dict, now: datetime, error: s
     return "; ".join([*notes, "comment marked refresh failed"])
 
 
+def _mark_failed(token: str, repo: str, pr: dict, now: datetime, error: str, *, re_refresh: bool) -> None:
+    """mark_refresh_failed for a targeted run, logging its outcome; never raises (the run is already red)."""
+    try:
+        note = mark_refresh_failed(token, repo, pr, now, error, re_refresh=re_refresh)
+    except (OSError, ValueError, RuntimeError) as e:
+        note = f"ERROR marking the failed refresh: {e}"
+    print(f"  PR #{pr['number']}: {note}", file=sys.stderr)
+
+
 def run_batch(token: str, repo: str, now: datetime | None = None, *, head_sha: str = "",
               trigger_workflow: str = "", deadline: float | None = None) -> int:
     """Snapshot every eligible open PR, or only those whose head is exactly ``head_sha``.
@@ -434,9 +454,20 @@ def run_batch(token: str, repo: str, now: datetime | None = None, *, head_sha: s
         if deadline is not None and _clock() + lc.DOWNLOAD_ATTEMPT_MAX_S + PR_MIN_BUDGET_S > deadline:
             left = len(targets) - i
             failures += left
+            if not head_sha:
+                then = "the next sweep takes them"
+            elif trigger_workflow:  # mark_refresh_failed queues one re-refresh per head (or notes the queued one)
+                then = "each is marked refresh failed; at most one re-refresh per head is queued, then the hourly sweep"
+            else:  # the re-refresh itself (or a dispatch) queues nothing
+                then = "each is marked refresh failed; the hourly sweep is next"
             print(f"ERROR run budget ({RUN_BUDGET_S}s) spent: {left} PR(s) not refreshed "
-                  f"(#{', #'.join(str(p['number']) for p in targets[i:])}); the next sweep takes them",
+                  f"(#{', #'.join(str(p['number']) for p in targets[i:])}); {then}",
                   file=sys.stderr)
+            if head_sha:  # a targeted run must not leave "running on" standing as if live (PR #1907 review)
+                for skipped in targets[i:]:
+                    _mark_failed(token, repo, skipped, now,
+                                 f"run budget ({RUN_BUDGET_S}s) spent before the refresh started",
+                                 re_refresh=bool(trigger_workflow))
             break
         try:
             result = process_pr(token, repo, pr, now, trigger_workflow=trigger_workflow, retry_delays=delays,
@@ -447,11 +478,7 @@ def run_batch(token: str, repo: str, now: datetime | None = None, *, head_sha: s
             print(f"  PR #{pr['number']}: ERROR {e}", file=sys.stderr)
             if head_sha:
                 # The sweep stays as it was (the next sweep retries); a targeted refresh must not leave "running on".
-                try:
-                    note = mark_refresh_failed(token, repo, pr, now, str(e), re_refresh=bool(trigger_workflow))
-                except (OSError, ValueError, RuntimeError) as e2:
-                    note = f"ERROR marking the failed refresh: {e2}"
-                print(f"  PR #{pr['number']}: {note}", file=sys.stderr)
+                _mark_failed(token, repo, pr, now, str(e), re_refresh=bool(trigger_workflow))
         except (OSError, ValueError, RuntimeError) as e:
             failures += 1
             print(f"  PR #{pr['number']}: ERROR {e}", file=sys.stderr)

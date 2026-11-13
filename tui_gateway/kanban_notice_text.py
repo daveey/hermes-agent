@@ -23,6 +23,12 @@ def timed_out_suffix(task, payload: dict, title: str) -> str:
     return f" timed out (max_runtime={limit}s){tail}"
 
 
+def left_open_suffix(payload: dict) -> str:
+    from hermes_cli.kanban_pr_landing import left_open_notice
+    notice = left_open_notice(payload)
+    return f"\n{notice}" if notice else ""
+
+
 def quota_episode_suffix(payload: dict) -> str:
     from hermes_cli.kanban_quota_episode import notice_text
     return notice_text(payload)

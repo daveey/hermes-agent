@@ -223,3 +223,173 @@ def test_a_worker_node_does_not_copy_a_ready_card_whose_parent_is_open(kanban_ho
         assert {r["id"] for r in wn.candidates(replica, OTHER)} == {"t_c", "t_free"}
     finally:
         replica.close()
+
+
+# --- synced board: the mirror's silence counts only when its replica is at the feed head ----------------------
+# 2026-11-12, David-MBP: a sync round stuck for hours in a long pull never refreshed the remote-parent mirror, so two
+# rework cards whose parents were done on the Board were blocked "parent ... missing" and two repair cards filed.
+
+def _stamp_replica(at, mirrored=...):
+    """Stamp the replica's last pull at ``at``. A whole round also refreshes the remote-parent mirror from that pull,
+    so ``mirror_pulled_at`` follows it unless ``mirrored`` names an older refresh (or None: never refreshed)."""
+    replica = kbc.connect(ksc.shadow_path(BOARD))
+    try:
+        with kbc.write_txn(replica):
+            replica.execute("UPDATE kanban_sync_state SET pulled_at = ?, mirror_pulled_at = ?",
+                            (at, at if mirrored is ... else mirrored))
+    finally:
+        replica.close()
+
+
+def _repairs(conn, child):
+    return conn.execute("SELECT id FROM tasks WHERE created_by = 'missing-parent-detector' AND title LIKE ?",
+                        (f"%{child}",)).fetchall()
+
+
+def _age_streak(conn, child):
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE task_events SET created_at = created_at - ? WHERE task_id = ? AND kind = 'parent_missing'",
+                     (kb.PARENT_MISSING_BLOCK_SECONDS + 1, child))
+
+
+def test_a_stale_replica_never_starts_or_expires_a_missing_parent_streak(live, svc, kanban_home):
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)  # the replica exists and holds the Board
+    _link_raw(live, "t_after_offline", child)  # a foreign parent the stalled round never mirrored
+    _stamp_replica(time.time() - kb.PARENT_MISSING_BLOCK_SECONDS - 1)  # last reached the feed head > 10 min ago
+    assert kb.parent_states(live, child) == [("t_after_offline", None)]
+    kb.recompute_ready(live)
+    assert not _events(live, child, "parent_missing")  # before the fix: the streak started from stale evidence
+    assert kb.get_task(live, child).status == "todo"  # an unknown parent still gates
+    # A streak begun while the replica was fresh is not expired by a replica that has since gone stale.
+    with kbc.write_txn(live):
+        kb._append_event(live, child, "parent_missing", {"parents": ["t_after_offline"]})
+    _age_streak(live, child)
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "todo" and not _events(live, child, "blocked")
+    assert not _repairs(live, child)
+
+
+def test_a_fresh_replica_that_lacks_the_parent_still_blocks_and_files_one_repair(live, svc, kanban_home):
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    _link_raw(live, "t_ghost", child)
+    _stamp_replica(time.time())  # at the feed head now: the Board really has no t_ghost
+    kb.recompute_ready(live)
+    assert len(_events(live, child, "parent_missing")) == 1
+    assert kb.get_task(live, child).status == "todo"
+    _age_streak(live, child)
+    kb.recompute_ready(live)
+    t = kb.get_task(live, child)
+    assert (t.status, t.block_kind) == ("blocked", "transient")
+    [(payload, _at)] = _events(live, child, "blocked")
+    assert "parent t_ghost missing from this board" in payload
+    kb.recompute_ready(live)
+    assert len(_repairs(live, child)) == 1
+
+
+def test_a_detached_board_keeps_its_mirror_table_but_still_blocks_a_missing_parent(live, svc, kanban_home):
+    """Sync off (``set_mode('off')``) keeps the mirror table but leaves no replica to judge by: the board is its own
+    authority again, so the freshness gate must not switch the detector off for good."""
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    _link_raw(live, "t_ghost", child)
+    sync.set_mode(live, "off")
+    support.write_sync_config(kanban_home, False)
+    assert sync.has_remote_parents(live)
+    kb.recompute_ready(live)
+    assert len(_events(live, child, "parent_missing")) == 1  # before the fix: no event, todo forever
+    _age_streak(live, child)
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "blocked"
+    kb.recompute_ready(live)
+    assert len(_repairs(live, child)) == 1
+
+
+def test_a_stalled_replica_is_reported_once_per_stale_stamp_at_info(live, svc, kanban_home, caplog, monkeypatch):
+    """Review nit on #1931: a stalled sync must not leave the deferral silent (DEBUG only), nor repeat it every
+    tick. One INFO line per board per replica stamp names the board, the last time at the head and the count."""
+    from hermes_cli import kanban_replica_freshness as fr
+    monkeypatch.setattr(fr, "_reported", {}, raising=False)
+    children = [kb.create_task(live, title=f"child {i}", assignee="worker") for i in range(2)]
+    _round(kanban_home, svc)
+    for i, child in enumerate(children):
+        _link_raw(live, f"t_after_offline_{i}", child)
+    stale = int(time.time()) - fr.FRESH_SECONDS - 60
+    _stamp_replica(stale)
+    caplog.set_level("INFO", logger=fr.__name__)
+
+    def lines():
+        return [r.getMessage() for r in caplog.records if r.name == fr.__name__ and r.levelname == "INFO"]
+
+    kb.recompute_ready(live)
+    kb.recompute_ready(live)  # same stale stamp: no second line
+    [first] = lines()
+    assert f"board {BOARD}" in first and "2 child(ren)" in first
+    assert time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(stale)) in first
+    _stamp_replica(stale + 1)  # the replica moved but is still behind: said once more
+    kb.recompute_ready(live)
+    assert len(lines()) == 2
+    for path in ksc.shadow_path(BOARD).parent.glob(f"{BOARD}.db*"):  # no replica at all: said once, as such
+        path.unlink()
+    kb.recompute_ready(live)
+    kb.recompute_ready(live)
+    assert len(lines()) == 3 and "no readable replica" in lines()[-1]
+    assert all(kb.get_task(live, c).status == "todo" and not _events(live, c, "parent_missing") for c in children)
+
+
+def _replica_stamps():
+    replica = kbc.connect(ksc.shadow_path(BOARD))
+    try:
+        row = replica.execute("SELECT pulled_at, mirror_pulled_at FROM kanban_sync_state").fetchone()
+        return row["pulled_at"], row["mirror_pulled_at"]
+    finally:
+        replica.close()
+
+
+def test_a_fresh_pull_does_not_vouch_for_a_mirror_not_yet_refreshed_from_it(live, svc, kanban_home):
+    """Review nit 1 (5888215084) on #1931: the round stamps ``pulled_at`` before its live pull and mirror refresh.
+    A streak that aged through a stall must not block, nor file a repair, in the pass between the two."""
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    pulled, mirrored = _replica_stamps()
+    assert mirrored == pulled  # a whole round stamps the mirror refresh from its own pull
+    _link_raw(live, "t_new_foreign", child)  # linked while the mirror was fresh: the streak starts
+    kb.recompute_ready(live)
+    assert len(_events(live, child, "parent_missing")) == 1
+    _age_streak(live, child)  # ... then the sync stalls for longer than the block window
+    now = time.time()
+    _stamp_replica(now, mirrored=now - 3600)  # caught up to the feed head; mirror still from before the stall
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "todo"  # before the fix: blocked on the stale mirror
+    assert not _events(live, child, "blocked") and not _repairs(live, child)
+    _round(kanban_home, svc)  # the round refreshes the mirror: the Board really lacks the parent
+    pulled, mirrored = _replica_stamps()
+    assert mirrored == pulled
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "blocked"
+    kb.recompute_ready(live)
+    assert len(_repairs(live, child)) == 1
+
+
+def test_the_deferral_line_is_said_again_when_more_children_wait_on_the_same_stamp(
+        live, svc, kanban_home, caplog, monkeypatch):
+    """Review nit 2 (5888215084) on #1931: keyed on the stamp alone, the line kept the first pass's count."""
+    from hermes_cli import kanban_replica_freshness as fr
+    monkeypatch.setattr(fr, "_reported", {}, raising=False)
+    children = [kb.create_task(live, title=f"child {i}", assignee="worker") for i in range(3)]
+    _round(kanban_home, svc)
+    _link_raw(live, "t_after_offline_0", children[0])
+    _stamp_replica(int(time.time()) - fr.FRESH_SECONDS - 60)
+    caplog.set_level("INFO", logger=fr.__name__)
+
+    def lines():
+        return [r.getMessage() for r in caplog.records if r.name == fr.__name__ and r.levelname == "INFO"]
+
+    kb.recompute_ready(live)
+    for i, child in enumerate(children[1:], start=1):  # same stale stamp, two more children start waiting
+        _link_raw(live, f"t_after_offline_{i}", child)
+    kb.recompute_ready(live)
+    kb.recompute_ready(live)  # same stamp, same count: no third line
+    assert len(lines()) == 2
+    assert "1 child(ren)" in lines()[0] and "3 child(ren)" in lines()[1]

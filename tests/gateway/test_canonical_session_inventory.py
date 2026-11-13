@@ -39,6 +39,8 @@ async def test_created_session_snapshot_carries_inventory_for_frozen_toolsets(tm
     monkeypatch.setenv('HERMES_HOME', str(home))
     monkeypatch.setattr(run, '_hermes_home', home)
     monkeypatch.setattr(banner, '_available_skills_cache', None)
+    # These assert the reply's inventory itself; a cold-import CI runner must not race the reply budget.
+    monkeypatch.setattr('gateway.session_local_inventory.REPLY_INVENTORY_BUDGET_S', 120.0)
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     runner = SimpleNamespace(session_store=store, _session_db=store._db, adapters={}, _draining=False,
                              _cached_agent_for=lambda route: None)
@@ -95,6 +97,8 @@ async def test_cli_surface_snapshot_carries_main_cli_toolsets_and_startup_warnin
     monkeypatch.setenv('HERMES_HOME', str(home))
     monkeypatch.setattr(run, '_hermes_home', home)
     monkeypatch.setattr(banner, '_available_skills_cache', None)
+    # These assert the reply's inventory itself; a cold-import CI runner must not race the reply budget.
+    monkeypatch.setattr('gateway.session_local_inventory.REPLY_INVENTORY_BUDGET_S', 120.0)
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     runner = SimpleNamespace(session_store=store, _session_db=store._db, adapters={}, _draining=False,
                              _cached_agent_for=lambda route: None)
@@ -141,6 +145,8 @@ async def test_cli_surface_counts_kanban_skills_like_main_cli_without_leaking(tm
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     monkeypatch.setattr(run, '_hermes_home', home)
     monkeypatch.setattr(banner, '_available_skills_cache', None)
+    # These assert the reply's inventory itself; a cold-import CI runner must not race the reply budget.
+    monkeypatch.setattr('gateway.session_local_inventory.REPLY_INVENTORY_BUDGET_S', 120.0)
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     runner = SimpleNamespace(session_store=store, _session_db=store._db, adapters={}, _draining=False,
                              _cached_agent_for=lambda route: None)

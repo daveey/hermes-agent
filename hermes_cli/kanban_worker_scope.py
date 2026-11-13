@@ -84,13 +84,20 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
-def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | None = None) -> dict | None:
+def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | None = None,
+                 started_at: float | None = None, exit_code: int | None = None) -> dict | None:
     """The run scope's failure, or None when the scope did not fail.
 
     Under ``OOMPolicy=continue`` a child's OOM kill leaves the scope running, so the
     worker's own ``oom_kill`` count no longer means the worker died of it. The kernel's
     record names the victim instead: the run failed by OOM only when that victim is the
-    worker ``pid`` itself (the agent was the largest process in its scope).
+    worker ``pid`` itself (the agent was the largest process in its scope). That lookup
+    runs whenever ``pid`` is known, not only when this process probed the policy: a
+    dispatcher restarted after the spawn has no probe verdict, and the agent's own SIGKILL
+    leaves no snapshot. ``started_at`` (the run's start, epoch seconds) bounds the
+    kernel-log read, which runs inside the reclaim write transaction; a known
+    ``exit_code`` of 0 skips that per-pid read, since a worker that exited cleanly was not
+    the victim.
     """
     if run_id is None:
         return None
@@ -106,10 +113,11 @@ def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | 
     if snapshot.get("oom_kill", 0) > 0 and not continued:
         result = "oom-kill"
     victim = None
+    since = journal_since(started_at)
     if result == "oom-kill":
-        victim = kernel_oom_victim(unit)
-    elif result != "signal" and pid and (continued or _oom_continue_supported):
-        victim = kernel_oom_victim(unit, pid=pid)
+        victim = kernel_oom_victim(unit, since=since)
+    elif result != "signal" and pid and exit_code != 0:  # rc 0: the worker outlived any kill
+        victim = kernel_oom_victim(unit, pid=pid, since=since)
         result = "oom-kill" if victim else result
     if result not in {"oom-kill", "signal"}:
         return None
@@ -128,6 +136,25 @@ def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | 
 _OOM_LINE = re.compile(r"oom-kill:.*?task_memcg=([^,]+),task=([^,]*),pid=(\d+)")
 _KILLED_LINE = re.compile(r"Killed process (\d+) \(.*?\).*?anon-rss:(\d+)kB")
 _USAGE_LINE = re.compile(r"memory: usage \d+kB, limit (\d+)kB")
+
+
+def run_started_at(conn: sqlite3.Connection | None, run_id: int | None) -> int | None:
+    """The run's start (epoch): it bounds the kernel-log read under the reclaim write txn."""
+    if conn is None or run_id is None:
+        return None
+    try:
+        row = conn.execute("SELECT started_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def journal_since(started_at: float | None) -> str:
+    """``journalctl -S`` for records no older than ``started_at`` (epoch seconds); a day when unknown."""
+    try:
+        return f"@{int(started_at)}" if started_at and float(started_at) > 0 else "-24h"
+    except (TypeError, ValueError):
+        return "-24h"
 
 
 def kernel_oom_victim(unit: str, *, pid: int | None = None, since: str = "-24h") -> dict | None:

@@ -179,13 +179,14 @@ def continue_task(
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         # A successful checkpoint supersedes stale auth/quota diagnostics, not counters.
-        cur = conn.execute(
+        from hermes_cli.kanban_source_receipt import with_source_receipt
+        cur = with_source_receipt(conn, task_id, lambda: conn.execute(
             "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
             "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL, "
             "last_failure_error = NULL "
             "WHERE id = ? AND status = 'running' AND current_run_id = ?",
             (new_status, task_id, int(row["current_run_id"])),
-        )
+        ))
         if cur.rowcount != 1:
             return {"ok": False, "error": "task changed state concurrently"}
         kpp.apply(conn, task_id, pin)  # unpushed state keeps a pooled card on this worker
@@ -201,6 +202,8 @@ def continue_task(
             conn, task_id, outcome=CONTINUED_OUTCOME, status=CONTINUED_OUTCOME,
             summary=kb._first_line(checkpoint, 400) or "checkpoint", metadata=meta,
         )
+        from hermes_cli import kanban_run_end_lease
+        kanban_run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
         payload = {"continuation": streak + 1, "status": new_status, "resume_status": source_status}
         # Server-derived ordering proof for PR comments sharing this checkpoint's second.
         # Persist inside the same transaction; caller metadata cannot override it.
@@ -245,14 +248,34 @@ def pending_wake_payload(kind: Optional[str], payload: Any) -> Optional[dict]:
     return data if isinstance(data.get("wake_at"), (int, float)) else None
 
 
-def pending_wake(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
-    """``continued`` payload (with ``wake_at``) of the event that parked ``task_id`` in ``scheduled``."""
+def park_state(conn: sqlite3.Connection, task_id: str) -> dict:
+    """The park holding ``task_id`` in ``scheduled``, read one way for the dispatcher
+    (:func:`pending_wake`, :func:`missing_wake`) and every display (``kanban_wake_summary``), so
+    the shown wake cannot drift from the one acted on. [daveey]
+
+    ``{"payload", "parked_at", "timed"}``: the latest ``SCHEDULED_ENTRY_EVENTS`` payload and its
+    time; ``timed`` when that payload carries ``wake_at``. With no parking event the payload is
+    empty and ``parked_at`` is the card's last event (else now)."""
+    from hermes_cli import kanban_db as kb
+
     marks = ",".join("?" for _ in SCHEDULED_ENTRY_EVENTS)
     event = conn.execute(
-        f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
+        f"SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
         "ORDER BY id DESC LIMIT 1", (task_id, *SCHEDULED_ENTRY_EVENTS),
     ).fetchone()
-    return pending_wake_payload(event[0], event[1]) if event else None
+    if event is None:
+        last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (task_id,)).fetchone()
+        parked_at = int(last[0]) if last and last[0] else int(time.time())
+        return {"payload": {}, "parked_at": parked_at, "timed": False}
+    timed = pending_wake_payload(event[0], event[1])
+    return {"payload": timed if timed is not None else kb._json_dict(event[1]),
+            "parked_at": int(event[2]), "timed": timed is not None}
+
+
+def pending_wake(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """``continued`` payload (with ``wake_at``) of the event that parked ``task_id`` in ``scheduled``."""
+    park = park_state(conn, task_id)
+    return park["payload"] if park["timed"] else None
 
 
 def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
@@ -287,6 +310,9 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
             continue
         resume = payload.get("resume_status") if payload.get("resume_status") in ("ready", "review") else "ready"
         with kb.write_txn(conn):
+            from hermes_cli.kanban_terminal_guard import skip_wake
+            if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=wake_at):
+                continue  # a stale copy: the card completed after it parked (t_01a1c7b27ca3b496) [daveey]
             landing = kb._landing_status_after_parents(conn, tid)
             new_status = "review" if landing == "ready" and resume == "review" else landing
             cur = conn.execute(
@@ -303,27 +329,24 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
 HUMAN_BLOCK_KINDS = ("needs_input", "capability")
 
 
-def missing_wake(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+def missing_wake(conn: sqlite3.Connection, task_id: str, *, park: Optional[dict] = None) -> Optional[dict]:
     """For a ``scheduled`` card with no timed wake: ``{"parked_at", "wake_at", "reason"}`` with the
-    wake implied by ``kanban_timed_park.implied_wake`` (None when the card has a real wake). [daveey]"""
-    from hermes_cli import kanban_db as kb
+    wake implied by ``kanban_timed_park.implied_wake`` (None when the card has a real wake).
+    ``park`` is a :func:`park_state` the caller already read. [daveey]"""
     from hermes_cli.kanban_timed_park import implied_wake
 
-    marks = ",".join("?" for _ in SCHEDULED_ENTRY_EVENTS)
-    event = conn.execute(
-        f"SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
-        "ORDER BY id DESC LIMIT 1", (task_id, *SCHEDULED_ENTRY_EVENTS),
-    ).fetchone()
-    if event is not None and pending_wake_payload(event[0], event[1]) is not None:
+    park = park_state(conn, task_id) if park is None else park
+    if park["timed"]:
         return None
-    if event is None:
-        last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (task_id,)).fetchone()
-        parked_at = int(last[0]) if last and last[0] else int(time.time())
-        payload: dict = {}
-    else:
-        parked_at, payload = int(event[2]), kb._json_dict(event[1])
+    payload, parked_at = park["payload"], park["parked_at"]
     reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
     return {"parked_at": parked_at, "wake_at": implied_wake(payload, parked_at), "reason": reason}
+
+
+def blocks_for_human(park: dict, block_kind: Optional[str]) -> bool:
+    """True when :func:`_enforce_wake_invariant` moves this park to ``blocked`` instead of waking
+    it: no timed wake and a human ``block_kind``. Displays read this, not their own rule. [daveey]"""
+    return not park["timed"] and block_kind in HUMAN_BLOCK_KINDS
 
 
 def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int, woken: list) -> bool:
@@ -333,10 +356,11 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
     anything else wakes at its implied time. True when the card moved. [daveey]"""
     from hermes_cli import kanban_db as kb
 
-    info = missing_wake(conn, tid)
+    park = park_state(conn, tid)
+    info = missing_wake(conn, tid, park=park)
     if info is None:
         return False
-    if block_kind in HUMAN_BLOCK_KINDS:
+    if blocks_for_human(park, block_kind):
         from hermes_cli.kanban_block_routing import latest_block_reason
 
         reason = latest_block_reason(conn, tid) or info["reason"] or (
@@ -353,6 +377,9 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
     if info["wake_at"] > now:
         return False
     with kb.write_txn(conn):
+        from hermes_cli.kanban_terminal_guard import skip_wake
+        if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=info["wake_at"]):
+            return False
         landing = kb._landing_status_after_parents(conn, tid)
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL WHERE id = ? AND status = 'scheduled'",

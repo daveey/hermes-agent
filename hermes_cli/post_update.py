@@ -324,6 +324,27 @@ def step_provision_runtimes() -> dict:
     return {"ok": True, "refreshed": refreshed}
 
 
+def step_kanban_board_schema(project_root: Path | None = None) -> dict:
+    """Board migrations belong to the home's installed core only (``kanban_schema_owner``). [daveey]
+
+    A checkout that is not this home's installed core (a worktree, scratch clone, prebuild stage, or env at
+    another HEAD) skips them here, and its board connects open read-only rather than migrate. The installed
+    core migrates on its first board connect, as before.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_schema_owner as owner
+
+    board = kb.kanban_home() / "kanban.db"
+    running = None if project_root is None else Path(project_root)
+    decision = owner.decide(board, running=running)
+    if decision.allowed:
+        return {"ok": True, "skipped": "first-connect", "why": decision.why}
+    logger.info("home maintenance: skipping board migrations: %s is %s (%s)", decision.running, decision.why,
+                decision.installed)
+    return {"ok": True, "skipped": "not-installed-core", "installed": str(decision.installed),
+            "running": str(decision.running)}
+
+
 # ---------------------------------------------------------------------------
 # step registries — boot_bootstrap gates each list with the matching record
 # ---------------------------------------------------------------------------
@@ -333,6 +354,7 @@ HOME_STEPS: tuple = (
     ("migrate_config", step_migrate_config),
     ("sync_skills", step_sync_skills),
     ("state_db_guard", step_state_db_guard),
+    ("kanban_board_schema", step_kanban_board_schema),
     ("drop_live_plugin_catalog", step_drop_live_plugin_catalog),
     ("expose_cli", expose_cli),
 )

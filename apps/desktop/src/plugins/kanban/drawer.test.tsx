@@ -32,8 +32,16 @@ let detail: object
 let client: QueryClient
 let disposeApi: () => void
 let disposeLocales: () => void
+// A GET path whose next read fails once (a dropped first read that React Query then retries).
+let failOnce = new Set<string>()
+// A GET path whose every read fails (gateway unreachable, task gone, a very slow link timing out).
+let failAlways = new Set<string>()
 
 const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<unknown> => {
+  if (!options?.method && (failOnce.delete(path) || failAlways.has(path))) {
+    throw new Error(`dropped read: ${path}`)
+  }
+
   if (path === '/tasks/t_example/attachments' && options?.method === 'POST') {
     detail = { ...legacyDetail, attachments: [{ id: 1, filename: options.upload?.filename }] }
 
@@ -74,6 +82,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  failOnce = new Set()
+  failAlways = new Set()
   setApiRequestConnection(null)
   setApiRequestProfile(null)
   clearNotifications()
@@ -265,6 +275,126 @@ describe('task attachment compatibility', () => {
 })
 
 describe('task modal dialog', () => {
+  it('tags the reads of each open foreground, so a slow link never skips a re-open; refetches stay polls', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+
+    const priorities = (match: (path: string) => boolean) =>
+      rest.mock.calls
+        .filter(([path, options]) => match(path) && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    const taskReads = () => priorities(path => path === '/tasks/t_example')
+
+    const logReads = () => priorities(path => path.startsWith('/tasks/t_example/log?'))
+
+    const first = openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground']))
+    await waitFor(() => expect(logReads()).toEqual(['foreground']))
+
+    // The socket invalidation / interval heartbeat of the same open: a background poll, thinned on a slow link.
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['kanban'] })
+    })
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', undefined]))
+    await waitFor(() => expect(logReads()).toEqual(['foreground', undefined]))
+
+    // Closing and re-opening the same task within seconds (cache still warm) is the user's read again.
+    first.unmount()
+    openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', undefined, 'foreground']))
+    await waitFor(() => expect(logReads()).toEqual(['foreground', undefined, 'foreground']))
+  })
+
+  it('keeps a retried first read foreground: a read counts as delivered only once it answered', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    // The shared client retries a failed query (React Query's default retry: 3).
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+    failOnce = new Set(['/tasks/t_example'])
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    openDrawer()
+    await screen.findByText('Keep this description readable.')
+    expect(taskReads()).toEqual(['foreground', 'foreground'])
+  })
+
+  it('makes the refetches of a kind whose reads all fail polls once its first fetch spent its retries', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+    failAlways = new Set(['/tasks/t_example'])
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    openDrawer()
+    // The open's read and its retry are the user's.
+    await waitFor(() =>
+      expect(client.getQueryCache().findAll({ predicate: q => q.state.status === 'error' })).toHaveLength(1)
+    )
+    expect(taskReads()).toEqual(['foreground', 'foreground'])
+
+    // The interval refetch after the retries ran out (and its own retry) is a background poll, thinned on a slow link.
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['kanban'] })
+    })
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground', undefined, undefined]))
+  })
+
+  it('makes the reads of a fetch that replaced a failed one during its retry delay polls', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    // A retry delay far longer than the test: the invalidation below cancels it, so the retry cannot race it.
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 10_000 } } })
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    const taskQuery = () => client.getQueryCache().find({ exact: false, queryKey: ['kanban', 'task'] })
+
+    // A first open caches the task, so the re-open's query has data.
+    const first = openDrawer()
+    await screen.findByText('Keep this description readable.')
+    first.unmount()
+
+    failAlways = new Set(['/tasks/t_example'])
+    openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground']))
+    // Its read failed: the fetch waits out its retry delay.
+    await waitFor(() => expect(taskQuery()?.state.fetchFailureCount).toBe(1))
+
+    // A socket invalidation in the retry delay cancels that fetch and starts a new one (cancelRefetch). The new fetch's
+    // first read is a poll: it must not pass for a retry of the cancelled fetch. (Its own retry waits out the long delay,
+    // so the invalidation is not awaited.)
+    act(() => {
+      void client.invalidateQueries({ queryKey: ['kanban'] })
+    })
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground', undefined]))
+  })
+
+  it('sends a foreground read when a task is re-opened while its cache is still fresh', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    // The shared client's staleTime (60 s): without a mount refetch a warm re-open sends nothing, and its first
+    // request is the task query's interval refetch 30 s later.
+    client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000 } } })
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    const first = openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground']))
+    first.unmount()
+    openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground']))
+  })
+
   it('is a modal dialog named by the task title that Esc dismisses', async () => {
     detail = { ...legacyDetail, attachments: [] }
     const onClose = vi.fn()

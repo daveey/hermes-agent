@@ -182,8 +182,13 @@ def test_refresh_is_thread_safe_under_concurrent_calls(monkeypatch):
                 _mcp_agent.refresh_agent_mcp_tools(agent)
                 # Coherence invariant: the name set must match the tool list
                 # at every observation, never a torn cross-attribute state.
-                names = {t["function"]["name"] for t in agent.tools}
-                assert agent.valid_tool_names == names
+                # Observe the pair under the publish lock, as a reader that
+                # needs both does: two bare reads let another thread publish
+                # the other set in between, a torn READ, not a torn write.
+                with _mcp_agent._agent_tools_lock:
+                    names = {t["function"]["name"] for t in agent.tools}
+                    valid = set(agent.valid_tool_names)
+                assert valid == names
                 assert names in ({"a", "b"}, {"a", "c"})
         except Exception as exc:  # pragma: no cover - failure path
             errors.append(exc)
@@ -192,7 +197,8 @@ def test_refresh_is_thread_safe_under_concurrent_calls(monkeypatch):
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=10)
+        t.join(timeout=120)  # returns as soon as the worker ends; generous for throttled runners
+    assert not any(t.is_alive() for t in threads)
 
     assert not errors
     assert agent.valid_tool_names in ({"a", "b"}, {"a", "c"})

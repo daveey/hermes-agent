@@ -42,9 +42,9 @@ KEEP_LARGE_UNTRACKED = "keep-large-untracked"
 KEEP_SUBMODULE_WORK = "keep-submodule-work"
 
 
-def _env(wt: Path) -> dict:
+def _env(wt: Path, budget=None) -> dict:
     from hermes_cli.worktree_archive import _env as archive_env
-    return {**archive_env(wt), "GIT_OPTIONAL_LOCKS": "0"}
+    return {**archive_env(wt, budget=budget), "GIT_OPTIONAL_LOCKS": "0"}
 
 
 def _git(args, wt: Path, env, timeout: float = 120) -> str:
@@ -123,17 +123,19 @@ def scan_tree(wt_path) -> _Scan:
     return scan
 
 
-def hidden_index_edits(wt_path, env=None) -> list[str]:
+def hidden_index_edits(wt_path, env=None, *, budget=None) -> list[str]:
     """Skip-worktree / assume-unchanged paths whose disk state differs from the index.
 
     ``git status`` trusts both flags and reports nothing. A skip-worktree file missing from disk
     is a sparse checkout, not an edit; a missing assume-unchanged file is a deletion. Raises
-    ``ArchiveError`` when git fails.
+    ``ArchiveError`` when git fails. With ``budget`` (:mod:`hermes_cli.git_budget`) every git call
+    draws its timeout from it.
     """
+    from hermes_cli.git_budget import timeout_for
     wt = Path(wt_path)
-    env = env or _env(wt)
+    env = env or _env(wt, budget)
     flagged = []
-    for record in _git(["ls-files", "-v", "-s", "-z"], wt, env).split("\0"):
+    for record in _git(["ls-files", "-v", "-s", "-z"], wt, env, timeout=timeout_for(budget, 120)).split("\0"):
         meta, _, rel = record.partition("\t")
         parts = meta.split()
         if not rel or len(parts) != 4 or not (parts[0] == "S" or parts[0].islower()):
@@ -154,15 +156,16 @@ def hidden_index_edits(wt_path, env=None) -> list[str]:
         if data is None:
             edits.append(rel)  # type changed
             continue
-        if _hash(wt, env, data, rel, raw=True) != sha and _hash(wt, env, data, rel, raw=False) != sha:
+        if (_hash(wt, env, data, rel, raw=True, timeout=timeout_for(budget, 60)) != sha
+                and _hash(wt, env, data, rel, raw=False, timeout=timeout_for(budget, 60)) != sha):
             edits.append(rel)
     return edits
 
 
-def _hash(wt: Path, env, data: bytes, rel: str, *, raw: bool) -> str:
+def _hash(wt: Path, env, data: bytes, rel: str, *, raw: bool, timeout: float = 60) -> str:
     args = ["hash-object", "--stdin"] + (["--no-filters"] if raw else [f"--path={rel}"])
     result = subprocess.run(["git", *args], cwd=str(wt), env=env, input=data, capture_output=True,
-                            timeout=60, check=False)
+                            timeout=timeout, check=False)
     return result.stdout.decode("ascii", "replace").strip() if result.returncode == 0 else ""
 
 

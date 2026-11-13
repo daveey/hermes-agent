@@ -37,14 +37,32 @@ import crypto from 'node:crypto'
 import http from 'node:http'
 import https from 'node:https'
 
+// [daveey] A pooled socket idle this long is closed by us, never reused. The backend closes idle
+// keep-alive connections after KEEP_ALIVE_IDLE_S (hermes_cli/web_server_transport.py, 120 s); if the
+// server closes first, its FIN crosses the SSH tunnel after we have already written the next request
+// into that socket: `socket hang up`, and one of those marks the whole remote down (hermes-hub
+// 2026-11-13, uvicorn's 5 s default: 197 such races in 7 min). Closing well before the server keeps
+// that race from ever starting. Node destroys a free socket at the agent `timeout`; an in-flight
+// request has its own deadline (startRequestDeadline) and is not cut by it.
+export const CLIENT_KEEPALIVE_IDLE_MS = 30_000
+
+/** A keep-alive agent whose free sockets close after *idleMs* idle (the client closes, not the server). */
+export function keepAliveAgent<T extends typeof http | typeof https>(
+  mod: T,
+  maxSockets: number,
+  idleMs: number = CLIENT_KEEPALIVE_IDLE_MS
+): T extends typeof https ? https.Agent : http.Agent {
+  return new mod.Agent({ keepAlive: true, maxSockets, timeout: idleMs }) as any
+}
+
 // JSON pool: many small concurrent calls (session lists, config, prompts).
-const HTTP_JSON_AGENT = new http.Agent({ keepAlive: true, maxSockets: 50 })
-const HTTPS_JSON_AGENT = new https.Agent({ keepAlive: true, maxSockets: 50 })
+const HTTP_JSON_AGENT = keepAliveAgent(http, 50)
+const HTTPS_JSON_AGENT = keepAliveAgent(https, 50)
 
 // Download pool: few long-lived streaming bodies. Isolated from the JSON pool
 // so saturating it with large file downloads can't block interactive calls.
-const HTTP_DOWNLOAD_AGENT = new http.Agent({ keepAlive: true, maxSockets: 8 })
-const HTTPS_DOWNLOAD_AGENT = new https.Agent({ keepAlive: true, maxSockets: 8 })
+const HTTP_DOWNLOAD_AGENT = keepAliveAgent(http, 8)
+const HTTPS_DOWNLOAD_AGENT = keepAliveAgent(https, 8)
 
 // [daveey] Probe pool: the dispatch-time /api/health probe of a pooled remote
 // (ensureHealthyPooledRemoteBackendForDispatch). On a slow link the JSON pool
@@ -52,9 +70,9 @@ const HTTPS_DOWNLOAD_AGENT = new https.Agent({ keepAlive: true, maxSockets: 8 })
 // it for minutes, failed, and tore down a tunnel that was answering fine.
 // Its own tiny pool keeps the health verdict about the remote, not about our
 // local socket queue.
-const PROBE_POOL_MAX_SOCKETS = 2
-const HTTP_PROBE_AGENT = new http.Agent({ keepAlive: true, maxSockets: PROBE_POOL_MAX_SOCKETS })
-const HTTPS_PROBE_AGENT = new https.Agent({ keepAlive: true, maxSockets: PROBE_POOL_MAX_SOCKETS })
+export const PROBE_POOL_MAX_SOCKETS = 2
+const HTTP_PROBE_AGENT = keepAliveAgent(http, PROBE_POOL_MAX_SOCKETS)
+const HTTPS_PROBE_AGENT = keepAliveAgent(https, PROBE_POOL_MAX_SOCKETS)
 
 export type JsonRequestPool = 'json' | 'probe'
 
@@ -210,7 +228,10 @@ const TRANSIENT_CODES = new Set([
   'EAI_AGAIN',
   'ENOTFOUND',
   'EHOSTUNREACH',
-  'ENETUNREACH'
+  'ENETUNREACH',
+  // [daveey] delta-reads.ts: a delta response that could not be decoded. The copy it needed is dropped, so the
+  // retry asks without a base and gets the whole body. Only GETs ask for deltas.
+  'HERMES_DELTA_RETRY'
 ])
 
 // Errors that prove the request never reached the server: the TCP connection

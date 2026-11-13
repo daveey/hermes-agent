@@ -831,3 +831,164 @@ def test_null_or_tilde_row_path_is_archived_and_repeat_gc_is_idempotent(board, m
     assert [k for k, _ in _events(tid)].count("workspace_archived") == 1
     assert _gc() == 0
     assert [k for k, _ in _events(tid)].count("workspace_archived") == 1
+
+
+# ---- reclaim throughput: uv's .git cache marker is data; fast gzip level ---------------------------
+
+
+def _uv_cache(p, marker=b""):
+    cache = p / "test-home" / ".cache" / "uv" / "sdists-v10"
+    cache.mkdir(parents=True)
+    (cache / ".git").write_bytes(marker)
+    (cache / ".gitignore").write_text("*\n")
+    (cache / "pkg.tar.gz").write_bytes(b"\x1f\x8bsdist")
+    return cache
+
+
+@pytest.mark.parametrize("marker", [b"", b"not a pointer\n"], ids=["empty", "no_gitdir_line"])
+def test_uv_git_marker_file_is_archived_as_data_and_round_trips(board, tmp_path, marker):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _plain_task(lambda p: _uv_cache(p, marker))
+    assert sa.find_repos(path) == []
+    assert _gc() == 0
+    assert not path.exists()
+    rel = "test-home/.cache/uv/sdists-v10"
+    m = _members(tid)
+    assert m[f"{rel}/.git"][0].isfile() and m[f"{rel}/.git"][1] == marker
+    sa.verify_complete_archive(_archive(tid))
+    out = tmp_path / "restored"
+    with tarfile.open(_archive(tid) / PAYLOAD / "tree.tar.gz", "r:gz") as tar:
+        tar.extractall(out, filter="tar")
+    assert (out / rel / ".git").read_bytes() == marker
+    assert (out / rel / ".gitignore").read_text() == "*\n"
+    assert (out / rel / "pkg.tar.gz").read_bytes() == b"\x1f\x8bsdist"
+
+
+@pytest.mark.parametrize("pointer", [b"gitdir: /src/repo/.git/worktrees/wt\n", b"  gitdir:/src/repo/.git/modules/m"],
+                         ids=["worktree", "leading_space"])
+def test_gitdir_pointer_file_is_still_refused(board, pointer):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _plain_task(lambda p: _uv_cache(p, pointer))
+    with pytest.raises(sa.ArchiveRefused, match="linked worktree or submodule"):
+        sa.find_repos(path)
+    assert _gc() == 0
+    assert (path / "test-home" / ".cache" / "uv" / "sdists-v10" / ".git").read_bytes() == pointer
+    assert not _archive(tid).exists()
+
+
+def test_git_symlink_is_still_refused_without_reading_its_target(board):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    def build(p):
+        (p / "empty-target").write_bytes(b"")
+        (p / "sub").mkdir()
+        (p / "sub" / ".git").symlink_to("../empty-target")
+
+    _tid, path = _plain_task(build)
+    with pytest.raises(sa.ArchiveRefused, match="linked worktree or submodule"):
+        sa.find_repos(path)
+    assert _gc() == 0 and (path / "sub" / ".git").is_symlink()
+
+
+def test_marker_judged_against_its_scanned_stat(board):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    _tid, path = _plain_task(lambda p: _uv_cache(p))
+    cache = path / "test-home" / ".cache" / "uv" / "sdists-v10"
+    stale = (cache / ".git").lstat()
+    dfd = os.open(cache, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert sa._is_gitlink(dfd, cache, stale) is False
+        (cache / ".git").write_bytes(b"gitdir: /elsewhere\n")
+        with pytest.raises(sa.ArchiveRefused, match="changed during scan"):
+            sa._is_gitlink(dfd, cache, stale)
+    finally:
+        os.close(dfd)
+
+
+def test_marker_read_through_the_scans_own_directory_fd(board, monkeypatch):
+    """Markers are judged via the scan's descriptor: no per-marker re-walk from /."""
+    from hermes_cli import kanban_scratch_archive as sa
+
+    def build(p):
+        _uv_cache(p)
+        (p / "other").mkdir()
+        (p / "other" / ".git").write_bytes(b"")
+
+    _tid, path = _plain_task(build)
+    opens = []
+    real_open_root = sa._open_root
+    monkeypatch.setattr(sa, "_open_root", lambda r: opens.append(r) or real_open_root(r))
+    assert sa.find_repos(path) == []
+    assert opens == [path]  # the scan root only, not once more per .git marker
+
+    # The directory is swapped by path after the scan entered it: the read stays on
+    # the directory the scan saw (its marker matches the scanned lstat), instead of
+    # following the path to the replacement's gitlink.
+    cache = path / "test-home" / ".cache" / "uv" / "sdists-v10"
+    real_is_gitlink = sa._is_gitlink
+
+    def swap_then_judge(dfd, directory, st):
+        if directory == cache:
+            cache.rename(cache.with_name("moved"))
+            cache.mkdir()
+            (cache / ".git").write_bytes(b"gitdir: /src/repo/.git/worktrees/wt\n")
+        return real_is_gitlink(dfd, directory, st)
+
+    monkeypatch.setattr(sa, "_is_gitlink", swap_then_judge)
+    repos, markers = sa._find_repos(path)
+    assert repos == [] and set(markers) == {"other/.git", "test-home/.cache/uv/sdists-v10/.git"}
+    assert (cache.with_name("moved") / ".git").read_bytes() == b""
+
+
+def test_unjudged_marker_fails_closed(board, monkeypatch):
+    """A regular .git the scan never judged is refused, not a KeyError."""
+    from hermes_cli import kanban_scratch_archive as sa
+
+    _tid, path = _plain_task(lambda p: _uv_cache(p))
+    real_scan = sa._scan
+    monkeypatch.setattr(sa, "_scan", lambda root, on_git_file=None, **kw: real_scan(root, **kw))
+    with pytest.raises(sa.ArchiveRefused, match="linked worktree or submodule"):
+        sa.find_repos(path)
+
+
+def test_marker_rewritten_into_gitlink_after_judgement_keeps_workspace(board, monkeypatch):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _plain_task(lambda p: _uv_cache(p))
+    marker = path / "test-home" / ".cache" / "uv" / "sdists-v10" / ".git"
+    real = sa._write_payload
+
+    def racing(workspace, dest):
+        marker.write_bytes(b"gitdir: /src/repo/.git/worktrees/wt\n")
+        return real(workspace, dest)
+
+    monkeypatch.setattr(sa, "_write_payload", racing)
+    assert _gc() == 0
+    assert marker.read_bytes().startswith(b"gitdir:")
+    parent = _archive(tid).parent
+    assert not parent.exists() or list(parent.iterdir()) == []
+
+
+def test_payload_uses_fast_gzip_level_and_old_level_9_archives_still_verify(board, monkeypatch, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    assert sa._GZIP_LEVEL == 1
+    tid, _path = _plain_task(lambda p: (p / "big.txt").write_text("compressible line\n" * 5000))
+    assert _gc() == 0
+    tree = _archive(tid) / PAYLOAD / "tree.tar.gz"
+    header = tree.read_bytes()[:10]
+    assert header[:2] == b"\x1f\x8b" and header[8] == 4  # XFL 4: fastest compression
+    assert _members(tid)["big.txt"][1] == b"compressible line\n" * 5000
+    sa.verify_complete_archive(_archive(tid))
+
+    # An archive written before this change (default level 9) reads back unchanged.
+    source = tmp_path / "legacy-src"
+    source.mkdir()
+    (source / "f.txt").write_text("legacy\n" * 1000)
+    monkeypatch.setattr(sa, "_GZIP_LEVEL", 9)
+    legacy = sa.archive_workspace(source, tmp_path / "legacy-archive", task_id="t", completed_at=OLD)
+    assert (legacy / PAYLOAD / "tree.tar.gz").read_bytes()[8] == 2  # XFL 2: maximum compression
+    sa.verify_complete_archive(legacy)

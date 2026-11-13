@@ -385,28 +385,27 @@ def test_session_tasks_stale_ok_does_not_wait_behind_a_ledger_rebuild(live, kanb
 _real_remote_links = ksa._remote_links
 
 
-def test_a_done_card_whose_shepherd_link_is_released_drops_the_owners_created_link(live, kanban_home, monkeypatch,
-                                                                                   tmp_path):
-    """[daveey] Phantom count (2026-11-01): the owner (hub) writes a ``created`` link for the origin chat
-    (``kanban_creator_chats``) that no gateway ever releases; the origin's ``shepherd`` link carries the verified
-    release. The done card stayed ``unknown`` and the sidebar said "4 open" while naming none. A released sibling
-    link of the same chat settles a closed card; it never drops an open card or another chat's link."""
+def test_a_released_sibling_link_does_not_settle_a_closed_cards_unreleased_link(live, kanban_home, monkeypatch,
+                                                                                 tmp_path):
+    """[daveey] Each link carries its own answer: a released ``shepherd`` sibling no longer drops the same chat's
+    unreleased ``created`` link to a closed card. The chat's gateway keeps a link unreleased only while its origin
+    ledger holds the card unfinished (done, release unverified), and releases the owner's unmanaged ``created``
+    link itself once the card closes (``_owner_written_releases``, the 2026-11-01 "4 open naming none" fix). The
+    removed reader rule hid 19 done-but-unverified hub cards from David-MBP chat 20261026_170127_f07c32 that its
+    ledger lists as ``unknown`` (links_diff not clean, 2026-11-13)."""
     rep = tmp_path / "default.db"
     _replica(rep, [("t_done", "done", "done", OTHER), ("t_arch", "archived", "archived", OTHER),
-                   ("t_open", "open", "running", OTHER), ("t_unrel", "done, unverified", "done", OTHER)],
+                   ("t_open", "open", "running", OTHER), ("t_settled", "settled", "done", OTHER)],
              [("t_done", ME, "s1", "created", 0), ("t_done", ME, "s1", "shepherd", 1),
               ("t_arch", ME, "s1", "created", 0), ("t_arch", ME, "s1", "shepherd", 1),
-              ("t_done", ME, "s2", "created", 0),  # another chat: its own release never arrived
               ("t_open", ME, "s1", "created", 0), ("t_open", ME, "s1", "shepherd", 1),
-              ("t_unrel", ME, "s3", "created", 0), ("t_unrel", ME, "s3", "shepherd", 0)])
+              ("t_settled", ME, "s1", "created", 1), ("t_settled", ME, "s1", "shepherd", 1)])
     got = sorted((c["session"], c["id"], c["status"])
                  for c in links.replica_cards(None, ME, ksa.LISTED_STATUSES, replicas=[("default", rep)]))
-    assert got == [("s1", "t_open", "running"), ("s2", "t_done", "unknown"), ("s3", "t_unrel", "unknown")]
+    assert got == [("s1", "t_arch", "unknown"), ("s1", "t_done", "unknown"), ("s1", "t_open", "running")]
     _switch_to_replica(kanban_home, monkeypatch, rep)
-    assert ksa.active_task_counts() == {"s1": 1, "s2": 1, "s3": 1}
-    rows = ksa.annotate_kanban_activity([{"id": "s1"}, {"id": "s2"}, {"id": "s3"}])
-    assert [r.get("kanban_active") for r in rows] == [1, 1, 1]
-    assert [c["id"] for c in ksa.session_tasks(["s1"])] == ["t_open"]  # the count names what it counts
+    assert ksa.active_task_counts() == {"s1": 3}
+    assert sorted(c["id"] for c in ksa.session_tasks(["s1"])) == ["t_arch", "t_done", "t_open"]  # names its count
 
 
 def test_tui_legacy_subs_on_done_local_cards_count_nothing(live, kanban_home, monkeypatch):

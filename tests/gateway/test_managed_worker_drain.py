@@ -99,3 +99,109 @@ async def test_listener_and_tickets_live_until_settlement(tmp_path, monkeypatch)
     assert tickets.redeem(ticket, profile_id=str(tmp_path), purpose='worker-adoption')['subject'] == 'human'
     await settle_gateway_runtime(runner)
     assert closed == ['listener']
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_close_tolerates_a_control_frame_that_raced_the_childs_exit():
+    """A restart drain's Stop written after the child already exited fails its flush (EPIPE) and
+    leaves the frame in stdin's buffer; close() must not re-raise it while flushing on close."""
+    from gateway.session_managed_worker import ManagedWorker
+    process = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.PIPE,  # exits at once
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process.wait(timeout=10)
+    worker = ManagedWorker(process)
+    with pytest.raises(BrokenPipeError):
+        worker.send({'type': 'stop'})  # what _write_controls swallows, leaving the frame buffered
+    worker.close()
+    assert process.stdin.closed and process.stdout.closed and process.stderr.closed
+
+
+@pytest.mark.platforms("linux")
+def test_finished_turn_keeps_its_answer_when_worker_teardown_raises(tmp_path, monkeypatch):
+    """A teardown OSError in execute_managed's finally must never replace the completed reply."""
+    import asyncio
+    from gateway import session_managed_worker as managed
+    from gateway.session_authority import LiveSession, SessionAuthority
+    from gateway.session_contract import SessionActor, SessionRef, Submission
+    from gateway.session_policy import build_policy
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch, claim_session_input
+    from tests.gateway.test_managed_worker_finished_exit import CHILD
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    db.create_session('s', source='test')
+    runner = SimpleNamespace(_draining=False, _cached_agent_for=lambda route: None,
+                             _adapter_for_source=lambda source: None)
+    authority = SessionAuthority(runner, profile_id='owned', instance_id='i', db=db,
+                                 epoch=begin_runtime_epoch(db, instance_id='i'))
+    authority.sessions['s'] = LiveSession(SimpleNamespace(platform=None, user_id='human', chat_id='c'), 'route')
+    actor = SessionActor('human', 'owned', frozenset({'session:submit', 'session:control'}), 'cli')
+    ref = SessionRef('owned', 's')
+    monkeypatch.setattr(authority, '_schedule', lambda ref: None)
+
+    class Child(subprocess.Popen):
+        def __init__(self, args, **kw):
+            super().__init__([sys.executable, '-c', CHILD, 'nonzero'], **kw)
+    monkeypatch.setattr(managed.subprocess, 'Popen', Child)
+    real_close = managed.ManagedWorker.close
+    closed = []
+
+    def close_then_break(self):
+        real_close(self)
+        closed.append(self)
+        raise BrokenPipeError(32, 'Broken pipe')
+    monkeypatch.setattr(managed.ManagedWorker, 'close', close_then_break)
+    policy = build_policy({'cwd': str(tmp_path), 'model': 'm'}, {}, profile_terminal=False)
+
+    async def scenario():
+        await authority.submit(actor, Submission('turn', ref, {'text': 'go'}, 'queue'))
+        row = claim_session_input(db, epoch=authority.epoch, session_id='s')
+        authority._stamp_claim(ref, authority.sessions['s'], row)
+        async with asyncio.timeout(40):
+            return await managed.execute_managed(authority, ref, row, policy)
+    with db:
+        response = asyncio.run(scenario())
+    assert response == 'FINISHED_ANSWER'
+    assert closed, 'the worker was never torn down'
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_close_finishes_when_closing_stdout_or_stderr_fails():
+    """Failing stdout/stderr closes (no reader or drain thread owns them) must not skip the
+    remaining close or raise out of close()."""
+    from gateway.session_managed_worker import ManagedWorker
+    process = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process.wait(timeout=10)
+    real_stdout, real_stderr = process.stdout, process.stderr
+
+    class FailingClose:
+        def __init__(self, pipe):
+            self.pipe = pipe
+
+        def close(self):
+            self.pipe.close()
+            raise OSError(9, 'Bad file descriptor')
+    process.stdout, process.stderr = FailingClose(real_stdout), FailingClose(real_stderr)
+    ManagedWorker(process).close()
+    assert real_stdout.closed and real_stderr.closed
+
+
+@pytest.mark.asyncio
+async def test_restart_loss_is_booked_when_worker_teardown_raises(monkeypatch):
+    """The restart-lost child's close raising must not skip the uncounted requeue booking."""
+    import gateway.session_kanban_restart as r
+    booked = []
+    monkeypatch.setattr(r, '_restart_stop', lambda cause: True)
+
+    async def book(authority, policy, checkpoint=None):
+        booked.append(policy)
+
+    def close():
+        raise BrokenPipeError(32, 'Broken pipe')
+    monkeypatch.setattr(r, 'book_restart_interruption', book)
+    policy = SimpleNamespace(kanban_json='{}')
+    cleanup = await r.close_and_book_restart_loss(object(), policy, SimpleNamespace(stop_cause='restart', close=close))
+    assert booked == [policy]
+    cleanup()  # the caller's finally must not close the same child again

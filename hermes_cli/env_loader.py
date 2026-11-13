@@ -185,9 +185,20 @@ def adopt_env_provenance(provenance: dict[str, list[str]]) -> None:
     _MANAGED_DOTENV_KEYS.update(provenance.get("managed", ()))
 
 
+def _home_key(hermes_home: str | os.PathLike) -> str:
+    """``str(Path(hermes_home).resolve())``, the key of the per-home source maps, memoized per input
+    for a home that exists (a missing one is resolved again: it may yet appear as a symlink). The
+    dashboard and control paths build a secret scope on the event loop for every request, and a
+    per-request realpath stalled that loop for seconds under FS pressure. The memo lives in
+    ``hermes_constants`` so ``reset_hermes_home_key_cache()`` clears it with ``hermes_home_key``'s."""
+    from hermes_constants import resolved_home_str
+
+    return resolved_home_str(hermes_home)
+
+
 def get_secret_source_values(hermes_home: str | os.PathLike) -> dict[str, str]:
     """Return the external-secret value snapshot for ``hermes_home``."""
-    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(str(Path(hermes_home).resolve()), {}))
+    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(_home_key(hermes_home), {}))
 
 
 def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, str]:
@@ -207,7 +218,7 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
 
     if worker_config_snapshot() is not None:
         return {}
-    home_key = str(home.resolve())
+    home_key = _home_key(home)
     if home_key in _APPLIED_HOMES:
         return get_secret_source_values(home)
 

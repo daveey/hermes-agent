@@ -162,3 +162,35 @@ it('a row that is not needs-input does not re-render when a prompt moves', () =>
 
   expect(renders).toBe(before)
 })
+
+// [daveey] self-heal desktop-e6cce5965c: a done chat still watching a card drew the same plain green as "all done".
+// It keeps the green, adds the eye glyph and names the pending check on hover.
+it('a done chat that still watches a card draws the eye glyph and names the check', () => {
+  const eta = new Date(2026, 10, 18, 9, 0).getTime() / 1000
+
+  const session = row('watch-chat', {
+    outcome: {
+      at: 1,
+      kind: 'done',
+      source: 'derived',
+      summary: 'Fix landed.',
+      watches: [{ eta, id: 't_watch1', kind: 'card', label: 'verify the re-run limit', state: 'watching' }]
+    }
+  } as Partial<SessionInfo>)
+
+  const { container } = render(<SessionRowStatusStripe outcomePainted session={session} statusStripe="done" />)
+
+  expect(container.querySelector('[data-testid="stripe-watch"]')).not.toBeNull()
+  expect(stripe(container)?.getAttribute('aria-label')).toBe('Fix landed.\nStill watching: t_watch1 (wakes Wed 09:00)')
+})
+
+it('a plain done chat draws no watch glyph', () => {
+  const session = row('done-chat', {
+    outcome: { at: 1, kind: 'done', source: 'derived', summary: 'Fix landed.' }
+  } as Partial<SessionInfo>)
+
+  const { container } = render(<SessionRowStatusStripe outcomePainted session={session} statusStripe="done" />)
+
+  expect(container.querySelector('[data-testid="stripe-watch"]')).toBeNull()
+  expect(stripe(container)?.getAttribute('aria-label')).toBe('Fix landed.')
+})

@@ -28,6 +28,7 @@ from hermes_cli import kanban_worker_node as wn
 from hermes_cli import kanban_worker_placement as wp
 from tests.hermes_cli import hub_judge_support
 from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli._placement_helpers import seen_now
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tools import kanban_tools as kt
 
@@ -56,7 +57,7 @@ def hub(tmp_path, monkeypatch, hub_judge):
     sync.set_mode(conn, "primary")
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: ME)
     monkeypatch.setattr(kt, "_persisted_identity", lambda: "default")
-    wn.set_registry_fetch(lambda: {"me": ME, "machines": [WORKER]})
+    wn.set_registry_fetch(lambda: {"me": ME, "machines": seen_now([WORKER])})
     hub_judge.admit_next = False
     try:
         yield home, conn
@@ -206,7 +207,7 @@ def test_self_check_leaves_other_worker_first_cards_to_the_reserve(hub, no_pull,
     tid = _stranded(conn, age=60 if case == "young" else 3600)
     cfg = {"worker_pools": CFG["worker_pools"]} if case == "no_queue" else CFG
     if case == "no_machine":
-        wn.set_registry_fetch(lambda: {"me": ME, "machines": [{**WORKER, "labels": ["pool:worker"]}]})
+        wn.set_registry_fetch(lambda: {"me": ME, "machines": seen_now([{**WORKER, "labels": ["pool:worker"]}])})
     if case == "registry_down":
         wn.set_registry_fetch(lambda: (_ for _ in ()).throw(OSError("board unreachable")))
     if case == "pinned":  # the Board already assigned it: runs_on machine:worker-N is not the bug state
@@ -254,6 +255,33 @@ def test_a_transient_board_error_on_a_self_check_repin_is_retried_next_tick(hub,
     _home, conn = hub
     tid = _stranded(conn, age=36 * 60)
     board = RecordingHub(refuse_repin="transient", refuse_status=status, refuse_detail=body)
+    for _ in range(2):
+        wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert [(r["task_id"], r["expected_revision"]) for r in board.repins] == [(tid, 4)] * 2
+    assert board.reserves == [] and not wp._selfcheck_refused
+
+
+@pytest.mark.parametrize("status,body", [(404, "<html><body>404 Not Found</body></html>"),
+                                         (405, "Method Not Allowed"), (501, "<html>Not Implemented</html>"),
+                                         (400, "Bad Request")])
+def test_an_uncoded_persistent_refusal_of_a_self_check_repin_reserves(hub, no_pull, status, body):
+    """A Board or proxy without the repin route answers an uncoded 404/405/501 every tick: that is a persistent
+    refusal, so the card goes back to the reserve at that revision instead of re-asking the repin forever."""
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    board = RecordingHub(refuse_repin="missing", refuse_status=status, refuse_detail=body)
+    for _ in range(2):
+        wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert len(board.repins) == 1, "the refused self-check repin was re-asked at the same revision"
+    assert [(r["task_id"], r["expected_revision"]) for r in board.reserves] == [(tid, 4)]
+    assert wp._selfcheck_refused == {(BOARD, tid): 4}
+
+
+@pytest.mark.parametrize("status", [408, 425])
+def test_an_uncoded_retryable_4xx_on_a_self_check_repin_is_retried(hub, no_pull, status):
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    board = RecordingHub(refuse_repin="transient", refuse_status=status, refuse_detail="try again")
     for _ in range(2):
         wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
     assert [(r["task_id"], r["expected_revision"]) for r in board.repins] == [(tid, 4)] * 2

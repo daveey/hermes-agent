@@ -266,9 +266,9 @@ def test_a_hub_pickup_re_place_keeps_the_label(monkeypatch):
     card = {"title": "review", "body": "", "assignee": "default", "workspace_kind": "scratch", "requires": "[]",
             "skills": None, "model_override": "claude-opus-5-5", "provider_override": "anthropic",
             "model_pin_mandatory": 1}
-    assert sorted(hap._target(hap._fields(card, BOARD), HUB, CFG, {})) == sorted([POOL, mp.LABEL])
+    assert sorted(hap._target(hap.card_fields(card, BOARD), HUB, CFG, {})) == sorted([POOL, mp.LABEL])
     plain = {**card, "model_pin_mandatory": None}
-    assert hap._target(hap._fields(plain, BOARD), HUB, CFG, {}) == [POOL]
+    assert hap._target(hap.card_fields(plain, BOARD), HUB, CFG, {}) == [POOL]
 
 
 def _machines(*, attest):

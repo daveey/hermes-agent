@@ -30,6 +30,7 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
+from hermes_cli import kanban_remote_stop as _remote_stop
 from hermes_cli import kanban_review_contract as _review_contract
 from hermes_cli import kanban_worker_shell as _worker_shell
 from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
@@ -41,6 +42,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_schema_owner import BoardSchemaNotOwned
 from hermes_cli.kanban_notify_identity import _caller_identity_for_target
 from hermes_cli.kanban_cli_metadata import ReceiptEditRefused, parse_metadata_flag as _parse_metadata_flag, receipt_refusal
 from hermes_cli.kanban_cli_park import (
@@ -203,14 +205,20 @@ def kanban_command(args: argparse.Namespace) -> int:
         # "no such table: tasks" on first use from a fresh HERMES_HOME.
         try:
             kb.init_db()
+        except BoardSchemaNotOwned as exc:  # one line, its own "kanban:" prefix
+            return _err(str(exc))
         except Exception as exc:
             return _err(f"kanban: could not initialize database: {exc}")
 
         handler = _HANDLERS.get(action)
         if not handler:
             return _err(f"kanban: unknown action {action!r}", 2)
+        if refused := _remote_stop.cli_refusal(action, args):  # [daveey] another machine's live Board lease
+            return _err(refused)
         try:
             return int(handler(args) or 0)
+        except BoardSchemaNotOwned as exc:  # a write a non-installed core may not make here, not a traceback [daveey]
+            return _err(str(exc))
         except (ValueError, RuntimeError, PermissionError) as exc:
             return _err(f"kanban: {exc}")
 
@@ -1003,7 +1011,9 @@ def _cmd_link(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         gated = kb.link_tasks(conn, args.parent_id, args.child_id,
                               expected_child_run_id=expected_child_run_id)
-    print(f"Linked {args.parent_id} -> {args.child_id}")
+        from hermes_cli.kanban_board_delivery import cli_lines
+        queued = cli_lines(conn)  # [daveey] the stopped Board sync keeps it here
+    print(f"Linked {args.parent_id} -> {args.child_id}", *queued, sep="\n")
     if gated:
         print(
             f"Note: {args.child_id} was ready and is now todo — parent "
@@ -1021,8 +1031,10 @@ def _cmd_unlink(args: argparse.Namespace) -> int:
         return _err(f"unlink refused: worker {env_tid} may only unlink its own card's edges; use kanban_supervisor_request")
     with kbc.connect_closing() as conn:
         ok = kb.unlink_tasks(conn, args.parent_id, args.child_id)
+        from hermes_cli.kanban_board_delivery import cli_lines
+        queued = cli_lines(conn) if ok else []  # [daveey] the stopped Board sync keeps it here
     return _ok_or_err(ok, f"No such link: {args.parent_id} -> {args.child_id}",
-                      f"Unlinked {args.parent_id} -> {args.child_id}")
+                      "\n".join([f"Unlinked {args.parent_id} -> {args.child_id}", *queued]))
 
 
 def _cmd_supervisor_requests(args: argparse.Namespace) -> int:
@@ -1069,10 +1081,15 @@ def _cmd_comment(args: argparse.Namespace) -> int:
         except ValueError as exc:
             return _err(f"kanban comment: {exc}", 2)
         live = kb.live_run_id(conn, args.task_id)
+        from hermes_cli.kanban_board_delivery import cli_lines, remote_runner
+        queued = cli_lines(conn, args.task_id)  # [daveey] the stopped Board sync keeps it here
+        remote = bool(queued) and remote_runner(conn, args.task_id) is not None
     print(f"Comment added to {args.task_id}")
     own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id
-    if live is not None and not own_run:
+    if live is not None and not own_run and not remote:
         print("The card has a live worker run: it gets this note at its next model call.")
+    for line in queued:
+        print(line)
     return 0
 
 
@@ -1287,7 +1304,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                     fail_msg[tid] = _contract_cli.complete_refusal(conn, tid) or fail_msg[tid]
             return done
 
-        return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
+        return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__, conn=conn)
 
 
 _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id", "review_required")
@@ -1377,7 +1394,8 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
             current = kb.get_task(conn, args.task_id)
             what = "unknown id" if current is None else f"status is {current.status!r}, not 'done'"
             return _err(f"cannot reopen {args.task_id} ({what}); use unblock/reopen-review for other states")
-    print(f"Reopened {args.task_id} -> {status}")
+        print(f"Reopened {args.task_id} -> {status}")
+        _print_queued_local(conn)
     return 0
 
 
@@ -1447,7 +1465,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 human_request=request, awaiting=awaiting, comment=comment, actor=cli_actor(),
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
             awaiting=awaiting, reason=reason, kind=kind)
-        return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
+        return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}", conn=conn)
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
@@ -1476,7 +1494,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_reason_comment import human_answer_refusal
         return _bulk_apply(ids, op, _parked_msg(conn, "Scheduled", suffix),
                            lambda tid: (refused.get(tid) or human_answer_refusal(conn, tid, "schedule")
-                                        or f"cannot schedule {tid}"))
+                                        or f"cannot schedule {tid}"), conn=conn)
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
@@ -1495,7 +1513,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
             return rc
         op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
+                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)", conn=conn)
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
@@ -1519,6 +1537,7 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
         persisted_run = kb.latest_run(conn, tid)
         display_summary = persisted_run.summary if persisted_run else None
         print(f"Requested review for {tid}" + (f": {display_summary}" if display_summary else ""))
+        _print_queued_local(conn)
     return 0
 
 
@@ -1530,7 +1549,15 @@ def _cmd_request_changes(args: argparse.Namespace) -> int:
         if not ok:
             return _err(f"cannot request changes for {tid}: {detail or 'invalid review state'}")
         print(f"Requested changes for {tid}" + (f"; routed to {detail}" if detail else ""))
+        _print_queued_local(conn)
     return 0
+
+
+def _print_queued_local(conn) -> None:
+    """[daveey] A write the stopped Board sync keeps local says so (``kanban_board_delivery``)."""
+    from hermes_cli.kanban_board_delivery import cli_lines
+    for line in cli_lines(conn):
+        print(line)
 
 
 def _cmd_reopen_review(args: argparse.Namespace) -> int:
@@ -1551,7 +1578,7 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
             return True
 
         return _bulk_apply(ids, op, lambda tid: f"Reopened {tid}{suffix}",
-                           lambda tid: f"cannot reopen {tid} (not in review?)")
+                           lambda tid: f"cannot reopen {tid} (not in review?)", conn=conn)
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
@@ -1627,7 +1654,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                         f"was sent and {out['holder']} archives it at its next dispatcher tick")
             return f"Archived {tid}"
 
-        return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}")
+        return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}", conn=conn)
 
 
 def _host_lock_holders() -> dict:

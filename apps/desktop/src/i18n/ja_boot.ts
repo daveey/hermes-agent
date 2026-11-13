@@ -11,7 +11,8 @@ export const jaBoot = {
       loadingSessions: '最近のセッションを読み込み中',
       retryingRemoteBackend: 'リモート Hermes バックエンドに再接続中…',
       startingDesktopConnection: 'デスクトップ接続を開始中',
-      startingHermesDesktop: 'Hermes Desktop を起動中…'
+      startingHermesDesktop: 'Hermes Desktop を起動中…',
+      waitingForRemoteUpdate: 'リモート Hermes のアップデート完了を待っています…'
     },
     errors: {
       backgroundExited: 'Hermes バックグラウンドプロセスが終了しました。',

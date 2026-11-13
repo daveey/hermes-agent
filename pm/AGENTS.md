@@ -35,3 +35,25 @@ dependencies themselves have to"; dates are checked by us, not users; pinned dep
 JS: `minimumReleaseAge` (14 days) in `pnpm-workspace.yaml`; an exemption is one exact
 `- name@1.2.3  # why` line in `minimumReleaseAgeExclude`, which `hermes pm update --pnpm` names
 and later drops (`website/docs/reference/package-management.md` § Release age and package mirrors).
+
+## Homes that borrow the account's state
+
+A home other than the account's `~/.hermes` on the same filesystem (a test, review or mutation
+`HERMES_HOME`) hard-links the account's verified tool entries and unchanged source-snapshot files,
+and shares its uv cache (`pm/environments.py::account_home_root`). A linked file is ONE inode in
+both homes, so **published tool entries and source snapshots are never written in place**: replace
+a file by writing a sibling and renaming it over (or remove the tree and stage it again); never
+open it for writing, `write_text` or append to a path inside a published entry or a snapshot
+package directory. The one sanctioned in-place change is `pm/install.py::_heal_exec_bit`, which
+only ADDS execute bits (the digest excludes modes, and the account's copy needs +x as well). Files
+a snapshot rewrites (the root `pyproject.toml`, generated members) are real copies, never links.
+`tests/pm/test_account_seed.py` fails when a borrower's install, re-pin or snapshot changes the
+bytes of an account inode.
+
+`HERMES_PM_ACCOUNT_SEED=0` turns borrowing off. CI sets it (`setup-pm`, whose `actions/cache`
+save/restore and `--exact-lock` prune act on the uv cache path), and so should a primary home kept
+outside `~/.hermes` beside a stale `~/.hermes`: it would otherwise share that home's uv cache and
+compile bytecode on first import instead of eagerly. It is an environment variable, not a config
+key (root AGENTS.md otherwise rejects new non-secret `HERMES_*` variables), because it is
+per-process, CI sets it before any home or config exists, and `scripts/run_tests.sh` reads it
+(trimmed and case-folded the same way) to decide tool-store borrowing without starting Python.

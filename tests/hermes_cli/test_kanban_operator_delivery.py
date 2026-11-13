@@ -278,6 +278,59 @@ def test_negation_outside_the_claim_verb_still_needs_a_receipt(fleet, summary):
     ("Comment to t_0123456789abcdef: queued.", False),
     ("Comment to t_0123456789abcdef — failed and was not sent.", False),
     ("Comment to t_0123456789abcdef (not posted).", False),
+    # A standalone spaced ASCII hyphen is a dash too; an intra-word hyphen is not.
+    ("No longer pending - posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef - not posted.", False),
+    ("Comment to t_0123456789abcdef - queued.", False),
+    ("Comment to t_0123456789abcdef - failed and was not sent.", False),
+    ("The note to t_0123456789abcdef was not re-posted.", False),
+    ("Re-posted the note to t_0123456789abcdef.", True),
+    # A future/infinitive form ("to be posted", "will be sent") is never a claim, across any boundary.
+    ("Queued to be posted to t_0123456789abcdef.", False),
+    ("Queued (to be posted to t_0123456789abcdef).", False),
+    ("Queued: to be posted to t_0123456789abcdef.", False),
+    ("Queued - to be posted to t_0123456789abcdef.", False),
+    ("Queued: will be sent to t_0123456789abcdef.", False),
+    ("Done (to be delivered to t_0123456789abcdef).", False),
+    ("Has been posted to t_0123456789abcdef.", True),
+    ("Posted to t_0123456789abcdef as it should be.", True),
+    # A spaced ASCII double hyphen and U+2212 are dashes as well.
+    ("Not done -- posted to t_0123456789abcdef.", True),
+    ("Not done − posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef -- not posted.", False),
+    # "be"/"being" govern from inside the window too: adverbs and the progressive are not claims.
+    ("Queued: to be later posted to t_0123456789abcdef.", False),
+    ("Queued: to be eventually sent to t_0123456789abcdef.", False),
+    ("The note to t_0123456789abcdef is being posted.", False),
+    ("Queued to be soon posted to t_0123456789abcdef.", False),
+    ("The note to t_0123456789abcdef is being quickly posted.", False),
+    # Windowed be/being governs only across an adverb gap: an unrelated "to be safe" or "being thorough" before
+    # an affirmative claim leaves it a claim (fail closed).
+    ("To be safe I posted the summary to t_0123456789abcdef.", True),
+    ("Being thorough I posted to t_0123456789abcdef.", True),
+    ("To be sure, posted to t_0123456789abcdef.", True),
+    # A spaced dash run of any length is a boundary, and a hyphen glued to either side of the verb splits too.
+    ("Not done --- posted to t_0123456789abcdef.", True),
+    ("Not done ---- posted to t_0123456789abcdef.", True),
+    ("Not done -posted to t_0123456789abcdef.", True),
+    ("Not done- posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef --- not posted.", False),
+    ("Comment to t_0123456789abcdef -not posted.", False),
+    ("The note to t_0123456789abcdef was never re-posted.", False),
+    # A hyphen-joined prefix is part of the verb, so be/being still governs it; alone it stays a claim.
+    ("The note is to be re-posted to t_0123456789abcdef.", False),
+    ("The note is to be cross-posted to t_0123456789abcdef.", False),
+    ("The note to t_0123456789abcdef is being soon re-sent.", False),
+    ("Cross-posted the note to t_0123456789abcdef.", True),
+    # Common -ly nouns, verbs and adjectives are no adverbs: be/being does not govern across them (fail closed).
+    ("Being early posted to t_0123456789abcdef.", True),
+    ("Being family posted to t_0123456789abcdef.", True),
+    ("To be supply posted to t_0123456789abcdef.", True),
+    ("Queued to be manually re-posted to t_0123456789abcdef.", False),
+    # A run of 2+ hyphens is a dash even glued on both sides; a single intra-word hyphen is not.
+    ("Not done--posted to t_0123456789abcdef.", True),
+    ("Not done---posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef--not posted.", False),
 ])
 def test_claimed_targets_scopes_negation_to_the_verb(text, claimed):
     from hermes_cli.kanban_operator_delivery import claimed_targets

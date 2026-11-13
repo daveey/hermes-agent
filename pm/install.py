@@ -20,7 +20,7 @@ from pm.lock import Facts, Lockfile
 from pm.package import InstallError, Package, Runner, StatePackage, compose_env
 from pm.plugin_inputs import Candidates, Members, PluginInput, Selection, StagedUpdate
 from pm.registry import get_package, walk
-from pm.store import Store, current_target, digest_matches, merge_tree, tree_digest
+from pm.store import Store, current_target, digest_matches, merge_tree, tree_digest, verified_digest
 
 LOG = logging.getLogger(__name__)
 
@@ -461,28 +461,32 @@ def _account_seed(package, lockfile, store: Store, version, target) -> tuple[dic
     return fact, seed
 
 
-def _seed_from_account(package, lockfile, store, staged, version, target) -> bool:
-    """Stage *package* by linking the account store's entry; False leaves the download to the caller.
+def _seed_from_account(package, lockfile, store, staged, version, target) -> str | None:
+    """Stage *package* by linking the account store's entry and return its verified digest;
+    ``None`` leaves the download to the caller.
 
     Entries are immutable once published and every name is replaced by rename, so a link shares
     bytes without sharing a tree. The staged tree must still hash to the digest the account
-    recorded for this exact pin; a seed that changes mid-link fails that check and is dropped."""
+    recorded for this exact pin; a seed that changes mid-link fails that check and is dropped.
+    The returned digest is ``tree_digest(staged)``, computed once while verifying; the caller
+    records it rather than hashing the published tree again."""
     seed = _account_seed(package, lockfile, store, version, target)
     if seed is None:
-        return False
+        return None
     fact, source_store = seed
     try:
         shutil.copytree(source_store.entry(fact["entry"]), staged, symlinks=True, copy_function=_link_or_copy)
-        if digest_matches(staged, fact["digest"]):
+        digest = verified_digest(staged, fact["digest"])
+        if digest is not None:
             LOG.info("%s: linked from %s", package.name, native(source_store.root))
-            return True
+            return digest
         LOG.warning("%s: %s does not match its recorded digest; downloading", package.name,
                     native(source_store.entry(fact["entry"])))
     except OSError as exc:
         LOG.warning("%s: cannot link from %s (%s); downloading", package.name, native(source_store.root), exc)
     if staged.exists():
         remove_tree(staged)
-    return False
+    return None
 
 
 def _log_repair(package, previous, version, artifacts) -> None:
@@ -551,10 +555,13 @@ def _install(
             )
         with store.scratch() as scratch:
             staged = scratch / "tree"
+            # The seeded tree's digest, hashed once while verifying the seed; a repair drops it.
+            seeded_digest = None
             try:
                 if copy_from is not None:
                     _copy_verified_source(package, lockfile, copy_from, staged, version, target)
-                elif facts is not None and _seed_from_account(package, lockfile, store, staged, version, target):
+                elif facts is not None and (seeded_digest := _seed_from_account(
+                        package, lockfile, store, staged, version, target)) is not None:
                     pass
                 else:
                     staged = _prepare_artifacts(package, store, scratch, artifacts, version, target,
@@ -566,6 +573,7 @@ def _install(
                     progress("verify", 0, 0, "")
                 reason, remedy = package.verify(staged, target), ""
                 if reason:
+                    seeded_digest = None  # the repair may rewrite the staged tree
                     reason, remedy = package.repair_staged_verification(staged, target, reason)
                 if reason:
                     raise InstallError(package.name, f"staged entry failed verification: {reason}", remedy)
@@ -576,7 +584,7 @@ def _install(
                         facts.record(
                             package.name, version, entry_name, package.env(entry, target), store.root,
                             target=target, artifacts=[a["sha256"] for a in artifacts],
-                            digest=tree_digest(entry),
+                            digest=seeded_digest or tree_digest(entry),
                         )
                 _remove_downloads(store, artifacts)
             except (InstallError, DownloadPaused):
@@ -799,6 +807,39 @@ def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candi
     enabled = sorted(set(_carried(package, fact["extras"])) | set(extras or []))
     stamp = package.expected_stamp(enabled, **_member_inputs(plugins))
     return _runtime_state_matches(fact, stamp, project_root=root)
+
+
+def borrowed_venv_is_current(*, project_root: Path | None = None) -> bool:
+    """Does the owner's committed generation serve a borrowing root that has none of its own?
+
+    A borrowing launch (``pm.environments.owning_home_root``) with no selection recorded asks for
+    what any first sync asks for (``first_generation_selection`` plus a pre-PM venv's extras). The
+    owner's generation serves it when its recorded extras already include that request and the
+    stamp recomputed here -- the checkout's lock, layout and Python, the plugin members THIS root
+    enables -- equals the owner's recorded stamp. A borrower enabling other plugins, or with a
+    selection of its own, keeps its own environment. Read-only: the owner's facts are only read.
+    """
+    from pm.environments import borrowed_venv, install_key, owning_home_root, runtime_facts_path
+    from pm.extras import first_generation_selection, pre_pm_baseline
+    from pm.packages import Venv
+
+    root = paths.repo_root() if project_root is None else Path(project_root).absolute()
+    owner = owning_home_root(root)
+    environment = borrowed_venv(root)
+    if owner is None or environment is None or Facts(runtime_facts_path(root), strict=True).get("venv") is not None:
+        return False
+    try:
+        fact = Facts(owner / "installs" / install_key(root) / "facts.json", strict=True).get("venv")
+    except (OSError, ValueError):
+        return False
+    if (not isinstance(fact, dict) or not isinstance(fact.get("stamp"), str) or not fact["stamp"]
+            or not isinstance(fact.get("extras"), list)
+            or any(not isinstance(extra, str) for extra in fact["extras"])):
+        return False
+    package = Venv(root)
+    requested = set(first_generation_selection(root) or []) | set(pre_pm_baseline(root))
+    enabled = sorted(set(_still_declared(package, fact["extras"])) | requested)
+    return package.expected_stamp(enabled) == fact["stamp"]
 
 
 def _feature_policy(extras: Optional[list[str]], *, repair: bool) -> tuple[list[str] | None, list[str] | None]:

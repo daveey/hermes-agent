@@ -7,11 +7,14 @@ with one local query.
 - :func:`reconcile` (run by the sync loop, idempotent, so its first run is the backfill) writes this gateway's
   links into a board file: chats that created a card here (``tasks.session_id``), chats that shepherd a card here
   (``tui`` subscriptions), and this gateway's chats' links to other gateways' cards from the origin-ledger
-  projection, with its released state. Links it no longer finds are marked released, never deleted.
+  projection, with its released state. Links it no longer finds are marked released, never deleted. As a card's
+  owner it also publishes, insert-only, the link of each chat on another gateway its ``platform='hub'``
+  subscriptions name (``_owner_hub_links``), so that chat's task list does not wait on that gateway's own sync.
 - :func:`replica_cards` answers a chat lineage's cards on other gateways from the replicas; ``session_tasks`` AND the
   sidebar counts use it instead of the origin ledger when ``kanban.sync.links_reader`` is ``replica``, so the
   count and the task strip are one projection in each mode.
-- :func:`links_diff` compares the two answers per chat, ``unknown`` unfinished obligations included; readers
+- :func:`links_diff` compares the two answers per chat, ``unknown`` unfinished obligations included, leaving out
+  the chats the writer never links (machine sessions, placeholders: counted in ``machine_links``); readers
   switch only once it is clean.
 """
 
@@ -159,16 +162,18 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
 
 
 def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Released copies of the ``created`` links another gateway (the card's owner) wrote for this gateway's chats,
-    once the replica shows the card closed (``done``/``archived``). [daveey]
+    """Released copies of the ``created`` and ``shepherd`` links another gateway (the card's owner) wrote for this
+    gateway's chats, once the replica shows the card closed (``done``/``archived``). [daveey]
 
     The owner writes them in ``kanban_creator_chats`` (``initialize_ownership`` / ``inherit_chats``) for a remote
-    origin chat. The owner's reconcile manages only its own chats' links, so nothing released them: a done card
+    origin chat, and from its ``platform='hub'`` subscriptions (``_owner_hub_links``, ``created`` or ``shepherd``).
+    The owner's reconcile manages only its own chats' links, so nothing released them: a done card
     whose origin ledger had no row for that chat (no ledger link with the same uid, no released shepherd sibling)
     stayed an ``unknown`` obligation in ``replica_cards`` forever (4 hub cards on macbook chat
     20261027_134353_5ab65c, 2026-11-01). The chat's gateway releases them by writing the same uid (the same row on
     the Board) with ``released = 1``, as it already does for a ledger ``origin`` row. Open cards and missing card
-    rows are left alone; links ``want`` already carries keep the ledger's answer. A card reopened after the release
+    rows are left alone, except a row whose chat session compressed into one this gateway links to the same card
+    (``_compressed_away``); links ``want`` already carries keep the ledger's answer. A card reopened after the release
     stays released for that chat: the uid is one row, so the owner's original intent is not recoverable here.
 
     A link to a machine session of this gateway (``is_machine_session``) is released whatever the card's status:
@@ -187,8 +192,8 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
             rows = [dict(r) for r in conn.execute(
                 "SELECT l.uid, l.task_id, l.chat_gateway, l.chat_profile, l.chat_session, l.kind, l.created_at, "
                 "t.status FROM task_chat_links l JOIN tasks t ON t.id = l.task_id "
-                "WHERE l.chat_gateway = ? AND l.kind = 'created' AND l.released = 0 AND l.uid IS NOT NULL "
-                "AND t.created_on IS NOT NULL AND t.created_on != ?",
+                "WHERE l.chat_gateway = ? AND l.kind IN ('created', 'shepherd') AND l.released = 0 "
+                "AND l.uid IS NOT NULL AND t.created_on IS NOT NULL AND t.created_on != ?",
                 (gateway, gateway))]
         finally:
             conn.close()
@@ -201,14 +206,166 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     # lookup was 60% of a 60 s profile of the hub's sync thread (t_01a1d2cc49634a78). [daveey]
     machine = _machine_by_profile(gateway, ((r["chat_profile"], r["chat_session"]) for r in rows
                                             if r["status"] not in TERMINAL_STATUSES))
+    superseded = _compressed_away(rows, want, gateway)
     for r in rows:
         # [daveey] A worker's ``local-<sha256>`` is released like any machine session, not skipped as a shepherd:
         # another gateway proves a foreign hash chat by an unreleased ``created`` link (``proven_foreign_chats``),
         # and only this gateway can say the hash is a worker (review t_01a1cf9aab0349a9).
         if r.pop("status") not in TERMINAL_STATUSES and str(r["chat_session"] or "") not in machine[
-                (type(r["chat_profile"]), r["chat_profile"])]:
+                (type(r["chat_profile"]), r["chat_profile"])] and r["uid"] not in superseded:
             continue
         out[r["uid"]] = {**r, "released": 1, "created_at": int(r["created_at"] or time.time())}
+    return out
+
+
+def _compressed_away(rows: list[dict[str, Any]], want: dict[str, dict[str, Any]], gateway: str) -> set[str]:
+    """Uids of owner-written rows on OPEN cards whose chat session is a compression ancestor of a session this
+    gateway already links, unreleased, to the same card and chat profile. [daveey]
+
+    The owner writes its link from the card's ``platform='hub'`` subscription (``_owner_hub_links``), which names
+    the session that placed the card. A chat that compressed before its gateway's ``accept_binding`` (its Board
+    sync down) has its ledger resolve the tip instead, so the card had two unreleased rows, the ancestor's from the
+    owner and the tip's from here: ``session_tasks`` deduped them but ``links_diff`` listed the ancestor
+    ``only_in_replica`` until the card closed (review of PR #2095). The descendant's row is the chat's link; the
+    ancestor's is released, as a closed card's is. Only this gateway's ``state.db`` (the chat profile's home) knows
+    the lineage; an unreadable one releases nothing this pass."""
+    from hermes_cli.kanban_origin import _ro
+    from hermes_cli.kanban_session_provenance import _local_homes
+    from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
+    linked: dict[tuple[str, Any], set[str]] = {}
+    for link in want.values():
+        if link.get("task_id") and not link.get("released") and link.get("chat_gateway") == gateway:
+            linked.setdefault((link["task_id"], link.get("chat_profile")), set()).add(str(link.get("chat_session")))
+    candidates: dict[Any, list[dict[str, Any]]] = {}
+    for r in rows:
+        sessions = linked.get((r["task_id"], r["chat_profile"]))
+        if r["status"] not in TERMINAL_STATUSES and sessions and str(r["chat_session"]) not in sessions:
+            candidates.setdefault(r["chat_profile"], []).append(r)
+    out: set[str] = set()
+    for profile, group in candidates.items():
+        for home in _local_homes(profile):
+            path = home / "state.db"
+            if not path.exists():
+                continue
+            try:
+                db = _ro(path)
+            except sqlite3.Error as exc:
+                _log.info("kanban chat links: %s unreadable for compression lineage (%s)", path, exc)
+                continue
+            try:
+                for r in group:
+                    sid, seen = str(r["chat_session"]), {str(r["chat_session"])}
+                    for _ in range(_CHAIN_CAP):
+                        step = db.execute(_CHAIN_STEP_SQL, (sid,)).fetchone()
+                        if step is None or step[0] in seen:
+                            break
+                        sid = str(step[0])
+                        seen.add(sid)
+                        if sid in linked[(r["task_id"], r["chat_profile"])]:
+                            out.add(r["uid"])
+                            break
+            except sqlite3.Error as exc:
+                _log.info("kanban chat links: compression lineage unreadable in %s (%s)", path, exc)
+            finally:
+                db.close()
+    return out
+
+
+def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list[dict[str, Any]]:
+    """Links this gateway (the card's owner) publishes for chats on OTHER gateways: one per counted ``platform='hub'``
+    subscription ``<gw>/<profile>/<session>`` on an open card it owns, the same subscriptions the hermes-hub collector
+    publishes as the card's ``sessions`` (so notices and the task list read one membership). [daveey]
+
+    Before this only the chat's own gateway wrote that link, from its origin ledger, so while its Board sync was down
+    (David-MBP gave up the sync role, SchemaAhead, 2026-11-13) six cards it placed elsewhere had no row on the Board:
+    its task list, sidebar counts and ask-gate missed them although their done notices arrived through hub.db.
+
+    The row is the one the chat's gateway writes for the same link (same uid: ``created`` for a courier-bound origin,
+    whose ledger row is ``via: origin``; ``shepherd`` otherwise), so when that gateway's reconcile comes back it
+    upserts this very row, never a second one. It is written once and never changed here: the chat's gateway owns
+    its release (its ledger, ``_owner_written_releases``). Nothing is written while any row for that card and chat
+    exists in this file or the replica, released included, so a release the chat's gateway already made is never
+    reopened; an unreadable replica writes nothing this pass."""
+    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_db_notify import machine_sessions
+    from hermes_cli.kanban_lockguard import connect
+    from hermes_cli.kanban_origin import OriginError, parse_origin
+    from hermes_cli.kanban_origin_intent_carry import EVENT_KIND
+    from hermes_cli.kanban_placement import is_placeholder_session
+    from hermes_cli.kanban_session_activity import _counted_sub_clause
+    task_cols = {c[1] for c in conn.execute("PRAGMA table_info(tasks)")}
+    mine = "AND (t.created_on IS NULL OR t.created_on = '' OR t.created_on = ?)" if "created_on" in task_cols else ""
+    try:
+        subs = conn.execute(
+            f"SELECT s.task_id, s.chat_id, s.created_at FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+            f"WHERE s.platform = 'hub' AND s.chat_id != '' AND t.status NOT IN ({', '.join('?' * len(TERMINAL_STATUSES))}) "
+            f"AND {_counted_sub_clause(conn)} {mine} ORDER BY s.task_id, s.chat_id",
+            (*TERMINAL_STATUSES, *((gateway,) if mine else ()))).fetchall()
+    except sqlite3.Error:  # board predates notify subscriptions
+        return []
+    wanted: dict[tuple, dict[str, Any]] = {}
+    for task_id, chat_id, created_at in subs:
+        try:
+            origin = parse_origin(chat_id)
+        except OriginError:
+            continue
+        if origin.gateway == gateway or is_placeholder_session(origin.session):
+            continue  # this gateway's own chats are its ``tui`` subscriptions (``_local_links``)
+        wanted.setdefault((task_id, origin.gateway, origin.profile, origin.session),
+                          {"created_at": int(created_at or time.time())})
+    if not wanted:
+        return []
+    groups: dict[tuple[str, str], list[str]] = {}
+    for _tid, gw, profile, session in wanted:
+        groups.setdefault((gw, profile), []).append(session)
+    # [daveey] The chat gateway's own verdict (``machine_sessions``, as its ``_owner_written_releases`` releases by):
+    # worker hashes AND ``cron_`` sessions. With only the headless filter a cron chat's sub got a row that gateway
+    # released on its next pass. A foreign ref is never looked up locally, so this reads no state.db.
+    machine = {(gw, profile): machine_sessions(gw, sessions, local_gateway=gateway, profile=profile)
+               for (gw, profile), sessions in groups.items()}
+    wanted = {k: v for k, v in wanted.items() if k[3] not in machine[(k[1], k[2])]}
+    task_ids = sorted({k[0] for k in wanted})
+    have: set[tuple] = set()
+    bound: set[tuple] = set()
+    path = ksc.shadow_path(board)
+    try:
+        replica = connect(f"file:{path}?mode=ro", uri=True, timeout=5) if path.exists() else None
+    except sqlite3.Error as exc:
+        _log.info("kanban chat links: replica %s unreadable for owner hub links (%s)", path, exc)
+        return []
+    try:
+        for db in (conn, replica):
+            if db is None:
+                continue
+            for i in range(0, len(task_ids), 500):
+                chunk = task_ids[i:i + 500]
+                have.update(tuple(r) for r in db.execute(
+                    "SELECT task_id, chat_gateway, COALESCE(chat_profile, 'default'), chat_session FROM task_chat_links "
+                    f"WHERE task_id IN ({', '.join('?' * len(chunk))})", chunk))
+        for i in range(0, len(task_ids), 500):
+            chunk = task_ids[i:i + 500]
+            for task_id, payload in conn.execute(
+                    f"SELECT task_id, payload FROM task_events WHERE kind = ? AND task_id IN "
+                    f"({', '.join('?' * len(chunk))})", (EVENT_KIND, *chunk)):
+                try:
+                    origin = json.loads(json.loads(payload)["binding_json"])["origin"]
+                    bound.add((task_id, origin["gateway"], origin["profile"], origin["session"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except sqlite3.Error as exc:  # nothing is written from a partial read; the next pass retries
+        _log.info("kanban chat links: owner hub links unreadable for %s (%s)", board, exc)
+        return []
+    finally:
+        if replica is not None:
+            replica.close()
+    out = []
+    for key, extra in wanted.items():
+        if key in have:
+            continue
+        task_id, gw, profile, session = key
+        kind = "created" if key in bound else "shepherd"
+        out.append({"uid": link_uid(task_id, gw, profile, session, kind), "task_id": task_id, "chat_gateway": gw,
+                    "chat_profile": profile, "chat_session": session, "kind": kind, "released": 0, **extra})
     return out
 
 
@@ -290,7 +447,17 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or (
         str(r[2] or "") in headless[(type(r[5]), r[5])] and not (r[1] and r[3] == "created"))}
     added = changed = released = retired = 0
+    owner_links = _owner_hub_links(conn, board, gateway)  # read before the write lock, like ``_plan``
     with write_txn(conn):
+        for link in owner_links:
+            # Insert-only, and only while no row for this card and chat exists (a concurrent write, or a pull that
+            # brought the chat gateway's own row in, wins). See ``_owner_hub_links``.
+            added += conn.execute(
+                "INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, released, "
+                "created_at) SELECT :uid, :task_id, :chat_gateway, :chat_profile, :chat_session, :kind, 0, :created_at "
+                "WHERE NOT EXISTS (SELECT 1 FROM task_chat_links WHERE task_id = :task_id AND chat_gateway = "
+                ":chat_gateway AND COALESCE(chat_profile, 'default') = :chat_profile AND chat_session = :chat_session)",
+                link).rowcount
         for uid in placeholders - set(want):
             conn.execute("DELETE FROM task_chat_links WHERE uid = ?", (uid,))
             have.pop(uid)
@@ -344,11 +511,13 @@ def _read_replica(path: Path, gateway: str,
     card row is missing), the replica's last successful pull, and the current-run terms of the linked running cards
     (``kanban_replica_execution.read_runs``). Raises ``sqlite3.Error`` when unreadable.
 
-    ``chat_released`` is 1 when another link of the same card and chat (other kind) is released. [daveey] The owner
-    writes a ``created`` link for a remote origin chat (``kanban_creator_chats``) that no gateway ever releases: the
-    owner's reconcile only manages its own chats' links and the origin's only its own board file. The origin's
-    ``shepherd`` link carries the verified release instead, so a done card stayed an ``unknown`` obligation forever
-    (sidebar "4 open" naming none, 2026-11-01)."""
+    [daveey] A released sibling link (same card and chat, other kind) no longer settles a closed card here. That
+    reader rule (9d13eeb47e, 2026-11-01) assumed the released sibling carried a verified release; the writer fix
+    for the same incident (``_owner_written_releases``) releases the owner's unmanaged ``created`` link itself, so
+    the rule only ever fired where the chat's own ledger still held the other link unreleased: a done card whose
+    release is unverified, whose owner-written ``shepherd`` sibling was released because the card closed. It hid 19
+    such hub cards from chat 20261026_170127_f07c32 that the ledger lists as ``unknown`` (David-MBP links_diff,
+    2026-11-13). Each link now carries its own answer, as ``replica_cards`` says: only a released link drops it."""
     from hermes_cli.kanban_activity_revision import SHADOW_TABLES, is_revision
     from hermes_cli.kanban_session_activity import _board_content_key, cached_ro  # lazy: that module imports this one
     # [daveey] The link rows only change with the replica's tasks/task_chat_links content; a pull that only moves
@@ -382,10 +551,7 @@ def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) ->
     return [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
         f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
-        "l.chat_session, l.chat_profile, l.kind, "
-        "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
-        "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
-        "AS chat_released "
+        "l.chat_session, l.chat_profile, l.kind "
         "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
         "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
         "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
@@ -519,10 +685,6 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             unknown = missing or status in TERMINAL_STATUSES or status is None
             if not unknown and status not in statuses:
                 continue
-            # A closed card this chat's other link released is settled for this chat (see ``_read_replica``). Only a
-            # terminal row: an open card keeps every unreleased link, and a missing row stays unknown.
-            if status in TERMINAL_STATUSES and r.get("chat_released"):
-                continue
             tid = str(r["id"])
             owner, owner_profile, named = _owner_of((owners or {}).get((board, tid), []), r["created_on"],
                                                     r["chat_session"])
@@ -573,24 +735,51 @@ def _ledger_obligation(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:
     return card.get("status") in statuses or (card.get("status") == UNKNOWN and bool(card.get("unfinished")))
 
 
+def _unlinked_chats(gateway: str, profiles: dict[str, set[Any]]) -> set[str]:
+    """The chats (``session -> origin profiles``) the link writer never links: a placeholder id, or a machine
+    session of this gateway (``_ledger_links`` skips them, ``reconcile`` releases them). Classified once per
+    profile, as ``_ledger_links`` does."""
+    from hermes_cli.kanban_db_notify import machine_sessions
+    from hermes_cli.kanban_placement import is_placeholder_session
+    out = {s for s in profiles if is_placeholder_session(s)}
+    groups: dict[tuple, tuple[Any, list[str]]] = {}
+    for session, names in profiles.items():
+        if session not in out:
+            for name in names:
+                groups.setdefault((type(name), name), (name, []))[1].append(session)
+    for name, refs in groups.values():
+        out |= {str(s) for s in machine_sessions(gateway, refs, local_gateway=gateway, profile=name)}
+    return out
+
+
 def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
     """Per chat, the remote obligations the origin ledger lists against the ones the replicas list, including
     ``unknown`` unfinished rows (done cards without a verified release). Clean when the two answers match for
-    every chat either side knows."""
+    every chat either side knows.
+
+    [daveey] Chats the link writer never links (``_unlinked_chats``: machine sessions, placeholders) are left out
+    of both sides and counted in ``machine_links``: their ledger rows were differences by construction, never a
+    reader regression. On David-MBP they were 250 of the 270 only-in-ledger links (137 of 140 chats, all kanban
+    worker transcripts, 2026-11-13), which hid the real difference among them."""
     from hermes_cli.kanban_session_activity import _remote_links
     ledger: dict[str, set[tuple[str, str, str]]] = {}
+    profiles: dict[str, set[Any]] = {}
     for card in _remote_links():
         if card.get("origin_gateway") not in (None, gateway) or not card.get("session"):
             continue
         if not _ledger_obligation(card, statuses):
             continue
         ledger.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
+        profiles.setdefault(card["session"], set()).add(card.get("origin_profile"))
     replica: dict[str, set[tuple[str, str, str]]] = {}
     unreadable: list[str] = []
     from hermes_cli import kanban_sync_client as ksc
     replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
     for card in replica_cards(None, gateway, statuses, replicas, ledger_fallback=False, unreadable_out=unreadable):
         replica.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
+        profiles.setdefault(card["session"], set()).add(card.get("origin_profile"))
+    skipped = _unlinked_chats(gateway, profiles)
+    machine_links = sum(len(side.pop(s, ())) for side in (ledger, replica) for s in skipped)
     # A replica that exists but cannot be read, or that is missing while the ledger has cards on its board, answers
     # nothing: the diff is never clean while one does (readers must not switch on it). A missing replica of a board
     # with no ledger cards has nothing to compare.
@@ -605,4 +794,5 @@ def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[
     # An unreadable replica answers nothing (see above).
     return {"clean": not only_ledger and not only_replica and not unreadable, "chats": len(sessions),
             "ledger_links": sum(len(v) for v in ledger.values()), "replica_links": sum(len(v) for v in replica.values()),
-            "only_in_ledger": only_ledger, "only_in_replica": only_replica, "unreadable": unreadable}
+            "machine_links": machine_links, "only_in_ledger": only_ledger, "only_in_replica": only_replica,
+            "unreadable": unreadable}

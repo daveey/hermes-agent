@@ -63,8 +63,10 @@ ADMISSION_ANSWER_MARGIN_S = 60.0
 # cards to triage. Before an admission the worker asks again (``kanban.run`` is idempotent per
 # attempt), and an owner that keeps refusing for ``OWNER_WAIT_S`` ends the run owner-unavailable (69:
 # requeued uncounted, bounded by ``NEUTRAL_STREAK_LIMIT``). Once admitted a turn may be running, so the
-# refusal stays final there.
-_HOST_REFUSAL_REASONS = frozenset({'storage_unavailable'})
+# refusal stays final there. ``capsule_observation_missing`` is the owner's transport state too: it refuses
+# before creating any session (``session_kanban.run_task``). worker-3 2026-11-13 booked six of them for
+# t_01a1d1197fa00599 as unproven crashes (an unreadable default policy made its owner require a capsule).
+_HOST_REFUSAL_REASONS = frozenset({'storage_unavailable', 'capsule_observation_missing'})
 
 
 def admission_answer_budget():

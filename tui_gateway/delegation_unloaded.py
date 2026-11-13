@@ -31,6 +31,11 @@ chat is in this host's stores, it:
 A started wake spends the chat's budget (``WAKES_PER_HOUR``; a woken turn may dispatch work whose result wakes it
 again). A chat past budget keeps its result pending: its next poller, or the next hour's pass, delivers it. The pass
 runs (and is disabled) with the kanban unloaded-session sweeper's loop.
+
+Under the host loop lease (``kanban_unloaded``, design t_01a1d45d75851804 §2b) only the lease holder runs the full
+pass; it skips a chat another backend holds (``skipped:held``) as before. Every other backend runs the pass with
+``only=`` its own live session ids, so a chat live in a backend that is not the holder still gets its result from
+that backend. The budget is per process, so with one holder it is in effect host-wide for unloaded chats.
 """
 
 from __future__ import annotations
@@ -44,6 +49,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
+
+from tui_gateway.wake_slots import WakeSlots
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +66,7 @@ _lock = threading.Lock()
 _recovered_at: dict[str, float] = {}  # ledger home -> last recover_abandoned_delegations run (this process)
 _wake_times: dict[str, list[float]] = {}  # chat -> started wakes (this process)
 _retry: dict[str, tuple[float, float]] = {}  # delegation id -> (not before, last delay)
-_wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
+_wake_slots = WakeSlots(MAX_PARALLEL_WAKES)
 
 
 def _reset_for_tests() -> None:
@@ -68,7 +75,7 @@ def _reset_for_tests() -> None:
         _wake_times.clear()
         _retry.clear()
         _recovered_at.clear()
-    _wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
+    _wake_slots = WakeSlots(MAX_PARALLEL_WAKES)
 
 
 def ledger_homes() -> list[Optional[Path]]:
@@ -202,8 +209,11 @@ def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
                homes: Callable[[], list] = ledger_homes, opener=None,
                holders: Optional[Callable[[], list[dict]]] = None,
                busy: Callable[[set], bool] = busy_here, wake: Callable[..., str] = wake_turn,
-               spawn: Callable[[Callable[[], Any]], Any] = _spawn_thread) -> list[dict]:
-    """One pass over every ledger this backend serves; one decision dict per candidate row (for logs and tests)."""
+               spawn: Callable[[Callable[[], Any]], Any] = _spawn_thread,
+               only: Optional[set[str]] = None) -> list[dict]:
+    """One pass over every ledger this backend serves; one decision dict per candidate row (for logs and tests).
+    ``only`` (a non-holder's residual pass): act only on rows whose chat or its tip is one of these live ids, and
+    leave the ledger's dead-owner recovery to the holder."""
     from tools import async_delegation as ad
     from tools.process_registry_notifications import format_process_notification
     from tui_gateway import kanban_unloaded as ku
@@ -216,7 +226,7 @@ def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
         with _home_scope(home):
             with _lock:
                 key = str(home or "")
-                recover = now - _recovered_at.get(key, float("-inf")) >= RECOVER_EVERY_S
+                recover = only is None and now - _recovered_at.get(key, float("-inf")) >= RECOVER_EVERY_S
                 if recover:
                     _recovered_at[key] = now
             try:
@@ -240,13 +250,16 @@ def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
                 if found is None:
                     decision["verdict"] = "skipped:no-store"
                     continue
+                ids = {chat, tip or chat}
+                if only is not None and not ids & only:
+                    decision["verdict"] = "skipped:not-live-here"  # the lease holder's pass owns it
+                    continue
                 if skip is not None:
                     # Left pending and unclaimed: an unarchived chat's poller can still take it, else the ledger's
                     # expiry ends it. Back off so the pass does not re-read the chat every tick.
                     _back_off(did, now)
                     decision["verdict"] = f"skipped:{skip}"
                     continue
-                ids = {chat, tip or chat}
                 if (holder := held_elsewhere(holders, ids)) is not None:
                     decision["verdict"] = f"skipped:held:{holder}"
                     continue

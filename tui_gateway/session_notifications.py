@@ -9,9 +9,11 @@ import threading
 
 from .method_ctx import bind_module
 from . import session_notifications_surface as _surface
-from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure
-from .kanban_notice_text import parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode
-from .kanban_notice_text import repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out
+from .kanban_notice_text import (chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure,
+    left_open_suffix as _kb_left_open, repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out,
+    parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode)
+from .completion_obligation import settle_started as _settle_started, settle_suppressed as _settle_suppressed
+from .kanban_leg_custody import LINEAGE_LIMIT
 
 
 def _notif_locked_sessions(fn, default):
@@ -179,9 +181,8 @@ _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
 
 
-# [daveey] Completion events (process id → event) a claimed notice turn is about to carry. The turn's start
-# (``start_synthesized_turn``) moves them to ``_completion_delivered`` + ``COMPLETION_UNSECURED``; until then
-# they stay in the poller's in-flight custody (backend-exit journal: exit_job_receipts).
+# [daveey] Completion events (pid → event) a claimed notice turn will carry; its start (start_synthesized_turn)
+# moves them to ``_completion_delivered`` + ``COMPLETION_UNSECURED``; until then, poller in-flight custody.
 NOTIF_OFFERED_COMPLETIONS = "_notif_offered_completions"
 # Delivered to a started turn whose crash marker is not written yet: the exit journal still reports these.
 # ``_record_turn_marker`` drops them once the marker (whose prompt carries the notice) is on disk.
@@ -200,14 +201,12 @@ def start_synthesized_turn(session: dict):
     ``_sessions_lock`` (it takes ``history_lock``; lock order is ``history_lock`` -> ``_sessions_lock``, since
     session.resume holds history_lock while it takes _sessions_lock). It yields ``commit(start)``; call that under
     ``_sessions_lock``, under which alone ``fence_exit_notices`` raises the exit fence, so the fence check and the
-    worker start are one step with respect to the exit journal (which fences first): fenced → refused (the events
-    are still in custody and get journaled); started → delivered, and unsecured until the turn's crash marker is
-    on disk. ``commit`` returns ``start()``'s result (None = not started).
-
-    The delivered mark is taken on entry, before the start: a marked completion is also unsecured, and the exit
-    journal reports unsecured ones, so a fence landing between mark and commit still journals it. A commit that did
-    not start (fenced, refused, raised or never called) rolls the mark back on exit, after the caller released
-    ``_sessions_lock``."""
+    worker start are one step for the exit journal (which fences first): fenced → refused (still in custody, so
+    journaled); started → delivered (owed receipts settled), unsecured until the turn's crash marker is on disk.
+    ``commit`` returns ``start()``'s result (None = not started). The delivered mark is taken on entry, before the
+    start: a marked completion is also unsecured and the journal reports those, so a fence landing between mark and
+    commit still journals it. A commit that did not start (fenced, refused, raised or never called) rolls the mark
+    back on exit, after the caller released ``_sessions_lock``."""
     with session["history_lock"]:
         synthesized = bool(session.get("_synthesized_turn"))
         fenced = synthesized and bool(session.get("_exit_notices_pending"))
@@ -228,7 +227,9 @@ def start_synthesized_turn(session: dict):
     try:
         yield commit
     finally:
-        if offered and started is None:
+        if offered and started is not None:  # delivered into the session: settle its owed receipt
+            _settle_started(offered)
+        elif offered:
             with session["history_lock"]:
                 session.get("_completion_delivered", set()).difference_update(offered)
                 unsecured = session.get(COMPLETION_UNSECURED) or {}
@@ -592,12 +593,6 @@ def _kb_completed(task, payload: dict, title: str) -> str:
     return f" done — {title}{handoff}{_kb_left_open(payload)}"
 
 
-def _kb_left_open(payload: dict) -> str:
-    from hermes_cli.kanban_pr_landing import left_open_notice
-    notice = left_open_notice(payload)
-    return f"\n{notice}" if notice else ""
-
-
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
@@ -754,6 +749,8 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
     except Exception:
         return []
     texts: list = []
+    from tui_gateway.kanban_leg_custody import chat_lineage, gateway_claims
+    chats = chat_lineage(session_key, _session_lineage)  # its local rows may sit on the lineage root
     with contextlib.closing(conn):
         try:
             subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key)
@@ -766,6 +763,8 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
         for sub in subs:
             if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
                 continue
+            if gateway_claims(session_key, sub := {**sub, "sibling_chats": chats}):
+                continue  # the live gateway owns the chat and claims this row within one tick (kanban_leg_custody)
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
             from gateway.kanban_wake_sibling import tui_defer
@@ -787,7 +786,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             claim = None
             if claims is not None:  # so a refused turn can hand the range back (_kb_rewind_refused) [daveey]
                 claim = {"board": slug, **sub_ident, "old": _old, "new": _new, "texts": [],
-                         "claimed_mono": time.monotonic()}
+                         "notifier_profile": sub.get("notifier_profile"), "claimed_mono": time.monotonic()}
                 claims.append(claim)
             task = _kb.get_task(conn, sub["task_id"])
             from gateway.kanban_wake_sibling import tui_formatter
@@ -801,6 +800,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)
                     from hermes_cli.kanban_failure_notice import event_key
                     text._kb_keys = (event_key(slug, ev),)  # type: ignore[attr-defined]
+                    text._kb_event = ev  # type: ignore[attr-defined]  # _kb_settle_held re-checks custody [daveey]
                     texts.append(text)
                     sub_texts.append(text)
                     if claim is not None:
@@ -833,8 +833,8 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     """Claim unseen terminal kanban events for this session's ``platform="tui"`` subscriptions (``kanban_create``
     auto-subscribes with ``chat_id=HERMES_SESSION_KEY``; no "tui" messaging adapter exists, so this poller is the
     delivery path). Same atomic cursor-claim as the gateway notifier: exactly-once even if a gateway polls the same DB.
-
-    See #59890.
+    See #59890. An owned chat's remote notices: kanban_remote_owner while it holds the chat's work, else this poller
+    once ownership ends; the sweep skips live chats (a claim here was handed straight back, review 5890277360). [daveey]
     """
     session_key = str(session.get("session_key") or "")
     if not session_key or session.get("_finalized"):
@@ -856,18 +856,19 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
         unique.setdefault(resolved, slug)
     seen = session.setdefault("_kb_board_seen", {})
     stray, unreclaimed = _kb_stray_delegate_keys(session, session_key), []
+    owned = _kb_gateway_owns(session)  # the gateway's collector admits the rows it claims in one tick: skipped below
     texts = [t for slug in unique.values() for t in _kb_poll_board(
         _kb, slug, session_key, claims, seen, stray=stray, unreclaimed=unreclaimed)]
     if stray and not unreclaimed:
         session["_kanban_stray_keys"] = ()  # every board is clean; stop probing
-    return texts + _collect_remote_kanban_notifications(session_key, claims)
+    return texts if owned else texts + _collect_remote_kanban_notifications(session_key, claims)
 
 
 _LINEAGE_TTL_S = 30.0
 _lineage_memo: dict[tuple, tuple] = {}  # (state.db, session key) -> (monotonic at, lineage)
 
 
-def _session_lineage(session_key: str, limit: int = 8) -> tuple:
+def _session_lineage(session_key: str, limit: int = LINEAGE_LIMIT) -> tuple:
     """Earlier ids of this chat (compaction parents): a remote card stays linked to the id that created it.
 
     Every live chat's poller asked for it every 5 s, opening state.db each time (t_01a1cee98b798343). A chat's
@@ -1240,6 +1241,16 @@ def _notif_collect_kanban(session: dict) -> tuple:
     return texts, claims
 
 
+def _kb_gateway_owns(session: dict) -> bool:  # the gateway's collector admits this chat's tui rows [daveey]
+    from tui_gateway.kanban_leg_custody import legacy_gateway_owns
+    return legacy_gateway_owns(session, _session_lineage, _session_db)
+
+
+def _kb_settle_held(session: dict) -> None:  # a buffered claim the chat's wake delivered meanwhile [daveey]
+    from tui_gateway.kanban_leg_custody import legacy_settle_held
+    legacy_settle_held(session, _session_lineage, _notif_log_failure)
+
+
 def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
     """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
     cursor-claimed, so they wait in the buffer instead of dropping the agent turn; a turn the admission gate
@@ -1262,6 +1273,10 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
         session.setdefault("_kanban_pending", []).extend(texts)
     if claims and prepared is None:  # prepared collections already transferred custody
         session.setdefault("_kanban_claims", []).extend(claims)
+    _kb_settle_held(session)
+    if session.get("_kanban_pending") and _kb_gateway_owns(session):  # hand back now, not after a refused turn
+        _kb_rewind_refused(session, list(session.get("_kanban_pending") or []), not_owned=True)
+        return
     if not session.get("_kanban_pending") or not _notif_claim_turn(session):
         return
     with session["history_lock"]:
@@ -1456,7 +1471,7 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
         return True
     text = fmt(evt)
     if not text:
-        return True
+        return _settle_suppressed(evt, "no notice text")
     # Emit once per dedup key: a re-queued completion would otherwise re-emit every 0.5s while the session is busy,
     # while distinct watch_match events from one process must stay visible.
     dedup_key = _notification_event_dedup_key(evt)
@@ -1472,7 +1487,7 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
     if evt_type != "async_delegation" and _background_notifications_off(session):
         # The user opted out of process-driven agent wakes: the status row above is the whole
         # delivery. Subagent results are not process notifications and still land.
-        return True
+        return _settle_suppressed(evt, "background notifications off")
     if evt_type == "completion" and completions is not None:
         completions.append((evt, text))
         return True

@@ -9,7 +9,8 @@ guessed a quota wall and parked the card. The tick logs had rotated, so the real
 * :func:`record_tick` (the dispatcher's post-result seam, ``kanban_capacity_evidence.observe_dispatch``) appends
   ONE ``dispatch_skipped {reason, detail, until?}`` event per (card, reason, detail) per ready episode for every
   row the tick passed over: ``skipped_ineligible``, ``capsule_refused``, ``no_progress_held``,
-  ``per_profile_capped``, ``claim_deferred`` (Board/claim refusals), ``owner_down`` and ``pinned_quota_wall``.
+  ``per_profile_capped``, ``claim_deferred`` (Board lease refusals and this host's admission-gate refusals, told
+  apart by the deferral's ``origin``), ``owner_down`` and ``pinned_quota_wall``.
   A (reason, detail) the episode already holds adds nothing; a new one appends. At most :data:`MAX_PER_EPISODE` per
   episode, so two dispatchers that disagree cannot grow a card's history without bound.
 * :func:`pinned_quota_hold` holds a fresh card (no run yet) on the ready lane whose explicit pin's provider pool
@@ -205,7 +206,9 @@ def _tick_skips(result: Any) -> list[tuple[str, str, Any, Optional[float], dict[
     """``(task_id, reason, detail, until, extra)`` for every row ``result`` says the tick passed over."""
     out: list[tuple[str, str, Any, Optional[float], dict[str, Any]]] = []
     for name in ("skipped_ineligible", "capsule_refused", "no_progress_held", "claim_deferred"):
-        out += [(tid, name, code, None, {}) for tid, code in getattr(result, name, ())]
+        # A claim deferral carries who set it (local gate vs Board); the skip words read it back (:func:`words`).
+        out += [(tid, name, code, None, {"origin": code.origin} if getattr(code, "origin", None) else {})
+                for tid, code in getattr(result, name, ())]
     out += [(tid, "per_profile_capped", who, None, {"running": n})
             for tid, who, n in getattr(result, "skipped_per_profile_capped", ())]
     out += [(tid, "owner_down", f"{who}:{code}", None, {}) for tid, who, code in getattr(result, "owner_down", ())]
@@ -294,11 +297,20 @@ _WORDS = {
 }
 
 
+def _local_gate(skip: dict[str, Any]) -> bool:
+    """The ``claim_deferred`` skip was set by this host (its admission gate, placement or worker-capacity check),
+    not by the Board service: the producer stamps ``origin`` (``kanban_db_sync.ClaimDeferral``); no name list."""
+    from hermes_cli.kanban_db_sync import ORIGIN_LOCAL
+    return skip.get("origin") == ORIGIN_LOCAL
+
+
 def words(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     """The skip as one clause, e.g. ``held: pinned model claude-opus-5-5 (anthropic) quota-walled until 01:59Z``."""
     reason = str(skip.get("reason") or "unknown")
     detail = skip.get("detail") or "no detail"
     text = _WORDS.get(reason, "skipped: {reason} ({detail})").format(reason=reason, detail=detail)
+    if reason == "claim_deferred" and _local_gate(skip):
+        text = f"skipped: this host's admission gate deferred its claim ({detail})"
     if skip.get("until"):
         text += f" until {_stamp(skip['until'], now)}"
         if _wall_passed(skip, now):
@@ -381,7 +393,8 @@ def notice_fields(place: Optional[dict[str, Any]], ready_seconds: Optional[float
     """Payload fields for a ready-wait notice: ``dispatch_skip`` or ``skip_unrecorded``; empty otherwise."""
     skip = (place or {}).get("skip")
     if skip:
-        return {"dispatch_skip": {k: skip.get(k) for k in ("reason", "detail", "until") if skip.get(k) is not None}}
+        return {"dispatch_skip": {k: skip.get(k) for k in ("reason", "detail", "until", "origin")
+                                  if skip.get(k) is not None}}
     return {"skip_unrecorded": True} if unrecorded(place, ready_seconds) else {}
 
 

@@ -16,14 +16,16 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
-from tests.hermes_cli import test_kanban_hub_admission as helpers
+from tests.hermes_cli import hub_admission_support as support
+from tests.hermes_cli.hub_admission_support import advisory, claim, configure, refused, task
 
 pytestmark = pytest.mark.platforms("posix")
 PRELEASE_MAX_AGE_MS = ka.ADVISORY_MAX_AGE_MS - getattr(ka, "PRELEASE_HEADROOM_MS", 5_000)
 
-board = helpers.board
-configure, advisory, task, claim, refused = (helpers.configure, helpers.advisory, helpers.task, helpers.claim,
-                                             helpers.refused)
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    yield from support.open_board(tmp_path, monkeypatch)
 
 
 def no_own_sample(monkeypatch):

@@ -315,6 +315,18 @@ def _get_claude_code_version() -> str:
     return _claude_code_version_cache
 
 
+def claude_code_identity_headers() -> dict[str, str]:
+    """User-agent + x-app every native OAuth request carries (Anthropic routes OAuth by user-agent)."""
+    return {"user-agent": f"claude-code/{_get_claude_code_version()} (external, cli)", "x-app": "cli"}
+
+
+def oauth_wire_headers(base_url: str | None = None) -> dict[str, str]:
+    """Beta + identity headers :func:`build_anthropic_client` sends for an OAuth token, for raw
+    callers (the Kanban quota proof) whose wire must not drift from the real client's."""
+    return {**_beta_header(_common_betas_for_base_url(base_url) + _OAUTH_ONLY_BETAS),
+            **claude_code_identity_headers()}
+
+
 _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
 _MCP_TOOL_PREFIX = "mcp__"
 
@@ -423,9 +435,7 @@ def _build_anthropic_client_with_bearer_hook(
         # key_cmd-sourced Claude Code OAuth on the native host: a bare bearer without the Claude Code
         # identity is answered with 429 rate_limit_error "Error" (#114967) — same headers as the
         # static "oauth" style in build_anthropic_client.
-        headers = _beta_header(betas + _OAUTH_ONLY_BETAS)
-        headers["user-agent"] = f"claude-code/{_get_claude_code_version()} (external, cli)"
-        headers["x-app"] = "cli"
+        headers = {**_beta_header(betas + _OAUTH_ONLY_BETAS), **claude_code_identity_headers()}
     else:
         headers = _beta_header(betas)
     return _new_sdk_client(sdk, kwargs, headers, route=base_url)
@@ -510,8 +520,7 @@ def build_anthropic_client(api_key, base_url: str | None = None, timeout: float 
     if style == "kimi":
         headers = {**_attribution_headers(), **headers}
     elif style == "oauth":
-        headers["user-agent"] = f"claude-code/{_get_claude_code_version()} (external, cli)"
-        headers["x-app"] = "cli"
+        headers.update(claude_code_identity_headers())
     if _is_opencode_endpoint(base_url):
         # OpenCode identifies clients by request headers (like OpenRouter). The OpenAI-wire paths
         # get these from profile.default_headers, but this route never sees the profile.

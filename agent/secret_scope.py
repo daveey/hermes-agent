@@ -474,9 +474,9 @@ def _is_process_home(hermes_home: Path) -> bool:
     """Is *hermes_home* the profile this process serves as its own? Same launch-home identity as
     ``serves_routed_profile()``: a host that mirrors a served profile into ``HERMES_HOME`` would
     otherwise seed the launch profile's bridged allow-all grant into that profile's scope."""
-    from hermes_constants import get_routing_process_hermes_home
+    from hermes_constants import get_routing_process_hermes_home, hermes_home_key
     try:
-        return Path(hermes_home).resolve() == get_routing_process_hermes_home().resolve()
+        return hermes_home_key(hermes_home) == hermes_home_key(get_routing_process_hermes_home())
     except OSError:
         return False
 

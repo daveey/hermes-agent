@@ -3,6 +3,7 @@ import zlib from 'node:zlib'
 
 import { lockServesConnect, resolveReadyTimeoutMs } from './remote-lifecycle'
 import { WINDOWS_CHECKOUT_LOCK_PS, WINDOWS_MARKER_JUDGE_PS } from './remote-update-marker-programs'
+import { REMOTE_UPDATE_PAUSED_PHRASE } from './remote-update-refusal'
 import { assertBootstrapNotSuperseded, redactSecrets, SSH_ERROR } from './ssh-connection'
 import { WINDOWS_NO_REPARSE_PS, windowsHelperArgv } from './windows-runtime-command'
 
@@ -331,9 +332,9 @@ async function assertWindowsRemoteInstallUpdateClear(ssh, hermesHome, python = '
 
   const error: any = new Error(
     live
-      ? `Remote Hermes update process ${live[1]} is still running; SSH startup is paused.`
+      ? `Remote Hermes update process ${live[1]} is still running; ${REMOTE_UPDATE_PAUSED_PHRASE}.`
       : observation === 'HELD'
-        ? 'A process the remote Hermes update started still holds the install; SSH startup is paused.'
+        ? `A process the remote Hermes update started still holds the install; ${REMOTE_UPDATE_PAUSED_PHRASE}.`
         : 'The remote Hermes update marker is unreadable or malformed; refusing SSH startup.'
   )
 

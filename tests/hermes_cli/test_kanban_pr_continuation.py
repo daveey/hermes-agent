@@ -80,6 +80,8 @@ def test_checkpoint_orders_only_real_pr_comments(monkeypatch, author, body, expe
 
 @pytest.mark.parametrize("watermark", [None, True, "1", -1])
 def test_invalid_or_legacy_checkpoint_watermark_fails_closed(monkeypatch, watermark):
+    """Without a valid watermark, only the same run's event order can order the tie
+    (kanban_pr_same_run_park); with that provenance unreadable too, it fails closed."""
     now = int(time.time())
     monkeypatch.setattr(time, "time", lambda: now)
     with kbc.connect() as conn:
@@ -95,6 +97,8 @@ def test_invalid_or_legacy_checkpoint_watermark_fails_closed(monkeypatch, waterm
         data["comment_id_at_checkpoint"] = watermark
         import json
         conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(data), row["id"]))
+        assert kbd.check_respawn_guard(conn, tid) is None  # same run: reported, then parked
+        conn.execute("DELETE FROM task_events WHERE task_id=? AND kind='commented'", (tid,))
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"
 
 
@@ -119,6 +123,11 @@ def test_non_immediate_or_superseded_continuation_still_guards(monkeypatch, mode
             worker_comment(conn, tid, "a", f"External PR remains: {URL}")
         else:
             conn.execute("UPDATE task_runs SET metadata='{}' WHERE id=?", (result["run_id"],))
+        if mode in {"scheduled", "missing_checkpoint"}:
+            # The run reported its PR, then parked in that same second: one continuation
+            # (2026-11-13 t_01a1ccbbc5a2ee34). Unreadable comment provenance keeps the hold.
+            assert kbd.check_respawn_guard(conn, tid) is None
+            conn.execute("DELETE FROM task_events WHERE task_id=? AND kind='commented'", (tid,))
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"
 
 

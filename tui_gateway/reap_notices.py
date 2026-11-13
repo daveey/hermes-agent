@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,22 @@ def notify_parents_of_killed_subagents(db: Any, swept: Iterable[str]) -> list[st
     if notified:
         logger.info("orphan reap: told %d parent chat(s) their subagent was stopped mid-work: %s",
                     len(notified), ", ".join(notified))
+    return notified
+
+
+def retry_pending_killed_notices_all(stores: Optional[Callable[[], Any]] = None, *,
+                                    now: Optional[float] = None) -> list[str]:
+    """:func:`retry_pending_killed_notices` over every profile store this host serves (``notice_guarantee._stores``),
+    not only this process's own one: under the host loop lease one process retries for the whole install (design
+    t_01a1d45d75851804 §2b). Never raises."""
+    if stores is None:
+        from tui_gateway.notice_guarantee import _stores as stores
+    notified: list[str] = []
+    try:
+        for db in stores():
+            notified.extend(retry_pending_killed_notices(db, now=now))
+    except Exception:
+        logger.warning("killed-subagent notice retry: store iteration failed", exc_info=True)
     return notified
 
 

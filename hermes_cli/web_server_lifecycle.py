@@ -623,7 +623,7 @@ def build_listener_server(served_app, host: str, port: int, *, auth_required: bo
         ws_ping = (None, None) if host in _LOOPBACK_HOST_VALUES else (
             _ws_ping_setting("ws_ping_interval"), _ws_ping_setting("ws_ping_timeout"))
     _uvicorn_console_logging()
-    from hermes_cli.web_server_transport import transport_observed_app
+    from hermes_cli.web_server_transport import KEEP_ALIVE_IDLE_S, transport_observed_app
 
     forwarded_allow_ips = _dashboard_forwarded_allow_ips(dash_cfg)
     served_app = transport_observed_app(
@@ -644,6 +644,7 @@ def build_listener_server(served_app, host: str, port: int, *, auth_required: bo
         # mid-turn request orphans the backend past that budget (#76244). 3s
         # leaves room for lifespan shutdown + cron_stop before the kill.
         timeout_graceful_shutdown=timeout_graceful_shutdown,
+        timeout_keep_alive=KEEP_ALIVE_IDLE_S,
         lifespan=lifespan,
     )
     return config, uvicorn.Server(config)

@@ -454,9 +454,10 @@ def uv_cache_dir() -> Path:
         # merge once and the directory-shaped entries the old copy left are healed in place.
         seed += "+payload2"
     try:
-        current = marker.read_text(encoding="utf-8-sig").strip() == seed
+        recorded = _seed_marker_lines(marker)
     except OSError:
-        current = False
+        recorded = []
+    current = seed in recorded
     if not current:
         # Seed from a shipped bundle cache when present (payload root =
         # store_root().parent on a sealed install). Record completion ONLY after a clean copy: a
@@ -487,10 +488,42 @@ def uv_cache_dir() -> Path:
         else:
             try:
                 marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text(seed, encoding="utf-8")
+                _write_seed_marker(marker, seed, recorded)
             except OSError:
                 pass
     return machine_cache
+
+
+# One line per lock whose seed this cache holds. Homes on different locks share one cache (a
+# borrowing home uses the account's, ``uv_cache_path``); a single-value marker flipped between
+# them and made each re-run its payload merge after the other. The marker is a hint, not an exact
+# record: its read-modify-write takes no lock, so two homes on different locks writing at once can
+# drop one line, and an older Hermes sharing the cache (single-value marker) rewrites it as one line.
+# Either only costs an idempotent re-merge of that lock's payload on its next call.
+_SEED_MARKER_LOCKS = 8
+
+
+def _seed_marker_lines(marker: Path) -> list[str]:
+    return [line.strip() for line in marker.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+
+
+def _write_seed_marker(marker: Path, seed: str, recorded: list[str]) -> None:
+    """Record *seed* first. A payload seed supersedes its own lock's other payload suffixes (their
+    copy semantics are stale); every other line, the seedless form included, stays."""
+    lock, _, suffix = seed.partition("+")
+
+    def superseded(line: str) -> bool:
+        other_lock, _, other_suffix = line.partition("+")
+        return bool(suffix) and other_lock == lock and bool(other_suffix) and other_suffix != suffix
+
+    lines = [seed, *(line for line in recorded if line != seed and not superseded(line))]
+    fd, staging = tempfile.mkstemp(prefix=".seeded-", dir=marker.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("\n".join(lines[:_SEED_MARKER_LOCKS]))
+        os.replace(staging, marker)
+    finally:
+        Path(staging).unlink(missing_ok=True)
 
 
 @register

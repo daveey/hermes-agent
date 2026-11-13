@@ -76,6 +76,7 @@ _has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/nul
 _account_tool_store() {
   local account py_minor
   [ -z "${HERMES_RUNTIME_DIR:-}" ] || return 1
+  _account_seed_enabled || return 1
   account="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
   [ -n "$account" ] || account="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')"
   [ -n "$account" ] && [ -d "$account" ] || return 1
@@ -89,8 +90,17 @@ _account_tool_store() {
   py_minor="$(_store_has_pins "$account/.hermes/tools")" || return 1
   printf '%s\n%s\n' "$account" "$py_minor"
 }
-# Read-only check that the store already records this checkout's pins
-# (scripts/tool_store_pins.py says why and what counts); prints the Python minor.
+# The same opt-out as pm.environments.account_seed_enabled (pm/AGENTS.md),
+# which strips surrounding whitespace and ignores case before matching.
+_account_seed_enabled() {
+  local value="${HERMES_PM_ACCOUNT_SEED:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  case "$value" in 0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) return 1 ;; esac
+}
+# Check, read-only for the store, that it already records this checkout's pins
+# (scripts/tool_store_pins.py says why and what counts, and the one write: the
+# borrower's own decline record); prints the Python minor.
 _store_has_pins() {
   local python
   python="$(HERMES_RUNTIME_DIR="$1" hermes_bootstrap_python "$REPO_ROOT")" || return 1
@@ -200,6 +210,9 @@ _pf86="$(env | sed -n 's/^ProgramFiles(x86)=//p' | head -n1)"
 #     tests/e2e/core/terminal instead of a skip (set by the e2e CI job).
 #   * CI / GITHUB_ACTIONS tell suites they run on a disposable runner (e.g.
 #     tests/e2e/core/upgrade runs the real updater unsandboxed only there).
+#     GITHUB_STEP_SUMMARY lets a test name a skipped proof in the job summary
+#     (tests/cron/heredoc_shape_corpus.note_ci_skip): the runner keeps skip
+#     counts but drops skip reasons and warnings.
 #   * HERMES_E2E_WINDOWS_INSTALL opts tests/e2e/core/windows_update into running
 #     the real install.ps1 (it writes HKCU PATH); HERMES_E2E_MACHINE_ROOT,
 #     HERMES_E2E_PROFILES_ROOT and HERMES_E2E_ARTIFACTS place its fake machines,
@@ -234,7 +247,7 @@ for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   HERMES_TEST_FILE_TIMEOUT HERMES_TEST_FILE_RETRIES HERMES_TEST_SLICE HERMES_TEST_FORKSERVER \
   HERMES_TEST_SLOW_CASE_S HERMES_TEST_FLAKY_REPORT HERMES_TEST_REQUIRE_EXTRAS \
   HERMES_TEST_HOST_SLOTS HERMES_TEST_SLOT_DIR HERMES_TEST_SLOT_HELD HERMES_TEST_USER_STEPS_API \
-  SSL_CERT_FILE SSL_CERT_DIR HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS \
+  SSL_CERT_FILE SSL_CERT_DIR HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS GITHUB_STEP_SUMMARY \
   HERMES_E2E_WINDOWS_INSTALL HERMES_E2E_MACHINE_ROOT HERMES_E2E_PROFILES_ROOT HERMES_E2E_ARTIFACTS \
   HERMES_E2E_STRICT_ACCEPTANCE HERMES_E2E_UPGRADE_BASE HERMES_E2E_N1_REF \
   HERMES_E2E_INSTALL_REF HERMES_E2E_GIT_OBJECTS HERMES_E2E_KEEP_ROOT \

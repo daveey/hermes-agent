@@ -100,6 +100,20 @@ KANBAN_LIST_SCHEMA = _schema(
     [],
 )
 
+
+def _operator_delivery_schema() -> dict[str, Any]:
+    """evidence.operator_delivery as the validator admits it: exactly hcr.OPERATOR_DELIVERY_FIELDS."""
+    text = {"type": "string", "minLength": 1, "maxLength": hcr.OPERATOR_DELIVERY_TEXT_MAX,
+            "pattern": hcr.TEXT_PATTERN}
+    special = {"comment_id": {"type": "integer", "minimum": 1},
+               "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+    return {
+        "type": "object", "additionalProperties": False, "required": list(hcr.OPERATOR_DELIVERY_FIELDS),
+        "description": "Optional: the applied operator result's operator_delivery, verbatim",
+        "properties": {key: dict(special.get(key, text)) for key in hcr.OPERATOR_DELIVERY_FIELDS},
+    }
+
+
 def _completion_receipt_schema() -> dict[str, Any]:
     """metadata.completion_receipt v1, from the validator's own limits (hermes_completion_receipt) so the
     advertised shape never drifts from what the card writer admits (self-heal agent-f82d813de9)."""
@@ -112,20 +126,23 @@ def _completion_receipt_schema() -> dict[str, Any]:
                        "reason": "not in this card's scope"}]}]}
     # No maxLength: llama.cpp's grammar converter rejects any bound >= 2000 (MAX_TEXT, MAX_REF) and refuses the
     # whole request; the card writer enforces the caps, and the description states them.
-    text = {"type": "string", "minLength": 1}
-    ref = {"type": "string", "minLength": 1}
+    text = {"type": "string", "minLength": 1, "pattern": hcr.TEXT_PATTERN}
+    ref = {"type": "string", "minLength": 1, "pattern": hcr.TEXT_PATTERN}
     return {
         "type": "object", "additionalProperties": False, "required": ["version", "items"],
         "description": (
             "Optional v1 per-scope receipt. Include it when this completion claims delivery of a scoped "
             "artifact or ask (a fix, file, PR, reply, setting): one item per scope with its disposition "
             "(delivered, superseded with superseded_by, contained = mitigated not fixed, rejected), evidence "
-            "refs with the ISO8601 time you observed each and verification independently_checked (you re-ran "
-            "or read it back this run) or reported (taken from someone's word), and what remains. Remaining "
+            "refs with the timezone-aware ISO-8601 time you observed each (a naive timestamp is refused) and "
+            "verification independently_checked (you re-ran or read it back this run) or reported (taken from "
+            "someone's word), and what remains. A cross-card operator delivery claim attaches the applied "
+            "result's operator_delivery object to its evidence. Remaining "
             "pending work needs an open owner card you created or linked, as @task:<board>@<gateway>/<id>; "
             "deferred work may have owner null with a reason. Chat close-outs relay this instead of guessing "
             f"from the summary. Text fields hold at most {hcr.MAX_TEXT} characters, refs and owners "
-            f"{hcr.MAX_REF}. Example: " + json.dumps(example, separators=(",", ":"))),
+            f"{hcr.MAX_REF}; the whole receipt's canonical JSON at most {hcr.MAX_BYTES} bytes. Example: "
+            + json.dumps(example, separators=(",", ":"))),
         "properties": {
             "version": {"type": "integer", "enum": [1]},
             "items": {"type": "array", "minItems": 1, "maxItems": hcr.MAX_ITEMS, "items": {
@@ -140,8 +157,11 @@ def _completion_receipt_schema() -> dict[str, Any]:
                         "required": ["ref", "observed_at", "verification"],
                         "properties": {
                             "ref": ref,
-                            "observed_at": {"type": "string", "maxLength": 64},
+                            "observed_at": {"type": "string", "maxLength": 64, "pattern": hcr.TEXT_PATTERN,
+                                            "description": (
+                                "ISO-8601 with timezone, e.g. 2026-11-13T06:40:00+00:00")},
                             "verification": {"type": "string", "enum": list(hcr.VERIFICATIONS)},
+                            "operator_delivery": _operator_delivery_schema(),
                         }}},
                     "remaining": {"type": "array", "maxItems": hcr.MAX_REMAINING, "items": {
                         "type": "object", "additionalProperties": False,
@@ -149,7 +169,7 @@ def _completion_receipt_schema() -> dict[str, Any]:
                         "properties": {
                             "scope": text,
                             "state": {"type": "string", "enum": ["pending", "deferred"]},
-                            "owner": {"type": ["string", "null"]},
+                            "owner": {"type": ["string", "null"], "pattern": hcr.TEXT_PATTERN},
                             "reason": text,
                         }}},
                 }}},
@@ -499,7 +519,8 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
         "blocker_id": _prop("string", _BLOCKER_ID_DESC),
         "watch": _prop("boolean", (
             "True for a later check that needs nothing from David before it reports (e.g. verify X on "
-            "Friday): the parked card stops holding its chat unfinished; a block, failure or done still "
+            "Friday): the parked card stops holding its chat unfinished (the chat shows done with a watch mark "
+            "naming this card; asked about the chat, name this pending check); a block, failure or done still "
             "notifies the chat. Sticky across re-parks; false clears it."
         )),
         **_CLEAR_BLOCKER_PROP,
@@ -1033,8 +1054,10 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
         "its defect (`kanban card t_...`), and a card that finished fix card "
         "created may do the same; an owner-wake supervisor card (\"Owner wake: "
         "supervise ...\") may unblock the cards its body lists while they are "
-        "in triage or blocked. Any other worker call is refused, and the "
-        "worker shell stays fenced."
+        "in triage or blocked; a missing-parent repair card may unblock the child "
+        "whose newest parent_missing block names it (on another gateway the call "
+        "is forwarded to the child's home as an operator call). Any other worker "
+        "call is refused, and the worker shell stays fenced."
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),

@@ -16,6 +16,12 @@ def reset():
     _identity, _rows = None, {}
 
 
+def seqs(index: dict) -> dict:
+    """``{(owner, key): seq}`` of the cards in ``index`` as of the last snapshot. Under the reader lock."""
+    return {(card["gw"], card["key"]): hit[0] for entries in index.values() for card in entries
+            if (hit := _rows.get((card["gw"], card["key"]))) is not None}
+
+
 def _read_rows(conn, me, previous):
     """Warm reads fetch only changed payloads, with identities in the same snapshot."""
     from tui_gateway import kanban_remote_notices as remote

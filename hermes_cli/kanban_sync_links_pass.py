@@ -6,15 +6,35 @@ queued on ``_links_lock`` behind Desktop readers) and the replica went 13 min st
 cards did not promote (t_01a1d2cc49634a78). The loop asks for a pass on its cadence; a request while one is running
 is refused and asked again on a later iteration, so passes never pile up. The thread owns its own connection scope
 and never calls the loop's ``keep_running`` (callers count its calls); the loop stops it.
+
+``stop`` waits only ``JOIN_S`` for a running pass, so a slow pass can outlive its loop. Passes are serialized per
+process (``_PASS_LOCK``): a restarted loop's runner refuses requests while a stopped runner's pass still runs, and
+never runs ``reconcile_links`` alongside it (both would share ``kanban_sync_client._LINKS_DONE``). A request refused
+because another runner holds the lock logs a warning naming how long the pass has held it: once when the hold is first
+seen, then again at most every ``REWARN_S`` while that same hold lasts, so a pass wedged for hours does not log only
+one near-0 s duration. A hung pass would otherwise refuse every later pass in the process silently.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 _log = logging.getLogger("hermes_cli.kanban_sync_client")
+
+# Held for the length of one ``reconcile_links`` call by whichever runner (live, or stopped but still running) owns it.
+_PASS_LOCK = threading.Lock()
+# (monotonic acquire time, hold token) while a pass holds ``_PASS_LOCK``, and (token, monotonic time) of the last
+# refusal warning: a wedged pass warns when first seen and then every ``REWARN_S``, not on every refused request.
+_HOLD: Optional[tuple[float, object]] = None
+_WARNED: Optional[tuple[object, float]] = None
+# Seconds between repeat warnings for one hold.
+REWARN_S = 600.0
+# Clock seam: tests step it instead of sleeping.
+_clock = time.monotonic
 
 
 class LinksPass:
@@ -30,17 +50,39 @@ class LinksPass:
         self._thread: Optional[threading.Thread] = None
 
     def request(self, boards: list[tuple[str, Path]]) -> bool:
-        """Start a pass over ``boards`` unless one is running. True when it started."""
+        """Start a pass over ``boards`` unless one is running: this runner's, or an earlier loop's that outlived its
+        ``stop``. True when it started."""
         if not self._idle.is_set():
+            return False
+        if _PASS_LOCK.locked():
+            self._warn_held_elsewhere()
             return False
         self._boards = list(boards)
         self._idle.clear()
         self._want.set()
         if self._thread is None or not self._thread.is_alive():
-            from agent.memory_provider import spawn_context_thread
-            self._thread = spawn_context_thread(self._run, name="kanban-sync-links")
+            # The loop's contextvars (profile scope) cross into the thread; no agent.memory_provider dependency.
+            self._thread = threading.Thread(target=contextvars.copy_context().run, args=(self._run,),
+                                            name="kanban-sync-links", daemon=True)
             self._thread.start()
         return True
+
+    @staticmethod
+    def _warn_held_elsewhere() -> None:
+        # The holder is never this runner: its own pass keeps ``_idle`` clear, so ``request`` returns before here,
+        # and ``_pass`` clears ``_HOLD`` before releasing the lock. While another runner holds the lock, ``_HOLD`` is
+        # None only between acquiring the lock and setting ``_HOLD``, and between clearing it and releasing the lock;
+        # a refusal in either window stays quiet, which is harmless because the next request warns.
+        global _WARNED
+        hold, warned, now = _HOLD, _WARNED, _clock()
+        if hold is None:
+            return
+        if warned is not None and warned[0] is hold[1] and now - warned[1] < REWARN_S:
+            return
+        _WARNED = (hold[1], now)
+        _log.warning("kanban sync: chat links pass refused: another runner's pass has held the pass lock for %.0fs "
+                     "(reconcile_links may be hung); repeats every %.0fs while it holds it",
+                     now - hold[0], REWARN_S)
 
     def wait_idle(self, timeout: Optional[float] = None) -> bool:
         return self._idle.wait(timeout)
@@ -50,6 +92,16 @@ class LinksPass:
         self._want.set()
         if self._thread is not None:
             self._thread.join(self.JOIN_S)
+
+    def _pass(self, client) -> None:
+        global _HOLD
+        with _PASS_LOCK:  # a request that raced past ``request``'s check waits here, never overlaps
+            _HOLD = (_clock(), object())
+            try:
+                if not self._stopped:
+                    client.reconcile_links(self._boards, self._gateway, skip_unchanged=True)
+            finally:
+                _HOLD = None
 
     def _run(self) -> None:
         from hermes_cli import kanban_sync_client as client  # module attribute: tests replace reconcile_links
@@ -63,7 +115,7 @@ class LinksPass:
                     if self._stopped:
                         break
                     try:
-                        client.reconcile_links(self._boards, self._gateway, skip_unchanged=True)
+                        self._pass(client)
                     except Exception as exc:  # health: allow BLE001 -- a failed pass must not end the thread
                         _log.warning("kanban sync: chat links pass failed (%s: %s)", type(exc).__name__, exc)
                     finally:

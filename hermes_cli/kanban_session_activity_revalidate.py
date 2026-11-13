@@ -25,6 +25,9 @@ STAT_SETTLED_S = 2.0
 # Set by ``refresh_if_unchanged`` while it re-reads a scope whose inputs it just found unchanged:
 # ``(without shadows or None, with shadows)``, so the readers do not read every board's revision again (per thread).
 inputs_pin = threading.local()
+# [daveey] ``force_read.scope``: this thread's next counts read of that scope really reads (the annotation holder
+# renewing an aging host copy, ``kanban_annotation_host._holder_refresh``).
+force_read = threading.local()
 
 
 def revalidatable(fingerprint: tuple, wall: float) -> bool:
@@ -78,6 +81,8 @@ def counts_fresh(scope: tuple[str, ...], fingerprint: tuple, now: float) -> bool
     from hermes_cli import kanban_session_activity as _ksa
     cache = _ksa._cache
     if cache is None or _ksa._cache_scope != scope or fingerprint != _ksa._cache_fingerprint:
+        return False
+    if getattr(force_read, "scope", None) == scope:
         return False
     if now < cache[0]:
         return True

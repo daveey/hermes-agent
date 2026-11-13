@@ -198,7 +198,7 @@ def test_standalone_profile_ticket_is_minted_on_the_profiles_own_socket(tmp_path
 
 
 def test_unreachable_owner_answers_503_with_discoverys_reason_not_a_bare_409(tmp_path, monkeypatch):
-    """An owner discovery saw but couldn't reach (starting, draining) still holds the lock: the
+    """An owner discovery saw but couldn't reach (draining) still holds the lock: the
     offline write loses, and mute and owner-backfill answer a retryable 503 naming why."""
     from contextlib import contextmanager
 
@@ -210,7 +210,7 @@ def test_unreachable_owner_answers_503_with_discoverys_reason_not_a_bare_409(tmp
     home.mkdir(mode=0o700)
     _seed(home, 'chat')
     monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint',
-                        lambda *_a, **_k: GatewayDiscovery('starting', reason_code='runtime_starting'))
+                        lambda *_a, **_k: GatewayDiscovery('draining', reason_code='update_paused'))
 
     @contextmanager
     def held(_homes, **_kw):
@@ -221,7 +221,7 @@ def test_unreachable_owner_answers_503_with_discoverys_reason_not_a_bare_409(tmp
         for path, payload in (('/api/sessions/chat/mute', {'muted': True}), ('/api/sessions/owner-backfill', {})):
             refused = client.post(path, json=payload)
             assert refused.status_code == 503, (path, refused.text)
-            assert refused.json()['detail'].startswith('owner_unavailable: runtime_starting'), refused.text
+            assert refused.json()['detail'].startswith('owner_unavailable: update_paused'), refused.text
 
 
 def test_multiplexer_served_profile_keeps_its_control_home_and_forwards_the_profile(tmp_path, monkeypatch):

@@ -8,6 +8,8 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
+from hermes_cli import kanban_run_end_lease as _run_end_lease
+from hermes_cli import kanban_schema_owner as _schema_owner
 import contextlib
 import json
 import os
@@ -922,6 +924,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             raise PermissionError("Kanban descendants require an initialized board; ask its owner to initialize it")
         return conn
     _refuse_dead_board_resurrection(path, board)
+    _schema_owner.refuse_missing_board(path)  # a non-installed core never creates a home's board file [daveey]
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fast path: once THIS process has initialized this path, skip the
@@ -930,6 +933,9 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     # the gateway dispatcher's next-tick connect() forever, and steady-state has
     # nothing for it to protect (no schema/migration writes).
     resolved = str(path.resolve())
+    if resolved in _schema_owner.READ_ONLY:  # a non-installed core found this board's schema not its own
+        return _schema_owner.open_read_only(path, _schema_owner.READ_ONLY[resolved],
+                                            timeout_s=_resolve_busy_timeout_ms() / 1000.0, text_factory=_kb._lossy_text)
     if resolved in _INITIALIZED_PATHS:
         conn, schema_present = _open_configured(path, _schema_is_present)
         if schema_present:
@@ -961,20 +967,42 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
         _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())
 
-        def _init_if_needed(conn: sqlite3.Connection) -> None:
+        def _init_if_needed(conn: sqlite3.Connection) -> Optional[str]:
             # Idempotent; runs under _INIT_LOCK so same-process dispatcher
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
-                conn.executescript(_kb.SCHEMA_SQL)
-                _migrate_add_optional_columns(conn)
-                from hermes_cli.kanban_wake_episode import ensure_schema
-                ensure_schema(conn)
+                # Only the home's installed core changes its board's schema (kanban_schema_owner). [daveey]
+                refusal = _schema_owner.check(conn, path)
+                if refusal:
+                    return refusal
+                if refusal == "":  # at par: no schema pass, but keep the board's sync mode (ids, Board leases);
+                    # the display-only activity revision is skipped too (its readers fall back to stat keys)
+                    _kb._sync.register_without_install(conn, resolved)
+                    _INITIALIZED_PATHS.add(resolved)
+                    return None
+                apply_schema_steps(conn)
                 _kb._sync.install_or_remove(conn, resolved)
                 _ensure_activity_revision(conn, resolved)
                 _INITIALIZED_PATHS.add(resolved)
+            return None
 
-        conn, _ = _open_configured(path, _init_if_needed)
+        conn, refusal = _open_configured(path, _init_if_needed)
+    if refusal:
+        conn.close()
+        return _schema_owner.open_read_only(path, refusal, timeout_s=_resolve_busy_timeout_ms() / 1000.0,
+                                            text_factory=_kb._lossy_text)
     return conn
+
+
+def apply_schema_steps(conn: sqlite3.Connection) -> None:
+    """Every table/column step of connect()'s schema pass. kanban_schema_owner replays this same function on an
+    in-memory DB to judge "at par", so a step added here is never missed there. [daveey]"""
+    conn.executescript(_kb.SCHEMA_SQL)
+    _migrate_add_optional_columns(conn)
+    from hermes_cli.kanban_wake_episode import ensure_schema
+    ensure_schema(conn)
+    from hermes_cli import kanban_source_receipt
+    kanban_source_receipt.ensure_schema(conn)  # before the capture triggers that read it
 
 
 @contextlib.contextmanager
@@ -1002,6 +1030,7 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     ensure_kanban_test_isolation(path)
     _refuse_dead_board_resurrection(path, board)
+    _schema_owner.refuse_missing_board(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:
@@ -1109,6 +1138,9 @@ _NOTIFY_SUB_COLUMNS = (
     # Epoch seconds of the earliest outstanding claim: a LIVE holder's claim older than NOTIFY_CLAIM_STALE_S no
     # longer blocks other consumers (t_01a199de3003e911). NULL = none, or written before this column. [daveey]
     ("inflight_at", "inflight_at INTEGER"),
+    # The card's last event when the row was inserted (its starting cursor; trg_notify_sub_created_event): a row
+    # never delivers an event written before it existed. NULL = inserted before this column. [daveey]
+    ("created_event_id", "created_event_id INTEGER"),
 )
 
 _TASK_RUN_COLUMNS = (
@@ -1229,6 +1261,16 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             pass  # a read-only (delegated-child) opener: the next writer stamps; inheritance has a fallback
 
     _rebuild_drifted_tables(conn)
+    _ensure_notify_sub_triggers(conn)
+
+
+def _ensure_notify_sub_triggers(conn: sqlite3.Connection) -> None:
+    """Stamp ``created_event_id`` on every new notify row (after any rebuild, which drops a table's triggers): the
+    sibling-leg rules read it to tell an event written before the row existed from one it delivered. [daveey]"""
+    if _table_exists(conn, "kanban_notify_subs"):
+        conn.execute("CREATE TRIGGER IF NOT EXISTS trg_notify_sub_created_event AFTER INSERT ON kanban_notify_subs "
+                     "WHEN NEW.created_event_id IS NULL BEGIN UPDATE kanban_notify_subs SET created_event_id = "
+                     "NEW.last_event_id WHERE rowid = NEW.rowid; END")
 
 
 def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
@@ -1336,6 +1378,7 @@ _REBUILD_SPECS = {
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
         " inflight_from INTEGER, inflight_pid INTEGER, inflight_start INTEGER, inflight_at INTEGER,"
+        " created_event_id INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
@@ -1514,6 +1557,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         # don't let this secondary failure shadow the real one.
         with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("ROLLBACK")
+        _run_end_lease.flush(conn, committed=False)
         raise
     else:
         try:
@@ -1523,7 +1567,9 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
             with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute("ROLLBACK")
+            _run_end_lease.flush(conn, committed=False)
             raise
+        _run_end_lease.flush(conn, committed=True)  # [daveey] Board lease of a run this txn ended
         # Post-commit torn-extend check — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)
 

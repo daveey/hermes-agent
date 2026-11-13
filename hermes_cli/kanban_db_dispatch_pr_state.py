@@ -3,7 +3,8 @@
 ``active_pr`` exists to stop a second worker opening a duplicate PR. Once every PR a
 card's comments name is MERGED or CLOSED there is nothing left to duplicate, so the hold
 must lift (2026-10-23: t_d507533c sat held 6 h after Metta-AI/coworld-qwop#1 merged).
-States and queue markers come from ``gh pr view --json state,comments``. A completed
+States and queue markers come from ``gh pr view --json state,comments,headRefOid`` (the head
+serves :func:`pr_head` from the same read). A completed
 rejection releases the worker to repair the existing PR, with a quoted card comment.
 Anything unknown (gh missing, auth, network,
 timeout, unparseable output) is ``None`` and the caller keeps holding (fail closed).
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import time
@@ -35,6 +37,9 @@ GH_TIMEOUT_SECONDS = 20
 # url -> (state or None, monotonic expiry or None for "forever")
 _cache: dict[str, tuple[Optional[str], Optional[float]]] = {}
 _rejections: dict[str, str] = {}
+# url -> (OPEN head sha or None, monotonic time of the gh read that saw it)
+_heads: dict[str, tuple[Optional[str], float]] = {}
+_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def _gh_argv() -> Optional[list[str]]:
@@ -44,24 +49,25 @@ def _gh_argv() -> Optional[list[str]]:
     broker wrapper such as ``token-broker exec --scope user/github --``) and resolves ``gh``
     from ~/bin / ~/.local/bin as the PR-acceptance gate does: a service process has a minimal
     PATH and often no ambient ``gh`` login, and without either every lookup failed closed, so
-    merged PRs held their cards for the full 6 h hold cap. [daveey]"""
+    merged PRs held their cards for the full 6 h hold cap. Built by the shared
+    :func:`hermes_cli.kanban_gh_argv.dispatcher_gh_argv`. [daveey]"""
     try:
-        from hermes_cli.kanban_pr_acceptance import _gh_command_prefix
-        from hermes_platform.resolver.github import resolve_gh
-        resolved = resolve_gh()
-        if not resolved.found:
-            return None
-        return [*_gh_command_prefix(None), *resolved.command]
+        from hermes_cli.kanban_gh_argv import dispatcher_gh_argv
+        return dispatcher_gh_argv()
     except Exception:  # config/setup errors may carry credentials: log no text
         logger.debug("kanban: gh argv for PR state unavailable")
         return None
 
 
 def _gh_pr_state(url: str) -> Optional[str]:
-    """GitHub state, ``REJECTED`` for a completed queue rejection, or None on failure."""
+    """GitHub state, ``REJECTED`` for a completed queue rejection, or None on failure.
+
+    The same read records the OPEN head for :func:`pr_head` (``_heads``), so the awaited-review
+    release costs no second ``gh pr view``. [daveey]"""
     gh = _gh_argv() or ["gh"]
     try:
-        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments"], stdin=subprocess.DEVNULL,
+        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments,headRefOid"],
+                              stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GH_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -77,6 +83,9 @@ def _gh_pr_state(url: str) -> Optional[str]:
         return None
     state = state.upper() if isinstance(state, str) and state else None
     key = norm_pr(url)
+    oid = data.get("headRefOid")
+    _heads[key] = (oid.lower() if state == "OPEN" and isinstance(oid, str) and _SHA.fullmatch(oid) else None,
+                   time.monotonic())
     _rejections.pop(key, None)
     if state == "OPEN":
         from hermes_cli.kanban_db_dispatch_pr_rejection import rejection_reason
@@ -88,6 +97,15 @@ def _gh_pr_state(url: str) -> Optional[str]:
     return state
 
 
+def _store(key: str, state: Optional[str], now: float) -> None:
+    if state == "REJECTED":
+        _cache.pop(key, None)  # requeue must invalidate rejection immediately
+    elif state in TERMINAL_STATES:
+        _cache[key] = (state, None)
+    else:
+        _cache[key] = (state, now + (OPEN_TTL_SECONDS if state else ERROR_TTL_SECONDS))
+
+
 def pr_state(url: str) -> Optional[str]:
     """Cached :func:`_gh_pr_state`."""
     key = norm_pr(url)
@@ -96,13 +114,27 @@ def pr_state(url: str) -> Optional[str]:
     if hit is not None and (hit[1] is None or now < hit[1]):
         return hit[0]
     state = _gh_pr_state(url)
-    if state == "REJECTED":
-        _cache.pop(key, None)  # requeue must invalidate rejection immediately
-    elif state in TERMINAL_STATES:
-        _cache[key] = (state, None)
-    else:
-        _cache[key] = (state, now + (OPEN_TTL_SECONDS if state else ERROR_TTL_SECONDS))
+    _store(key, state, now)
     return state
+
+
+def pr_head(url: str, *, max_age: Optional[float] = None) -> Optional[str]:
+    """Full lowercase head sha of an OPEN PR, from :func:`pr_state`'s read; None when unknown.
+
+    Serves the head recorded by the last ``gh pr view`` of this PR while it is younger than
+    ``max_age`` (default: :data:`OPEN_TTL_SECONDS` for a head, :data:`ERROR_TTL_SECONDS` for
+    unknown), else re-reads, refreshing ``pr_state``'s cache entry too. [daveey]"""
+    key = norm_pr(url)
+    now = time.monotonic()
+    hit = _heads.get(key)
+    if hit is not None:
+        limit = max_age if max_age is not None else (OPEN_TTL_SECONDS if hit[0] else ERROR_TTL_SECONDS)
+        if now - hit[1] < limit:
+            return hit[0]
+    _heads.pop(key, None)
+    _store(key, _gh_pr_state(url), now)
+    _heads.setdefault(key, (None, now))  # a failed read is unknown: cached like an error state
+    return _heads[key][0]
 
 
 def all_prs_finished(urls: Iterable[str]) -> bool:
@@ -325,7 +357,9 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     not insertion order: synced history can append older events after promotion.
     A park in the same second as the newest PR comment counts only when the park's
     server-stamped comment watermark covers that comment (the owner reported, then
-    parked); without it the tie stays guarded.
+    parked); without it the tie stays guarded. Only awaited parents' results can
+    refuse it: a review parent that finished before the park, unchanged since, was
+    already in the owner's context.
     """
     from hermes_cli import kanban_db as kb
 
@@ -393,12 +427,17 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
             or kb.unsatisfied_parents(conn, task_id)):
         return False
     from hermes_cli.kanban_dependency_review import _awaited_parents, is_review_result
-    if not _awaited_parents(conn, parents, evidence, parked_at):
+    awaited_now = _awaited_parents(conn, parents, evidence, parked_at)
+    if not awaited_now:
         return False
     awaited = evidence.get("awaited")
     # Results is_review_result calls reviews (incomplete or invalid verdicts included)
-    # belong to resumes_review: this handoff must not bypass its exact-head checks. [daveey]
-    for parent in parents:
+    # belong to resumes_review: this handoff must not bypass its exact-head checks. A
+    # parent proven finished and unchanged before the park is not awaited: its verdict
+    # predates the park, so it neither authorizes nor refuses (2026-11-13
+    # t_01a1d09d3547337b: an approval of PR #1760 that preceded the owner's rollout park
+    # held the owner 30 min after the rollout finished). [daveey]
+    for parent in awaited_now:
         result = conn.execute(
             "SELECT metadata, summary FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,),
         ).fetchone()
@@ -420,12 +459,16 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
 
 
 def _handed_off_after(conn: sqlite3.Connection, task_id: str, since: int, latest_pr_comment_id: int,
-                      pr_urls: list[str]) -> bool:
-    """Any supported handoff strictly after the newest PR comment (see :func:`active_pr_reason`)."""
+                      pr_urls: list[str], tie_comment_ids: tuple[int, ...] = ()) -> bool:
+    """Any supported handoff strictly after the newest PR comment (see :func:`active_pr_reason`).
+
+    ``tie_comment_ids`` are the PR comments at ``since``: the run that wrote them and then
+    parked in that same second handed them off (:mod:`kanban_pr_same_run_park`)."""
     from hermes_cli import kanban_db_dispatch as _kbd
     from hermes_cli.kanban_db_dispatch_rerun import is_handoff_event, reopened_after
     from hermes_cli.kanban_hold_release import released_after
     from hermes_cli.kanban_operator_resume import resumed_after
+    from hermes_cli.kanban_pr_same_run_park import reported_then_parked
 
     if released_after(conn, task_id, since, pr_urls):
         return True
@@ -433,12 +476,15 @@ def _handed_off_after(conn: sqlite3.Connection, task_id: str, since: int, latest
         return True  # operator `kanban resume`: one continuation of the latest run
     if _immediate_checkpoint_after(conn, task_id, since, latest_pr_comment_id):
         return True
-    # Strictly after: a same-second handoff tie stays guarded (fail closed).
+    # Strictly after: a same-second handoff tie stays guarded (fail closed), except the
+    # publishing run's own orderly park ordered after its comments.
     if any(is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
             conn, "task_events", task_id, since,
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
             "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
+        return True
+    if reported_then_parked(conn, task_id, since, tie_comment_ids):
         return True
     if reopened_after(conn, task_id, since):
         return True  # operator reopen of the PR owner: it resumes THAT PR (its comments are in context)
@@ -455,8 +501,9 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
     PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
     its PR, and the wake resumes it from that checkpoint, not a context-free respawn.
-    The parking run's own note written just after that park, restating PRs this card
-    already named, belongs to the park and does not post-date it
+    The parking run's own note written just after that park, naming only PRs this card
+    already named or the park itself names (its awaiting ref, reason or ship CI probe),
+    belongs to the park and does not post-date it
     (:mod:`hermes_cli.kanban_pr_park_note`); any other run's note, a new PR or unreadable
     provenance keeps the hold.
     So does a supported operator reopen of the done card (``reopened``, strictly after): the
@@ -542,13 +589,18 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             if pr_state(url) == "REJECTED":
                 comment_rejection(conn, task_id, url, _rejections[norm_pr(url)])
         return None
-    if _handed_off_after(conn, task_id, max(pr_times), latest_pr_comment_id, pr_urls):
+    since = max(pr_times)
+    ties = tuple(cid for t, cid in published if t == since)
+    if _handed_off_after(conn, task_id, since, latest_pr_comment_id, pr_urls, ties):
         return None
     from hermes_cli import kanban_requeued_publisher
     if kanban_requeued_publisher.continues(conn, task_id, published, latest_pr_comment_id):
         return None  # its own publisher was paused by a core-update requeue: one continuation
     from hermes_cli.kanban_review_release import released
     if released(conn, task_id, pr_urls) or resumes_review(conn, task_id, pr_urls):
+        return None
+    from hermes_cli.kanban_awaited_review import resumes_awaited_review
+    if resumes_awaited_review(conn, task_id, pr_urls):
         return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
     discharged = {u for u, s in states.items() if s in TERMINAL_STATES or s == "REJECTED"}
@@ -564,3 +616,4 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
 def clear_cache() -> None:
     _cache.clear()
     _rejections.clear()
+    _heads.clear()

@@ -260,6 +260,80 @@ def test_exit_funnel_parks_the_main_thread_once_the_bound_owns_the_exit():
     assert not exit_deadline._done.is_set()
 
 
+@pytest.mark.parametrize(("raised", "code"), [
+    (RuntimeError("runner.stop() failed"), 1),  # escapes asyncio.run uncaught: exit 1
+    (SystemExit(75), 75),  # main() routes the SystemExit's code through the funnel
+])
+def test_post_tail_bound_takes_the_unwinding_exception_code(monkeypatch, raised, code):
+    """runner.stop() / wait_gateway_runtime raised: the tail still runs in start_gateway's finally and
+    resolves a clean verdict, but the process exits with the exception's code, so the bound must too."""
+    exits: list = []
+    env = _fake_tail_env(monkeypatch, exits)
+    monkeypatch.setattr(exit_deadline, "POST_TAIL_GRACE_S", 0.2)
+    exit_deadline.set_exit_target(time.monotonic() + 0.3, "test")
+    runner = MagicMock(exit_reason=None, should_exit_with_failure=False, exit_code=None,
+                       _restart_via_service=False)
+
+    from gateway.run_bootstrap import _start_gateway_shutdown_tail
+
+    async def start_gateway_finally():
+        try:
+            raise raised
+        finally:
+            await _start_gateway_shutdown_tail(runner, None, *env, [False])
+
+    with pytest.raises(type(raised)):
+        asyncio.run(start_gateway_finally())
+    wait_until(lambda: exits, timeout=5.0, what="the post-tail bound to take the exit")
+    assert exits[0][0] == code
+
+
+def test_post_tail_bound_writes_an_exit_diag_record_before_the_funnel(monkeypatch, tmp_path):
+    """The bound's exit skips `hermes gateway run`'s asyncio.run.returned / exit_clean records."""
+    import json
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_GATEWAY_EXIT_DIAG", "1")
+    diag = tmp_path / "logs" / "gateway-exit-diag.log"
+    seen: list = []
+    exit_deadline._state.update(started_mono=time.monotonic())
+    exit_deadline.set_exit_target(time.monotonic() + 0.1, "core update checkpoint")
+    assert exit_deadline.bound_post_tail(
+        1, lambda code: seen.append([json.loads(line) for line in diag.read_text().splitlines()]), grace_s=0.1)
+    wait_until(lambda: seen, timeout=5.0, what="the post-tail bound to take the exit")
+    records = [r for r in seen[0] if r["tag"] == "gateway.post_tail_bound"]
+    assert len(records) == 1, seen[0]
+    assert records[0]["exit_code"] == 1 and records[0]["level"] == "warning"
+    assert records[0]["target_reason"] == "core update checkpoint"
+    assert "post_tail_bound" in records[0]["phases"] and records[0]["over_target_s"] >= 0
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("funnel failed"),
+    SystemExit(1),  # a BaseException: the bound must not die still holding exit_owner
+])
+def test_exit_funnel_wakes_when_the_bound_hands_the_exit_back(failure):
+    """The bound took the exit, the main thread parked in the funnel, then the bound's funnel failed:
+    the parked main thread wakes and runs the funnel instead of waiting for the hard deadline."""
+    owned, release = threading.Event(), threading.Event()
+
+    def failing_funnel(_code):
+        owned.set()
+        release.wait(5)
+        raise failure
+
+    exit_deadline.set_exit_target(time.monotonic() + 0.05, "test")
+    assert exit_deadline.bound_post_tail(0, failing_funnel, grace_s=0.05)
+    wait_until(owned.is_set, timeout=5.0, what="the post-tail bound to take the exit")
+    funnel = threading.Thread(target=exit_deadline.enter_exit_funnel, daemon=True)
+    funnel.start()
+    funnel.join(0.3)
+    assert funnel.is_alive()  # parked while the bound owns the exit
+    release.set()
+    funnel.join(5)
+    assert not funnel.is_alive()  # handed back: the main thread now owns the exit
+    assert exit_deadline._done.is_set()
+
+
 def test_exit_funnel_marks_its_phase(monkeypatch):
     exit_deadline._state.update(started_mono=time.monotonic() - 2.0)
     monkeypatch.setattr(gateway_run, "_best_effort", lambda step, *a, **k: None)

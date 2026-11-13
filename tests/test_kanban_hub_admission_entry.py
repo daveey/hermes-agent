@@ -68,7 +68,7 @@ def test_cli_denied_follows_worker_queue(hub_cli, monkeypatch, mode, queued):
     from hermes_cli import kanban_db_sync as sync
     monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": []},
                                                       "worker_queue": {"hub": "pool:worker"}})
-    monkeypatch.setattr(placement, "_machine_picks_up", lambda label: label == "pool:worker")
+    monkeypatch.setattr(placement, "_machine_picks_up", lambda labels: "pool:worker" in labels)
     monkeypatch.setattr(sync, "board_mode", lambda _conn: mode)
     hub_cli.admit_next = False
     assert _cli_create(MARKED) == 0

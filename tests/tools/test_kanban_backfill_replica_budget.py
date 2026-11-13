@@ -114,7 +114,7 @@ def test_replica_closes_on_resolution_error(tmp_path, monkeypatch):
     remote = _replica(home)
     with kbc.connect_closing() as conn:
         reader = creator._ReplicaReader(conn)
-        def broken(*args):
+        def broken(*args, **kwargs):
             raise sqlite3.OperationalError('injected read failure')
         monkeypatch.setattr(creator, 'resolve_chats', broken)
         with reader:

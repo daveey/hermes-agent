@@ -18,6 +18,26 @@ MAX_EVIDENCE = 32
 MAX_REMAINING = 32
 MAX_TEXT = 2000
 MAX_REF = 2048
+MAX_BYTES = 32768  # canonical (compact, ASCII) JSON of the whole receipt
+# evidence.operator_delivery: every field required, no others; comment_id a positive int, content_sha256 lowercase
+# hex SHA-256, the rest text of at most OPERATOR_DELIVERY_TEXT_MAX. tools/kanban_tools_schemas.py advertises these.
+OPERATOR_DELIVERY_FIELDS: tuple[str, ...] = (
+    "request_uid", "target_task_id", "board", "caller_task_id", "caller_run_uid",
+    "caller_gateway", "executor_gateway", "comment_id", "content_sha256", "result_event_uid")
+OPERATOR_DELIVERY_TEXT_MAX = 128
+# Every _text field: no C0 control but tab/newline, and not all str.isspace() (what strip() removes). One regex both
+# _text and the advertised JSON-schema `pattern` (tools/kanban_tools_schemas.py) read, so they cannot drift; anchors,
+# character classes and \x/\u escapes only, valid in Python re, ECMA-262 and llama.cpp's grammar converter.
+# Cost: the schema repeats it on 15 fields (~2.3 KB of KANBAN_COMPLETE_SCHEMA, sent on every worker request), so
+# keep it short: the nonblank class folds _CONTROL, tab, newline and space into one \x00-\x20 range. A shared
+# `$defs` + `$ref` would send it once, but only the `parametersJsonSchema` path keeps it (agent/gemini_schema's
+# prepare_gemini_tool_parameters inlines same-document `$ref` there); the legacy `parameters` translator
+# (sanitize_gemini_schema) drops `$ref`, so the field loses its type. Every field carries the pattern inline.
+_CONTROL = "\\x00-\\x08\\x0b-\\x1f"
+_SPACE = "\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"  # isspace() above \x20
+TEXT_PATTERN = f"^[^{_CONTROL}]*[^\\x00-\\x20{_SPACE}][^{_CONTROL}]*$"
+_TEXT = re.compile(TEXT_PATTERN)
+_CONTROL_CHAR = re.compile(f"[{_CONTROL}]")
 _QUALIFIED_OWNER = re.compile(r"@(task|session):[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+/[^\s/@]+\Z")
 
 
@@ -28,11 +48,11 @@ def _object(value: Any, required: set[str], optional: set[str] | None = None) ->
 
 
 def _text(value: Any, name: str, limit: int = MAX_TEXT) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > limit:
-        raise ValueError(f"completion_receipt: {name} needs nonempty text of at most {limit} characters")
-    if any(ord(c) < 32 and c not in "\n\t" for c in value):
+    if isinstance(value, str) and len(value) <= limit and _TEXT.fullmatch(value):
+        return value
+    if isinstance(value, str) and _CONTROL_CHAR.search(value):
         raise ValueError(f"completion_receipt: {name} contains control characters")
-    return value
+    raise ValueError(f"completion_receipt: {name} needs nonempty text of at most {limit} characters")
 
 
 def _enum(value: Any, choices: tuple[str, ...], name: str) -> str:
@@ -48,10 +68,9 @@ def _array(value: Any, name: str, limit: int, *, nonempty: bool = False) -> list
 
 
 def _operator_delivery(value):
-    fields = {"request_uid", "target_task_id", "board", "caller_task_id", "caller_run_uid",
-              "caller_gateway", "executor_gateway", "comment_id", "content_sha256", "result_event_uid"}
+    fields = set(OPERATOR_DELIVERY_FIELDS)
     raw = _object(value, fields)
-    out = {key: _text(raw[key], key, 128) for key in fields - {"comment_id"}}
+    out = {key: _text(raw[key], key, OPERATOR_DELIVERY_TEXT_MAX) for key in fields - {"comment_id"}}
     if type(raw["comment_id"]) is not int or raw["comment_id"] <= 0:
         raise ValueError("completion_receipt: comment_id needs a positive integer")
     if not re.fullmatch(r"[0-9a-f]{64}", out["content_sha256"]):
@@ -134,6 +153,6 @@ def validate_completion_receipt(value: Any) -> dict:
     if type(raw["version"]) is not int or raw["version"] != 1:
         raise ValueError("completion_receipt: version must be integer 1")
     out = {"version": 1, "items": [_item(i) for i in _array(raw["items"], "items", MAX_ITEMS, nonempty=True)]}
-    if len(json.dumps(out, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > 32768:
-        raise ValueError("completion_receipt: canonical JSON must not exceed 32768 bytes")
+    if len(json.dumps(out, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > MAX_BYTES:
+        raise ValueError(f"completion_receipt: canonical JSON must not exceed {MAX_BYTES} bytes")
     return out

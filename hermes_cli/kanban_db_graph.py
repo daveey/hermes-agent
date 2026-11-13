@@ -1,28 +1,50 @@
 """Task graph initialization and atomic decomposition persistence."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Any, Optional
 
+
 def note_missing_parents(
-    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]],
+    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]], *,
+    remote: bool = False, fresh: Optional[dict] = None,
 ) -> bool:
-    """Track a missing-parent streak inside the home gateway's readiness transaction."""
+    """Track a missing-parent streak inside the home gateway's readiness transaction.
+
+    On a synced board (``remote``) a parent with no status is unknown, not missing, unless the mirror's replica is
+    at the feed head and, on a primary board, the mirror was refreshed from that pull
+    (``kanban_replica_freshness.mirror_at_head``, read once per readiness pass into ``fresh``):
+    otherwise no streak event is recorded and nothing is blocked. The child still waits: an unknown parent gates.
+    Each deferral is counted in ``fresh["deferred"]`` and the pass logs one INFO line per board per stale replica
+    stamp (``kanban_replica_freshness.report_deferred``). A replica that never catches up is alarmed in awake time
+    by the sync-freshness check of t_01a1d3df5e5d0757, not by a wall-clock bound here: a laptop's stamp is hours
+    old on wake from sleep, so such a bound would fire at once and bring back the false blocks.
+    A streak is scoped (``_streak_open``): a parent missing after an unblock or a link, or one the open streak does
+    not name, starts a fresh ``parent_missing`` and waits its own :data:`PARENT_MISSING_BLOCK_SECONDS`."""
     from hermes_cli import kanban_db as kb
 
     if not states:
         return False
     missing = [pid for pid, st in states if st is None]
+    if missing and remote:
+        from hermes_cli.kanban_replica_freshness import mirror_at_head, synced
+        cache = {} if fresh is None else fresh
+        if "fresh" not in cache:  # a detached board (sync off) keeps its mirror table but is its own authority
+            cache["fresh"] = mirror_at_head(conn) if synced(conn) else True
+        if not cache["fresh"]:
+            cache["deferred"] = cache.get("deferred", 0) + 1
+            return False
     last = conn.execute(
-        "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN ('parent_missing', 'parent_found') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
+        "SELECT id, kind, created_at, payload FROM task_events WHERE task_id = ? "
+        "AND kind IN ('parent_missing', 'parent_found') ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     if not missing:
         if last is not None and last["kind"] == "parent_missing":
             kb._append_event(conn, task_id, "parent_found", None)
         return False
-    if last is None or last["kind"] != "parent_missing":
+    if not _streak_open(conn, task_id, last, missing):
         kb._append_event(conn, task_id, "parent_missing", {"parents": missing})
         return False
     if int(kb.time.time()) - int(last["created_at"] or 0) < kb.PARENT_MISSING_BLOCK_SECONDS:
@@ -41,6 +63,105 @@ def note_missing_parents(
         "repair_task_id": repair_id,
     })
     return True
+
+
+# The newest of these on a blocked child must be the detector's own block for it to be cleared automatically.
+_LIFECYCLE_EVENTS = ("blocked", "unblocked", "gave_up", "block_loop_detected", "dependency_wait", "status",
+                     "supervisor_escalated", "changes_requested", "review_reopened")
+
+
+def clear_found_parents(conn: sqlite3.Connection, row, *, remote: bool) -> str:
+    """Inside the readiness transaction: return a child the detector blocked (:func:`note_missing_parents`) to
+    ``todo`` once :func:`kanban_db.parent_states` shows every parent again (the local row synced in, or the
+    remote-parent mirror now has it). Returns the readiness ``row``'s status after the call (``todo`` when it
+    cleared the block); the caller then runs its ``todo`` path, which writes ``parent_found`` and promotes the
+    child when every parent is done.
+
+    Only the detector's own block is cleared: the child's newest lifecycle event must be the ``blocked`` with
+    ``source`` 'parent_missing', with no human request on the card. A later hand, policy or
+    breaker block, or a block from any other source, stays for its owner. A child left with no parent link at all
+    also clears (nothing is missing): that unblock's ``source`` is ``parents_unlinked``, since no parent came back
+    and no ``parent_found`` follows. The repair card is left to finish, with a system comment (while still open)
+    saying which of the two cleared the block.
+    2026-11-13, David-MBP: t_01a1d0ea6db6c158 stayed blocked hours after its parent was mirrored done. [daveey]"""
+    from hermes_cli import kanban_db as kb
+
+    task_id, status = row["id"], row["status"]
+    if status != "blocked":
+        return status
+    last = conn.execute(
+        f"SELECT id, payload FROM task_events WHERE task_id = ? AND kind IN "
+        f"({', '.join('?' * len(_LIFECYCLE_EVENTS))}) ORDER BY id DESC LIMIT 1", (task_id, *_LIFECYCLE_EVENTS),
+    ).fetchone()
+    if last is None or _event_field(last["payload"], "source") != "parent_missing":  # only the detector's block
+        return status
+    # No parent left (every link removed while blocked) counts as resolved: nothing is missing any more.
+    states = kb.parent_states(conn, task_id, remote=remote)
+    if any(st is None for _pid, st in states):
+        return status
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'blocked' AND human_request IS NULL", (task_id,),
+    )
+    if cur.rowcount != 1:
+        return status
+    repair_id = _event_field(last["payload"], "repair_task_id")
+    # PR #2192 review: with no link left note_missing_parents writes no parent_found, so say what really happened.
+    source = "parent_found" if states else "parents_unlinked"
+    kb._append_event(conn, task_id, "unblocked", {
+        "status": "todo", "source": source, "cleared_block": "parent_missing",
+        "blocked_event_id": last["id"], "parents": _event_field(last["payload"], "parents"),
+        "repair_task_id": repair_id,
+    })
+    _tell_repair_card(conn, repair_id, task_id, last["id"], source)
+    return "todo"
+
+
+def _tell_repair_card(conn: sqlite3.Connection, repair_id, task_id: str, blocked_event_id: int, source: str) -> None:
+    """In the caller's txn: note on the still-open repair card that its child's block cleared, so its worker does
+    not investigate a parent that is back. A finished or absent repair card gets nothing. The note is a system
+    comment (no writer run), so the repair card's own worker receives it even when this pass ran inside it. [daveey]"""
+    from hermes_cli import kanban_db as kb
+
+    if not isinstance(repair_id, str) or kb._task_status(conn, repair_id) in (None, "done", "archived"):
+        return
+    why = ("every parent came back (parent_found)" if source == "parent_found"
+           else "every parent link was removed while it was blocked (parents_unlinked); no parent came back")
+    kb.add_comment(conn, repair_id, "kanban-dispatcher", (
+        f"The parent_missing block on {task_id} (blocked_event_id {blocked_event_id}) cleared: {why}, "
+        "so the child is back in todo. Nothing is left to recover for that block; confirm and close this card."
+    ), system=True)
+
+
+def report_deferred_pass(conn: sqlite3.Connection, fresh: dict) -> None:
+    """After a readiness pass: the children :func:`note_missing_parents` deferred because the replica is not at the
+    feed head get one INFO line per board per stale replica stamp (``kanban_replica_freshness.report_deferred``)."""
+    if fresh.get("deferred"):
+        from hermes_cli.kanban_replica_freshness import report_deferred
+        report_deferred(conn, fresh["deferred"])
+
+
+def _streak_open(conn: sqlite3.Connection, task_id: str, last, missing: list[str]) -> bool:
+    """The newest ``parent_missing`` is this streak only when no ``unblocked`` event, nor a ``linked`` event for a
+    parent missing now (or naming none), follows it, and it names every parent missing now: a later incident must
+    not inherit an earlier one's elapsed time, and a link to a present parent does not restart a missing one's."""
+    if last is None or last["kind"] != "parent_missing":
+        return False
+    for kind, payload in conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('unblocked', 'linked')",
+        (task_id, last["id"]),
+    ).fetchall():
+        if kind == "unblocked" or _event_field(payload, "parent") in (None, *missing):
+            return False
+    named = _event_field(last["payload"], "parents")
+    return isinstance(named, list) and set(missing) <= set(named)
+
+
+def _event_field(payload, key: str):
+    """``key`` of a JSON event payload; None when absent or unreadable."""
+    try:
+        return (json.loads(payload or "{}") or {}).get(key)
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[str]) -> str:
@@ -66,7 +187,11 @@ def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[
               + ", ".join(missing) + ".\n\n"
               "Inspect the owning gateway, full Board replica and authoritative Board row evidence. "
               "A missing local row is not proof of Board loss; check sync freshness and pickup eligibility. "
-              "Recover missing publication or dependency state, then unblock the child. "
+              "Recover missing publication or dependency state, then unblock the child with the kanban_unblock "
+              "tool: it works across gateways (when the child lives on another gateway it forwards the unblock "
+              "as an operator call, which the child's home applies) and records the unblock as this card's. "
+              "Never run the hermes CLI over ssh on the child's home gateway: that unblock is recorded as "
+              "David's. "
               "Do not unlink a required dependency merely to make it run. Record evidence and verify "
               "the child resumes. This is agent-owned repair, not a human decision."),
         assignee=_supervisor_profile(), created_by="missing-parent-detector",

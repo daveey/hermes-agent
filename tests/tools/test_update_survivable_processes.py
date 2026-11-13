@@ -319,9 +319,9 @@ def test_recovery_racing_a_foreground_release_never_adopts_it(tmp_path, monkeypa
     recovered = []
     real_locked = registry._recover_from_checkpoint_locked
 
-    def locked(owner):
+    def locked(owner, *rest):
         in_recovery.set()
-        return real_locked(owner)
+        return real_locked(owner, *rest)
 
     registry._recover_from_checkpoint_locked = locked
     racer = threading.Thread(target=lambda: recovered.append(registry.recover_from_checkpoint()), daemon=True)
@@ -419,13 +419,13 @@ def test_recovery_racing_a_real_handoff_tracks_the_command_once(tmp_path, monkey
                                 daemon=True, name="recovery")
     real_locked = registry._recover_from_checkpoint_locked
 
-    def locked(owner):  # recovery owns the file lock and is about to decide
+    def locked(owner, *rest):  # recovery owns the file lock and is about to decide
         racing.set()
         if first == "recovery":
             handoff.start()
             popped.wait(0.3)  # fixed: the handoff waits for our lock before it drops the hold
         try:
-            return real_locked(owner)
+            return real_locked(owner, *rest)
         finally:
             decided.set()
 
@@ -678,7 +678,7 @@ def test_long_foreground_command_outlives_a_shutdown_interrupt(tmp_path, monkeyp
 @pytest.mark.skipif(not _user_systemd(), reason="needs a user systemd bus")
 def test_update_pause_cancel_keeps_the_surviving_jobs_result(tmp_path, monkeypatch):
     """Card A's mid-tool update cancel commits the cancelled call's result: for a survivable foreground
-    command it is the real ``process continues as <id>`` result, not the "re-run if still needed" stamp."""
+    command it is the real ``process continues as <id>`` result, not the update stamp."""
     from agent import update_pause_cancel
 
     result = _run_owner(tmp_path, monkeypatch, {"command": "sleep 8; echo fg-done", "timeout": 120},
@@ -697,7 +697,7 @@ def test_update_pause_cancel_keeps_the_surviving_jobs_result(tmp_path, monkeypat
 
         agent = _Agent()
         update_pause_cancel.started(agent, "c1")
-        assert update_pause_cancel.cancel(agent, "[interrupted by Hermes update: re-run if still needed]") == ["c1"]
+        assert update_pause_cancel.cancel(agent, "[interrupted by Hermes update: check its outcome before re-running]") == ["c1"]
         tool_text = json.dumps(result, ensure_ascii=False)
         committed, cancelled = update_pause_cancel.committed(agent, "c1", tool_text)
         assert cancelled is True

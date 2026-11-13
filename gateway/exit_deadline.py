@@ -43,6 +43,9 @@ DRAIN_DB_PATIENCE_S = 2.0
 
 _lock = threading.Lock()
 _done = threading.Event()
+# Set when the post-tail bound's exit funnel failed and it gave the exit back: wakes a main thread
+# already parked in enter_exit_funnel so it runs the funnel itself.
+_handback = threading.Event()
 _state: dict[str, Any] = {}
 
 
@@ -51,6 +54,7 @@ def _reset_for_tests() -> None:
     with _lock:
         _state.clear()
         _done.clear()
+        _handback.clear()
 
 
 def margin_for(budget_s: float) -> float:
@@ -150,16 +154,29 @@ def bound_post_tail(exit_code: int, exit_fn: Callable[[int], None], *,
                 return
             _state["exit_owner"] = threading.get_ident()  # the main thread's funnel now parks (disarm)
         mark_phase("post_tail_bound")
+        over_s = round(time.monotonic() - target, 3)
         with contextlib.suppress(Exception):
             logger.warning("Shutdown still running %.1fs after the core update exit target (%s): asyncio.run "
                            "shutdown / outer finally did not finish; exiting %s now (phase marks: %s)",
-                           time.monotonic() - target, _state.get("target_reason"), exit_code, phases())
+                           over_s, _state.get("target_reason"), exit_code, phases())
+        # This exit skips the caller's own records (`hermes gateway run`: asyncio.run.returned,
+        # gateway.exit_clean / nonzero_exit_record), so the exit-diag log gets one of its own.
+        with contextlib.suppress(Exception):
+            from hermes_cli.gateway_exit_diag import make_exit_diag
+            make_exit_diag()("gateway.post_tail_bound", exit_code=exit_code, over_target_s=over_s,
+                             target_reason=_state.get("target_reason"), phases=phases())
         try:
             exit_fn(exit_code)
-        except Exception:  # health: allow BLE001 -- hand the exit back to the main thread's funnel
-            logger.exception("Post-tail exit bound: the exit funnel failed")
+        # BaseException too (e.g. a SystemExit out of the funnel): dying here still holding exit_owner
+        # would park the main thread's funnel until the hard deadline.
+        except BaseException as exc:  # health: allow BLE001 -- hand the exit back to the main thread's funnel
+            with contextlib.suppress(Exception):
+                logger.exception("Post-tail exit bound: the exit funnel failed")
             with _lock:
                 _state.pop("exit_owner", None)
+            _handback.set()  # a main thread parked in enter_exit_funnel wakes and runs the funnel
+            if not isinstance(exc, Exception):
+                raise
 
     try:
         threading.Thread(target=_watch, daemon=True, name=POST_TAIL_THREAD_NAME).start()
@@ -280,11 +297,12 @@ def disarm() -> bool:
 
 def enter_exit_funnel() -> None:
     """The graceful exit funnel's disarm: marks ``exit_funnel`` and disarms. When the post-tail bound
-    already took the exit on another thread, the caller parks for good instead: that thread is running
-    the same funnel and ``os._exit``s."""
+    already took the exit on another thread, the caller parks instead: that thread is running the same
+    funnel and ``os._exit``s. If that funnel fails, the bound gives the exit back and the caller wakes
+    and runs it."""
     mark_phase("exit_funnel")
-    if not disarm():
-        threading.Event().wait()
+    while not disarm():
+        _handback.wait()
 
 
 def _exit_diag_record() -> dict[str, Any]:

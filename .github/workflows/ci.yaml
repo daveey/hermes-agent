@@ -7,9 +7,10 @@ name: CI
 #
 # Sub-workflows are triggered via ``workflow_call`` and keep their own job
 # definitions, matrices, and concurrency settings. They no longer have
-# ``push:`` / ``pull_request:`` triggers of their own, except hermes-state-macos
-# and native-memory-macos: each keeps standalone main validation (its own
-# ``push:`` trigger), masked out of this workflow on main pushes.
+# ``push:`` / ``pull_request:`` triggers of their own, except native-memory-macos,
+# which keeps standalone main validation (its own path-filtered ``push:``
+# trigger). hermes-state-macos validates main from its own 4-hourly schedule
+# instead. Both are masked out of this workflow on main pushes.
 #
 # SECURITY: this workflow runs PR-controlled actions, workflows, and code.
 # Do not add ``secrets: inherit`` or GitHub App credentials here. Trusted
@@ -132,11 +133,10 @@ jobs:
         # lanes are forced off unless this is a release run or a manual dispatch
         # (whose empty diff already turns every lane on): never on a pull request
         # or a push to main, whatever the diff or labels say. The macOS state and
-        # native memory lanes are off on a main push (hermes-state-macos.yml runs
-        # main from its own path-filtered push trigger and 4-hourly schedule, and
-        # native-memory-macos.yml from its own push trigger, so a main push never
-        # runs a suite twice on the one mini runner) and on for a dispatch or a
-        # release.
+        # native memory lanes are off on a main push (hermes-state-macos.yml tests
+        # main from its own 4-hourly schedule, and native-memory-macos.yml from
+        # its own push trigger, so a main push never queues the one mini runner
+        # behind required PR jobs) and on for a dispatch or a release.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
@@ -316,7 +316,7 @@ jobs:
     # on the mini: the job skips, and macos-state-required below then fails the
     # selected lane, so a fork change to that surface cannot merge on a skip.
     # Main pushes skip here (detect turns the lane off); the workflow's own
-    # path-filtered push trigger and 4-hourly schedule run main.
+    # 4-hourly schedule tests main HEAD.
     if: needs.detect.outputs.hermes_state == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/hermes-state-macos.yml
     with:

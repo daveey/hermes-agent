@@ -79,7 +79,8 @@ def schedule_task(
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params.append(int(expected_run_id))
-        if conn.execute(sql, params).rowcount != 1:
+        from hermes_cli.kanban_source_receipt import with_source_receipt
+        if with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
             return False
         kpp.apply(conn, task_id, pin)  # unpushed state keeps a pooled card on this worker
         # A card behind a shared blocker stays behind it: a park without the id says nothing about

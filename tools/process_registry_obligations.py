@@ -26,6 +26,15 @@ Recovery is bounded by ``OBLIGATION_MAX_AGE_SECONDS`` and ``OBLIGATION_MAX_RECOV
 
 ``python -m tools.process_registry_obligations reopen proc_<id> ...`` marks the obligation on one
 existing receipt by exact id. It refuses when a completion admission for that identity already exists.
+
+A Desktop chat's notify job (``owner: tui``) finished in the Desktop backend that hosts the chat carries the same
+block. Its delivery is in that backend's memory until the notice turn starts; a SIGKILL/OOM of the backend
+(no orderly exit journal) lost it. ``tui_gateway/completion_obligation.py`` settles it (turn start, intended
+suppression, the exit journal's custody transfer), and Desktop recovery (``recover_from_checkpoint(owner="tui")``)
+re-arms an owed one whose writer is gone, once per start, through the re-adopt sink. Each owner adopts only its
+own (``owner``; a block without one is the gateway's). A tui obligation whose chat is never reopened (deleted or
+archived) is re-armed and wakes that chat on each Desktop start until ``OBLIGATION_MAX_RECOVERIES`` or
+``OBLIGATION_MAX_AGE_SECONDS`` drops it: bounded by design, like the gateway's.
 """
 
 from __future__ import annotations
@@ -45,7 +54,7 @@ logger = logging.getLogger("tools.process_registry")
 OBLIGATION_KEY = "delivery_obligation"
 # Like the async-delegation replay cap: an owed notice older than this is dropped with a logged reason.
 OBLIGATION_MAX_AGE_SECONDS = 48 * 3600
-# Gateway starts that may re-arm one obligation (a notice refused at every start must not loop forever).
+# Gateway or Desktop starts that may re-arm one obligation (a notice refused at every start must not loop forever).
 OBLIGATION_MAX_RECOVERIES = 8
 _ROUTE_FIELDS = ("watcher_platform", "watcher_chat_id", "watcher_user_id", "watcher_user_name",
                  "watcher_thread_id", "watcher_message_id", "watcher_interval", "parent_session_id",
@@ -97,6 +106,22 @@ def owes_gateway_delivery(session) -> bool:
                                             "watcher_platform": session.watcher_platform}) == OWNER_GATEWAY)
 
 
+def owes_tui_delivery(session) -> bool:
+    """Whether a finished session's completion is owed to a Desktop chat this Desktop backend hosts (a CLI or
+    worker process delivers in-process and never leaves one behind)."""
+    from tools.process_registry_readopt import OWNER_TUI, checkpoint_entry_owner
+    if not session.notify_on_complete or checkpoint_entry_owner(
+            {"session_key": session.session_key, "watcher_platform": session.watcher_platform}) != OWNER_TUI:
+        return False
+    from hermes_cli.process_identity import is_desktop_owned_backend
+    return is_desktop_owned_backend()
+
+
+def obligation_owner(owed: dict) -> str:
+    from tools.process_registry_readopt import OWNER_GATEWAY
+    return str(owed.get("owner") or OWNER_GATEWAY)
+
+
 def obligation_for(session, *, owed_since: Optional[float] = None) -> dict:
     from agent.redact import redact_sensitive_text
     owed = {f: getattr(session, f) for f in _ROUTE_FIELDS}
@@ -143,7 +168,9 @@ def settle_quietly(session_id: str, how: str) -> bool:
 
 
 class ProcessObligationMixin:
-    """Registry side: decide, settle and re-arm owed gateway completions."""
+    """Registry side: decide, settle and re-arm owed completions, a messaging gateway's (``owner: gateway``) and a
+    Desktop chat's (``owner: tui``). ``_tui_owed`` holds the ids this process wrote or re-armed a tui obligation for,
+    so a Desktop notice turn settles only those and never reads the receipt of a job that owes nothing."""
 
     # Supplied by ProcessRegistry / ProcessCheckpointMixin / ProcessReadoptMixin.
     _lock: Any
@@ -154,12 +181,22 @@ class ProcessObligationMixin:
     _owned_here: Any
     _writer_alive: Any
     _recovered_watcher: Any
+    _deliver_readopted_event: Any
 
     def _completion_obligation(self, session) -> Optional[dict]:
         """Called under ``self._lock`` by the receipt writer: the owed-delivery block, or None."""
-        if session.id in self._completion_consumed or not owes_gateway_delivery(session):
+        from tools.process_registry_readopt import OWNER_GATEWAY, OWNER_TUI
+        if session.id in self._completion_consumed:
             return None
-        return obligation_for(session)
+        if owes_gateway_delivery(session):
+            return {**obligation_for(session), "owner": OWNER_GATEWAY}
+        if not owes_tui_delivery(session):
+            return None
+        self._tui_owed_ids().add(session.id)
+        return {**obligation_for(session), "owner": OWNER_TUI}
+
+    def _tui_owed_ids(self) -> set:
+        return vars(self).setdefault("_tui_owed", set())
 
     def _consume_completion(self, session_id: str) -> None:
         """The agent has the output (wait/log/kill): suppress the autonomous notice, here and across a restart.
@@ -174,6 +211,19 @@ class ProcessObligationMixin:
         with self._lock:
             return settle_quietly(session_id, how)
 
+    def settle_tui_completion(self, session_id: str, how: str) -> bool:
+        """``settle_completion`` for a Desktop notice: only an id in ``_tui_owed`` (this process wrote or re-armed
+        its obligation) can owe one here, so any other id is answered from memory, with no receipt read. The id
+        stays while the receipt still owes it, so a failed write is retried by the next settle."""
+        with self._lock:
+            owed = self._tui_owed_ids()
+            if session_id not in owed:
+                return False
+            settled = settle_quietly(session_id, how)
+            if settled or owed_still(session_id) is None:
+                owed.discard(session_id)
+            return settled
+
     def _rewrite_killed_receipt(self, session, consume_output: bool) -> None:
         """A kill that lost the finish race rewrites the reader's receipt as killed. An explicit kill
         (``consume_output``) hands the output to its caller, so it settles the obligation; any other kill
@@ -185,11 +235,12 @@ class ProcessObligationMixin:
             registry_module.save_completed_result(session, None if consume_output else owed_still(session.id))
 
     def _recover_owed_completions_locked(self, owner: Optional[str]) -> int:
-        """Under the checkpoint file lock: re-arm a watcher for each owed receipt of this profile."""
-        from tools.process_registry_readopt import OWNER_GATEWAY, owner_accepts
+        """Under the checkpoint file lock: re-arm each owed receipt of this profile that *owner* holds (a gateway's
+        through a recovered watcher, a Desktop chat's through the re-adopt sink)."""
+        from tools.process_registry_readopt import OWNER_GATEWAY, OWNER_TUI, owner_accepts
         from tools.process_registry_profiles import scope_profile
-        if owner != OWNER_GATEWAY:
-            return 0  # only a messaging gateway runs process watchers
+        if owner not in (OWNER_GATEWAY, OWNER_TUI):
+            return 0  # a managed worker or CLI holds no other process's owed completion
         from hermes_constants import get_hermes_home
         directory = get_hermes_home() / "logs" / "process-results"
         try:
@@ -200,7 +251,7 @@ class ProcessObligationMixin:
         for path in paths:
             record = _read(path) or {}
             owed = record.get(OBLIGATION_KEY)
-            if not isinstance(owed, dict):
+            if not isinstance(owed, dict) or obligation_owner(owed) != owner:
                 continue
             sid = record["id"]
             entry = {"session_key": record.get("session_key"), "watcher_platform": owed.get("watcher_platform")}
@@ -208,8 +259,8 @@ class ProcessObligationMixin:
                 continue
             with self._lock:
                 tracked = sid in self._running or sid in self._finished
-            if tracked:
-                continue
+            if tracked or (owner == OWNER_TUI and owed.get("writer_pid") == os.getpid()):
+                continue  # this process still holds it (a Desktop backend parks it in memory for the chat)
             if owed.get("writer_pid") != os.getpid() and self._writer_alive(owed):
                 continue  # a live gateway still has this watcher
             reason, tries = "", 0
@@ -218,7 +269,7 @@ class ProcessObligationMixin:
                 if not math.isfinite(age) or tries < 0:
                     raise ValueError("invalid recovery budget")
                 if tries >= OBLIGATION_MAX_RECOVERIES:
-                    reason = f"{tries} gateway starts did not admit it"
+                    reason = f"{tries} {owner} starts did not deliver it"
                 elif age > OBLIGATION_MAX_AGE_SECONDS:
                     reason = f"owed for {int(age)}s"
             except (TypeError, ValueError, OverflowError):
@@ -244,10 +295,16 @@ class ProcessObligationMixin:
                 continue
             with self._lock:
                 self._finished[sid] = session
-            self.pending_watchers.append(self._recovered_watcher(session))
+                if owner == OWNER_TUI:
+                    self._tui_owed_ids().add(sid)
+            if owner == OWNER_TUI:  # parks for the chat (woken when it is not loaded here)
+                from tools.process_registry_awaiting import completion_event, publishable
+                self._deliver_readopted_event({**publishable(completion_event(session)), "park_if_unowned": True})
+            else:
+                self.pending_watchers.append(self._recovered_watcher(session))
             armed += 1
-            logger.info("Re-armed the watcher for %s (session %s): its completion was owed when the last "
-                        "gateway stopped (exit %s)", sid, session.session_key or "-", session.exit_code)
+            logger.info("Re-armed the owed completion of %s (session %s): it was owed when the last %s stopped "
+                        "(exit %s)", sid, session.session_key or "-", owner, session.exit_code)
         return armed
 
     @staticmethod

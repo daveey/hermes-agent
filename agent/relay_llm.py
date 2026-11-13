@@ -13,6 +13,7 @@ from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
+from agent import aux_provider_handoff as handoff
 from agent import relay_runtime
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,9 @@ _LogicalCall = tuple[relay_runtime.RelayTurnContext, Any, str]
 # Bound for awaiting a Relay stream's aclose() on the private loop: a wedged
 # close must not hang the worker thread or hold the runtime lease forever.
 _ACLOSE_TIMEOUT = 10.0
+# Bound for a cancelled chunk read to return after its socket was shut down (normally milliseconds; a
+# stream with no reachable socket reads on until its own timeout and is left to close itself).
+_ABANDONED_READ_TIMEOUT = 2.0
 
 
 # api_mode -> (Relay operation name, codec class name on ``relay.codecs``)
@@ -289,6 +293,20 @@ def _aclose_on_loop(loop: asyncio.AbstractEventLoop, stream: Any) -> bool:
     return True
 
 
+def _shutdown_provider_stream(raw_stream: Any) -> int:
+    """Shut down (never close) the socket behind an SDK stream's ``.response``; FD-safe from any thread."""
+    from agent.agent_runtime_helpers import _shutdown_socket, _socket_from_response
+    try:
+        sock = _socket_from_response(getattr(raw_stream, "response", None))
+        if sock is None:
+            return 0
+        _shutdown_socket(sock)
+    except Exception:
+        logger.debug("Provider stream socket shutdown failed", exc_info=True)
+        return 0
+    return 1
+
+
 def _next_provider_chunk(callback: Callable[..., Any], raw_iterator: Any) -> tuple[Any, bool]:
     """Read one synchronous provider chunk without leaking StopIteration through a Future."""
     try:
@@ -326,6 +344,7 @@ class ManagedLlmStream(Iterator[Any]):
         self._completed_response_predicate = completed_response_predicate
         self._raw_chunks: list[tuple[Any, Any]] = []
         self._prefetched_chunks: list[Any] = []
+        self._abandoned_reads: list[handoff.ProviderAttempt] = []
         attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
         if attempt is None:
             self._start_unmanaged(request)
@@ -349,6 +368,7 @@ class ManagedLlmStream(Iterator[Any]):
         """Relay's provider callback: run the factory and yield JSON-encoded chunks."""
         run_callback = attempt.run_callback
         raw_stream = None
+        abandoned: list[handoff.ProviderAttempt] = []
         try:
             raw_stream = run_callback(self._stream_factory, attempt.provider_request(next_request))
             predicate = self._completed_response_predicate
@@ -363,7 +383,9 @@ class ManagedLlmStream(Iterator[Any]):
                 # Off the loop: Relay pulls the next provider chunk before it hands over the
                 # current one, so a blocking read here withholds each chunk until the provider
                 # sends the next. Text vanishes for every provider pause and a steer aborts it.
-                chunk, exhausted = await asyncio.to_thread(_next_provider_chunk, run_callback, raw_iterator)
+                # A cancelled read leaves its worker in SSL_read: recorded, so the close below waits for it.
+                with handoff.collect_abandoned(abandoned):
+                    chunk, exhausted = await handoff.run_in_thread(_next_provider_chunk, run_callback, raw_iterator)
                 if exhausted:
                     break
                 if self._accept_chunk is not None and not run_callback(self._accept_chunk, chunk):
@@ -377,7 +399,15 @@ class ManagedLlmStream(Iterator[Any]):
             raise
         finally:
             close = getattr(raw_stream, "close", None)
-            if callable(close):
+            if abandoned:
+                # Never close the socket under the worker still reading it (a recycled fd once took a
+                # TLS alert into a SQLite header): shut it down from here, the worker closes the stream.
+                self._abandoned_reads.extend(abandoned)
+                handoff.release_client(
+                    raw_stream, lambda _stream: run_callback(close) if callable(close) else None,
+                    abandoned, shutdown=_shutdown_provider_stream,
+                )
+            elif callable(close):
                 try:
                     run_callback(close)
                 except BaseException as exc:
@@ -582,11 +612,21 @@ class ManagedLlmStream(Iterator[Any]):
                     close_loop = _aclose_on_loop(loop, self._stream)
                 except Exception as exc:
                     self._keep_first_close_error(exc)
+                self._await_abandoned_reads()
             self._finish_logical(logical_outcome, error)
             if close_loop:
                 loop.close()
         finally:
             self._release_runtime_lease()
+
+    def _await_abandoned_reads(self) -> None:
+        """Return only once each cancelled chunk read unwound and closed its stream, so a caller's own client
+        close (``close_once`` after a /stop) never lands on a socket a worker still reads."""
+        attempts, self._abandoned_reads = getattr(self, "_abandoned_reads", None) or [], []
+        for attempt in attempts:
+            if not attempt.wait(_ABANDONED_READ_TIMEOUT):
+                logger.warning("Provider chunk read still running %ss after its stream was abandoned; "
+                               "it closes the stream itself when it returns", _ABANDONED_READ_TIMEOUT)
 
     def _release_runtime_lease(self) -> None:
         lease, self._runtime_lease = self._runtime_lease, None

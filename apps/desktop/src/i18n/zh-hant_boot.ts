@@ -12,7 +12,8 @@ export const zhHantBoot = {
       loadingSessions: '正在載入最近工作階段',
       retryingRemoteBackend: '正在重新連線遠端 Hermes 後端…',
       startingDesktopConnection: '正在啟動桌面連線',
-      startingHermesDesktop: '正在啟動 Hermes Desktop…'
+      startingHermesDesktop: '正在啟動 Hermes Desktop…',
+      waitingForRemoteUpdate: '正在等待遠端 Hermes 更新完成…'
     },
     errors: {
       backgroundExited: 'Hermes 背景程序已結束。',

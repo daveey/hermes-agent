@@ -1,0 +1,272 @@
+"""Is this gateway's live board copy current enough to state a Board fact? Asked of its pulled replica. [daveey]
+
+Defect t_01a1d390d19239dd (2026-11-12, MacBook): the dispatcher posted ``chat_wait_unclaimed`` ("ready with no
+worker claiming it") for t_01a1d1292db9d3cb and t_01a1d12a594c8fd7 at 22:11 PST, 30 min after the Board completed
+them. The live board's feed cursor (1650734) was ~62k rows behind its own pulled replica (``sync-shadow``, 1713384)
+after a sync-loop stall, so the live rows still read ``ready``. Nothing compared the live copy with the replica.
+
+The replica is the same Board feed applied into ``kanban/sync-shadow/<board>.db``; each successful pull stamps
+``kanban_sync_state.pulled_at`` (``kanban_db_sync.mark_pulled``), the stamp ``kanban_chat_links`` already derives
+replica staleness from. Two reads, both fail-open (no replica, an unsynced board or an unreadable file is no
+evidence, and callers keep their old behaviour). Only a board this process syncs in ``primary`` mode is compared
+(``kanban_db_sync.board_mode``, which already folds in ``kanban.sync.enabled``, ``kanban.sync.boards`` and a detach
+to ``off``): in ``shadow`` mode the live board never applies the feed, so its cursor never moves and its lag would grow
+without bound; on an ``off``/disabled board the replica stays on disk while pulls stop, so its stamp only ages:
+
+- :func:`lag_hold`: why every ready-wait notice waits now, when the live feed position trails the replica by more
+  than :data:`MAX_FEED_LAG_ROWS` rows, or the replica's last pull is older than :data:`REPLICA_STALE_SECONDS` (a
+  stalled sync loop stops both copies, so the row gap alone cannot see it).
+- :func:`newer_rows`: the replica's rows of some cards where they carry a newer Board revision (``sync_version``)
+  than the live rows.
+
+Absence judgements read the replica's own freshness instead (t_01a1d36dcde2b6ed, 2026-11-12, David-MBP: a sync round
+stuck in a ~75k-change pull left the remote-parent mirror old, and the missing-parent detector blocked two rework
+cards whose parents were done on the Board and filed repair cards):
+
+- :func:`replica_at_head`: the replica last pulled to the feed head within :data:`FRESH_SECONDS` on the same board.
+  The missing-parent detector (``kanban_db_graph.note_missing_parents``) fails closed on it: no proof, no block.
+- :func:`local_copy_stale`: the parent-unclaimed notice waits while a synced board's replica shows lag.
+"""
+from __future__ import annotations
+
+import logging
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+_log = logging.getLogger(__name__)
+
+# Feed rows the live board may trail its replica before Board facts from it wait (~6 min at ~359 rows/min).
+MAX_FEED_LAG_ROWS = 2000
+# A replica not pulled for this long vouches for nothing: the sync loop (live apply included) is not running.
+REPLICA_STALE_SECONDS = 600
+
+
+def _live_state(conn) -> Optional[tuple[str, int]]:
+    """``(board slug, feed cursor)`` of a live board attached to the Board service that this process syncs in
+    ``primary`` mode (the live board applies the feed), else None."""
+    from hermes_cli import kanban_db_sync as sync
+    try:
+        if sync.board_mode(conn) != "primary":
+            return None
+        row = conn.execute("SELECT board_id, cursor FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.OperationalError:  # never synced: no sync tables
+        return None
+    if row is None or not row[0] or str(row[0]).startswith("local:"):
+        return None
+    return str(row[0]), int(row[1] or 0)
+
+
+def _replica(conn) -> Optional[tuple[Path, int]]:
+    """``(replica path, live cursor)`` when this live board has a pulled replica on disk."""
+    state = _live_state(conn)
+    if state is None:
+        return None
+    from hermes_cli import kanban_sync_client as ksc
+    path = ksc.shadow_path(state[0])
+    return (path, state[1]) if path.exists() else None
+
+
+def lag_hold(conn, *, now: Optional[float] = None) -> Optional[dict[str, Any]]:
+    """``{"reason", "feed_lag_rows", "replica_pull_age_s"}`` while Board facts read from ``conn`` must wait, else
+    None (no replica, an unreadable one, or a live copy within bounds)."""
+    found = _replica(conn)
+    if found is None:
+        return None
+    path, live_cursor = found
+    now = time.time() if now is None else now
+    from hermes_cli.kanban_session_activity import cached_ro  # lazy: a heavy module
+    try:
+        with cached_ro(path) as rconn:
+            row = rconn.execute("SELECT cursor, pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error as exc:
+        _log.debug("kanban replica freshness: %s unreadable (%s)", path, exc)
+        return None
+    if row is None:
+        return None
+    lag = int(row[0] or 0) - live_cursor
+    age = None if row[1] is None else now - float(row[1])
+    out = {"feed_lag_rows": lag, "replica_pull_age_s": None if age is None else int(age)}
+    if lag > MAX_FEED_LAG_ROWS:
+        return {**out, "reason": f"live feed {lag} rows behind its replica (bound {MAX_FEED_LAG_ROWS})"}
+    if age is not None and age > REPLICA_STALE_SECONDS:
+        return {**out, "reason": f"replica last pulled {int(age)} s ago (bound {REPLICA_STALE_SECONDS} s)"}
+    return None
+
+
+def newer_rows(conn, task_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """``{task_id: replica row}`` for the cards whose replica row carries a strictly newer Board revision
+    (``sync_version``) than the live row. A row is ``{"status", "ready_since", "sync_version", "result",
+    "summary", "live_ready_since"}``. Cards with no replica row, or an older or equal one, are absent; so is a
+    card with an unpushed local change (a pending outbox op: the live row is ahead of what the Board has seen), and
+    everything when there is no readable replica."""
+    ids = [str(t) for t in task_ids if t]
+    found = _replica(conn) if ids else None
+    if found is None:
+        return {}
+    path = found[0]
+    marks = ",".join("?" * len(ids))
+    try:
+        live = {r[0]: (int(r[1] or 0), r[2]) for r in conn.execute(
+            f"SELECT id, sync_version, ready_since FROM tasks WHERE id IN ({marks})", ids).fetchall()}
+        unpushed = {r[0] for r in conn.execute(
+            f"SELECT DISTINCT row_uid FROM kanban_sync_outbox WHERE table_name = 'tasks' AND state = 'pending' "
+            f"AND row_uid IN ({marks})", ids).fetchall()}
+    except sqlite3.OperationalError:  # a board without the sync columns has no revision to compare
+        return {}
+    ids = [t for t in ids if t not in unpushed]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    from hermes_cli.kanban_session_activity import cached_ro
+    try:
+        with cached_ro(path) as rconn:
+            rows = rconn.execute(
+                f"SELECT id, status, ready_since, sync_version, result FROM tasks WHERE id IN ({marks})",
+                ids).fetchall()
+            out = {r[0]: {"status": r[1], "ready_since": r[2], "sync_version": int(r[3] or 0), "result": r[4],
+                          "live_ready_since": live.get(r[0], (0, None))[1]}
+                   for r in rows if int(r[3] or 0) > live.get(r[0], (0, None))[0]}
+            for tid, row in out.items():
+                if row["status"] == "done":
+                    s = rconn.execute(
+                        "SELECT summary FROM task_runs WHERE task_id = ? AND summary IS NOT NULL AND summary != '' "
+                        "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1", (tid,)).fetchone()
+                    row["summary"] = s[0] if s else None
+    except sqlite3.Error as exc:
+        _log.debug("kanban replica freshness: %s unreadable (%s)", path, exc)
+        return {}
+    return out
+
+
+def moved_past(row: Optional[dict[str, Any]]) -> Optional[str]:
+    """Why a replica row (from :func:`newer_rows`) shows the live ``ready`` episode is over, or None: the Board
+    has the card in another status, or ready again from a later episode (``ready_since``)."""
+    if row is None:
+        return None
+    if row["status"] != "ready":
+        return f"replica has it {row['status']} (revision {row['sync_version']})"
+    if row.get("ready_since") and row.get("live_ready_since") and row["ready_since"] != row["live_ready_since"]:
+        return f"replica has a later ready episode (revision {row['sync_version']})"
+    return None
+
+
+# --- absence judgements: is the replica itself at the feed head? (t_01a1d36dcde2b6ed) ---------------------------
+
+# The last pull must have reached the feed head this recently.
+FRESH_SECONDS = REPLICA_STALE_SECONDS
+
+
+def replica_at_head(conn: sqlite3.Connection) -> bool:
+    """Whether the replica of ``conn``'s synced board last pulled to the feed head within :data:`FRESH_SECONDS`, on
+    the same board. A missing, unreadable, other-board, unstamped or future-stamped replica is not at head."""
+    return _replica_at_head(conn) is True
+
+
+def _replica_at_head(conn: sqlite3.Connection):
+    """True/False as :func:`replica_at_head`; None when there is no readable replica to judge by."""
+    return _replica_state(conn)[0]
+
+
+def mirror_at_head(conn: sqlite3.Connection) -> bool:
+    """:func:`replica_at_head`, and on a ``primary`` board the live remote-parent mirror was refreshed from that same
+    pull or a later one (``mirror_pulled_at`` >= ``pulled_at``, stamped by ``kanban_db_sync.mark_mirrored``). The
+    round stamps ``pulled_at`` before its live pull and mirror refresh, so between the two a fresh stamp vouches for
+    a mirror that may still be hours old (review 5888215084 on #1931). Only the missing-parent detector reads the
+    mirror; a ``shadow`` board never refreshes one, so its replica's stamp is enough."""
+    verdict, _board, pulled, mirrored = _replica_state(conn)
+    if verdict is not True:
+        return False
+    return _mode(conn) != "primary" or (type(mirrored) in (int, float) and mirrored >= pulled)
+
+
+def _mode(conn: sqlite3.Connection) -> Optional[str]:
+    try:
+        row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    return None if row is None else row["mode"]
+
+
+def _replica_state(conn: sqlite3.Connection) -> tuple:
+    """``(verdict, board_id, pulled_at, mirror_pulled_at)``: the :func:`_replica_at_head` verdict, the live board's
+    id (None when unsynced or unreadable), the replica's numeric ``pulled_at`` stamp (None when it has none) and the
+    ``pulled_at`` the remote-parent mirror was last refreshed from (None when unknown)."""
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from hermes_cli.kanban_foreign_card import open_replica
+
+    try:
+        local = conn.execute("SELECT board_id FROM kanban_sync_state LIMIT 1").fetchone()
+        if local is None:
+            return None, None, None, None
+        with open_replica(_main_db_file(conn)) as replica:
+            if replica is None:
+                return None, local["board_id"], None, None
+            state = replica.execute("SELECT * FROM kanban_sync_state LIMIT 1").fetchone()
+    except (sqlite3.Error, OSError, ValueError):
+        return None, None, None, None
+    if state is None or state["board_id"] != local["board_id"]:
+        return False, local["board_id"], None, None
+    if "pulled_at" not in state.keys():  # unreadable, as when this was read by name
+        return None, local["board_id"], None, None
+    pulled = state["pulled_at"]
+    mirrored = state["mirror_pulled_at"] if "mirror_pulled_at" in state.keys() else None
+    if type(pulled) not in (int, float):
+        return False, local["board_id"], None, mirrored
+    return 0 <= time.time() - pulled <= FRESH_SECONDS, local["board_id"], pulled, mirrored
+
+
+def synced(conn: sqlite3.Connection) -> bool:
+    """Whether ``conn`` is a board the Board service syncs (mode ``primary`` or ``shadow``)."""
+    try:
+        row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None and row["mode"] in ("primary", "shadow")
+
+
+def local_copy_stale(conn: sqlite3.Connection, what: str) -> bool:
+    """True (and one DEBUG line naming ``what``) when ``conn`` is a synced board whose replica shows it is not at
+    the feed head. An unsynced board is its own authority, and with no readable replica there is no evidence of
+    lag: both are never stale here (a notice is a report, unlike the missing-parent block, which needs proof)."""
+    if not synced(conn) or _replica_at_head(conn) is not False:
+        return False
+    _log.debug("%s: local copy not at the feed head; deferring to the next tick", what)
+    return True
+
+
+# Live board file -> (replica stamps, count) its last deferral line named: one INFO line per board per stale stamp
+# and deferred count.
+_reported: dict[str, object] = {}
+
+
+def report_deferred(conn: sqlite3.Connection, deferred: int) -> None:
+    """One INFO line when a readiness pass deferred ``deferred`` missing-parent judgements because the replica is
+    not at the feed head (or the remote-parent mirror not yet refreshed from it), repeated only when the replica's
+    stamps or the count change: a line keyed on the stamp alone kept the first pass's count while more children
+    joined the wait (review 5888215084 on #1931). It names the board, the replica's last time at the head (or "no
+    readable replica") and the count. There is deliberately no wall-clock escalation
+    here: after a laptop sleeps for hours its stamp is hours old on wake, so a bound would fire at once and bring
+    back the false blocks this gate removes. A replica that never catches up is alarmed in awake time by the
+    sync-freshness check of t_01a1d3df5e5d0757, which files one card per incident."""
+    from datetime import UTC, datetime
+    from hermes_cli.kanban_db_connect import _main_db_file
+
+    verdict, board, pulled, mirrored = _replica_state(conn)
+    key = str(_main_db_file(conn) or board)
+    stamp = ("unreadable" if verdict is None else (pulled, mirrored), deferred)
+    if key in _reported and _reported[key] == stamp:
+        return
+    _reported[key] = stamp
+    if verdict is None:
+        last = "no readable replica"
+    elif pulled is None:
+        last = "replica not stamped at the feed head"
+    else:
+        last = "replica last at the feed head " + datetime.fromtimestamp(pulled, UTC).isoformat(
+            timespec="seconds")
+        if verdict:
+            last += ", remote-parent mirror not refreshed from that pull yet"
+    _log.info("missing-parent check deferred on board %s (%s): %s; %d child(ren) wait with parent status unknown",
+              board or "?", key, last, deferred)

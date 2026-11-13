@@ -49,6 +49,8 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
             conn, task_id, outcome="reclaimed", status="reclaimed",
             summary="task archived with run still active",
         )
+        from hermes_cli import kanban_run_end_lease
+        kanban_run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
         # [daveey] via: archived outside the creator scope; event_extra: e.g. a forwarded run (kanban_owner_archive_relay)
         payload = {"source_status": row["status"], **({"via": via} if via else {}), **(event_extra or {})}
         kb._append_event(conn, task_id, "archived", payload, run_id=run_id)

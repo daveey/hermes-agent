@@ -133,6 +133,35 @@ def test_home_resume_accepts_worker_only_observation(gws, clock, monkeypatch):
     assert _status(worker.conn, tid) == "running"
 
 
+def test_home_resume_accepts_a_worker_hold_recorded_after_a_reassign(gws, clock, monkeypatch):
+    """t_01a1d120e7d7c686, 2026-11-12: a same-profile reassign on the hub, the workers re-held the card 3 s later,
+    and hub ``resume`` refused with "guard: none". The hub's DB holds only the replicated worker events."""
+    hub, worker = gws
+    tid = _held_on_worker(gws, clock)
+    hub.enter()
+    clock[0] += 30
+    assert kb.assign_task(hub.conn, tid, "default")
+    hub.round()
+    worker.round()
+    clock[0] += 3
+    worker.tick()  # the worker's own guard holds the copy again, after the reassign
+    assert _status(worker.conn, tid) == "ready"
+    worker.round()
+    hub.round()
+    hub.enter()
+    held_after = [e for e in kb.list_events(hub.conn, tid) if e.kind in ("assigned", "respawn_guarded")]
+    assert [e.kind for e in held_after][-2:] == ["assigned", "respawn_guarded"]  # replicated, not hub-written
+    clock[0] += 30
+    with monkeypatch.context() as patch:
+        patch.setattr(kbd, "check_respawn_guard", lambda *_: None)
+        resume.resume(hub.conn, tid, reason="runner-only hold after reassign", actor="operator")
+    hub.round()
+    worker.round()
+    clock[0] += 5
+    worker.tick()
+    assert _status(worker.conn, tid) == "running"
+
+
 def test_without_a_resume_the_kept_copy_stays_held(gws, clock):
     hub, worker = gws
     tid = _held_on_worker(gws, clock)

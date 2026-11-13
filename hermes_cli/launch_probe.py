@@ -1,12 +1,14 @@
 """Bounded, passive dependency-environment probe for launchers.
 
 ``probe(root)`` asks an isolated worker (``sys.executable -I -S``) whether the
-environment recorded for ``root`` is current, or (``operation='runtime'``) to
+environment recorded for ``root`` is current, (``operation='borrowed'``) whether the
+owner's committed environment serves a root that borrows the checkout
+(``pm.install.borrowed_venv_is_current``), or (``operation='runtime'``) to
 activate it and report the resulting PATH. It never installs or repairs.
 
 Contract (stdlib only, so a bootstrap interpreter can import it):
 
-* ``{"schema": 1, "state": "current" | "stale"}`` for ``currency``.
+* ``{"schema": 1, "state": "current" | "stale"}`` for ``currency`` and ``borrowed``.
 * ``{"schema": 1, "state": "runtime", "problems": [str], "path": str}`` for ``runtime``.
 * ``{"schema": 1, "state": "error", "detail": str}`` when the worker ran and failed.
   Permission failures with a denied path also carry ``permission_error`` with
@@ -57,6 +59,12 @@ try:
     if operation == "currency":
         import pm
         reply = {"schema": 1, "state": "current" if pm.venv_is_current(project_root=root) else "stale"}
+    elif operation == "borrowed":
+        # A borrowing root with no PM runtime of its own: judge on the owner's generation.
+        from pm.environments import activate_dependencies
+        activate_dependencies(root)
+        from pm.install import borrowed_venv_is_current
+        reply = {"schema": 1, "state": "current" if borrowed_venv_is_current(project_root=root) else "stale"}
     else:
         from pm.environments import activate_dependencies
         activate_dependencies(root)  # before any third-party import
@@ -88,7 +96,7 @@ def _valid(operation: str, reply: Any) -> bool:
                 and (error["errno"] is None or type(error["errno"]) is int)
                 and (error["strerror"] is None or isinstance(error["strerror"], str))
                 and isinstance(error["filename"], str))
-    if operation == "currency":
+    if operation in ("currency", "borrowed"):
         return state in ("current", "stale") and set(reply) == {"schema", "state"}
     problems = reply.get("problems")
     return (state == "runtime" and isinstance(problems, list)
@@ -132,7 +140,7 @@ def probe(root: str | os.PathLike[str], operation: str = "currency",
     """Run one passive probe for ``root``; see the module docstring for the result shapes."""
     if timeout is None:
         timeout = DEFAULT_TIMEOUT
-    if os.name != "posix" or operation not in ("currency", "runtime") or not timeout > 0:
+    if os.name != "posix" or operation not in ("currency", "borrowed", "runtime") or not timeout > 0:
         return None
     deadline = time.monotonic() + timeout
     try:

@@ -145,7 +145,7 @@ _TOOL_STUBS = {
         '"""Targeted find-and-replace (mode="replace") or V4A multi-file patches (mode="patch"). Returns dict with status."""',
         '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile}'),
     "terminal": ("command: str, timeout: int = None, workdir: str = None, http_readback: bool = False",
-        '"""Run a command (foreground only); http_readback opts into native HTTP status readback. Returns dict with "output" and "exit_code"."""',
+        '"""Run a command (foreground only); http_readback opts into native HTTP status readback. Returns dict with "output" (the complete stdout), "exit_code" and "truncated" (True only when the full text could not be recovered; then read "full_output_path")."""',
         '{"command": command, "timeout": timeout, "workdir": workdir, "http_readback": http_readback}'),
 }
 
@@ -891,7 +891,8 @@ _TOOL_DOC_LINES = [
      "    target: \"content\" (search inside files) or \"files\" (find files by name). Returns {\"matches\": [...]}"),
     ("patch", "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False)"),
     ("terminal", "  terminal(command: str, timeout=None, workdir=None)\n"
-     "    Foreground only (no background/pty). Returns {\"output\": \"...\", \"exit_code\": N}"),
+     "    Foreground only (no background/pty). Returns {\"output\": \"...\", \"exit_code\": N, \"truncated\": bool}.\n"
+     "    output is the complete stdout (a long one comes raw from the spill: redacted, no sudo notes or plugin hook rewrites); if truncated is True the middle was cut, so read full_output_path."),
 ]
 
 

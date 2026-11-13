@@ -9,6 +9,7 @@ export interface BootTranslations {
     retryingRemoteBackend: string
     startingDesktopConnection: string
     startingHermesDesktop: string
+    waitingForRemoteUpdate: string
   }
   errors: {
     backgroundExited: string

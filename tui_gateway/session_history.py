@@ -259,6 +259,9 @@ def _expand_skill_invocation_for_replay(text: str, task_id: str) -> str:
 # Opening of the crash-recovery note synthesized by _auto_continue_note; matched (not just built) for
 # rows persisted before display typing existed and for the messaging gateway's twin note.
 _AUTO_CONTINUE_NOTE_PREFIX = "[System note: Your previous turn was interrupted mid-run"
+# [daveey] update_pause.PAUSE_REPLAY_NOTE_PREFIX: a paused request continued after later turns ran over it, or
+# forwarded to the gateway that owns the chat (which persists it untyped).
+_PAUSE_REPLAY_NOTE_PREFIX = "[System note: A turn of yours paused for a Hermes update"
 
 
 def _legacy_display_kind(role: str, text: str) -> str | None:
@@ -269,7 +272,8 @@ def _legacy_display_kind(role: str, text: str) -> str | None:
 
     if failed_turn := untyped_failed_turn_display_kind(role, text):
         return failed_turn
-    return "auto_continue" if role == "user" and text.lstrip().startswith(_AUTO_CONTINUE_NOTE_PREFIX) else None
+    return ("auto_continue" if role == "user" and text.lstrip().startswith(
+        (_AUTO_CONTINUE_NOTE_PREFIX, _PAUSE_REPLAY_NOTE_PREFIX)) else None)
 
 
 _HISTORY_ASSISTANT_DETAIL_KEYS = (

@@ -424,21 +424,63 @@ def wake_probe(target: str, remote_tid: str) -> str:
                        "--until", ",".join(UNTIL)])
 
 
-def remote_args(conn: sqlite3.Connection, task, *, self_gw: str) -> dict:
-    """The ``kanban_create`` view of the local card sent to the target: its options, and the body with
-    the parents' handoffs (the target cannot read this board)."""
+def _quoted(text: str) -> str:
+    """Parent text safe inside the evidence fence: a close marker in it would end the fence early and expose
+    the rest of the handoff to the placement scans."""
+    from hermes_cli.kanban_placement import EVIDENCE_CLOSE
+    return text.replace(EVIDENCE_CLOSE, "<!-- /placement-evidence (quoted) -->")
+
+
+def _own_text(body: str) -> str:
+    """The card's own body, safe above the footer's fence: an open marker after its last close marker is
+    unclosed and would pair with the footer's close, so ``without_evidence`` would strip the card's own
+    text (its home commands included) up to the footer. Neutralise those; complete fences stay."""
+    from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN
+    cut = body.rfind(EVIDENCE_CLOSE)
+    cut = 0 if cut < 0 else cut + len(EVIDENCE_CLOSE)
+    return body[:cut] + body[cut:].replace(EVIDENCE_OPEN, "<!-- placement-evidence (quoted) -->")
+
+
+def opened_board(conn: sqlite3.Connection) -> str:
+    """Slug of the board file ``conn`` opened. ``connect_closing()`` resolves ``HERMES_KANBAN_DB`` before
+    ``HERMES_KANBAN_BOARD`` but ``get_current_board()`` ignores the DB pin, so read the slug off the file;
+    a pinned file outside the board layout (or no file) falls back to the active board."""
+    from pathlib import Path
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_sync as sync
+    path = sync._db_key(conn)
+    if path:
+        slug = sync.board_slug_for_path(path)
+        if slug != kb.DEFAULT_BOARD or Path(path).resolve() == kb.board_own_db_path(None).resolve():
+            return slug
+    return kb.get_current_board()
+
+
+def remote_args(conn: sqlite3.Connection, task, *, self_gw: str, board: Optional[str] = None) -> dict:
+    """The ``kanban_create`` view of the local card sent to the target: its options, and the body with
+    the parents' handoffs (the target cannot read this board). ``board`` is the source card's board slug
+    (default: the board ``conn`` opened), named in the footer's read target."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN
     parents = kb.parent_ids(conn, task.id)
     summaries = kb.latest_summaries(conn, parents) if parents else {}
     lines = []
     for pid in parents:
         p = kb.get_task(conn, pid)
         handoff = (summaries.get(pid) or (p.result if p else None) or "(no handoff)").strip()
-        lines.append(f"- {pid} ({p.title if p else '?'}): {handoff[:1500]}")
-    body = (task.body or "").rstrip()
+        lines.append(_quoted(f"- {pid} ({p.title if p else '?'}): {handoff[:1500]}"))
+    body = _own_text((task.body or "").rstrip())
     if lines:
+        board = board or opened_board(conn)
+        # Spell the tool's read call: "with cross_task @task:..." parses as an unknown explicit invocation in
+        # kanban_placement_coordination._actions (ACTION_REASON), which kept such forwarded cards on the
+        # target's home instead of the pool (t_01a1d49003c65ca4). A read only needs coordination-read.
+        # The parents' titles and handoffs are quoted evidence of work done on this gateway, not this card's
+        # work: fence them so a handoff describing `with cross_task x` or `hermes-hub restart` (or the hub,
+        # ssh, ...) does not keep the forwarded card home (t_01a1d4bd40dca767). The worker still reads them.
         body += (f"\n\n---\nParent handoffs (the parents ran on {self_gw}; read them there with "
-                 f"cross_task @task:default@{self_gw}/<id>):\n" + "\n".join(lines))
+                 f"cross_task(action='read', target='@task:{board}@{self_gw}/<id>')):\n"
+                 f"{EVIDENCE_OPEN}\n" + "\n".join(lines) + f"\n{EVIDENCE_CLOSE}")
     body += f"\n\nThis card was {self_gw} card {task.id}; it completes there when this one is done."
     return {
         "title": task.title, "body": body, "assignee": task.assignee or "default",
@@ -465,6 +507,7 @@ class Forwarder:
         self.sleep = time.sleep
         self.cfg = kp.config()
         self.self_gw = reg.self_gateway() or "local"
+        self.board = opened_board(conn)  # the board whose DB main() opened, HERMES_KANBAN_DB pin included
         self.hub_cli = reg.hub_cli_path(self.cfg.get("hub_cli"))
         self.live = lambda t: kp.target_live(t, now=self.now(), live_seconds=kp._Cfg(self.cfg).live_seconds())
         self.create = kp.create_remote
@@ -502,7 +545,7 @@ class Forwarder:
                 return self._cancel(f"{target} not live {MAX_NOT_LIVE} times: {dead}")
             self._event(NOT_LIVE, {"why": dead})
             return self._park_clock(f"{target} is not live yet ({dead}); retrying the forward")
-        args = remote_args(self.conn, task, self_gw=self.self_gw)
+        args = remote_args(self.conn, task, self_gw=self.self_gw, board=self.board)
         distinct = self.carries_options()
         if distinct:
             # The target's overlap guard sees this local card through the replica and would refuse its own copy

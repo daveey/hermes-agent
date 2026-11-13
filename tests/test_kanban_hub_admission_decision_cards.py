@@ -64,7 +64,7 @@ def test_blocked_decision_card_on_hub_makes_no_judge_call(gate, pin):
 
 
 def test_blocked_decision_card_follows_worker_queue(gate):
-    result = decide(decision_card(), cfg=QUEUE_CFG, machine_ok=lambda label: label == "pool:worker")
+    result = decide(decision_card(), cfg=QUEUE_CFG, machine_ok=lambda labels: "pool:worker" in labels)
     assert gate == []
     assert result["runs_on"][0] == "pool:worker"
     assert "capability:hub-write" in result["runs_on"]

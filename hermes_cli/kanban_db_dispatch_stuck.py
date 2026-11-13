@@ -112,7 +112,7 @@ def held_cards(results: Iterable[Optional[Any]]) -> str:
             continue
         for field in ("respawn_guarded", "claim_deferred", "skipped_ineligible", "capsule_refused"):
             held.update(f"{tid}={reason}" for tid, reason in getattr(res, field, ()))
-        for field in ("skipped_unassigned", "skipped_nonspawnable", "rate_limited"):
+        for field in ("skipped_unassigned", "skipped_nonspawnable", "rate_limited", "admission_deferred"):
             held.update(f"{tid}={field}" for tid in getattr(res, field, ()))
         held.update(f"{tid}=profile_capacity({profile},{count})"
                     for tid, profile, count in res.skipped_per_profile_capped)

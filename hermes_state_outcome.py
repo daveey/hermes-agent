@@ -353,6 +353,19 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     return decisions, waits
 
 
+# [daveey] Keys a done outcome derives from live state (owned crons, watch parks); never carried from a declaration.
+_NAMED_KEYS = frozenset({"crons", "watches"})
+
+
+def _watch_items(ids: list[str]) -> list[dict]:
+    """[daveey] The chat's watch-parked cards (``kanban_watch.chat_watches``). A watch is not live work (it frees
+    the chat), so a done outcome names them as ``watches``, like the crons it owns: done, still watching, not plain
+    green with a check still pending (self-heal desktop-e6cce5965c)."""
+    from hermes_cli.kanban_watch import chat_watches
+
+    return chat_watches(ids)
+
+
 def _cron_items(ids: list[str]) -> list[dict]:
     from hermes_cli import cron_session_activity as cron
 
@@ -741,9 +754,10 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
     if lost_subagents:
         return _outcome("unresolved", now, reason="subagent_lost", on=lost_subagents, **carry)
     crons = _guarded("cron", sid, lambda: _cron_items(ids), [])
-    named = {"crons": crons} if crons else {}
+    watches = _guarded("watches", sid, lambda: _watch_items(ids), [])
+    named = {**({"crons": crons} if crons else {}), **({"watches": watches} if watches else {})}
     if holds and declared and declared.get("kind") == "waiting":
-        return {k: v for k, v in declared.items() if k != "crons"}
+        return {k: v for k, v in declared.items() if k not in _NAMED_KEYS}
     if card_read_failed:
         # Unknown card state is not evidence of completion, regardless of the reply or a declared
         # done: a counted open card outranks a declared done (``waits`` above), so an unread one must too.
@@ -751,7 +765,7 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
             return stored
         return _outcome("unresolved", now, reason="card_read_failed", **carry)
     if holds and declared and declared.get("kind") == "done":
-        return {**{k: v for k, v in declared.items() if k != "crons"}, **named}
+        return {**{k: v for k, v in declared.items() if k not in _NAMED_KEYS}, **named}
     if not tail:
         return _outcome("unresolved", now, reason="empty", **carry)
     reason = _tail_reason(tail)

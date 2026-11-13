@@ -11,7 +11,8 @@ export const ruBoot = {
       loadingSessions: 'Загрузка последних сеансов',
       retryingRemoteBackend: 'Переподключение к удалённому бэкенду Hermes…',
       startingDesktopConnection: 'Запуск подключения приложения',
-      startingHermesDesktop: 'Запуск Hermes Desktop…'
+      startingHermesDesktop: 'Запуск Hermes Desktop…',
+      waitingForRemoteUpdate: 'Ожидание завершения обновления удалённого Hermes…'
     },
     errors: {
       backgroundExited: 'Фоновый процесс Hermes завершён.',

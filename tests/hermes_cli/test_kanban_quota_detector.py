@@ -121,6 +121,26 @@ def test_managed_worker_cannot_drain(tmp_path, monkeypatch):
     assert len(Detector(path).pending()) == 1
 
 
+def test_drain_without_flock_skips_quietly_and_keeps_reports(tmp_path, monkeypatch, caplog):
+    """Windows has no fcntl: the drain is an explicit no-op with one debug line, not a warning per tick."""
+    import logging
+    import sys
+    from hermes_cli import kanban_quota_detector as detector
+    _kb, conn = _board(tmp_path, monkeypatch)
+    path = tmp_path / 'd.db'
+    _three(path)
+    monkeypatch.setitem(sys.modules, 'fcntl', None)  # `import fcntl` raises ImportError, as on Windows
+    monkeypatch.setattr(detector, '_fcntl', None, raising=False)
+    monkeypatch.setattr(detector, '_NO_FLOCK_LOGGED', False, raising=False)
+    with caplog.at_level(logging.DEBUG, logger=detector.__name__):
+        assert detector.drain_owner(conn, detector=detector.Detector(path)) == 0
+        assert detector.drain_owner(conn, detector=detector.Detector(path)) == 0
+    records = [r for r in caplog.records if r.name == detector.__name__]
+    assert [r.levelno for r in records] == [logging.DEBUG]
+    assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 0
+    assert len(detector.Detector(path).pending()) == 1
+
+
 def test_drain_failsoft_and_concurrent_owners_single_card(tmp_path, monkeypatch):
     from hermes_cli.kanban_quota_detector import Detector, drain_owner
     _kb, conn = _board(tmp_path, monkeypatch)

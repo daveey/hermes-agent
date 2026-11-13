@@ -473,6 +473,8 @@ def setup_logging(
     if root.level == logging.NOTSET or root.level > level:
         root.setLevel(level)
     _quiet_noisy_loggers()
+    from agent.ssl_close_tripwire import install_if_enabled  # lazy: debug-only, logging.debug_ssl_close
+    install_if_enabled(log_cfg.get("debug_ssl_close"))
     _logging_initialized = True
     return log_dir
 

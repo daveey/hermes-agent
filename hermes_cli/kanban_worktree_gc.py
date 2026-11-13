@@ -10,10 +10,12 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 
 from hermes_cli import kanban_db_workspace as ws
@@ -23,10 +25,25 @@ from hermes_cli.kanban_workspace_jobs import defer_owned_job_cleanup
 log = logging.getLogger(__name__)
 
 
-def retention_days() -> int:
+def retention_days() -> float:
+    """Age-based GC window in days; 0 disables it.
+
+    ``kanban.worktree_retention_hours`` (a non-negative number), when set,
+    takes precedence over the whole-day ``kanban.worktree_retention_days`` and
+    is returned as a fraction of a day. An invalid value of the key in effect
+    disables age-based GC and logs a warning; it never falls back to the other
+    key. [daveey]
+    """
     from hermes_cli.config import load_config
     try:
-        value = load_config().get("kanban", {}).get("worktree_retention_days", 7)
+        kanban = load_config().get("kanban", {})
+        hours = kanban.get("worktree_retention_hours")
+        if hours is not None:
+            if (isinstance(hours, bool) or not isinstance(hours, (int, float))
+                    or not math.isfinite(hours) or hours < 0):
+                raise ValueError("invalid worktree_retention_hours")
+            return hours / 24
+        value = kanban.get("worktree_retention_days", 7)
         if isinstance(value, bool) or int(value) != value or value < 0:
             raise ValueError("invalid worktree retention")
         return int(value)
@@ -35,16 +52,19 @@ def retention_days() -> int:
         return 0
 
 
-def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = None) -> int:
+def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None = None) -> int:
     """Retry terminal scratch cleanup, failing closed on any unreadable board.
 
     Only task records establish ownership; never infer it from directory names.
     Read every board before the first removal, even if an earlier board reports
-    a live sharer. Keep the selected owner locked against concurrent resumption.
+    a live sharer. The owner is re-checked (unchanged, terminal, no active
+    children) in a short write txn right before each removal, which detaches
+    the tree by rename there; walks and rmtree never hold the board lock.
 
     A tree that is kept only because it holds standalone git clones is archived
     and then removed once its card finished more than *older_than_days* ago
-    (default ``kanban.worktree_retention_days``; 0 disables). [daveey]
+    (default ``retention_days()``: ``kanban.worktree_retention_hours`` / 24 when
+    set, else ``kanban.worktree_retention_days``; 0 disables). [daveey]
     """
     import shutil
 
@@ -53,36 +73,45 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
     days = retention_days() if older_than_days is None else older_than_days
     removed = 0
     aged: list[tuple[str, Path, int | None]] = []
-    with kb.write_txn(conn):
-        try:
+    # Only the candidate SELECT holds the board's write lock. The inventory, the tree walks and
+    # every rmtree run outside it (they took 11 min for 29 trees on a loaded Mac, holding BEGIN
+    # IMMEDIATE on the board throughout); each removal re-checks its owner in a short write txn
+    # and detaches the tree by rename there, so a card resumed mid-GC never sees it half-deleted.
+    try:
+        with kb.write_txn(conn):
             rows = conn.execute(
-                "SELECT t.id, t.workspace_path, t.completed_at, t.created_at, "
+                "SELECT t.id, t.workspace_path, t.workspace_kind, t.completed_at, t.created_at, "
                 "(SELECT MAX(created_at) FROM task_events e WHERE e.task_id=t.id "
                 " AND e.kind NOT LIKE 'workspace%') AS last_event "
                 "FROM tasks t WHERE t.workspace_kind='scratch' "
                 f"AND t.status IN {ws._TERMINAL_STATUSES_SQL}"
             ).fetchall()
-            known_paths = _scratch_owner_paths(conn)
-            for board in ws._sibling_board_db_files(conn):
-                with _read_board(board) as other:
-                    known_paths.update(_scratch_owner_paths(other))
-        except (OSError, sqlite3.Error):
-            log.warning("Scratch GC aborted: cannot read all boards; preserving workspaces", exc_info=True)
-            return 0
-        try:
-            _report_unowned_scratch(kb.workspaces_root(), known_paths)
-        except OSError:
-            log.warning("Scratch preservation inventory unavailable; unknown paths remain preserved",
-                        exc_info=True)
-        for row in rows:
-            path = Path(row["workspace_path"] or (kb.workspaces_root() / row["id"])).expanduser()
-            if not path.is_dir() or path.is_symlink() or not ws._is_managed_scratch_path(path):
-                continue
-            if ws._has_active_children(conn, row["id"]):
-                continue
-            removable = ws._scratch_tree_removable(path)
-            if not removable and not _finished_before(row, days):
-                _report_scratch_retention(row, path, days)
+        known_paths = _scratch_owner_paths(conn)
+        for board in ws._sibling_board_db_files(conn):
+            with _read_board(board) as other:
+                known_paths.update(_scratch_owner_paths(other))
+    except (OSError, sqlite3.Error):
+        log.warning("Scratch GC aborted: cannot read all boards; preserving workspaces", exc_info=True)
+        return 0
+    _sweep_detached_trash(kb.workspaces_root(), rows)
+    try:
+        _report_unowned_scratch(kb.workspaces_root(), known_paths)
+    except OSError:
+        log.warning("Scratch preservation inventory unavailable; unknown paths remain preserved",
+                    exc_info=True)
+    for row in rows:
+        path = Path(row["workspace_path"] or (kb.workspaces_root() / row["id"])).expanduser()
+        if not path.is_dir() or path.is_symlink() or not ws._is_managed_scratch_path(path):
+            continue
+        if ws._has_active_children(conn, row["id"]):
+            continue
+        removable = ws._scratch_tree_removable(path)
+        if not removable and not _finished_before(row, days):
+            _report_scratch_retention(row, path, days)
+            continue
+        trash = None
+        with kb.write_txn(conn):
+            if not _scratch_owner_unchanged(conn, row, path):
                 continue
             if ws._defer_shared_workspace_cleanup(conn, row["id"], path):
                 continue
@@ -92,16 +121,78 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
                 aged.append((row["id"], path, row["completed_at"]))
                 continue
             ws.release_lsp_clients(str(path))
-            shutil.rmtree(path, ignore_errors=True)
-            if not path.exists():
-                ws._log_scratch_removal(conn, row["id"], path, "scratch workspace (GC retry)")
-                removed += 1
+            trash = path.with_name(f".{path.name}{_TRASH_INFIX}{uuid.uuid4().hex}")
+            try:
+                os.rename(path, trash)
+            except OSError:
+                log.warning("Scratch GC could not detach %s; keeping it", path, exc_info=True)
+                continue
+            ws._log_scratch_removal(conn, row["id"], path, "scratch workspace (GC retry)")
+            removed += 1
+        shutil.rmtree(trash, ignore_errors=True)
+        if os.path.lexists(trash):
+            log.warning("Scratch GC left detached tree %s (from %s) after a partial removal", trash, path)
     # Archiving runs git for minutes on big clones: never hold the board's write lock for it.
     for task_id, path, completed_at in aged:
         removed += _archive_and_remove_scratch(conn, task_id, path, completed_at)
     from hermes_cli.kanban_scratch_custody import gc_custody
     removed += gc_custody(conn, days)
     return removed
+
+
+# A tree detached for removal: ``.<workspace name>.gc-rm-<uuid4 hex>``, a sibling of the workspace.
+# Only this GC creates the name, after the owner check passed; the rename runs before the removal
+# is logged, so a log failure rolls the txn back but leaves the tree detached with no removal
+# record. _sweep_detached_trash therefore logs every tree it deletes.
+_TRASH_INFIX = ".gc-rm-"
+_TRASH_NAME = re.compile(r"\..+\.gc-rm-[0-9a-f]{32}")
+
+
+def _is_detached_trash(path: Path) -> bool:
+    return _TRASH_NAME.fullmatch(path.name) is not None
+
+
+def _sweep_detached_trash(root: Path, rows) -> None:
+    """Finish removals an earlier run detached but could not rmtree (no board lock is held here).
+
+    Looks in the workspaces root and beside each candidate's workspace, never follows a symlink,
+    and only touches names this GC mints."""
+    import shutil
+
+    parents = {root}
+    for row in rows:
+        if row["workspace_path"]:
+            path = Path(row["workspace_path"]).expanduser()
+            if ws._is_managed_scratch_path(path):
+                parents.add(path.parent)
+    for parent in parents:
+        try:
+            entries = [p for p in parent.iterdir() if _is_detached_trash(p)]
+        except OSError:
+            continue
+        for trash in entries:
+            if trash.is_symlink() or not trash.is_dir():
+                continue
+            shutil.rmtree(trash, ignore_errors=True)
+            if os.path.lexists(trash):
+                log.warning("Scratch GC left detached tree %s; retried next run", trash)
+            else:
+                log.warning("Scratch GC swept detached tree %s left by an earlier run", trash)
+
+
+def _scratch_owner_unchanged(conn: sqlite3.Connection, row: sqlite3.Row, path: Path) -> bool:
+    """Inside the removal txn: the candidate's task still owns ``path`` exactly as selected, is
+    still terminal and has no active children (it may have been resumed or reassigned since)."""
+    from hermes_cli import kanban_db as kb
+    current = conn.execute("SELECT workspace_kind, workspace_path, completed_at FROM tasks WHERE id=?",
+                           (row["id"],)).fetchone()
+    if current is None or current["workspace_kind"] != "scratch":
+        return False
+    if (current["workspace_path"], current["completed_at"]) != (row["workspace_path"], row["completed_at"]):
+        return False
+    if Path(current["workspace_path"] or (kb.workspaces_root() / row["id"])).expanduser() != path:
+        return False
+    return ws._is_terminal_task(conn, row["id"]) and not ws._has_active_children(conn, row["id"])
 
 
 def _scratch_owner_paths(conn: sqlite3.Connection) -> set[Path]:
@@ -128,15 +219,15 @@ def _report_unowned_scratch(root: Path, known_paths: set[Path]) -> None:
     represented = {root_key / known.relative_to(root_key).parts[0]
                    for known in known_paths if known.is_relative_to(root_key) and known != root_key}
     for path in root.iterdir():
-        if path.is_symlink() or not path.is_dir():
-            continue
+        if path.is_symlink() or not path.is_dir() or _is_detached_trash(path):
+            continue  # detached trash is swept by gc_task_scratch, not an unknown owner
         if path.resolve() not in represented:
             log.warning("Scratch preserved: reason=owner_unverified path=%s; "
                         "no local task workspace record; moved or unknown ownership; "
                         "no deletion deadline", path)
 
 
-def _report_scratch_retention(row: sqlite3.Row, path: Path, days: int) -> None:
+def _report_scratch_retention(row: sqlite3.Row, path: Path, days: float) -> None:
     # Logs, not task events: observing retention must never extend its age.
     since = row["completed_at"] or row["last_event"] or row["created_at"]
     reason = "retention_disabled" if days <= 0 else "retention_pending"
@@ -146,7 +237,7 @@ def _report_scratch_retention(row: sqlite3.Row, path: Path, days: int) -> None:
                 reason, path, row["id"], eligible_at)
 
 
-def _finished_before(row: sqlite3.Row, days: int) -> bool:
+def _finished_before(row: sqlite3.Row, days: float) -> bool:
     if days <= 0:
         return False
     since = row["completed_at"] or row["last_event"] or row["created_at"]
@@ -209,7 +300,7 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
         return 0
 
 
-def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: int = 7,
+def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: float = 7,
                      repo_root: str | None = None) -> int:
     """Reap terminal rows only, retaining active children and cross-board sharers.
 

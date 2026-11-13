@@ -25,6 +25,11 @@ def _executable(path: Path, text: str) -> Path:
     return path
 
 
+def _wc_l(path: Path) -> int:
+    """What `wc -l` prints: the file's newline count."""
+    return path.read_bytes().count(b"\n")
+
+
 def test_line_cap_refusal_names_script_and_cap(tmp_path):
     script = _executable(tmp_path / "hermes-sync", "#!/bin/sh\n" + "echo ok\n" * 17000)
 
@@ -33,19 +38,57 @@ def test_line_cap_refusal_names_script_and_cap(tmp_path):
     assert unsafe is True
     assert refusal is not None
     assert str(script) in refusal
-    assert "17002 lines, over the 16384-line scan cap (text at depth 1)" in refusal
+    assert _wc_l(script) == 17001
+    assert "has 17001 lines, over the 16384-line scan cap (text at depth 1)" in refusal
+
+
+def test_line_count_without_trailing_newline_counts_the_last_line(monkeypatch, tmp_path):
+    monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 4)
+    script = _executable(tmp_path / "s.sh", "echo ok\n" * 5 + "echo last")  # wc -l says 5
+
+    unsafe, refusal = scan_gateway_lifecycle(shlex.quote(str(script)))
+
+    assert unsafe is True
+    assert refusal is not None
+    assert f"`{script}` has 6 lines, over the 4-line scan cap" in refusal
+
+
+def test_line_count_at_the_cap_names_the_charged_count(monkeypatch):
+    """Verdict unchanged: the budget charges the empty line after a final newline, so text with
+    exactly the cap's own lines is still refused, and the message says why."""
+    monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 3)
+
+    assert scan_gateway_lifecycle("one\ntwo\nthree\n") == (
+        True,
+        "the scan budget was exhausted: the command has 3 lines (4 counted), "
+        "over the 3-line scan cap (text at depth 0)",
+    )
 
 
 def test_line_cap_refusal_names_remaining_budget(monkeypatch, tmp_path):
     """A file under the cap that overruns what earlier text left says so."""
     monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 10)
-    script = _executable(tmp_path / "s.sh", "echo ok\n" * 9)  # 10 lines
+    script = _executable(tmp_path / "s.sh", "echo ok\n" * 9)  # 9 lines, charged as 10
 
     unsafe, refusal = scan_gateway_lifecycle(f"true\ntrue\n{shlex.quote(str(script))}")
 
     assert unsafe is True
     assert refusal is not None
     assert str(script) in refusal
+    assert "has 9 lines, over the 7 lines left of the 10-line scan cap" in refusal
+
+
+def test_cap_line_file_after_earlier_text_is_over_what_is_left(monkeypatch, tmp_path):
+    """A file of exactly cap lines charges cap+1, but its own count is not over the cap: after
+    earlier text spent part of the budget the message names what was left, not the whole cap."""
+    monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 10)
+    script = _executable(tmp_path / "s.sh", "echo ok\n" * 10)
+
+    unsafe, refusal = scan_gateway_lifecycle(f"true\ntrue\n{shlex.quote(str(script))}")
+
+    assert unsafe is True
+    assert refusal is not None
+    assert _wc_l(script) == 10
     assert "has 10 lines, over the 7 lines left of the 10-line scan cap" in refusal
 
 
@@ -113,14 +156,33 @@ def test_cron_refusal_names_prompt_and_script(monkeypatch, tmp_path, suffix):
     monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 4)
     script = tmp_path / f"job{suffix}"
     script.write_text("x = 1\n" * 6, encoding="utf-8")
+    assert _wc_l(script) == 6
 
     with pytest.raises(lifecycle_guard.GatewayLifecycleBlocked) as excinfo:
         lifecycle_guard.check_gateway_lifecycle("run report", str(script))
-    assert f"the job prompt plus `{script}` has 8 lines, over the 4-line scan cap" in str(excinfo.value)
+    assert f"the job prompt plus `{script}` has 7 lines, over the 4-line scan cap" in str(excinfo.value)
+
+    # No prompt: the join newline is charged but is not a line of the script.
+    for prompt in ("", None):
+        with pytest.raises(lifecycle_guard.GatewayLifecycleBlocked) as excinfo:
+            lifecycle_guard.check_gateway_lifecycle(prompt, str(script))
+        assert f": `{script}` has 6 lines, over the 4-line scan cap" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("suffix", [".sh", ".py"])
+def test_cron_script_without_prompt_verdict_still_charges_the_join(monkeypatch, tmp_path, suffix):
+    """Verdict unchanged: a 6-line script with no prompt is charged 8 lines, so a 7-line cap
+    refuses it, and the message names its own 6 lines with the charged count."""
+    monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 7)
+    script = tmp_path / f"job{suffix}"
+    script.write_text("x = 1\n" * 6, encoding="utf-8")
 
     with pytest.raises(lifecycle_guard.GatewayLifecycleBlocked) as excinfo:
         lifecycle_guard.check_gateway_lifecycle("", str(script))
-    assert f": `{script}` has 8 lines, over the 4-line scan cap" in str(excinfo.value)
+    assert f": `{script}` has 6 lines (8 counted), over the 7-line scan cap" in str(excinfo.value)
+
+    monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 8)
+    lifecycle_guard.check_gateway_lifecycle("", str(script))
 
 
 def test_scan_budget_summary_formats_sizes_exactly():

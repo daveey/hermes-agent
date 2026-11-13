@@ -3707,6 +3707,8 @@ export const esOverrides = {
     messageCount: (count: number) => `${count} ${count === 1 ? 'mensaje' : 'mensajes'}`,
     toolCallCount: (count: number) => `${count} ${count === 1 ? 'llamada a herramienta' : 'llamadas a herramientas'}`,
     row: {
+      backgroundUnknown: 'Trabajo abierto, estado actual desconocido',
+      backgroundWaiting: 'Trabajo abierto, en espera',
       kanbanUnknown: count => `${count} elementos de trabajo con estado actual desconocido: faltan pruebas, han caducado o no están verificadas. Esto no significa terminado; no se solicitó una nueva comprobación.`,
       pausedQueue: 'Puede que un mensaje en cola antes de un reinicio no se haya ejecutado: envíalo de nuevo o descártalo',
       pin: 'Fijar',

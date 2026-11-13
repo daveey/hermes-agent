@@ -28,9 +28,11 @@ or the slug itself in the title still names it (``Metta-AI/unconventional-collab
 equals a board slug does not count.
 
 Closed cards never match (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
-``<profile>/<board>/<id>`` twin). Heuristic exemptions (singletons ignore these except the capability
-waiting card): the creator's own card, the new card's parents, cards the same chat or the same
-worker created (fan-out), the waiting card a capability-owner create quotes, and another capability-owner
+``<profile>/<board>/<id>`` twin). Heuristic exemptions (singletons ignore these, except the waiting card a
+capability-owner create quotes and a card bound to it, :func:`_bound_to`): the creator's own card, the new
+card's parents, cards the same chat or the same worker created (fan-out), the waiting card a capability-owner
+create quotes, a local card bound to that
+waiting card (its deferred-placement origin, or a card parked on it: :func:`_bound_to`), and another capability-owner
 card for that same waiting card, a card the new one parks/waits/depends on (:func:`waits_on`), a card whose failed
 execution the new one recovers (:func:`recovers`: ``self-heal: kanban card t_X ... failed 2x``), and a card that
 names a different target (:func:`distinct_target`: another repo, host or process, an inverted check at another
@@ -552,10 +554,16 @@ def _board_cards(c: sqlite3.Connection, slug: str, self_gw: Optional[str], *,
     ``create_task`` waits for the write lock, so a slow concurrent create can commit a row older than the check."""
     marks = ",".join("?" * len(OPEN))
     newer = " AND (t.rowid > ? OR t.created_at >= ?)" if since is not None else ""
+    # ``placed_as``: the card on another gateway this one was forwarded to (deferred placement); ``awaits``: the
+    # card its latest park waits on. Either binds this card's completion to that card (:func:`_bound_to`).
     rows = c.execute(
         "SELECT t.id, t.title, t.body, t.status, t.session_id, (SELECT json_extract(e.payload, "
         "'$.creator_task_id') FROM task_events e WHERE e.task_id = t.id AND e.kind = 'created' "
-        f"LIMIT 1), t.idempotency_key FROM tasks t WHERE t.status IN ({marks}){newer}",
+        "LIMIT 1), t.idempotency_key, (SELECT json_extract(e.payload, '$.remote_task_id') FROM task_events e "
+        "WHERE e.kind = 'placement_forwarded' AND e.task_id = t.id AND json_extract(e.payload, "
+        "'$.remote_task_id') IS NOT NULL ORDER BY e.id DESC LIMIT 1), (SELECT json_extract(e.payload, "
+        "'$.awaiting.ref') FROM task_events e WHERE e.kind IN ('scheduled', 'continued') AND e.task_id = t.id "
+        f"ORDER BY e.id DESC LIMIT 1) FROM tasks t WHERE t.status IN ({marks}){newer}",
         (*OPEN, *(since or ()))).fetchall()
     if not rows:
         return []
@@ -569,8 +577,10 @@ def _board_cards(c: sqlite3.Connection, slug: str, self_gw: Optional[str], *,
     return [{"id": tid, "board": slug, "gateway": self_gw or "local", "status": status, "title": title,
              "body": body or "",
              "session_id": sess, "creator_task_id": creator, "local": True, "key_family": key_family(key),
+             "placed_as": placed if isinstance(placed, str) else None,
+             "awaits": awaits if isinstance(awaits, str) and status == "scheduled" else None,
              "chats": sorted(chats.get(tid, set()) | ({sess} if sess else set()))}
-            for tid, title, body, status, sess, creator, key in rows]
+            for tid, title, body, status, sess, creator, key, placed, awaits in rows]
 
 
 def _local_cards(self_gw: Optional[str]) -> Iterable[dict]:
@@ -659,6 +669,19 @@ def capability_owner_waiting_id(title: str, body: str) -> Optional[str]:
     return None
 
 
+def _bound_to(card: dict, waiting_id: str) -> bool:
+    """True when ``card`` completes only through ``waiting_id``: it was forwarded there by deferred placement
+    (``placement_forwarded``, the origin placeholder the placed card's body names), or it is parked on it.
+
+    Such a card waits on the waiting card by construction, so it can never do the capability owner's scoped
+    action: counting it as an owner refused every owner create a placed card asked its origin gateway for
+    (hub t_01a1d49003c65ca4, macbook placeholder t_01a1d48f676074bc).
+    """
+    # ``awaits`` is the park's bare awaiting.ref; awaiting.gateway is ignored. This relies on task ids being
+    # globally unique: a card on another gateway with this id is the same card, not a namesake.
+    return waiting_id in (card.get("placed_as"), card.get("awaits"))
+
+
 def _sibling_owner(card_title: str, waiting_id: str) -> bool:
     found = _OWNER_TITLE_RE.match(card_title or "")
     return bool(found and found.group(1) == waiting_id)
@@ -701,7 +724,7 @@ def _find(*, title: str, body: str, target_board: str, session_id: Optional[str]
             continue
         # The capability owner executes this exact waiting card, even for a singleton.
         # Keep other mirror owners visible; do not exempt a whole family or envelope.
-        if card["id"] == waiting:
+        if waiting and (card["id"] == waiting or _bound_to(card, waiting)):
             continue
         if not singleton and (card["id"] in skip
                 or (waiting and _sibling_owner(card.get("title") or "", waiting))

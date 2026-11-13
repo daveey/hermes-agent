@@ -71,6 +71,56 @@ def test_promotion_does_not_trust_creation_portability(setup):
     assert kb.get_task(conn, tid).requires == ["host_repo"]
 
 
+@pytest.mark.parametrize("probe, promoted", [
+    ("test -f ~/.hermes/cache/ready.flag", False),  # hub-local: the claim screen keeps it, so promotion must too
+    ("git -C ~/code/_wt/fix merge-base --is-ancestor abc HEAD", False),
+    ("gh pr view 1 --json state", True),
+])
+def test_promotion_applies_the_claim_screens_keep_reasons(setup, probe, promoted):
+    conn, hub = setup
+    tid = make(conn)
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "scheduled", {"wake_check": probe})
+    assert wp.reevaluate(conn, hub, "default", "hub") == int(promoted)
+    assert [body["mode"] for _board, body in hub.calls] == (["promote"] if promoted else [])
+
+
+def test_unreadable_card_fields_keep_the_card_on_the_hub(setup, monkeypatch):
+    """The keep-reason screen fails closed: a row it cannot read (a missing column) is never promoted."""
+    from hermes_cli import kanban_hub_admission_pickup as pickup
+    from hermes_cli import kanban_placement_recovery as recovery
+    conn, hub = setup
+    tid = make(conn)
+    row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    cfg = placement.config()
+    assert recovery.promotion_mode(conn, row, cfg) == "promote"  # readable: promoted
+    del row["title"]
+    assert recovery.hub_keep_reason(conn, row, cfg) == "card fields unreadable"
+    for error in (KeyError("title"), IndexError("No item with that key"), TypeError("requires"),
+                  ValueError("requires")):
+        def unreadable(_card, _board, error=error):
+            raise error
+        monkeypatch.setattr(pickup, "card_fields", unreadable)
+        assert wp.reevaluate(conn, hub, "default", "hub") == 0
+    assert not hub.calls
+
+
+def test_promotion_reads_the_keep_reasons_on_the_reevaluated_board(setup, monkeypatch):
+    from hermes_cli import kanban_hub_admission_pickup as pickup
+    from hermes_cli import kanban_placement_recovery as recovery
+    conn, _hub = setup
+    row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (make(conn),)).fetchone())
+    seen = []
+    real = pickup.card_fields
+    monkeypatch.setattr(pickup, "card_fields", lambda card, board: seen.append(board) or real(card, board))
+    assert recovery.available_mode(conn, row, placement.config(), object(), "default", "hub") == "promote"
+    # A non-default board is a structural keep reason, so the threaded board is what the screen judged. "other"
+    # differs from every keyword default, so the available_mode -> recovery_mode -> promotion_mode hops are pinned.
+    assert recovery.available_mode(conn, row, placement.config(), object(), "other", "hub") is None
+    assert recovery.promotion_mode(conn, row, placement.config(), board="other") is None
+    assert seen == ["default", "other", "other"]
+
+
 def test_promotion_preserves_explicit_local_intent(setup):
     conn, hub = setup
     tid = make(conn)

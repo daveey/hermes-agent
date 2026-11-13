@@ -561,6 +561,56 @@ def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes
     return None
 
 
+def _session_aliases_for_guard(env: Any) -> Optional[frozenset[str]]:
+    """Alias names the backend's command shell holds before the command runs (its login
+    snapshot turns ``expand_aliases`` on); ``None`` = unknown. Looked up on the class so a test
+    double's auto-attributes (``MagicMock``) never stand in for a backend's answer; a backend
+    without the hook has no snapshot."""
+    hook = getattr(type(env), "lifecycle_guard_session_aliases", None)
+    if hook is None:
+        return frozenset()
+    try:
+        names = hook(env)
+    except (AttributeError, TypeError, ValueError, OSError):  # a half-built backend: unknown
+        return None
+    if names is None or isinstance(names, frozenset):
+        return names
+    return None
+
+
+# hermes-sync can idle-restart the gateway it runs under, so the guard refuses it inside the
+# gateway (by lifecycle content, or because the script is over the scan budget). The generic
+# "separate shell" advice made agents wrap it in systemd-run/nohup; name the sanctioned route.
+_HERMES_SYNC = "hermes-sync"
+
+
+def _runs_hermes_sync(command: str) -> bool:
+    """Whether *command* EXECUTES hermes-sync (a mere mention such as ``grep x hermes-sync`` does
+    not count); see ``cron.lifecycle_guard.executes_command_named``."""
+    from cron.lifecycle_guard import executes_command_named
+
+    return executes_command_named(command, _HERMES_SYNC)
+
+
+def _refusal_hint(command: str) -> str:
+    if not _runs_hermes_sync(command):
+        return ""
+    from hermes_constants import display_hermes_home, get_default_hermes_root, get_hermes_home
+
+    # hermes-sync logs under its own home (the root ~/.hermes), not a profile gateway's home.
+    root = get_default_hermes_root(home=get_hermes_home())
+    sync_log = f"{display_hermes_home(root)}/logs/hermes-sync.log"
+    return (
+        " hermes-sync runs only from its scheduled cron/systemd pass, never from a gateway chat. "
+        "To deploy a pushed hermes-mods commit from here, run "
+        "`git -C ~/code/hermes-mods fetch -q origin && git -C ~/code/hermes-mods merge --ff-only origin/main`, "
+        "then wait for the next scheduled "
+        f"sync pass and read its `mods-reload:` line in {sync_log}. "
+        "Do not wrap hermes-sync in systemd-run, nohup, setsid or a background shell to get past "
+        "this refusal."
+    )
+
+
 def gateway_lifecycle_block(
     *,
     command: str,
@@ -625,6 +675,7 @@ def gateway_lifecycle_block(
         command,
         cwd=guard_cwd,
         read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES),
+        session_aliases=_session_aliases_for_guard(env),
     )
     if unsafe and refusal:
         # Not a lifecycle command: a script the command EXECUTES could not be scanned (budget,
@@ -634,7 +685,8 @@ def gateway_lifecycle_block(
             f"Blocked: the lifecycle guard could not scan this command or referenced script: {refusal}. "
             "Nothing in the command is known to contain a gateway lifecycle command, but a "
             "script the command executes must be scannable (a regular text file "
-            f"{lifecycle_scan_budget_summary()}) before it can run inside the gateway process.",
+            f"{lifecycle_scan_budget_summary()}) before it can run inside the gateway process."
+            + _refusal_hint(command),
             "error",
         )
     if unsafe:
@@ -647,7 +699,7 @@ def gateway_lifecycle_block(
             "uninstall the gateway from inside the gateway process. The gateway would "
             "kill this command before it could complete (SIGTERM propagates "
             "to child processes). Run `hermes gateway restart` from a "
-            "separate shell outside the running gateway.",
+            "separate shell outside the running gateway." + _refusal_hint(command),
             "error",
         )
     return None

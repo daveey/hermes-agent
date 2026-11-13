@@ -381,7 +381,9 @@ class GatewaySessionStore:
         """The current session snapshot's banner fields (``gateway/session_local_inventory``), as
         ``build_welcome_banner`` kwargs; None until a session is open."""
         info = (self.current or {}).get("info") or {}
-        if "tools" not in info:
+        # ``inventory_pending``: a loaded gateway answered before its inventory was built; a banner of
+        # empty tools would misreport the session, so the compact banner shows instead.
+        if "tools" not in info or info.get("inventory_pending"):
             return None
         grouped = info.get("tools") or {}
         toolset_of = {name: toolset for toolset, names in grouped.items() for name in names or []}

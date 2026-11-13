@@ -19,6 +19,7 @@ from hermes_cli import kanban_continuation as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kn
+from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_parent_unclaimed as pu
 
 LANDED = "LANDED: PR1148 MERGED 08:15:20Z as main 6948d8bc; NEXT: wait for main CI then live-check"
@@ -208,3 +209,265 @@ def test_old_payload_without_the_field_renders_unchanged(render):
     sentence = f'Last checkpoint (08:00Z): "{LANDED}". {SENTENCE} '
     assert sentence in with_field
     assert with_field.replace(sentence, "") == before
+
+
+# --- a live board lagging its pulled replica (t_01a1d390d19239dd) -----------------------------------------------
+# 2026-11-12 22:11 PST, MacBook: chat_wait_unclaimed for t_01a1d1292db9d3cb and t_01a1d12a594c8fd7, done on the Board
+# 30 min earlier. The live feed cursor (1650734) trailed its own replica (1713384) after a sync-loop stall, so the
+# live rows still read ready. These model that pair: a synced live board and a replica at sync-shadow/default.db.
+
+
+@pytest.fixture
+def synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli import kanban_sync_client as ksc
+    from tests.hermes_cli import kanban_sync_support as support
+    home = support.kanban_home(tmp_path, monkeypatch)
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    support.write_sync_config(home, True)
+    monkeypatch.setattr(cw, "_LAG_WARNED", set())
+    c = kbc.connect(home / "kanban.db")
+    ksc.ensure_identity(c, "default", "macbook")
+    sync.set_mode(c, "primary")  # the MacBook's mode: the live board applies the feed
+    ksa._reset_cache_for_tests()
+    yield c
+    c.close()
+    ksa._reset_cache_for_tests()
+
+
+def _set_live(conn, tid, *, cursor, version):
+    """The live board's feed cursor and the card's revision, with every local change pushed (outbox drained)."""
+    conn.execute("UPDATE kanban_sync_state SET cursor = ?", (cursor,))
+    conn.execute("UPDATE tasks SET sync_version = ? WHERE id = ?", (version, tid))
+    conn.execute("DELETE FROM kanban_sync_outbox")
+    conn.commit()
+
+
+def _set_replica(*rows, cursor, pulled_at=None):
+    """The pulled replica: its feed cursor, its ``mark_pulled`` stamp and ``(id, status, sync_version)`` rows."""
+    import sqlite3
+    from hermes_cli import kanban_sync_client as ksc
+    path = ksc.shadow_path("default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rep = sqlite3.connect(path)
+    rep.executescript(
+        "CREATE TABLE IF NOT EXISTS kanban_sync_state (id INTEGER PRIMARY KEY CHECK (id = 1), cursor INTEGER, "
+        "pulled_at REAL);"
+        "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, status TEXT, ready_since INTEGER, "
+        "sync_version INTEGER, result TEXT);"
+        "CREATE TABLE IF NOT EXISTS task_runs (id INTEGER PRIMARY KEY, task_id TEXT, summary TEXT, "
+        "started_at INTEGER, ended_at INTEGER);")
+    rep.execute("INSERT OR REPLACE INTO kanban_sync_state VALUES (1, ?, ?)",
+                (cursor, time.time() if pulled_at is None else pulled_at))
+    rep.executemany("INSERT OR REPLACE INTO tasks (id, status, sync_version) VALUES (?, ?, ?)", rows)
+    rep.commit()
+    rep.close()
+
+
+def _waiting(conn):
+    tid = kb.create_task(conn, title="waited on", assignee="default")
+    _subscribe(conn, tid)
+    _age(conn, tid)
+    return tid
+
+
+def test_replica_completed_later_skips_the_notice(synced, caplog):
+    """(a) Live row ready 31 min; the replica, at the same feed position, has the card done at a newer revision."""
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "done", 7), cursor=1000)
+    with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+        assert cw.sweep(synced) == 0
+    assert _notices(synced, tid, cw.NOTICE_KIND) == []
+    assert f"{tid} skipped: replica has it done (revision 7)" in caplog.text
+
+
+def test_live_feed_lag_defers_the_notice_until_it_closes(synced, caplog):
+    """(b) The replica also has the card ready, but the live feed trails it past the bound: nothing is said until
+    the lag closes, then exactly one notice for the same episode."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    tid = _waiting(synced)
+    head = 1000 + fresh.MAX_FEED_LAG_ROWS + 1
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=head)
+    with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+        assert cw.sweep(synced) == 0
+    assert _notices(synced, tid, cw.NOTICE_KIND) == []
+    assert "1 notice(s) deferred: live feed" in caplog.text
+    deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+    assert deferred == ["WARNING"]  # the first deferred sweep of a stall warns: a long stall drops the episode
+    with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+        assert cw.sweep(synced) == 0
+    deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+    assert deferred == ["WARNING", "INFO"]
+    _set_live(synced, tid, cursor=head, version=5)
+    assert cw.sweep(synced) == 1
+    assert cw.sweep(synced) == 0
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+def test_stale_replica_pull_defers_the_notice(synced):
+    """A stalled sync loop stops both copies, so their cursors agree: the replica's pull stamp is what shows it."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=1000, pulled_at=time.time() - fresh.REPLICA_STALE_SECONDS - 60)
+    assert cw.sweep(synced) == 0
+    _set_replica((tid, "ready", 5), cursor=1000)
+    assert cw.sweep(synced) == 1
+
+
+def test_in_sync_replica_still_ready_posts_once(synced):
+    """(c) Regression guard: no lag and the replica agrees the card is ready, so the notice goes out once."""
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=1000)
+    assert cw.sweep(synced) == 1
+    assert cw.sweep(synced) == 0
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+def test_shadow_mode_board_is_not_compared(synced):
+    """In ``shadow`` mode (``sync attach``'s default) the live board never applies the feed, so its cursor stays
+    put while the replica's runs ahead: no lag defer and no cross-check, the live board's own notice goes out."""
+    sync.set_mode(synced, "shadow")
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=0, version=5)
+    _set_replica((tid, "done", 7), cursor=50_000)
+    assert cw.sweep(synced) == 1
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+@pytest.mark.parametrize("how", ["detached", "disabled"])
+def test_detached_or_disabled_board_is_not_compared(synced, tmp_path, how):
+    """A board detached to ``off``, or one this home no longer syncs, keeps its replica on disk while pulls stop:
+    its aging stamp must not hold the notice forever."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    from tests.hermes_cli import kanban_sync_support as support
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=1000, pulled_at=time.time() - fresh.REPLICA_STALE_SECONDS - 86_400)
+    if how == "detached":
+        sync.set_mode(synced, "off")
+        conn = synced
+    else:  # a fresh process of a home whose config no longer syncs the board
+        support.write_sync_config(tmp_path / ".hermes", False)
+        kbc._INITIALIZED_PATHS.clear()
+        sync._SYNCED_PATHS.clear()
+        conn = kbc.connect(tmp_path / ".hermes" / "kanban.db")
+    try:
+        assert fresh.lag_hold(conn) is None
+        assert cw.sweep(conn) == 1
+    finally:
+        if conn is not synced:
+            conn.close()
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+def _db_file(conn):
+    return next(file for _seq, name, file in conn.execute("PRAGMA database_list") if name == "main")
+
+
+def test_lagging_board_warns_once_per_stall_while_another_board_is_healthy(tmp_path, monkeypatch, caplog):
+    """PR #1932 review nit: the dispatcher sweeps each board separately. Board A lags its replica, board B is
+    healthy; B's undeferred sweep each tick must not re-arm A's WARNING, so A warns once per stall, not per tick."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(cw, "_LAG_WARNED", set())
+    a, b = kbc.connect(tmp_path / "a.db"), kbc.connect(tmp_path / "b.db")
+    try:
+        ta, tb = _waiting(a), _waiting(b)
+        lagging = {_db_file(a)}
+        monkeypatch.setattr(fresh, "lag_hold", lambda conn, now=None: (
+            {"reason": "live feed 9999 rows behind its replica"} if _db_file(conn) in lagging else None))
+        ticks = 5
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+            posted = [(cw.sweep(a), cw.sweep(b)) for _tick in range(ticks)]
+        assert posted == [(0, 1)] + [(0, 0)] * (ticks - 1)  # B's card stays due, so every B sweep runs undeferred
+        deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+        assert deferred == ["WARNING"] + ["INFO"] * (ticks - 1)
+        assert _notices(a, ta, cw.NOTICE_KIND) == [] and len(_notices(b, tb, cw.NOTICE_KIND)) == 1
+        lagging.clear()  # A's lag closes: its own undeferred sweep ends the stall and posts the held notice
+        assert cw.sweep(a) == 1
+        lagging.add(_db_file(a))
+        _waiting(a)  # a new due card on A, so the next stall has something to defer
+        caplog.clear()
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+            cw.sweep(b)
+            cw.sweep(a)
+        deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+        assert deferred == ["WARNING"]  # a new stall on A warns again
+    finally:
+        a.close()
+        b.close()
+
+
+def test_board_with_nothing_due_ends_its_stall(tmp_path, monkeypatch, caplog):
+    """PR #2041 review nit 2: the stall's due card is claimed before the lag closes, so the board's next sweep has
+    nothing due and returns early. That sweep must still end the stall: a later stall with a due card warns again
+    instead of logging only at INFO. PR #2057 review nit: the stall is the replica lag, so a nothing-due sweep while
+    the board still lags keeps its key; a new due card in that same lag logs at INFO, and only the lag closing ends
+    the stall."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(cw, "_LAG_WARNED", set())
+    a = kbc.connect(tmp_path / "a.db")
+    try:
+        lagging = {_db_file(a)}
+        monkeypatch.setattr(fresh, "lag_hold", lambda conn, now=None: (
+            {"reason": "live feed 9999 rows behind its replica"} if _db_file(conn) in lagging else None))
+        first = _waiting(a)
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+            assert cw.sweep(a) == 0
+            assert kb.claim_task(a, first)  # a worker takes it while the replica still lags: nothing is due now
+            assert cw.sweep(a) == 0
+            assert cw._LAG_WARNED == {_db_file(a)}  # still lagging: the stall goes on with nothing due
+            second = _waiting(a)  # a new due card in the same lag
+            assert cw.sweep(a) == 0
+            assert kb.claim_task(a, second)
+            lagging.clear()
+            assert cw.sweep(a) == 0  # the lag closes with nothing due
+            assert cw._LAG_WARNED == set()
+            lagging.add(_db_file(a))
+            _waiting(a)  # a new stall with a due card
+            assert cw.sweep(a) == 0
+        deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+        assert deferred == ["WARNING", "INFO", "WARNING"]
+    finally:
+        a.close()
+
+
+def test_nothing_due_sweep_of_unwarned_board_skips_lag_hold(tmp_path, monkeypatch):
+    """PR #2072 review nit 2: a sweep with nothing due never reads the replica lag for a board outside
+    ``_LAG_WARNED``, so a healthy board pays no extra replica read per tick. Another board's stall stays recorded."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    other = str(tmp_path / "lagging.db")
+    monkeypatch.setattr(cw, "_LAG_WARNED", {other})  # non-empty, so the nothing-due discard path runs
+    calls = []
+
+    def _lag_hold(conn, now=None):
+        calls.append(_db_file(conn))
+        raise AssertionError("lag_hold read on a nothing-due sweep of an unwarned board")
+
+    monkeypatch.setattr(fresh, "lag_hold", _lag_hold)
+    a = kbc.connect(tmp_path / "a.db")
+    try:
+        assert cw.sweep(a) == 0
+        assert calls == []
+        assert cw._LAG_WARNED == {other}
+    finally:
+        a.close()

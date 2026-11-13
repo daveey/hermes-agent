@@ -2,7 +2,7 @@
 
 ``MID_TOOL_GRACE_S`` after the later of the pause request's first sighting and the call's start, a still-running
 call of an auto-continuable turn is cancelled through the user-Stop interrupt path. Its result is persisted as
-``[interrupted by Hermes update at <UTC>: re-run if still needed]`` and the turn pauses at the step boundary
+``[interrupted by Hermes update at <UTC>: check its outcome before re-running]`` and the turn pauses at the step boundary
 right after it, exactly as a between-step pause: marker kept with ``reason: core_update_pause``, then the next
 backend's startup sweep continues it with ``pause_note``. Finished calls of a parallel step keep their real
 results; turns ``not_resumable_reason`` rejects are never cancelled.
@@ -35,7 +35,9 @@ from tui_gateway.turn_marker import read_turn_marker, record_turn_start
 
 CFG = {"desktop": {"auto_continue": {"enabled": True, "resume_on_startup": True, "freshness_minutes": 240,
                                      "max_attempts": 2}}}
-STAMP = re.compile(r"^\[interrupted by Hermes update at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: re-run if still needed\]$")
+STAMP = re.compile(r"^\[interrupted by Hermes update at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: check its outcome before re-running\]"
+                   r"(?:\nThe call's own result when the update cancelled it:\n.+\n\[end of the cancelled call's own result\])?$",
+                   re.DOTALL)
 TOOL_CAP_S = 8.0  # a fake call left alone runs this long, then returns its own result
 
 
@@ -147,7 +149,7 @@ def test_capability_flag_is_text_greppable():
 
 
 def test_stamp_format():
-    assert up.interrupted_tool_result(0) == "[interrupted by Hermes update at 1970-01-01T00:00:00Z: re-run if still needed]"
+    assert up.interrupted_tool_result(0) == "[interrupted by Hermes update at 1970-01-01T00:00:00Z: check its outcome before re-running]"
 
 
 def test_long_tool_call_is_cancelled_after_the_grace_and_the_turn_pauses_resumably(home, tmp_path, monkeypatch):
@@ -166,6 +168,7 @@ def test_long_tool_call_is_cancelled_after_the_grace_and_the_turn_pauses_resumab
     assert agent.client.chat.completions.create.call_count == 1  # no model call after the cancel
     assert result["interrupted"] is True and result["paused_for_update"] == up.PAUSE_REASON
     assert STAMP.match(_durable_tools(home)["call_1"])  # persisted exactly, in the canonical store
+    assert '"output": "partial"' in _durable_tools(home)["call_1"]  # with the call's own result kept below it
     assert session["_test_hook_calls"] == [1]  # one boundary pause: the marker is written and jobs stopped once
     marker = read_turn_marker(home, "session-key")
     assert marker["reason"] == "core_update_pause" and marker["pauses"] == 1 and marker["attempts"] == 0
@@ -440,7 +443,8 @@ def test_the_cancel_is_not_a_user_intervention(tmp_path):
     assert update_pause_cancel.cancel(agent, "stamp") == ["c1"]
     assert interrupt_issuer(agent) == "hermes_update_pause"
     assert agent._turn_user_intervened is False
-    assert update_pause_cancel.committed(agent, "c1", "partial") == ("stamp", True)
+    assert update_pause_cancel.committed(agent, "c1", "partial") == (update_pause_cancel.with_own_result(
+        "stamp", "partial"), True)
 
 
 def test_a_foreground_command_handed_to_the_background_keeps_its_result(tmp_path):
@@ -458,16 +462,78 @@ def test_a_foreground_command_handed_to_the_background_keeps_its_result(tmp_path
 
 @pytest.mark.parametrize("result", [
     None, {"status": "continues_in_background", "session_id": "proc_1"},  # not the tool's JSON text
+    "", "  \n", "stamp",  # no own text result to keep
+])
+def test_a_cancelled_call_with_no_text_result_gets_the_bare_stamp(tmp_path, result):
+    agent = _make_agent(tmp_path, "long_job")
+    update_pause_cancel.started(agent, "c1")
+    assert update_pause_cancel.cancel(agent, "stamp") == ["c1"]
+    assert update_pause_cancel.committed(agent, "c1", result) == ("stamp", True)
+
+
+@pytest.mark.parametrize("result", [
     'output mentions "continues_in_background" but is not JSON',
     '{"status": "completed", "note": "continues_in_background"}',
     '["continues_in_background"]',
     '{"status": "continues_in_background", "session_id": ""}',
 ])
-def test_any_other_result_of_a_cancelled_call_is_stamped(tmp_path, result):
+def test_any_other_result_of_a_cancelled_call_is_kept_below_the_stamp(tmp_path, result):
     agent = _make_agent(tmp_path, "long_job")
     update_pause_cancel.started(agent, "c1")
     assert update_pause_cancel.cancel(agent, "stamp") == ["c1"]
-    assert update_pause_cancel.committed(agent, "c1", result) == ("stamp", True)
+    assert update_pause_cancel.committed(agent, "c1", result) == (
+        f"stamp\n{update_pause_cancel.OWN_RESULT_INTRO}\n{result}\n{update_pause_cancel.OWN_RESULT_END}", True)
+
+
+def test_a_cancelled_calls_resume_handle_survives_the_stamp(tmp_path):
+    """t_01a1d41fd158579d: run_in_user_terminal had returned its job_id when the update cancelled it, and the
+    stamp replaced that result, so the resumed turn polled with the wrong id and lost a Terraform apply's
+    outcome. The stamp now keeps the call's own result, and never tells the model to re-run blindly."""
+    import json
+
+    agent = _make_agent(tmp_path, "long_job")
+    update_pause_cancel.started(agent, "c1")
+    stamp = up.interrupted_tool_result(0)
+    assert update_pause_cancel.cancel(agent, stamp) == ["c1"]
+    own = json.dumps({"error": "interrupted", "job_id": "20261112-230727-c18e35"})
+    text, cancelled = update_pause_cancel.committed(agent, "c1", own)
+    assert cancelled and text.startswith(stamp + "\n") and own in text
+    assert "check its outcome before re-running" in stamp and "re-run if still needed" not in text
+
+
+def test_the_executors_cancelled_json_is_no_own_result(tmp_path):
+    """t_01a1d4b4c463cc06 (review 5890290599 on #2062): ``_ToolCallRef.emit_cancelled``'s JSON is the executor's
+    text for a KeyboardInterrupt mid-tool, not the call's result, so the bare stamp is committed."""
+    from agent.tool_executor import _ToolCallRef
+
+    agent = _make_agent(tmp_path, "long_job")
+    update_pause_cancel.started(agent, "c1")
+    assert update_pause_cancel.cancel(agent, "stamp") == ["c1"]
+    with patch("agent.tool_executor._emit_terminal_post_tool_call"):
+        executor_text = _ToolCallRef("long_job", {}, "t", "c1", []).emit_cancelled(agent, time.time())
+    assert json.loads(executor_text)["status"] == "cancelled"
+    assert update_pause_cancel.committed(agent, "c1", executor_text) == ("stamp", True)
+    # A tool's own JSON that only says cancelled (no executor wording) is still its result.
+    own = json.dumps({"status": "cancelled", "error": "job cancelled by the remote", "job_id": "j-1"})
+    assert update_pause_cancel.with_own_result("stamp", own) != "stamp"
+
+
+def test_a_long_own_result_keeps_its_head_and_tail_within_about_2kb():
+    head, middle, tail = '{"job_id": "j-1", "output": "', "x" * 50_000, '", "session_id": "proc_9"}'
+    text = update_pause_cancel.with_own_result("stamp", head + middle + tail)
+    assert len(text) < 2_200
+    assert '"job_id": "j-1"' in text and '"session_id": "proc_9"' in text
+    assert "chars omitted" in text
+
+
+def test_a_kept_interrupted_command_output_does_not_read_as_interrupted_on_replay():
+    """An executor's killed-command text ends on ``[Command interrupted]``; kept as the last line, replay
+    cleanup would treat the whole stamped result as interrupted and rewrite it away again."""
+    from agent.replay_cleanup import is_interrupted_tool_result
+
+    own = "applying...\n[Command interrupted]"
+    assert is_interrupted_tool_result(own)
+    assert not is_interrupted_tool_result(update_pause_cancel.with_own_result("stamp", own))
 
 
 def test_a_later_request_in_the_same_turn_cancels_again(home, monkeypatch):

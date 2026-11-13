@@ -14,8 +14,9 @@ import fnmatch
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 HOST_REASON_REQUIRED = "host_reason_required"
 POOL_KEEPS_PUSHED = "pool_keeps_pushed"
@@ -87,7 +88,8 @@ def _per_card(path: Path) -> bool:
 def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] = "",
                extra: Iterable[str] = (), *, linked_text_only: bool = False) -> list[str]:
     """Git trees on this host that hold the card's work: the workspace and its direct children, linked worktrees
-    whose worktree-owner marker names the card, trees the park text names (``~/code/_wt/<slug>``), and ``extra``.
+    whose worktree-owner marker names the card, trees the park text names (``~/code/_wt/<slug>``) unless their
+    owner marker names another card, and ``extra``.
     ``linked_text_only`` keeps, among the text-named trees and ``extra``, only linked worktrees (a ``.git`` file) and
     clones at a per-card location (``~/code/_wt/<slug>``): a shared main checkout a card body merely mentions
     (``~/code/babybear``, the gateway's live ``~/.hermes/hermes-agent``) is not the card's work."""
@@ -103,10 +105,16 @@ def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] 
         home = _trees_home()
         for pattern in _WORKTREE_GLOBS:
             found += [p for p in sorted(home.glob(pattern)) if p.is_dir() and _owner(p) == task_id]
-    for raw in [*_PATH.findall(text or ""), *extra]:
+    named = [(raw, True) for raw in _PATH.findall(text or "")] + [(raw, False) for raw in extra]
+    for raw, from_text in named:
         p = Path(raw.rstrip(".,;:)]'\"")).expanduser()
-        if p.is_dir() and _is_tree(p) and not (linked_text_only and (p / ".git").is_dir() and not _per_card(p)):
-            found.append(p)
+        if not (p.is_dir() and _is_tree(p)) or (linked_text_only and (p / ".git").is_dir() and not _per_card(p)):
+            continue
+        # A tree the text only names but whose owner marker names another card is that card's work (a reviewer
+        # card naming the implementer's ~/code/_wt/<slug>): its state is not this card's to carry.
+        if from_text and task_id and (owner := _owner(p)) and owner != task_id:
+            continue
+        found.append(p)
     out: list[str] = []
     for p in found:
         key = str(p.resolve())
@@ -120,7 +128,7 @@ _MAX_ANCESTRY_CHECKS = 50
 _MAX_REFRESHES = 5
 
 
-def pushed_on_remote(tree: str) -> bool:
+def pushed_on_remote(tree: str, *, budget: Optional[Callable[[float], float]] = None) -> bool:
     """Whether a tree the local refs call unpushed has HEAD on a remote branch after all. Fails toward False.
 
     ``git push https://github.com/<o>/<r>.git HEAD:wt/x`` (a URL, not the remote's name: the HTTPS-credential push
@@ -128,33 +136,39 @@ def pushed_on_remote(tree: str) -> bool:
     branch past HEAD again. The local check then reports pushed work as unpushed, and the park pinned a card to
     its worker (11-12: t_01a1d0a1eaa00371 sat ready on ``machine:worker-2`` while worker-2 was on a Board hold).
     So ask the remote: HEAD is a remote branch tip, or a stale tracking ref HEAD builds on, once refreshed from
-    the remote, contains HEAD."""
+    the remote, contains HEAD. Every git call draws its timeout from ``budget`` (:mod:`hermes_cli.git_budget`); a
+    spent budget raises ``GitUnchecked`` (no verdict) rather than answering False ("unpushed")."""
     from functools import partial
+    from hermes_cli.git_budget import GitUnchecked, ensure_left, timeout_for
     from hermes_cli.worktree_ops import _git_out, _worktree_has_unpushed_commits
     # Keep credential helpers for private remotes, but never consume the caller's stdin.
     git_out = partial(_git_out, stdin=subprocess.DEVNULL)
+
+    def t(cap: float) -> float:
+        return timeout_for(budget, cap)
     try:
-        head = git_out(["rev-parse", "HEAD"], tree)
-        remotes = (git_out(["remote"], tree) or "").split()
+        head = git_out(["rev-parse", "HEAD"], tree, timeout=t(10))
+        remotes = (git_out(["remote"], tree, timeout=t(10)) or "").split()
         if not head or not remotes:
             return False
-        branch = git_out(["symbolic-ref", "-q", "HEAD"], tree)
+        branch = git_out(["symbolic-ref", "-q", "HEAD"], tree, timeout=t(10))
         preferred: set[tuple[str, str]] = set()
         if branch:
             destinations = git_out(["for-each-ref", "--format=%(upstream:remotename) %(upstream:remoteref)"
-                                    "%0a%(push:remotename) %(push:remoteref)", branch], tree) or ""
+                                    "%0a%(push:remotename) %(push:remoteref)", branch], tree,
+                                   timeout=t(10)) or ""
             preferred = {(remote, ref) for line in destinations.splitlines() if " " in line
                          for remote, ref in [line.split(" ", 1)]}
         stale: list[tuple[str, str, str]] = []
         fallback: list[tuple[str, str, str]] = []
         checks = 0
         for remote in remotes:
-            listing = git_out(["ls-remote", "--heads", remote], tree, timeout=_REMOTE_TIMEOUT)
+            listing = git_out(["ls-remote", "--heads", remote], tree, timeout=t(_REMOTE_TIMEOUT))
             if not listing:
                 continue
             tracked = dict(line.split(" ", 1)[::-1] for line in (git_out(
-                ["for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}"], tree) or ""
-            ).splitlines() if " " in line)
+                ["for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}"], tree, timeout=t(10))
+                or "").splitlines() if " " in line)
             for line in listing.splitlines():
                 sha, _, ref = line.partition("\t")
                 if sha == head:
@@ -166,7 +180,7 @@ def pushed_on_remote(tree: str) -> bool:
                 candidate = (remote, ref, tracking)
                 if local and checks < _MAX_ANCESTRY_CHECKS:
                     checks += 1
-                    if git_out(["merge-base", "--is-ancestor", local, "HEAD"], tree) is not None:
+                    if git_out(["merge-base", "--is-ancestor", local, "HEAD"], tree, timeout=t(10)) is not None:
                         stale.append(candidate)
                         continue
                 # New URL-pushed branches have no tracking ref; rebased URL pushes
@@ -178,33 +192,61 @@ def pushed_on_remote(tree: str) -> bool:
             (c[0], c[1]) not in preferred, c[1] != branch,
         ))[:_MAX_REFRESHES]
         for remote, ref, tracking in refresh:
-            git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=_REMOTE_TIMEOUT)
-        return bool(refresh) and not _worktree_has_unpushed_commits(tree)
+            git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=t(_REMOTE_TIMEOUT))
+        return bool(refresh) and not _worktree_has_unpushed_commits(tree, timeout=10, budget=budget)
+    except GitUnchecked:
+        raise
+    except subprocess.TimeoutExpired:
+        ensure_left(budget)  # cut short by the deadline: no verdict; else an unreachable remote proves nothing
+        return False
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
 
 
-_DIRTY, _UNPUSHED = "dirty worktree ", "unpushed commits in "
+_DIRTY, _UNPUSHED, _UNCHECKED = "dirty worktree ", "unpushed commits in ", "unchecked worktree "
 
 
 def state_parts(state: str) -> tuple[str, str]:
-    """``(check, tree)`` of a :func:`tree_state` string: ``("dirty", <p>)`` or ``("unpushed", <p>)``."""
-    for check, prefix in (("dirty", _DIRTY), ("unpushed", _UNPUSHED)):
+    """``(check, tree)`` of a :func:`tree_state` string: ``("dirty", <p>)``, ``("unpushed", <p>)`` or
+    ``("unchecked", <p>)`` (its `` (<cause>)`` suffix dropped)."""
+    for check, prefix in (("dirty", _DIRTY), ("unpushed", _UNPUSHED), ("unchecked", _UNCHECKED)):
         if state.startswith(prefix):
-            return check, state[len(prefix):]
+            rest = state[len(prefix):]
+            return check, (rest.rsplit(" (", 1)[0] if check == "unchecked" and rest.endswith(")") else rest)
     return "", state
 
 
-def tree_state(trees: Iterable[str]) -> Optional[str]:
-    """``dirty worktree <p>`` / ``unpushed commits in <p>`` for the first tree with state, else None."""
+# Git time for one card's trees. The operator call's scan and the pickup-stall alarm run the move guard inline, and
+# 20+ trees at 10-20 s per git call took minutes; past the budget the rest count as unchecked (fail safe: state).
+# Every git call of the scan (the hardening probes and the hidden-edit scan of the dirty check, every call of the
+# unpushed check and the remote refresh) draws its timeout from this one budget (:mod:`hermes_cli.git_budget`).
+STATE_BUDGET_S = 20.0
+
+
+def _clock() -> float:
+    """Monotonic seconds (a seam: tests advance a fake clock per git call)."""
+    return time.monotonic()
+
+
+def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S) -> Optional[str]:
+    """``dirty worktree <p>`` / ``unpushed commits in <p>`` for the first tree with state, else None. Git runs at
+    most ``budget`` seconds in all (per-call timeouts shrink to the time left); a tree it could not check (budget
+    spent, git timed out) reads ``unchecked worktree <p> (<cause>)``, which callers treat as state (fail safe)."""
+    from hermes_cli.git_budget import BUDGET_SPENT, GitUnchecked, deadline_budget
     from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
+    timeouts = deadline_budget(budget, clock=lambda: _clock())
     for tree in trees:
         if not Path(tree).is_dir():
             continue
-        if _worktree_is_dirty(tree, tree):
-            return f"{_DIRTY}{tree}"
-        if _worktree_has_unpushed_commits(tree) and not pushed_on_remote(tree):
-            return f"{_UNPUSHED}{tree}"
+        try:
+            if _worktree_is_dirty(tree, tree, timeout=10, budget=timeouts):
+                return f"{_DIRTY}{tree}"
+            if (_worktree_has_unpushed_commits(tree, timeout=10, budget=timeouts)
+                    and not pushed_on_remote(tree, budget=timeouts)):
+                return f"{_UNPUSHED}{tree}"
+        except GitUnchecked as exc:
+            cause = f"git checks of the card's trees took over {budget:g}s" if str(exc) == BUDGET_SPENT else str(exc)
+            return f"{_UNCHECKED}{tree} ({cause})"
     return None
 
 

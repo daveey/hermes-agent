@@ -36,12 +36,17 @@ def merge_base() -> str:
 
 
 def extract_base_snapshot(base_sha: str, destination: Path) -> None:
-    """Extract the snapshot as committed at the merge base; a base without one leaves it absent."""
+    """Extract the snapshot as committed at the merge base; a base without one leaves it absent.
+
+    ``git ls-tree`` prints nothing and exits 0 for a path the base lacks, but exits non-zero when
+    it cannot read the base's trees (a missing object, a bad SHA). ``cat-file -e <base>:<path>``
+    fails the same way in both cases, so it would read a missing object as "no snapshot".
+    """
     destination.mkdir(parents=True, exist_ok=True)
-    present = subprocess.run(("git", "cat-file", "-e", f"{base_sha}:{PROMPT_SURFACE_SNAPSHOT}"),
-                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-                             timeout=GIT_TIMEOUT, check=False)
-    if present.returncode != 0:
+    listing = subprocess.run(("git", "ls-tree", "--full-tree", base_sha, "--", PROMPT_SURFACE_SNAPSHOT),
+                             stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                             timeout=GIT_TIMEOUT, check=True).stdout
+    if not listing.strip():
         return
     archive = subprocess.run(("git", "archive", base_sha, PROMPT_SURFACE_SNAPSHOT),
                              stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,

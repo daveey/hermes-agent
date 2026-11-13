@@ -864,6 +864,19 @@ def _whole_file_rewrite_hint(task_id: str, resolved: str | None, new_content: st
     )
 
 
+def _truncation_marker_warning(content: str) -> dict:
+    """Detection guard for agent-7ac9c5fa93: content carrying Hermes' own head+tail notice
+    is almost always a truncated tool result written as data. Never blocks the write."""
+    from tools.tool_output_truncate import contains_truncation_notice
+    if not isinstance(content, str) or not contains_truncation_notice(content):
+        return {}
+    logger.warning("write_file: content contains a tool truncation marker")
+    return {"warning": ("Content contains a tool truncation marker ('[... TRUNCATED - N omitted "
+                        "out of M total]'): part of it was cut from a tool result. If this file "
+                        "should hold the full data, regenerate it from the complete source "
+                        "(full_output_path / stdout_spill_path) and rewrite it.")}
+
+
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False,
                     session_id: str | None = None) -> str:
@@ -909,6 +922,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                 result_dict["_warning"] = warnings[0]
             if rewrite_hint and not result_dict.get("error"):
                 result_dict["hint"] = rewrite_hint
+            result_dict.update(_truncation_marker_warning(content))
             if _resolved:
                 # Always report the ABSOLUTE path written so a wrong-cwd mismatch
                 # is visible in the response instead of silently landing elsewhere.

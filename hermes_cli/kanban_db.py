@@ -32,11 +32,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
+from hermes_cli import kanban_run_end_lease as _run_end_lease  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
 from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run, hub_cpu_advisory
@@ -980,7 +981,7 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     last_ping_event_id INTEGER NOT NULL DEFAULT 0,
     inflight_from INTEGER,
     inflight_pid  INTEGER,
-    inflight_start INTEGER, inflight_at INTEGER,
+    inflight_start INTEGER, inflight_at INTEGER, created_event_id INTEGER,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
@@ -1835,6 +1836,7 @@ def _end_or_synthesize_run(
     run — transitions that reassign the task (e.g. review handoff) pass the
     acting profile captured before the rewrite."""
     run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata)
+    _run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
     if run_id is None and synthesize:
         run_id = _synthesize_ended_run(conn, task_id, outcome=outcome, summary=summary, metadata=metadata, profile=profile)
     return run_id
@@ -1910,22 +1912,27 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote dependency waits and recoverable stops in an IMMEDIATE txn.
+    """Promote dependency waits and recoverable failure stops; returns the count.
 
-    Call OUTSIDE any write txn. Guard holds/sticky blocks require explicit resolution.
-    Failure limit: max_retries > failure_limit > DEFAULT_FAILURE_LIMIT; the
-    dependency-review release is precomputed outside the transaction and fenced inside.
+    Opens its own IMMEDIATE txn: call OUTSIDE any write txn. Agent-triage failure-budget
+    stops get the same recovery as legacy blocked stops; guard holds and other triage
+    reasons still need explicit resolution. ``kanban_block_routing.recovery_held`` skips a
+    sticky stop (a worker ``kanban_block`` stays blocked until ``kanban_unblock``, #28712) and
+    one at the breaker limit (``max_retries`` > ``failure_limit`` > DEFAULT_FAILURE_LIMIT; else
+    the breaker could never trip). The dependency-review release is
+    precomputed outside the txn (same skips: no GitHub reads for held cards), fenced inside.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
-    from hermes_cli.kanban_block_routing import has_sticky_block
+    from hermes_cli.kanban_block_routing import recovery_held
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli import kanban_review_release
+    from hermes_cli import kanban_db_graph as _graph
     promoted = 0
     remote = _sync.has_remote_parents(conn)
-    from hermes_cli import kanban_review_release
-    releases = kanban_review_release.prepare(conn)
+    releases = kanban_review_release.prepare(conn, failure_limit)
     with write_txn(conn):
-        copies = foreign_ids(conn)
+        copies, fresh = foreign_ids(conn), {}  # fresh: the mirror-freshness verdict, read once per pass
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked') OR ("
@@ -1941,28 +1948,18 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             # publish a second promotion or expire the owner's missing streak.
             if task_id in copies:
                 continue
-            cur_status = row["status"]
-            if cur_status in ("blocked", "triage") and has_sticky_block(conn, task_id):
-                # Explicit human-intervention block; only ``unblock_task`` may exit it.
+            cur_status = _graph.clear_found_parents(conn, row, remote=remote)  # parent_missing block, parents back: todo
+            if cur_status == row["status"] and recovery_held(conn, row, failure_limit):
                 continue
             states = parent_states(conn, task_id, remote=remote)
-            if cur_status == "todo" and _note_missing_parents(conn, task_id, states):
+            # Inside this txn, for a ``todo`` child: start/close a missing-parent streak (``parent_missing`` /
+            # ``parent_found``) and block after PARENT_MISSING_BLOCK_SECONDS (synced: replica at the feed head only).
+            if cur_status == "todo" and _graph.note_missing_parents(conn, task_id, states, remote=remote, fresh=fresh):
                 continue
             if all(st in ("done", "archived") for _pid, st in states):
                 resume_status = _resume_status_from_events(conn, task_id)
                 promotion_payload = kanban_review_release.promotion_payload(conn, task_id, resume_status, releases)
                 if cur_status in ("blocked", "triage"):
-                    # At the breaker limit, no auto-recovery (else block ->
-                    # recover -> respawn -> exhaust -> block forever). The
-                    # counter is preserved so it accumulates across cycles.
-                    failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
-                    )
-                    if failures >= effective_limit:
-                        continue
                     conn.execute(
                         "UPDATE tasks SET status = ? "
                         "WHERE id = ? AND status = ?", (resume_status, task_id, cur_status),
@@ -1977,6 +1974,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                     promotion_payload,
                 )
                 promoted += 1
+    _graph.report_deferred_pass(conn, fresh)  # one INFO line per board per stale replica stamp
     return promoted
 
 
@@ -2008,16 +2006,6 @@ def parent_states(
         sql = ("SELECT l.parent_id AS id, p.status AS status FROM task_links l "
                "LEFT JOIN tasks p ON p.id = l.parent_id WHERE l.child_id = ? ORDER BY l.parent_id")
     return [(row["id"], row["status"]) for row in conn.execute(sql, (task_id,)).fetchall()]
-
-
-def _note_missing_parents(
-    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]],
-) -> bool:
-    """Inside :func:`recompute_ready`'s txn, for a ``todo`` child: record when a parent goes missing
-    (``parent_missing`` event, once per streak), clear the streak when it comes back (``parent_found``), and block
-    the child after :data:`PARENT_MISSING_BLOCK_SECONDS`. True when the child was blocked here."""
-    from hermes_cli.kanban_db_graph import note_missing_parents
-    return note_missing_parents(conn, task_id, states)
 
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -2558,14 +2546,13 @@ def complete_task(
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))
-        if conn.execute(sql, params).rowcount != 1:
+        if _sr.with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
             return False
         if isinstance(metadata, dict):
             staged.extend(_stage_completion_artifacts(conn, task_id, metadata, now))
-        run_id = _end_run(
-            conn, task_id, outcome="completed", status="done", summary=handoff_summary,
-            metadata=metadata,
-        )
+        run_id = _end_run(conn, task_id, outcome="completed", status="done", summary=handoff_summary,
+                          metadata=metadata)
+        _run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
         # Never-claimed task: synthesize a run so the handoff fields survive.
         if run_id is None and (summary or metadata or result or prior_status == "review"):
             synth_summary, synth_metadata = handoff_summary, metadata
@@ -3143,7 +3130,7 @@ def request_review(
                 *(() if reviewer is None else (reviewer,)), task_id,
                 *(() if expected_run_id is None else (int(expected_run_id),)),
             )
-            cur = conn.execute(
+            cur = _sr.with_source_receipt(conn, task_id, lambda: conn.execute(
                 """
                 UPDATE tasks
                    SET status        = 'review',
@@ -3156,7 +3143,7 @@ def request_review(
                    AND status IN ('running', 'ready')
                 """ + run_guard,
                 params,
-            )
+            ))
             if cur.rowcount != 1:
                 return _ret(
                     False, "task is not in running/ready (or expected_run_id did not match the current run)",
@@ -3246,7 +3233,7 @@ def request_changes(
         new_status = _landing_status_after_parents(conn, task_id)
         # consecutive_failures deliberately PRESERVED: a review transition is
         # not evidence the pathology cleared; only complete_task resets it.
-        cur = conn.execute(
+        cur = _sr.with_source_receipt(conn, task_id, lambda: conn.execute(
             """
             UPDATE tasks
                SET status = ?,
@@ -3257,12 +3244,11 @@ def request_changes(
              WHERE id = ? AND status = 'running' AND current_run_id = ?
             """,
             (new_status, implementer, task_id, int(current_run_id)),
-        )
+        ))
         if cur.rowcount != 1:
             return False, "task changed during review handoff"
-        run_id = _end_run(
-            conn, task_id, outcome="changes_requested", status=new_status, summary=reason,
-        )
+        run_id = _end_run(conn, task_id, outcome="changes_requested", status=new_status, summary=reason)
+        _run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
         _append_event(
             conn,
             task_id,
@@ -3370,11 +3356,15 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tu
     loop escalated can go back to work without the specifier/decomposer rewriting it. ``comment`` is
     written in the same txn and only when the unblock lands (``kanban_reason_comment``); ``event_extra``
     is merged into the ``unblocked`` event (audit provenance). ``precondition`` runs first inside the
-    write txn; a returned refusal aborts with ``False`` and no change. [daveey]"""
+    write txn; a returned refusal aborts with ``False`` and no change. A card held terminal is refused before both
+    (``kanban_terminal_guard.unblock_held``: ``unblocked`` is a reopen). [daveey]"""
     from hermes_cli.kanban_reason_comment import reason_comment
+    from hermes_cli.kanban_terminal_guard import unblock_held
     now = int(time.time())
-    with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
-        if precondition is not None and precondition(conn):
+    # ``held`` is decided before the comment's savepoint opens: a rollback to it would drop the note.
+    with write_txn(conn), reason_comment(conn, task_id, None if (held := unblock_held(conn, task_id)) else comment) \
+            as noted:
+        if held or precondition is not None and precondition(conn):
             return False
         resume_status = (_resume_status_from_events(conn, task_id)
                          if _task_status(conn, task_id) in ("blocked", "triage") else "ready")
@@ -3406,50 +3396,6 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tu
             payload = {**(payload or {}), **event_extra}
         _append_event(conn, task_id, "unblocked", payload)
         return noted.keep(True)
-
-
-def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``review`` -> ``ready``/``todo`` so the implementer re-runs on the new
-    comments; restores the implementer from the ``review_requested`` event.
-    Preserves ``consecutive_failures`` and the block loop counter (review is
-    not a block; only :func:`complete_task` clears them)."""
-    now = int(time.time())
-    with write_txn(conn):
-        task = get_task(conn, task_id)
-        if task is None or task.status != "review":
-            return False
-        review_event = _latest_event(conn, task_id, "review_requested")
-        handoff = _json_dict(_row_get(review_event, "payload"))
-        implementer = _nonblank_str(handoff.get("implementer"))
-        if implementer:
-            from hermes_cli.kanban_capabilities import validate_assignment
-
-            validate_assignment(implementer, requires=task.requires,
-                                workspace_kind=task.workspace_kind, workspace_path=task.workspace_path, skills=task.skills)
-        _reclaim_dangling_run(
-            conn, task_id, statuses=("review",), now=now,
-            note="invariant recovery on review reopen",
-        )
-        new_status = _landing_status_after_parents(conn, task_id)
-        params: tuple[Any, ...] = (new_status, *((implementer,) if implementer else ()), task_id)
-        cur = conn.execute(
-            # consecutive_failures deliberately PRESERVED: review reopen is not
-            # a success signal; only complete_task resets the breaker (#35072).
-            "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
-            + (", assignee = ?" if implementer else "")
-            + " WHERE id = ? AND status = 'review'",
-            params,
-        )
-        if cur.rowcount != 1:
-            return False
-        payload: dict[str, Any] = {"status": new_status}
-        if implementer:
-            payload["implementer"] = implementer
-        _append_event(
-            conn, task_id, "review_reopened", payload if payload != {"status": "ready"} else None,
-        )
-        return True
 
 
 def invalidate_descendants_for_parent_reopen(
@@ -3506,10 +3452,9 @@ def invalidate_descendants_for_parent_reopen(
             elif previous_status == "running":
                 resume_status = _retry_status_for_run(conn, row["id"], row["current_run_id"])
                 terminations.append((row["worker_pid"], row["claim_lock"], row["worker_started_at"]))
-                run_id = _end_run(
-                    conn, row["id"], outcome="reclaimed", status="todo",
-                    summary=f"ancestor {task_id} reopened",
-                )
+                run_id = _end_run(conn, row["id"], outcome="reclaimed", status="todo",
+                                  summary=f"ancestor {task_id} reopened")
+                _run_end_lease.note(conn, row["id"], run_id)  # [daveey] free the Board lease after commit
             # consecutive_failures = 0: deliberate operator reset — see
             # docstring for why this diverges from reopen_review_task.
             conn.execute(
@@ -4022,6 +3967,7 @@ from hermes_cli.kanban_db_comment_ids import (
 from hermes_cli.kanban_db_archive import archive_task
 from hermes_cli.kanban_db_list import list_task_rows, list_tasks
 from hermes_cli.kanban_db_schedule import schedule_task
+from hermes_cli.kanban_db_review_reopen import reopen_review_task
 from hermes_cli.kanban_db_edit import PriorityLowerRefused, edit_task
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer
 from hermes_cli.kanban_db_notify import _inherit_notify_subs, _owning_sub_clause

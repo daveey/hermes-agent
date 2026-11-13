@@ -22,7 +22,13 @@ from hermes_state_health import (
 
 
 @pytest.fixture(autouse=True)
-def _fresh_latch():
+def _fresh_latch(monkeypatch):
+    # Latching the canonical state.db starts a daemon thread that files a Kanban incident card
+    # (tests/hermes_state/test_storage_corruption_incident.py covers it). Here it would outlive
+    # the test and still be importing gateway/kanban modules during the next test's setup.
+    import hermes_state_corruption_incident
+
+    monkeypatch.setattr(hermes_state_corruption_incident, "schedule_incident", lambda *args: None)
     reset_storage_state()
     yield
     reset_storage_state()

@@ -150,6 +150,10 @@ def destinations(cfg, target=None):
 
 
 FRESH_S = 300
+# ``last_seen`` is stamped by the Board's clock, and a just-refreshed entry's margin is sub-second (worker-7: 0.06 s),
+# so a host whose clock lags the Board by ~0.1 s reads it as from the future. A few seconds of future skew is lag,
+# not a bad stamp; further ahead stays stale. Queue liveness (label_machines) and attestation (eligible) share it.
+SKEW_S = 5
 
 
 def _machines():
@@ -164,7 +168,7 @@ def _fresh(entry, now):
         age = now - float(entry.get("last_seen")) / 1000
     except (TypeError, ValueError, OverflowError):
         return False
-    return math.isfinite(age) and 0 <= age <= FRESH_S
+    return math.isfinite(age) and -SKEW_S <= age <= FRESH_S
 
 
 def eligible(names, machines, *, now=None):

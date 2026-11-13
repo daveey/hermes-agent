@@ -638,7 +638,7 @@ class AuthorityConnection:
                 'scope': 'live'}
 
     async def resume(self, ref, params):
-        from gateway.session_local_inventory import snapshot_info
+        from gateway.session_local_inventory import reply_info
         replay_from = self.replay_cursors.pop(ref.session_id, None)
         reconnect = ref.session_id in self.reconnects
         self.reconnects.discard(ref.session_id)
@@ -724,7 +724,8 @@ class AuthorityConnection:
                 await asyncio.to_thread(refresh_profile_hooks, policy)
                 if opening is not None:
                     opening.fire(policy, live.route)
-                info = await snapshot_info(self.authority, snapshot.handle.ref)
+                # Bounded: a slow inventory follows as a ``session.info`` event, never delays the reply.
+                info = await reply_info(self.authority, snapshot.handle.ref)
         finally:
             if opening is not None:  # not fired (a refusal, a messaging lane, a history mount): nothing waits
                 opening.release()

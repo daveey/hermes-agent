@@ -12,7 +12,8 @@ export const arBoot = {
       loadingSessions: 'جار تحميل الجلسات الأخيرة',
       retryingRemoteBackend: 'جارٍ إعادة الاتصال بخادم Hermes البعيد…',
       startingDesktopConnection: 'جار بدء اتصال سطح المكتب',
-      startingHermesDesktop: 'جار تشغيل Hermes Desktop...'
+      startingHermesDesktop: 'جار تشغيل Hermes Desktop...',
+      waitingForRemoteUpdate: 'بانتظار انتهاء تحديث Hermes البعيد…'
     },
     errors: {
       backgroundExited: 'خرجت عملية Hermes الخلفية.',

@@ -702,6 +702,31 @@ def _check_plugins_in_both_lists(should_fix: bool, f: Finding) -> None:
                                f"memory.provider set), or keep it off with `hermes plugins disable {name}`")
 
 
+@doctor_check("")  # best-effort: an unreadable lease directory must never break doctor
+def _check_host_loop_leases(should_fix: bool, f: Finding) -> None:
+    """Who runs each host-wide background loop of this home (``hermes_cli.host_loop_lease``). [daveey]"""
+    import time
+    from hermes_cli import host_loop_lease as hll
+    leases = hll.holders()
+    if not leases:
+        return
+    _section("Host Loop Leases")
+    if not hll.enabled():
+        check_info(f"{hll.KILL_SWITCH_ENV}=0: every process runs its own host passes")
+    for meta in leases:
+        name = meta.get("name")
+        if not meta.get("live"):
+            check_info(f"{name}: no live holder (the next process to poll takes it)")
+            continue
+        age = time.time() - float(meta.get("heartbeat_at") or 0)
+        interval = float(meta.get("interval") or 0)
+        detail = f"({meta.get('role')} pid {meta.get('pid')}, core {str(meta.get('sha') or '?')[:10]}, beat {age:.0f}s ago)"
+        if interval and age > hll.WATCHDOG_FACTOR * interval:
+            check_warn(f"{name}: holder heartbeat is stale", detail)
+        else:
+            check_ok(f"{name}: held", detail)
+
+
 @doctor_check("")  # best-effort: a busy or missing board must never break doctor
 def _check_hub_admission_claims(should_fix: bool, f: Finding) -> None:
     """On the hub: its claims of cards with no hub-admission verdict in the last week (should be 0). [daveey]"""

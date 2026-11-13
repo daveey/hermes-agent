@@ -148,10 +148,7 @@ def _is_owner_restart_run(run) -> bool:
 # Within this window a GitHub PR URL in a comment blocks re-spawn.
 _RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
 
-_RESPAWN_GUARD_PR_URL_RE = re.compile(
-    r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+",
-    re.IGNORECASE,
-)
+_RESPAWN_GUARD_PR_URL_RE = re.compile(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+", re.IGNORECASE)
 
 
 @dataclass
@@ -202,6 +199,7 @@ class DispatchResult:
     claim_deferred: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, reason)`` whose claim the Board lease deferred this tick (``lease_held``, ``labels_mismatch``,
     ``offline``). The tick moves on to the next candidate; the stuck warning names these. [daveey]"""
+    admission_deferred: list[str] = field(default_factory=list)  # hub claim screen left unclaimed, unjudged [daveey]
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     capsule_refused: list[tuple[str, str]] = field(default_factory=list)  # (task_id, code): kanban_capsule_admission [daveey]
@@ -332,16 +330,16 @@ _EXIT_TRAILER_RE = re.compile(
 )
 
 
-def _worker_log_exit_code(task_id: str, board: Optional[str] = None, *, run_id=None) -> Optional[int]:
+def _worker_log_exit_code(task_id: str, board: Optional[str] = None, *, run_id=None, log: Optional[str] = None) -> Optional[int]:
     """Exit code from the trailer the worker CLI wrote to its own log; None when absent.
 
     The durable twin of ``_recent_worker_exits``: written by the worker itself
     (``hermes_cli.quiet_single_query.exit_single_query``), so it is there whether
     or not the process running this sweep ever reaped the worker. Last trailer
-    wins — the log is append-mode across re-runs.
+    wins — the log is append-mode across re-runs. ``log``: the whole log a caller holds (not re-read).
     """
     try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=None if run_id is not None else 4000, board=board)
+        raw = log if log is not None else _kb.read_worker_log(task_id, tail_bytes=None if run_id is not None else 4000, board=board)
     except Exception:
         return None
     # A log with no run marker predates it (worker spawned before the deploy): last trailer wins, as before.
@@ -1180,8 +1178,10 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    log = _kb.read_worker_log(task_id, tail_bytes=None, board=board) if task_id and run_id else ""
-    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid) if task_id else None
+    log = (_kb.read_worker_log(task_id, tail_bytes=None, board=board) or "") if task_id and run_id else None
+    exited = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id, log=log)
+    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid, started_at=_worker_scope.run_started_at(conn, run_id),
+                                         exit_code=0 if exited.kind == "clean_exit" else None) if task_id else None  # rc 0 skips the kernel log
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
         if kind == "oom_killed" and task_id:
@@ -1191,7 +1191,7 @@ def _classify_dead_worker(
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
-        dead = _ou.noted(_classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id), conn, task_id, run_id, log)
+        dead = _ou.noted(exited, conn, task_id, run_id, log)
     if task_id and not dead.rate_limited:
         worker_output = crash_worker_output(conn, task_id, run_id, pid, claimer, board=board)
         if worker_output:
@@ -1205,13 +1205,8 @@ def _classify_dead_worker(
 
 
 def _classify_dead_worker_exit(
-    pid: int,
-    claimer: Optional[str],
-    exit_code=None,
-    *,
-    task_id: Optional[str] = None,
-    board: Optional[str] = None,
-    run_id: Optional[int] = None,
+    pid: int, claimer: Optional[str], exit_code=None, *, task_id: Optional[str] = None,
+    board: Optional[str] = None, run_id: Optional[int] = None, log: Optional[str] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 
@@ -1220,13 +1215,13 @@ def _classify_dead_worker_exit(
     registry only knows children of THIS process; a per-tick dispatcher reads the exit trailer
     the worker left in its log instead, so the same death gets the same booking (protocol
     violation / rate-limit requeue / crash) as under the gateway-embedded dispatcher. A worker
-    that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash.
+    that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash. ``log``: as held by the caller.
     """
     kind, code = _classify_worker_exit(pid)
     if exit_code is not None:
         kind, code = _exit_code_kind(int(exit_code))
     elif kind == "unknown" and task_id:
-        logged = _worker_log_exit_code(task_id, board=board, run_id=run_id)
+        logged = _worker_log_exit_code(task_id, board=board, run_id=run_id, log=log)
         if logged is not None:
             kind, code = _exit_code_kind(logged)
     if kind == "clean_exit":
@@ -1970,13 +1965,11 @@ def _dispatch_lane_task(
         if deferral is not None:  # the lane decides whether this refusal permits later candidates
             result.claim_deferred.append((task_id, deferral))
         return False
-    try:
-        resolved_branch_name = None
-        if claimed.workspace_kind == "worktree":
-            workspace, resolved_branch_name = _kbw.resolve_worktree_for_dispatch(conn, claimed, board=board)
-        else:
-            workspace = _kbw.resolve_workspace(claimed, board=board)
+    try:  # R4b: a grant snapshot with custody or a manifest routes to the source resolver before any kind branch
+        workspace, resolved_branch_name, source = _source_dispatch.resolve(conn, claimed, board=board, kbw=_kbw)
     except Exception as exc:
+        if _source_dispatch.refused(conn, claimed, exc, result):
+            return False
         # A misconfigured worktree (no repo to anchor it, relative path, board
         # without default_workdir) fails identically on every retry: block on the
         # first occurrence (sticky) with the reason instead of spending the
@@ -1991,9 +1984,9 @@ def _dispatch_lane_task(
             result.auto_blocked.append(claimed.id)
         return False
     _kbw.set_workspace_path(conn, claimed.id, str(workspace))
-    if claimed.workspace_kind == "worktree":
+    if claimed.workspace_kind == "worktree" and source is None:  # a source card's branch is the manifest's (fenced)
         _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
-    _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+    _kbw._maybe_emit_scratch_tip(conn, claimed.id, "worktree" if source is not None else claimed.workspace_kind)
     if lane == "review":
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
@@ -2307,6 +2300,7 @@ def _dispatch_once_locked(
     # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
     # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
     all_ready = [row for row in lane_rows(conn, "ready") if row["id"] not in unjudged]  # hub: judged next tick
+    result.admission_deferred = sorted(unjudged)
     from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
     # Review rows are enumerated up front so the budget split can see whether
@@ -2682,7 +2676,7 @@ def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[st
         require_restart_safe_scope=True,
         outlives_parent=True,
     ).argv)
-    argv = _worker_scope.oom_policy_continue(_worker_scope.apply_oom_recovery(argv, task.id, board))  # raised cap; OOM kill takes a command, not the run
+    argv = _worker_scope.oom_policy_continue(_worker_scope.apply_oom_recovery(argv, task.id, board))  # before bounded_scope: its `-- nice -n 15` must follow OOMPolicy, which apply_toolchain_env reads before the first `--`
     return _aggregate_scope.bounded_scope(argv, task_id=task.id, board=str(_kb.kanban_db_path(board=board).resolve()))  # pool + per-card slice
 
 
@@ -2910,3 +2904,4 @@ def run_daemon(
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
 from hermes_cli import kanban_db_workspace as _kbw
+from hermes_cli import kanban_source_dispatch as _source_dispatch

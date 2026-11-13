@@ -6,8 +6,9 @@ gateway's per-turn watcher (``update_pause.start_mid_tool_cancel``) reads which 
 and once the grace has passed calls ``cancel``: every running call is recorded with the stamped result and
 the turn is interrupted through the same path a user Stop takes (``agent.interrupt``: terminal foreground
 kill, process-group interrupt, abandoned sequential worker), with a fixed ``tool_reason``. The executor
-persists that stamped text as each cancelled call's result (``committed``); calls that had already finished
-keep their real results. At the next step boundary ``turn_iteration_prep.begin_iteration`` takes the pending
+persists that stamped text as each cancelled call's result (``committed``), with whatever the call itself
+returned kept below it (``with_own_result``); calls that had already finished keep their real results. At the
+next step boundary ``turn_iteration_prep.begin_iteration`` takes the pending
 cancel (``take_pending``) and runs the normal boundary pause hook, so the turn ends exactly as a boundary
 pause does (marker kept with ``reason: core_update_pause``, reservation released, the pause announced).
 """
@@ -78,10 +79,53 @@ def committed(agent: Any, call_id: str, result: Any) -> tuple[Any, bool]:
     record = _slots(agent).get(_CANCEL)
     if record and call_id in record["calls"] and interrupt_issuer(agent) == _ISSUER:
         # A survivable foreground command (terminal.update_survivable_processes) was not killed: it became a
-        # background job, and its result names it (``process continues as <id>``). Stamping "re-run if still
-        # needed" over it would hide a still-running job from the resumed turn and invite a duplicate run.
-        return (result, True) if _continues_in_background(result) else (record["text"], True)
+        # background job, and its result names it (``process continues as <id>``). The stamp over it would hide
+        # a still-running job from the resumed turn and invite a duplicate run. Any other result of the call is
+        # kept below the stamp (``with_own_result``), so its resume handles (a job_id) survive the cancel.
+        if _continues_in_background(result):
+            return result, True
+        return with_own_result(record["text"], result), True
     return result, False
+
+
+# [daveey] t_01a1d41fd158579d: what a cancelled call's own result keeps below the stamp. Head and tail, so a
+# resume handle at either end (``job_id`` first in run_in_user_terminal's JSON, ``session_id`` last) survives.
+OWN_RESULT_HEAD = 1536
+OWN_RESULT_TAIL = 512
+OWN_RESULT_INTRO = "The call's own result when the update cancelled it:"
+OWN_RESULT_END = "[end of the cancelled call's own result]"
+# The executor's own text for a call the interrupt abandoned or skipped (tool_executor): no result of the call.
+# Its ``emit_cancelled`` JSON for a KeyboardInterrupt mid-tool is the same (``_executor_cancelled_json``).
+_EXECUTOR_CANCEL_PREFIXES = ("[Tool execution cancelled \u2014 ", "[Tool execution skipped \u2014 ")
+
+
+def with_own_result(stamp: str, result: Any) -> str:
+    """The stamp, followed by the call's own text result (head and tail, at most ~2 KB) when it produced one.
+    The stamp alone dropped resume handles: run_in_user_terminal's ``{"error": "interrupted", "job_id": ...}``
+    lost its job_id and a Terraform apply's outcome with it (t_01a1d40fc0dda5c3). The closing line keeps a
+    result whose last line is an executor's ``[Command interrupted]`` marker from reading as an interrupted
+    result on replay (``replay_cleanup.is_interrupted_tool_result``), which would rewrite it away again."""
+    if not isinstance(result, str) or not result.strip() or result == stamp \
+            or result.startswith(_EXECUTOR_CANCEL_PREFIXES) or _executor_cancelled_json(result):
+        return stamp
+    kept = result.strip()
+    if len(kept) > OWN_RESULT_HEAD + OWN_RESULT_TAIL:
+        omitted = len(kept) - OWN_RESULT_HEAD - OWN_RESULT_TAIL
+        kept = f"{kept[:OWN_RESULT_HEAD]}\n[... {omitted} chars omitted ...]\n{kept[-OWN_RESULT_TAIL:]}"
+    return f"{stamp}\n{OWN_RESULT_INTRO}\n{kept}\n{OWN_RESULT_END}"
+
+
+def _executor_cancelled_json(result: str) -> bool:
+    """``result`` is ``_ToolCallRef.emit_cancelled``'s JSON (a KeyboardInterrupt mid-tool): the executor's own
+    text, not the call's result (t_01a1d4b4c463cc06, review 5890290599 on #2062)."""
+    if '"cancelled"' not in result:
+        return False
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("status") == "cancelled" \
+        and str(parsed.get("error") or "").startswith("Tool execution cancelled")
 
 
 @contextmanager
@@ -150,7 +194,8 @@ def model_request_in_flight(agent: Any, messages: Any, *, api_call_count: int) -
     """[daveey] t_01a1d293248f5e12: a model request at a step boundary is in flight like a tool call, so the
     watcher's cancel reaches it after the same grace. Without this a long request (169 s on the hub) held the
     turn's admission reservation unpublished past the instant update's cap: a pause lands only at a step boundary.
-    The turn's first request (no tool result yet) is not tracked: there is no boundary to pause at."""
+    A turn's first request (no tool result yet) is tracked only for a continuation (``first_request_can_pause``):
+    its refunded iteration pauses before any request. Any other turn has no boundary to pause at there."""
     tracked = model_request_can_yield(messages, api_call_count=api_call_count,
                                       first_request_ok=first_request_can_pause(agent))
     if tracked:
@@ -174,21 +219,44 @@ def first_request_can_pause(agent: Any) -> bool:
     return getattr(agent, FIRST_REQUEST_ATTR, False) is True
 
 
-def pause_before_turn(agent: Any, conversation_history: Any) -> dict | None:
-    """The result of a continuation that yields to an already-pending pause before its turn starts: no request,
-    nothing persisted, the transcript unchanged (the next continuation sends the same note). None otherwise."""
-    hook = getattr(agent, "step_boundary_pause", None)
-    if not first_request_can_pause(agent) or not callable(hook):
-        return None
+# [daveey] t_01a1d49d50e4c656: a per-run gate the gateway installs (``vars(agent)``, never a class attribute) for a
+# fresh claim whose admission class the claim itself would now hold (a notifier wake under a core-update claim hold).
+# The claim checked the hold once, but its turn may begin much later: it waits on the cross-process session turn
+# lease first (David-MBP incident 31763: claimed 02:54, started 03:07:12 inside the drain window, right after the
+# Desktop backend's turn holding the lease parked). Asked once the lease is held and before anything of the turn
+# runs; a truthy reason ends it unstarted and the result carries ``UNSTARTED_KEY`` so the gateway re-queues the
+# admission in its FIFO place instead of checkpointing a boundary that does not exist.
+BEFORE_TURN_ATTR = "update_yield_before_turn"
+UNSTARTED_KEY = "update_pause_unstarted"
+
+
+def _ask(hook: Any) -> Any:
     try:
-        reason = hook() or None
+        return hook() or None
     except Exception:  # health: allow BLE001 -- a failing pause hook never pauses (as _step_boundary_pause)
         return None
+
+
+def pause_before_turn(agent: Any, conversation_history: Any) -> dict | None:
+    """The result of a turn that yields to an already-pending pause before it starts: no request, nothing persisted,
+    the transcript unchanged (the next continuation sends the same note; a re-queued admission runs as it was).
+    None otherwise. Runs before the turn-start compression preflight: that compression has no step boundary to
+    land on (``compression_can_yield``), so a turn whose pause predates it must never enter it."""
+    hook = getattr(agent, "step_boundary_pause", None)
+    reason = _ask(hook) if first_request_can_pause(agent) and callable(hook) else None
+    unstarted = False
+    if not reason:
+        try:
+            gate = vars(agent).get(BEFORE_TURN_ATTR)
+        except TypeError:
+            gate = None
+        reason = _ask(gate) if callable(gate) else None
+        unstarted = bool(reason)
     if not reason:
         return None
     return {"final_response": "", "messages": list(conversation_history or []), "api_calls": 0,
             "completed": False, "interrupted": True, "paused_for_update": reason,
-            "turn_exit_reason": f"paused_for_update({reason})"}
+            "turn_exit_reason": f"paused_for_update({reason})", **({UNSTARTED_KEY: True} if unstarted else {})}
 
 
 def model_yield_requested(agent: Any) -> bool:

@@ -263,11 +263,14 @@ def test_needs_with_human_request_is_refused(env, monkeypatch):
     assert "error" in out and env["calls"] == []
 
 
-def test_rejected_owner_request_is_cannot_tell_not_not_yet(env):
+def test_rejected_owner_request_wakes_now_with_the_refusal(env):
+    """A rejected request never makes an owner card: wake the card at once (0) with the refusal, never the
+    "cannot tell" 2 that woke it only after three strikes as wake_check_broken (t_01a1d4dc5eb85b00)."""
     env["hub"].execute("INSERT INTO sent VALUES ('capability-owner:t_x:ssh:mini', ?, 'rejected', ?, 0, 0, 1)",
                        (json.dumps({"to_gw": "mini", "key": "default/default/new"}), json.dumps({"error": "no"})))
     env["hub"].commit()
-    assert kcr.wait_check("capability-owner:t_x:ssh:mini")[0] == 2
+    rc, msg = kcr.wait_check("capability-owner:t_x:ssh:mini")
+    assert rc == 0 and "rejected by mini" in msg and "no" in msg, msg
     assert kcr.wait_check("capability-owner:t_unknown:ssh:mini")[0] == 2
 
 
@@ -722,11 +725,11 @@ def test_capability_route_creates_owner_when_reason_duplicates_requester_title(e
 
 def test_unrelated_title_twin_still_rejects_the_owner_create(env, monkeypatch):
     """Excluding the waiting card must not disable overlap. A different open card with the
-    same title is still a second owner, and wait-check reports the rejection (2)."""
+    same title is still a second owner, and wait-check wakes the card with the rejection (0)."""
     _tid, awaited, stranger, rid, applied = _route_overlapping(env, monkeypatch, stranger=True)
     assert applied.get("rejected"), applied
     assert "create_overlap" in applied.get("error", ""), applied
     assert stranger in applied["matches"] and stranger not in applied["distinct"]
     assert awaited in applied.get("distinct", [])
     rc, msg = kcr.wait_check(rid)
-    assert rc == 2 and "rejected" in msg, msg
+    assert rc == 0 and "rejected" in msg and "create_overlap" in msg, msg

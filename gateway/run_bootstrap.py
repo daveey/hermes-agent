@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -527,6 +528,9 @@ async def _start_gateway_shutdown_tail(
     """Post-``wait_for_shutdown`` teardown; returns the process exit verdict (True = exit 0)."""
     from gateway.run import (_CRON_SHUTDOWN_DRAIN_TIMEOUT, _HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT, _await_thread_exit, _best_effort, _resolve_gateway_exit_verdict, _shutdown_mcp_servers_nonblocking, _stop_cron_provider, exit_deadline)
     tail_started = time.monotonic()
+    # The tail runs in start_gateway's finally: an active exception here means runner.stop() or
+    # wait_gateway_runtime raised, so the process exits with that exception's code, not the verdict.
+    unwinding = sys.exc_info()[1]
     exit_deadline.mark_phase("tail_start")  # the slow-tail line's phase marks count from the stop's start
     # Control socket first: once shutdown begins we are no longer a truthful "serving here" answer and a
     # successor must be able to bind. Early-exit paths rely on the atexit cleanup_files hook instead.
@@ -587,11 +591,20 @@ async def _start_gateway_shutdown_tail(
     try:
         verdict = _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
     except SystemExit as exc:
-        exit_deadline.bound_post_tail(
-            0 if exc.code is None else exc.code if isinstance(exc.code, int) else 1, _exit_after_graceful_shutdown)
+        exit_deadline.bound_post_tail(_unwind_exit_code(exc), _exit_after_graceful_shutdown)
         raise
-    exit_deadline.bound_post_tail(0 if verdict else 1, _exit_after_graceful_shutdown)
+    exit_deadline.bound_post_tail(
+        _unwind_exit_code(unwinding) if unwinding is not None else 0 if verdict else 1,
+        _exit_after_graceful_shutdown)
     return verdict
+
+
+def _unwind_exit_code(exc: BaseException) -> int:
+    """The code the process exits with once ``exc`` escapes ``asyncio.run``: main() routes a SystemExit's
+    code through the funnel, and any other exception is uncaught (1)."""
+    if isinstance(exc, SystemExit):
+        return 0 if exc.code is None else exc.code if isinstance(exc.code, int) else 1
+    return 1
 
 
 

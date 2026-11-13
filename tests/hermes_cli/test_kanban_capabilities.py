@@ -188,6 +188,76 @@ def test_profile_policy_resolves_inside_a_bound_worker_scope(profiles, assignee)
         assert get_terminal_scope() is bound_terminal
 
 
+def test_own_profile_policy_resolves_launch_injected_refs(profiles, monkeypatch):
+    """A managed ``${VAR}`` that only the launch environment supplies (systemd ``Environment=``,
+    ``op run``) resolves when the process checks its OWN profile, as ``_bind_whole_profile`` binds
+    it; another profile still never sees the launch env (t_01a1d3f89c1e13c6). [daveey]"""
+    from agent import secret_scope
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.setenv("WORKER_TERMINAL_BACKEND", "local")
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)  # this test's launch env
+    policy = "platform_toolsets: {cli: [terminal, file]}\nterminal: {backend: '${WORKER_TERMINAL_BACKEND}'}\n"
+    profiles("default", policy)
+    profiles("coder", policy)
+    token = secret_scope.set_multiplex_context(True)  # a multiplexing gateway: a scope miss is a miss
+    try:
+        assert validate_assignment("default", requires=["host_repo"]) == ["host_repo"]
+        with pytest.raises(CapabilityMismatchError) as caught:
+            validate_assignment("coder", requires=["host_repo"])
+        assert caught.value.missing == ["host_repo"]
+    finally:
+        secret_scope.reset_multiplex_context(token)
+
+
+@pytest.mark.parametrize("multiplex", [False, True])
+def test_own_profile_policy_counts_launch_only_terminal_backend(profiles, monkeypatch, multiplex):
+    """A backend that only the launch environment sets (``TERMINAL_ENV`` from systemd, ``op run``,
+    a launcher bridge) is the backend the process's own profile runs with, as ``_bind_whole_profile``
+    binds it; another profile never inherits it (t_01a1d4138fd1167a). [daveey]"""
+    from agent import secret_scope
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)  # this test's launch env
+    policy = "platform_toolsets: {cli: [terminal, file]}\n"  # no backend in config.yaml or .env
+    profiles("default", policy)
+    profiles("coder", policy)
+    token = secret_scope.set_multiplex_context(multiplex)
+    try:
+        with pytest.raises(CapabilityMismatchError) as caught:
+            validate_assignment("default", requires=["host_repo"])
+        assert caught.value.missing == ["host_repo"]
+        assert validate_assignment("default", requires=["terminal", "git"]) == ["terminal", "git"]
+        # Another profile reads its own files only: the default backend (local) still grants host_repo.
+        assert validate_assignment("coder", requires=["host_repo"]) == ["host_repo"]
+        # Single-profile: read from the live launch env, the snapshot stays unfrozen (t_01a1d42d00bdbb33).
+        assert (launch_profile_policy._snapshot is None) is not multiplex
+    finally:
+        secret_scope.reset_multiplex_context(token)
+
+
+def test_own_profile_check_does_not_freeze_the_launch_env(profiles, monkeypatch):
+    """A single-profile process (multiplexing inactive) that checks its OWN profile, bare or inside
+    its own bound worker scope (``_bind_whole_profile``), reads the live launch env and leaves the
+    process-wide launch snapshot unfrozen: freezing it before activation would miss values the
+    launch process still bridges at startup (t_01a1d42d00bdbb33). [daveey]"""
+    from agent import secret_scope
+    from agent.runtime_scope import bind_profile_scope
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)
+    home = profiles("default", LOCAL)
+    token = secret_scope.set_multiplex_context(False)
+    try:
+        assert validate_assignment("default", requires=["host_repo"]) == ["host_repo"]
+        with bind_profile_scope(home, hydrate_secrets=False):
+            assert validate_assignment("default", requires=["terminal", "git"]) == ["terminal", "git"]
+        assert launch_profile_policy._snapshot is None
+    finally:
+        secret_scope.reset_multiplex_context(token)
+
+
 def test_skill_names_are_not_guessed_as_capabilities(profiles):
     # Skill capability metadata has no established convention; do not infer from names/prose.
     assert validate_assignment("legacy", skills=["git", "terminal"]) == []

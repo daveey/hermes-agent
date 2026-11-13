@@ -155,6 +155,28 @@ processes currently holding the database (`<db> is held by PID <n> (<command>)`)
 so you know what to stop; when the holder scan is partial or unavailable it says
 `cannot prove the database is quiet` instead of giving an all-clear.
 
+## Logging
+
+Hermes writes rotating log files under `~/.hermes/logs/` (`agent.log` at
+`logging.level` and above, `errors.log` at WARNING and above):
+
+```yaml
+logging:
+  level: INFO            # minimum level for agent.log: DEBUG, INFO, WARNING
+  max_size_mb: 5         # rotate a log file once it reaches this size
+  backup_count: 3        # rotated backups to keep per file
+  debug_ssl_close: false # debug tripwire, see below
+```
+
+`logging.debug_ssl_close: true` installs a debug tripwire on `ssl.SSLSocket`:
+when one thread closes a TLS socket while another thread is still reading
+it, Hermes logs a WARNING with the closing thread's stack. Such a close frees
+the file descriptor under the reader's live TLS session; the kernel can then
+hand the number to the next file opened, and the reader's TLS alert lands in
+that file (for example a SQLite header). Leave it off unless you are chasing
+that class of bug: every TLS read pays a small Python-level wrapper while it
+is on. It is read when logging starts, so restart Hermes after changing it.
+
 ## Environment Variable Substitution
 
 You can reference environment variables in `config.yaml` using `${VAR_NAME}` syntax:
@@ -1435,7 +1457,7 @@ agent:
 
 `agent.max_turns` is **unlimited by default** — the turn cap caused more problems than it solved (silent mid-task truncation), so out of the box Hermes runs a conversation turn to completion. To impose a cap, set a positive integer. To be explicit about "no limit", any of these case-insensitive spellings work: `"none"`, `"null"`, `"unlimited"`, `"infinite"`, `"infinity"`, `"inf"`, `0`, `-1` (they resolve to a `sys.maxsize` sentinel so the loop never exits on a turn count).
 
-`agent.budget_warning_ratio` is off by default for ordinary and delegated conversations. When set to a value strictly between `0` and `1` alongside a finite `max_turns`, Hermes appends one model-visible checkpoint notice to the latest tool result after the threshold is reached. The notice rearms each conversation turn and uses each agent's own iteration budget. It only appends to a current tool-result tail, never an older turn, and does not add a synthetic user/system message or change the existing exhaustion grace call. Dispatcher-owned Kanban workers receive a completion checkpoint at 90% by default (an explicit ratio changes that threshold), while their tools are still available. The checkpoint asks for verified completion or a durable progress comment, not premature success.
+`agent.budget_warning_ratio` is off by default for interactive conversations and the subagents they delegate to. One-shot runs (`hermes chat -q`, `hermes -z`) and the subagents delegated from inside one default to 80% when no ratio is configured and they run under a finite turn cap (a plain `hermes chat -q` has none unless you pass `--max-turns` or set `agent.max_turns`; subagents always do, through `delegation.max_iterations`), since a one-shot loses its tools at the cap and cannot write its deliverable afterwards; their notice names the remaining iterations. When set to a value strictly between `0` and `1` alongside a finite `max_turns`, Hermes appends one model-visible checkpoint notice to the latest tool result after the threshold is reached. The notice rearms each conversation turn and uses each agent's own iteration budget. It only appends to a current tool-result tail, never an older turn, and does not add a synthetic user/system message or change the existing exhaustion grace call. Dispatcher-owned Kanban workers receive a completion checkpoint at 90% by default, even when launched as a one-shot (the Kanban default takes precedence). An explicit ratio overrides both defaults. The Kanban checkpoint arrives while their tools are still available. The checkpoint asks for verified completion or a durable progress comment, not premature success.
 
 `agent.api_max_retries` controls how many times Hermes retries a provider API call on transient errors (rate limits, connection drops, 5xx) **before** fallback-provider switching engages. The default is `3` — four attempts total. If you have [fallback providers](./features/fallback-providers.md) configured and want to fail over faster, drop this to `0` so the first transient error on your primary immediately hands off to the fallback instead of churning retries against the flaky endpoint.
 

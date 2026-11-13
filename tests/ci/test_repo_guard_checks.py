@@ -214,6 +214,64 @@ def test_dependency_bounds_report_lists_only_floor_only_specs(repo, step):
     assert report == '"loose>=2.1"\n'
 
 
+def _drop_object(repo: Path, rev: str) -> None:
+    """Delete ``rev``'s loose object, as a partial clone that lost its promisor would lack it."""
+    sha = git(repo, "rev-parse", rev).strip()
+    (repo / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+
+
+@pytest.mark.parametrize("scan", ["patterns", "dependency-bounds"])
+@pytest.mark.parametrize("broken", ["nonexistent base", "unreadable base tree"])
+def test_supply_chain_scans_fail_when_git_cannot_diff_the_pr(repo, step, scan, broken):
+    base = commit(repo, {"pyproject.toml": 'deps = ["old>=1,<2"]\n', "pkg/a.py": "x = 1\n"})
+    head = commit(repo, {"pyproject.toml": 'deps = ["loose>=2"]\n', "pkg/a.py": "x = 2\n"})
+    if broken == "nonexistent base":
+        base = "0" * 40
+    else:
+        _drop_object(repo, f"{base}^{{tree}}")
+    failed = step.run(repo, "scan_supply_chain.py", scan, _HERMES_PR_BASE_SHA=base,
+                      _HERMES_PR_HEAD_SHA=head)
+    assert failed.returncode == 2, failed.stdout + failed.stderr
+    assert f"::error::Could not diff this PR, so the {scan} scan did not run: git diff {base}...{head} exited 128" \
+        in failed.stdout
+    assert "fatal:" in failed.stdout
+    assert "found" not in step.outputs()
+
+
+@pytest.mark.parametrize("scan", ["patterns", "dependency-bounds"])
+def test_supply_chain_scans_pass_a_pr_that_changes_nothing(repo, step, scan):
+    head = git(repo, "rev-parse", "HEAD").strip()
+    passed = step.run(repo, "scan_supply_chain.py", scan, _HERMES_PR_BASE_SHA=head, _HERMES_PR_HEAD_SHA=head)
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert step.outputs()["found"] == "false"
+
+
+def _pr_diff_report(monkeypatch, repo: Path):
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    import pr_diff_report
+    return pr_diff_report
+
+
+def test_base_snapshot_extraction_tells_a_missing_snapshot_from_an_unreadable_base(repo, tmp_path, monkeypatch):
+    report = _pr_diff_report(monkeypatch, repo)
+    snapshot = report.PROMPT_SURFACE_SNAPSHOT
+    without = git(repo, "rev-parse", "HEAD").strip()
+    report.extract_base_snapshot(without, tmp_path / "none")
+    assert not (tmp_path / "none" / snapshot).exists()
+
+    with_snapshot = commit(repo, {f"{snapshot}/tool.json": "{}\n"})
+    report.extract_base_snapshot(with_snapshot, tmp_path / "some")
+    assert (tmp_path / "some" / snapshot / "tool.json").read_text(encoding="utf-8") == "{}\n"
+
+    _drop_object(repo, f"{with_snapshot}:tests")
+    with pytest.raises(subprocess.CalledProcessError):
+        report.extract_base_snapshot(with_snapshot, tmp_path / "unreadable")
+    with pytest.raises(subprocess.CalledProcessError):
+        report.extract_base_snapshot("0" * 40, tmp_path / "bad-sha")
+
+
 def test_emit_publishes_the_report_only_when_the_flag_is_true(repo, step):
     (step.runner_temp / "supply-chain-unbounded.txt").write_text('"loose>=2.1"\n', encoding="utf-8")
     step.run(repo, "review_status.py", "emit", "dependency-bounds", FOUND="false")

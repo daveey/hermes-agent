@@ -345,8 +345,17 @@ def tree_digest(root: Path) -> str:
 
 def digest_matches(root: Path, recorded: str | None) -> bool:
     """Facts recorded before desktop metadata was skipped hashed it as payload."""
-    return recorded is not None and (
-        tree_digest(root) == recorded or _tree_digest(root, skip_metadata=False) == recorded)
+    return verified_digest(root, recorded) is not None
+
+
+def verified_digest(root: Path, recorded: str | None) -> str | None:
+    """``tree_digest(root)`` when *root* matches *recorded* (as ``digest_matches``), else ``None``.
+
+    The caller that records the tree next reuses it instead of hashing the tree again."""
+    if recorded is None:
+        return None
+    digest = tree_digest(root)
+    return digest if digest == recorded or _tree_digest(root, skip_metadata=False) == recorded else None
 
 
 def _tree_digest(root: Path, *, skip_metadata: bool) -> str:

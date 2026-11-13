@@ -937,9 +937,14 @@ async def _plugin_api_request_refused(name: str) -> bool:
     keeps its router mounted until restart, so every request is checked again. An unknown name
     counts as a user plugin (safe default: refused).
     """
-    from hermes_cli.web_server import _get_dashboard_plugins
+    from hermes_cli.web_server import _fresh_dashboard_plugins, _get_dashboard_plugins
     from hermes_cli.web_server_plugin_profiles import rescanned_plugin, secondary_profile_home
-    plugin = next((p for p in _get_dashboard_plugins() if p.get("name") == name), None)
+    # Runs on the event loop for every request: read the cached list, and leave its plugin-dir
+    # sweep (a stat per plugin, or a full rescan) to a worker thread once the cache is due.
+    plugins = _fresh_dashboard_plugins()
+    if plugins is None:
+        plugins = await asyncio.to_thread(_get_dashboard_plugins)
+    plugin = next((p for p in plugins if p.get("name") == name), None)
     home = secondary_profile_home()
     if plugin is None and home is not None:  # installed since the last scan (rate-limited per name)
         plugin = await asyncio.to_thread(rescanned_plugin, home, name)  # a disk scan: off the event loop

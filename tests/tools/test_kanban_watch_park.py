@@ -78,6 +78,7 @@ def test_watch_park_frees_the_chat_and_keeps_the_notice(board):
     assert out.get("ok") is not False and not out.get("error"), out
     assert out["status"] == "scheduled"
     assert out.get("watch") is True
+    assert "watch mark" in out.get("watch_note", ""), out
     n, tasks = _open_for_chat(board)
     assert n == 0, "a watch park must not hold the chat open"
     assert tasks == [], "the close-out gate (session_tasks ACTIVE_STATUSES) must see no open card"
@@ -143,3 +144,67 @@ def test_complete_on_scheduled_card_says_not_running(board):
     assert "card is scheduled with no run" in out["error"]
     assert "archive it with a comment" in out["error"]
     assert "watch=true" in out["error"]
+
+
+# [daveey] A watch park freed the chat, and its row then went plain green: "why is this session green" with the
+# card's last check still pending (self-heal desktop-e6cce5965c). A done chat names its watches, the way it names
+# the crons it owns, and the outcome audit lists it as ``done_watching``.
+def _chat_outcome(tmp_path, refresh: bool = True):
+    import hermes_state_outcome as outcomes
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=tmp_path / "state.db")
+    if db._read_one("SELECT 1 FROM sessions WHERE id = ?", (CHAT,)) is None:
+        db.create_session(CHAT, source="desktop")
+        outcomes.declare_outcome(CHAT, {"kind": "done", "summary": "Fix landed; the live check runs Friday."}, db=db)
+    out = outcomes.refresh_outcome(CHAT, "manual", db=db) if refresh else outcomes.get_outcome(CHAT, db=db)
+    return db, out
+
+
+def test_done_chat_names_its_watch_park(board, tmp_path):
+    tid = _chat_card(board)
+    _schedule(tid, 72, watch=True)
+    db, out = _chat_outcome(tmp_path)
+    try:
+        assert out["kind"] == "done", out  # the watch does not hold the chat open (kanban-85e428ecb2)
+        watches = out.get("watches") or []
+        assert [w["id"] for w in watches] == [tid], out
+        assert watches[0]["kind"] == "card" and watches[0]["state"] == "watching"
+        assert watches[0]["label"] == "check sign-in after expiry"
+        assert isinstance(watches[0].get("eta"), float) and watches[0]["eta"] > time.time() + 70 * 3600
+        from hermes_cli.sessions_cmd_outcome import audit_rows
+        row = next(r for r in audit_rows(db) if r["id"] == CHAT)
+        assert row["reason"] == "done_watching", row
+        assert [w["id"] for w in row["on"]] == [tid]
+    finally:
+        db.close()
+
+
+def test_watch_mark_clears_once_the_card_is_done(board, tmp_path):
+    tid = _chat_card(board)
+    _schedule(tid, 72, watch=True)
+    db, out = _chat_outcome(tmp_path)
+    db.close()
+    assert out.get("watches"), out
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        assert board.unblock_task(conn, tid)
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (tid,))
+        conn.commit()
+    db, out = _chat_outcome(tmp_path)
+    try:
+        assert out["kind"] == "done", out
+        assert not out.get("watches"), out
+        from hermes_cli.sessions_cmd_outcome import audit_rows
+        row = next(r for r in audit_rows(db) if r["id"] == CHAT)
+        assert row["reason"] != "done_watching", row
+    finally:
+        db.close()
+
+
+def test_plain_scheduled_card_is_a_wait_not_a_watch(board, tmp_path):
+    tid = _chat_card(board)
+    _schedule(tid, 72)
+    db, out = _chat_outcome(tmp_path)
+    db.close()
+    assert out["kind"] == "waiting", out
+    assert not out.get("watches"), out

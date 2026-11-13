@@ -45,6 +45,28 @@ def _pipe_marker(session_id: str) -> str:
     return f"__HERMES_PIPE_{session_id}__"
 
 
+def _alias_marker(session_id: str) -> str:
+    return f"__HERMES_ALIASES_{session_id}__"
+
+
+def _alias_names_printf(marker: str) -> str:
+    """Bootstrap lines that print the snapshot's alias names between two *marker*s. Pure bash (no
+    sed): a multi-line alias value may add a spurious name, which only makes the guard stricter."""
+    return (
+        "__hermes_an=\n"
+        "while IFS= read -r __hermes_al; do case $__hermes_al in 'alias '*=*) "
+        "__hermes_al=${__hermes_al#alias }; __hermes_al=${__hermes_al#-- }; "
+        "__hermes_an=\"$__hermes_an ${__hermes_al%%=*}\";; esac; done < <(alias -p)\n"
+        f"printf '\\n{marker}%s{marker}\\n' \"$__hermes_an\"\n")
+
+
+def _split_alias_marker(output: str, marker: str) -> "frozenset[str] | None":
+    """Alias names the bootstrap printed (see ``_alias_names_printf``); ``None`` when it printed
+    none (the snapshot may hold aliases whose names are unknown)."""
+    match = re.search(re.escape(marker) + r"(.*?)" + re.escape(marker), output or "")
+    return None if match is None else frozenset(match.group(1).split())
+
+
 def _pipe_marker_printf(marker: str) -> str:
     """Emit the pipeline's per-segment exit statuses (``PIPESTATUS``) on their own line.
 
@@ -120,6 +142,7 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
 
 def _snapshot_bootstrap_script(
     *, quoted_cwd: str, quoted_snap: str, snap_tmp_template: str, excluded_names: Iterable[str], cwd_marker: str,
+    alias_marker: str = "",
 ) -> str:
     """Login-shell bootstrap that captures env/functions/aliases into the snapshot. Atomic publish:
     assemble in a ``mktemp`` file, then ``mv`` over the final path so a concurrent ``source`` never
@@ -128,7 +151,9 @@ def _snapshot_bootstrap_script(
     ``declare -F`` (a line-based ``declare -f | grep -v`` strips the header and leaves an orphaned
     body that breaks every sourced command); the non-empty guard matters because bare ``declare -f``
     dumps ALL functions. The trailing ``cd`` restores the configured cwd after profile scripts (e.g.
-    ``cd ~``) so ``pwd -P`` reports terminal.cwd, not the profile's directory."""
+    ``cd ~``) so ``pwd -P`` reports terminal.cwd, not the profile's directory. With *alias_marker*
+    it also prints the alias names it captured (``_alias_names_printf``): the lifecycle guard must
+    know them, because the snapshot turns ``expand_aliases`` on for every command."""
     return (
         "umask 077\n"
         f"__hermes_snap_tmp=$(mktemp {snap_tmp_template}) || exit 1\n"
@@ -136,7 +161,8 @@ def _snapshot_bootstrap_script(
         "__hermes_fns=$(declare -F | awk '{print $3}' | grep -vE '^_[^_]') || true\n"
         f"[ -n \"$__hermes_fns\" ] && declare -f $__hermes_fns >> {_SNAP_TMP} 2>/dev/null || true\n"
         f"alias -p >> {_SNAP_TMP}\n"
-        f"echo 'shopt -s expand_aliases' >> {_SNAP_TMP}\n"
+        + (_alias_names_printf(alias_marker) if alias_marker else "")
+        + f"echo 'shopt -s expand_aliases' >> {_SNAP_TMP}\n"
         f"echo 'set +e' >> {_SNAP_TMP}\n"
         f"echo 'set +u' >> {_SNAP_TMP}\n"
         # Publish only if assembly succeeded; otherwise drop the partial temp.

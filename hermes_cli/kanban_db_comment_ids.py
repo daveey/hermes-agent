@@ -96,7 +96,8 @@ def agent_comment_ids(conn: sqlite3.Connection, task_id: str, comment_ids: list[
 
 def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, *,
                 origin_gateway: Optional[str] = None, writer_kind: Optional[str] = None,
-                writer_session: Optional[str] = None, relayed_human: Optional[dict] = None) -> int:
+                writer_session: Optional[str] = None, relayed_human: Optional[dict] = None,
+                system: bool = False) -> int:
     """Append a comment (moved from ``kanban_db``; re-exported there). ``origin_gateway``: the gateway it came from (the hermes-hub relay passes the
     sender); default: the gateway the author spelling names, else this gateway (kanban_comment_origin). [daveey]
 
@@ -106,7 +107,11 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
 
     ``relayed_human`` (``{session, message_id, at}``, verified by ``kanban_relayed_human``) marks an agent
     comment that carries the user's reply from a chat: the no-progress budget counts it as a human answer,
-    while ``writer_kind`` stays ``agent`` so it gains no operator authority (kanban-d1b921f32e). [daveey]"""
+    while ``writer_kind`` stays ``agent`` so it gains no operator authority (kanban-d1b921f32e). [daveey]
+
+    ``system``: a kernel note written for the card's worker, not by it (the readiness pass telling a repair card its
+    child cleared). It carries no :func:`writer_provenance`, even when that pass runs inside the card's own worker,
+    so the live comment bridge still delivers it to that run. [daveey]"""
     if relayed_human is not None and writer_kind != "agent":
         raise ValueError("relayed_human marks an agent's relay of the user's message; it needs writer_kind='agent'")
     if not body or not body.strip():
@@ -134,7 +139,8 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
         )
         cid = int(cur.lastrowid or 0)
         payload: dict = {"author": author, "len": len(body), "comment_id": cid}
-        payload.update(writer_provenance(conn, task_id))  # writer_run_id + portable writer_run_uid
+        if not system:
+            payload.update(writer_provenance(conn, task_id))  # writer_run_id + portable writer_run_uid
         if writer_kind:
             payload["writer_kind"] = writer_kind
             if writer_session:

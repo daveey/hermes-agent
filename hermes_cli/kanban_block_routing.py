@@ -69,6 +69,19 @@ def has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
 
 
+def recovery_held(conn: sqlite3.Connection, row, failure_limit: int) -> bool:
+    """True when ``recompute_ready`` must not auto-recover this ``blocked``/``triage`` row
+    (``id``, ``status``, ``consecutive_failures``, ``max_retries``): a sticky stop that only
+    ``unblock_task`` exits (#28712), or failures at the breaker limit (else block -> recover ->
+    respawn -> exhaust -> block forever; the counter is kept so it accumulates across cycles).
+    Limit order matches ``_record_task_failure``: ``max_retries`` > ``failure_limit``. The
+    review-release precompute applies the same skips, so a held card costs no GitHub read."""
+    if row["status"] not in ("blocked", "triage"):
+        return False
+    limit = row["max_retries"] if row["max_retries"] is not None else failure_limit
+    return has_sticky_block(conn, row["id"]) or int(row["consecutive_failures"] or 0) >= int(limit)
+
+
 def classify_stop(conn, task_id, kind, reason, blocker_id, *, human_request=None):
     """Compose continuation recovery with assignment routing without changing human asks."""
     from hermes_cli import kanban_assignment_routing

@@ -177,6 +177,22 @@ def _index(path: Path) -> tuple[str, dict]:
     return me, index
 
 
+def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple) -> tuple[str, dict[str, Any], dict]:
+    """``(me, {sid: [card, ...]}, observed)`` for one chat: the host's published copy when it is of the replica's
+    current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]"""
+    from tui_gateway import kanban_remote_index as published
+    from tui_gateway.kanban_replica_observer import fingerprint
+
+    ledger_file = Path(ledger) if ledger is not None else ledger_path()
+    stamp = fingerprint(path)
+    hit = published.lookup(path, ledger_file, stamp, profile, sids)
+    if hit is not None:
+        return hit
+    me, index, observed = published.compute(path, ledger, ledger_file, now,
+                                            published.current_key(path, ledger_file, stamp))
+    return me, {sid: index.get((profile, sid), ()) for sid in sids}, observed
+
+
 def _linked_chats(task: dict, me: str) -> list[tuple[str, str]]:
     """``(profile, session)`` of this gateway's chats a remote card notifies: its unreleased shepherd links, and
     the origin chat of every origin binding (``kanban_origin_adopt``) naming this gateway. [daveey]
@@ -600,13 +616,12 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
     now = time.time() if now is None else now
     profile = profile or "default"
     try:
-        with _lock:
-            me, index = _index(path)
-        from tui_gateway.kanban_remote_observations import observe
-        fresh_times = observe(path, ledger, now)
-        cards = []
-        for sid in (session_key, *lineage):
-            cards.extend(dict(c, sid=sid) for c in index.get((profile, sid), ()))
+        sids = (session_key, *lineage)
+        if hub_db is None and ledger is None:  # the host's own replica: keep its published copy current
+            from tui_gateway.kanban_remote_index import ensure_holder
+            ensure_holder("serve")  # once per process; a gateway's own later claim upgrades the role
+        me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids)
+        cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
             return []
         out: list[dict] = []
@@ -655,6 +670,7 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 if verdict == "offer":
                     out.append(_notice_item(card, claim_session, me, profile, now))
                     offered.add((ref, state))
+                    _note_poller_claim(sid, claim_session, ref, state)  # after the claim is out; never raises
         finally:
             conn.close()
         from tui_gateway.kanban_remote_late import collect_groups, release_undelivered
@@ -733,6 +749,102 @@ SWEPT_KEEP_S = 90 * 86400.0
 _delivered: dict[tuple, None] = {}
 _swept_loaded: set[str] = set()
 _last_stale: dict[str, int] = {}  # replica -> stale count last logged, so the sweep logs a change, not every pass
+# [daveey] Why each notice last waited, per (chat, ref, state). The sweep's silent skips (chat open in this backend,
+# claim in flight under another backend, left to the gateway's FIFO) and the live poller's claim each log once per
+# change of reason. Without it a notice held in flight for 30 min left no line, and the 46 min "discovery lag" on
+# t_01a1d46be379dfd3 was filed against a poller that had seen the card in 63 s.
+_waits: dict[tuple, str] = {}
+_waits_lock = threading.Lock()
+_WAITS_MAX = 5000
+_POLLER_CLAIM = "claimed by the live poller of backend pid "
+_poller_claims: dict[tuple, str] = {}  # (link session, ref, state) -> session the poller's ledger row is keyed by
+_CLAIM_DELIVERED = "\0delivered"  # _poller_claims value once the row read back delivered
+
+
+def _note_wait(session: str, ref: str, state: str, why: str) -> None:
+    """Log why a notice waits, once per change of reason. Never raises: collect calls it holding a claim, and an
+    exception there (eviction racing a concurrent sweep) would strand that claim in flight (PR #2116 review)."""
+    try:
+        key = (session, ref, state)
+        with _waits_lock:
+            if _waits.get(key) == why:
+                return
+            _waits.pop(key, None)
+            _waits[key] = why
+            while len(_waits) > _WAITS_MAX:
+                _waits.pop(next(iter(_waits)), None)
+        logger.info("remote Kanban notice %s %s for chat %s waits: %s", ref, state, session, why)
+    except Exception:  # diagnostics only; the caller's claim must not depend on them
+        with contextlib.suppress(Exception):
+            logger.debug("remote kanban: wait log failed", exc_info=True)
+
+
+def _note_poller_claim(link_sid: str, claim_session: str, ref: str, state: str) -> None:
+    """Log the live poller's claim and remember which ledger row holds it, keyed by the LINK's session: the sweep
+    looks it up by the link, while the claim may sit under the live session key of a compacted chat (PR #2158
+    review). Never raises."""
+    try:
+        with _waits_lock:
+            _poller_claims.pop((link_sid, ref, state), None)
+            _poller_claims[(link_sid, ref, state)] = claim_session
+            while len(_poller_claims) > _WAITS_MAX:
+                _poller_claims.pop(next(iter(_poller_claims)), None)
+    except Exception:  # diagnostics only
+        with contextlib.suppress(Exception):
+            logger.debug("remote kanban: poller claim marker failed", exc_info=True)
+    _note_wait(claim_session, ref, state, f"{_POLLER_CLAIM}{os.getpid()}")
+
+
+def _poller_claim_state(claim_session: str, ref: str, state: str, ledger) -> str:
+    """``delivered`` (final), ``held`` (in flight under a live backend, or the ledger is unreadable: this only
+    picks a log level) or ``stuck``: released undelivered (``release_undelivered``) or held by a dead pid."""
+    try:
+        with contextlib.closing(_ledger(ledger)) as conn:
+            row = conn.execute("SELECT delivered, holder_pid, holder_start FROM notices "
+                               "WHERE session=? AND ref=? AND state=?", (claim_session, ref, state)).fetchone()
+    except Exception:
+        logger.debug("remote kanban: poller claim readback failed", exc_info=True)
+        return "held"
+    if row is None:
+        return "stuck"
+    if row["delivered"]:
+        return "delivered"
+    return "held" if _holder_alive(row["holder_pid"], row["holder_start"]) else "stuck"
+
+
+def _note_open_chat(sid: str, ref: str, state: str, waker, observed_at, now, ledger=None) -> None:
+    """The healthy path: this backend's live poller claims the notice within seconds and logs that claim. Only a
+    notice past the waker's grace window whose poller claim is missing, released undelivered or held by a dead
+    backend logs the open-chat skip at INFO (PR #2116, #2158 reviews)."""
+    grace = waker.grace_s if waker is not None else 0.0
+    if observed_at is not None and now is not None and now - observed_at >= grace:
+        with _waits_lock:
+            claim_session = _poller_claims.get((sid, ref, state))
+        if claim_session is None:
+            verdict = "stuck"
+        elif claim_session == _CLAIM_DELIVERED:
+            verdict = "delivered"
+        else:
+            verdict = _poller_claim_state(claim_session, ref, state, ledger)
+        if verdict == "stuck":
+            _note_wait(sid, ref, state, "chat is open in this backend; its live poller claims it")
+            return
+        if verdict == "delivered" and claim_session != _CLAIM_DELIVERED:
+            with _waits_lock:  # final: later passes skip the ledger read
+                if _poller_claims.get((sid, ref, state)) == claim_session:
+                    _poller_claims[(sid, ref, state)] = _CLAIM_DELIVERED
+    logger.debug("remote Kanban notice %s %s for chat %s: chat is open in this backend", ref, state, sid)
+
+
+def _wait_reason(conn, session: str, ref: str, state: str) -> Optional[str]:
+    """Why ``_claim_notice`` skipped an undelivered notice: the backend whose claim holds it, else None."""
+    row = conn.execute("SELECT delivered, holder_pid FROM notices WHERE session=? AND ref=? AND state=?",
+                       (session, ref, state)).fetchone()
+    if row is None or row["delivered"] or row["holder_pid"] is None:
+        return None
+    if _holder_is_me(row["holder_pid"]):
+        return f"in flight in this backend (pid {row['holder_pid']}) until its turn's row is written"
+    return f"in flight under backend pid {row['holder_pid']} until that claim is acked or released"
 
 
 def _remember_delivered(key: tuple) -> None:
@@ -808,6 +920,8 @@ def _reset_for_tests() -> None:
     from tui_gateway.remote_sweep_projection import reset as reset_projection
 
     from tui_gateway.remote_index_projection import reset as reset_index_projection
+    from tui_gateway.kanban_remote_index import reset as reset_published_index
+    reset_published_index()
     reset_projection()
     reset_index_projection()
     global _index_memo, _sweep_memo
@@ -823,6 +937,8 @@ def _reset_for_tests() -> None:
     _delivered.clear()
     _swept_loaded.clear()
     _last_stale.clear()
+    _waits.clear()
+    _poller_claims.clear()
     with _woken_lock:
         _woken.clear()
 
@@ -1105,11 +1221,14 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
     if is_placeholder_session(sid):
         logger.warning("Dropped Kanban notice to placement placeholder %s", sid)
         return
-    if not profile or not sid or sid in live:
+    if not profile or not sid:
         return
     try:
         memo_key = (str(path), profile, sid, _notice_id(owner, key, task, profile, sid))
         if memo_key in _delivered:
+            return
+        if sid in live:
+            _note_open_chat(sid, ref, state, waker, observed_at, now, ledger)
             return
         if waker is not None and observed_at is not None and now is not None and now - observed_at < waker.grace_s:
             return  # a live poller (any backend) claims within seconds; it owns the chat's turn
@@ -1128,11 +1247,17 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
             if settled((sid, tip), ref, state):
                 _remember_delivered(memo_key)
                 return
-            from tui_gateway.kanban_remote_fifo import gateway_holds, lineage_ids
-            if gateway_holds(db, lineage_ids(db, sid, tip), event_key):
+            from tui_gateway.kanban_remote_fifo import gateway_holds, gateway_lease_pid, lineage_ids
+            ids = lineage_ids(db, sid, tip)
+            if gateway_holds(db, ids, event_key):
                 # [daveey] The gateway runs this chat's turns and admits the notice to its FIFO
                 # (gateway.kanban_remote_owner); a claim here would only race it (t_01a1cff0541bf30c).
-                logger.debug("remote Kanban notice %s for chat %s left to the gateway's FIFO", ref, sid)
+                _note_wait(sid, ref, state, "left to the gateway's FIFO (the gateway runs this chat's turns)")
+                return
+            if (gw_pid := gateway_lease_pid(db, ids, profile)) is not None:
+                # [daveey] A gateway turn holds the chat: no row or wake can land here until it ends, and the
+                # gateway's owner pass admits the notice meanwhile. No claim, so nothing races it (G3).
+                _note_wait(sid, ref, state, f"left to gateway pid {gw_pid}: its turn holds the chat's lease")
                 return
             if waker is None:
                 row_id = db.append_kanban_notice(tip, text, metadata)
@@ -1148,14 +1273,19 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                                         notice_key=event_key, task_id=str(task["id"]),
                                         transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t),
                                         swept_key=memo_key)
+                waiting = _wait_reason(conn, sid, ref, state) if verdict == "skip" else None
         if verdict == "acked":
             return  # _claim_notice recorded it in ``swept`` (reason transcript) and the memo
         if verdict != "offer":
-            return  # another consumer holds it in flight
+            if waiting:  # another consumer holds it in flight: name it, once
+                _note_wait(sid, ref, state, waiting)
+            return
+        extra = {"defer": lambda: release(claim, ledger=ledger)} if getattr(waker, "supports_defer", False) else {}
         result = waker.deliver(
             tip, text, metadata, task, now or time.time(),
             persist=lambda: _persist_claimed(session_db, profile, sid, text, metadata, claim, memo_key, ledger),
-            started=lambda: _settle_started(session_db, profile, sid, event_key, claim, memo_key, ledger))
+            started=lambda: _settle_started(session_db, profile, sid, event_key, claim, memo_key, ledger),
+            **extra)
         delivered.append({"task_id": task["id"], "session_id": tip, "wake": result})
     except Exception:
         logger.debug("remote Kanban notice deferred for %s/%s", owner, key, exc_info=True)

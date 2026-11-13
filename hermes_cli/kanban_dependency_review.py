@@ -9,6 +9,9 @@ continuation when it records an exact-head approval. The next claim consumes it.
 A review parent linked after the park by someone else (an orchestrator's
 ``kanban_link``) counts as awaited only as an exact-current-head re-review of a
 captured PR (:mod:`kanban_dependency_review_relink`).
+A captured PR a historical parent approved before the park, still at that exact head,
+is covered when every awaited parent finished with an exact-head verdict, even on a PR the
+checkpoint never captured (:mod:`kanban_dependency_review_historical`).
 A later comment that repeats a captured PR does not re-arm the hold; a new PR,
 a review naming a different PR, or a crash/reclaim does.
 """
@@ -79,7 +82,8 @@ def apply_block_update(conn, task_id, expected_run_id, kind, new_status, set_sql
     if expected_run_id is not None:
         sql += " AND current_run_id = ?"
         params = (*params, int(expected_run_id))
-    return conn.execute(sql, params).rowcount == 1
+    from hermes_cli.kanban_source_receipt import with_source_receipt
+    return with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) == 1
 
 
 def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
@@ -407,10 +411,16 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     # the other) also resume: each named parent left exact-head evidence for a checkpointed
     # PR and together they cover every holding PR. Still no merge approval, one continuation.
     approvals = {p: _approval_prs(conn, p, parked_at, row["id"], captured_set) for p in parents}
-    if not all(approvals[p] or repairs[p] for p in parents):
-        return False
     named_awaited = evidence.get("awaited")
     named = [*(named_awaited if isinstance(named_awaited, list) else ()), *late]
-    if not all(urls.issubset(a) for p, a in approvals.items() if p not in named):
-        return False
-    return urls.issubset(reviewed.union(*approvals.values()))
+    covered = reviewed.union(*approvals.values())
+    if (all(approvals[p] or repairs[p] for p in parents)
+            and all(urls.issubset(a) for p, a in approvals.items() if p not in named)
+            and urls.issubset(covered)):
+        return True
+    # A captured PR a historical parent approved before the park, still at that head, while the
+    # awaited parents reviewed (exact head, explicit verdict) a sibling PR the checkpoint never
+    # captured (:mod:`kanban_dependency_review_historical`; 2026-11-13 t_01a1d4635554fa12).
+    from hermes_cli.kanban_dependency_review_historical import covers
+    return covers(conn, parents=parents, checkpointed=checkpointed, named_awaited=named, urls=urls,
+                  covered=covered, parked_at=parked_at, owner_run_id=row["id"], captured=captured_set)

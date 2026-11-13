@@ -237,6 +237,107 @@ def test_borrowed_launch_already_on_the_store_interpreter_does_not_reexec(tmp_pa
     assert borrowed_facts.is_file()
 
 
+@pytest.mark.parametrize("serves", [True, False])
+def test_a_borrowing_launch_runs_the_owners_generation_when_it_serves(tmp_path, monkeypatch, completion_tail, serves):
+    """When the owner's committed generation serves the borrower's request, the launch builds nothing
+    of its own: it relaunches on the store interpreter, whose boot leases the owner's generation."""
+    import pm
+    from hermes_cli import _launchers
+
+    root = _checkout(tmp_path, monkeypatch)
+    facts = _state(tmp_path / ".hermes", root)
+    owner_facts = facts.read_bytes()
+    _home(monkeypatch, tmp_path / "tmp" / "borrowed")
+    syncs = []
+    python = tmp_path / ".hermes" / "tools" / "python" / "bin" / "python3"
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: bool(syncs))  # nothing of the borrower's own until it syncs
+    monkeypatch.setattr(venv_sync, "_owner_environment_serves", lambda r: serves)
+    monkeypatch.setattr(pm, "sync_venv", lambda extras=None, **kw: syncs.append(extras))
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _, **__: python)
+    monkeypatch.setattr(venv_sync, "publish_launchers", lambda *a, **kw: pytest.fail("published the owner's launchers"))
+
+    assert venv_sync.prepare_launch(root, ["config", "path"]) == python
+    assert len(syncs) == (0 if serves else 1)
+    if serves:
+        assert not install_state_dir(root).exists(), "the borrower built state of its own"
+    assert facts.read_bytes() == owner_facts, "a borrowing launch wrote the owner's facts"
+    assert completion_tail == []
+
+
+@pytest.mark.parametrize("own", [False, True])
+def test_a_served_borrowing_launch_hands_its_verdict_across_the_relaunch(tmp_path, monkeypatch, own):
+    """The relaunched store interpreter (same pid) trusts the verdict once: it repeats neither the
+    currency probe nor the owner check, and its runtime check reuses it. *own*: the borrower's own
+    generation is current; otherwise the owner's serves it."""
+    import pm
+    from hermes_cli import _launchers
+
+    root = _checkout(tmp_path, monkeypatch).resolve()
+    _state(tmp_path / ".hermes", root)
+    _home(monkeypatch, tmp_path / "tmp" / "borrowed")
+    python = tmp_path / ".hermes" / "tools" / "python" / "bin" / "python3"
+    probes: list[str] = []
+    monkeypatch.setattr(venv_sync, "_launch_currency", lambda r, command: probes.append("currency") or own)
+    monkeypatch.setattr(venv_sync, "_owner_environment_serves", lambda r: probes.append("borrowed") or True)
+    monkeypatch.setattr(pm, "sync_venv", lambda *a, **kw: pytest.fail("a served borrower synced"))
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _, **__: python)
+    monkeypatch.setattr(venv_sync, "_current_roots", set())
+    monkeypatch.delenv(venv_sync.LAUNCH_HANDOFF_ENV, raising=False)
+
+    assert venv_sync.prepare_launch(root, ["config", "path"]) == python
+    assert probes == (["currency"] if own else ["currency", "borrowed"])
+    handoff = venv_sync.launch_handoff_env()
+    assert handoff == {venv_sync.LAUNCH_HANDOFF_ENV: f"current:{os.getpid()}:{root}"}
+    assert root not in venv_sync._current_roots, "the launching interpreter is not the one that runs"
+
+    for name, value in handoff.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(sys, "executable", str(python))
+    probes.clear()
+    assert venv_sync.prepare_launch(root, ["config", "path"]) is None
+    assert probes == [], "the relaunched interpreter repeated its parent's checks"
+    assert venv_sync.LAUNCH_HANDOFF_ENV not in os.environ, "the handoff must not reach subprocesses"
+    assert venv_sync.launch_handoff_env() == {}
+    assert root in venv_sync._current_roots, "check_runtime would probe again"
+
+    # A later re-exec (the handoff was consumed) checks for itself again.
+    assert venv_sync.prepare_launch(root, ["config", "path"]) is None
+    assert probes == (["currency"] if own else ["currency", "borrowed"])
+
+
+def test_a_borrowing_launch_that_synced_its_own_hands_nothing_on(tmp_path, monkeypatch, completion_tail):
+    """As after the main path's sync, the relaunched child checks the fresh generation itself."""
+    import pm
+    from hermes_cli import _launchers
+
+    root = _checkout(tmp_path, monkeypatch).resolve()
+    _state(tmp_path / ".hermes", root)
+    _home(monkeypatch, tmp_path / "tmp" / "borrowed")
+    syncs = []
+    python = tmp_path / ".hermes" / "tools" / "python" / "bin" / "python3"
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: bool(syncs))
+    monkeypatch.setattr(venv_sync, "_owner_environment_serves", lambda r: False)
+    monkeypatch.setattr(pm, "sync_venv", lambda extras=None, **kw: syncs.append(extras))
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _, **__: python)
+    monkeypatch.setattr(venv_sync, "_current_roots", set())
+
+    assert venv_sync.prepare_launch(root, ["config", "path"]) == python
+    assert len(syncs) == 1
+    assert venv_sync.launch_handoff_env() == {}
+    assert root not in venv_sync._current_roots
+
+
+def test_the_owner_check_needs_an_owner_generation_before_probing(tmp_path, monkeypatch):
+    """No generation named in the owner's facts: no probe, the borrower syncs its own."""
+    from hermes_cli import launch_probe
+
+    root = _checkout(tmp_path, monkeypatch)
+    _state(tmp_path / ".hermes", root)  # a record naming no environment
+    _home(monkeypatch, tmp_path / "tmp" / "borrowed")
+    monkeypatch.setattr(launch_probe, "probe", lambda *a, **kw: pytest.fail("probed with no owner generation"))
+    assert venv_sync._owner_environment_serves(root) is False
+
+
 def test_temp_home_relaunch_imports_hermes_state_without_dropping_venv_deps(tmp_path):
     """A venv-launched script under a temp HERMES_HOME re-enters on a bare interpreter.
 

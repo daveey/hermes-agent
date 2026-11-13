@@ -29,6 +29,21 @@ Protected background work keeps its poller but releases the idle writer lease. R
 A chat mid-turn refuses the row (``SessionTurnLeaseLostError``): that is "busy, try later", so the claim is rewound
 with one INFO line and the next pass retries; a notice still stalled after ``OVERDUE_S`` logs one WARNING per card
 and chat with the reason (kanban-e5babca565).
+
+Host loop lease (design t_01a1d45d75851804 §2b). Every gateway, Desktop ``serve`` and dashboard process starts this
+loop, and the sweeps are host-wide work (the cursor CAS made N racers exactly-once, at N times the CPU). The loop now
+runs its HOST pass (remote and local sweeps, delegation and guarantee for every chat, the card-change fan-out, the
+killed-subagent retry over every profile store) only while it holds the ``kanban-unloaded`` lease
+(``hermes_cli.host_loop_lease``: gateway > serve > dashboard, ``lease.beat()`` after each pass). Every other process
+runs a RESIDUAL pass for the chats it holds itself (``live_session_ids()``): the delegation and guarantee passes
+skip a chat another backend holds (``skipped:held``), so those deliveries must come from the holding process. The
+holder starts up to ``wake_slots.HOLDER_SLOTS`` (8) wakes per pass kind instead of 2; when they are all busy, the
+claim is rewound and the next pass retries (``deferred:slots``) instead of writing a passive row, until the notice
+is ``OVERDUE_S`` old (then the row is written, as before). The per-chat wake budget
+(``HERMES_KANBAN_UNLOADED_WAKES_PER_HOUR``) is counted by the holder, so it is now in effect host-wide; a hand-off
+starts it afresh. ``HERMES_HOST_LOOP_LEASE=0`` restores the per-process passes (every process its own host pass,
+with its base wake slots and the killed-subagent retry over its own store only); a lease that failed open does the
+same, since ``held()`` is then True in every process (``lease.exclusive()`` is False).
 [daveey]
 """
 
@@ -43,20 +58,25 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from tui_gateway import wake_slots
+
 logger = logging.getLogger(__name__)
 
 GRACE_S = 30.0
 INTERVAL_S = 30.0
 FIRST_RUN_DELAY_S = 20.0
+LEASE_NAME = "kanban-unloaded"
 
 WAKES_PER_HOUR = 4
 MAX_PARALLEL_WAKES = 2
+SLOTS_DEFERRED = "deferred:slots"
 
 _sweeper_started = False
 _sweeper_lock = threading.Lock()
 _wake_lock = threading.Lock()
 _wake_times: dict[str, list[float]] = {}  # chat -> recent started wakes (this process)
-_wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
+_wake_slots = wake_slots.WakeSlots(MAX_PARALLEL_WAKES)
+_slot_waits: dict[tuple, float] = {}  # remote notice -> when slots first refused it (this process)
 
 # A chat mid-turn refuses notice rows (SessionTurnLeaseLostError): a normal "busy, try later", not a failure.
 # Each claim that had to be rewound records why; a notice still waiting OVERDUE_S after its event logs ONE warning
@@ -437,6 +457,15 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 # event-id identity shared with the live poller: a notice it already wrote is not written twice
                 "kanban_event_keys": [f"{slug}:{int(e.id)}" for e in claimed if fmt(sub, task, e, slug)]}
     held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s)
+    if verdict == "skipped:slots" and _slots_may_wait(claimed, now):
+        # Every wake slot is busy: hand the range back so the next pass wakes the chat, instead of a passive row
+        # that no turn reads (design t_01a1d45d75851804 R4). An OVERDUE_S-old notice gets its row as before.
+        with contextlib.suppress(Exception):
+            _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+        if _note_stall(_stall_key(slug, ident), "every wake slot is busy"):
+            logger.info("kanban notice for %s/%s to chat %s deferred: every wake slot is busy; retrying next pass",
+                        slug, ident["task_id"], tip)
+        return None
     persisted = True
     if verdict is None:  # a worker slot is ours: the job wakes, or writes the row itself
         try:
@@ -459,6 +488,27 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 tip, slug, ident["task_id"], len(texts), verdict)
     return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
             "texts": texts, "woken": verdict == "started", "wake_result": verdict, "held_by": held_by}
+
+
+def _slots_may_wait(events: list, now: float) -> bool:
+    """A notice refused a wake slot waits for the next pass unless its oldest event is ``OVERDUE_S`` old."""
+    try:
+        oldest = min(float(getattr(e, "created_at", 0) or 0) for e in events)
+    except ValueError:
+        return False
+    return now - oldest < OVERDUE_S
+
+
+def _slot_wait_ok(key: tuple, now: float) -> bool:
+    """A remote notice refused a wake slot may wait for the next pass until ``OVERDUE_S`` after its first refusal."""
+    with _wake_lock:
+        if len(_slot_waits) > 5000:
+            _slot_waits.clear()
+        first = _slot_waits.setdefault(key, now)
+        if now - first < OVERDUE_S:
+            return True
+        _slot_waits.pop(key, None)
+        return False
 
 
 def _undelivered(db, tip, slug, claimed: list) -> list:
@@ -553,13 +603,18 @@ class _RemoteWaker:
     Before, the remote sweep only wrote the row: on 2026-10-29 two hub cards' notices sat as rows in an idle
     David-MBP chat for 2 h and 3.5 h, until a local card's wake ran a turn that finally read them."""
 
+    supports_defer = True  # callers pass ``defer=`` (test fakes without it keep the two-callback shape)
+
     def __init__(self, wake: Callable[[str, str, dict], str], spawn: Callable[[Callable[[], str]], str],
                  grace_s: float) -> None:
         self.wake, self.spawn, self.grace_s = wake, spawn, grace_s
 
     def deliver(self, tip: str, text: str, metadata: dict, task: dict, now: float, *,
-                persist: Callable[[], bool], started: Callable[[], None]) -> str:
-        """Start one turn with ``text`` in ``tip``, else ``persist()`` the row. Returns the verdict. Never raises."""
+                persist: Callable[[], bool], started: Callable[[], None],
+                defer: Optional[Callable[[], Any]] = None) -> str:
+        """Start one turn with ``text`` in ``tip``, else ``persist()`` the row. Returns the verdict. Never raises.
+        With every wake slot busy, ``defer()`` hands the claim back for the next pass instead of the row, until the
+        notice has waited ``OVERDUE_S`` for a slot (design t_01a1d45d75851804 R4)."""
         try:
             from types import SimpleNamespace
             view = SimpleNamespace(status=task.get("status"), human_request=task.get("human_request"),
@@ -572,8 +627,13 @@ class _RemoteWaker:
             persist()
             return skip
         if not _wake_slots.acquire(blocking=False):
+            if defer is not None and _slot_wait_ok((tip, metadata.get("notice_id") or text), now):
+                with contextlib.suppress(Exception):
+                    defer()
+                return SLOTS_DEFERRED
             persist()
             return "skipped:slots"
+        _slot_waits.pop((tip, metadata.get("notice_id") or text), None)
 
         def job() -> str:
             try:
@@ -612,34 +672,96 @@ def sweep_remote_once(live_ids: set[str], *, grace_s: float = GRACE_S, **kwargs)
     return sweep_remote_notices(live_ids=live_ids, waker=_RemoteWaker(wake_turn, _spawn_thread, grace_s), **kwargs)
 
 
-def _loop(stop: threading.Event) -> None:
-    interval = max(1.0, _env_float("HERMES_KANBAN_UNLOADED_SWEEP_S", INTERVAL_S))
-    grace = _env_float("HERMES_KANBAN_UNLOADED_GRACE_S", GRACE_S)
-    stop.wait(_env_float("HERMES_KANBAN_UNLOADED_FIRST_S", FIRST_RUN_DELAY_S))
-    while not stop.is_set():
-        try:
-            sweep_remote_once(live_session_ids(), grace_s=grace)
-            sweep_once(live_session_ids(), grace_s=grace)
-        except Exception:
-            logger.warning("kanban unloaded sweep failed", exc_info=True)
-        # [daveey] Async-delegation results no live poller delivers (parent unloaded, loaded headless, or held by
-        # another backend than the copy's): one turn in the parent, ledger-claimed (delegation_unloaded).
-        try:
-            from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
-            delegation_sweep_once()
-        except Exception:
-            logger.warning("async delegation unloaded sweep failed", exc_info=True)
-        # [daveey] Session outcome: refresh chats whose cards moved, then make sure no notice ends a chat unanswered.
-        from tui_gateway.notice_fanout import card_change_pass
-        from tui_gateway.notice_guarantee import guarantee_pass
-        card_change_pass()
-        # [daveey] A parent that was mid-turn when the orphan reap killed its subagent refused that notice: re-offer
-        # it before the guarantee pass, so the same tick can wake the parent on it (desktop-ac1b365935).
+def host_pass(grace: float = GRACE_S, *, every_store: bool = True) -> None:
+    """Everything this loop does for the whole install; run by the ``kanban-unloaded`` lease holder only.
+    ``every_store=False`` (kill switch, lease failed open: every process runs this) retries killed-subagent
+    notices in this process's own store only."""
+    try:
+        sweep_remote_once(live_session_ids(), grace_s=grace)
+        sweep_once(live_session_ids(), grace_s=grace)
+    except Exception:
+        logger.warning("kanban unloaded sweep failed", exc_info=True)
+    # [daveey] Async-delegation results no live poller delivers (parent unloaded, loaded headless, or held by
+    # another backend than the copy's): one turn in the parent, ledger-claimed (delegation_unloaded).
+    try:
+        from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
+        delegation_sweep_once()
+    except Exception:
+        logger.warning("async delegation unloaded sweep failed", exc_info=True)
+    # [daveey] Session outcome: refresh chats whose cards moved, then make sure no notice ends a chat unanswered.
+    from tui_gateway.notice_fanout import card_change_pass
+    from tui_gateway.notice_guarantee import guarantee_pass
+    card_change_pass()
+    # [daveey] A parent that was mid-turn when the orphan reap killed its subagent refused that notice: re-offer
+    # it before the guarantee pass, so the same tick can wake the parent on it (desktop-ac1b365935). Every
+    # profile store, since one holder now retries for the whole install; without a real lease each process
+    # retries its own store, as before the lease.
+    if every_store:
+        from tui_gateway.reap_notices import retry_pending_killed_notices_all
+        retry_pending_killed_notices_all()
+    else:
         from tui_gateway import server
         from tui_gateway.reap_notices import retry_pending_killed_notices
         retry_pending_killed_notices(server._get_db())
-        guarantee_pass()
-        stop.wait(interval)
+    guarantee_pass()
+
+
+def residual_pass() -> None:
+    """A standby's pass for the chats it holds itself: the delegation and guarantee passes skip a chat another
+    backend holds (``skipped:held``), so the holder never delivers those. Nothing to do without live chats."""
+    live = live_session_ids()
+    if not live:
+        return
+    try:
+        from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
+        delegation_sweep_once(only=live)
+    except Exception:
+        logger.warning("async delegation residual sweep failed", exc_info=True)
+    from tui_gateway.notice_guarantee import guarantee_pass
+    guarantee_pass(only=live)
+
+
+def make_lease():
+    """This process's ``kanban-unloaded`` lease (role from its process kind)."""
+    from hermes_cli.host_loop_lease import HostLoopLease, process_role
+    interval = max(1.0, _env_float("HERMES_KANBAN_UNLOADED_SWEEP_S", INTERVAL_S))
+    return HostLoopLease(LEASE_NAME, process_role(), interval=interval)
+
+
+def run_pass(lease, grace: float = GRACE_S) -> str:
+    """One tick: the host pass while ``lease`` is held (then ``beat()``, also when the pass raises, so the
+    watchdog keeps the lease and a ``.want`` hand-off still happens), else the residual pass. Returns which.
+
+    Only a lease really held (``exclusive()``: not the kill switch, not failed open) gets the holder's wake
+    slots and retries killed-subagent notices in every profile store; a process that runs the host pass only
+    because every process does keeps its base slots and its own store, as before the lease."""
+    holder = lease.held()
+    exclusive = holder and lease.exclusive()
+    wake_slots.set_holder(exclusive)
+    if holder:
+        try:
+            host_pass(grace, every_store=exclusive)
+        finally:
+            lease.beat()
+        return "host"
+    residual_pass()
+    return "residual"
+
+
+def _loop(stop: threading.Event) -> None:
+    interval = max(1.0, _env_float("HERMES_KANBAN_UNLOADED_SWEEP_S", INTERVAL_S))
+    grace = _env_float("HERMES_KANBAN_UNLOADED_GRACE_S", GRACE_S)
+    lease = make_lease()
+    stop.wait(_env_float("HERMES_KANBAN_UNLOADED_FIRST_S", FIRST_RUN_DELAY_S))
+    try:
+        while not stop.is_set():
+            try:
+                run_pass(lease, grace)
+            except Exception:
+                logger.warning("kanban unloaded pass failed", exc_info=True)
+            stop.wait(interval)
+    finally:
+        lease.release()
 
 
 def start_kanban_unloaded_sweeper() -> Optional[threading.Event]:

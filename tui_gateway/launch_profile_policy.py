@@ -123,12 +123,16 @@ def _launch_env() -> dict[str, str]:
 
 
 def launch_terminal_env() -> dict[str, str]:
-    """The frozen launch ``TERMINAL_*`` overlay for a launch-profile turn's terminal scope.
+    """The launch ``TERMINAL_*`` overlay for a launch-profile turn's terminal scope: frozen once
+    multiplexing is active, the live process env before (``_launch_env``).
 
-    Production always captured at activation; a first capture here only happens when the
-    multiplexer flag was set by another owner (the messaging gateway) or a harness.
+    [daveey] A single-profile process that binds or validates its own profile before any
+    activation (``_bind_whole_profile``, the kanban ``requires`` check) must not freeze the
+    process-wide snapshot here: it would miss what the launch process still bridges at startup.
+    Once multiplexing is active, production captured at activation; a first capture here only
+    happens when the flag was set by another owner (the messaging gateway) or a harness.
     """
-    return {k: v for k, v in capture_launch_env().items() if k.startswith("TERMINAL_")}
+    return {k: v for k, v in _launch_env().items() if k.startswith("TERMINAL_")}
 
 
 def launch_secret_scope(launch_home: str | Path) -> dict[str, str]:
@@ -186,9 +190,10 @@ def launch_body() -> Iterator[None]:
 @contextlib.contextmanager
 def launch_profile_runtime_scope(launch_home: str | Path) -> Iterator[None]:
     """Bind the launch profile's own runtime scope for one body: HERMES_HOME override naming the
-    launch home, ``launch_secret_scope``, and its terminal policy over the frozen launch
-    ``TERMINAL_*`` overlay. For hosts whose launch-profile bodies are not RPC sessions (the
-    standalone messaging gateway after a hosted room activated multiplexing, #112878).
+    launch home, ``launch_secret_scope``, and its terminal policy over the launch
+    ``TERMINAL_*`` overlay (frozen once multiplexing is active, the live env before). For hosts
+    whose launch-profile bodies are not RPC sessions (the standalone messaging gateway after a
+    hosted room activated multiplexing, #112878).
 
     The home override is bound even though the launch home IS the process home: under multiplexing
     "override unset" is the fail-closed signal for an UNBOUND context (``serves_routed_profile``,
@@ -199,7 +204,7 @@ def launch_profile_runtime_scope(launch_home: str | Path) -> Iterator[None]:
     from agent.runtime_scope import bind_state, scope_for_profile
 
     home = Path(launch_home)
-    # Own home: secrets unstamped (no foreign-home stamp), terminal policy over the frozen overlay.
+    # Own home: secrets unstamped (no foreign-home stamp), terminal policy over the launch overlay.
     tokens = bind_state(scope_for_profile(home), secrets=launch_secret_scope(home), stamp_home=False,
                         env_overlay=launch_terminal_env())
     try:
@@ -214,11 +219,14 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
 
     The launch home (``launch_home``, default ``get_process_hermes_home()``) gets its launch secret
     scope with no home override or terminal scope (an enclosing secondary's are unbound for the
-    body), or the full :func:`launch_profile_runtime_scope` once the process multiplexes. Any other
+    body), or the full :func:`launch_profile_runtime_scope` once the process multiplexes. Inside a
+    bound scope (which refuses those unbinds) it binds the launch profile's whole scope. Any other
     home gets only its own files, stamped as foreign. No external-source hydration.
     """
+    from agent.runtime_scope import bind_state, scope_for_profile
     from agent.secret_scope import build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope
     from hermes_constants import get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from hermes_scope import current_scope
     from tools.terminal_scope import install_profile_terminal_scope, reset_terminal_scope, set_terminal_scope
 
     home = Path(home)
@@ -227,6 +235,13 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
         if home.resolve() == launch.resolve():
             if is_multiplex_active():
                 stack.enter_context(launch_profile_runtime_scope(launch))
+            elif current_scope() is not None:
+                # A bound scope (kanban dispatch, a scoped turn) refuses the unbinds below: bind the
+                # launch profile whole instead, from the LIVE env (single-profile: freezing it here
+                # would capture it before activation, see ``launch_terminal_env``).
+                stack.enter_context(bind_state(
+                    scope_for_profile(launch), secrets=launch_secret_scope(launch), stamp_home=False,
+                    env_overlay=launch_terminal_env()))
             else:
                 # Unbind an enclosing secondary's home and terminal, or the launch secrets would
                 # pair with that profile's config. Unset resolves to the process home, which is the

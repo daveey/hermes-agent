@@ -10623,6 +10623,18 @@
             ],
             "default": null
           },
+          "inventory_pending": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Inventory Pending"
+          },
           "source": {
             "title": "Source",
             "type": "string"
@@ -11506,6 +11518,18 @@
               }
             ],
             "default": null
+          },
+          "inventory_pending": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Inventory Pending"
           },
           "desktop_protocol": {
             "const": "hermes-gateway-v1",

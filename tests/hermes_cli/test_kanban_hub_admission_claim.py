@@ -121,6 +121,40 @@ def test_a_denied_card_that_must_stay_is_claimed_and_kept_recorded(gws, hub_judg
     assert _events(hub.conn, tid, "moved") == []
 
 
+def _recovered(svc, tid):
+    return [body for kind, _board, body in svc.calls if kind == "recover" and body["task_id"] == tid]
+
+
+@pytest.mark.parametrize("admit", [False, True])
+def test_promotion_keeps_a_card_with_a_hub_local_wake_check_on_the_hub(gws, hub_judge, admit):
+    """The Board serves recover(mode=promote): the sync round's reevaluate reaches the legacy-routed card before
+    the claim screen does, and must apply the screen's keep reasons (t_01a1d4125c1130dc)."""
+    hub, _worker, svc = gws
+    hub_judge.admit_next = admit
+    tid = _hub_card(hub)
+    with kb.write_txn(hub.conn):
+        kb._append_event(hub.conn, tid, "scheduled", {"wake_check": "test -f ~/.hermes/cache/ready.flag"})
+    hub.round()  # push: the Board acks the hub-created card
+    _tick(hub)  # the feed echo stamps created_on, so this round's reevaluate sees it; then the claim screen
+    assert _recovered(svc, tid) == [] and _events(hub.conn, tid, "moved") == []
+    assert _holder(svc, tid) == HUB
+    [verdict] = _events(hub.conn, tid, "hub_admission")
+    assert verdict["admit"] is admit and verdict.get("kept") == (None if admit else "wake_check reads a hub-local path")
+
+
+def test_promotion_still_moves_a_portable_hub_card_to_the_pool(gws, hub_judge):
+    hub, _worker, svc = gws
+    tid = _hub_card(hub)
+    hub.round()
+    hub.round()  # the echo stamps created_on; reevaluate promotes, and the feed carries the Board's placement
+    assert [b["mode"] for b in _recovered(svc, tid)] == ["promote"]
+    assert json.loads(svc.board(BOARD)["rows"]["tasks"][tid]["runs_on"]) == [f"machine:{WORKER}"]
+    hub.tick()
+    assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]) == [
+        f"machine:{WORKER}"]  # the round's feed pull applied the Board's placement
+    assert _holder(svc, tid) != HUB and hub_judge.calls == []  # labelled: never screened, never claimed here
+
+
 @pytest.mark.parametrize("probe", ["git -C ~/code/hermes merge-base --is-ancestor abc HEAD",
                                    "gh api repos/o/r/tags --jq '.[].name' | grep -q v2"])
 def test_a_portable_wake_check_does_not_keep_a_denied_card(gws, hub_judge, probe):
@@ -347,6 +381,68 @@ def test_screen_reports_deferred_ids(gws, hub_judge):
     assert len(hub_judge.calls) == 1 and counts.judged == 1
     assert counts.deferred == 2 and counts.deferred_ids == frozenset(tids[1:])
     assert "deferred=2" in counts.line()
+    assert all(tid in counts.line() for tid in tids[1:]) and tids[0] not in counts.line()
+
+
+def test_deferred_ids_appear_in_the_dispatch_result(gws, hub_judge, monkeypatch, caplog):
+    """A card deferred every tick (kept edited, or a long backlog) must be visible in the tick's diagnostics:
+    ``lane_candidates`` leaves it out, so the result and the log line name it (review of #1811)."""
+    from hermes_cli.kanban_db_dispatch_stuck import held_cards
+    hub, _worker, _svc = gws
+    _no_board_promotion(monkeypatch)
+    tids = [_hub_card(hub, title=f"backlog card {i}") for i in range(hac.MAX_JUDGED_PER_TICK + 2)]
+    with caplog.at_level(logging.INFO, logger=hac.__name__):
+        result = _tick(hub)
+    deferred = [tid for tid in tids if not _events(hub.conn, tid, "hub_admission")]
+    assert len(deferred) == 2 and sorted(result.admission_deferred) == sorted(deferred)
+    assert all(f"{tid}=admission_deferred" in held_cards([result]) for tid in deferred)
+    [line] = [r.getMessage() for r in caplog.records if "claim screen" in r.getMessage()]
+    assert "deferred=2" in line and all(tid in line for tid in deferred)
+    assert _tick(hub).admission_deferred == []  # judged on the next tick: nothing left deferred
+
+
+def test_print_deferred_names_the_cards(capsys):
+    hac.print_deferred([])
+    assert capsys.readouterr().out == ""
+    hac.print_deferred(["t_a", "t_b"])
+    assert capsys.readouterr().out == "Deferred by the hub claim screen (unjudged, judged next tick): t_a, t_b\n"
+
+
+def test_a_write_to_a_later_card_during_an_earlier_judge_call_does_not_defer_it(gws, hub_judge, monkeypatch):
+    """Each card's row is read when its turn comes, not once before the first judge call: a write to card 2
+    during card 1's (up to 30 s) call no longer makes ``_apply`` defer card 2 and waste its judge call."""
+    hub, _worker, _svc = gws
+    first, second = _hub_card(hub, title="card 1"), _hub_card(hub, title="card 2")
+    fake = judge.admit
+
+    def write_card_2_during_card_1(card, hub_reason=None):
+        if not hub_judge.calls:
+            hub.conn.execute("UPDATE tasks SET body = 'edited before its turn' WHERE id = ?", (second,))
+            hub.conn.commit()
+        return fake(card, hub_reason=hub_reason)
+    monkeypatch.setattr(judge, "admit", write_card_2_during_card_1)
+    hub.enter()
+    counts = hac.screen(hub.conn)
+    assert counts.deferred == 0 and counts.judged == 2
+    assert [c["card"]["body"] for c in hub_judge.calls] == ["Portable repo work: edit, test, PR.",
+                                                            "edited before its turn"]
+    assert _events(hub.conn, first, "hub_admission") and _events(hub.conn, second, "hub_admission")
+
+
+def test_a_later_card_that_stops_being_screenable_is_not_judged(gws, hub_judge, monkeypatch):
+    hub, _worker, _svc = gws
+    _first, second = _hub_card(hub, title="card 1"), _hub_card(hub, title="card 2")
+    fake = judge.admit
+
+    def label_card_2_during_card_1(card, hub_reason=None):
+        hub.conn.execute("UPDATE tasks SET runs_on = '[\"linux\"]' WHERE id = ?", (second,))
+        hub.conn.commit()
+        return fake(card, hub_reason=hub_reason)
+    monkeypatch.setattr(judge, "admit", label_card_2_during_card_1)
+    hub.enter()
+    counts = hac.screen(hub.conn)
+    assert [c["card"]["title"] for c in hub_judge.calls] == ["card 1"]
+    assert counts.judged == 1 and counts.deferred == 0 and _events(hub.conn, second, "hub_admission") == []
 
 
 def test_the_judge_budget_follows_dispatch_priority_not_creation_order(gws, hub_judge):

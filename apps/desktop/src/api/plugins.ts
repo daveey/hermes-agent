@@ -50,6 +50,10 @@ export interface PluginRestOptions {
   timeoutMs?: number
   /** Read an already-running backend without starting one for a background probe. */
   passive?: boolean
+  /** [daveey] A read the user asked for just now (opening a detail view), not a timer poll: Desktop never thins,
+   *  holds or skips a 'foreground' request, while an untagged plugin GET may be skipped as a background poll on
+   *  a slow link or after wake (electron/slow-link.ts, power-settle.ts). Interval refetches stay untagged. */
+  priority?: 'foreground'
   /** [daveey] Send this call to ONE registry connection (its id) instead of
    *  the active gateway — for plugins that read every gateway at once (the
    *  Kanban board). The ambient profile is NOT carried: a profile name belongs
@@ -95,7 +99,8 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
     timeoutMs: opts.timeoutMs,
     ...(opts.passive ? { passive: true } : {}),
     ...(opts.connectionId ? { connectionId: opts.connectionId } : {}),
-    ...(opts.profile !== undefined ? profileScoped(opts.profile) : opts.connectionId ? {} : profileScoped())
+    ...(opts.profile !== undefined ? profileScoped(opts.profile) : opts.connectionId ? {} : profileScoped()),
+    ...(opts.priority === 'foreground' ? { priority: 'foreground' as const } : {})
   })
 }
 

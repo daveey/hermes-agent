@@ -246,7 +246,7 @@ def _execute(tmp_path, monkeypatch, events, context, *, start=None, agent_error=
     monkeypatch.setattr('agent.runtime_session_store.WorkerRPC', RPC)
     monkeypatch.setattr('agent.runtime_session_store.RuntimeSessionStore', Store)
     monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint',
-                        lambda: events.append('recover'))
+                        lambda **_k: events.append('recover'))
     monkeypatch.setattr('run_agent.AIAgent', Agent)
     monkeypatch.setattr('tools.capsule_workspace.bind_worker_workspace', bind_workspace)
     # In-process the socketpair's creator is this pid, not an ancestor; the real ancestry check is

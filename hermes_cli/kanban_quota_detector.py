@@ -23,7 +23,13 @@ import sqlite3
 import time
 from contextlib import closing
 
+try:
+    import fcntl as _fcntl
+except ImportError:  # Windows: drain_owner skips (see there)
+    _fcntl = None
+
 log = logging.getLogger(__name__)
+_NO_FLOCK_LOGGED = False
 WINDOW_SECONDS = 1800
 THRESHOLD = 3
 _ID = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
@@ -175,10 +181,18 @@ def drain_owner(conn, *, detector=None, writer=None):
         det = detector or Detector(default_path())
         if not det.pending():
             return 0
-        import fcntl  # one drainer at a time: create_task's idempotency check is not atomic
+        if _fcntl is None:
+            # No flock (Windows): one owner-side drainer cannot be guaranteed, and create_task's
+            # idempotency check is not atomic. Keep the reports pending rather than warn every tick.
+            global _NO_FLOCK_LOGGED
+            if not _NO_FLOCK_LOGGED:
+                _NO_FLOCK_LOGGED = True
+                log.debug('quota contradiction drain skipped: no fcntl.flock on this platform')
+            return 0
+        # one drainer at a time: create_task's idempotency check is not atomic
         with open(str(det.path) + '.drain.lock', 'ab') as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _fcntl.flock(lock, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
             except OSError:
                 return 0
             return det.deliver(lambda r: (writer or create_or_comment)(conn, r))

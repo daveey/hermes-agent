@@ -149,6 +149,16 @@ launch profile's wrapper. `gh` is resolved on the child PATH, then in `~/bin` an
 `~/.local/bin`; a missing CLI or invalid wrapper setting is a `setup` rejection,
 not a transient infrastructure failure.
 
+The dispatcher's own GitHub reads use the same setting from the **dispatcher's
+home** (the home whose dispatcher ticks the board), not the assignee's: the
+PR-state read that releases cards held on an active PR, and the CI-run progress
+sweep that wakes a card parked (`awaiting` kind `ci`) on a GitHub Actions run
+that no runner is picking up. Configure the prefix there too when that home's
+`gh` has no ambient login (a hub or service host), or those reads fail open:
+merged-PR holds wait out their cap, and the CI-run check is disabled with an
+hourly `no credential` WARNING per home and board (`gh not installed` when the
+CLI itself is missing, which no prefix fixes).
+
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
 store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
 instructions; `last_failure_error` surfaces the next step. Fix failures, rerun
@@ -683,6 +693,35 @@ or set `kanban.dispatch_profiles` per home to declare exactly which assignees
 that home may claim — anything else lands in the dispatcher's
 `skipped_nonspawnable` bucket instead of spawning, and no longer counts as
 spawnable work for the gateway's wake-up probe.
+
+### Portable worktree sources (`kanban.workspace_source`, preview)
+
+A synced board can move a branch-backed card between machines: the Board keeps a
+manifest (`repository`, `branch`, exact `commit`) and custody (`source_holder`,
+`state`), and a machine that picks the card up materializes that exact branch
+and commit in a dedicated registered clone. This release ships the client half
+**inert**: setting `enabled: true` logs a warning and is ignored until the
+publish protocol lands.
+
+```yaml
+kanban:
+  workspace_source:
+    enabled: false            # ignored (warns) until the protocol is complete
+    clones:                   # GitHub "owner/name" -> absolute path of a dedicated clone
+      acme/widget: /home/me/code/_src/widget
+    publish_on_park: true     # push the task branch when a run parks or ends
+    push_timeout_s: 30
+    preflight_timeout_s: null    # null = push_timeout_s + 30
+    materialize_timeout_s: null  # null = claim ttl / 3 - 30 s
+```
+
+A clone is proven before it is used or attested to the Board: its root, a
+GitHub `origin` with no `pushurl` or `url.*` rewrite, a reachable remote, and a
+GitHub repository id (cached 6 h per home) that matches the manifest. A host
+that cannot materialize a card (wrong or dirty clone, occupied path, timeout)
+releases it without a failure and skips that manifest revision; a source that
+moved or vanished blocks the card for a person. On such cards
+`workspace_kind` and `branch_name` cannot be changed (`source_fenced`).
 
 ### Idempotent create (for automation / webhooks)
 
@@ -1336,6 +1375,12 @@ Worktree GC also covers done, failed, and cancelled tasks. After
 worktrees may be removed even with unpushed commits: their HEAD and history are
 first retained in the repository at `refs/hermes/kanban-archive/<task-id>/<commit>`.
 Zero disables this age-based archival; legacy clean, fully-pushed cleanup remains.
+For a sub-day window set `kanban.worktree_retention_hours` to a non-negative number
+of hours (fractions allowed, e.g. `3` or `1.5`); when set it takes precedence over
+`worktree_retention_days`, and `0` disables age-based archival. Unset or `null` (the
+default) keeps the days behaviour. An invalid value (a boolean, a string, NaN,
+infinity or a negative number) disables age-based archival and logs a warning; it
+never falls back to the days key. Remove the key to return to the days window.
 Dirty trees, locked trees, active tasks, active children and live shared workspaces
 are preserved. Custom branches remain; generated `wt/` branches are pruned only
 when their tip still matches the archived commit.

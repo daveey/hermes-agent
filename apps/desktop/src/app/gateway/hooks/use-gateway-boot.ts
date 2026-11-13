@@ -110,6 +110,8 @@ import {
 import { warnIfTerminalBackendUnavailable } from '@/store/terminal-backend-warning'
 import { isPeerInstanceWindow, windowProfileOverride } from '@/store/windows'
 
+import { isRemoteUpdatePausedBootError, RemoteUpdateWait } from '../remote-update-wait'
+
 import { stashGatewaySurvivor, survivorIsStale, takeGatewaySurvivor } from './gateway-hmr-survivor'
 import { notifyPrimaryReauth } from './primary-reauth-notice'
 import { useConnectionsRegistry } from './use-connections-registry'
@@ -440,6 +442,7 @@ export function useGatewayBoot({
     // Bounded automatic boot retry for transient REMOTE failures (#82679).
     let bootRetryAttempt = 0
     let bootRetryTimer: ReturnType<typeof setTimeout> | null = null
+    const remoteUpdateWait = new RemoteUpdateWait()
 
     const clearBootRetryTimer = () => {
       if (bootRetryTimer !== null) {
@@ -893,6 +896,7 @@ export function useGatewayBoot({
         clearLivenessReprobeTimer()
         livenessProbeFailures = 0
         bootRetryAttempt = 0
+        remoteUpdateWait.reset()
         resetReconnectBackoff()
         reauthNotified = false
         primaryReauthError = null
@@ -1754,6 +1758,7 @@ export function useGatewayBoot({
         completeDesktopBoot()
         bootCompleted = true
         bootRetryAttempt = 0
+        remoteUpdateWait.reset()
         // A drop before bootCompleted was not redialed by the close handler.
         scheduleReconnect()
         // A Docker/SSH terminal backend that fails its probe means shell
@@ -1763,6 +1768,26 @@ export function useGatewayBoot({
       } catch (err) {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : String(err)
+          // [daveey] A remote's own update pauses SSH startup: poll past the bounded budget until it exits.
+          const updatePaused = isRemoteUpdatePausedBootError(err)
+          const updateDelay = updatePaused ? remoteUpdateWait.next() : null
+
+          if (updateDelay !== null) {
+            bootFailed = false
+            resumeDesktopBootForRetry(translateNow('boot.steps.waitingForRemoteUpdate'))
+            clearBootRetryTimer()
+            bootRetryTimer = setTimeout(() => {
+              bootRetryTimer = null
+              void boot()
+            }, updateDelay)
+
+            return
+          }
+
+          // Past the cap the wait stays spent, so the bounded retries below cannot restart a 30 min wait.
+          if (!updatePaused) {
+            remoteUpdateWait.reset()
+          }
 
           // Main's classification (#82679) still decides every failure it can
           // see. The one it cannot see is the renderer-owned WebSocket dial:

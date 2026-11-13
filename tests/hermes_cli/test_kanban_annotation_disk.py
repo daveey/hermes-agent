@@ -58,6 +58,20 @@ def test_old_other_scope_or_corrupt_copy_is_no_copy(copy_on):
     assert disk.load(SCOPE) is None
 
 
+def test_a_version_1_copy_is_ignored(copy_on):
+    """A version 1 copy may hold lists and dicts bare (before PR #2200) or wrapped as ``{"l"}``/``{"d"}``: the
+    bumped version makes each core ignore the other's encoding instead of seeding wrappers as data (review nit 3)."""
+    parts = _parts()
+    assert disk.save(SCOPE, parts) and disk.save_host(SCOPE, "f" * 64, time.time(), parts)
+    for path in (disk._path(SCOPE), disk._path(SCOPE).with_suffix(".host.json")):
+        body = json.loads(path.read_text(encoding="utf-8"))
+        assert body["version"] == disk._VERSION != 1
+        body["version"] = 1
+        path.write_text(json.dumps(body), encoding="utf-8")
+    assert disk.load(SCOPE) is None
+    assert disk.load_host(SCOPE) is None
+
+
 def test_off_under_the_test_harness_by_default(monkeypatch, copy_on):
     monkeypatch.setattr(disk, "FORCE", False)
     assert not disk.save(SCOPE, _parts())

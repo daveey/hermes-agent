@@ -163,5 +163,8 @@ class SweepBatches:
         if self.waker is None:
             result = "persisted" if persist() else "deferred"
         else:
-            result = self.waker.deliver(tip, text, metadata, rep[3], self.now, persist=persist, started=started)
+            extra = ({"defer": partial(release_undelivered, [e[0] for e in entries], self.ledger)}
+                     if getattr(self.waker, "supports_defer", False) else {})
+            result = self.waker.deliver(tip, text, metadata, rep[3], self.now, persist=persist, started=started,
+                                        **extra)
         return {"task_id": rep[3]["id"], "session_id": tip, "wake": result}

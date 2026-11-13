@@ -63,10 +63,22 @@ def test_resolver_roundtrips_addresses_without_network():
     assert all(row[0] == socket.AF_INET and row[4] == ('127.0.0.1', 443) for row in rows)
 
 
-def test_resolver_failure_is_closed_and_reaped(monkeypatch):
+@pytest.mark.parametrize('child_exits_first', [False, True])
+def test_resolver_failure_is_closed_and_reaped(monkeypatch, child_exits_first):
     import asyncio
 
     monkeypatch.setattr(recovery, '_DNS_SCRIPT', 'import sys; sys.exit(1)')
+    if child_exits_first:
+        # A starved parent can be scheduled after the child has already exited:
+        # writing the request then hits EPIPE. Force that ordering deterministically.
+        real_popen = subprocess.Popen
+
+        def exited_popen(*args, **kw):
+            process = real_popen(*args, **kw)
+            process.wait(timeout=30)
+            return process
+
+        monkeypatch.setattr(subprocess, 'Popen', exited_popen)
     with pytest.raises(OSError, match='DNS resolution failed'):
         asyncio.run(recovery._getaddrinfo('unused.invalid', 443))
 
@@ -92,3 +104,59 @@ def test_resolver_explicit_reap_guard_and_mutant(monkeypatch, drop_wait):
     monkeypatch.setattr(subprocess, 'Popen', spawn)
     assert asyncio.run(module._getaddrinfo('unused.invalid', 443)) == []
     assert process.wait.called is (not drop_wait)
+
+
+@pytest.mark.parametrize('child_ok', [False, True])
+def test_unreaped_resolver_timeout_never_escapes(monkeypatch, child_ok):
+    """A resolver that outlives the 1 s reap is killed and reaped again; TimeoutExpired never escapes."""
+    import asyncio
+    import io
+    import types
+    from unittest.mock import Mock
+
+    waits = Mock(side_effect=[subprocess.TimeoutExpired('resolver', 1), 0])
+    process = types.SimpleNamespace(stdin=io.BytesIO(), poll=lambda: 0, returncode=0 if child_ok else 1,
+                                    wait=waits, kill=Mock())
+
+    def spawn(*args, **kw):
+        kw['stdout'].write(b'[]')
+        return process
+
+    monkeypatch.setattr(subprocess, 'Popen', spawn)
+    if child_ok:
+        assert asyncio.run(recovery._getaddrinfo('unused.invalid', 443)) == []
+    else:
+        with pytest.raises(OSError, match='DNS resolution failed'):
+            asyncio.run(recovery._getaddrinfo('unused.invalid', 443))
+    assert waits.call_count == 2
+    process.kill.assert_called_once_with()
+
+
+def test_completion_returns_false_when_resolver_spawn_raises_subprocess_error(monkeypatch):
+    """A SubprocessError from the resolver spawn (not an OSError) still reads as a failed proof."""
+    import httpx
+    import types
+
+    def spawn(*args, **kwargs):
+        raise subprocess.SubprocessError('resolver spawn failed')
+
+    monkeypatch.setattr(subprocess, 'Popen', spawn)
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(timeout=timeout, trust_env=False))
+    entry = types.SimpleNamespace(runtime_api_key='synthetic')
+    assert recovery.completion_succeeds('anthropic', 'm', entry, time.monotonic() + 5) is False
+
+
+def test_completion_returns_false_when_resolver_cannot_be_reaped(monkeypatch):
+    import httpx
+    import io
+    import types
+    from unittest.mock import Mock
+
+    process = types.SimpleNamespace(
+        stdin=io.BytesIO(), poll=lambda: 0, returncode=1, kill=Mock(),
+        wait=Mock(side_effect=subprocess.TimeoutExpired('resolver', 1)))
+    monkeypatch.setattr(subprocess, 'Popen', lambda *a, **kw: process)
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(timeout=timeout, trust_env=False))
+    entry = types.SimpleNamespace(runtime_api_key='synthetic')
+    assert recovery.completion_succeeds('anthropic', 'm', entry, time.monotonic() + 5) is False
+    assert process.wait.call_count >= 2

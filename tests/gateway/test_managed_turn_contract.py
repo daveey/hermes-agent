@@ -76,7 +76,7 @@ def test_child_executes_under_finite_policy_and_preserves_receipt(tmp_path, monk
     monkeypatch.setattr(worker, 'WorkerControls', Controls)
     monkeypatch.setattr('agent.runtime_session_store.WorkerRPC', lambda home: lambda *a, **k: {'owner_epoch': 3})
     monkeypatch.setattr('agent.runtime_session_store.RuntimeSessionStore', Store)
-    monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint', lambda: None)
+    monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint', lambda **_k: None)
     monkeypatch.setattr('run_agent.AIAgent', Agent)
     monkeypatch.setattr('agent.title_generator.wait_for_title_upgrades', lambda: None)
     clear_session('managed-contract')  # the child owns a fresh approval registry

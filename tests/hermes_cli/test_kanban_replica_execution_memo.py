@@ -170,6 +170,100 @@ def test_last_good_preserves_run_evidence_when_replica_read_fails(shadow, monkey
         assert after[field] == before[field]
 
 
+@pytest.mark.parametrize("status, request_json, last_known", [
+    ("scheduled", None, "waiting"), ("review", None, "waiting"), ("blocked", None, "waiting"),
+    ("blocked", '{"action": "reply A or B"}', "needs_user")])
+def test_parked_remote_card_projects_one_record_in_list_counts_and_checker(shadow, monkeypatch, status,
+                                                                         request_json, last_known):
+    """A parked replica card has no executor clock: every consumer is unknown, and all of them keep the SAME
+    last-known state. The counts used to rebuild the row from its count key alone (no status), so the sidebar and
+    session-idle-check (``annotate_kanban_activity``) showed ``last_known_state`` null while
+    ``/api/session-kanban-tasks`` showed the row's status (t_01a1d495b43909e8)."""
+    _path, conn, now = shadow
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = ?, human_request = ? WHERE id = 't_hub'", (status, request_json))
+        conn.execute("UPDATE task_runs SET status = 'released', ended_at = ? WHERE id = 7", (int(now - 60),))
+    sync.mark_pulled(conn, at=now)
+    monkeypatch.setattr(time, "time", lambda: now)
+    counted = _counted_observation()  # the sidebar counts row, which session-idle-check reads too
+    (listed,) = ksa.session_tasks(["s1"])
+    (obs,) = listed["execution_observations"]
+    assert obs == counted
+    assert obs["state"] == "unknown" and obs["unknown_reason"] == "missing_qualified_identity"
+    assert obs["last_known_state"] == last_known
+    assert obs["observed_at"] is None and obs["evidence_refs"] == []  # the pull clock never dates it
+    assert obs["identity"] == {"gateway": OWNER, "profile": "work", "board": "default", "kind": "card",
+                               "work_id": "t_hub"}
+
+
+# Every other remote row ``raw`` declines (no running replica evidence) takes the same ``card_raw`` path in
+# ``kanban_replica_execution.collect`` (review 5890273353 of PR #2144). A replica ``done`` row whose link is still
+# unreleased is listed as status ``unknown`` (``replica_cards``); a running card whose current run has no liveness
+# event yet has no ``_replica_run``.
+_OTHER_REMOTE_ROWS = {
+    "todo": ["UPDATE tasks SET status = 'todo' WHERE id = 't_hub'",
+             "UPDATE task_runs SET status = 'released', ended_at = 1 WHERE id = 7"],
+    "unknown": ["UPDATE tasks SET status = 'done' WHERE id = 't_hub'",
+                "UPDATE task_runs SET status = 'done', ended_at = 1 WHERE id = 7"],
+    "running-no-beat": ["DELETE FROM task_events WHERE task_id = 't_hub'"],
+}
+
+
+@pytest.mark.parametrize("case, last_known", [("todo", "queued"), ("unknown", None),
+                                              ("running-no-beat", "running")])
+def test_other_remote_rows_project_one_record_in_list_and_counts(shadow, monkeypatch, case, last_known):
+    path, conn, now = shadow
+    with kbc.write_txn(conn):
+        for statement in _OTHER_REMOTE_ROWS[case]:
+            conn.execute(statement)
+    sync.mark_pulled(conn, at=now)
+    monkeypatch.setattr(time, "time", lambda: now)
+    (card,) = links.replica_cards(["s1"], ME, replicas=[("default", path)], now=now)
+    assert "_replica_run" not in card  # the fixture really is a row ``raw`` declines
+    counted = _counted_observation()
+    (listed,) = ksa.session_tasks(["s1"])
+    (obs,) = listed["execution_observations"]
+    assert obs == counted
+    assert obs["state"] == "unknown" and obs.get("last_known_state") == last_known
+    assert obs["observed_at"] is None and obs["evidence_refs"] == []  # the pull clock never dates it
+    assert obs["identity"]["gateway"] == OWNER and obs["identity"]["profile"] == "work"
+    assert obs["identity"]["work_id"] == "t_hub"
+
+
+@pytest.mark.parametrize("status", ["scheduled", "running"])
+def test_remote_card_adapter_error_projects_one_record_in_list_and_counts(shadow, monkeypatch, status):
+    """An adapter error is the same explicit unknown everywhere: ``add_cards`` projects ``failed_card`` (adapter_error,
+    the ask kept), and the counts used to fall back to the count key alone (no ask, another unknown_reason)."""
+    from hermes_cli import kanban_execution_observations as keo
+    from hermes_cli import kanban_replica_execution as kre
+
+    _path, conn, now = shadow
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = ?, human_request = ? WHERE id = 't_hub'",
+                     (status, '{"action": "reply A or B", "resolved_check": "true"}'))
+        if status != "running":
+            conn.execute("UPDATE task_runs SET status = 'released', ended_at = ? WHERE id = 7", (int(now - 60),))
+    sync.mark_pulled(conn, at=now)
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("adapter failed")
+
+    # ``running`` breaks the running-evidence adapter, the other status the generic card adapter.
+    if status == "running":
+        monkeypatch.setattr(kre, "raw", broken)
+    else:
+        monkeypatch.setattr(keo, "card_raw", broken)
+    counted = _counted_observation()
+    (listed,) = ksa.session_tasks(["s1"])
+    (obs,) = listed["execution_observations"]
+    assert obs == counted
+    assert obs["state"] == "unknown" and obs["unknown_reason"] == "adapter_error"
+    assert obs["human_request"] == {"action": "reply A or B"}  # probe fields stripped, the ask kept
+    assert obs["identity"] == {"gateway": OWNER, "profile": "work", "board": "default", "kind": "card",
+                               "work_id": "t_hub"}
+
+
 def test_warm_counts_reproject_expired_run_without_recompute(shadow, monkeypatch):
     _path, _conn, now = shadow
     beat = int(now - 170)

@@ -33,6 +33,7 @@ import { parseRemoteProfileListing } from './connection-registry'
 import { backendProfileArg } from './profile-id-guard'
 import { fingerprintToken, logReuseMiss } from './remote-lifecycle-reuse-miss'
 import { REMOTE_MARKER_GATE_PY } from './remote-update-marker-programs'
+import { REMOTE_UPDATE_PAUSED_PHRASE } from './remote-update-refusal'
 import { assertBootstrapNotSuperseded, withRemoteTimeout } from './ssh-connection'
 
 const LOCKFILE_SCHEMA_VERSION = 2
@@ -317,12 +318,11 @@ async function probeRemoteHermesHome(ssh) {
  *
  * The probe uses only the host's system Python and the shared marker judge
  * (remote-update-marker-programs.ts); it never imports the changing checkout.
- * Absence or a confirmed-dead claim (owner and delegate) is clear, and a dead
- * claim is unlinked under `<marker>.lock` unless the checkout lock is still
- * held (HELD: a killed updater's child is still running). `hermesPath`, once
- * located, adds its checkout to the probed ones. Every parse, read, lock, or
- * transport uncertainty fails closed so a Desktop relaunch cannot start
- * `serve` beside an updater that survived the old app process.
+ * Absence or a confirmed-dead claim (owner and delegate) is clear, and a dead claim is unlinked under
+ * `<marker>.lock` unless the checkout lock is still held (HELD: a killed updater's child is still running).
+ * `hermesPath`, once located, adds its checkout to the probed ones. Every parse, read, lock, or transport
+ * uncertainty fails closed so a Desktop relaunch cannot start `serve` beside an updater that survived the old
+ * app process.
  *
  * The program travels on stdin (`python3 -`), not in argv. `ssh.exec` rides the
  * POSIX ControlMaster mux socket, where ssh writes the session request and only
@@ -361,9 +361,9 @@ async function assertRemoteInstallUpdateClear(ssh, hermesHome, hermesPath = '') 
 
   const error: any = new Error(
     live
-      ? `Remote Hermes update process ${live[1]} is still running; SSH startup is paused.`
+      ? `Remote Hermes update process ${live[1]} is still running; ${REMOTE_UPDATE_PAUSED_PHRASE}.`
       : observation === 'HELD'
-        ? 'A process the remote Hermes update started still holds the install; SSH startup is paused.'
+        ? `A process the remote Hermes update started still holds the install; ${REMOTE_UPDATE_PAUSED_PHRASE}.`
         : 'The remote Hermes update marker is unreadable, malformed, or locked; refusing SSH startup.'
   )
 

@@ -441,6 +441,9 @@ export const logKey = (scope: string, slug: string, id: string, owner?: TaskOwne
   owner ? ['kanban', 'log', owner.gateway, owner.board, id, owner.profile] as const
     : ['kanban', 'log', scope, slug, id] as const
 export const boardsKey = (scope: string) => ['kanban', 'boards', scope] as const
+/** [daveey] The routed gateway's server-current board slug (the '' alias), see resolvedSlug. */
+const currentBoardKey = (scope: string) => ['kanban', 'current-board', scope] as const
+const CURRENT_BOARD_STALE_MS = 30_000
 export const profilesKey = (scope: string, owner?: TaskOwner) =>
   owner ? ['kanban', 'profiles', owner.gateway, owner.profile] as const : ['kanban', 'profiles', scope] as const
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
@@ -612,12 +615,26 @@ async function resolvedSlug(): Promise<string> {
     return slug
   }
 
-  try {
-    const boards = await call<BoardsResponse>('/boards')
+  // [daveey] Every board refetch (socket frame, poll, retry) lands here, so the
+  // answer is cached per routed scope for CURRENT_BOARD_STALE_MS and concurrent
+  // callers share one in-flight read. Re-reading the full `/boards` list (per-board
+  // counts) before each board read doubled the routed gateway's traffic: 297 `/boards`
+  // timeouts in 30 min on a slow link, 2026-11-13. A failed read keeps the last answer.
+  const queryKey = currentBoardKey(routedScope())
 
-    return typeof boards.current === 'string' ? boards.current : ''
+  try {
+    return await queryClient.fetchQuery({
+      queryFn: async () => {
+        const boards = await call<BoardsResponse>('/boards')
+
+        return typeof boards.current === 'string' ? boards.current : ''
+      },
+      queryKey,
+      retry: false,
+      staleTime: CURRENT_BOARD_STALE_MS
+    })
   } catch {
-    return ''
+    return queryClient.getQueryData<string>(queryKey) ?? ''
   }
 }
 
@@ -862,15 +879,71 @@ export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
   return rememberOwners(board, slug)
 }
 
-export const fetchTask = async (id: string, owner?: TaskOwner) => {
+/** [daveey] One opening of a task detail view. Its reads of each kind (`kind` names the query) go out as priority
+ *  'foreground' until that kind's open read has settled, so a slow link's poll thinner never skips the user's read:
+ *  not on a re-open within the thinning gap, and not on React Query's retry of a failed first read (`retry`: this
+ *  call retries a failed read of the same fetch). The open read settles when a read answers, or when a fetch whose
+ *  reads all failed has spent its retries: the next fetch then starts with `retry` false. A fetch that a socket
+ *  invalidation (cancelRefetch) cancels in a failed read's retry delay settles it too, by design: the user's read
+ *  already went out foreground and failed, and the replacement fetch starts with `retry` false. Every later read of that
+ *  kind (interval or socket refetch) is a background poll again and may be thinned (electron/slow-link.ts), so a kind
+ *  whose reads keep failing (gateway unreachable, task gone, timeouts on a very slow link) stops bypassing the
+ *  thinner after its first fetch. */
+export function userOpenReads(): <T>(
+  kind: string,
+  read: (options: PluginRestOptions) => Promise<T>,
+  retry?: boolean
+) => Promise<T> {
+  const delivered = new Set<string>()
+  const failed = new Set<string>()
+
+  return async (kind, read, retry = false) => {
+    if (failed.has(kind) && !retry) {
+      delivered.add(kind)
+    }
+
+    try {
+      const result = await read(delivered.has(kind) ? {} : { priority: 'foreground' })
+
+      delivered.add(kind)
+
+      return result
+    } catch (error) {
+      failed.add(kind)
+
+      throw error
+    }
+  }
+}
+
+/** [daveey] What `retryingFetch` reads of a React Query function context. */
+export type ReadFetchContext = { client: typeof queryClient; queryKey: readonly unknown[] }
+
+/** [daveey] Whether React Query is calling a query function to retry a failed read of the same fetch: it counts the
+ *  fetch's failures before each retry and resets the count when a new fetch starts. That leans on query-core reducer
+ *  details it does not document ('failed' sets `fetchFailureCount`, 'fetch' and 'success' reset it), including a fetch
+ *  that `cancelRefetch` (a socket invalidation) starts in a failed fetch's retry delay: query-core 5.104 still
+ *  dispatches 'fetch' there, because the restart's undefined meta differs from the running fetch's `fetchMeta` (null).
+ *  drawer.test.tsx pins both; after a React Query bump, check "makes the refetches of a kind whose reads all fail polls
+ *  once its first fetch spent its retries" and "makes the reads of a fetch that replaced a failed one during its retry
+ *  delay polls". */
+export const retryingFetch = ({ client, queryKey }: ReadFetchContext) =>
+  (client.getQueryState(queryKey)?.fetchFailureCount ?? 0) > 0
+
+export const fetchTask = async (id: string, owner?: TaskOwner, read: PluginRestOptions = {}) => {
   const downloadAttachment = captureGatewayFileDownload(owner ? { connectionId: owner.gateway, profile: owner.profile } : undefined)
-  const detail = await call<KanbanTaskDetail>(...forTask(id, `/tasks/${id}`, {}, owner))
+  const [path, opts] = forTask(id, `/tasks/${id}`, {}, owner)
+  const detail = await call<KanbanTaskDetail>(path, { ...opts, ...read })
 
   return { ...detail, downloadAttachment }
 }
 
 /** Worker stdout/stderr tail (last 16 KiB — plenty for the drawer). */
-export const fetchLog = (id: string, owner?: TaskOwner) => call<WorkerLog>(...forTask(id, `/tasks/${id}/log`, { tail: '16384' }, owner))
+export const fetchLog = (id: string, owner?: TaskOwner, read: PluginRestOptions = {}) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/log`, { tail: '16384' }, owner)
+
+  return call<WorkerLog>(path, { ...opts, ...read })
+}
 
 /** Every gateway's boards as one list: union by slug, card totals summed,
  *  `current` = the routed gateway's. A remote-only board is listed too, so

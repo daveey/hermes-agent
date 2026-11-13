@@ -9,6 +9,7 @@ anchored on concrete command identifiers — so they cannot fire on prose. Defen
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import re
@@ -295,7 +296,8 @@ _UNSAFE_DATA_ARG_MARKERS = ("`", "$(", "<(", ">(", "\\!")
 _DOT_COMMAND_ARGUMENT = re.compile(r"^\.[A-Za-z]")
 # A data sink piped into a shell/interpreter can feed matched lines to execution; never mask it.
 _PIPE_TO_INTERPRETER = re.compile(
-    r"\|\s*&?\s*(?:sudo\s+)?(?:sh|bash|dash|ksh|zsh|xargs|eval|source)\b"
+    r"\|\s*&?\s*(?:sudo\s+)?(?:(?:sh|bash|dash|ksh|zsh|xargs|eval|source)\b"
+    r"|(?:python[\d.]*|pypy[\d.]*|py|uv)(?![\w.-]))"
 )
 
 # Bytes sniffed before reading a referenced file in full (see _BINARY_MAGICS).
@@ -312,6 +314,8 @@ _ReadRemoteScriptFn = Callable[[str], Optional[str]]
 _TRANSPARENT_COMMAND_PREFIXES = frozenset({
     "sudo", "doas", "env", "nohup", "setsid", "nice", "ionice", "stdbuf",
     "timeout", "exec", "command", "builtin", "eatmydata",
+    # time(1) (`/usr/bin/time x`, `command time x`); the `time` keyword is peeled separately.
+    "time",
     # Privilege and namespace wrappers: options, then the command they run.
     "pkexec", "su", "runuser", "setpriv", "systemd-run", "nsenter", "unshare",
 })
@@ -325,6 +329,7 @@ _TRANSPARENT_PREFIX_VALUE_OPTIONS = {
     "ionice": {"-c", "-n", "-p", "--class", "--classdata"},
     "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
     "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "time": {"-f", "--format", "-o", "--output"},
     "pkexec": {"--user"},
     "su": {"-s", "--shell", "-g", "--group", "-G", "--supp-group"},
     "runuser": {"-u", "--user", "-s", "--shell", "-g", "--group", "-G", "--supp-group"},
@@ -348,6 +353,23 @@ _STRING_COMMAND_OPTIONS = {
 _TRANSPARENT_PREFIX_OPERANDS = {"timeout": 1}
 
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# `uv [global options] run [options] <command>` runs <command> (a `.py` file through Python).
+_UV_VALUE_OPTIONS = frozenset({
+    "--directory", "--project", "--config-file", "--cache-dir", "--color", "-p", "--python",
+    "--with", "--with-editable", "--with-requirements", "--env-file", "--package", "--extra",
+    "--group", "--no-group", "--only-group", "--index", "--default-index", "-i", "--index-url",
+    "--extra-index-url", "-f", "--find-links", "--index-strategy", "--keyring-provider",
+    "--resolution", "--prerelease", "--fork-strategy", "--exclude-newer", "-C",
+    "--config-setting", "--link-mode", "-P", "--upgrade-package", "--reinstall-package",
+    "--refresh-package", "--no-binary-package", "--no-build-package", "--python-platform",
+    "--allow-insecure-host", "--no-extra",
+})
+# Python program runners whose file operand (or stdin) is scanned as Python source.
+_PYTHON_RUNNER_RE = re.compile(r"^(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?$|^py(?:\.exe)?$")
+_PYTHON_SOURCE_SUFFIXES = (".py", ".pyw")
+# A redirection word: optional fd, operator, optional glued target (`<f`, `0<f`, `2>>log`).
+_REDIRECTION = re.compile(r"^(\d*)(<<<|<<-|<<|<>|<&|>&|>>|>\||<|>)(.*)$", re.DOTALL)
 
 # Bound the walk: a pathological token run must not spin here.
 _MAX_PREFIX_PEELS = 8
@@ -391,8 +413,9 @@ def _contains_launchctl_gateway_lifecycle(normalized_text: str) -> bool:
     )
 
 
-def contains_gateway_lifecycle_command(text: str) -> bool:
-    """Return True if *text* contains a gateway lifecycle command pattern.
+def contains_gateway_lifecycle_command(text: str, *, mask_heredocs: bool = True) -> bool:
+    """Return True if *text* contains a gateway lifecycle command pattern. ``mask_heredocs=False``
+    scans inert-looking heredoc bodies too (a session alias may shadow their consumer).
 
     Passes, in order: raw-text regex (the only pass that fires on inputs shlex cannot tokenize, e.g.
     Python source); profile-flag form; the same regex on each shell-tokenized segment with quotes/
@@ -420,7 +443,8 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     # restart" inside such a body is documentation, not a command this shell will execute.
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
-    text = strip_inert_heredoc_bodies(text)
+    if mask_heredocs:
+        text = strip_inert_heredoc_bodies(text)
     normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
     if _GATEWAY_LIFECYCLE_PATTERN.search(normalized):
         return True
@@ -478,15 +502,19 @@ class _LifecycleScanBudget:
     cloud placeholder) so the caller can tell the model the real reason (#113944)."""
 
     __slots__ = (
+        "aliases_possible",
         "bytes_remaining",
         "lines_remaining",
+        "mask_heredocs",
         "overrun",
         "paths_remaining",
         "refusal",
         "remote_reads_remaining",
+        "separator_lines",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, session_aliases: Optional[frozenset[str]] = frozenset(), *,
+                 separator_lines: int = 0) -> None:
         # Read the module constants at construction so tests/operators can lower them at runtime.
         self.bytes_remaining = _MAX_LIFECYCLE_SCAN_BYTES
         self.lines_remaining = _MAX_LIFECYCLE_SCAN_LINES
@@ -496,6 +524,21 @@ class _LifecycleScanBudget:
         # Message-only: which limit the last refused ``charge_text`` hit, e.g. "has 17340 lines,
         # over the 16384-line scan cap". Never consulted for a verdict.
         self.overrun: Optional[str] = None
+        # Message-only: newlines a caller added when joining the root text (cron's empty-prompt
+        # join). Charged like any line, never reported as the text's own; spent on the first charge.
+        self.separator_lines = separator_lines
+        # Sticky for the whole walk: any walked text (the command, an eval payload, a sourced
+        # script) that may define an alias makes `NAME ( … )` possibly a keyword-led subshell. So do
+        # aliases the command's shell already holds (*session_aliases*, see `scan_gateway_lifecycle`).
+        self.aliases_possible = session_aliases is None or bool(session_aliases)
+        # False when a session alias may shadow a heredoc consumer, wrapper or shell name
+        # (`alias python3=bash`): then no heredoc body is provably inert, so none is masked.
+        self.mask_heredocs = not _session_aliases_shadow_consumers(session_aliases)
+
+    def note_aliases(self, text: str) -> None:
+        """Record (sticky) that walked *text* may define or enable an alias."""
+        if not self.aliases_possible:
+            self.aliases_possible = _may_define_alias(text)
 
     def charge_text(self, text: str) -> bool:
         """Charge *text* before tokenization; False when it does not fit (``overrun`` says why)."""
@@ -507,9 +550,15 @@ class _LifecycleScanBudget:
         if encoded > self.bytes_remaining:
             self.overrun = _overrun("is", encoded, "byte", self.bytes_remaining, _MAX_LIFECYCLE_SCAN_BYTES)
             return False
+        separators, self.separator_lines = self.separator_lines, 0
         lines = text.count("\n") + 1
         if lines > self.lines_remaining:
-            self.overrun = _overrun("has", lines, "line", self.lines_remaining, _MAX_LIFECYCLE_SCAN_LINES)
+            # Report the text's own lines (`wc -l` for a newline-terminated file), not the charged
+            # count, which adds one for the last line and one per join separator.
+            own = text.count("\n") - separators + (0 if text.endswith("\n") else 1)
+            self.overrun = _overrun(
+                "has", own, "line", self.lines_remaining, _MAX_LIFECYCLE_SCAN_LINES, charged=lines,
+            )
             return False
         # One huge token is the quadratic shlex case; bound the longest physical line (chars, a
         # lower bound on bytes — tight enough for a DoS bound without a per-line encode).
@@ -576,12 +625,20 @@ def _format_size(size: int) -> str:
     return f"{size} bytes"
 
 
-def _overrun(verb: str, amount: int, unit: str, remaining: int, cap: int) -> str:
+def _overrun(
+    verb: str, amount: int, unit: str, remaining: int, cap: int, *, charged: Optional[int] = None,
+) -> str:
     """``has 17340 lines, over the 16384-line scan cap``, or ``over the N lines left of`` that cap
-    when the text alone would fit but earlier text in the same walk already spent part of it."""
-    if amount > cap:
-        return f"{verb} {amount} {unit}s, over the {cap}-{unit} scan cap"
-    return f"{verb} {amount} {unit}s, over the {remaining} {unit}s left of the {cap}-{unit} scan cap"
+    when the text alone would fit but earlier text in the same walk already spent part of it.
+    *charged* is the budget's own count when it differs from *amount*; it is named only when
+    *amount* alone does not exceed what was left."""
+    charged = amount if charged is None else charged
+    counted = f" ({charged} counted)" if amount <= remaining else ""
+    # Name the whole cap only when nothing was spent yet or *amount* alone exceeds it; a charged
+    # count over the cap is not enough (a cap-line file after earlier text is over what is left).
+    if amount > cap or remaining >= cap:
+        return f"{verb} {amount} {unit}s{counted}, over the {cap}-{unit} scan cap"
+    return f"{verb} {amount} {unit}s{counted}, over the {remaining} {unit}s left of the {cap}-{unit} scan cap"
 
 
 def _budget_exhausted(
@@ -687,20 +744,115 @@ def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterat
         yield segment
 
 
-def _iter_command_segments(command: str) -> Iterator[list[str]]:
-    """Yield shell-tokenized command segments per logical line; a line shlex rejects (unbalanced
-    quotes) falls back to per-physical-line tokenization."""
+def _iter_command_token_lists(command: str) -> Iterator[list[str]]:
+    """Yield the shell tokens of each logical line; a line shlex rejects (unbalanced quotes) falls
+    back to per-physical-line tokenization."""
     for line in _split_logical_lines(command.replace("\\\n", "")):
         try:
             tokens = _shlex_tokens(line)
         except ValueError:
             for physical_line in line.splitlines():
                 try:
-                    yield from _split_segments(_shlex_tokens(physical_line))
+                    yield _shlex_tokens(physical_line)
                 except ValueError:
                     continue
             continue
+        yield tokens
+
+
+def _iter_command_segments(command: str) -> Iterator[list[str]]:
+    """Yield shell-tokenized command segments per logical line (see ``_iter_command_token_lists``)."""
+    for tokens in _iter_command_token_lists(command):
         yield from _split_segments(tokens)
+
+
+# Words after which `(` still opens a command list (`if (cd x && ./y)`, `! (…)`, `time (…)`).
+_SUBSHELL_OPENING_WORDS = frozenset({
+    "if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc", "in", "{",
+    "function",
+})
+
+
+def _opens_call_arguments(segment: list[str]) -> bool:
+    """Whether ``(`` follows an interpreter call, not a shell command prefix.
+
+    Keywords are recognized in command position, including operands such as
+    ``time -p`` and ``coproc name``. Merely inspecting the adjacent word mistakes
+    these executable subshells for inert interpreter arguments. Conversely an
+    ordinary command's argument named ``time`` is not a shell keyword.
+    """
+    index = 0
+    while index < len(segment):
+        word = segment[index]
+        if word not in _SUBSHELL_OPENING_WORDS:
+            break
+        index += 1
+        if word == "time":
+            if index < len(segment) and segment[index] == "-p":
+                index += 1
+            if index < len(segment) and segment[index] == "--":
+                index += 1
+        elif word in ("coproc", "function") and index < len(segment):
+            # `coproc NAME ( … )`; `function NAME ( … )` defines a function whose body is a subshell.
+            if word == "function" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", segment[index]):
+                index += 1
+    if index == len(segment):
+        return False
+    return not segment[-1].endswith(("$", "<", ">", "="))
+
+
+def _may_define_alias(text: str) -> bool:
+    """Whether *text* may define or enable an alias (``alias T=' '``, ``BASH_ALIASES[T]=…``,
+    ``shopt -s expand_aliases``), even quote-split (``al''ias``) or ANSI-C quoted (``$'…'``).
+    An alias can expand to a keyword prefix, so ``T ( bash big.sh )`` may run a subshell.
+
+    Deliberately broad: any "alias" substring (a path, ``BASH_ALIASES``, prose) counts. A false
+    positive only makes call-argument paths executed again (fail closed); narrowing it to whole
+    words or ``alias NAME=`` would let quote-split or ``$'…'`` spellings fail open. Do not tighten."""
+    # Dropping every quote and backslash rejoins quote-split words (`al''ias`, `al\ias`).
+    return "alias" in re.sub(r"[\"'\\\\]", "", text).lower() or "$'" in text
+
+
+def _session_aliases_shadow_consumers(session_aliases: Optional[frozenset[str]]) -> bool:
+    """Whether aliases the command's shell already holds may rename a heredoc consumer, wrapper
+    or shell (``alias python3=bash`` runs a "Python" body as shell). ``None`` means the names
+    are unknown, so any name may be shadowed."""
+    from tools.shell_heredoc import shadows_heredoc_consumer
+
+    if session_aliases is None:
+        return True
+    return any(not isinstance(name, str) or shadows_heredoc_consumer(name)
+               for name in session_aliases)
+
+
+def _iter_segment_contexts(command: str) -> Iterator[tuple[list[str], bool, list[str]]]:
+    """``(segment, call_argument, piped_files)``: whether the segment is the argument list of a
+    call (the segment right after a ``(`` that follows an ordinary word), and the files a ``cat``
+    pipes into its stdin (``cat f.sh | bash``)."""
+    for tokens in _iter_command_token_lists(command):
+        segment: list[str] = []
+        call_argument = False
+        previous: Optional[list[str]] = None
+        piped = False
+        for token in tokens:
+            if token and set(token) <= _CONTROL_CHARS:
+                next_is_call = token == "(" and bool(segment) and _opens_call_arguments(segment)
+                if segment:
+                    yield segment, call_argument, _cat_operands(previous) if piped else []
+                    previous = segment
+                    segment = []
+                piped = token in ("|", "|&")
+                call_argument = next_is_call
+                continue
+            segment.append(token)
+        if segment:
+            yield segment, call_argument, _cat_operands(previous) if piped else []
+
+
+def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
+    """``_iter_command_segments`` plus whether each segment is the argument list of a call."""
+    for segment, call_argument, _ in _iter_segment_contexts(command):
+        yield segment, call_argument
 
 
 def _executable_name(token: str) -> str:
@@ -717,6 +869,12 @@ def _peel_transparent_prefixes(segment: list[str], index: int) -> int:
         if index >= len(segment):
             return index
         name = _executable_name(segment[index])
+        if name == "uv":
+            uv_command = _peel_uv_run(segment, index)
+            if uv_command is None:
+                return index
+            index = uv_command
+            continue
         if name not in _TRANSPARENT_COMMAND_PREFIXES:
             return index
         value_options = _TRANSPARENT_PREFIX_VALUE_OPTIONS.get(name, frozenset())
@@ -754,6 +912,62 @@ def _executed_command_index(segment: list[str]) -> Optional[int]:
     return index if index < len(segment) else None
 
 
+def _peel_uv_run(segment: list[str], index: int) -> Optional[int]:
+    """Index of the command ``uv [opts] run [opts] <command>`` runs (may be ``len(segment)``);
+    ``None`` when *index* is not such a ``uv`` (``uv pip ...``, ``uv tool run``)."""
+    index += 1
+    seen_run = False
+    while index < len(segment):
+        token = segment[index]
+        if token.startswith("-"):
+            index += 2 if token in _UV_VALUE_OPTIONS else 1
+        elif seen_run:
+            return index
+        elif token == "run":
+            seen_run = True
+            index += 1
+        else:
+            return None
+    return index if seen_run else None
+
+
+def _runs_under_uv(segment: list[str], index: int) -> bool:
+    """Whether a wrapper chain reached ``segment[index]`` through ``uv run``."""
+    return any(_executable_name(token) == "uv" and _peel_uv_run(segment, position) is not None
+               for position, token in enumerate(segment[:index]))
+
+
+def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
+    """``(arguments without redirections, files redirected to stdin)``. A heredoc, here-string or
+    descriptor duplication is stripped but feeds no file; ``<`` and ``<>`` on fd 0 do."""
+    kept: list[str] = []
+    stdin: list[str] = []
+    index = 0
+    while index < len(arguments):
+        match = _REDIRECTION.match(arguments[index])
+        index += 1
+        if match is None:
+            kept.append(arguments[index - 1])
+            continue
+        fd, operator, target = match.groups()
+        if not target and index < len(arguments):
+            target = arguments[index]
+            index += 1
+        if operator in ("<", "<>") and fd in ("", "0") and target:
+            stdin.append(target)
+    return kept, stdin
+
+
+def _cat_operands(segment: Optional[list[str]]) -> list[str]:
+    """Files a ``cat`` segment writes to its stdout (its stdout piped on to a program reader)."""
+    for view in _command_segment_views(segment) if segment else []:
+        index = _executed_command_index(view)
+        if index is not None and _executable_name(view[index]) == "cat":
+            arguments, _ = _split_redirections(view[index + 1 :])
+            return [argument for argument in arguments if not argument.startswith("-")]
+    return []
+
+
 def contains_launchctl_submit_command(command: str) -> bool:
     """Detect an executed ``launchctl submit``/``bootstrap``, not quoted text.
 
@@ -762,13 +976,105 @@ def contains_launchctl_submit_command(command: str) -> bool:
 
     See #62891.
     """
-    for segment in _iter_command_segments(command):
+    for segment in _iter_command_segment_views(command):
         index = _executed_command_index(segment)
         if index is not None and _executable_name(segment[index]) == "launchctl":
             arguments = segment[index + 1 :]
             if arguments and arguments[0].lower() in {"submit", "bootstrap"}:
                 return True
     return False
+
+
+# Reserved words that may precede a simple command in the same segment (`if hermes-sync`,
+# `then x`, `! x`, `time -p x`, `{ x; }`, `coproc x`); `fi`/`done`/`}` close a list and run nothing.
+_COMMAND_PREFIX_KEYWORDS = frozenset({
+    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{", "coproc",
+})
+_MAX_EXECUTES_NAMED_DEPTH = 4
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _peel_command_keywords(segment: list[str]) -> list[str]:
+    """*segment* without its leading reserved words (and ``time``'s ``-p``/``--``, and the NAME of
+    ``coproc NAME { … }``)."""
+    index = 0
+    while index < len(segment) and segment[index] in _COMMAND_PREFIX_KEYWORDS:
+        word = segment[index]
+        index += 1
+        if word == "time":
+            while index < len(segment) and segment[index] in ("-p", "--"):
+                index += 1
+        elif (word == "coproc" and index + 1 < len(segment) and segment[index + 1] == "{"
+              and _SHELL_NAME.fullmatch(segment[index])):
+            index += 1
+    return segment[index:]
+
+
+def _command_segment_views(segment: list[str]) -> list[list[str]]:
+    """*segment* as written, then without its leading reserved words when it has any. Callers
+    read every view, so peeling only ever ADDS a reference. Without the peeled view `time ./x.sh`,
+    `if true; then ./x.sh; fi` and `{ ./x.sh; }` read the keyword as the command and never open
+    ``./x.sh``."""
+    peeled = _peel_command_keywords(segment)
+    return [segment, peeled] if peeled and len(peeled) != len(segment) else [segment]
+
+
+def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
+    """Every ``_command_segment_views`` view of every segment of *command*."""
+    for segment in _iter_command_segments(command):
+        yield from _command_segment_views(segment)
+
+
+def _shell_script_operand(arguments: list[str]) -> Optional[str]:
+    """The script a POSIX shell runs from *arguments*, skipping options and the values of
+    ``-o``/``-O``/``+o``/``+O``; ``None`` for ``-c`` (inline source) or no operand."""
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            index += 1
+            break
+        if argument in _SHELL_COMMAND_FLAGS:
+            return None
+        if argument in _SHELL_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if argument.startswith(("-", "+")):
+            index += 1
+            continue
+        break
+    return arguments[index] if index < len(arguments) else None
+
+
+def executes_command_named(command: str, name: str, *, _depth: int = 0) -> bool:
+    """Whether *command* EXECUTES a program whose basename is *name*: as a segment's command word
+    (shell keywords such as ``if``/``then``/``time``/``!``, env assignments and wrappers such as
+    sudo/nohup/systemd-run peeled), as the script a shell or Python interpreter runs, or inside an
+    ``sh -c`` payload. A mere mention (``grep x name``) does not count. A command over the scan
+    budget answers False, so callers must not use this as a refusal gate (it serves hints)."""
+    if name not in command or not lifecycle_scan_root_within_budget(command):
+        return False
+    for raw_segment in _iter_command_segments(command):
+        segment = _peel_command_keywords(raw_segment)
+        index = _executed_command_index(segment)
+        if index is None:
+            continue
+        executable = _executable_name(segment[index])
+        if executable == name:
+            return True
+        arguments = segment[index + 1 :]
+        if executable in _SHELL_EXECUTABLES:
+            script = _shell_script_operand(arguments)
+        elif _is_interpreter_image(executable):
+            script = next((t for t in arguments if not t.startswith("-")), None)
+        else:
+            continue
+        if script is not None and _executable_name(script) == name:
+            return True
+    if _depth >= _MAX_EXECUTES_NAMED_DEPTH:
+        return False
+    return any(executes_command_named(payload, name, _depth=_depth + 1)
+               for payload in _iter_shell_command_payloads(command))
 
 
 def _mask_data_sink_arguments(text: str) -> str:
@@ -811,19 +1117,20 @@ def _mask_data_sink_arguments(text: str) -> str:
     return "\n".join(lines_out) if changed else text
 
 
-def _lifecycle_command_scan_with_data_exemption(text: str) -> bool:
+def _lifecycle_command_scan_with_data_exemption(text: str, *, mask_heredocs: bool = True) -> bool:
     """Lifecycle scan exempting matches inside data arguments: cheap regex first (no-match pays
     nothing), then re-scan with data-sink arguments masked; only a surviving match blocks."""
-    if not contains_gateway_lifecycle_command(text):
+    if not contains_gateway_lifecycle_command(text, mask_heredocs=mask_heredocs):
         return False
     normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
-    return contains_gateway_lifecycle_command(_mask_data_sink_arguments(normalized))
+    return contains_gateway_lifecycle_command(
+        _mask_data_sink_arguments(normalized), mask_heredocs=mask_heredocs)
 
 
-def _direct_lifecycle_scan(command: str) -> bool:
+def _direct_lifecycle_scan(command: str, *, mask_heredocs: bool = True) -> bool:
     """Pure-string direct scans: lifecycle regex (data-exempted) + submit."""
     return (
-        _lifecycle_command_scan_with_data_exemption(command)
+        _lifecycle_command_scan_with_data_exemption(command, mask_heredocs=mask_heredocs)
         or contains_launchctl_submit_command(command)
     )
 
@@ -932,8 +1239,11 @@ def _iter_option_values(segment: list[str], start: int, option: str) -> Iterator
             yield token[len(prefix):]
 
 
-def _references_at(segment: list[str], index: int, cwd: Optional[str]) -> Iterator[Path]:
-    """Yield the scripts the token at *index* executes, if any."""
+def _references_at(
+    segment: list[str], index: int, cwd: Optional[str], piped: Optional[list[str]] = None,
+) -> Iterator[Path]:
+    """Yield the scripts the token at *index* executes, if any; *piped* are files a pipe feeds to
+    its stdin, run by a shell given no script operand (or ``-s``)."""
     if index >= len(segment):
         return
     executable = segment[index]
@@ -945,7 +1255,8 @@ def _references_at(segment: list[str], index: int, cwd: Optional[str]) -> Iterat
         return
 
     if executable_name in _SHELL_EXECUTABLES:
-        arguments = segment[index + 1 :]
+        arguments, stdin = _split_redirections(segment[index + 1 :])
+        reads_stdin = False
         arg_index = 0
         while arg_index < len(arguments):
             argument = arguments[arg_index]
@@ -958,11 +1269,18 @@ def _references_at(segment: list[str], index: int, cwd: Optional[str]) -> Iterat
                 arg_index += 2
                 continue
             if argument.startswith("-"):
+                reads_stdin = reads_stdin or (not argument.startswith("--") and "s" in argument)
                 arg_index += 1
                 continue
             break
-        if arg_index < len(arguments) and arguments[arg_index] not in _SHELL_COMMAND_FLAGS:
+        command_string = arg_index < len(arguments) and arguments[arg_index] in _SHELL_COMMAND_FLAGS
+        if arg_index < len(arguments) and not command_string:
             yield from _resolved_or_nothing(arguments[arg_index], cwd)
+        elif not command_string:
+            reads_stdin = True
+        if reads_stdin:
+            for source in stdin or piped or []:
+                yield from _resolved_or_nothing(source, cwd)
         return
 
     # A bare "/" is pathlib's division operator in Python sources, not an executable; resolving it
@@ -971,24 +1289,97 @@ def _references_at(segment: list[str], index: int, cwd: Optional[str]) -> Iterat
         yield from _resolved_or_nothing(executable, cwd)
 
 
-def _iter_referenced_shell_scripts(command: str, *, cwd: Optional[str] = None) -> Iterator[Path]:
+def _iter_referenced_shell_scripts(
+    command: str, *, cwd: Optional[str] = None, call_arguments: bool = False,
+) -> Iterator[Path]:
     """Yield scripts executed directly or through a POSIX shell. Each segment is read at the
-    original token AND at the peeled wrapper target — additive on purpose: peeling must never REMOVE
-    a reference (a local ``./timeout`` is a script, not the coreutils wrapper)."""
-    for segment in _iter_command_segments(command):
-        index = _command_token_index(segment)
-        if index is None:
+    original token AND at the peeled wrapper target, both with and without leading reserved words
+    (`time`, `!`, `then`, `{`, …) — additive on purpose: peeling must never REMOVE
+    a reference (a local ``./timeout`` is a script, not the coreutils wrapper). With
+    *call_arguments* the same discovery runs over call-argument segments instead
+    (``expanduser("~/x")``): paths there are interpreter string literals, i.e. mentions."""
+    for segment, is_call_argument, piped in _iter_segment_contexts(command):
+        if is_call_argument != call_arguments:
             continue
-        yield from _references_at(segment, index, cwd)
-        peeled = _peel_transparent_prefixes(segment, index)
-        if peeled != index:
-            yield from _references_at(segment, peeled, cwd)
+        for view in _command_segment_views(segment):
+            index = _command_token_index(view)
+            if index is None:
+                continue
+            yield from _references_at(view, index, cwd, piped)
+            peeled = _peel_transparent_prefixes(view, index)
+            # `uv run x.py` runs Python: the interpreter scan reads it, never the shell walk (#77131).
+            if peeled != index and not (
+                    peeled < len(view) and view[peeled].endswith(_PYTHON_SOURCE_SUFFIXES)
+                    and _runs_under_uv(view, peeled)):
+                yield from _references_at(view, peeled, cwd, piped)
+
+
+# CPython short options that take a value (glued `-Wignore` or the next token), and the ones after
+# which no script FILE runs (`-c` inline code, `-m` module).
+_PYTHON_VALUE_SHORT_OPTIONS = frozenset("WX")
+_PYTHON_NO_SCRIPT_SHORT_OPTIONS = frozenset("cm")
+_PYTHON_VALUE_LONG_OPTIONS = frozenset({"--check-hash-based-pycs"})
+
+
+def _python_script_operand(arguments: list[str]) -> Optional[str]:
+    """The script file a CPython argv tail runs: ``-`` when the program is read from stdin (a
+    ``-`` operand or none), ``None`` for ``-c``/``-m``. Short-option clusters are read like
+    CPython's getopt (`-uc code` is ``-u -c``)."""
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            index += 1
+            break
+        if argument == "-" or not argument.startswith("-"):
+            break
+        if argument.startswith("--"):
+            index += 2 if argument in _PYTHON_VALUE_LONG_OPTIONS else 1
+            continue
+        for position, flag in enumerate(argument[1:], start=1):
+            if flag in _PYTHON_NO_SCRIPT_SHORT_OPTIONS:
+                return None
+            if flag in _PYTHON_VALUE_SHORT_OPTIONS:
+                if position == len(argument) - 1:
+                    index += 1  # the value is the next token
+                break
+        index += 1
+    return arguments[index] if index < len(arguments) else "-"
+
+
+def _iter_python_interpreter_scripts(command: str, *, cwd: Optional[str] = None) -> Iterator[Path]:
+    """Yield files a segment runs as ``python3 [options] <file>`` (also ``py``/``pypy3``, behind
+    wrappers and reserved words: ``do /usr/bin/env python3 <file>``, ``uv run [python] <file>``),
+    or feeds a Python reading its program from stdin (``python3 < f``, ``cat f | python3``). An
+    interpreter is never itself a wrapper, so only the executed command is read."""
+    for raw_segment, _, piped in _iter_segment_contexts(command):
+        for segment in _command_segment_views(raw_segment):
+            index = _executed_command_index(segment)
+            if index is None:
+                continue
+            if segment[index].endswith(_PYTHON_SOURCE_SUFFIXES) and _runs_under_uv(segment, index):
+                yield from _resolved_or_nothing(segment[index], cwd)
+                continue
+            if not _PYTHON_RUNNER_RE.match(_executable_name(segment[index]).lower()):
+                continue
+            arguments, stdin = _split_redirections(segment[index + 1 :])
+            operand = _python_script_operand(arguments)
+            for source in (stdin or piped) if operand == "-" else [operand] if operand else []:
+                yield from _resolved_or_nothing(source, cwd)
+
+
+def _python_source_is_unsafe(text: str, budget: _LifecycleScanBudget) -> bool:
+    """Scan an interpreter-run Python file the way ``check_gateway_lifecycle`` scans a ``.py`` cron
+    script: the lifecycle regex with data-sink masking, never the shell reference walk (a
+    false-positive generator on Python sources, #77131). The masker tokenizes, so charge first;
+    text over the budget is not scanned and not refused (see ``_walk_candidates``)."""
+    return budget.charge_text(text) and _lifecycle_command_scan_with_data_exemption(text)
 
 
 def _iter_shell_command_payloads(command: str) -> Iterator[str]:
     """Yield code passed through ``sh|bash|... -c`` (and ``su -c`` / ``env -S``) for recursive
-    scanning."""
-    for segment in _iter_command_segments(command):
+    scanning; reserved words before the shell (`time bash -c …`) are peeled."""
+    for segment in _iter_command_segment_views(command):
         index = _command_token_index(segment)
         if index is None:
             continue
@@ -1003,6 +1394,64 @@ def _iter_shell_command_payloads(command: str) -> Iterator[str]:
             if argument in _SHELL_COMMAND_FLAGS:
                 yield arguments[arg_index + 1]
                 break
+
+
+# Quoted string literals (shell or interpreter quoting alike), each kind on its own; a literal may
+# span lines (`eval "$( cat <<'PY'` … `)"`). The lookahead yields the span after EVERY quote up to
+# the next one of its kind, not just alternate pairs: an apostrophe inside the other kind
+# (`print("it's")`) must not shift which spans count as literals (review 5890784121 nit 1).
+_QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r"(?=\"([^\"]+)\")"))
+# C-style escapes a producer turns into whitespace (`printf 'bash /x/a.sh\n'`, `print('…\n')`):
+# left in, `\n` would glue onto the path and hide the script it names.
+_PRINTED_ESCAPE_RE = re.compile(r"\\[ntrvf]")
+# Producers that print their own arguments, quoted or not (`echo bash /x/a.sh | bash`).
+_ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
+
+
+def _with_escapes_decoded(text: str) -> Iterator[str]:
+    yield text
+    if "\\" in text:
+        yield _PRINTED_ESCAPE_RE.sub("\n", text)
+
+
+def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
+    """When some output in *command* is run as shell code (``python3 - <<'PY' | bash``,
+    ``eval "$(…)"``, ``bash <(…)``), yield what a producer may print as the shell's command:
+    every quoted string literal (``print('bash /x/big.sh')``) and the argument line of every
+    ``echo``/``printf`` (``echo bash /x/big.sh``), each also with ``\\n``-style escapes turned into
+    newlines. Their paths are executed, not mentions. Single and double quotes are matched
+    independently, so a literal nested in the other kind (``python3 -c "print('bash x')"``) is
+    yielded too, and every span between two consecutive quotes of a kind is yielded, so a stray
+    apostrophe (``print("it's")``) cannot pair the quotes around a later literal the wrong way.
+
+    Fails closed by design (review 5890191993 nits): every yielded literal is walked as an
+    executed command, so a producer that merely reads an oversized data file
+    (``sqlite3.connect('/d/big.db')``) refuses on the scan cap, and the literals charge the shared
+    line/byte budget, so a generator of ~16k lines piped to a shell refuses on the line cap (~8k
+    lines when each prints a literal; the between-quote spans dedupe and leave both unchanged)."""
+    from tools.shell_heredoc import output_reaches_shell
+
+    if not output_reaches_shell(command):
+        return
+    seen: set[str] = set()
+
+    def unseen(text: str) -> Iterator[str]:
+        for variant in _with_escapes_decoded(text):
+            if variant not in seen:
+                seen.add(variant)
+                yield variant
+
+    for pattern in _QUOTED_LITERAL_RES:
+        for match in pattern.finditer(command):
+            yield from unseen(match[1])
+    if not any(name in command for name in _ARGUMENT_PRINTERS):
+        return  # skip a second tokenization of a large generator that never echoes
+    for segment in _iter_command_segments(command):
+        while segment and segment[0] in _SUBSHELL_OPENING_WORDS:  # `{ echo …; }`, `then echo …`
+            segment = segment[1:]
+        index = _executed_command_index(segment)
+        if index is not None and _executable_name(segment[index]) in _ARGUMENT_PRINTERS:
+            yield from unseen(" ".join(segment[index + 1 :]))
 
 
 # --- referenced-script reading ----------------------------------------------------------------
@@ -1143,8 +1592,62 @@ def _read_script_for_scanning(script_path: str) -> tuple[str, Optional[str]]:
 
 # --- recursive walk ---------------------------------------------------------------------------
 
+def _walk_candidates(
+    command: str, walk_command: str, *, cwd: Optional[str], executed: bool,
+    budget: _LifecycleScanBudget,
+) -> Iterator[tuple[Path, bool, bool]]:
+    """``(path, executed, python_source)`` for every path *command* references, executed
+    candidates first.
+
+    Paths named only inside a masked body are still READ: an interpreter body that hands
+    `/x/restart.sh` to os.system() executes it. Only the fail-closed verdicts (cloud placeholder,
+    oversized/binary, budget) stay restricted to the executed view — a mere data mention must not
+    trip them. Executed candidates come first so a mention never starves a real script's budget. A
+    path in interpreter call syntax (`expanduser("~/x")`, `connect('/d/x.db')`) is a string
+    literal the shell never runs: a mention too, read and scanned but never a fail-closed verdict,
+    unless an alias may turn its `NAME (` into a subshell (`alias T=' '; T ( bash big.sh )`). That
+    is decided lazily, when the entry is reached: the executed candidates before it (a sourced
+    script may define the alias) have been walked by then.
+
+    A file run as ``python3 <file>`` (masked or not) comes last, as ``python_source``: regex-scanned
+    only, never walked as shell, and never failed closed. A file the scan cannot read (oversized, a
+    stream such as ``/dev/stdin``, a device) ran before this scan existed, so only a lifecycle
+    command actually found in it blocks.
+    """
+    entries = [
+        (path, executed, False) for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd)
+    ]
+    entries += [
+        (path, executed, True)
+        for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd, call_arguments=True)
+    ]
+    if walk_command != command:
+        entries += [
+            (path, False, False)
+            for call_arguments in (False, True)
+            for path in _iter_referenced_shell_scripts(
+                command, cwd=cwd, call_arguments=call_arguments)
+        ]
+    for path, candidate_executed, call_argument in entries:
+        yield path, candidate_executed and (budget.aliases_possible or not call_argument), False
+    # Python candidates are never executed (fail-closed) entries, so the unmasked text, a superset
+    # of the masked view, finds them all.
+    for path in _iter_python_interpreter_scripts(command, cwd=cwd):
+        yield path, False, True
+
+
+def _visit_key(resolved: Path, *, python_source: bool) -> object:
+    """A shell walk of a file subsumes its Python regex scan, never the reverse, so the two are
+    keyed apart in ``visited``."""
+    return (resolved, "python") if python_source else resolved
+
+
+def _already_visited(visited: set[object], resolved: Path, *, python_source: bool) -> bool:
+    return resolved in visited or _visit_key(resolved, python_source=python_source) in visited
+
+
 def _contains_unsafe_gateway_action(
-    command: str, *, cwd: Optional[str], depth: int, visited: set[Path], budget: _LifecycleScanBudget,
+    command: str, *, cwd: Optional[str], depth: int, visited: set[object], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
     source: Optional[str] = None,
 ) -> bool:
@@ -1155,12 +1658,17 @@ def _contains_unsafe_gateway_action(
     # Charge BEFORE _direct_lifecycle_scan: every scan in it tokenizes with shlex.
     if not budget.charge_text(command):
         return _budget_exhausted(budget, "text", depth, source=source) if executed else False
-    if _direct_lifecycle_scan(command):
+    if _direct_lifecycle_scan(command, mask_heredocs=budget.mask_heredocs):
         return True
+    budget.note_aliases(command)
     if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
         return _depth_limit_reached(budget, depth, executed=executed)
 
-    def recurse(text: str, cwd: Optional[str], executed: bool, source: Optional[str]) -> bool:
+    def recurse(
+        text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,
+    ) -> bool:
+        if python_source:
+            return _python_source_is_unsafe(text, budget)
         return _contains_unsafe_gateway_action(
             text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
             read_remote_script=read_remote_script, executed=executed, source=source,
@@ -1171,22 +1679,18 @@ def _contains_unsafe_gateway_action(
     # oversized data file mentioned there otherwise fails closed as a "script".
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
-    walk_command = strip_inert_heredoc_bodies(command)
+    walk_command = (strip_inert_heredoc_bodies(command, nested=True) if budget.mask_heredocs
+                    else command)
 
-    for payload in _iter_shell_command_payloads(walk_command):
-        # An `sh -c` payload is text of the same file (or command) it appears in.
+    for payload in itertools.chain(_iter_shell_command_payloads(walk_command),
+                                   _iter_printed_shell_payloads(walk_command)):
+        # An `sh -c` payload is text of the same file (or command) it appears in; so is a string
+        # an interpreter prints when its output is fed to a shell.
         if recurse(payload, cwd, executed, source):
             return True
 
-    # Paths named only inside a masked body are still READ: an interpreter body that hands
-    # `/x/restart.sh` to os.system() executes it. Only the fail-closed verdicts (cloud placeholder,
-    # oversized/binary, budget) stay restricted to the executed view — a mere data mention must not
-    # trip them. Executed candidates come first so a mention never starves a real script's budget.
-    candidates = [(path, executed) for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd)]
-    if walk_command != command:
-        candidates += [(path, False) for path in _iter_referenced_shell_scripts(command, cwd=cwd)]
-
-    for script_path, candidate_executed in candidates:
+    for script_path, candidate_executed, python_source in _walk_candidates(
+            command, walk_command, cwd=cwd, executed=executed, budget=budget):
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
         if _on_cloud_path(script_path):
             if candidate_executed:
@@ -1197,13 +1701,13 @@ def _contains_unsafe_gateway_action(
                 )
             continue
         resolved = _resolve_lenient(script_path)
-        if resolved in visited:
+        if _already_visited(visited, resolved, python_source=python_source):
             continue
         if not budget.charge_path():
             if candidate_executed:
                 return _budget_exhausted(budget, "paths", depth)
-            break  # remaining candidates are all mentions
-        visited.add(resolved)
+            continue  # an alias may make a later call-argument entry executed
+        visited.add(_visit_key(resolved, python_source=python_source))
         # Never read more than the walk can still afford to tokenize; a file larger than the
         # remainder fails closed exactly like an oversized one.
         script_text, unsafe = _read_referenced_script(script_path, max_bytes=budget.bytes_remaining)
@@ -1217,7 +1721,7 @@ def _contains_unsafe_gateway_action(
             if not budget.charge_remote_read():
                 if candidate_executed:
                     return _budget_exhausted(budget, "remote reads", depth)
-                break
+                continue
             script_text, unsafe = _sanitize_remote_script_text(
                 read_remote_script(str(script_path)), max_bytes=budget.bytes_remaining
             )
@@ -1234,7 +1738,7 @@ def _contains_unsafe_gateway_action(
         # Relative references inside a script resolve against that script's directory, not the cwd.
         if recurse(
             script_text, _resolve_script_directory(str(resolved)) or cwd, candidate_executed,
-            f"`{script_path}`",
+            f"`{script_path}`", python_source,
         ):
             return True
     return False
@@ -1244,11 +1748,21 @@ def scan_gateway_lifecycle(
     command: str, *, cwd: Optional[str] = None,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None,
     source: Optional[str] = None,
+    separator_lines: int = 0,
+    session_aliases: Optional[frozenset[str]] = frozenset(),
 ) -> tuple[bool, Optional[str]]:
     """``(unsafe, refusal)``: *refusal* names a non-lifecycle reason the walk failed closed (budget,
     size, device, live SQLite, cloud) so callers can tell the model; ``None`` when the verdict is a
     real lifecycle command or the command is allowed. *source* names the root text in a budget
-    refusal (default "the command").
+    refusal (default "the command"); *separator_lines* counts newlines the caller added to join it,
+    left out of a refusal's reported line count (the budget still charges them).
+
+    *session_aliases* are the alias names the shell running *command* already holds before its
+    first line, outside the walked text: the terminal backend sources a login snapshot holding
+    ``alias -p`` and ``shopt -s expand_aliases`` (``tools/environments/base_session_env.py``).
+    ``None`` means it may hold aliases with unknown names. Any session alias makes ``NAME ( … )``
+    possibly a keyword-led subshell (``alias t='time '``), and one that may rename a heredoc
+    consumer, wrapper or shell (``alias python3=bash``) leaves every heredoc body visible.
 
     Total by construction: never raises. Direct scans are pure string ops; the referenced-script
     walk (filesystem, remote backends, shlex on decoded bytes) is best-effort defense-in-depth — an
@@ -1259,7 +1773,7 @@ def scan_gateway_lifecycle(
     every terminal command until the gateway restarts (#77780, #78256), which is strictly worse than either
     verdict.
     """
-    budget = _LifecycleScanBudget()
+    budget = _LifecycleScanBudget(session_aliases, separator_lines=separator_lines)
     try:
         unsafe = _contains_unsafe_gateway_action(
             command, cwd=cwd, depth=0, visited=set(), budget=budget,
@@ -1273,10 +1787,10 @@ def scan_gateway_lifecycle(
             exc_info=True,
         )
         try:
-            return _direct_lifecycle_scan(command), None
+            return _direct_lifecycle_scan(command, mask_heredocs=budget.mask_heredocs), None
         except Exception:
             # If even the data-argument masker fails, fall to raw regex + submit scan: stay total.
-            return (contains_gateway_lifecycle_command(command)
+            return (contains_gateway_lifecycle_command(command, mask_heredocs=budget.mask_heredocs)
                     or contains_launchctl_submit_command(command)), None
 
 
@@ -1298,6 +1812,8 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
     python_script = False
     refusal: Optional[str] = None
     source: Optional[str] = None
+    # An empty prompt still gets the join newline below: charged, but not a line of the script.
+    separator_lines = 0
     if script:
         source = f"the job prompt plus `{script}`" if prompt else f"`{script}`"
         resolved_script = _resolve_script_path(script)
@@ -1319,6 +1835,7 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         python_script = resolved_script is not None and resolved_script.suffix == ".py"
         script_text, refusal = _read_script_for_scanning(script)
         if script_text:
+            separator_lines = 0 if combined else 1
             combined = f"{combined}\n{script_text}"
 
     if refusal:
@@ -1330,7 +1847,7 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         # The data-exemption masker tokenizes with shlex, so it is charged against the walk budget.
         # The direct command regex below still scans the full text, so a literal `hermes gateway restart`
         # embedded in a .py script is still blocked. See #77131, #78398.
-        budget = _LifecycleScanBudget()
+        budget = _LifecycleScanBudget(separator_lines=separator_lines)
         if not budget.charge_text(combined):
             unsafe = _budget_exhausted(budget, "text", 0, source=source)
             refusal = budget.refusal
@@ -1339,6 +1856,7 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
     else:
         unsafe, refusal = scan_gateway_lifecycle(
             combined, cwd=_resolve_script_directory(script) if script else None, source=source,
+            separator_lines=separator_lines,
         )
     if unsafe and refusal:
         raise GatewayLifecycleBlocked(

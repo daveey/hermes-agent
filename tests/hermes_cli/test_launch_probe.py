@@ -81,6 +81,21 @@ def test_currency_reports_pm_verdict_for_requested_root(tmp_path, use_source, cu
 
 
 @posix
+@pytest.mark.parametrize("current", [True, False])
+def test_borrowed_activates_then_reports_the_owner_generation_verdict(tmp_path, use_source, current):
+    order = tmp_path / "order.txt"
+    source = _fake_source(tmp_path, "return True", f"open({str(order)!r}, 'a').write('deps ')")
+    (source / "pm" / "install.py").write_text(
+        "def borrowed_venv_is_current(*, project_root):\n"
+        f"    open({str(order)!r}, 'a').write('borrowed:' + str(project_root))\n"
+        f"    return {current}\n")
+    use_source(source)
+    assert launch_probe.probe(tmp_path / "r", "borrowed", timeout=BOUND) == {
+        "schema": 1, "state": "current" if current else "stale"}
+    assert order.read_text() == f"deps borrowed:{tmp_path / 'r'}"
+
+
+@posix
 def test_runtime_activates_dependencies_before_pm_and_returns_path(tmp_path, use_source):
     order = tmp_path / "order.txt"
     use_source(_fake_source(

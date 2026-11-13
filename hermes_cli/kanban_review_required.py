@@ -42,6 +42,8 @@ def require_review(conn, task_id: str, expected_run_id: int | None, *, placement
     if task.status == "review":  # never tell any lane an in-review card "is not in review"
         stale = ("" if expected_run_id is None else
                  f" Run {expected_run_id} is not its current run: a card pending review has none.")
+        if not worker:  # an operator reaches here only with a run id: name the allowed route
+            stale += " To approve it as the operator, complete it again without expected_run_id."
         raise ReviewRequiredError(
             f"{task_id} is pending review: a reviewer approves it by claiming the review run; only "
             f"{OPERATOR} may approve it without claiming it.{stale}"

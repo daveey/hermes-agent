@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from gateway.runtime_ownership import ProfileOwnership
 from hermes_cli.gateway_runtime import GatewayDiscovery
+from hermes_cli.session_owner_discovery import STARTING_DETAIL
 from hermes_cli.web_routers.sessions import manage_router
 from hermes_state import SessionDB
 from hermes_state_runtime import admit_session_input, begin_runtime_epoch
@@ -71,11 +72,14 @@ async def test_standalone_edit_refuses_while_a_gateway_owns_the_store(tmp_path, 
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                          base_url='http://localhost', headers=AUTH) as client:
-                # The held lock without a control socket reads as a starting owner: retryable, never offline.
+                # The held lock without a control socket reads as a starting owner: re-read within its
+                # budget, then retryable with no drain/stop advice; never offline.
+                monkeypatch.setattr('hermes_cli.session_owner_discovery.OWNER_STARTING_BUDGET_S', 0.3)
                 starting = await client.patch('/api/sessions/owned',
                                               json={'request_id': 'r1', 'expected_revision': 0, 'title': 'X'})
                 assert starting.status_code == 503, starting.text
-                assert starting.json()['detail'].startswith('owner_unavailable: starting: Exclusive maintenance refused')
+                assert starting.json()['detail'] == STARTING_DETAIL
+                assert 'Drain and stop' not in starting.json()['detail']
                 assert 'gateway owner not reachable (starting)' in caplog.text
                 # An owner that reserves after discovery read absent still wins the offline reservation.
                 monkeypatch.setattr('hermes_cli.gateway_runtime.discover_gateway_endpoint',

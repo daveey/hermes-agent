@@ -32,6 +32,14 @@ THRESHOLD_SECONDS = pu.THRESHOLD_SECONDS
 # A ready episode older than this when first seen is backlog, not a wait the chat just promised; kanban_show's
 # queue_hint covers it. This also bounds the burst on the first tick after deploy.
 MAX_EPISODE_SECONDS = 6 * 3600
+# Boards (main DB file of the swept conn) whose current lag stall has logged its WARNING; the rest of that stall logs
+# at INFO. Keyed per board: the dispatcher sweeps each board separately, so a healthy board's undeferred sweep must
+# not re-arm a lagging board's WARNING every tick. A stall is one run of replica lag, so a board leaves the set only on
+# its own sweep that finds the lag closed: an undeferred sweep, or one with nothing due whose lag_hold is None (a
+# stall that ends with no card waiting would otherwise make the next one log only at INFO). Cards that come due and
+# get claimed within one lag log at INFO after the first WARNING; lag_hold runs on a nothing-due sweep only for a
+# board in the set.
+_LAG_WARNED: set[str] = set()
 NO_PROMISE = "check placement and available capacity first; re-place if suitable; don't promise a pickup"
 
 
@@ -168,17 +176,52 @@ def _clock_hold_unchecked(conn, task_id: str, since: int, now: float) -> dict[st
     return {"hold_reason": str(reason), "hold_until": int(until)} if until else {}
 
 
+def _board_key(conn) -> str:
+    """Identity of the board ``conn`` reads, for :data:`_LAG_WARNED`: its main DB file ("" in memory)."""
+    from hermes_cli.kanban_db_connect import _main_db_file
+    return _main_db_file(conn) or ""
+
+
 def sweep(conn, *, now: Optional[float] = None) -> int:
-    """Append the once-per-ready-episode notice for every qualifying card; returns how many were appended."""
+    """Append the once-per-ready-episode notice for every qualifying card; returns how many were appended.
+
+    "No worker claiming it" is a Board fact read from this gateway's live copy, so it is checked against the pulled
+    replica first (``kanban_replica_freshness``, t_01a1d390d19239dd): while the live feed lags the replica past the
+    bound every notice waits (the episode keeps its key, so it fires once when the lag closes, if still ready), and
+    a card whose newer replica row has left this ready episode is skipped. A deferral that outlasts
+    ``MAX_EPISODE_SECONDS`` drops that episode's notice for good (the stall itself is the sync loop's to report), so
+    the first deferred sweep of each stall (one run of replica lag, see :data:`_LAG_WARNED`) logs at WARNING."""
+    from hermes_cli import kanban_replica_freshness as fresh
     from hermes_cli.kanban_sync_diagnostics import missing_board, update_hold
     now = time.time() if now is None else now
-    drain = update_hold()
-    posted = 0
     rows = conn.execute(_CANDIDATES, (int(now - MAX_EPISODE_SECONDS), int(now - THRESHOLD_SECONDS))).fetchall()
+    due = []
     for row in rows:
         since = pu.ready_since(conn, row["id"], row["created_at"])
         ready_for = now - since
-        if ready_for < THRESHOLD_SECONDS or ready_for > MAX_EPISODE_SECONDS:
+        if THRESHOLD_SECONDS <= ready_for <= MAX_EPISODE_SECONDS:
+            due.append((row, since, ready_for))
+    if not due:  # the stall is the lag, not the waiting card: it ends when the lag closes, even with nothing due
+        if _LAG_WARNED:
+            board = _board_key(conn)
+            if board in _LAG_WARNED and fresh.lag_hold(conn, now=now) is None:
+                _LAG_WARNED.discard(board)
+        return 0
+    lag = fresh.lag_hold(conn, now=now)
+    board = _board_key(conn)
+    if lag is not None:
+        (_log.info if board in _LAG_WARNED else _log.warning)(
+            "kanban chat-wait: %d notice(s) deferred: %s (board %s)", len(due), lag["reason"], board or "<memory>")
+        _LAG_WARNED.add(board)
+        return 0
+    _LAG_WARNED.discard(board)
+    newer = fresh.newer_rows(conn, [row["id"] for row, _since, _for in due])
+    drain = update_hold()
+    posted = 0
+    for row, since, ready_for in due:
+        moved = fresh.moved_past(newer.get(row["id"]))
+        if moved:
+            _log.info("kanban chat-wait: %s skipped: %s", row["id"], moved)
             continue
         if pu.post_notice(conn, row["id"], row["id"], wait_key=f"ready@{since}", waited_seconds=ready_for,
                           ready_seconds=ready_for, parent_title=row["title"], kind=NOTICE_KIND,

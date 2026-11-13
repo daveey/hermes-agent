@@ -190,6 +190,8 @@ def collect_superseded_generations(project_root: Path) -> None:
 #: Answered from the tree alone; a metadata query must never wait on (or fail with)
 #: a network-bound source-update completion.
 _METADATA_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
+# Longer than the currency probe's second: the alternative to an answer is a full dependency sync.
+_BORROWED_PROBE_SECONDS = 5.0
 
 
 def _is_read_only_gateway_status(command: list[str]) -> bool:
@@ -717,16 +719,44 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     return None
 
 
+def _owner_environment_serves(root: Path) -> bool:
+    """Does the owner's committed generation serve this borrowing root (``pm.install.borrowed_venv_is_current``)?
+
+    Asked through the bounded launch probe: plugin discovery may read this root's config, which
+    needs the owner's packages, and a fresh borrowing root has no PM runtime of its own to ask.
+    No answer (a timeout, a probe error, no owner generation) is no: the borrower builds its own.
+    """
+    from hermes_cli.launch_probe import probe
+    from pm.environments import borrowed_venv
+
+    if borrowed_venv(root) is None:
+        return False
+    result = probe(root, "borrowed", timeout=_BORROWED_PROBE_SECONDS)
+    return result is not None and result["state"] == "current"
+
+
 def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path | None:
     """Launch a checkout that another data root owns (#123238).
 
-    Dependency state is per data root, so a borrowing root -- a test's temporary
-    ``HERMES_HOME``, a per-task home -- still gets an environment of its own, synced exactly
-    as a process spawned under a live update syncs. The rest is the checkout's, and so the
-    owner's: launchers, product builds, post-update maintenance, the install stamp and the
-    owner's own update markers. None of it is armed, run or published from here, so a
-    borrowing launch cannot rebind the shared launchers, rebuild products another root is
-    serving, or race the owner's tail under a lock that lives in a different home.
+    Dependency state is per data root, but a borrowing root -- a test's temporary
+    ``HERMES_HOME``, a per-task home -- that has committed nothing of its own runs the owner's
+    committed generation when that generation serves its request (``pm.borrowed_venv_is_current``:
+    same lock, Python and plugin members, extras including the first-sync request), leased in
+    place (``pm.environments.activate_dependencies``). Otherwise it gets an environment of its
+    own, synced exactly as a process spawned under a live update syncs. The rest is the
+    checkout's, and so the owner's: launchers, product builds, post-update maintenance, the
+    install stamp, the owner's own update markers and its dependency facts. None of it is armed,
+    run, written or published from here, so a borrowing launch cannot rebind the shared
+    launchers, rebuild products another root is serving, or race the owner's tail under a lock
+    that lives in a different home.
+
+    A launch whose dependencies serve it -- its own current generation, or the owner's that
+    serves it -- hands that verdict to the store interpreter it relaunches into (``_handoff``,
+    as ``prepare_launch`` does), so the exec'd child repeats neither the currency probe nor the
+    owner check; on that interpreter it records the root as current, so ``check_runtime`` skips
+    its own probe as well. A borrower's child reads ``current`` as "served" (its own or the
+    owner's) and takes this path again. A launch that just synced its own hands nothing on: its
+    child checks for itself, as a relaunch after the main path's sync does.
     """
     import os
     import sys
@@ -734,7 +764,9 @@ def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path 
     from hermes_cli._launchers import resolve_store_python
     from hermes_cli.update_lock import UpdateLock
 
-    if not current:
+    global _handoff
+    served = current or _owner_environment_serves(root)
+    if not served:
         lock = UpdateLock(install_root=root, checkout_first=False)  # R6, as in prepare_launch
         if not lock.acquire():
             raise RuntimeError("an update is still running; wait for it to exit, then relaunch Hermes")
@@ -752,7 +784,13 @@ def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path 
     # The pre-sync flag used to force a re-exec even when this process already is the store
     # interpreter. A script that mints a new HERMES_HOME on each start would then sync and
     # re-exec forever. Activation runs in this process when prepare_launch returns None.
-    return None if same else python
+    if not same:
+        if served:
+            _handoff = ("current", root)
+        return python
+    if served:
+        _current_roots.add(root)
+    return None
 
 
 def _finish_source_update(root: Path, *, current: bool, pending: Path) -> None:

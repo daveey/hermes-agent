@@ -9,7 +9,17 @@ read_file pagination) are different products and stay separate.
 
 from __future__ import annotations
 
+import re
+
 HEAD_RATIO = 0.4
+
+# Matches every notice ``truncation_notice`` renders, whatever the label/unit.
+TRUNCATION_NOTICE_RE = re.compile(
+    r"\[[A-Z_ ]{1,32} TRUNCATED - [\d,]{1,20} \w{1,16} omitted out of [\d,]{1,20} total\]")
+
+
+def contains_truncation_notice(text: str) -> bool:
+    return bool(text) and TRUNCATION_NOTICE_RE.search(text) is not None
 
 
 def truncation_notice(omitted: int, total: int, *, label: str = "OUTPUT", unit: str = "chars") -> str:

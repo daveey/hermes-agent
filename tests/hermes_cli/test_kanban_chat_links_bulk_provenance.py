@@ -457,3 +457,214 @@ def test_backfill_result_and_rows_match_the_per_row_implementation(home, tmp_pat
     old = run(copy, _frozen_backfill)
     assert new == old
     assert "creator_chats_resolved" in new and "creator_chats_unresolved" in new
+
+
+class _SlowClock:
+    """Every ``monotonic`` call advances past the 300 s source-cache TTL: each entry expires before its next use."""
+    t = 1000.0
+
+    @classmethod
+    def monotonic(cls):
+        cls.t += provenance._MISSING_TTL_S + 1
+        return cls.t
+
+
+def test_backfill_reads_no_provenance_inside_its_transaction_when_the_pass_outlives_the_cache(home, opens,
+                                                                                               monkeypatch):
+    """t_01a1d2f6289c3fe7: warming the source cache before ``write_txn`` bounded reads only while the pass stayed
+    inside the 300 s TTL. With every entry expired by its next use, ``backfill`` must still look verdicts up
+    under the lock: no ``scoped_sources`` / ``_local_session_sources`` call and no state.db open."""
+    seen, board = opens
+    calls: list[tuple[str, bool]] = []
+
+    def spy(name):
+        real = getattr(provenance, name)
+
+        def wrapped(*a, **kw):
+            conn = board.get("conn")
+            calls.append((name, bool(conn is not None and conn.in_transaction)))
+            return real(*a, **kw)
+        monkeypatch.setattr(provenance, name, wrapped)
+
+    for name in ("scoped_sources", "_local_session_sources"):
+        spy(name)
+    with kbc.connect_closing() as conn:
+        _backfill_board(conn, 40)
+        with kbc.write_txn(conn):  # hub-sub origins resolve_chats also tests (legacy courier rows)
+            conn.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, delivery_metadata, created_at) "
+                         "VALUES ('t_lost', 'hub', ?, ?, 1)",
+                         (f"{GW}/default/{DESKTOP}", json.dumps({"reason": "origin"})))
+        notify._source_cache.clear()
+        monkeypatch.setattr(provenance, "time", _SlowClock)
+        board["conn"] = conn
+        seen.clear()
+        calls.clear()
+        out = creator_chats.backfill(conn)
+        board.clear()
+    assert len(out["attempted"]) > 10
+    assert any(not in_txn for _n, in_txn in calls)  # verdicts were read, before the transaction
+    inside = [n for n, in_txn in calls if in_txn] + [p for p, in_txn in seen if in_txn]
+    assert not inside, f"{len(inside)} provenance reads inside write_txn: {sorted(set(inside))}"
+
+
+@pytest.mark.parametrize("slow", [False, True])
+def test_backfill_with_expiring_cache_matches_the_per_row_implementation(home, tmp_path, monkeypatch, slow):
+    with kbc.connect_closing() as conn:
+        _backfill_board(conn, 40)
+    board = home / "kanban.db"
+    copy = tmp_path / "copy.db"
+    shutil.copy(board, copy)
+    if slow:
+        monkeypatch.setattr(provenance, "time", _SlowClock)
+
+    def run(path, fn):
+        notify._source_cache.clear()
+        conn = kbc.connect(path)
+        try:
+            result = fn(conn)
+            rows = conn.execute("SELECT * FROM task_chat_links ORDER BY 1").fetchall()
+            events = conn.execute("SELECT task_id, kind, payload FROM task_events ORDER BY id").fetchall()
+            return _dump([result, [tuple(r) for r in rows], [tuple(r) for r in events]])
+        finally:
+            conn.close()
+
+    assert run(board, creator_chats.backfill) == run(copy, _frozen_backfill)
+
+
+def test_link_verdicts_never_read_for_a_link_missing_from_the_map(home, opens):
+    """A link that arrives mid-pass: another gateway's chat is classified (no read needed); a local one fails
+    closed (owns nothing, retried next pass) rather than reading state.db under the lock."""
+    seen, _board = opens
+    verdicts = creator_chats.LinkVerdicts({}, GW)
+    seen.clear()
+    assert verdicts.is_machine(GW, None, DESKTOP) is True
+    assert verdicts.is_machine(None, "default", DESKTOP) is True
+    assert verdicts.is_machine("away", "default", DESKTOP) is True  # a foreign hash: suppressed without proof
+    assert verdicts.is_machine("away", "default", "20261101_000000_human") is False
+    assert not seen
+
+
+def test_link_verdicts_match_per_row_is_machine_session(home):
+    keys = [(gw, prof, s) for s in MIXED for gw in (GW, "away", None) for prof in (None, "default", "research", "")]
+    batch = provenance.machine_verdicts(keys, local_gateway=GW)
+    notify._source_cache.clear()
+    per_row = {(gw, prof, s): notify.is_machine_session(gw, s, local_gateway=GW, profile=prof)
+               for gw, prof, s in keys}
+    assert batch == per_row
+    assert any(batch.values()) and not all(batch.values())
+
+
+def test_prefetch_skips_other_gateways_refs(home, opens):
+    """t_01a1d2f6289c3fe7 nit 3: ``scoped_sources`` never reads another gateway's ``gw/profile/sid`` locally, so the
+    prefetch does not either."""
+    seen, _board = opens
+    seen.clear()
+    provenance.prefetch_sources([f"away/default/{DESKTOP}", f"away/research/{RCHAT}", "a/b"])
+    assert not seen
+    provenance.prefetch_sources([f"{GW}/default/{DESKTOP}"])
+    assert len(seen) == 3
+
+
+@pytest.mark.parametrize("gateway", [None, GW, "away"])
+@pytest.mark.parametrize("profile", [None, "default", "research"])
+def test_prefetch_leaves_scoped_verdicts_unchanged(home, gateway, profile):
+    """The mixed-ref corpus (bare, local-qualified and foreign-qualified refs) gets the same ``scoped_sources``
+    verdicts from a cold cache and after the filtered prefetch."""
+    notify._source_cache.clear()
+    cold = provenance.scoped_sources(gateway, MIXED, local_gateway=GW, profile=profile)
+    notify._source_cache.clear()
+    provenance.prefetch_sources(MIXED)
+    assert provenance.scoped_sources(gateway, MIXED, local_gateway=GW, profile=profile) == cold
+    assert any(v is not None for v in cold.values()) or gateway == "away"
+
+
+def test_backfill_resolves_replica_links_on_a_host_without_a_gateway_name(home, opens, monkeypatch):
+    """t_01a1d41a82ced7d9 (PR #2013 review nit 1): without a hub.db gateway name ``LinkVerdicts.read`` leaves the
+    replica unopened, yet ``_ReplicaReader`` still resolves creators from it. Safe because every replica link names
+    a gateway (``chat_gateway`` is NOT NULL in the synced schema, so no bare link exists) and, with no local name,
+    ``scoped_sources`` answers each such ref without a read: a map miss gets the per-row verdict, with no
+    provenance read under ``write_txn`` even as the source cache expires before each use."""
+    from hermes_cli import kanban_db as kdb
+    monkeypatch.setattr("hermes_cli.kanban_origin.gateway_names", lambda: ("", set()))
+    rep = ksc.shadow_path("default")
+    rep.parent.mkdir(parents=True, exist_ok=True)
+    kbc.init_db(rep)
+    rows = [("away", None, "20261101_000000_human"), ("", "default", "20261101_000000_cron"),
+            (GW, None, DESKTOP), ("away", "research", WORKER), (GW, "default", "20261101_000000_nosuch")]
+    with kbc.connect_closing(rep) as remote:
+        creator = kdb.create_task(remote, title="creator synced from another machine", assignee="default")
+        with kbc.write_txn(remote):
+            for gw, prof, sid in rows:
+                _link(remote, creator, sid, gateway=gw, profile=prof)
+        with pytest.raises(sqlite3.IntegrityError, match="chat_gateway"):  # the premise: no bare link
+            _link(remote, creator, DESKTOP, gateway=None)
+    notify._source_cache.clear()
+    want = {r for r in rows if not notify.is_machine_session(r[0], r[2], local_gateway="", profile=r[1])}
+    assert want and want != set(rows)  # owners kept and machine links dropped
+    seen, board = opens
+    calls: list[tuple[str, bool]] = []
+
+    def spy(name):
+        real = getattr(provenance, name)
+
+        def wrapped(*a, **kw):
+            conn = board.get("conn")
+            calls.append((name, bool(conn is not None and conn.in_transaction)))
+            return real(*a, **kw)
+        monkeypatch.setattr(provenance, name, wrapped)
+
+    for name in ("_local_session_sources",):  # a map miss calls scoped_sources, which answers without this read
+        spy(name)
+    with kbc.connect_closing() as conn:
+        assert not conn.execute("SELECT 1 FROM tasks WHERE id=?", (creator,)).fetchone()
+        with kbc.write_txn(conn):
+            _add_task(conn, "t_child", payload={"creator_task_id": creator})
+        notify._source_cache.clear()
+        monkeypatch.setattr(provenance, "time", _SlowClock)
+        board["conn"] = conn
+        seen.clear()
+        calls.clear()
+        out = creator_chats.backfill(conn)
+        board.clear()
+        owned = conn.execute("SELECT chat_gateway, chat_profile, chat_session FROM task_chat_links "
+                             "WHERE task_id='t_child' AND released=0").fetchall()
+        resolved = conn.execute("SELECT payload FROM task_events WHERE task_id='t_child' "
+                                "AND kind='creator_chats_resolved'").fetchone()
+    assert out == {"attempted": ["t_child"], "unresolved": []}
+    assert {tuple(r) for r in owned} == want
+    assert json.loads(resolved[0])["source"] == "replica"
+    inside = [n for n, in_txn in calls if in_txn] + [p for p, in_txn in seen if in_txn]
+    assert not inside, f"{len(inside)} provenance reads inside write_txn: {sorted(set(inside))}"
+
+
+_SCOPE_REFS = [*MIXED, f"{GW}/research/{RCHAT}", f"away/research/{RCHAT}", f"{GW}//{DESKTOP}", f"{GW}/default/",
+               "", "x/y/z/w"]
+
+
+@pytest.mark.parametrize("local_gateway", [GW, "", None])
+@pytest.mark.parametrize("gateway", [None, GW, "away"])
+@pytest.mark.parametrize("profile", [None, "default", "research"])
+def test_reads_local_store_is_exactly_when_scoped_sources_reads(home, monkeypatch, local_gateway, gateway, profile):
+    """t_01a1d41a82ced7d9 (PR #2013 review nit 2): ``reads_local_store`` answers the same rule as ``scoped_sources``,
+    including a qualified ``gw/profile/sid`` ref whose outer gateway or profile contradicts the scope (answered
+    unknown without a read, so not reported as a read either). ``local_gateway=None`` on this named host resolves
+    to its name in both (t_01a1d44128e287b9, PR #2044 review nit)."""
+    me = GW if local_gateway is None else local_gateway
+    real = provenance._local_homes
+    reads: list[Any] = []
+
+    def counted(prof):
+        reads.append(prof)
+        return real(prof)
+    monkeypatch.setattr(provenance, "_local_homes", counted)
+    mismatched = 0
+    for ref in _SCOPE_REFS:
+        reads.clear()
+        provenance.scoped_sources(gateway, [ref], local_gateway=local_gateway, profile=profile)
+        claim = provenance.reads_local_store(gateway, ref, local_gateway=local_gateway, profile=profile)
+        assert claim == bool(reads), (ref, claim, reads)
+        parts = ref.split("/")
+        mismatched += len(parts) == 3 and parts[0] == me and (
+            (gateway is not None and gateway != parts[0]) or (profile is not None and profile != parts[1]))
+    if me and (gateway == "away" or profile is not None):
+        assert mismatched  # the corpus holds the over-approximated case for this scope

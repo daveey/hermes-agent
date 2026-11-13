@@ -22,7 +22,7 @@ from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
-from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
+from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc, kanban_origin_creation
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
                                           _effective_board_args, _origin_enrollment, _landing_placement, _pinned_note,
@@ -235,6 +235,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 if tool_name in _RUN_LIFECYCLE_TOOLS and isinstance(out, str) and out.startswith('{"ok": true'):
                     from tools import kanban_tools_run_end as kre
                     out = kre.annotate_success(_board, args, out)
+                if isinstance(out, str):  # [daveey] a write the stopped Board sync keeps local says so
+                    from tools import kanban_tools_board_delivery as kbd_
+                    out = kbd_.annotate(_board, tool_name, args, out)
                 if classify_rejections and isinstance(out, str) and out.startswith('{"error"'):
                     out = _tag_rejection(out, "invalid_args")
                 return out
@@ -276,7 +279,7 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
 # kanban_archive is not here: it sends the holder a stop request instead (kanban_remote_stop). [daveey]
 _LEASE_FENCED_TOOLS = frozenset({
     "kanban_complete", "kanban_block", "kanban_unblock", "kanban_schedule", "kanban_continue",
-    "kanban_request_review", "kanban_request_changes",
+    "kanban_request_review", "kanban_request_changes", "kanban_move",
 })
 
 
@@ -291,7 +294,7 @@ def _remote_lease_refusal(tool_name: str, args: dict) -> Optional[str]:
     if not tid:
         return None
     try:
-        from hermes_cli.kanban_remote_stop import remote_holder
+        from hermes_cli.kanban_remote_stop import refusal, remote_holder
         with _board(args.get("board"), quiet_close=True) as (_kb, conn):
             holder = remote_holder(conn, str(tid))
     except Exception:
@@ -299,11 +302,9 @@ def _remote_lease_refusal(tool_name: str, args: dict) -> Optional[str]:
         return None  # the handler reports its own board errors
     if holder is None:
         return None
-    return tool_error(
-        f"{tool_name} refused: {tid} is running under {holder}'s live lease on the Board, which accepts "
-        f"lifecycle writes only from the lease holder. Nothing changed. Act on {holder}, use kanban_archive "
-        f"(it sends {holder} a stop request), or wait for the run to end.",
-        rejection="live_claim", code="remote_live_lease", holder=holder)
+    verb = tool_name.removeprefix("kanban_").replace("_", " ")
+    return tool_error(refusal(verb, str(tid), holder), rejection="live_claim", code="remote_live_lease",
+                      holder=holder)
 
 
 # The delegate-child / worker-subprocess write fence lives in a sibling (line cap); re-exported here. [daveey]
@@ -1002,7 +1003,7 @@ def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
         from hermes_cli import kanban_wake_check as kwc
         wake = (probe, kwc.normalize_every(None), wake[2])
     try:
-        kaw.confirm_remote(awaiting)  # ssh, so before the park's write txn
+        kaw.confirm_remote(awaiting, hint=" ".join(str(x) for x in (wake[0], args.get("reason"), args.get("checkpoint")) if x))
     except kaw.AwaitingError as exc:
         raise _Reject(str(exc), exc.code) from exc
     return awaiting, wake
@@ -1196,7 +1197,7 @@ def _handle_schedule(args: dict, **kw) -> str:
         # [daveey] A watch says so; a long non-watch park says which chat it holds open and how to free it.
         hold = kwatch.chat_hold_hint(conn, tid)
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason, **_wake_check_echo(wake),
-                          **({"watch": True} if kwatch.is_watch(conn, tid) else {}),
+                          **({"watch": True, "watch_note": kwatch.WATCH_NOTE} if kwatch.is_watch(conn, tid) else {}),
                           **({"chat_hold": hold} if hold else {}))
 
 
@@ -1507,14 +1508,16 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         # A chat model reads task_id null as "not created" and calls kanban_create again, which made a
         # duplicate card (10-27 drill). Fetch the target's answer for a bounded wait so the id comes
         # back like a local create's; otherwise say plainly that the card exists. [daveey]
+        owner: dict = {}  # the owner's courier answer: did it write this chat's link to the Board?
         tid, remote_status = (None, None) if placed.get("queued_only") else kp.await_task_id(
-            rid, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), budget=float(cfg.get("wait_seconds", 10) or 0))
+            rid, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), budget=float(cfg.get("wait_seconds", 10) or 0), result_out=owner)
         retry = ("This identical kanban_create call was already made, so no second card was sent; this is "
                  "the same card. " if placed.get("retry") else "")
         fields = {"placed": {"gateway": target, "request_id": rid, "task_id": tid, "origin_session": session_id,
-                             "queued_only": bool(placed.get("queued_only")), "retry": bool(placed.get("retry"))}}
+                             "queued_only": bool(placed.get("queued_only")), "retry": bool(placed.get("retry")), **kp.owner_chat_link(owner.get("result"))}}
+        from tools import kanban_tools_board_delivery as kbd_words  # [daveey] the stopped-sync rewrite's anchors
         if tid:
-            shows = " and shows in this chat's tasks" if session_id else ""
+            shows = kbd_words.CHAT_TASKS_SHOWS if session_id else ""
             note = (f"{retry}Created on {target} as {tid}, not here: {decision['why']} (kanban.placement). It runs "
                     f"there{shows}. Read it with cross_task @task:default@{target}/{tid} or "
                     f"`hermes-hub tasks --gw {target}`.")
@@ -1526,7 +1529,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request. Changed calls with an explicit "
                 f"creation key are refused; without one they may duplicate. Its task id appears when {target} applies it "
-                + ("(this chat's tasks, " if session_id else "(")
+                + (kbd_words.CHAT_TASKS_HEAD + kbd_words.CHAT_TASKS_SEP if session_id else "(")
                 + "`hermes-hub requests`).")
         return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
     except Exception as exc:
@@ -1707,7 +1710,7 @@ def _handle_create(args: dict, **kw) -> str:
                 "request_id": origin_intent["request_id"],
                 "binding": json.loads(row["binding_json"]),
                 "child_request_id": row["child_request_id"],
-            }}
+            }, **kanban_origin_creation.origin_link_fields(conn, new_tid, origin_intent["origin"])}  # chat_link [daveey]
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
         extra.update(_marker_placement_fields(conn, new_tid, marker_placement, **place_origin))
@@ -1931,7 +1934,7 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
         return tool_error(f"authenticated origin courier context required. {message}".strip().rstrip("."),
                           code="origin_context_required", handoff_complete=False, **hint)
     from hermes_cli.kanban_origin import OriginError
-    from hermes_cli.kanban_origin_creation import adopt_with_origin
+    from hermes_cli.kanban_origin_creation import adopt_with_origin, origin_link_fields
     if (not isinstance(intent, dict) or not isinstance(intent.get("owner"), dict)
             or intent["owner"].get("task_id") != args.get("task_id")
             or intent["owner"].get("board") != args.get("board")):
@@ -1944,7 +1947,8 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
                            "code": "origin_bind_pending", "handoff_complete": False,
                            "origin_creation": {"request_id": intent["request_id"],
                                                "binding": json.loads(row["binding_json"]),
-                                               "child_request_id": row["child_request_id"]}})
+                                               "child_request_id": row["child_request_id"]},
+                           **origin_link_fields(conn, tid, intent["origin"])})
 
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---

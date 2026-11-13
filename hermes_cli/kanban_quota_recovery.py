@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from contextvars import copy_context
 
 MAX_RESPONSE_BYTES = 1 << 20
+# A refused/failed proof benches that (provider, model, account) proof for this long across
+# every process of the home: during a real wall each Kanban start would otherwise spend one
+# real completion per benched account.
+FAILED_PROOF_COOLDOWN_SECONDS = 600
 
 # libc DNS has no cancellation API. Keep it outside the interpreter/executor so
 # cancelling a probe can kill AND reap the resolver, including during loop shutdown.
@@ -38,8 +44,11 @@ async def _getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
             stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
             env=build_subprocess_env(base={}))
         try:
-            process.stdin.write(json.dumps([host, port, family, type, proto, flags]).encode('utf-8'))
-            process.stdin.close()
+            try:
+                process.stdin.write(json.dumps([host, port, family, type, proto, flags]).encode('utf-8'))
+                process.stdin.close()
+            except BrokenPipeError:
+                pass  # the child already exited; its exit status below decides the result
             while process.poll() is None:
                 await asyncio.sleep(0.01)
             if process.returncode != 0:
@@ -55,7 +64,18 @@ async def _getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
                     process.kill()
                 except ProcessLookupError:
                     pass
-            process.wait(timeout=1)
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                # Not reaped within 1 s (killed child stuck in the kernel, or never killed): kill
+                # again and give it one more bounded reap; Popen's own cleanup list reaps a
+                # survivor later. Never let TimeoutExpired replace the closed result.
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=1)
 
 
 async def _run_attempt(provider, url, headers, body, deadline):
@@ -143,12 +163,13 @@ def completion_succeeds(provider, model, observed, deadline):
         return False
     headers = {'Authorization': f'Bearer {observed.runtime_api_key}'}
     if provider == 'anthropic':
+        # The real OAuth client's wire (betas, detected Claude Code user-agent, x-app): a
+        # drifted proof wire would be refused and read as a false "still walled".
+        from agent.anthropic_adapter import _CLAUDE_CODE_SYSTEM_PREFIX, oauth_wire_headers
         url = 'https://api.anthropic.com/v1/messages'
-        headers.update({'anthropic-version': '2023-06-01',
-                        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
-                        'user-agent': 'claude-code/2.1.280 (external, cli)', 'x-app': 'cli'})
+        headers.update({'anthropic-version': '2023-06-01', **oauth_wire_headers()})
         body = {'model': model, 'max_tokens': 1,
-                'system': [{'type': 'text', 'text': "You are Claude Code, Anthropic's official CLI for Claude."}],
+                'system': [{'type': 'text', 'text': _CLAUDE_CODE_SYSTEM_PREFIX}],
                 'messages': [{'role': 'user', 'content': 'Reply OK.'}]}
     elif provider == 'openai-codex':
         from agent.codex_headers import CODEX_AUX_BASE_URL, codex_cloudflare_headers
@@ -163,8 +184,74 @@ def completion_succeeds(provider, model, observed, deadline):
         return False
     try:
         return asyncio.run(_run_attempt(provider, url, headers, body, deadline))
-    except (httpx.HTTPError, OSError, ValueError, TimeoutError):
+    except (httpx.HTTPError, OSError, ValueError, TimeoutError, subprocess.SubprocessError):
         return False
+
+
+def _proof_gate_path():
+    from hermes_cli.kanban_db import kanban_home
+    return str(kanban_home() / 'quota_proof_gate.db')
+
+
+def _proof_key(provider, model, entry):
+    aid = getattr(entry, 'id', None)
+    return json.dumps([provider, model, aid]) if isinstance(aid, str) and aid else None
+
+
+def _gate_connect(path):
+    import sqlite3
+    # quota_proof_gate.db: a local per-home proof throttle, never a board.
+    conn = sqlite3.connect(path, timeout=0.25)  # noqa: kanban-lockguard (not a board)
+    conn.execute('CREATE TABLE IF NOT EXISTS proofs (key TEXT PRIMARY KEY, at REAL)')
+    conn.commit()
+    return conn
+
+
+def _reserve_proofs(provider, model, entries, now, *, path=None):
+    """Entries whose proof may run now, each reserved for the cooldown window (cross-process).
+
+    An account with a failed or in-flight proof within FAILED_PROOF_COOLDOWN_SECONDS is skipped,
+    so concurrent and back-to-back starts share one probe. A verified proof deletes its row.
+    Entries without a pool row id are not gated. An unusable store fails open (probe as before).
+    """
+    from contextlib import closing
+    keyed = [(e, _proof_key(provider, model, e)) for e in entries]
+    try:
+        with closing(_gate_connect(path or _proof_gate_path())) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('DELETE FROM proofs WHERE at < ?', (now - FAILED_PROOF_COOLDOWN_SECONDS,))
+            allowed = []
+            for entry, key in keyed:
+                if key is not None:
+                    if conn.execute('SELECT 1 FROM proofs WHERE key=?', (key,)).fetchone():
+                        continue
+                    conn.execute('INSERT OR REPLACE INTO proofs VALUES (?, ?)', (key, now))
+                allowed.append(entry)
+            return allowed
+    except Exception:  # health: allow BLE001 -- a broken throttle must not disable recovery
+        import logging
+        logging.getLogger(__name__).debug('quota proof gate unavailable; probing ungated', exc_info=True)
+        return list(entries)
+
+
+def _release_proof(provider, model, entry, *, path=None):
+    """Drop an account's reservation so its next bench probes at once.
+
+    Called for every reservation that must not stand for the cooldown window: a successful proof
+    (before or after the deadline), a cancelled proof, and an entry left unprobed because the
+    deadline passed after the reserve. Idempotent (a DELETE). Best effort: a locked or broken gate
+    (0.25 s sqlite timeout) is logged at debug and swallowed, leaving the row to expire.
+    """
+    from contextlib import closing
+    key = _proof_key(provider, model, entry)
+    if key is None:
+        return
+    try:
+        with closing(_gate_connect(path or _proof_gate_path())) as conn, conn:
+            conn.execute('DELETE FROM proofs WHERE key=?', (key,))
+    except Exception:  # health: allow BLE001 -- runs in a proof thread's done-callback; never raise
+        import logging
+        logging.getLogger(__name__).debug('quota proof gate release failed; row expires', exc_info=True)
 
 
 def _eligible(entry, provider, model, now, disabled):
@@ -186,31 +273,59 @@ def recover(provider, model, *, seconds=None):
 
     Futures hold detached observations, never the pool. Timed-out futures can finish but cannot
     clear anything. Usage endpoints are intentionally not prerequisites: unknown usage is common.
+    Each (provider, model, account) proof is reserved for FAILED_PROOF_COOLDOWN_SECONDS across
+    processes, so a real wall costs one completion per account per window, not one per Kanban
+    start. Only a proof that ran and did not succeed keeps its row: nothing is reserved past the
+    deadline, and unprobed or successful (even late) proofs release theirs.
     """
     from copy import deepcopy
     from agent.credential_pool import load_pool
     from agent.credential_pool_disabled import disabled_keys
     from hermes_cli.kanban_quota_probe import PROBE_DEADLINE_SECONDS
+    if provider == 'anthropic':
+        # Resolve the cached Claude Code version (a `claude --version` subprocess) before the
+        # proof deadline starts, not inside every proof thread.
+        from agent.anthropic_adapter import _get_claude_code_version
+        _get_claude_code_version()
     deadline = time.monotonic() + (PROBE_DEADLINE_SECONDS if seconds is None else seconds)
     if provider not in ('anthropic', 'openai-codex') or not model:
         return False
     pool = load_pool(provider, allowed_auth_types={'oauth'})
     disabled = disabled_keys(provider)
     entries = [deepcopy(e) for e in pool.entries() if _eligible(e, provider, model, time.time(), disabled)]
+    # A reservation stands only for a proof that ran and did not succeed: never reserve past the
+    # deadline, and release rows that will not be probed or whose proof succeeded (even late).
     if not entries or time.monotonic() >= deadline:
         return False
+    entries = _reserve_proofs(provider, model, entries, time.time())
+    if not entries:
+        return False
+    if time.monotonic() >= deadline:
+        for entry in entries:
+            _release_proof(provider, model, entry)
+        return False
+
+    def settle(future, entry):
+        if future.cancelled() or (future.exception() is None and future.result()):
+            _release_proof(provider, model, entry)
+
     executor = ThreadPoolExecutor(max_workers=len(entries), thread_name_prefix='quota-proof')
     cleared = False
     verified = []
     try:
         futures = {executor.submit(copy_context().run, completion_succeeds, provider, model, e, deadline): e
                    for e in entries}
+        for future, entry in futures.items():
+            future.add_done_callback(lambda f, entry=entry: settle(f, entry))
         try:
             for future in as_completed(futures, timeout=max(0, deadline - time.monotonic())):
                 if time.monotonic() >= deadline:
                     break
                 if not future.exception() and future.result() and time.monotonic() < deadline:
                     observed = futures[future]
+                    # Intentional, though settle() also releases: done-callbacks run after
+                    # as_completed's waiter wakes, so only this release is done before we return.
+                    _release_proof(provider, model, observed)
                     if pool.clear_verified_model_cooldown(observed, model):
                         cleared = True
                         verified.append({'id': getattr(observed, 'id', ''),

@@ -73,8 +73,9 @@ def _mem_used_pct() -> Optional[float]:
 
 # One statement, one result row, whatever the column or running-row count. In the gateway every sqlite3 call and row
 # step releases the GIL and must win it back from busy Python threads (~one 5 ms switch interval each under
-# contention); iterating ``PRAGMA table_info`` and the running rows made ~80 handoffs a board, ~4 s for the hub's
-# 10 boards, so the final hub gate (which runs this census twice under admission.lock) overran its 2.25 s hold.
+# contention); iterating ``PRAGMA table_info`` and the running rows cost 95 sqlite steps for one board (measured: the
+# hub's 55-column ``tasks``, 22-column ``task_runs``, 8 running rows; this statement makes 4), seconds over the hub's
+# boards, so the final hub gate (which then ran this census twice under admission.lock) overran its 2.25 s hold.
 _RECEIPTS = ("json_group_array(json_array(t.id, t.current_run_id, r.admission_pool, r.admission_class, "
              "r.admission_origin)) FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id "
              "WHERE t.status = 'running'")
@@ -86,12 +87,15 @@ _LOCAL_SQL = f"SELECT (SELECT count(*) FROM pragma_table_info('tasks') WHERE nam
 
 def _running_rows(db) -> Optional[tuple[bool, Any, list]]:
     """``(synced, own gateway id, [(task_id, run_id, pool, class, origin), ...])`` for the running rows this host
-    counts, read in one statement; ``None`` when the board's schema predates claim receipts, or has lease holders
-    without sync state (read it the long way, which decides those exactly as before)."""
+    counts, read in one statement; ``None`` when the board's schema predates claim receipts, when this SQLite lacks
+    JSON1 (``no such function: json_group_array``), or when it has lease holders without sync state (read it the long
+    way, which decides those exactly as before)."""
     for synced, sql in ((True, _SYNCED_SQL), (False, _LOCAL_SQL)):
         try:
             head, rows = db.execute(sql).fetchone()
         except sqlite3.OperationalError as exc:
+            # "no such table/column" (pre-receipt schema, unsynced board) or "no such function" (no JSON1): both
+            # fall through to the long path, which needs neither.
             if str(exc).startswith("no such "):
                 continue
             raise
@@ -106,9 +110,10 @@ def table_columns(db, table: str) -> set:
 
     [daveey] Runs under admission.lock in the gateway. CPython's sqlite3 drops the GIL around every row step, and
     in a process with a GIL-bound thread each re-acquire waits out the switch interval (~5 ms). ``PRAGMA
-    table_info`` returns one row per column (~70 for ``tasks``), so per-column steps on every board cost seconds
-    (hub 2026-11-13: ~840 handoffs per census; a probe beside one busy thread took 4.2 s instead of 20 ms, and every
-    hub claim overran its hold). ``table`` is a fixed identifier from our own code, never user input."""
+    table_info`` returns one row per column (55 for the hub's ``tasks``, 22 for ``task_runs``), so per-column steps
+    made one board's census 95 sqlite steps (see ``_RECEIPTS``; a hub probe beside one busy thread took 4.2 s instead
+    of 20 ms, and every hub claim overran its hold). ``table`` is a fixed identifier from our own code, never user
+    input."""
     row = db.execute("SELECT group_concat(name, char(31)) FROM pragma_table_info(?)", (table,)).fetchone()
     return set(row[0].split("\x1f")) if row and row[0] else set()
 

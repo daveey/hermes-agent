@@ -763,6 +763,27 @@ class TestReadLoggingConfig:
         mb = 1024 * 1024
         assert seen == {"agent.log": (5 * mb, 3), "errors.log": (2 * mb, 2), "gateway.log": (5 * mb, 3)}
 
+    @pytest.mark.parametrize("value, installed", [(None, False), (False, False), (True, True), ("on", True)])
+    def test_debug_ssl_close_from_config_yaml_installs_the_tripwire(self, hermes_home, value, installed):
+        """[daveey] ``logging.debug_ssl_close`` (a DEFAULT_CONFIG key, off by default) reaches
+        agent.ssl_close_tripwire only through setup_logging's config read: prove the key end to end."""
+        import ssl
+
+        import hermes_yaml as yaml
+        from agent import ssl_close_tripwire
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["logging"]["debug_ssl_close"] is False
+        logging_cfg = {"level": "INFO"} if value is None else {"debug_ssl_close": value}
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump({"logging": logging_cfg}), encoding="utf-8")
+        assert not hasattr(ssl.SSLSocket.recv, "__wrapped__")
+        try:
+            hermes_logging.setup_logging(hermes_home=hermes_home, force=True)
+            assert hasattr(ssl.SSLSocket.recv, "__wrapped__") is installed
+        finally:
+            ssl_close_tripwire.uninstall()
+        assert not hasattr(ssl.SSLSocket.recv, "__wrapped__")
+
 
 
 class TestExternalRotationRecovery:

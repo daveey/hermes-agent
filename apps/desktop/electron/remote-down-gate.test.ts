@@ -436,8 +436,8 @@ describe('remote down gate: trial deadline', () => {
 describe('main.ts wiring', () => {
   const main = readFileSync(join(__dirname, 'main.ts'), 'utf8')
 
-  it('fetchJson picks the probe pool when asked and fetchJsonForBackend forwards it', () => {
-    expect(main).toMatch(/jsonAgentFor\(parsed\.protocol, options\.pool === 'probe' \? 'probe' : 'json'\)/)
+  // fetchJson's own pool choice is proven by behaviour in json-fetch.test.ts.
+  it('fetchJsonForBackend forwards the pool option', () => {
     const body = main.slice(main.indexOf('async function fetchJsonForBackend('))
     expect(body.slice(0, 4000)).toMatch(/pool: opts\.pool/)
   })

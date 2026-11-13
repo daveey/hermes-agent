@@ -25,8 +25,8 @@ from tools.environments.base_output import (
     ProcessHandle, _finalize_wait_result, _new_output_collector, _start_drain_thread,
 )
 from tools.environments.base_session_env import (
-    _SHELL_ENV_NAME_RE, _SNAP_TMP_SUFFIX, _cwd_marker, _pipe_marker, _snapshot_bootstrap_script, _split_cwd_marker,
-    _wrap_command_script,
+    _SHELL_ENV_NAME_RE, _SNAP_TMP_SUFFIX, _alias_marker, _cwd_marker, _pipe_marker, _snapshot_bootstrap_script,
+    _split_alias_marker, _split_cwd_marker, _wrap_command_script,
 )
 from tools.environments.base_processes import LongLivedProcessMixin
 from tools.environments.base_wait import _WaitTrace
@@ -342,6 +342,9 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
         self._cwd_marker = _cwd_marker(self._session_id)
         self._pipe_marker = _pipe_marker(self._session_id)
         self._snapshot_ready = False
+        # Alias names the login snapshot holds (it turns expand_aliases on for every command);
+        # None until a bootstrap reported them. See lifecycle_guard_session_aliases().
+        self._snapshot_aliases: frozenset[str] | None = None
         self._snapshot_passthrough_names: set[str] = set()
         # True when login bash is unusable (e.g. broken Git-for-Windows startup)
         # so execute() must fall back to non-login ``bash -c``, not ``bash -l``.
@@ -421,6 +424,15 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
             logger.debug("Could not refresh profile-scoped snapshot exclusions", exc_info=True)
         return tuple(sorted(self._snapshot_passthrough_names))
 
+    def lifecycle_guard_session_aliases(self) -> frozenset[str] | None:
+        """Alias names a command's shell holds before its first line, for the lifecycle guard
+        (``cron.lifecycle_guard.scan_gateway_lifecycle(session_aliases=…)``): each command sources
+        the login snapshot, which carries ``alias -p`` and turns ``expand_aliases`` on. ``None``
+        when unknown: no snapshot yet (commands run ``bash -l``, whose login files may define and
+        enable aliases) or a bootstrap that did not report names. Sticky from the login snapshot,
+        which is the most aliases any later command can see."""
+        return self._snapshot_aliases if self._snapshot_ready else None
+
     def _snapshot_script_kwargs(self, cwd: str) -> dict:
         """Quoting inputs shared by the bootstrap and per-command wrapper scripts.
         ``_quote_cwd_for_cd`` / ``_quote_shell_path`` (not bare shlex.quote) let the Windows
@@ -437,12 +449,15 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
         under ``bash -l``. On failure, fall back to ``bash -l`` per command — unless a non-login
         probe shows login bash itself is dead, in which case prefer ``bash -c``."""
         bootstrap = _snapshot_bootstrap_script(
-            excluded_names=self._snapshot_excluded_passthrough_names(), **self._snapshot_script_kwargs(self.cwd))
+            excluded_names=self._snapshot_excluded_passthrough_names(),
+            alias_marker=_alias_marker(self._session_id), **self._snapshot_script_kwargs(self.cwd))
         try:
             proc = self._run_bash(bootstrap, login=True, timeout=self._snapshot_timeout)
             result = self._wait_for_process(proc, timeout=self._snapshot_timeout)
             if int(result.get("returncode") or 0) != 0:
                 raise RuntimeError(f"snapshot bootstrap failed with exit code {result.get('returncode')}")
+            self._snapshot_aliases = _split_alias_marker(
+                result.get("output", ""), _alias_marker(self._session_id))
             self._snapshot_ready = True
             self._update_cwd(result)
             logger.info("Session snapshot created (session=%s, cwd=%s)", self._session_id, self.cwd)
@@ -718,6 +733,16 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
             result["cwd_observed"] = True
             result["cwd"] = cwd_path
         result["output"] = cleaned
+
+    def strip_session_markers(self, text: str) -> str:
+        """*text* without this session's pipe-status and cwd marker lines. The spill file holds
+        the raw stream, so it still carries the markers ``_extract_cwd_from_output`` removed
+        from the rendered window."""
+        for marker in (self._pipe_marker, self._cwd_marker):
+            split = _split_cwd_marker(text, marker) if marker else None
+            if split is not None:
+                text = split[1]
+        return text
 
     # --- Hooks ---
     def _before_execute(self) -> None:

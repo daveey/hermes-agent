@@ -11,6 +11,16 @@ const UNRESOLVED_REASONS: Readonly<Record<string, string>> = {
   turn_failed: 'Unresolved: the last turn failed'
 }
 
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
+const pad2 = (n: number) => String(n).padStart(2, '0')
+
+/** Local `Wed 09:00` for an epoch-seconds wake time (a watch is often days out, so the weekday matters). */
+const wakeLabel = (eta: number): string => {
+  const date = new Date(eta * 1000)
+
+  return `${WEEKDAYS[date.getDay()]} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
 // [daveey] Sidebar row status copy (kanban + process badges, outcome stripe tooltips), spread into en.ts.
 export const enSessionRowStatus = {
   kanbanUnknown: count =>
@@ -25,6 +35,8 @@ export const enSessionRowStatus = {
     `${count} ${count === 1 ? 'card has' : 'cards have'} stalled: waiting over 2 h on something only an agent can do, with nothing producing it`,
   outcomeDone: 'Done',
   outcomeCrons: names => `Keeps running: ${names.join(', ')}`,
+  outcomeWatches: cards =>
+    `Still watching: ${cards.map(card => (card.eta === undefined ? card.id : `${card.id} (wakes ${wakeLabel(card.eta)})`)).join(', ')}`,
   outcomeDecision: 'Waiting on your decision',
   outcomeMuted: 'Muted',
   outcomeRunning: 'Running',
@@ -35,6 +47,8 @@ export const enSessionRowStatus = {
   unreadNotDone: outcome => `Unread — ${outcome}`,
   muteFailed: 'Could not update the parked state',
   backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
+  backgroundUnknown: 'Open work, current status unknown',
+  backgroundWaiting: 'Open work, waiting',
   backgroundProcessUnnamed: 'background process',
   stopProcess: 'Stop',
   stoppingProcess: 'Stopping…'

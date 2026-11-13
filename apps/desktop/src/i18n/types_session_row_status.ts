@@ -7,6 +7,8 @@ export interface SessionRowStatusCopy {
   kanbanUnknown: (count: number) => string
   outcomeDone: string
   outcomeCrons: (names: string[]) => string
+  /** [daveey] Cards a done chat still watches; `eta` = wake time in epoch seconds, when known. */
+  outcomeWatches: (cards: { id: string; eta?: number }[]) => string
   outcomeDecision: string
   outcomeMuted: string
   outcomeRunning: string
@@ -18,6 +20,10 @@ export interface SessionRowStatusCopy {
   unreadNotDone: (outcome: string) => string
   muteFailed: string
   backgroundProcesses: (count: number) => string
+  /** [daveey] The hollow background dot when its only open work has unknown or unfresh status (never "running"). */
+  backgroundUnknown: string
+  /** [daveey] The hollow background dot when its only open work is known waiting (parked, held or a fresh wait). */
+  backgroundWaiting: string
   backgroundProcessUnnamed: string
   stopProcess: string
   stoppingProcess: string

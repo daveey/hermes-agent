@@ -97,7 +97,10 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
 }
 # Set by the service, never by a gateway: applied from the feed, never captured.
 # ``ready_since``: when the card last became ready (ms), for the Board's ``home_grace`` placement rule.
-SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"created_on", "ready_since"})}
+# ``workspace_source``/``workspace_custody``: Board-written only (``publish_source``, custody hooks); a push is refused.
+SERVER_COLUMNS: dict[str, frozenset[str]] = {
+    "tasks": frozenset({"created_on", "ready_since", "workspace_source", "workspace_custody"})}
+JSON_SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"workspace_source", "workspace_custody"})}
 # Old columns an ADD-first rename migration keeps (``kanban_db_connect._RENAMED_TASK_COLUMNS``: the new column is
 # added and filled from the old one, which stays). Every board older than the rename holds them; only
 # ``Task.from_row``'s pre-migration fallbacks read them, and they never travel. Known, so the schema-ahead guard
@@ -114,6 +117,10 @@ REF_COLUMNS: dict[tuple[str, str], str] = {
     ("task_events", "run_id"): "run_uid",
 }
 SYNCED_TABLES = tuple(SYNCED_COLUMNS)
+# Wire-only fields: carried by an outbox op and sent, never a column (so never in ``SYNCED_COLUMNS``, which
+# ``undeclared_columns``, ``_row_fields`` and the import path read as real columns). ``source_receipt`` rides
+# the status-leaving tasks op (``kanban_source_receipt``); an old Board's refusal drops it with no omission.
+VIRTUAL_WIRE_FIELDS: dict[str, frozenset[str]] = {"tasks": frozenset({"source_receipt"})}
 # Synced columns core keeps in Unix SECONDS (``int(time.time())``). The service's own clocks (leases, HLCs, the feed,
 # tombstones) are milliseconds; a millisecond value in one of these columns makes every ``now - started_at`` reader
 # wrong by 1000x (2026-10-27: the Board's lease grants wrote ``task_runs.started_at`` in ms and
@@ -221,6 +228,11 @@ CREATE TABLE IF NOT EXISTS task_chat_links (
     created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_chat_links_chat ON task_chat_links(chat_gateway, chat_session);
+-- [daveey] Per-card lookups (the owner's ``_owner_hub_links``, ``proven_foreign_chats``, the released-sibling
+-- EXISTS of ``_read_replica_links``) scanned every link without it. An index is no column: ``SchemaAhead`` and the
+-- wire format only compare columns, so an older core syncs a file that has it. A process's first open of each board
+-- file and replica runs this script (``install_or_remove``), so it is also the migration of existing files.
+CREATE INDEX IF NOT EXISTS idx_task_chat_links_task ON task_chat_links(task_id);
 CREATE TABLE IF NOT EXISTS kanban_sync_state (
     board_id        TEXT PRIMARY KEY,
     cursor          INTEGER NOT NULL DEFAULT 0,
@@ -244,11 +256,16 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "ready_since", "ready_since INTEGER"),
     # Placement (RFC "Placement"): JSON list of labels the claiming machine must all carry; NULL = default.
     ("tasks", "runs_on", "runs_on TEXT"),
+    # workspace_source v1: the Board's manifest and custody (JSON), pulled read-only, never captured or pushed.
+    ("tasks", "workspace_source", "workspace_source TEXT"),
+    ("tasks", "workspace_custody", "workspace_custody TEXT"),
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
     # 1 once repair_ms_timestamps ran on this file (the one-time repair of rows applied before the guard).
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
     # Wall time of the last successful feed pull into this file (replicas): readers derive staleness from it. [daveey]
     ("kanban_sync_state", "pulled_at", "pulled_at REAL"),
+    # Replicas: the ``pulled_at`` of the pull the live remote-parent mirror was last refreshed from. [daveey]
+    ("kanban_sync_state", "mirror_pulled_at", "mirror_pulled_at REAL"),
     # Local-only round-robin position; refused revisions must not monopolize bounded batches.
     ("kanban_sync_state", "worker_reserve_cursor", "worker_reserve_cursor TEXT"),
 )
@@ -402,11 +419,7 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
                 return
             drop_triggers(conn)
         return
-    conn.executescript(SYNC_SCHEMA_SQL)
-    for table, column, ddl in _SYNC_COLUMN_DDL:
-        _add_column_if_missing(conn, table, column, ddl)
-    for table in _UID_TABLES:
-        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
+    apply_sync_schema_steps(conn)
     from hermes_cli.kanban_db_connect import write_txn
     with write_txn(conn):  # one transaction: no other writer can land between dropping and recreating a trigger
         enabled_now = conn.execute(
@@ -439,6 +452,38 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
             if fixed:
                 _log.warning("kanban sync: %d millisecond timestamp(s) rewritten to seconds", fixed)
     _SYNCED_PATHS.add(db_path)
+
+
+def apply_sync_schema_steps(conn: sqlite3.Connection) -> None:
+    """Every sync table/column/index step of :func:`install_or_remove`. ``kanban_schema_owner`` replays it on an
+    in-memory DB to judge a synced board "at par", so a sync column added here is never missed there. [daveey]"""
+    conn.executescript(SYNC_SCHEMA_SQL)
+    for table, column, ddl in _SYNC_COLUMN_DDL:
+        _add_column_if_missing(conn, table, column, ddl)
+    for table in _UID_TABLES:
+        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
+
+
+def live_without_install(conn: sqlite3.Connection, db_path: str) -> bool:
+    """Whether :func:`register_without_install` registers ``db_path`` as synced: sync is on for the board and the
+    installed core attached it (state row not ``off``, capture triggers present). [daveey]"""
+    try:
+        return bool(sync_enabled() and board_selected(db_path)
+                    and conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+                                     "AND name LIKE 'kanban_sync_%' LIMIT 1").fetchone() is not None
+                    and (conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone() or ("off",))[0] != "off")
+    except sqlite3.OperationalError:  # no kanban_sync_state: the installed core never enabled sync here
+        return False
+
+
+def register_without_install(conn: sqlite3.Connection, db_path: str) -> None:
+    """:func:`install_or_remove` for a core that may not change this board's schema (``kanban_schema_owner``: a
+    non-installed checkout on a board already at its schema). Writes nothing: the installed core owns the sync
+    tables and capture triggers. When it has attached the board (:func:`live_without_install`), register the path,
+    so :func:`board_mode` reads the real mode and this process mints Board ids and takes Board leases like the
+    installed core. [daveey]"""
+    live = live_without_install(conn, db_path)
+    (_SYNCED_PATHS.add if live else _SYNCED_PATHS.discard)(db_path)
 
 
 def _attached(conn: sqlite3.Connection) -> bool:
@@ -574,6 +619,9 @@ def _update_trigger(table: str, columns: list[str]) -> str:
         f"SELECT '{_wire_name(table, c)}' AS k, {_wire_value(table, c, 'NEW')} AS v WHERE OLD.{c} IS NOT NEW.{c}"
         for c in columns
     )
+    if table == "tasks":  # the virtual receipt rides the status-leaving op (kanban_source_receipt)
+        from hermes_cli.kanban_source_receipt import trigger_pair
+        pairs += f" UNION ALL {trigger_pair()}"
     fields = f"(SELECT json_group_object(k, json(v)) FROM ({pairs}))"
     base = "NEW.sync_version" if table == "tasks" else "NULL"
     body = _outbox_insert(table, "upsert", _row_uid_sql(table, "NEW"), fields, base)
@@ -615,6 +663,8 @@ def install_triggers(conn: sqlite3.Connection) -> None:
     """(Re)generate every capture trigger from the live column list. A no-op when the installed set already
     matches, so ordinary process starts never touch them; callers hold a write transaction so a rebuild has no
     window in which another process's write goes uncaptured."""
+    from hermes_cli import kanban_source_receipt
+    kanban_source_receipt.ensure_schema(conn)  # the tasks UPDATE trigger reads its pending table
     wanted = wanted_triggers(conn)
     have = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'"))
     if have == wanted:
@@ -693,6 +743,20 @@ def mark_pulled(conn: sqlite3.Connection, at: Optional[float] = None) -> None:
         conn.execute("UPDATE kanban_sync_state SET pulled_at = ? WHERE pulled_at IS NOT ?", (stamp, stamp))
 
 
+def mark_mirrored(replica: sqlite3.Connection, board: str = "") -> None:
+    """Record on the replica that the live remote-parent mirror now reflects its last pull (``mirror_pulled_at`` =
+    ``pulled_at``). The round stamps ``pulled_at`` before it refreshes the mirror, so a fresh ``pulled_at`` alone
+    does not prove the mirror is current; the missing-parent detector also needs this one. A failed stamp only
+    leaves the detector deferring (fail closed), so it is logged, not raised. [daveey]"""
+    from hermes_cli.kanban_db_connect import write_txn
+    try:
+        with write_txn(replica):
+            replica.execute("UPDATE kanban_sync_state SET mirror_pulled_at = pulled_at "
+                            "WHERE mirror_pulled_at IS NOT pulled_at")
+    except sqlite3.Error as exc:
+        _log.warning("kanban sync: %s remote-parent mirror not stamped (%s)", board, exc)
+
+
 def new_task_id(conn: sqlite3.Connection) -> str:
     """Synced boards: ``t_`` + 16 hex (48-bit ms timestamp + 16 random bits), safe
     across gateways and offline creation; otherwise the classic 8-hex id."""
@@ -720,6 +784,8 @@ class Lease:
     holder: Optional[str] = None
     reason: Optional[str] = None
     version: Optional[int] = None
+    # workspace_source v1: the grant response row's manifest/custody (``None``: an old Board sent no snapshot keys).
+    source_snapshot: Optional[Any] = None
 
 
 class LeaseClient(Protocol):
@@ -784,14 +850,49 @@ class ClaimGate:
             _log.info("kanban sync: release of unused lease for %s failed: %s", task_id, err)
 
 
-# task_id -> why the Board did not grant its lease, set by :func:`claim_gate` and read once by the dispatcher
-# (:func:`pop_claim_deferral`), so a tick can tell a deferred claim from a lost CAS and the "dispatcher stuck"
-# warning can name it.
-_CLAIM_DEFERRALS: dict[str, str] = {}
+ORIGIN_LOCAL = "local"  # this host refused: its admission gate (kanban_admission), placement or worker capacity
+ORIGIN_BOARD = "board"  # the Board service refused the lease, or could not be reached
 
 
-def pop_claim_deferral(task_id: str) -> Optional[str]:
+class ClaimDeferral(str):
+    """A claim deferral reason that knows who set it (``origin``: :data:`ORIGIN_LOCAL` / :data:`ORIGIN_BOARD`).
+    A ``str``, so every consumer that compares, logs or serialises the reason is unchanged; the dispatch skip
+    words read ``origin`` instead of guessing from the reason's name (PR #2003 review). [daveey]"""
+
+    origin: str
+
+    def __new__(cls, reason: str, origin: str) -> ClaimDeferral:
+        self = super().__new__(cls, reason)
+        self.origin = origin
+        return self
+
+
+# task_id -> why the claim was not granted (a :class:`ClaimDeferral`), set by :func:`claim_gate` and this host's
+# admission gate and read once by the dispatcher (:func:`pop_claim_deferral`), so a tick can tell a deferred claim
+# from a lost CAS and the "dispatcher stuck" warning can name it.
+_CLAIM_DEFERRALS: dict[str, ClaimDeferral] = {}
+
+
+def defer_claim(task_id: str, reason: str, origin: str) -> None:
+    _CLAIM_DEFERRALS[task_id] = ClaimDeferral(reason, origin)
+
+
+def pop_claim_deferral(task_id: str) -> Optional[ClaimDeferral]:
     return _CLAIM_DEFERRALS.pop(task_id, None)
+
+
+def _source_skip(conn: sqlite3.Connection, row: sqlite3.Row) -> Optional[str]:
+    """A source card this host already refused at its current manifest revision (host scope, v3 §6b skip memo)."""
+    from hermes_cli import kanban_workspace_source as kws
+    snap = kws.replica_snapshot(row)
+    if snap is None or snap.manifest_value is None:
+        return None
+    try:
+        revision = kws.parse_manifest(snap.manifest_value).manifest_revision
+    except kws.ManifestInvalid:
+        return None
+    code = kws.skipped(conn, row["id"], revision)
+    return f"workspace_source_refused_here:{code}" if code else None
 
 
 def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str = "ready") -> ClaimGate:
@@ -801,8 +902,8 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     from hermes_cli.kanban_worker_placement import execution_refusal
     from hermes_cli.kanban_sync_diagnostics import record_claim
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is not None and (reason := execution_refusal(conn, row)):
-        _CLAIM_DEFERRALS[task_id] = reason
+    if row is not None and (reason := execution_refusal(conn, row) or _source_skip(conn, row)):
+        defer_claim(task_id, reason, ORIGIN_LOCAL)
         return ClaimGate(expires, deferred=True)
     if board_mode(conn) != "primary":
         return ClaimGate(expires)
@@ -814,12 +915,12 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
                                   ttl_s=max(expires - int(time.time()), 1), lane=lane)
     except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
         _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
-        _CLAIM_DEFERRALS[task_id] = "offline"
+        defer_claim(task_id, "offline", ORIGIN_BOARD)
         record_claim(conn, task_id, "offline")
         return ClaimGate(expires, deferred=True)
     if not lease.granted:
         _log.info("claim_deferred: %s task=%s holder=%s", lease.reason or "denied", task_id, lease.holder)
-        _CLAIM_DEFERRALS[task_id] = lease.reason or "denied"
+        defer_claim(task_id, lease.reason or "denied", ORIGIN_BOARD)
         record_claim(conn, task_id, lease.reason or "denied")
         return ClaimGate(expires, deferred=True)
     record_claim(conn, task_id, "granted")
@@ -833,7 +934,7 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
         if not local_admission(conn):
             with gate:
                 pass  # release the unused grant; no local task/run was started
-            _CLAIM_DEFERRALS[task_id] = "waiting_for_worker_capacity"
+            defer_claim(task_id, "waiting_for_worker_capacity", ORIGIN_LOCAL)
             return ClaimGate(expires, deferred=True)
     return gate
 
@@ -853,6 +954,8 @@ def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate
     conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ?, "
                  "lease_version = COALESCE(?, lease_version) WHERE id = ?",
                  (gate._ids[1], lease.expires_ms, lease.version, task_id))
+    from hermes_cli.kanban_workspace_source import stash_grant_snapshot
+    stash_grant_snapshot(task_id, lease.source_snapshot)  # the resolver decides from the grant, not the replica
     gate.consumed = True
     return lease.run_uid
 
@@ -1150,6 +1253,10 @@ class ApplyResult:
     # committed (None: no table or row). The sync client credits a live revision change made only by applies.
     revision_before: Optional[int] = None
     revision_after: Optional[int] = None
+    # [daveey] Cards this page moved out of done/archived, and cards it brought a reopen event for
+    # (``kanban_terminal_guard.enforce_after_apply``, run at the end of the page in the same transaction).
+    left_terminal: list[tuple[str, str]] = field(default_factory=list)
+    reopened: set[str] = field(default_factory=set)
 
 
 def _repair_revision(conn: sqlite3.Connection) -> Optional[int]:
@@ -1192,6 +1299,9 @@ def apply_remote_changes(
             own = _state(conn)["gateway_id"]
             for change in changes:
                 _apply_one(conn, change, own, result)
+            if result.left_terminal or result.reopened:  # a wake never reopens a done card [daveey]
+                from hermes_cli.kanban_terminal_guard import enforce_after_apply
+                enforce_after_apply(conn, result.left_terminal, result.reopened)
         # Cursor-only pages have no capture triggers to suppress. Avoid dirtying
         # the state row at all when both persisted values already match.
         conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0 "
@@ -1199,6 +1309,8 @@ def apply_remote_changes(
         result.revision_after = _repair_revision(conn)
     if observers:
         _after_commit(conn, result, board)
+        from hermes_cli.kanban_source_refusal_block import drain
+        drain(conn)
     return result
 
 
@@ -1252,6 +1364,9 @@ def _local_fields(conn: sqlite3.Connection, table: str, fields: Mapping[str, Any
         value = _from_wire(fields[wire])
         if column in SECONDS_COLUMNS.get(table, ()):
             value = to_seconds(value)
+        if column in JSON_SERVER_COLUMNS.get(table, ()):
+            from hermes_cli.kanban_workspace_source import json_column
+            value = json_column(value)
         if table == "tasks" and column == "priority" and value is not None:
             from hermes_cli.kanban_priority import bounded
             value = bounded(value)
@@ -1277,6 +1392,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         note_restored_task(conn, ch.uid, cols.get("created_on"), own)  # our own card back from the Board
     else:
         changed = {c for c, v in cols.items() if old[c] != v}
+        if "status" in changed and old["status"] in ("done", "archived") and cols["status"] not in ("done", "archived"):
+            result.left_terminal.append((ch.uid, old["status"]))
         assignments = ", ".join(f"{c} = ?" for c in cols)
         conn.execute(f"UPDATE tasks SET {assignments}{', ' if cols else ''}sync_version = ? WHERE id = ?",
                      (*cols.values(), ch.version, ch.uid))
@@ -1347,6 +1464,8 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     from hermes_cli.kanban_sync_omissions import without_held
     cols = _local_fields(conn, table, without_held(conn, table, ch.uid, ch.fields), task_id)
     if table == "task_events" and "origin_gateway" in table_columns(conn, table):
+        # Authority, not provenance only: kanban_review_release.released() honours a promoted event's
+        # review_release stamp only when this column names the card's home, so it must come from the wire. [daveey]
         cols["origin_gateway"] = ch.origin_gateway or None
     if table == "task_links":
         return conn.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
@@ -1376,6 +1495,10 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     names = ["uid", *cols]
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))
+    if table == "task_events" and task_id:
+        from hermes_cli.kanban_terminal_guard import is_reopen
+        if is_reopen({"kind": cols.get("kind"), "payload": cols.get("payload")}):
+            result.reopened.add(str(task_id))
     if table == "task_events" and ch.fields.get("kind") in ("archive_requested", "capability_owner_archive_requested"):
         result.wake_dispatcher = True  # a stop request (kanban_remote_stop) or forwarded owner archive to apply
     if table == "task_chat_links":

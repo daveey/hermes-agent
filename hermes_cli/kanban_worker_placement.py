@@ -17,11 +17,13 @@ DISPATCH_NETWORK_BUDGET_S = 2.0
 # Re-asking at the same revision every dispatcher tick only repeats the refusal; wait for a new revision instead.
 NOT_CLAIMABLE_BACKOFF_S = 600.0
 _refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (refused revision, retry after)
-# (board, task) -> revision at which the Board refused the worker-first self-check's repin (any code but
-# not_claimable, which _refused covers). While the card stays at that revision it goes back to the reserve rather
+# (board, task) -> revision at which the Board refused the worker-first self-check's repin: any 4xx but
+# 408/425/429, coded or not, and a 501; except not_claimable, which _refused covers. Other 5xx and 408/425/429 are
+# outages, retried next tick. While the card stays at that revision it goes back to the reserve rather
 # than re-asking a repin the Board already refused; a new revision asks again. Explicit kanban_move repins never
 # fall back: a reserve would hand the run's move straight back to the pool.
 _selfcheck_refused: dict[tuple[str, str], int] = {}
+_RETRYABLE_4XX = frozenset({408, 425, 429})  # request timeout, too early, rate limited: not the Board's answer
 # No assigned keepalive exists here. Sixty seconds bounds queue probes while still discovering
 # registry-only capacity changes without waiting for a task revision. Assigned renewals are unchanged.
 RESERVE_KEEPALIVE_S = 60.0
@@ -106,8 +108,11 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``,
     non-portable work, or when no active, unheld machine carries the label. Courier and origin-bound creates queue
     too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). On a pool worker a built-in local-marker
-    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`), but only when one active, unheld
-    machine holds the whole label set (queue, group and coordination labels); else the local keep stands. [daveey]
+    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`). Either way the card queues only
+    when one active, unheld machine holds the whole label set (queue, group and coordination labels), judged by
+    ``machine_ok`` (given the label tuple) or the registry; else the local keep stands. The registry counts only
+    machines seen within ``FRESH_S`` (:func:`kanban_placement.label_machines`), so during a Board outage the card
+    stays local once the last good snapshot ages out, instead of queueing on ``pool:worker``. [daveey]
     """
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
@@ -124,14 +129,18 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     elif reason:
         return None
     extra = coordination.required_labels(args, cfg)
-    if extra is None or not (machine_ok or placement._machine_picks_up)(label):
+    if extra is None:
+        return None
+    if unmet is not None:
+        extra = extra | unmet["labels"]
+    runs_on = [label, *sorted(extra - {label})]
+    # One liveness source for the whole set, marker hit or not: an active, unheld pickup machine must hold every
+    # label, else nobody could claim the card and today's local keep stands. The machine_ok seam sees the set.
+    if not (machine_ok or placement._machine_picks_up)(label if len(runs_on) == 1 else tuple(runs_on)):
         return None
     if unmet is None:
-        return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}
-    extra = extra | unmet["labels"]
-    if not placement.label_machines([label, *extra]):
-        return None  # no live machine holds every label: nobody could claim it, so keep today's local keep
-    return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "note": unmet["note"],
+        return {"where": "local", "runs_on": runs_on, "why": QUEUED_WHY.format(label=label)}
+    return {"where": "local", "runs_on": runs_on, "note": unmet["note"],
             "why": QUEUED_WHY.format(label=label) + UNMET_WHY.format(hit=unmet["hit"], gateway=gateway)}
 
 
@@ -530,10 +539,11 @@ def _selfcheck_unrefused(key, row, labels, why):
 def _remember_selfcheck_refusal(key, revision, why, exc):
     """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead).
 
-    Only a coded 4xx is the Board's answer: a 5xx/429 (an outage) or an uncoded body is retried on the next tick."""
-    status, code = getattr(exc, "status", None), rejection_code(exc)
-    transient = type(status) is not int or not 400 <= status <= 499 or status == 429
-    if why is None or transient or code in (None, "not_claimable"):
+    Any 4xx but 408/425/429, coded or not (a Board or proxy without the repin route answers an uncoded 404/405 HTML
+    body every tick), and a 501 are persistent. Other 5xx and 408/425/429 are outages, retried on the next tick."""
+    status = getattr(exc, "status", None)
+    persistent = type(status) is int and (400 <= status <= 499 or status == 501) and status not in _RETRYABLE_4XX
+    if why is None or not persistent or rejection_code(exc) == "not_claimable":
         return
     _selfcheck_refused[key] = revision  # popped by _selfcheck_unrefused first, so this is the newest entry
     if len(_selfcheck_refused) > 1024:  # cards that left the query never come back to clear theirs

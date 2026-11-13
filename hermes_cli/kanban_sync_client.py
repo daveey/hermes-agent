@@ -52,6 +52,7 @@ from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-wi
     next_deferred_repair, note_round, reset as reset_repair_window,
 )
 from hermes_cli.kanban_sync_own_writes import credited, reset as reset_own_writes, take as take_credited
+from hermes_cli.kanban_sync_links_inputs import ledger_slices, links_signature
 
 _log = logging.getLogger(__name__)
 
@@ -547,6 +548,7 @@ def _next_hlc(conn: sqlite3.Connection, gateway: str) -> str:
 def _wire_fields(table: str, fields: dict) -> dict:
     """Only the synced wire columns (a column a later migration added is not sent until it is declared)."""
     allowed = {sync._wire_name(table, c) for c in sync.SYNCED_COLUMNS[table]}
+    allowed |= sync.VIRTUAL_WIRE_FIELDS.get(table, frozenset())
     return {k: v for k, v in fields.items() if k in allowed}
 
 
@@ -587,7 +589,9 @@ def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
     if task is None or task["sync_version"] is not None:
         from hermes_cli.kanban_worker_placement import acknowledged_outbox
         return acknowledged_outbox(row, task)
-    return {**row, "fields": _row_fields(conn, "tasks", task)}
+    fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"])
+    virtual = {k: v for k, v in fields.items() if k in sync.VIRTUAL_WIRE_FIELDS["tasks"]}  # not in the row
+    return {**row, "fields": {**_row_fields(conn, "tasks", task), **virtual}}
 
 
 # Rejections the service lifts on its own; anything else is final. A capped number of retries keeps a real mismatch
@@ -672,7 +676,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
         if not rows:
             break
         with write_txn(conn):
-            wire = [translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)) for r in rows]
+            from hermes_cli.kanban_terminal_guard import strip_stale_push  # no wake reopens a done card [daveey]
+            wire = [strip_stale_push(conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))) for r in rows]
             parents = _unacked_parents(conn, rows, gateway)
             wire = [op for op, _tid in parents] + wire
         try:
@@ -730,10 +735,10 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     out.rejected += 1
                     _log.warning("kanban sync: %s %s %s rejected (%s)", board, row["table_name"], row["row_uid"], reason)
                     if res.get("reason") == "forbidden_field":
-                        from hermes_cli.kanban_sync_compat import enqueue_retry, record_rejection
+                        from hermes_cli.kanban_sync_compat import VIRTUAL_DROPPED, enqueue_retry, record_rejection
                         sent_op = next(op for op in wire if op["client_op_id"] == op_id)
-                        enqueue_retry(conn, row, sent_op, res)
-                        record_rejection(conn, row, reason)
+                        if enqueue_retry(conn, row, sent_op, res) != VIRTUAL_DROPPED:
+                            record_rejection(conn, row, reason)
                     elif row["table_name"] == "tasks" and res.get("reason") == "live_claim":
                         _record_live_claim_rejection(conn, row, reason)
                     if primary and res.get("row"):
@@ -1025,6 +1030,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                     _REPAIR_CREDIT.pop(key, None)
             note_round(slug, outcome, _repair_clock())
             if mode == "primary":
+                # The mirror matches this round's pull (refreshed above, or inputs unchanged since the last refresh)
+                sync.mark_mirrored(replica, slug)  # only then can a parent be missing (kanban_replica_freshness)
                 heal_clobbered_completions(live)
                 from hermes_cli.kanban_sync_divergence import heal_running_over_ended_run
                 heal_running_over_ended_run(live)
@@ -1090,6 +1097,8 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     ident = load_identity() if hub is None else hub.ident
     hub = hub or Hub(ident)
     publish_pickup_if_changed(hub)
+    from hermes_cli.kanban_source_clones import attest_if_due
+    attest_if_due(hub)  # workspace_source clone attestation; inert unless enabled
     results = []
     for slug, path in board_paths() if boards is None else boards:
         mark = sync_timing.board_start(slug, results)
@@ -1183,32 +1192,41 @@ def _links_clock() -> float:
     return time.monotonic()
 
 
-# The running loop's links pass (tests wait on it to observe a pass deterministically).
+# A board's links pass logs its duration with its counts (``kanban sync: <board> chat links {...} in <s>s``); a pass
+# with no changes logs only when it took this long, so a slow pass is visible even when it changed nothing; a whole
+# pass this slow (ledger read included) also logs ``kanban sync: chat links pass over N board(s) took <s>s``. A board
+# skipped as unchanged after LINKS_SLOW_LOG_S or more logs ``<board> chat links unchanged, skipped in <s>s``, and a
+# failed board's warning carries ``failed after <s>s``. Each board's time runs from before its connection is borrowed,
+# so it counts the connect (any lock wait on it included), ``board_mode`` and the inputs read: lock waits are what it is
+# meant to expose. The hub pass ran ~10 min on 2026-11-13 and the line carried no duration to measure it by
+# (t_01a1d35d8d7e22a7). [daveey]
+LINKS_SLOW_LOG_S = 10.0
+
+
+def _links_pass_clock() -> float:
+    return time.monotonic()
+
+
+# The running loop's links pass (tests wait on it to observe a pass deterministically); None once the loop exits.
 _LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop runs
 
 
-def _ledger_slices(cards: Iterable[Mapping[str, Any]], gateway: str) -> dict[str, frozenset]:
-    """Per board, every field of this gateway's origin-ledger rows that a links pass reads (``ledger_boards``,
-    ``kanban_chat_links._ledger_links``). Compared by value: a re-projection with the same rows is no change."""
-    out: dict[str, set] = {}
-    for c in cards:
-        if not c.get("board") or c.get("origin_gateway") not in (None, gateway):
-            continue
-        out.setdefault(str(c["board"]), set()).add(
-            (c.get("id"), c.get("session"), c.get("via"), c.get("origin_profile"), bool(c.get("released"))))
-    return {board: frozenset(rows) for board, rows in out.items()}
-
-
-def _links_signature(gateway: str, placement: Mapping[str, Any]) -> Optional[tuple]:
-    """The configuration a links pass reads besides its board: gateway names, profile, homes, placement config."""
-    try:
-        from hermes_constants import get_hermes_home
-        from hermes_cli.kanban_origin import gateway_names
-        from hermes_cli.profiles import get_active_profile_name
-        return (gateway, gateway_names()[0], get_active_profile_name(), str(get_hermes_home()),
-                json.dumps(placement, sort_keys=True, default=str))
-    except (OSError, sqlite3.Error, TypeError, ValueError):
-        return None
+def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float) -> tuple[bool, float]:
+    """(whether a board's links-pass inputs equal its last completed pass's, under ``LINKS_MAX_AGE_S`` ago, so the
+    pass is skipped; the pass start to record). Not a pure predicate: it pops ``_LINKS_DONE[key]`` and puts it back
+    only on a skip, so a non-skip drops the stale entry and the caller re-records it when inputs were readable and
+    reconcile succeeded (unreadable inputs or a raising reconcile leave it dropped). A skip ``LINKS_SLOW_LOG_S`` or
+    more after ``began`` names its board; ``began`` is taken before the board's connection is
+    borrowed, so that time counts the connect (a lock wait included), ``board_mode`` and the inputs read."""
+    done = _LINKS_DONE.pop(key, None)
+    started = _links_clock()
+    if inputs is None or done is None or done[0] != inputs or started - done[1] >= LINKS_MAX_AGE_S:
+        return False, started
+    _LINKS_DONE[key] = done
+    took = _links_pass_clock() - began
+    if took >= LINKS_SLOW_LOG_S:
+        _log.info("kanban sync: %s chat links unchanged, skipped in %.1fs", slug, took)
+    return True, started
 
 
 def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str, mode: str,
@@ -1250,11 +1268,12 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
     the loop's connection scope (``kanban_sync_connections``). [daveey]"""
     from hermes_cli import kanban_chat_links
     from hermes_cli.kanban_placement import config_snapshot
+    pass_began = _links_pass_clock()
     with config_snapshot() as placement:
         ledger: Optional[dict[str, frozenset]] = None
         try:
             from hermes_cli.kanban_session_activity import _remote_links
-            ledger = _ledger_slices(_remote_links(), gateway)
+            ledger = ledger_slices(_remote_links(), gateway)
             local = {slug for slug, _path in boards}
             if not skip_unchanged or set(ledger) - local:
                 created = ensure_link_boards(set(ledger), gateway)
@@ -1263,9 +1282,11 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                     boards = board_paths()
         except Exception as exc:  # health: allow BLE001 -- link-only boards are best effort; local links still reconcile
             _log.warning("kanban sync: link-only boards failed (%s: %s)", type(exc).__name__, exc)
-        signature = _links_signature(gateway, placement) if skip_unchanged else None
+        signature = links_signature(gateway, placement) if skip_unchanged else None
         for slug, path in boards:
             key = str(path)
+            counts: dict = {}
+            began = _links_pass_clock()
             try:
                 with connection(path, lambda: _connect(path)) as conn:
                     mode = sync.board_mode(conn)
@@ -1274,19 +1295,21 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                     inputs, started = None, 0.0
                     if skip_unchanged:
                         inputs = _links_inputs(conn, path, slug, gateway, mode, ledger, signature)
-                        done = _LINKS_DONE.pop(key, None)
-                        started = _links_clock()
-                        if inputs is not None and done is not None and done[0] == inputs \
-                                and started - done[1] < LINKS_MAX_AGE_S:
-                            _LINKS_DONE[key] = done
+                        skip, started = _links_unchanged(key, inputs, slug, began)
+                        if skip:
                             continue
                     counts = kanban_chat_links.reconcile(conn, slug, gateway)
                     if inputs is not None:
                         _LINKS_DONE[key] = (inputs, started)
-                if any(counts.values()):
-                    _log.info("kanban sync: %s chat links %s", slug, counts)
+                took = _links_pass_clock() - began
+                if any(counts.values()) or took >= LINKS_SLOW_LOG_S:
+                    _log.info("kanban sync: %s chat links %s in %.1fs", slug, counts, took)
             except Exception as exc:  # health: allow BLE001 -- one board's links must not stop the sync loop
-                _log.warning("kanban sync: chat links for %s failed (%s: %s)", slug, type(exc).__name__, exc)
+                _log.warning("kanban sync: chat links for %s failed after %.1fs (%s: %s)", slug,
+                             _links_pass_clock() - began, type(exc).__name__, exc)
+    took = _links_pass_clock() - pass_began
+    if took >= LINKS_SLOW_LOG_S:
+        _log.info("kanban sync: chat links pass over %d board(s) took %.1fs", len(boards), took)
 
 
 class _BoardWatch:
@@ -1457,9 +1480,11 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
         _log.warning("%s; kanban sync not started", exc)
         runstate.record_down(f"not starting: {exc}")
         return
+    from hermes_cli.kanban_sync_schema_alert import note_start, on_give_up  # one hub card per incident [daveey]
+    note_start()
     ahead = _schema_ahead_boards(board_paths())
     if ahead:
-        runstate.record_down("not starting: " + "; ".join(f"board {slug}: {why}" for slug, why in ahead))
+        on_give_up(runstate, ident.gateway, "not starting: ", ahead)
         return  # give the host sync role up: a current core's gateway can take it [daveey]
     hub = Hub(ident)
     sync.set_lease_client(HubLeaseClient(hub))
@@ -1501,7 +1526,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
             if ahead:
                 _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
-                runstate.record_down("gave up the sync role: " + "; ".join(f"board {r.board}: {r.error}" for r in ahead))
+                on_give_up(runstate, ident.gateway, "gave up the sync role: ", [(r.board, r.error) for r in ahead])
                 return
             runstate.clear()  # a completed round: the loop runs
             for r in results:
@@ -1519,14 +1544,14 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
     finally:
         links.stop()
+        _LINKS_RUNNER = None  # no stale runner for the next loop's tests to wait on
         sender.close()
         sampler.close()
     runstate.record_down(runstate.STOPPED)
 
 
 def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[tuple[str, str]]:
-    """``(slug, refusal)`` per board a newer core migrated (logged at ERROR). An unreadable board is left to the
-    round's own errors."""
+    """``(slug, refusal)`` per board a newer core migrated (logged at ERROR); an unreadable one is the round's error."""
     ahead = []
     for slug, path in boards:
         try:
@@ -1953,9 +1978,10 @@ class HubLeaseClient:
             raise sync.LeaseUnavailable(str(exc)) from exc
         lease = res.get("lease") or {}
         granted = res.get("status") == "applied" and lease.get("run_uid") == run_uid
+        from hermes_cli.kanban_workspace_source import snapshot_from_row
         return sync.Lease(granted=granted, run_uid=run_uid, expires_ms=lease.get("expires"),
                           holder=lease.get("holder"), reason=None if granted else res.get("reason"),
-                          version=res.get("version"))
+                          version=res.get("version"), source_snapshot=snapshot_from_row(res.get("row")))
 
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
                 lane: str = "ready") -> sync.Lease:

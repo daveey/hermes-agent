@@ -20,6 +20,7 @@ cursor key stays ``tui`` throughout.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sqlite3
 from typing import Any, Optional
@@ -70,22 +71,24 @@ def _launch_authority(runner: Any, profile: Optional[str]) -> Any:
 def _gateway_holds_work(authority: Any, ids: set) -> bool:
     """Whether the gateway's ledger holds work that ends on its own for ``ids``, or this process holds
     the turn lease. This is when the legacy backend refuses the chat. A read error answers False and
-    leaves the row to the legacy backend."""
-    from tui_gateway.session_lifecycle import _CANONICAL_PENDING_SQL
+    leaves the row to the legacy backend. The ledger is read by the legacy hand-back's own rule
+    (``kanban_leg_custody.lineage_ledger_status``) over the same ids, ``ids`` plus their compaction parents
+    (``with_parents``): an ``unknown`` row on any of them owns nothing."""
+    from tui_gateway.kanban_leg_custody import lineage_ledger_status, with_parents
     db = getattr(authority, "db", None)
     read_ctx = getattr(db, "_read_ctx", None)
     if read_ctx is None:
         return False
     try:
         with read_ctx() as conn:
-            for sid in sorted(filter(None, ids)):
-                row = conn.execute(_CANONICAL_PENDING_SQL, (sid, sid)).fetchone()
-                if row is not None:
-                    return row[0] in _FORWARDABLE_LEDGER_STATES
+            lineage = with_parents(conn, ids)
+            status = lineage_ledger_status(conn, lineage)
+            if status is not None:
+                return status in _FORWARDABLE_LEDGER_STATES
         owner_of = getattr(db, "session_turn_lease_owner", None)
         if owner_of is not None:
             mine = f"pid={os.getpid()}:"
-            for sid in sorted(filter(None, ids)):
+            for sid in sorted(lineage):
                 owner = owner_of(sid)
                 if owner and str(owner.get("holder") or "").startswith(mine):
                     return True
@@ -129,19 +132,6 @@ def owned_live_session(runner: Any, sub: dict, *, require_work: bool = True) -> 
     return live
 
 
-def has_local_sibling(conn: Any, sub: dict) -> bool:
-    """The same card already notifies this chat through a ``local`` row (gateway-native): that row
-    delivers it here, so serving the tui row too would wake the chat twice."""
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local' AND chat_id = ? LIMIT 1",
-            (sub["task_id"], sub["chat_id"]),
-        ).fetchone()
-    except sqlite3.Error:
-        return False
-    return row is not None
-
-
 def _owned_this_tick(collector: Any, sub: dict) -> Any:
     """:func:`owned_live_session` once per chat per collector tick: a chat's cards share one answer, and each
     answer costs a lineage walk in state.db (1,655 pending tui rows over 122 chats on the hub). The delivery
@@ -153,9 +143,52 @@ def _owned_this_tick(collector: Any, sub: dict) -> Any:
     return seen[key]
 
 
+def _lineage_this_tick(collector: Any, sub: dict) -> tuple:
+    """The chat's compression-lineage root beside its tip, once per chat per tick: the chat's ``local`` rows
+    are keyed by the root (the authority's logical owner), its ``tui`` rows by the live tip."""
+    seen = collector.__dict__.setdefault("_tui_lineage", {})
+    chat = str(sub.get("chat_id") or "")
+    if chat not in seen:
+        logical = None
+        authority = _launch_authority(collector.runner, sub.get("notifier_profile") or None)
+        with contextlib.suppress(Exception):
+            logical = authority.logical_owner(chat) if authority is not None else None
+        seen[chat] = tuple(c for c in (chat, str(logical or "")) if c)
+    return seen[chat]
+
+
+def with_tip_chats(collector: Any, conn: Any, sub: dict) -> dict:
+    """``sub`` (a waking ``local`` row) stamped with ``tui_chats``: the chats of the card's ``tui`` rows whose
+    compression-lineage root is this row's chat (``kanban_wake_sibling._tui_chats``). ``local`` rows are keyed by
+    the root and ``tui`` rows by the live tip, so the wake's floor and settle must reach the tip's row. Reads only
+    the card's few ``tui`` rows; a row whose lineage cannot be read is left out (claim-time cover still applies)."""
+    from gateway import kanban_wake_sibling as sibling
+    if not sibling._waking_local(sub):
+        return sub
+    chat = str(sub.get("chat_id") or "")
+    try:
+        rows = conn.execute("SELECT chat_id FROM kanban_notify_subs WHERE task_id = ? AND platform = 'tui' "
+                            "AND thread_id = ? AND chat_id != ?",
+                            (sub["task_id"], sub.get("thread_id") or "", chat)).fetchall()
+    except sqlite3.Error:
+        return sub
+    tips = tuple(str(r[0]) for r in rows if chat in _lineage_this_tick(collector, {**sub, "chat_id": r[0]})[1:])
+    return {**sub, "tui_chats": tips} if tips else sub
+
+
 def claim(collector: Any, conn: Any, slug: str, sub: dict) -> Optional[dict]:
-    """Claim one tui row's unseen events for this gateway, or None (left to the legacy backend)."""
-    if has_local_sibling(conn, sub) or _owned_this_tick(collector, sub) is None:
+    """Claim one tui row's unseen events for this gateway, or None (left to the legacy backend).
+
+    The chat's waking ``local`` row takes precedence the same way as on the legacy poller
+    (``kanban_wake_sibling``): the row stays unclaimed while that row still owes a covered event, and the events
+    it already delivered are dropped from the batch. An event written before that row existed, or any event of a
+    ``notify``-only local row, stays with this row: skipping the row whenever a ``local`` row existed lost
+    t_01a1ce412fbf6e7f's completion on a busy gateway-owned chat (2026-11-12). [daveey]"""
+    from gateway import kanban_wake_sibling as sibling
+    if _owned_this_tick(collector, sub) is None:
+        return None
+    row, sub = sub, {**sub, "sibling_chats": _lineage_this_tick(collector, sub)}
+    if sibling.tui_defer(conn, sub):
         return None
     from hermes_cli import kanban_db_notify as _kbn
     old_cursor, cursor, events = _kbn.claim_unseen_events_for_sub(
@@ -165,10 +198,16 @@ def claim(collector: Any, conn: Any, slug: str, sub: dict) -> Optional[dict]:
     )
     if not events:
         return None
+    if sibling.wake_owes_after(conn, sub, old_cursor):  # a covered event raced the defer check: the wake carries it
+        _kbn.rewind_notify_cursor(conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
+                                  thread_id=sub.get("thread_id") or "", claimed_cursor=cursor, old_cursor=old_cursor)
+        return None
+    if (cover := sibling.tui_cover(conn, sub)) is not None:
+        events = [ev for ev in events if not cover(ev)]  # delivered by the wake; an empty batch just advances
     task = collector.kb.get_task(conn, sub["task_id"])
     logger.debug("kanban notifier: claimed %d tui event(s) for %s on board %s cursor %s→%s (gateway owns %s)",
                  len(events), sub["task_id"], slug, old_cursor, cursor, sub["chat_id"])
-    return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task,
+    return {"sub": row, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task,
             "board": slug, "tui_owner": True}
 
 

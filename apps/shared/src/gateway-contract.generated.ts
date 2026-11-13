@@ -4986,6 +4986,7 @@ export interface CanonicalSessionInfo {
   tool_availability_warnings?: string[] | null
   unknown_toolsets?: string[] | null
   usage?: Usage | null
+  inventory_pending?: boolean | null
   source: string
   model?: string | null
   lazy: boolean
@@ -5358,6 +5359,7 @@ export interface CanonicalSnapshotInfo {
   tool_availability_warnings?: string[] | null
   unknown_toolsets?: string[] | null
   usage?: Usage | null
+  inventory_pending?: boolean | null
   desktop_protocol: 'hermes-gateway-v1'
   source?: string | null
   model?: string | null

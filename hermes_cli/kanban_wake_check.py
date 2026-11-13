@@ -432,6 +432,9 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
             st = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
             if st is None or st[0] != "scheduled" or get_state(conn, tid) is not None:
                 continue
+            from hermes_cli.kanban_terminal_guard import skip_wake
+            if skip_wake(conn, tid, RESTORED_EVENT, park_event_id=park_id):
+                continue  # worker-1's six done cards came back through this restore (11-11) [daveey]
             restored = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",
                                     (tid, park_id, RESTORED_EVENT)).fetchone()[0]
             if not restored:
@@ -942,6 +945,15 @@ def _wake(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> O
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_continuation import pending_wake
 
+    from hermes_cli.kanban_terminal_guard import skip_wake
+    if skip_wake(conn, task_id, kind):  # a stale scheduled copy of a done card: no wake [daveey]
+        # Every producer reaching a held card here (shared-blocker clear, supervisor-request wake, CI progress, dead
+        # ancestry, a lost probe, a probe result) also drops its probe and wake episode: kept, it would rerun every
+        # ``check_every`` (holding a slot) until the feed heals the row to done. ``restore_missing_checks`` skips a
+        # held card, so it stays gone, and re-registers it (or wakes the card) if a reopen lifts the hold.
+        conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
+        episode.reset(conn, task_id)
+        return None
     park = pending_wake(conn, task_id) or {}
     resume = park.get("resume_status") if park.get("resume_status") in ("ready", "review") else "ready"
     landing = kb._landing_status_after_parents(conn, task_id)
@@ -960,6 +972,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
     """Start every due probe (at most ``MAX_CONCURRENT`` in flight) and return at once;
     ``wait=True`` (tests, one-shot callers) also waits up to ``TICK_BUDGET_SECONDS`` for them.
     Returns ``{"submitted": [task ids], "in_flight": n}``. Never raises."""
+    from hermes_cli import kanban_ci_progress  # [daveey] a card parked on a CI run that never starts
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
@@ -992,8 +1005,9 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
             (ts,)).fetchall()
         for task_id, cmd, every, generation, purpose in due:
             key = (db_path, task_id)
+            sweeping = kanban_ci_progress.running_sweeps()  # [daveey] a CI sweep holds a pool worker too
             with _LOCK:
-                busy = sum(1 for f in _IN_FLIGHT.values() if not f.done())
+                busy = sum(1 for f in _IN_FLIGHT.values() if not f.done()) + sweeping
                 running = key in _IN_FLIGHT and not _IN_FLIGHT[key].done()
             if running:
                 continue
@@ -1023,6 +1037,11 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         with _LOCK:
             for k in [k for k, f in _IN_FLIGHT.items() if f.done()]:
                 _IN_FLIGHT.pop(k, None)
+            busy = len(_IN_FLIGHT)
+        sweep = kanban_ci_progress.submit_sweep(
+            conn, _pool(), slots_free=MAX_CONCURRENT - busy - kanban_ci_progress.running_sweeps())
+        if sweep is not None:
+            futures.append(sweep)
     except Exception:
         logger.warning("kanban wake checks: tick failed", exc_info=True)
     if wait and futures:
@@ -1032,6 +1051,8 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                 fut.result(timeout=max(0.0, deadline - time.monotonic()))
             except (FutureTimeout, CancelledError):
                 logger.debug("kanban wake check still running after the wait budget")
+            except Exception:  # [daveey] any pool callable's exception, not only those that never raise
+                logger.warning("kanban wake checks: a pool task raised", exc_info=True)
     return {"submitted": submitted, "in_flight": len(in_flight())}
 
 

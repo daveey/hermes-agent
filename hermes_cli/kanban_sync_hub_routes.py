@@ -39,3 +39,7 @@ class HubRoutesMixin:
     def report_pickup(self, pickup: Optional[str]) -> dict:
         """Publish this machine's ``kanban.sync.pickup`` (None → null) on its own registry row."""
         return self._call("POST", "/v2/machines/me", {"pickup": pickup})
+
+    def attest_sources(self, body: dict) -> dict:
+        """workspace_source v1 clone attestation: ``{version: 1, repos: [{id, full_name}]}`` (404 on an old Board)."""
+        return self._call("POST", "/v2/machines/me/sources", body)

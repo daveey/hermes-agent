@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hermes_cli import restart_ignore_paths as _restart_ignore_paths  # at boot: a lazy import would be pinned
 from hermes_cli._startup_fast import project_root_str
 
 _PROJECT_ROOT = Path(project_root_str())
@@ -97,11 +98,43 @@ def current_code_sha() -> str | None:
 
 
 def detect_code_skew() -> tuple[str, str] | None:
-    """``(boot_rev, disk_rev)`` short labels if the checkout drifted since boot, else ``None``."""
+    """``(boot_rev, disk_rev)`` short labels if the checkout drifted since boot, else ``None``.
+
+    [daveey] A forward drift whose every commit touches only ``RESTART_IGNORE_GLOBS`` paths (tests, docs, CI)
+    is no skew: this process runs exactly the code on disk, and hermes-sync moves the hub checkout over such a
+    range without restarting anything (t_01a1d471b754e5bc)."""
     current = _fingerprint() if _boot_fingerprint is not None else None
     if current is None or current == _boot_fingerprint:
         return None
+    if _drift_restart_free(_boot_fingerprint, current):
+        return None
     return _short(_boot_fingerprint), _short(current)
+
+
+# (boot sha, disk sha) -> range_restart_verdict. A commit range never changes, so a definite verdict is final; the
+# watchdogs poll every few seconds and would otherwise run two git commands per poll for the same pair. A transient
+# git failure (None: timeout, OSError, git not found) is not cached: it reads as skew now and is asked again on the
+# next poll, so it never pins the pair as skewed for the life of the process (t_01a1d49d2f2a8ae2). A sha git says
+# is no commit (boot commit gc'd after a force-push) is a definite False and is cached (PR #2151 review). A disk
+# sha may still appear later (shallow checkout deepened, ref written before its objects): the cached False then
+# keeps that pair skewed until the cache clears or the process restarts, failing closed (at worst one restart).
+_restart_free_verdicts: dict[tuple[str, str], bool] = {}
+
+
+def _drift_restart_free(boot_fingerprint: str | None, current: str) -> bool:
+    boot_sha = (boot_fingerprint or "").rsplit(":", 1)[-1]
+    disk_sha = current.rsplit(":", 1)[-1]
+    key = (boot_sha, disk_sha)
+    verdict = _restart_free_verdicts.get(key)
+    if verdict is None:
+        # range_restart_verdict never raises: an unprovable drift is False/None = skew, as before
+        answer = _restart_ignore_paths.range_restart_verdict(str(_PROJECT_ROOT), boot_sha, disk_sha)
+        if answer is None:
+            return False
+        if len(_restart_free_verdicts) > 64:
+            _restart_free_verdicts.clear()
+        _restart_free_verdicts[key] = verdict = answer
+    return verdict
 
 
 _import_mix_noted: set[tuple[str, str]] = set()
@@ -113,7 +146,9 @@ def note_import_error(exc: BaseException, where: str) -> bool:
     One ``code-skew import mix`` WARNING per (boot, disk) pair, so the error signal shows the cause
     (a process running two revisions; restart it) instead of a bare ``cannot import name``
     (agent-529f2244ac). Returns True when the error happened under skew. Never raises: the
-    fingerprint readers swallow their own failures and the rest is string work."""
+    fingerprint readers and ``range_restart_verdict`` swallow their own failures. Not free: the first
+    ImportError for an uncached (boot, disk) pair runs a few git subprocesses (``_drift_restart_free``,
+    15 s timeout each); later ones hit the verdict cache unless git failed transiently."""
     if not isinstance(exc, ImportError):
         return False
     boot = _boot_fingerprint or _process_boot_fingerprint()
@@ -121,6 +156,9 @@ def note_import_error(exc: BaseException, where: str) -> bool:
         return False
     current = _fingerprint()
     if not current or current == boot:
+        return False
+    if _drift_restart_free(boot, current):
+        # a tests/docs/CI-only drift: the process runs the code on disk, so this is no mix (t_01a1d49d2f2a8ae2)
         return False
     pair = (boot, current)
     if pair not in _import_mix_noted:

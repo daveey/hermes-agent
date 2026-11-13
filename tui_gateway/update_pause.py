@@ -10,6 +10,10 @@ so the update applies. The next backend's startup sweep continues the turn with 
 crash-resume attempt is used. After ``MAX_PAUSES`` checkpoints, a failed window no longer restarts
 the turn while its drainer holds ``cache/core-update/drain.lock``: it stays idle for the next window.
 The threshold bounds no-progress continuations, never the checkpoint needed to let the update apply.
+A continuation's pre-turn and pre-first-request pauses (t_01a1d31bf400d56c) make no progress yet count toward
+``MAX_PAUSES`` like any other: after ``MAX_PAUSES`` windows released without an apply the turn parks between windows
+(``drain_retry_pending``, at most ``PARK_MAX_S``) without having taken a step. That is the intended bound: a
+window that cannot apply should not keep re-running the same request.
 
 A turn the next backend would not auto-continue is never paused. A paused turn whose window ends without
 an update (expired, apply refused) continues in place (``start_in_place_watcher``), unless its pause
@@ -273,7 +277,7 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
                 declined.append(why)
                 logger.info("core-update pause: session %s keeps running (%s)", marker_key, why)
             return None
-        from tui_gateway.turn_marker import mark_turn_paused, read_turn_marker
+        from tui_gateway.turn_marker import clear_carried_turn_paused, mark_turn_paused, read_turn_marker
         home = _home(session)
         marker = read_turn_marker(home, marker_key)
         if marker is None:
@@ -286,6 +290,13 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
         # Counted already: a synthesized turn over the paused marker pays it, and a turn retrying its own pause
         # after a failed attempt left the write-ahead mark. Only the former is ``carried`` (the caller's call).
         increment = marker.get("reason") != PAUSE_REASON
+        # Only a stamp this turn adds is its to take back: an earlier carried pause that stood keeps its own.
+        stamps = carried and not marker.get("carried_turn_paused")
+
+        def take_back() -> None:
+            if stamps:  # the carried pause did not stand: the notification turn goes on, so do not name it
+                clear_carried_turn_paused(home, marker_key)
+
         if not mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=increment,
                                 carried=carried):
             return None
@@ -294,18 +305,25 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
                                     carried=carried)
         try:
             if not stop_owned_jobs_for_update_pause(killed, save):
+                take_back()
                 return None
         except Exception:
             logger.warning("core-update pause: background cleanup failed; refusing pause for %s", marker_key, exc_info=True)
+            take_back()
             return None
         drainer_lock = _drainer_lock(session)  # request disappears when the window ends
         with session["history_lock"]:
-            if user_stop_pending(session):  # under the lock user_stop_wins takes: one of the two sees the other
-                logger.info("core-update pause: session %s was stopped by the user; not pausing it", marker_key)
-                return None
-            session["_update_pause_marker_key"] = marker_key
-            session["_update_pause_drainer_lock"] = drainer_lock
-            session.pop("_update_pause_parked_stamp", None)  # a new pause starts unparked
+            stopped = user_stop_pending(session)  # under the lock user_stop_wins takes: one sees the other
+            if not stopped:
+                session["_update_pause_marker_key"] = marker_key
+                session["_update_pause_drainer_lock"] = drainer_lock
+                session.pop("_update_pause_parked_stamp", None)  # a new pause starts unparked
+                if stamps:  # pause_stands takes it back if the turn does not end paused (a later Stop won)
+                    session["_carried_pause_stamped"] = marker_key
+        if stopped:
+            logger.info("core-update pause: session %s was stopped by the user; not pausing it", marker_key)
+            take_back()
+            return None
         logger.info("core-update pause: session %s paused at a step boundary for a Hermes update", marker_key)
         return PAUSE_REASON
 
@@ -368,19 +386,36 @@ def effective_pause_key(session: dict, marker_key: str) -> str:
 def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
     """The turn's end: it ended paused for the update AND the session still keeps this turn's marker (a Stop
     that won dropped it). A turn whose hook paused it but which did not end paused (the Stop won in the agent
-    loop) drops the session's keep here, before its marker is retired."""
+    loop) drops the session's keep here, before its marker is retired, and a carried turn takes back the
+    write-ahead ``carried_turn_paused`` stamp its hook added, so the continuation does not name a stopped turn.
+
+    A backend exit's own interrupt (no user Stop before it) keeps that stamp when it landed (the result is
+    ``interrupted``): the exit keeps the pause, and the
+    notification turn it cut short after its hook paid did not finish, so the next backend's continuation still
+    names it (``CARRIED_TURN_NOTE``), as it would had the turn ended paused."""
+    from tui_gateway.exit_job_receipts import USER_STOP_AT_EXIT
     with session["history_lock"]:
         mine = bool(marker_key) and session.get("_update_pause_marker_key") == marker_key
         stands = mine and isinstance(result, dict) and bool(result.get("paused_for_update"))
-        if mine and not stands and not session.get("_exit_keeps_turn_marker"):
+        exiting = bool(session.get("_exit_keeps_turn_marker"))
+        if mine and not stands and not exiting:
             _drop_pause(session)
+        stamped = session.pop("_carried_pause_stamped", None) == marker_key
+        # Only a turn the exit's interrupt actually landed on was cut short: one that completed normally after
+        # the exit began (before its interrupt) ran to completion, so it takes the stamp back like any other.
+        interrupted = isinstance(result, dict) and bool(result.get("interrupted"))
+        cut_short_by_exit = exiting and interrupted and not session.get(USER_STOP_AT_EXIT)
+    if stamped and not stands and not cut_short_by_exit:  # its hook paid the pause but the turn ended otherwise
+        from tui_gateway.turn_marker import clear_carried_turn_paused
+        clear_carried_turn_paused(_home(session), marker_key)
     return stands
 
 
 def interrupted_tool_result(at: float | None = None) -> str:
-    """The persisted result of a tool call the update cancelled (UTC, whole seconds)."""
+    """The persisted result of a tool call the update cancelled (UTC, whole seconds). It never invites a blind
+    re-run: a cancelled side-effecting call may have taken effect (t_01a1d41fd158579d)."""
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_now() if at is None else at))
-    return f"[interrupted by Hermes update at {stamp}: re-run if still needed]"
+    return f"[interrupted by Hermes update at {stamp}: check its outcome before re-running]"
 
 
 def mid_tool_cancel_step(session: dict, marker_key: str, agent: Any, state: dict) -> list[str] | None:
@@ -488,16 +523,113 @@ CARRIED_TURN_NOTE = ("[A notification turn that ran after this pause was itself 
                      "finished; its partial work is above. Finish what it still needs too.]")
 
 
-def pause_note(prompt: str, killed_jobs: list | None = None, *, carried: bool = False) -> str:
-    from tui_gateway.session_history import _AUTO_CONTINUE_NOTE_PREFIX
-    note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "
-            "tool result above is complete; continue with the next step and don't redo finished steps. "
-            "Tool output above may be stale: re-read any PR, CI or card state before reporting it; the update "
-            "may itself be one of those changes. "
-            f"The paused request was:]\n\n{prompt}")
+def pause_note(prompt: str, killed_jobs: list | None = None, *, carried: bool = False,
+               paused_at: float | None = None, later_turns: int | None = 0, queued: bool = False,
+               pauses: int = 0) -> str:
+    """The continuation's note. Right after the pause it is the chat's previous turn; once later turns ran over the
+    pause (``later_turns``; None = unknown and the pause is older than ``STALE_NOTE_AFTER_S``), or it is
+    ``queued`` behind the owner's other turns, it says when the request was paused and that other turns ran (or may
+    run) since, so the model checks before redoing anything (t_01a1d4920ce3cbf4: a 2 h old, already handled notice
+    was replayed as "your previous turn was interrupted"). ``pauses`` >= 2: the marker keeps the chain's root
+    prompt, which earlier continuations already worked on, so the note says so instead of presenting it as new."""
+    stale = paused_at is not None and (queued or bool(later_turns) or (
+        later_turns is None and _now() - float(paused_at) > STALE_NOTE_AFTER_S))
+    if stale and paused_at is not None:
+        at = float(paused_at)
+        since = (f"{later_turns} later turn{'s' if later_turns != 1 else ''} ran in this chat since" if later_turns
+                 else "it was queued behind other turns in this chat, which may have run first" if queued
+                 else "other turns may have run in this chat since")
+        earlier = pauses - 1
+        chain = (f" This request is not new: it already ran as a continuation after {earlier} earlier "
+                 f"pause{'s' if earlier != 1 else ''}, and that work is above." if earlier >= 1 else "")
+        note = (f"{PAUSE_REPLAY_NOTE_PREFIX} at {_clock_label(at)} ({_age_label(at)} "
+                f"ago) and only continues now; {since}.{chain} Every tool result from the paused turn is complete. "
+                "Before doing anything, check the transcript and re-read any PR, CI or card state: a later turn may "
+                "already have handled this request, so don't redo finished work. The paused request was:]"
+                f"\n\n{prompt}")
+    else:
+        from tui_gateway.session_history import _AUTO_CONTINUE_NOTE_PREFIX
+        note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "
+                "tool result above is complete; continue with the next step and don't redo finished steps. "
+                "Tool output above may be stale: re-read any PR, CI or card state before reporting it; the update "
+                "may itself be one of those changes. "
+                f"The paused request was:]\n\n{prompt}")
     report = killed_jobs_report(killed_jobs, "Background jobs stopped for this Hermes update:")
     note = f"{note}\n\n{report}" if report else note
     return f"{note}\n\n{CARRIED_TURN_NOTE}" if carried else note
+
+
+# [daveey] Opening of the note for a pause that later turns ran over (classified ``auto_continue`` like the
+# interrupted-turn note: session_history._legacy_display_kind, gateway.run._is_auto_continue_noise).
+PAUSE_REPLAY_NOTE_PREFIX = "[System note: A turn of yours paused for a Hermes update"
+# A pause older than this whose later turns cannot be counted is worded as stale, never as "your previous turn".
+STALE_NOTE_AFTER_S = 600.0
+
+
+def _clock_label(at: float) -> str:
+    from datetime import datetime
+    return datetime.fromtimestamp(at).astimezone().strftime("%H:%M %Z").strip()
+
+
+def _age_label(at: float) -> str:
+    age = max(0.0, _now() - at)
+    if age < 90:
+        return f"{age:.0f} s"
+    if age < 90 * 60:
+        return f"{age / 60:.0f} min"
+    return f"{age / 3600:.1f} h"
+
+
+def later_turns_since(session: dict, session_key: str, since: float | None,
+                      prompt: str | None = None) -> int | None:
+    """[daveey] User-originated rows the stored transcript holds after the pause stamp ``since``: turns that ran
+    over the paused turn (notices carried over it, the owner's queued turns). The paused turn's own request row
+    (``prompt``) never counts, even when it was persisted or stamped after the pause (a late step flush): a turn is
+    never later than itself. None when it cannot be read. The compression tip is counted too (a rotation moves the
+    chat)."""
+    if not session_key or since is None:
+        return 0 if since is None else None
+    try:
+        from tui_gateway import server  # session_workdir's helpers run bound onto server (method_ctx)
+        with server._session_db(session) as db:
+            read_ctx = getattr(db, "_read_ctx", None) if db is not None else None
+            if read_ctx is None:
+                return None
+            ids = {session_key}
+            tip = getattr(db, "get_compression_tip", None)
+            if tip is not None:
+                ids.add(tip(session_key) or session_key)
+            marks = ",".join("?" * len(ids))
+            with read_ctx() as conn:
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM messages WHERE session_id IN ({marks}) AND role='user' AND timestamp>? "
+                    "AND COALESCE(_compressed_summary, 0)=0 AND content IS NOT ?",
+                    (*ids, float(since), prompt)).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        logger.debug("core-update pause: could not count later turns of %s", session_key, exc_info=True)
+        return None
+
+
+def retire_paused_turn(session: dict, session_key: str, marker: dict, why: str, *, handed: bool = False) -> bool:
+    """[daveey] End a core-update pause this backend cannot continue (t_01a1d4920ce3cbf4): its continuation went
+    to the chat's owner (``handed``), or no owner will run it. Drops only that pause's marker (identity by
+    ``paused_at``) and logs why, once; the readers that deferred to this live writer then see no pause."""
+    from tui_gateway.turn_marker import retire_paused_marker
+    removed = retire_paused_marker(_home(session), session_key, marker.get("paused_at"))
+    with session["history_lock"]:
+        session.pop("_update_pause_due_until", None)  # nothing will start here: automatic turns may run again
+    if not removed:
+        return False
+    head = " ".join(str(marker.get("prompt") or "").split())[:120]
+    paused_for = _now() - float(marker.get("paused_at") or marker.get("started_at") or _now())
+    if handed:
+        logger.info("core-update pause: continuation of %s (paused %.0fs ago) %s; its marker is retired here",
+                    session_key, paused_for, why)
+    else:
+        logger.warning("core-update pause: retired the paused turn of %s (paused %.0fs ago): %s. Paused request: %r",
+                       session_key, paused_for, why, head)
+    return True
 
 
 def killed_jobs_report(killed_jobs: list | None, heading: str) -> str:
@@ -610,11 +742,19 @@ def resume_closed_session(marker_key: str) -> str:
     return "missing"
 
 
-def _announce_window_end(marker_key: str, left_at: float | None, announced: bool) -> bool:
-    if left_at is None and not announced:
-        logger.info("core-update pause: window ended without an update; continuing session %s here", marker_key)
-        return True
-    return announced
+def _announce_window_end(session: dict, marker_key: str, left_at: float | None) -> None:
+    """Once per pause, not once per watcher: a re-armed or carried-turn watcher of the same pause stays quiet
+    (t_01a1d4920ce3cbf4 logged the line every 5 s for 7 min, 146 times for one chat)."""
+    if left_at is not None:
+        return
+    from tui_gateway.turn_marker import read_turn_marker
+    marker = read_turn_marker(_home(session), marker_key) or {}
+    pause = (marker_key, marker.get("started_at"), marker.get("paused_at"), marker.get("pauses"))
+    with session["history_lock"]:
+        if session.get("_update_pause_announced") == pause:
+            return
+        session["_update_pause_announced"] = pause
+    logger.info("core-update pause: window ended without an update; continuing session %s here", marker_key)
 
 
 def _schedule_here(sid: str, session: dict, marker_key: str) -> str:
@@ -934,7 +1074,7 @@ def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threadin
         from tui_gateway import server
         from hermes_cli.backend_retirement import retirement
         started, left_at, last_outlook, scheduled, over_at = time.monotonic(), None, None, False, None
-        warned = announced = False
+        warned = False
         try:
             while time.monotonic() - started < WATCH_MAX_S:
                 time.sleep(WATCH_POLL_S)
@@ -986,7 +1126,7 @@ def start_in_place_watcher(sid: str, session: dict, marker_key: str) -> threadin
                             continue
                         action = "resume"
                     if action == "resume":
-                        announced = _announce_window_end(marker_key, left_at, announced)
+                        _announce_window_end(session, marker_key, left_at)
                         outcome = _schedule_here(sid, session, marker_key)
                         if outcome == "retry":
                             continue  # admission refused or not yet idle: the next poll decides again

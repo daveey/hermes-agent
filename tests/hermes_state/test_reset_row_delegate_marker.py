@@ -30,6 +30,14 @@ def _reset_chat(db: SessionDB) -> None:
     db.append_message(LIVE, "user", "the live chat")
 
 
+def _as_a_later_process() -> None:
+    """The heal runs on a store's first open per process (then at most every 10 min): forget this
+    process's schema memo so the reopen below behaves like the next process's first open."""
+    import hermes_state_schema_memo
+
+    hermes_state_schema_memo.clear()
+
+
 def test_a_polluted_reset_row_is_listed_again_after_the_store_opens(tmp_path):
     path = tmp_path / "state.db"
     db = SessionDB(db_path=path)
@@ -41,6 +49,7 @@ def test_a_polluted_reset_row_is_listed_again_after_the_store_opens(tmp_path):
     con.commit()
     con.close()
 
+    _as_a_later_process()
     db = SessionDB(db_path=path)
     try:
         assert _config(db, LIVE) == {"_reset_from": OLD}
@@ -112,6 +121,7 @@ def test_a_healed_reset_row_is_indexed_for_substring_search(tmp_path):
     con.commit()
     con.close()
 
+    _as_a_later_process()
     db = SessionDB(db_path=path)
     try:
         hits = db._conn.execute(

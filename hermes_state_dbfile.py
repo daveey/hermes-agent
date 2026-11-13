@@ -337,7 +337,13 @@ _SCAN_THREAD = _interpreter_thread_class()
 # verdicts are never cached. A cached verdict also holds only while the sidecars cannot have been
 # retired since: see :func:`_darwin_clean_key`.
 _DARWIN_FD_CLEAN_TTL_SECONDS = 30.0
-_darwin_clean_until: dict[str, tuple[float, tuple]] = {}
+# [daveey] Past its TTL, a clean verdict whose key still matches is served for up to this long
+# (measured from the pass that produced it) while one refresh pass runs in the background: see
+# :func:`_iter_darwin_sidecar_holders`. Under GIL load a pass outran the 5 s budget, so every
+# writer open after each 30 s TTL blocked for 5 s (49 times in one hour on David-MBP, 2026-11-12).
+_DARWIN_FD_STALE_CLEAN_MAX_SECONDS = 300.0
+# ``base -> (valid until, key, recorded at)``, all monotonic seconds except the key.
+_darwin_clean_until: dict[str, tuple[float, tuple, float]] = {}
 
 
 def _darwin_libproc():
@@ -531,6 +537,14 @@ def _darwin_clean_cached(base: str, key: tuple) -> bool:
     return cached is not None and cached[0] > time.monotonic() and cached[1] == key
 
 
+def _darwin_clean_servable_stale(base: str, key: tuple) -> bool:
+    """[daveey] Whether an expired clean verdict for *base* may still be served: same key, and the
+    pass that produced it is younger than ``_DARWIN_FD_STALE_CLEAN_MAX_SECONDS``."""
+    cached = _darwin_clean_until.get(base)
+    return (cached is not None and cached[1] == key and len(cached) > 2
+            and time.monotonic() - cached[2] < _DARWIN_FD_STALE_CLEAN_MAX_SECONDS)
+
+
 class _DarwinFdScan:
     """One libproc pass, shared by every caller that arrives while it runs.
 
@@ -584,9 +598,14 @@ class _DarwinFdScan:
                     # Publish caches and retire the flight atomically: every caller
                     # that joined this pass has a verdict, including late joiners.
                     for base, (key, _watched) in self.watchers.items():
-                        if not self.verdicts[base] and _clean_key_settled(key, self.taken[base]):
+                        if self.verdicts[base]:
+                            # [daveey] A holder voids any earlier clean verdict, so it is never
+                            # served stale either.
+                            _darwin_clean_until.pop(base, None)
+                        elif _clean_key_settled(key, self.taken[base]):
+                            now = time.monotonic()
                             _darwin_clean_until[base] = (
-                                time.monotonic() + _DARWIN_FD_CLEAN_TTL_SECONDS, key)
+                                now + _DARWIN_FD_CLEAN_TTL_SECONDS, key, now)
                     if _DARWIN_SCAN_IN_FLIGHT is self:
                         _DARWIN_SCAN_IN_FLIGHT = None
                     return
@@ -613,6 +632,38 @@ def _darwin_holders(candidates, watched: dict[str, str]) -> list[tuple[int, str]
 _DARWIN_SCAN_CACHED = _DarwinFdScan(0.0)  # sentinel, never run: a clean verdict appeared while waiting for the lock
 
 
+def _claim_darwin_fd_scan(base, key, watched, taken_ns) -> _DarwinFdScan | None:
+    """The in-flight pass, started if none is alive, with the caller registered as a watcher.
+
+    Caller holds ``_DARWIN_SCAN_LOCK``. ``None`` when the pass in flight is stuck past its deadline;
+    ``_DARWIN_SCAN_CACHED`` when no pass is in flight and a fresh clean verdict for *base* exists."""
+    global _DARWIN_SCAN_IN_FLIGHT
+    scan = _DARWIN_SCAN_IN_FLIGHT
+    if scan is not None and time.monotonic() > scan.deadline:
+        return None  # stuck past its deadline (kernel-blocked): it can only end expired
+    if scan is None and base is not None and key is not None and _darwin_clean_cached(base, key):
+        return _DARWIN_SCAN_CACHED
+    if scan is None:
+        scan = _DarwinFdScan(time.monotonic() + _DARWIN_FD_SCAN_TIMEOUT_SECONDS)
+        _DARWIN_SCAN_IN_FLIGHT = scan
+        try:
+            _SCAN_THREAD(target=scan.run, name=_DARWIN_FD_SCAN_THREAD_NAME, daemon=True).start()
+        except BaseException:
+            _DARWIN_SCAN_IN_FLIGHT = None
+            raise
+    if base is not None and key is not None and watched is not None:
+        if base not in scan.watchers:
+            scan.watchers[base] = (key, watched)
+            scan.taken[base] = taken_ns  # 0 (none given): nothing settles, nothing is cached
+    return scan
+
+
+def _refresh_darwin_fd_scan(base: str, key: tuple, watched: dict[str, str], taken_ns: int) -> None:
+    """[daveey] Start or join a pass for *base* without waiting for it; it publishes as usual."""
+    with _DARWIN_SCAN_LOCK:
+        _claim_darwin_fd_scan(base, key, watched, taken_ns)
+
+
 def _join_darwin_fd_scan(base: str | None = None, key: tuple | None = None,
                          watched: dict[str, str] | None = None,
                          taken_ns: int = 0) -> _DarwinFdScan | None:
@@ -621,27 +672,12 @@ def _join_darwin_fd_scan(base: str | None = None, key: tuple | None = None,
     With *base*/*key*/*watched*, returns ``_DARWIN_SCAN_CACHED`` when a pass that just finished
     already recorded a clean verdict for *base*, and registers the caller so the pass records its
     verdict before it leaves the in-flight slot."""
-    global _DARWIN_SCAN_IN_FLIGHT
     timeout = _DARWIN_FD_SCAN_TIMEOUT_SECONDS
     with _DARWIN_SCAN_LOCK:
-        scan = _DARWIN_SCAN_IN_FLIGHT
-        if scan is not None and time.monotonic() > scan.deadline:
-            return None  # stuck past its deadline (kernel-blocked): it can only end expired
-        if scan is None and base is not None and key is not None and _darwin_clean_cached(base, key):
-            return _DARWIN_SCAN_CACHED
-        if scan is None:
-            scan = _DarwinFdScan(time.monotonic() + timeout)
-            _DARWIN_SCAN_IN_FLIGHT = scan
-            try:
-                _SCAN_THREAD(target=scan.run, name=_DARWIN_FD_SCAN_THREAD_NAME, daemon=True).start()
-            except BaseException:
-                _DARWIN_SCAN_IN_FLIGHT = None
-                raise
+        scan = _claim_darwin_fd_scan(base, key, watched, taken_ns)
+        if scan is None or scan is _DARWIN_SCAN_CACHED:
+            return scan
         scan.waiters += 1
-        if base is not None and key is not None and watched is not None:
-            if base not in scan.watchers:
-                scan.watchers[base] = (key, watched)
-                scan.taken[base] = taken_ns  # 0 (none given): nothing settles, nothing is cached
     try:
         # ponytail: a kernel-blocked proc_pidfdinfo cannot be interrupted, so that one thread
         # may outlive us; it is the only one, and it dies with the process.
@@ -658,7 +694,18 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
 
     The watched side is resolved with ``os.path.realpath`` because libproc reports the kernel's
     path for the vnode, while ``os.path.abspath`` does not resolve symlinks -- a textual compare
-    of the two silently misses every sidecar under a symlinked prefix (on macOS ``/var`` itself)."""
+    of the two silently misses every sidecar under a symlinked prefix (on macOS ``/var`` itself).
+
+    [daveey] Stale-while-revalidate: once a clean verdict's TTL has passed, the open still returns
+    ``[]`` at once when the key is unchanged and the verdict's pass is younger than
+    ``_DARWIN_FD_STALE_CLEAN_MAX_SECONDS``, and only starts (or joins) a refresh pass in the
+    background, which publishes under the usual rules (a holder is never cached and voids the old
+    verdict). A changed key, no prior clean verdict, or one older than that bound still blocks on
+    the pass and fails open after the budget, as before. Safe because a retired generation needs a
+    watched sidecar path to be unlinked, renamed away or replaced, which changes the path's identity
+    and so the key (:func:`_darwin_clean_key`): with the key unchanged since a clean pass, nothing
+    can have been retired since, so that pass's verdict is no weaker than the fail-open ``[]`` the
+    open would return anyway when a pass outruns its budget under GIL load."""
     base = os.path.realpath(os.path.abspath(os.fspath(db_path)))
     # APFS/HFS+ are case-insensitive by default and libproc reports the pathname as the opener
     # spelled it; ``os.path.normcase`` is the identity on darwin, so fold case here.
@@ -666,6 +713,9 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     taken_ns = _wall_clock_ns()  # before the key: the settle window counts back from here
     key = _darwin_clean_key(base)  # taken before the pass, so a change during it invalidates
     if _darwin_clean_cached(base, key):
+        return []
+    if _darwin_clean_servable_stale(base, key):
+        _refresh_darwin_fd_scan(base, key, watched, taken_ns)
         return []
     scan = _join_darwin_fd_scan(base, key, watched, taken_ns)
     if scan is _DARWIN_SCAN_CACHED:

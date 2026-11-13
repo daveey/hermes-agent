@@ -20,7 +20,7 @@ from hermes_cli import kanban_worker_node as wn
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
 from tests.hermes_cli import kanban_sync_support as support
-from tests.hermes_cli.test_kanban_hub_admission import locked
+from tests.hermes_cli.hub_admission_support import locked
 
 pytestmark = pytest.mark.platforms("posix")
 

@@ -121,7 +121,6 @@ async def test_a_read_stuck_past_its_socket_deadline_cannot_stretch_the_write(tm
 @pytest.mark.asyncio
 @pytest.mark.parametrize('verdict', [
     GatewayDiscovery('absent'),
-    GatewayDiscovery('starting'),
     GatewayDiscovery('draining', reason_code='update_paused'),
     GatewayDiscovery('inaccessible', reason_code='authorization'),
     GatewayDiscovery('inaccessible', reason_code='profile_mismatch'),
@@ -134,6 +133,7 @@ async def test_every_other_verdict_is_final_on_its_first_read(tmp_path, monkeypa
     seen = _reads(monkeypatch, [verdict, TIMEOUT], clock)
     assert await sod.discover_session_owner(tmp_path, clock=clock, sleep=clock.sleep) is verdict
     assert len(seen) == 1
+    assert not sod.is_starting(verdict) and not sod.is_transient(verdict)
 
 
 def test_a_timeout_with_an_endpoint_is_not_retried():

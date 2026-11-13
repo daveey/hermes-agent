@@ -2,11 +2,12 @@
 
 Inside the gateway every ``sqlite3`` call releases the GIL and has to win it back from busy Python threads (the Kanban
 sync loop, the event loop); under that contention each handoff costs about one switch interval (5 ms). The final gate
-runs the whole-host census twice under ``admission.lock`` (cap check before the ~1 s sample, recount after it), inside
-a 2.25 s hold. A census that iterates ``PRAGMA table_info`` and row-by-row cursors makes ~80 handoffs per board, so on
-the hub (10 boards) it took ~4 s (7 s measured with one busy thread) and every hub claim was refused before sampling
-as ``hub_cpu_unknown`` from 2026-11-13 02:03Z. The model below charges one switch interval per sqlite call/row step
-on a virtual clock, so the test is deterministic and fast.
+ran the whole-host census twice under ``admission.lock`` (cap check before a ~1 s sample, recount after it), inside
+a 2.25 s hold; it now runs one census and re-reads the sampler's sample. A census that iterates ``PRAGMA table_info``
+and row-by-row cursors makes 95 handoffs per board (measured: the hub's 55-column ``tasks``, 8 running rows; the
+one-statement census makes 4), so on the hub (10 boards) it took seconds (7 s measured with one busy thread) and every
+hub claim was refused before sampling as ``hub_cpu_unknown`` from 2026-11-13 02:03Z. The model below charges one switch
+interval per sqlite call/row step on a virtual clock, so the test is deterministic and fast.
 """
 import json
 import logging
@@ -24,10 +25,16 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
-from tests.hermes_cli.test_kanban_hub_admission import advisory, claim, fake_sample, refused, task
-from tests.hermes_cli.test_kanban_hub_admission import board as board  # noqa: PLC0414 -- pytest fixture re-export
+from tests.hermes_cli import hub_admission_support as support
+from tests.hermes_cli.hub_admission_support import advisory, claim, fake_sample, refused, task
 
 pytestmark = pytest.mark.platforms("posix")
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    yield from support.open_board(tmp_path, monkeypatch)
+
 
 HUB_BOARDS = 10  # hermes-hub: the default board plus 9 named boards with a kanban.db
 
@@ -119,27 +126,21 @@ def _hub_boards(conn, home, *, cap=20, synced=False):
                     other.execute("UPDATE tasks SET status='running', lease_holder='worker-9' WHERE id=?", (foreign,))
 
 
-def _sample_taking(clock, window_s=1.0, pct=10.0):
-    def sample(*a, **k):
-        clock.offset += window_s
-        return {"cpu_busy_pct": pct, "cpu_busy_window_ms": round(window_s * 1000),
-                "cpu_busy_sample_end_ms": int(time.time() * 1000)}
-    return sample
-
-
 @pytest.mark.parametrize("synced", [True, False])
 @pytest.mark.parametrize("review", [False, True])
-def test_contended_census_leaves_the_sample_room_inside_the_hold(board, monkeypatch, review, synced):
-    """RED before the fix: ~80 handoffs per board x 10 boards ~ 4 s refused every claim before sampling."""
+def test_contended_census_fits_inside_the_hold(board, monkeypatch, review, synced):
+    """RED before the census fix: 95 handoffs per board x 10 boards overran the hold on every claim. The gate now
+    runs one census (4 steps per board) and re-reads the sampler's sample (never samples), so the claim commits
+    inside 2.25 s."""
     conn, home = board
     _hub_boards(conn, home, synced=synced)
     t = task(conn, review)
     clock = _contended(monkeypatch, sys.getswitchinterval())
-    monkeypatch.setattr(cm, "sample", _sample_taking(clock))
+    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("the locked gate reads the sampler, never samples"))
     claimed = claim(conn, t, review)
     assert claimed is not None, (sync.pop_claim_deferral(t), clock.handoffs)
-    # One census over 10 boards (the sampler's sample is re-read, not measured): a handful of sqlite calls per board.
-    assert clock.handoffs <= 2 * HUB_BOARDS * 8, clock.handoffs
+    # One census over 10 boards: a handful of sqlite calls per board (a second census would double it).
+    assert clock.handoffs <= HUB_BOARDS * 8, clock.handoffs
     payload = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='claimed' "
                                       "ORDER BY id DESC", (t,)).fetchone()[0])
     assert payload["hub_admission"]["pools"] == {"regular": HUB_BOARDS, "priority": 0}
@@ -192,7 +193,14 @@ def _expires_during_census(mp):
     mp.setattr(ka, "_expired", lambda gate: next(calls, True))
 
 
+def _limit_unreadable_at_the_lock(mp):
+    # The pre-lease advisory would refuse first with the same code; skip it so only the locked gate reads the limit.
+    mp.setattr(kb, "hub_cpu_advisory", lambda task_id=None, *, conn=None: None)
+    mp.setattr(cm, "root_limit", lambda *a, **k: (cm.UNKNOWN, None))
+
+
 @pytest.mark.parametrize("reason,stage,setup", [
+    (ka.HUB_CPU_LIMIT_UNKNOWN, "limit_unknown", _limit_unreadable_at_the_lock),
     # The pre-lease advisory passes a max age; only the locked gate's re-read (no argument) finds the sample gone.
     (ka.HUB_CPU_SAMPLE_STALE, "sample_stale_or_missing", lambda mp: mp.setattr(
         ka, "sampler_sample", lambda max_age_ms=None, _real=ka.sampler_sample:

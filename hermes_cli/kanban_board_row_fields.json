@@ -1,6 +1,6 @@
 {
   "repository": "daveey/hermes-hub",
-  "commit": "d8c1d0d801a3e7a31b34f80944be63f11cc8cbde",
+  "commit": "ec06ae083562d3418465b63603e96775763f220c",
   "row_fields": {
     "tasks": [
       "title",
@@ -40,7 +40,8 @@
       "block_recurrences",
       "completion_contract",
       "runs_on",
-      "placement_policy"
+      "placement_policy",
+      "source_receipt"
     ],
     "task_links": [
       "parent_id",

@@ -57,7 +57,8 @@ Lanes:
   (hermes-state-macos.yml): the state modules, their tests, the shared pytest
   harness and the dependency manifests. An empty diff, a ``.github/`` change or
   a list at the compare API's 300-file cap runs it. ci.yaml's ``detect`` turns
-  it off on a non-release main push: the standalone workflow already runs main.
+  it off on a non-release main push: the standalone workflow's 4-hourly
+  schedule tests main.
 * ``native_memory`` — the Darwin memory reader's ABI and no-fork tests on the
   real macOS mini (native-memory-macos.yml). Those tests are
   ``platforms("macos")`` and skip on every Linux lane, so a PR that touches one
@@ -280,8 +281,32 @@ _PY_TEST_HARNESS = (
 )
 # The macOS state lane (hermes-state-macos.yml runs tests/hermes_state/ on the mini):
 # hermes_state.py and every hermes_state_* sibling, their tests, the shared pytest harness
-# that runs them, and the dependency manifests they import through.
-_HERMES_STATE_PATHS = ("hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS)
+# that runs them, the dependency manifests they import through, and the first-party
+# modules hermes_state* imports at load time (a break there fails ``import hermes_state``).
+# tests/ci/test_macos_state_import_surface.py reads those imports from the source and
+# fails until this list equals them; lazy imports and their own imports are left out.
+HERMES_STATE_IMPORTS = (
+    "agent/__init__.py",
+    "agent/compaction_display.py",
+    "agent/context_compressor.py",
+    "agent/conversation_compression_archive.py",
+    "agent/memory_context.py",
+    "agent/message_metadata.py",
+    "agent/message_sanitization.py",
+    "agent/model_routing_switch_intent.py",
+    "agent/session_activity.py",
+    "agent/skill_commands.py",
+    "hermes_cli/__init__.py",
+    "hermes_cli/sqlite_runtime.py",
+    "hermes_cli/timefmt.py",
+    "hermes_constants.py",
+    "hermes_dir_acl.py",
+    "hermes_startup_watchdog.py",
+    "utils.py",
+)
+_HERMES_STATE_PATHS = (
+    "hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS, *HERMES_STATE_IMPORTS,
+)
 # The native memory lane (native-memory-macos.yml): the Darwin memory reader, its one
 # caller, their macOS-only tests and the lane's own wiring. Exact files, kept equal to the
 # standalone workflow's ``push.paths`` by tests/ci/test_native_memory_gate.py.
@@ -412,6 +437,7 @@ _UPDATE_DEPENDENCIES = (
     "agent/deadline.py",  # bounded probes' process-tree timeout cleanup
     "hermes_cli/kanban_db.py",  # update_upstream_conflict files the conflict card
     "hermes_cli/kanban_db_connect.py",
+    "hermes_cli/kanban_schema_owner.py",  # post_update reports a board schema only the installed core may migrate
     "hermes_cli/kanban_capability_routing.py",  # update_pause_siblings names this host's Board gateway
     "hermes_cli/kanban_foreign_card.py",  # update_pause_siblings reads sibling alarms in the Board replica
     # migrate_all_homes' second-hop provider/profile decisions, run on every update. Its

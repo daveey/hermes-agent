@@ -104,6 +104,10 @@ def prepare(args) -> None:
     file_commands("GITHUB_ENV", {
         "HERMES_HOME": home,
         "HERMES_RUNTIME_DIR": home / "tools",
+        # A self-hosted runner's account may have a live ~/.hermes on this filesystem: borrowing
+        # it would point uv-cache-path, the cache save/restore and the exact-lock prune at the
+        # account's own uv cache (pm/AGENTS.md, Homes that borrow the account's state).
+        "HERMES_PM_ACCOUNT_SEED": "0",
         "PYTHONUTF8": "1",
     })
 
@@ -307,6 +311,7 @@ def main() -> None:
         parser.error("Python dependencies require the python or all toolchain")
     os.environ["HERMES_HOME"] = str(args.home.resolve())
     os.environ["HERMES_RUNTIME_DIR"] = str(args.home.resolve() / "tools")
+    os.environ["HERMES_PM_ACCOUNT_SEED"] = "0"
     phases[args.phase](args)
 
 

@@ -54,6 +54,7 @@ from hermes_cli.doctor_state import (
     _check_cron_store,
     _check_directory_structure,
     _check_hub_admission_claims,
+    _check_host_loop_leases,
     _check_memory_provider,
     _check_plugin_dir_conflicts,
     _check_plugins_disabled_by_update,
@@ -131,7 +132,7 @@ DOCTOR_CHECKS = (
     ('Memory Provider', _check_memory_provider), ('Plugin Directories', _check_plugin_dir_conflicts),
     (None, _check_plugins_disabled_by_update), (None, _check_plugins_in_both_lists),
     ('NeMo Relay Plugins', _check_relay_plugins),
-    (None, _check_profiles), (None, _check_hub_admission_claims),
+    (None, _check_profiles), (None, _check_hub_admission_claims), (None, _check_host_loop_leases),
 )
 
 

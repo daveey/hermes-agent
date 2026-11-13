@@ -449,6 +449,12 @@ from hermes_cli.web_upload_limit import ChatFileUploadLimitMiddleware
 # and the receive limit runs before FastAPI can spool a multipart attachment.
 app.add_middleware(ChatFileUploadLimitMiddleware)
 
+# [daveey] Inside auth too: a refused request is never remembered or delta-encoded, and what is remembered is
+# kept per credential (web_delta_response.py).
+from hermes_cli.web_delta_response import DeltaResponseMiddleware
+
+app.add_middleware(DeltaResponseMiddleware)
+
 # Endpoints that do NOT require the session token; everything else under /api/
 # is gated below. Shared with the OAuth gate so the two allowlists cannot
 # drift (/api/status once 401'd under the OAuth gate, breaking the portal probe).
@@ -952,21 +958,48 @@ _ACTION_LOG_FILES.setdefault("computer-use-grant", "action-computer-use-grant.lo
 
 # Cache discovered plugins per-process (refresh on explicit re-scan).
 _dashboard_plugins_cache: Optional[list] = None
+# The cache list last proven current (every plugin dir still present) and when. The dir sweep stats
+# every plugin (~80 on a Mac) and ran on the event loop for each /api/plugins/* request; under FS
+# pressure that stalled the loop for seconds per request. Identity, not just time: a list assigned
+# directly (tests, a rescan) is unproven until swept.
+DASHBOARD_PLUGINS_STALE_CHECK_SECS = 5.0
+_dashboard_plugins_checked: tuple = (None, 0.0)
+
+
+def _fresh_dashboard_plugins() -> Optional[list]:
+    """The active scope's cached plugin list when it was proven current within
+    :data:`DASHBOARD_PLUGINS_STALE_CHECK_SECS`, else None. No disk access: the request gate reads
+    this on the event loop and sends a miss to :func:`_get_dashboard_plugins` on a worker thread."""
+    from hermes_cli.web_server_plugin_profiles import fresh_profile_dashboard_plugins, secondary_profile_home
+    home = secondary_profile_home()
+    if home is not None:
+        return fresh_profile_dashboard_plugins(home)
+    checked, at = _dashboard_plugins_checked
+    cache = _dashboard_plugins_cache
+    if cache is not None and checked is cache and time.monotonic() - at < DASHBOARD_PLUGINS_STALE_CHECK_SECS:
+        return cache
+    return None
 
 
 def _get_dashboard_plugins(force_rescan: bool = False) -> list:
-    """The active scope's dashboard plugins: a secondary profile's are its own (PLG-3)."""
-    global _dashboard_plugins_cache
+    """The active scope's dashboard plugins: a secondary profile's are its own (PLG-3).
+
+    A removed plugin dir triggers a rescan, checked at most once per
+    :data:`DASHBOARD_PLUGINS_STALE_CHECK_SECS`; ``force_rescan`` always rescans."""
+    global _dashboard_plugins_cache, _dashboard_plugins_checked
     from hermes_cli.web_server_plugin_profiles import profile_dashboard_plugins, secondary_profile_home
     home = secondary_profile_home()
     if home is not None:
         return profile_dashboard_plugins(home, force_rescan)
-    stale = _dashboard_plugins_cache is None or force_rescan or any(
-        not Path(p["_dir"]).is_dir() for p in _dashboard_plugins_cache
-    )
-    if stale:
-        _dashboard_plugins_cache = _discover_dashboard_plugins()
-    return _dashboard_plugins_cache
+    if not force_rescan:
+        fresh = _fresh_dashboard_plugins()
+        if fresh is not None:
+            return fresh
+    cache = _dashboard_plugins_cache
+    if cache is None or force_rescan or any(not Path(p["_dir"]).is_dir() for p in cache):
+        cache = _dashboard_plugins_cache = _discover_dashboard_plugins()
+    _dashboard_plugins_checked = (cache, time.monotonic())
+    return cache
 
 
 # Router mounting. ORDER IS ROUTE-MATCHING ORDER: literal paths must land before
@@ -1270,7 +1303,7 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
 
     _uvicorn_console_logging()  # log_config=None: uvicorn's dictConfig would close every live handler
     from hermes_cli.web_server_skew_exit import wrap_asgi_close_when_draining
-    from hermes_cli.web_server_transport import transport_observed_app
+    from hermes_cli.web_server_transport import KEEP_ALIVE_IDLE_S, transport_observed_app
 
     # [daveey] A superseded always-on backend closes keep-alive sockets after each response (drain).
     served_app = wrap_asgi_close_when_draining(served_app)
@@ -1295,6 +1328,7 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
         # mid-turn request orphans the backend past that budget (#76244). 3s
         # leaves room for lifespan shutdown + cron_stop before the kill.
         timeout_graceful_shutdown=3,
+        timeout_keep_alive=KEEP_ALIVE_IDLE_S,
     )
     return config, uvicorn.Server(config)
 

@@ -7,6 +7,7 @@ from functools import wraps
 from types import SimpleNamespace
 from uuid import uuid4
 
+from agent.aux_provider_handoff import client_scope
 from agent.model_routing import ModelRoutingError, is_class_selector
 from agent.model_routing_runtime import resolve_class_runtime
 
@@ -248,24 +249,30 @@ def _complete(task, runtime, client, kwargs):
 
 def _stream(task, runtime, client, kwargs, options):
     from agent import auxiliary_client as aux
-    try:
-        if aux._client_streams_internally(client):
-            # Native adapters aggregate their SDK stream; expose one normalized
-            # chunk, preserving tool calls, rather than iterating a response object.
+
+    def close(c):
+        aux._close_cached_client(c, close_async=True)
+    if aux._client_streams_internally(client):
+        # Native adapters aggregate their SDK stream; expose one normalized
+        # chunk, preserving tool calls, rather than iterating a response object.
+        # _complete runs the protected provider daemon, so client_scope keeps a hard cancel's close off this
+        # thread. Nothing is yielded inside the scope: its context var is set and reset in one resumption.
+        with client_scope(client, close):
             response = _complete(task, runtime, client, kwargs)
-            choice = response.choices[0]
-            yield SimpleNamespace(choices=[SimpleNamespace(index=0, delta=choice.message,
-                                                           finish_reason=choice.finish_reason)],
-                                  model=runtime["model"], usage=getattr(response, "usage", None))
-        else:
-            kwargs["stream"] = True
-            if options.get("stream_options"):
-                kwargs["stream_options"] = options["stream_options"]
-            yield from aux._relay_sync_stream(client, kwargs, provider=runtime["provider"],
-                                              api_mode=runtime["api_mode"])
+        choice = response.choices[0]
+        yield SimpleNamespace(choices=[SimpleNamespace(index=0, delta=choice.message,
+                                                       finish_reason=choice.finish_reason)],
+                              model=runtime["model"], usage=getattr(response, "usage", None))
+        return
+    try:
+        kwargs["stream"] = True
+        if options.get("stream_options"):
+            kwargs["stream_options"] = options["stream_options"]
+        yield from aux._relay_sync_stream(client, kwargs, provider=runtime["provider"],
+                                          api_mode=runtime["api_mode"])
         # Never replay a stream after yielding any output.
     finally:
-        aux._close_cached_client(client, close_async=True)
+        close(client)
 
 
 def _stream_with_recovery(task, options, request):
@@ -306,12 +313,13 @@ def class_routed_sync(callback):
         while True:
             runtime, client, kwargs = _prepare(task, options, request, failed)
             terminal = None
-            try:
-                return _complete(task, runtime, client, kwargs)
-            except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
-                terminal = _recover(runtime, client, exc, attempted, failed)
-            finally:
-                aux._close_cached_client(client, close_async=True)
+            # A hard cancel can leave the provider daemon reading this client: the scope then shuts its
+            # sockets down and the daemon closes it, never this thread (TLS fd recycled into SQLite).
+            with client_scope(client, lambda c: aux._close_cached_client(c, close_async=True)):
+                try:
+                    return _complete(task, runtime, client, kwargs)
+                except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
+                    terminal = _recover(runtime, client, exc, attempted, failed)
             if terminal is not None:
                 raise terminal
     return wrapped
@@ -331,18 +339,26 @@ def class_routed_async(callback):
             client, _ = aux._to_async_client(sync_client, runtime["model"])
             client._managed_subscription_runtime = runtime
             terminal = None
-            try:
-                async def create(request_kwargs):
-                    return await aux._acreate_with_progress(
-                        client, request_kwargs, task, force_stream=aux._provider_requires_stream(
-                            runtime["provider"], runtime["base_url"]), provider=runtime["provider"])
-                return aux._validate_llm_response(await aux._relay_async_completion(
-                    client, kwargs, provider=runtime["provider"], api_mode=runtime["api_mode"], create=create), task)
-            except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
-                terminal = _recover(runtime, sync_client, exc, attempted, failed)
-            finally:
-                aux._close_cached_client(client, close_async=True)
-                aux._close_cached_client(sync_client, close_async=True)
+            # Adapter clients read on a to_thread worker that outlives a cancelled await: the scope then shuts
+            # the sockets down and that worker closes both clients, never this loop thread (as the sync twin).
+            with client_scope(sync_client, lambda _, pair=(client, sync_client): _close_pair(aux, *pair)):
+                try:
+                    async def create(request_kwargs):
+                        return await aux._acreate_with_progress(
+                            client, request_kwargs, task, force_stream=aux._provider_requires_stream(
+                                runtime["provider"], runtime["base_url"]), provider=runtime["provider"])
+                    return aux._validate_llm_response(await aux._relay_async_completion(
+                        client, kwargs, provider=runtime["provider"], api_mode=runtime["api_mode"], create=create), task)
+                except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
+                    terminal = _recover(runtime, sync_client, exc, attempted, failed)
             if terminal is not None:
                 raise terminal
     return wrapped
+
+
+def _close_pair(aux, client, sync_client) -> None:
+    # AsyncGeminiNativeClient wraps the sync leaf itself: its coroutine close() would, on an abandoned to_thread
+    # worker (no running loop), asyncio.run a to_thread close on yet another thread. Close the leaf here instead.
+    if getattr(client, "_real_client", None) is not sync_client:
+        aux._close_cached_client(client, close_async=True)
+    aux._close_cached_client(sync_client, close_async=True)

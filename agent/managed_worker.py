@@ -351,9 +351,16 @@ def execute(frame, channel):
     from agent.observation_bind import observation_bind, observation_finish, observation_revoke
     observation_bind(frame)
     # Background processes a previous admission of this session started outlive that worker
-    # (F24); adopt them so process_manage in this turn can poll and kill them.
+    # (F24); adopt them so process_manage in this turn can poll and kill them. Only this session's:
+    # another chat's orphan (a Desktop job whose backend just rolled over) would finish in this
+    # per-turn process, whose completion queue nobody reads, and its notice was lost. So a managed
+    # worker no longer adopts keyless orphans or orphans of other worker routes either. A keyed
+    # orphan waits for a later run of its own route or for its owner's keeper (gateway keeper for
+    # messaging keys, Desktop/TUI keeper for Desktop session ids). A keyless one waits for a gateway
+    # restart only: the Desktop keeper never takes keyless entries (owner_accepts), so a host with
+    # no gateway never re-adopts it. [daveey]
     from tools.process_registry import process_registry
-    process_registry.recover_from_checkpoint()
+    process_registry.recover_from_checkpoint(session_keys=(frame['route'], scope['session_id']))
     # Store construction binds the delegation ledger before tool discovery.
     from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks, surface_label
     policy = restore_policy(frame['policy'])

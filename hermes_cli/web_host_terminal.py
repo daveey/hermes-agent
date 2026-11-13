@@ -121,7 +121,8 @@ def resolve_argv(
         scope = launch_profile_runtime_scope(home)
     # The startup eager-multiplex guard applies even before a secondary's first
     # request. Home alone cannot authorize passthrough reads; both shell paths
-    # need the same complete scope, including the frozen launch environment.
+    # need the same complete scope, including the launch environment (frozen
+    # once multiplexing is active).
     override_token = set_hermes_home_override(str(home))
     try:
         with scope:

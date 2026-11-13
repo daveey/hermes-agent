@@ -45,7 +45,7 @@ on:
         required: false
         default: ""
       delay_seconds:
-        description: "Wait this long before refreshing (capped at 600)"
+        description: "Wait this long before refreshing (capped at 480)"
         required: false
         default: "0"
       retry_of:

@@ -58,7 +58,12 @@ class ManagedPinRejectedError(ModelRoutingError):
     def __init__(self, model, provider, allowed):
         self.model, self.provider, self.allowed = model, provider, list(allowed)
         self.registry_empty = not self.allowed
-        super().__init__("Managed subscription policy rejects unregistered or ambiguous concrete pin")
+        # Every chat, gateway.log and alert shows only str(exc): name the pin and the way out.
+        on = f" on provider {provider!r}" if provider else ""
+        allowed_text = ", ".join(self.allowed) or "none (the registry serves no subscription pin)"
+        super().__init__(
+            f"Managed subscription policy rejects unregistered or ambiguous concrete pin {model!r}{on}. "
+            f"Allowed: {allowed_text}. Pick one with /model, or register it in this host's model_routing.routes.")
 
 
 def allowed_pins(config):

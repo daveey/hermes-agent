@@ -103,7 +103,10 @@ def project_paused_result(result, common: dict) -> dict | None:
     empty-response error, no media tags) so the authority can branch before terminal settlement."""
     if not paused_update_result(result):
         return None
-    return {"final_response": "", "paused_for_update": True, **common}
+    from agent.update_pause_cancel import UNSTARTED_KEY
+    # [daveey] t_01a1d49d50e4c656: an unstarted yield has no boundary to checkpoint; the authority re-queues it.
+    unstarted = {UNSTARTED_KEY: True} if result.get(UNSTARTED_KEY) is True else {}
+    return {"final_response": "", "paused_for_update": True, **common, **unstarted}
 
 
 def _persisted_turn(agent, agent_history, result, compressions) -> dict | None:
