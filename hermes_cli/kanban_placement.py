@@ -278,22 +278,28 @@ def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) 
     """Active, unheld, fresh registry machines that carry ``label`` (or every label of a list/set) and pick up
     other gateways' cards (sorted). Fresh is coordination attestation's window (``last_seen`` within
     ``FRESH_S``, up to ``SKEW_S`` ahead of this clock): a stale entry holding the whole set leases nothing, so it
-    must not make a queue look live.
+    must not make a queue look live. ``labels`` must be a list of str, as coordination's ``_carries`` requires (a
+    missing or null one is empty); any other shape fails closed, so a malformed entry is skipped rather than raising
+    TypeError or matching a str's characters.
 
     Board outage: ``wn.registry()`` keeps the last good snapshot, so ``FRESH_S`` after the last successful fetch
     every entry is stale and this returns []. Callers then fail closed: hub-admission deny-route cards go
     worker-first (:func:`kanban_hub_admission_placement.pool_route`) and portable cards keep their local placement
     (:func:`kanban_worker_placement.queue_decision`) instead of queueing on a pool label nobody may lease."""
     from hermes_cli import kanban_worker_node as wn
-    from hermes_cli.kanban_placement_coordination import _fresh
+    from hermes_cli.kanban_placement_coordination import _carries, _fresh
     if machines is None:
         machines = (wn.registry() or {}).get("machines") or {}
     wanted = {label} if isinstance(label, str) else set(label)
+
+    def carries(entry):
+        labels = entry.get("labels")
+        return _carries({"labels": [] if labels is None else labels}, wanted)
     now = time.time()
     return sorted(name for name, entry in machines.items()
                   if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
                   and ("pickup" not in entry or wn.advertises_pickup(entry)) and _fresh(entry, now)
-                  and wanted <= set(entry.get("labels") or []))
+                  and carries(entry))
 
 
 class _Cfg:
