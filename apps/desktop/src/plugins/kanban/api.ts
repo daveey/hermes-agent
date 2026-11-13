@@ -866,7 +866,9 @@ export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
  *  'foreground' until that kind's open read has settled, so a slow link's poll thinner never skips the user's read:
  *  not on a re-open within the thinning gap, and not on React Query's retry of a failed first read (`retry`: this
  *  call retries a failed read of the same fetch). The open read settles when a read answers, or when a fetch whose
- *  reads all failed has spent its retries: the next fetch then starts with `retry` false. Every later read of that
+ *  reads all failed has spent its retries: the next fetch then starts with `retry` false. A fetch that a socket
+ *  invalidation (cancelRefetch) cancels in a failed read's retry delay settles it too, by design: the user's read
+ *  already went out foreground and failed, and the replacement fetch starts with `retry` false. Every later read of that
  *  kind (interval or socket refetch) is a background poll again and may be thinned (electron/slow-link.ts), so a kind
  *  whose reads keep failing (gateway unreachable, task gone, timeouts on a very slow link) stops bypassing the
  *  thinner after its first fetch. */

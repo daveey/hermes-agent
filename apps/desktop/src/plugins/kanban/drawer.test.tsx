@@ -347,7 +347,8 @@ describe('task modal dialog', () => {
 
   it('makes the reads of a fetch that replaced a failed one during its retry delay polls', async () => {
     detail = { ...legacyDetail, attachments: [] }
-    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 300 } } })
+    // A retry delay far longer than the test: the invalidation below cancels it, so the retry cannot race it.
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 10_000 } } })
 
     const taskReads = () =>
       rest.mock.calls
@@ -368,13 +369,12 @@ describe('task modal dialog', () => {
     await waitFor(() => expect(taskQuery()?.state.fetchFailureCount).toBe(1))
 
     // A socket invalidation in the retry delay cancels that fetch and starts a new one (cancelRefetch). The new fetch's
-    // reads (first and retry) are polls: its first read must not pass for a retry of the cancelled fetch.
-    await act(async () => {
-      await client.invalidateQueries({ queryKey: ['kanban'] })
+    // first read is a poll: it must not pass for a retry of the cancelled fetch. (Its own retry waits out the long delay,
+    // so the invalidation is not awaited.)
+    act(() => {
+      void client.invalidateQueries({ queryKey: ['kanban'] })
     })
-    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground', undefined, undefined]), {
-      timeout: 3_000
-    })
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground', undefined]))
   })
 
   it('sends a foreground read when a task is re-opened while its cache is still fresh', async () => {
