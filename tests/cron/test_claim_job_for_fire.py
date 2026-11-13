@@ -401,6 +401,42 @@ def test_fresh_claim_from_a_dead_same_host_owner_is_reclaimable(temp_home):
     assert claim_job_for_fire(jid) is True
 
 
+def test_claim_held_by_a_live_restart_safe_worker_survives_its_gateways_exit(temp_home):
+    """A restart-safe external worker keeps running a fire after the gateway that claimed it
+    exits; the claim's ``by`` still names that gateway's pid. The worker's heartbeat stamps the
+    process actually running the fire, so the next gateway's tick must not reclaim the job while
+    that runner lives (hub self-heal lane, 11-13: every lane pass longer than the 5-6 min between
+    core-update restarts was re-fired and interrupted with "fire claim ownership lost")."""
+    import socket
+    import subprocess
+    import sys
+
+    from cron.jobs import claim_job_for_fire, create_job, heartbeat_fire_claim, load_jobs, save_jobs
+
+    jid = create_job(prompt="x", schedule="every 5m", name="w")["id"]
+    assert claim_job_for_fire(jid) is True
+
+    gateway = subprocess.Popen([sys.executable, "-c", "pass"])
+    gateway.wait()
+    owner = f"{socket.gethostname()}:{gateway.pid}:tok"
+    jobs = load_jobs()
+    next(j for j in jobs if j["id"] == jid)["fire_claim"]["by"] = owner
+    save_jobs(jobs)
+
+    # This process plays the external worker: its heartbeat names it as the runner.
+    assert heartbeat_fire_claim(jid, expected_owner=owner) is True
+    assert claim_job_for_fire(jid) is False
+
+    # Runner gone too → provably dead, reclaimable at once.
+    worker = subprocess.Popen([sys.executable, "-c", "pass"])
+    worker.wait()
+    jobs = load_jobs()
+    claim = next(j for j in jobs if j["id"] == jid)["fire_claim"]
+    claim["runner"] = f"{socket.gethostname()}:{worker.pid}"
+    save_jobs(jobs)
+    assert claim_job_for_fire(jid) is True
+
+
 def test_heartbeat_does_not_wait_on_the_fence_its_own_run_holds(temp_home, monkeypatch):
     """The run thread holds the per-job fire fence across delivery; the heartbeat thread must
     refresh the claim without taking it, or every long run reads as a false ownership loss."""
