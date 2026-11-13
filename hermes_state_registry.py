@@ -352,8 +352,7 @@ def close_all() -> int:
 
 
 def _close_kept_readers(root: Optional[Path]) -> None:
-    """Kept read-only handles (``hermes_state_kept_reader``, the producer-admission sweep's observers) hold the
-    same files: retire them too."""
+    """Retire kept readers, producer observers and watcher handles holding the same files."""
     import sys
 
     kept = sys.modules.get("hermes_state_kept_reader")
@@ -362,6 +361,9 @@ def _close_kept_readers(root: Optional[Path]) -> None:
     observers = sys.modules.get("tui_gateway.producer_admission")
     if observers is not None:
         observers.release_under(root)
+    watched = sys.modules.get("tui_gateway.watch_store")
+    if watched is not None:
+        watched.release_under(root)
 
 
 def close_all_under(directory: str | Path) -> int:

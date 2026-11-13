@@ -134,6 +134,49 @@ def test_kept_connections_are_bounded_and_tracked(tmp_path):
     assert not has_live_connection(paths[-1])
 
 
+def test_a_new_wal_generation_reopens_the_kept_connection(tmp_path):
+    """A handle stranded on a replaced -wal/-shm would make the next writer refuse to open: drop it."""
+    path = tmp_path / "s.db"
+    writer = sqlite3.connect(path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE t(v)")
+    writer.commit()
+    watch_store.reset()
+    with watch_store.observed(path) as (first, _conn):
+        pass
+    wal = str(path) + "-wal"
+    assert os.path.exists(wal)
+    shutil.copy(wal, wal + ".copy")
+    os.replace(wal + ".copy", wal)  # same name, new inode: a new WAL generation
+    with watch_store.observed(path) as (second, _conn):
+        pass
+    assert second[2] != first[2], "reopened (a new generation)"
+    with watch_store.observed(path) as (third, _conn):
+        pass
+    assert third[2] == second[2], "stable once reopened"
+    watch_store.reset()
+    writer.close()
+
+
+def test_close_all_under_releases_kept_connections(tmp_path):
+    """A profile delete or snapshot restore (``hermes_state_registry.close_all_under``) closes the watcher's kept
+    readers under that home first, so rmtree on Windows and the header-probe release see no other descriptor."""
+    from hermes_cli.sqlite_safe_read import has_live_connection
+    from hermes_state_registry import close_all_under
+    watch_store.reset()
+    inside, outside = tmp_path / "doomed" / "state.db", tmp_path / "kept" / "state.db"
+    for p in (inside, outside):
+        p.parent.mkdir()
+        with sqlite3.connect(p) as conn:
+            conn.execute("CREATE TABLE t(v)")
+        with watch_store.observed(p):
+            pass
+    close_all_under(tmp_path / "doomed")
+    assert not has_live_connection(inside)
+    assert has_live_connection(outside)
+    watch_store.reset()
+
+
 def test_a_transaction_left_open_drops_the_connection(tmp_path):
     p = tmp_path / "s.db"
     with sqlite3.connect(p) as conn:
