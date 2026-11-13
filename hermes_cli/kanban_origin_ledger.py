@@ -19,6 +19,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Callable
 
+from hermes_cli import kanban_completion_refs as _refs
 from hermes_cli.kanban_scope_heartbeat import SCOPE_HEARTBEAT_FLOOR_S, scope_window
 
 
@@ -132,7 +133,9 @@ def completion_verdict(task_id, row, event, run, archived, *, bound_event, curre
     if event and not contract_verified:
         completed = json.loads(event[3] or '{}')
         acceptance_id = completed.get('pr_acceptance_event_id') if isinstance(completed, dict) else None
-        acceptance = bound_event('pr_acceptance', acceptance_id, event[0]) if type(acceptance_id) is int else None
+        acceptance_uid = completed.get('pr_acceptance_event_uid') if isinstance(completed, dict) else None
+        acceptance = (bound_event('pr_acceptance', acceptance_id, event[0], acceptance_uid)
+                      if type(acceptance_id) is int or isinstance(acceptance_uid, str) else None)
         if acceptance and acceptance[1] is not None and acceptance[1] == event[1]:
             receipt = json.loads(acceptance[0] or '{}')
             # [daveey] A contract_waiver is accepted only on a no_required_checks receipt (kanban_pr_acceptance_store).
@@ -150,7 +153,9 @@ def completion_verdict(task_id, row, event, run, archived, *, bound_event, curre
     if row[3] and event:
         completed = json.loads(event[3] or '{}')
         receipt_id = completed.get('goal_verified_event_id') if isinstance(completed, dict) else None
-        receipt = bound_event('goal_verified', receipt_id, event[0]) if type(receipt_id) is int else None
+        receipt_uid = completed.get('goal_verified_event_uid') if isinstance(completed, dict) else None
+        receipt = (bound_event('goal_verified', receipt_id, event[0], receipt_uid)
+                   if type(receipt_id) is int or isinstance(receipt_uid, str) else None)
         if receipt and receipt[1] is not None and receipt[1] == event[1]:
             from hermes_cli.kanban_db import _first_line
             from hermes_cli.kanban_goal_receipt import digest
@@ -233,9 +238,10 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
         (task['id'],)).fetchone() if row[0] == 'archived' and event else None
     verified, legacy, terminal = completion_verdict(
         task['id'], row, event, run, archived,
-        bound_event=lambda kind, event_id, before: conn.execute(
-            "SELECT payload,run_id FROM task_events WHERE id=? AND task_id=? AND kind=? AND id<?",
-            (event_id, task['id'], kind, before)).fetchone(),
+        # [daveey] By uid, else id; a replayed legacy completion binds its run's receipt (kanban_completion_refs).
+        bound_event=lambda kind, event_id, before, uid=None: _refs.pick(
+            _refs.read_candidates(conn, [task['id']])[task['id']], task_id=task['id'], kind=kind, event_id=event_id,
+            uid=uid, before=before, run_id=event[1], imported_from=_refs.origin_of(conn, event[0])),
         current_task=lambda: conn.execute('SELECT title,body FROM tasks WHERE id=?', (task['id'],)).fetchone(),
         receipt_epoch=lambda: _receipt_epoch(conn))
     payload = {k: v for k, v in task.items()

@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli import kanban_chat_links_released as _released
 from hermes_cli.kanban_replica_execution import read_runs, run_evidence
 from hermes_cli.kanban_run_machine import placement_select, run_machine
 
@@ -713,7 +714,29 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             if named and owner is not None and not unknown and (run := run_evidence(
                     {"status": status, **runs.get(tid, {})})) is not None:
                 out[pair]["_replica_run"] = run
+        # [daveey] A reader that lists closed cards keeps a released link's card as an explicit released row.
+        for r in _released_links(path, board, gateway, profile, ids, statuses):
+            tid = str(r["id"])
+            if owners is None:
+                owners = _ledger_owners(stale_ok)
+            owner, owner_profile, _named = _owner_of(owners.get((board, tid), []), r["created_on"], r["chat_session"])
+            key = f"{owner or '?'}/{owner_profile}/{board}/{tid}"
+            out.setdefault((r["chat_session"], key), _released.row(
+                r, board=board, gateway=gateway, key=key, owner=owner, owner_profile=owner_profile, pulled=pulled,
+                stale=stale))
     return list(out.values())
+
+
+def _released_links(path: Path, board: str, gateway: str, profile: str, ids: Optional[set[str]],
+                    statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+    """``kanban_chat_links_released.read`` for one lineage; an unreadable replica adds nothing (logged)."""
+    if not ids or not set(statuses) & set(TERMINAL_STATUSES):
+        return []
+    try:
+        return _released.read(path, gateway, profile, ids, statuses)
+    except sqlite3.Error as exc:
+        _log.info("kanban chat links: released links of %s unreadable (%s)", path, exc)
+        return []
 
 
 def _decoded_request(value: Any) -> Any:

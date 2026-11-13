@@ -2574,10 +2574,9 @@ def complete_task(
             conn.execute("UPDATE task_events SET run_id=? WHERE id=? AND task_id=?",
                          (run_id, acceptance_event_id, task_id))
             completion_payload["pr_acceptance_event_id"] = acceptance_event_id
-        _append_event(
-            conn, task_id, "completed", completion_payload,
-            run_id=run_id,
-        )
+        from hermes_cli.kanban_completion_refs import stamp_uids
+        stamp_uids(conn, completion_payload)  # [daveey] ids are per board file; the uid survives the Board feed
+        _append_event(conn, task_id, "completed", completion_payload, run_id=run_id)
         _placement_fwd.record_cancel_intent(conn, task_id, "completed", settled=placement_settled)  # [daveey]
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
     _placement_fwd.forward_completion(conn, task_id, settled=placement_settled)

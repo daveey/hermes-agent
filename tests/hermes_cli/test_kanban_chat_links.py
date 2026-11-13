@@ -423,3 +423,33 @@ def test_tui_legacy_subs_on_done_local_cards_count_nothing(live, kanban_home, mo
     ksa._reset_cache_for_tests()
     assert ksa.active_task_counts() == {"s_legacy": 1, "s_junk": 1}
     assert ksa.waiting_on_task_ids() == {"s_legacy": frozenset({still}), "s_junk": frozenset({still})}
+
+
+def test_a_released_link_to_a_closed_card_stays_listed_as_done_for_a_reader_of_closed_cards(live, kanban_home,
+                                                                                           monkeypatch, tmp_path):
+    """[daveey] ``hermes kanban chat-tasks`` asks for done/archived cards too, yet a link released after its card
+    closed made the card vanish from that list: worker-homed t_01a1d4e38cf61e24 (PR #2227) was ``[unknown]`` in the
+    MacBook chat at 06:02 and gone by 06:06, and hub t_01a1d4f2f591d595, linked with ``chat-tasks --expect`` rc=0,
+    dropped out (2026-11-13). The card stays as a ``done`` row with ``released`` and its ``release_reason``; the
+    sidebar's open-status read, which never asks for closed cards, is unchanged."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_worker", "worker card", "done", "worker-2"), ("t_hub", "hub card", "done", OTHER),
+                   ("t_arch", "archived", "archived", OTHER), ("t_open", "open", "running", OTHER),
+                   ("t_elsewhere", "another chat's", "done", OTHER), ("t_mine", "local", "done", ME)],
+             [("t_worker", ME, "s1", "created", 1), ("t_worker", ME, "s1", "shepherd", 1),
+              ("t_hub", ME, "s1", "created", 0), ("t_hub", ME, "s1", "shepherd", 1),
+              ("t_arch", ME, "s1", "shepherd", 1), ("t_open", ME, "s1", "shepherd", 0),
+              ("t_elsewhere", ME, "s9", "created", 1), ("t_mine", ME, "s1", "created", 1)])
+    closed = ksa.LISTED_STATUSES + ("done", "archived")
+    got = {c["id"]: c for c in links.replica_cards(["s1"], ME, closed, replicas=[("default", rep)])}
+    assert sorted((tid, c["status"], c["released"], c.get("release_reason")) for tid, c in got.items()) == [
+        ("t_arch", "archived", True, "link_released"), ("t_hub", "unknown", False, None),
+        ("t_open", "running", False, None), ("t_worker", "done", True, "link_released")]
+    assert got["t_worker"]["unfinished"] is False and got["t_worker"]["via"] == "origin"
+    assert got["t_worker"]["session_id"] == "s1" and got["t_worker"]["source"] == "replica"
+    # The open-status readers (sidebar counts, handover) still drop released links.
+    assert sorted(c["id"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])) == ["t_hub", "t_open"]
+    _switch_to_replica(kanban_home, monkeypatch, rep)
+    assert ksa.active_task_counts() == {"s1": 2}  # t_hub (unknown) and t_open
+    rows = {r["id"]: r["status"] for r in ksa.session_tasks(["s1"], closed)}
+    assert rows == {"t_arch": "archived", "t_hub": "unknown", "t_open": "running", "t_worker": "done"}

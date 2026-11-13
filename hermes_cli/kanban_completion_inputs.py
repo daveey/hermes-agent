@@ -12,6 +12,7 @@ import logging
 import sqlite3
 from typing import NamedTuple
 
+from hermes_cli.kanban_completion_refs import pick, read_candidates
 from hermes_cli.kanban_origin_ledger import _receipt_epoch, completion_verdict
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,8 @@ def read_completions(conn, ids) -> dict[str, Completion]:
                                             "completion_contract", "title", "body", "assignee", "session_id"))
     run_fields = _select(run_cols, "r.", ("id", "task_id", "uid", "status", "outcome", "ended_at", "summary"))
     event_fields = ",".join(("e.id", "e.task_id", "e.run_id", "e.kind", "e.created_at",
-                             "e.payload"))
+                             "e.payload", "e.origin_gateway" if "origin_gateway" in event_cols
+                             else "NULL AS origin_gateway"))
     epoch = []
     for start in range(0, len(ids), CHUNK):
         chunk = ids[start:start + CHUNK]
@@ -78,23 +80,12 @@ def read_completions(conn, ids) -> dict[str, Completion]:
                 conn, f"SELECT * FROM (SELECT {event_fields}, ROW_NUMBER() OVER (PARTITION BY e.task_id "
                       f"ORDER BY e.id DESC) AS _rank FROM task_events e WHERE e.task_id IN ({amarks}) "
                       "AND e.kind='archived') WHERE _rank=1", archived_ids)}
-        refs = set()
-        for row in completed.values():
-            try:
-                payload = _payload(row["payload"])
-            except ValueError:
-                continue  # that card's verdict fails closed in _completion
-            for key in ("pr_acceptance_event_id", "goal_verified_event_id"):
-                if type(payload.get(key)) is int:
-                    refs.add(payload[key])
-        bound = {}
-        if refs:
-            rmarks = ",".join("?" for _ in refs)
-            bound = {r["id"]: r for r in _rows(
-                conn, f"SELECT {event_fields} FROM task_events e WHERE e.id IN ({rmarks}) "
-                      "AND e.kind IN ('pr_acceptance','goal_verified')", sorted(refs))}
+        refs = read_candidates(conn, list(completed))
+        imported = {tid: row["origin_gateway"] if isinstance(row["origin_gateway"], str) and row["origin_gateway"]
+                    else None for tid, row in completed.items()}
         for tid, task in tasks.items():
-            out[tid] = _completion(conn, tid, task, completed.get(tid), runs.get(tid), archived.get(tid), bound, epoch)
+            out[tid] = _completion(conn, tid, task, completed.get(tid), runs.get(tid), archived.get(tid),
+                                   refs.get(tid, []), imported.get(tid), epoch)
     return out
 
 
@@ -110,18 +101,16 @@ def _payload(raw):
     return value
 
 
-def _completion(conn, tid, task, event, run, archived, bound, epoch):
+def _completion(conn, tid, task, event, run, archived, receipts, imported_from, epoch):
     row = (task["status"], task["completed_at"], task["current_run_id"], task["goal_mode"],
            task["completion_contract"])
     event_t = None if event is None else (event["id"], event["run_id"], event["created_at"], event["payload"])
     run_t = None if run is None else (run["id"], run["status"], run["outcome"], run["ended_at"], run["summary"])
     archived_t = None if archived is None else (archived["id"], archived["payload"])
 
-    def bound_event(kind, event_id, before):
-        found = bound.get(event_id)
-        if found is None or found["task_id"] != tid or found["kind"] != kind or not event_id < before:
-            return None
-        return found["payload"], found["run_id"]
+    def bound_event(kind, event_id, before, uid=None):
+        return pick(receipts, task_id=tid, kind=kind, event_id=event_id, uid=uid, before=before,
+                    run_id=None if event is None else event["run_id"], imported_from=imported_from)
 
     def receipt_epoch():
         if not epoch:
