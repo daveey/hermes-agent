@@ -7,6 +7,7 @@ whether a PR's own added test case is slow (>= 10 s) before it attributes a wall
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -83,7 +84,15 @@ def test_runner_prints_the_slow_case_line(tmp_path, monkeypatch):
         timeout=120, check=False, env={**__import__("os").environ, "HERMES_TEST_SLOW_CASE_S": "0.4"},
     )
     assert proc.returncode == 0, proc.stdout
-    lines = [ln for ln in proc.stdout.splitlines() if "⏱ slow test case" in ln]
-    assert len(lines) == 1, proc.stdout
-    assert lines[0].strip().startswith("⏱ slow test case 0.")
-    assert lines[0].endswith("test_probe_slow.py::test_sleeps"), lines[0]
+    # Only lower bounds hold on a CPU-starved runner: the 0.6 s sleep is a floor (a throttled slice measured it
+    # at 1.75 s), and even ``test_fast`` may cross 0.4 s there. Which cases fall under the threshold is pinned
+    # by the parser unit test above, so this probe checks the printed line's shape and the threshold floor.
+    cases: dict[str, float] = {}
+    for ln in proc.stdout.splitlines():
+        if "⏱ slow test case" in ln:
+            m = re.fullmatch(r"\s*⏱ slow test case (\d+\.\d\d)s (\S+)", ln)
+            assert m, ln
+            cases[m.group(2).rsplit("::", 1)[-1]] = float(m.group(1))
+    assert set(cases) <= {"test_sleeps", "test_fast"}, proc.stdout
+    assert cases.get("test_sleeps", 0.0) >= 0.6, proc.stdout
+    assert all(secs >= 0.4 for secs in cases.values()), proc.stdout
