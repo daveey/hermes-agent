@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
 from cron.lifecycle_guard_printf import _printf_format_lines  # what `printf FORMAT …` prints
@@ -818,30 +819,6 @@ def _opens_call_arguments(segment: list[str]) -> bool:
     if _peel_reserved_words(segment) == len(segment):
         return False
     return not segment[-1].endswith(("$", "<", ">", "="))
-
-
-def _may_define_alias(text: str) -> bool:
-    """Whether *text* may define or enable an alias (``alias T=' '``, ``BASH_ALIASES[T]=…``,
-    ``shopt -s expand_aliases``), even quote-split (``al''ias``) or ANSI-C quoted (``$'…'``).
-    An alias can expand to a keyword prefix, so ``T ( bash big.sh )`` may run a subshell.
-
-    Deliberately broad: any "alias" substring (a path, ``BASH_ALIASES``, prose) counts. A false
-    positive only makes call-argument paths executed again (fail closed); narrowing it to whole
-    words or ``alias NAME=`` would let quote-split or ``$'…'`` spellings fail open. Do not tighten."""
-    # Dropping every quote and backslash rejoins quote-split words (`al''ias`, `al\ias`).
-    return "alias" in re.sub(r"[\"'\\\\]", "", text).lower() or "$'" in text
-
-
-def _session_aliases_shadow_consumers(session_aliases: Optional[frozenset[str]]) -> bool:
-    """Whether aliases the command's shell already holds may rename a heredoc consumer, wrapper
-    or shell (``alias python3=bash`` runs a "Python" body as shell). ``None`` means the names
-    are unknown, so any name may be shadowed."""
-    from tools.shell_heredoc import shadows_heredoc_consumer
-
-    if session_aliases is None:
-        return True
-    return any(not isinstance(name, str) or shadows_heredoc_consumer(name)
-               for name in session_aliases)
 
 
 def _iter_segment_contexts(
