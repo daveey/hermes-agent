@@ -46,8 +46,11 @@ def _defer(task_id, reason):
 def hub_cpu_advisory(task_id=None, *, conn=None):
     """Lock-free pre-check before a Board lease (review ruling 5). Returns a refusal reason or None.
 
-    Off unless the root limit is set. Uses the advisory sampler's latest complete sample: missing, stale (>10 s),
-    future or malformed reads as unknown and defers; a fresh value at or above the limit defers. Advisory only.
+    Off unless the root limit is set. Uses the advisory sampler's latest complete sample: missing, stale (>10 s here),
+    future or malformed (a non-number field, a busy % outside 0-100, a window outside 1-2 s) defers as
+    ``hub_cpu_unknown``; a fresh value at or above the limit defers. An unreadable root limit defers as
+    ``hub_cpu_limit_unknown``, an unreadable pool limit (priority-pool settings or the card's class) as
+    ``hub_cpu_pool_limit_unknown``. Advisory only.
     Freshness here is ``PRELEASE_MAX_AGE_MS`` (``ADVISORY_MAX_AGE_MS - PRELEASE_HEADROOM_MS``, 10 s): the locked
     gate re-reads the same file with the looser ``ADVISORY_MAX_AGE_MS``, so a sample accepted before the lease is not
     stale by the time the gate reads it."""
@@ -73,8 +76,9 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
             try:
                 limit = advisory_limit(conn, task_id, limit)
             except (OSError, ValueError, TypeError):
-                _defer(task_id, reason)
-                return reason
+                # the priority-pool settings or the card's admission class is unreadable: not a sample problem
+                _defer(task_id, HUB_CPU_POOL_LIMIT_UNKNOWN)
+                return HUB_CPU_POOL_LIMIT_UNKNOWN
         last = sampler_sample(PRELEASE_MAX_AGE_MS)
         if last is not None:
             if cpu.below(last["cpu_busy_pct"], limit):
@@ -156,9 +160,11 @@ def _cap_full(echo=None, *, conn=None, task_id=None):
 COMMIT_RESERVE_S = 0.25  # lock time left for the SQL commit after the gate admits
 
 # [daveey] One reason per final-gate refusal branch (hub 2026-11-13: the branches shared ``hub_cpu_unknown``, so the
-# skip event and the queue line could not say which fired). The lock-free advisory keeps ``hub_cpu_unknown`` for its
-# own missing/stale/malformed sample or unreadable pool limit; a hold overrun is ``OVERRUN``.
+# skip event and the queue line could not say which fired). The lock-free advisory keeps ``hub_cpu_unknown`` only for
+# its own missing/stale/future/malformed sample and reports ``HUB_CPU_POOL_LIMIT_UNKNOWN`` when the pool limit it
+# compares against cannot be read; a hold overrun is ``OVERRUN``.
 HUB_CPU_LIMIT_UNKNOWN = "hub_cpu_limit_unknown"  # root kanban.admission.cpu_busy_below_pct unreadable/invalid
+HUB_CPU_POOL_LIMIT_UNKNOWN = "hub_cpu_pool_limit_unknown"  # advisory: priority-pool settings or card class unreadable
 HUB_CPU_GATE_EXPIRED = "hub_cpu_gate_expired"  # the claim/lease deadline had passed before the census
 HUB_CPU_SAMPLE_STALE = "hub_cpu_sample_stale"  # the sampler's sample is missing, stale or malformed at the lock
 HUB_CPU_GATE_EXPIRED_COUNTING = "hub_cpu_gate_expired_counting"  # the deadline passed during the census

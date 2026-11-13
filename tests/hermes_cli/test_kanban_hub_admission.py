@@ -845,7 +845,8 @@ def test_sample_is_taken_while_admission_lock_is_held(board, monkeypatch, review
 
 @pytest.mark.parametrize("review", [False, True])
 @pytest.mark.parametrize("advice,reason", [(80.0, "hub_cpu_at_or_above_limit"), ("stale", "hub_cpu_unknown"),
-                                           ("missing", "hub_cpu_unknown"), ("future", "hub_cpu_unknown")])
+                                           ("missing", "hub_cpu_unknown"), ("future", "hub_cpu_unknown"),
+                                           (150.0, "hub_cpu_unknown"), ("text", "hub_cpu_unknown")])
 def test_advisory_precheck_defers_before_any_lease_or_sample(board, monkeypatch, review, advice, reason):
     conn, home = board
     configure(home)

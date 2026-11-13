@@ -104,11 +104,11 @@ def test_invalid_pool_policy_defers_at_advisory_before_lease(board, monkeypatch,
     configure(home, cap=7)
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: wrong\n")
-    advisory(home)
+    advisory(home)  # a fresh, low sample: the refusal is the pool limit's, never reported as a sample problem
     no_lease_or_sample(monkeypatch)
     t = task(conn, review)
     assert claim(conn, t, review) is None
-    refused(conn, t, review, "hub_cpu_unknown")
+    refused(conn, t, review, "hub_cpu_pool_limit_unknown")
 
 
 @pytest.mark.parametrize("review", [False, True])

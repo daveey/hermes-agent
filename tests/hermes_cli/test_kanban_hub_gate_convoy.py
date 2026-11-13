@@ -3,8 +3,9 @@
 Two things made that undiagnosable and slow. Every final-gate refusal branch (unreadable limit, expired lease, stale
 sample, hold overrun) reported the same ``hub_cpu_unknown``, so the skip event could not say which fired. And under
 admission.lock the census and the pool/origin lookups read ``PRAGMA table_info`` row by row (one sqlite step per
-column, ~70 for ``tasks``); in the gateway each step drops the GIL and re-acquires it behind CPU-bound threads, so the
-lookups cost seconds per claim. ``_Steps`` counts those steps deterministically, with no real contention.
+column: 55 for the hub's ``tasks``, 22 for ``task_runs``; 95 steps for one board's census, 4 now); in the gateway
+each step drops the GIL and re-acquires it behind CPU-bound threads, so the lookups cost seconds per claim.
+``_Steps`` counts those steps deterministically, with no real contention.
 """
 import sqlite3
 import types
@@ -124,8 +125,22 @@ def test_final_gate_refusals_each_have_their_own_reason():
     assert "hub_cpu_unknown" not in reasons and ka.OVERRUN in reasons
 
 
-@pytest.mark.parametrize("reason", ka.FINAL_GATE_REASONS)
+@pytest.mark.parametrize("reason", (*ka.FINAL_GATE_REASONS, ka.HUB_CPU_POOL_LIMIT_UNKNOWN))
 def test_queue_line_names_the_branch(reason):
     from hermes_cli import kanban_dispatch_skip as skip
     assert f"({reason})" in skip.words({"reason": "claim_deferred", "detail": reason})
     assert reason in qr.CODES  # a Board queue observation carrying it is kept, not flattened to unavailable
+
+
+def test_advisory_pool_limit_failure_is_not_reported_as_a_sample_problem(monkeypatch):
+    """The advisory's ``hub_cpu_unknown`` means its sample; an unreadable pool limit has its own reason."""
+    from hermes_cli import kanban_admission_pools as pools
+    from hermes_cli import machine_cpu_metrics as cpu
+
+    def unreadable(*a, **k):
+        raise ValueError("priority_slots: wrong")
+    monkeypatch.setattr(cpu, "root_limit", lambda: (cpu.ON, 50.0))
+    monkeypatch.setattr(pools, "advisory_limit", unreadable)
+    monkeypatch.setattr(ka, "sampler_sample", lambda *a, **k: pytest.fail("no sample read after a limit failure"))
+    assert ka.hub_cpu_advisory(conn=object()) == ka.HUB_CPU_POOL_LIMIT_UNKNOWN != "hub_cpu_unknown"
+    assert ka.HUB_CPU_POOL_LIMIT_UNKNOWN not in ka.FINAL_GATE_REASONS  # advisory-only: the final gate never returns it

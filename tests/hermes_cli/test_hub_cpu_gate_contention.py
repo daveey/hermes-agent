@@ -4,10 +4,10 @@ Inside the gateway every ``sqlite3`` call releases the GIL and has to win it bac
 sync loop, the event loop); under that contention each handoff costs about one switch interval (5 ms). The final gate
 ran the whole-host census twice under ``admission.lock`` (cap check before a ~1 s sample, recount after it), inside
 a 2.25 s hold; it now runs one census and re-reads the sampler's sample. A census that iterates ``PRAGMA table_info``
-and row-by-row cursors makes ~80 handoffs per board, so on
-the hub (10 boards) it took ~4 s (7 s measured with one busy thread) and every hub claim was refused before sampling
-as ``hub_cpu_unknown`` from 2026-11-13 02:03Z. The model below charges one switch interval per sqlite call/row step
-on a virtual clock, so the test is deterministic and fast.
+and row-by-row cursors makes 95 handoffs per board (measured: the hub's 55-column ``tasks``, 8 running rows; the
+one-statement census makes 4), so on the hub (10 boards) it took seconds (7 s measured with one busy thread) and every
+hub claim was refused before sampling as ``hub_cpu_unknown`` from 2026-11-13 02:03Z. The model below charges one switch
+interval per sqlite call/row step on a virtual clock, so the test is deterministic and fast.
 """
 import json
 import logging
@@ -129,8 +129,9 @@ def _hub_boards(conn, home, *, cap=20, synced=False):
 @pytest.mark.parametrize("synced", [True, False])
 @pytest.mark.parametrize("review", [False, True])
 def test_contended_census_fits_inside_the_hold(board, monkeypatch, review, synced):
-    """RED before the census fix: ~80 handoffs per board x 10 boards ~ 4 s overran the hold on every claim. The gate
-    now runs one census and re-reads the sampler's sample (never samples), so the claim commits inside 2.25 s."""
+    """RED before the census fix: 95 handoffs per board x 10 boards overran the hold on every claim. The gate now
+    runs one census (4 steps per board) and re-reads the sampler's sample (never samples), so the claim commits
+    inside 2.25 s."""
     conn, home = board
     _hub_boards(conn, home, synced=synced)
     t = task(conn, review)
