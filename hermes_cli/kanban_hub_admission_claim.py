@@ -22,7 +22,8 @@ every hub run passes, so before the hub claims a ready, label-less card with no 
   would hold that tick's claims for minutes). Neither is ever claimed unjudged.
 
 A card with any verdict (forced or skipped included) makes no model call. :func:`unjudged_claims` is the
-detector: this gateway's claims of a card that had no verdict yet (``hermes doctor`` reports it on the hub).
+detector: this gateway's claims of a card that had no verdict yet (``hermes doctor`` reports it on the hub). Its
+gate (the board's first verdict) counts audits riding a ``created`` payload as well as ``hub_admission`` events.
 """
 from __future__ import annotations
 
@@ -181,9 +182,10 @@ def _apply(conn: sqlite3.Connection, own: str, tid: str, audit: dict, target: Op
         kb._append_event(conn, tid, "hub_admission", audit)
         if target is None:
             return False
+        previous = wn._parse(row["runs_on"])  # None (NULL or '') or [] ('[]'): what the card carried
         wn.set_runs_on(conn, tid, target)
         kb._append_event(conn, tid, km.MOVED_EVENT, {
-            "from_machine": own, "runs_on": target, "previous_runs_on": None,
+            "from_machine": own, "runs_on": target, "previous_runs_on": previous,
             "reason": f"hub admission denied at claim: {str(audit.get('why') or '')[:300]}",
             "move_no": len(km.history(conn, tid)) + 1, "forced": False, "matches": [], "queued": True,
             "hub_admission": audit})
@@ -205,7 +207,10 @@ def unjudged_claims(conn: sqlite3.Connection, own: str, *, now: Optional[float] 
     """``[(task_id, claimed_at)]``: claims by ``own`` in the last ``window`` seconds, after the board's first
     verdict (the gate's rollout), of a card with no verdict before that claim."""
     now = time.time() if now is None else now
-    gate = conn.execute("SELECT MIN(created_at) FROM task_events WHERE kind = 'hub_admission'").fetchone()[0]
+    gate = conn.execute(  # a verdict is a hub_admission event or an audit riding a created payload
+        "SELECT MIN(t) FROM (SELECT MIN(created_at) AS t FROM task_events WHERE kind = 'hub_admission' "
+        "UNION ALL SELECT MIN(created_at) FROM task_events WHERE kind = 'created' AND json_valid(payload) "
+        "AND json_type(payload, '$.hub_admission') = 'object')").fetchone()[0]
     if gate is None:
         return []
     rows = conn.execute(

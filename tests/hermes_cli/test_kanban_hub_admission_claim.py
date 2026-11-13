@@ -232,7 +232,9 @@ def test_an_empty_label_list_is_screened_like_no_labels(gws, hub_judge):
     hub.conn.commit()
     hub.enter()
     assert hac.screen(hub.conn).moved == 1
-    assert _events(hub.conn, tid, "moved")[0]["runs_on"][0] == POOL
+    [moved] = _events(hub.conn, tid, "moved")
+    assert moved["runs_on"][0] == POOL
+    assert moved["previous_runs_on"] == []  # the card's real prior labels, not None
 
 
 def test_screen_makes_no_model_call_inside_a_write_transaction(gws, hub_judge):
@@ -403,6 +405,26 @@ def test_unjudged_claims_accepts_a_creation_time_verdict_without_an_admission_ev
             kb._append_event(hub.conn, tid, "claimed", {"holder": HUB})
     assert _events(hub.conn, audited, "hub_admission") == []
     assert [tid for tid, _at in hac.unjudged_claims(hub.conn, HUB)] == [bare]
+
+
+def test_unjudged_claims_gate_opens_on_a_creation_payload_verdict(gws):
+    """A board whose only verdicts ride ``created`` payloads (synced creations) has a live gate: a later claim of
+    an unjudged card is reported, not hidden behind a missing ``hub_admission`` event."""
+    hub, _worker, _svc = gws
+    audited = _hub_card(hub, title="admitted at creation")
+    bare = _hub_card(hub, title="never judged")
+    with kb.write_txn(hub.conn):
+        hub.conn.execute(
+            "UPDATE task_events SET payload = json_set(COALESCE(payload, '{}'), '$.hub_admission', json(?)) "
+            "WHERE task_id = ? AND kind = 'created'",
+            (json.dumps({"admit": True, "entry": "create", "why": "ok"}), audited))
+        kb._append_event(hub.conn, bare, "claimed", {"holder": HUB})
+    assert hub.conn.execute("SELECT COUNT(*) FROM task_events WHERE kind = 'hub_admission'").fetchone()[0] == 0
+    assert [tid for tid, _at in hac.unjudged_claims(hub.conn, HUB)] == [bare]
+    with kb.write_txn(hub.conn):  # a claim before that creation-time verdict predates the gate
+        hub.conn.execute("UPDATE task_events SET created_at = created_at - 60 WHERE task_id = ? AND kind = 'claimed'",
+                         (bare,))
+    assert hac.unjudged_claims(hub.conn, HUB) == []
 
 
 def test_unjudged_claims_counts_hub_claims_without_a_prior_verdict(gws, hub_judge, monkeypatch):
