@@ -158,6 +158,33 @@ def test_outcome_unknown_work_is_still_refused_and_never_forwarded(monkeypatch, 
         db.close()
 
 
+@pytest.mark.parametrize("unknown_row", [0, 1], ids=["unknown_first", "queued_first"])
+def test_a_queued_row_beside_an_unknown_admission_never_forwards_past_it(monkeypatch, tmp_path, unknown_row):
+    """One id with a ``queued`` and an ``unknown`` admission, in either row order. The refusal read one arbitrary
+    row (``_CANONICAL_PENDING_SQL``'s ``LIMIT 1``), so a ``queued`` row first answered ``queued`` and the prompt was
+    forwarded past the ``unknown`` barrier (review 5890229371 nit 1). Every row is read, non-forwardable first."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key, turns, _emitted = _legacy(monkeypatch, db)
+    try:
+        db.create_session(key, "test")
+        epoch = begin_runtime_epoch(db, instance_id="gateway")
+        rows = [admit_session_input(db, epoch=epoch, principal_id="bot", session_id=key, request_id=f"dm-{i}",
+                                    payload={"text": f"m{i}"})["admission_id"] for i in range(2)]
+        db._execute_write(lambda conn: conn.execute(
+            "UPDATE session_admissions SET status='unknown' WHERE admission_id=?", (rows[unknown_row],)))
+        assert sorted(r["status"] for r in list_session_admissions(db, session_id=key)) == ["queued", "unknown"]
+        refusal = server._canonical_ledger_refusal(server._sessions[sid])
+        assert refusal.ledger_status == "unknown"
+        _owner(monkeypatch, db, key, epoch)
+        reply = server.handle_request({"id": "p", "method": "prompt.submit",
+                                       "params": {"session_id": sid, "text": "hi"}})
+        assert reply["error"]["code"] == 4090 and reply["error"]["data"] == {"reason": "SESSION_NOT_OWNED"}
+        assert len(list_session_admissions(db, session_id=key)) == 2 and turns == []
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
 def test_a_closed_desktop_session_releases_its_relay_without_an_owner_frame(monkeypatch):
     """The relay re-checked ``_finalized`` only when an owner frame arrived, so a closed Desktop session
     held the relay thread and its owner socket until the owner's next frame (up to RELAY_TIMEOUT_S)."""

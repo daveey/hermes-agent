@@ -138,7 +138,7 @@ def legacy_gateway_owns(session: dict, session_lineage, session_db, now: Optiona
 
 # Every non-terminal ledger row of one id: ``session_lifecycle._CANONICAL_PENDING_SQL`` without its ``LIMIT 1``. That
 # answers with one arbitrary row, so a ``queued`` row could mask an ``unknown`` admission on the same id (review
-# 5889497938 nit 1).
+# 5889497938 nit 1). Read through :func:`ledger_status`, which orders the rows.
 _LINEAGE_PENDING_SQL = """SELECT status FROM session_admissions WHERE target_session_id=? AND status!='terminal'
     UNION ALL SELECT status FROM worker_executions WHERE session_id=? AND status!='terminal'"""
 
@@ -173,25 +173,37 @@ def with_parents(conn, ids) -> tuple:
     return tuple(out)
 
 
+def ledger_status(conn, sid) -> Optional[str]:
+    """The gateway ledger's answer for one id: every non-terminal row is read (``_LINEAGE_PENDING_SQL``) and a
+    status outside ``owner_forward.FORWARDABLE_LEDGER_STATES`` (an ``unknown`` admission) answers before any
+    forwardable one, ties by name, so a ``queued`` row never masks an ``unknown`` one in either insertion order.
+    None when the id has no non-terminal row. Both the legacy turn refusal
+    (``session_lifecycle._canonical_ledger_refusal``, which ``prompt.submit`` forwards on) and
+    :func:`lineage_ledger_status` read it (review 5890229371 nit 1)."""
+    from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
+    statuses = [str(row[0]) for row in conn.execute(_LINEAGE_PENDING_SQL, (sid, sid))]
+    return min(statuses, key=lambda s: (s in FORWARDABLE_LEDGER_STATES, s), default=None)
+
+
 def lineage_ledger_status(conn, ids) -> Optional[str]:
     """The gateway ledger's answer for a chat's lineage ``ids``: the one rule this backend's hand-back and the
     gateway's claim (``gateway.kanban_tui_owner._gateway_holds_work``) both read, so the two cannot disagree on
     which row counts (review 5888998970 nit 1: the tip ``queued`` and the root ``unknown`` answered ``queued``
-    key-first here and ``unknown`` sorted there). Order-independent: every non-terminal row of every id is read,
-    and any one outside ``owner_forward.FORWARDABLE_LEDGER_STATES`` (an ``unknown`` admission, even beside a
-    ``queued`` row on the same id) answers with its status, which owns nothing, so this backend keeps the chat;
-    else the alphabetically first status (deterministic; the forwardable states have no order among themselves)
-    of the first id in sorted order that has one; None when no id has a non-terminal row. The gateway passes its
-    ids through :func:`with_parents`, so both legs read the same lineage up to ``LINEAGE_LIMIT`` hops (beyond it
-    the gateway reads a superset; see :func:`with_parents`)."""
+    key-first here and ``unknown`` sorted there). Order-independent: each id answers by :func:`ledger_status`
+    (every non-terminal row read, a non-forwardable status first), and the first id in sorted order whose answer
+    is outside ``owner_forward.FORWARDABLE_LEDGER_STATES`` (an ``unknown`` admission, even beside a ``queued`` row
+    on the same id) answers with it, which owns nothing, so this backend keeps the chat; else the first id in sorted
+    order with a row answers with its alphabetically first status (deterministic; the forwardable states have no
+    order among themselves); None when no id has a non-terminal row. The gateway passes its ids through
+    :func:`with_parents`, so both legs read the same lineage up to ``LINEAGE_LIMIT`` hops (beyond it the gateway
+    reads a superset; see :func:`with_parents`)."""
     from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
     first = None
     for sid in sorted({str(s) for s in ids if s}):
-        statuses = sorted(str(row[0]) for row in conn.execute(_LINEAGE_PENDING_SQL, (sid, sid)))
-        blocked = [s for s in statuses if s not in FORWARDABLE_LEDGER_STATES]
-        if blocked:
-            return blocked[0]
-        first = first or (statuses[0] if statuses else None)
+        status = ledger_status(conn, sid)
+        if status is not None and status not in FORWARDABLE_LEDGER_STATES:
+            return status
+        first = first or status
     return first
 
 

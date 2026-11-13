@@ -180,6 +180,8 @@ def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool
     return limit_message
 
 
+# Whether an id has a non-terminal ledger row (existence only: ``LIMIT 1`` returns an arbitrary row, so a status is
+# read through ``kanban_leg_custody.ledger_status``).
 _CANONICAL_PENDING_SQL = """SELECT status FROM session_admissions WHERE target_session_id=? AND status!='terminal'
     UNION ALL SELECT status FROM worker_executions WHERE session_id=? AND status!='terminal' LIMIT 1"""
 
@@ -237,21 +239,24 @@ def _canonical_ledger_refusal(session: dict):
             read_ctx = getattr(db, "_read_ctx", None)
             if read_ctx is None:
                 return None
+            from tui_gateway.kanban_leg_custody import ledger_status
             with read_ctx() as conn:
-                row = next(iter(conn.execute(_CANONICAL_PENDING_SQL, (key, key))), None)
+                # Every row, non-forwardable first: one arbitrary row (``LIMIT 1``) let a ``queued`` row beside
+                # an ``unknown`` admission forward past it (review 5890229371 nit 1).
+                status = ledger_status(conn, key)
     except sqlite3.Error:
         logger.warning("canonical ledger read failed for %s", key, exc_info=True)
         return ActiveSessionRefusal(_SESSION_OWNERSHIP_UNAVAILABLE, SESSION_COORDINATION_UNAVAILABLE)
-    if row is None:
+    if status is None:
         return None
-    logger.info("Refusing legacy turn for %s: canonical ledger holds %s work", key, row[0])
+    logger.info("Refusing legacy turn for %s: canonical ledger holds %s work", key, status)
     refusal = ActiveSessionRefusal(
-        f"Session {key} has {'outcome-unknown' if row[0] == 'unknown' else 'pending'} work in the gateway's "
+        f"Session {key} has {'outcome-unknown' if status == 'unknown' else 'pending'} work in the gateway's "
         "durable queue. Resume it through the gateway (hermes chat --resume, Desktop or the TUI) to "
         "resolve it; nothing was run here.", SESSION_NOT_OWNED)
     # prompt.submit forwards a typed prompt to the owner's FIFO for work that ends on its own
     # (tui_gateway/owner_forward.py); an ``unknown`` admission is never forwarded past.
-    refusal.ledger_status = row[0]
+    refusal.ledger_status = status
     return refusal
 
 
