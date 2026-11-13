@@ -7,10 +7,14 @@ listed 1-3 brand-new cards, each gone within 20-60 s, so ``clean`` was False in 
 a parity gate (David-MBP, 6 samples 20 s apart, 2026-11-13, live proof t_01a1d5c12a26ef3f).
 
 :func:`settle` re-reads the diff every ``poll_s`` for up to ``settle_s`` and keeps as a difference only an entry
-present in EVERY sample: a persistent divergence (a link one side never gets) is still in the last sample and the
-report stays unclean; an entry that cleared, or that showed up only after the first sample, is sync lag and is
-reported under ``in_flight`` without making the report unclean. It stops at the first sample in which nothing of the
-first sample persists, so a quiet board answers in one read.
+present in EVERY sample that could read its board: a persistent divergence (a link one side never gets) is still in
+the last sample and the report stays unclean; an entry that cleared, or that showed up only after the first sample,
+is sync lag and is reported under ``in_flight`` without making the report unclean. It stops at the first sample in
+which nothing persists and every replica was readable, so a quiet board answers in one read.
+
+A sample in which a board's replica is unreadable says nothing about that board: it neither clears nor confirms its
+entries, and the report is never clean while the LAST sample has an unreadable replica (PR #2520 review: a plain
+intersection let a replica that turned unreadable mid-window drop its differences and end clean).
 """
 
 from __future__ import annotations
@@ -21,6 +25,9 @@ from typing import Any, Callable
 # Longer than the slowest lag observed (~60 s) and several sync rounds (``kanban.sync.interval_seconds``, 5 s).
 DEFAULT_SETTLE_S = 90.0
 DIFF_KEYS = ("only_in_ledger", "only_in_replica")
+
+Entry = tuple[str, str, tuple]  # (diff key, session, (gateway, board, task id))
+Read = tuple[set[Entry], set[str]]  # one sample: (entries, unreadable boards)
 
 
 def default_poll_s() -> float:
@@ -34,12 +41,27 @@ def default_poll_s() -> float:
     return max(5.0, 2 * interval)
 
 
-def _entries(report: dict[str, Any]) -> set[tuple[str, str, tuple]]:
+def _entries(report: dict[str, Any]) -> set[Entry]:
     return {(key, session, tuple(card)) for key in DIFF_KEYS for session, cards in report[key].items()
             for card in cards}
 
 
-def _grouped(entries: set[tuple[str, str, tuple]], key: str) -> dict[str, list[tuple]]:
+def _board(entry: Entry) -> str:
+    return entry[2][1]
+
+
+def _split(reads: list[Read]) -> tuple[set[Entry], set[Entry]]:
+    """(persistent, in_flight). Persistent: listed by every sample that could read the entry's board, and at least
+    one could. In flight: the rest of what any sample listed (a sample that could not read the board neither clears
+    nor confirms the entry)."""
+    listed: set[Entry] = set().union(*(entries for entries, _bad in reads))
+    persistent = {e for e in listed
+                  if any(_board(e) not in bad for _e, bad in reads)
+                  and all(e in entries for entries, bad in reads if _board(e) not in bad)}
+    return persistent, listed - persistent
+
+
+def _grouped(entries: set[Entry], key: str) -> dict[str, list[tuple]]:
     out: dict[str, list[tuple]] = {}
     for k, session, card in entries:
         if k == key:
@@ -52,30 +74,25 @@ _clock: Callable[[], float] = time.monotonic
 
 
 def settle(snapshot: Callable[[], dict[str, Any]], settle_s: float, poll_s: float) -> dict[str, Any]:
-    """``snapshot()`` (one raw ``links_diff`` read) re-read until nothing of the first read persists or ``settle_s``
-    has passed. Counts come from the last read; ``only_in_*`` and ``unreadable`` hold what every read listed;
-    ``in_flight`` what some read listed and another did not."""
+    """``snapshot()`` (one raw ``links_diff`` read) re-read until nothing persists and every replica is readable, or
+    ``settle_s`` has passed. Counts and ``unreadable`` come from the last read; ``only_in_*`` hold what every read
+    able to read the board listed; ``in_flight`` the rest of what some read listed."""
     sleep, clock = _sleep, _clock
     start = clock()
-    report = snapshot()
-    persistent = _entries(report)
-    seen = set(persistent)
-    unreadable = set(report["unreadable"])
-    samples = 1
-    while (persistent or unreadable) and clock() - start < settle_s:
-        sleep(max(0.0, min(poll_s, settle_s - (clock() - start))))
+    reads: list[Read] = []
+    while True:
         report = snapshot()
-        samples += 1
-        current = _entries(report)
-        seen |= current
-        persistent &= current
-        unreadable &= set(report["unreadable"])
-    in_flight = seen - persistent
+        reads.append((_entries(report), set(report["unreadable"])))
+        persistent, in_flight = _split(reads)
+        unreadable = reads[-1][1]
+        if not (persistent or unreadable) or clock() - start >= settle_s:
+            break
+        sleep(max(0.0, min(poll_s, settle_s - (clock() - start))))
     out = dict(report)
     out.update({key: _grouped(persistent, key) for key in DIFF_KEYS})
     out["unreadable"] = sorted(unreadable)
     out["clean"] = not persistent and not unreadable
     out["in_flight"] = {key: _grouped(in_flight, key) for key in DIFF_KEYS}
-    out["settle"] = {"window_s": settle_s, "poll_s": poll_s, "samples": samples,
+    out["settle"] = {"window_s": settle_s, "poll_s": poll_s, "samples": len(reads),
                      "elapsed_s": round(clock() - start, 1)}
     return out

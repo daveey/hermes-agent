@@ -122,12 +122,48 @@ def test_only_in_replica_settles_the_same_way(clock):
     assert report["clean"] is False and report["only_in_replica"] == {"s1": [card[1]]}
 
 
-def test_an_unreadable_replica_is_unclean_only_while_every_read_fails(clock):
+def test_an_unreadable_replica_is_unclean_only_while_the_last_read_fails(clock):
     report = _run(clock, [_report(unreadable=["default"]), _report()])
     assert report["clean"] is True and report["unreadable"] == []
     clock.update(step=0, now=0.0)
     report = _run(clock, [_report(unreadable=["default"])])
     assert report["clean"] is False and report["unreadable"] == ["default"] and clock["now"] == 30
+
+
+def test_a_read_that_cannot_read_the_board_neither_clears_nor_confirms_its_entries(clock):
+    # PR #2520 review repro: read 1 lists a difference on board B, read 2 cannot read B. A plain intersection
+    # dropped the entry and the unreadable board both, so the window ended clean: True.
+    stuck = ("s1", ("hub", "B", "t_x"))
+    report = _run(clock, [_report([stuck], key="only_in_replica"), _report(unreadable=["B"])])
+    assert report["clean"] is False and report["unreadable"] == ["B"]
+    assert report["only_in_replica"] == {"s1": [stuck[1]]}
+    # B readable again and still listing it: a persistent difference, not in flight.
+    clock.update(step=0, now=0.0)
+    report = _run(clock, [_report([stuck], key="only_in_replica"), _report(unreadable=["B"]),
+                          _report([stuck], key="only_in_replica")])
+    assert report["clean"] is False and report["unreadable"] == []
+    assert report["only_in_replica"] == {"s1": [stuck[1]]} and report["in_flight"]["only_in_replica"] == {}
+    # Lag on B in read 1, B unreadable in read 2 (second repro): unclean while B cannot be read.
+    clock.update(step=0, now=0.0)
+    report = _run(clock, [_report([stuck]), _report(unreadable=["B"])])
+    assert report["clean"] is False
+    # An unreadable B does not hold up entries on a readable board: they still clear as lag.
+    clock.update(step=0, now=0.0)
+    lag = ("s2", ("hub", "default", "t_lag"))
+    report = _run(clock, [_report([lag]), _report(unreadable=["B"])])
+    assert report["only_in_ledger"] == {} and report["in_flight"]["only_in_ledger"] == {"s2": [lag[1]]}
+    assert report["clean"] is False and report["unreadable"] == ["B"]
+
+
+def test_a_difference_on_a_board_first_unreadable_counts_from_its_first_readable_read(clock):
+    # Read 1 cannot read B, reads 2-3 list a difference on it: persistent, not lag (else it ended clean).
+    stuck = ("s1", ("hub", "B", "t_x"))
+    report = _run(clock, [_report(unreadable=["B"]), _report([stuck]), _report([stuck])])
+    assert report["clean"] is False and report["only_in_ledger"] == {"s1": [stuck[1]]}
+    # Listed only while B was unreadable, never once B could be read: not a difference.
+    clock.update(step=0, now=0.0)
+    report = _run(clock, [_report([stuck], unreadable=["B"]), _report()])
+    assert report["clean"] is True and report["in_flight"]["only_in_ledger"] == {"s1": [stuck[1]]}
 
 
 def test_the_last_sleep_stops_at_the_window(clock):
