@@ -9,6 +9,7 @@ import sqlite3
 import threading
 
 from tests.tui_gateway.test_kanban_remote_arrival import CHAT, _card, _hub
+from tests.waiting import wait_until
 from tui_gateway import kanban_remote_notices as krn
 from tui_gateway import kanban_remote_observations as obs
 
@@ -143,3 +144,196 @@ def test_a_busy_wal_switch_is_retried_not_raised(tmp_path, monkeypatch):
     monkeypatch.setattr(krn.sqlite3, "connect", lambda *a, **kw: real(*a, factory=Racing, **kw))
     replica, ledger, _cards = _world(tmp_path)
     assert len(obs.observe(replica, ledger, NOW)) == 20 and len(busy) == 3
+
+
+def _waiters(monkeypatch):
+    """Threads that reached the wait for another poller's in-flight pass (the ``_Pending`` event)."""
+    waiting = []
+    real_init = obs._Pending.__init__
+
+    class Counted(threading.Event):
+        def wait(self, timeout=None):
+            waiting.append(threading.get_ident())  # list.append is atomic
+            return super().wait(timeout)
+
+    def init(self, token):
+        real_init(self, token)
+        self.done = Counted()
+
+    monkeypatch.setattr(obs._Pending, "__init__", init)
+    return waiting
+
+
+def test_concurrent_polls_of_one_snapshot_persist_it_once(tmp_path, monkeypatch):
+    """[daveey] Pollers that arrive while another persists the same snapshot wait for its answer.
+
+    The memo is published only after ``_persist`` commits, outside the lane, so every notice poller that came in
+    meanwhile re-ran the full pass over every terminal card and queued on the ledger's ``BEGIN IMMEDIATE``
+    (hermes-hub 11-13: 7 pollers per process, 21 snapshot changes -> 79 ``_persist`` runs when a pass took 0.6 s).
+    """
+    replica, ledger, _cards = _world(tmp_path, n=50)
+    real = obs._persist
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow(source, cards_, ledger_, now):
+        calls.append(now)
+        entered.set()
+        assert release.wait(10)
+        return real(source, cards_, ledger_, now)
+
+    monkeypatch.setattr(obs, "_persist", slow)
+    waiting = _waiters(monkeypatch)
+    results = []
+    leader = threading.Thread(target=lambda: results.append(obs.observe(replica, ledger, NOW)))
+    leader.start()
+    assert entered.wait(10)
+    followers = [threading.Thread(target=lambda: results.append(obs.observe(replica, ledger, NOW + 1)))
+                 for _ in range(6)]
+    for t in followers:
+        t.start()
+    wait_until(lambda: len(waiting) >= 6 or len(calls) > 1, timeout=10)  # all wait, or one re-persisted
+    release.set()
+    for t in (leader, *followers):
+        t.join(10)
+    assert len(calls) == 1
+    assert len(results) == 7 and all(r == results[0] for r in results) and len(results[0]) == 50
+    assert obs._pending == {}
+
+
+def test_a_failed_persist_lets_a_waiting_poll_persist_itself(tmp_path, monkeypatch):
+    replica, ledger, _cards = _world(tmp_path)
+    real = obs._persist
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def flaky(source, cards_, ledger_, now):
+        calls.append(now)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(10)
+            raise sqlite3.OperationalError("database is locked")
+        return real(source, cards_, ledger_, now)
+
+    monkeypatch.setattr(obs, "_persist", flaky)
+    waiting = _waiters(monkeypatch)
+    errors, results = [], []
+
+    def first():
+        try:
+            obs.observe(replica, ledger, NOW)
+        except sqlite3.OperationalError as exc:
+            errors.append(exc)
+
+    leader = threading.Thread(target=first)
+    leader.start()
+    assert entered.wait(10)
+    follower = threading.Thread(target=lambda: results.append(obs.observe(replica, ledger, NOW + 1)))
+    follower.start()
+    wait_until(lambda: len(waiting) >= 1, timeout=10)
+    release.set()
+    for t in (leader, follower):
+        t.join(10)
+    assert len(errors) == 1 and len(calls) == 2
+    assert len(results) == 1 and len(results[0]) == 20
+    assert obs._pending == {}
+
+
+def test_a_failed_persist_with_several_waiters_ends_and_answers_each(tmp_path, monkeypatch):
+    replica, ledger, _cards = _world(tmp_path)
+    real = obs._persist
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def flaky(source, cards_, ledger_, now):
+        calls.append(now)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(10)
+            raise sqlite3.OperationalError("database is locked")
+        return real(source, cards_, ledger_, now)
+
+    monkeypatch.setattr(obs, "_persist", flaky)
+    waiting = _waiters(monkeypatch)
+    results = []
+
+    def first():
+        try:
+            obs.observe(replica, ledger, NOW)
+        except sqlite3.OperationalError:
+            pass
+
+    leader = threading.Thread(target=first)
+    leader.start()
+    assert entered.wait(10)
+    followers = [threading.Thread(target=lambda: results.append(obs.observe(replica, ledger, NOW + 1)))
+                 for _ in range(3)]
+    for t in followers:
+        t.start()
+    wait_until(lambda: len(waiting) >= 3, timeout=10)
+    release.set()
+    for t in (leader, *followers):
+        t.join(10)
+        assert not t.is_alive()
+    assert 2 <= len(calls) <= 4  # each waiter persists at most once itself; none loops
+    assert len(results) == 3 and all(len(r) == 20 for r in results)
+    assert obs._pending == {}
+
+
+def test_a_newer_snapshot_does_not_wait_for_an_older_one(tmp_path, monkeypatch):
+    replica, ledger, cards = _world(tmp_path)
+    real = obs._persist
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow(source, cards_, ledger_, now):
+        calls.append(now)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(10)
+        return real(source, cards_, ledger_, now)
+
+    monkeypatch.setattr(obs, "_persist", slow)
+    older = threading.Thread(target=lambda: obs.observe(replica, ledger, NOW))
+    older.start()
+    assert entered.wait(10)
+    _move(replica, cards[2], "blocked", NOW + 5)
+    newer = obs.observe(replica, ledger, NOW + 10)  # answers while the older pass is still blocked
+    assert len(calls) == 2 and older.is_alive()
+    assert any(k[1] == cards[2]["key"] and str(k[2]).startswith("blocked") for k in newer), sorted(newer)[:3]
+    release.set()
+    older.join(10)
+    assert obs._pending == {}
+
+
+def test_reset_clears_pending_and_never_strands_a_waiter(tmp_path, monkeypatch):
+    replica, ledger, _cards = _world(tmp_path)
+    real = obs._persist
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow(source, cards_, ledger_, now):
+        entered.set()
+        assert release.wait(10)
+        return real(source, cards_, ledger_, now)
+
+    monkeypatch.setattr(obs, "_persist", slow)
+    waiting = _waiters(monkeypatch)
+    results = []
+    leader = threading.Thread(target=lambda: results.append(obs.observe(replica, ledger, NOW)))
+    leader.start()
+    assert entered.wait(10)
+    follower = threading.Thread(target=lambda: results.append(obs.observe(replica, ledger, NOW + 1)))
+    follower.start()
+    wait_until(lambda: len(waiting) >= 1, timeout=10)
+    krn._reset_for_tests()
+    assert obs._pending == {}
+    release.set()
+    for t in (leader, follower):
+        t.join(10)
+        assert not t.is_alive()
+    assert len(results) == 2 and results[0] == results[1]

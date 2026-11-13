@@ -760,7 +760,7 @@ def _record_swept(keys: list[tuple], ledger: Optional[Path], *, reason: str) -> 
 
 def _reset_for_tests() -> None:
     """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
-    from tui_gateway.kanban_remote_observations import _generation, _known, _memo
+    from tui_gateway.kanban_remote_observations import _generation, _known, _memo, _pending
     from tui_gateway.kanban_remote_observations import _flights, _retained
     from tui_gateway.kanban_replica_observer import reset as reset_observers
     from tui_gateway.remote_sweep_projection import reset as reset_projection
@@ -774,6 +774,7 @@ def _reset_for_tests() -> None:
     _memo.clear()
     _known.clear()
     _generation.clear()
+    _pending.clear()  # never orphans a waiter: its leader sets ``done`` whether or not it is still listed
     _flights.clear()
     _retained.clear()
     _index_memo = None

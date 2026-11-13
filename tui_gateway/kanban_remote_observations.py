@@ -244,7 +244,20 @@ def _replica_flight(tag):
     return flight
 
 
-def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
+class _Pending:
+    """One ``_persist`` in flight for an observe key: callers holding the same snapshot wait for its answer."""
+
+    def __init__(self, token: tuple):
+        self.token = token  # (signature, replica file identity, ledger file id), all read before the snapshot
+        self.owner = threading.get_ident()
+        self.done = threading.Event()
+        self.fresh: dict | None = None  # set only when the leader's _persist returned
+
+
+_pending: dict[tuple, _Pending] = {}
+
+
+def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tuple, float | None]:
     """Only changed replica snapshots decode cards and touch the observation ledger.
 
     An unchanged replica change key (the observer's data_version) skips the replica read entirely; a key is kept
@@ -252,6 +265,11 @@ def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
     seqs still gate every re-decode); only a replaced file or an unknown key forgets them.
     Cache timestamps, not freshness verdicts: a quiet replica must still age out.
     Ledger replacement invalidates the cache; acknowledgements need not invalidate it.
+
+    [daveey] A caller whose snapshot (same signature, replica file and ledger file) is already being persisted
+    waits for that answer: it is the one a memo hit would return. Each notice poller (5-7 per backend on
+    hermes-hub, 11-13) otherwise re-ran the whole pass over every terminal card while the first one still held
+    the ledger (21 replica changes -> 79 passes). If the leader fails, the waiter persists once itself.
     """
     from tui_gateway.kanban_remote_notices import ledger_path
     from tui_gateway.kanban_replica_observer import file_identity, fingerprint
@@ -277,20 +295,48 @@ def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
         if not ready:
             return {}
         with _lock:
-            if cached is not None and signature is not None and signature == cached[0]:
-                fresh = cached[1]
+            # Re-read: a leader may have published this snapshot's memo since the first look.
+            latest = _memo.get(key)
+            if latest is not None and (latest[2] != ledger_id or latest[4] != ident):
+                latest = None
+            if latest is not None and signature is not None and signature == latest[0]:
+                fresh = latest[1]
                 _remember(key, (signature, fresh, ledger_id, stamp, ident))
                 return fresh
-            _generation[key] = generation = _generation.get(key, 0) + 1
+            token = (signature, ident, ledger_id)
+            waiting = _pending.get(key)
+            leading: _Pending | None = None
+            generation = 0
+            if not (_follow and signature is not None and ident is not None and waiting is not None
+                    and waiting.token == token and waiting.owner != threading.get_ident()):
+                waiting = None
+                _generation[key] = generation = _generation.get(key, 0) + 1
+                leading = _Pending(token) if signature is not None and ident is not None else None
+                if leading is not None:
+                    _pending[key] = leading
+    if waiting is not None:
+        waiting.done.wait()  # holds no lock; the leader sets it in ``finally``
+        if waiting.fresh is not None:
+            return waiting.fresh
+        return observe(replica, ledger, now, _follow=False)  # the leader failed: persist this snapshot here
     # [daveey] The ledger write runs without ``_lock``: holding it there kept every notice poller waiting on one
     # poller's transaction. ``cards`` is this call's own snapshot, so the answer is the one it would have had under
     # the lock; only the newest snapshot started for ``key`` publishes its memo, and only after its commit.
-    fresh = _persist(key[0], cards or [], ledger, now)
-    ledger_id = _file_id(ledger)
-    with _lock:
-        if _generation.get(key) == generation:
-            _remember(key, (signature, fresh, ledger_id, stamp, ident))
-        return fresh
+    try:
+        fresh = _persist(key[0], cards or [], ledger, now)
+        ledger_id = _file_id(ledger)
+        with _lock:
+            if leading is not None:
+                leading.fresh = fresh
+            if _generation.get(key) == generation:
+                _remember(key, (signature, fresh, ledger_id, stamp, ident))
+            return fresh
+    finally:
+        if leading is not None:
+            with _lock:
+                if _pending.get(key) is leading:
+                    del _pending[key]
+            leading.done.set()
 
 
 def _remember(key: tuple, entry: tuple) -> None:

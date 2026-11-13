@@ -45,8 +45,19 @@ def test_concurrent_snapshot_is_singleflight_outside_publication_lock(tmp_path, 
     snapshots, statements = [], []
     real_snapshot, real_ro, real_persist = obs._snapshot, krn._ro, obs._persist
     start = threading.Barrier(CALLERS)
-    # No memo can be published until every caller has obtained its snapshot.
-    persist = threading.Barrier(CALLERS)
+    # No memo can be published until every other caller has its snapshot and waits for the one persisting it.
+    waiting, persisted = [], []
+
+    class CountedEvent(threading.Event):
+        def wait(self, timeout=None):
+            waiting.append(threading.get_ident())  # list.append is atomic
+            return super().wait(timeout)
+
+    real_pending_init = obs._Pending.__init__
+
+    def pending_init(self, token):
+        real_pending_init(self, token)
+        self.done = CountedEvent()
 
     def snapshot(*args):
         snapshots.append(lock.owned())
@@ -58,13 +69,18 @@ def test_concurrent_snapshot_is_singleflight_outside_publication_lock(tmp_path, 
         return conn
 
     def save(*args):
-        persist.wait(timeout=20)
+        persisted.append(threading.get_ident())
+        for _ in range(4000):
+            if len(waiting) >= CALLERS - 1:
+                break
+            threading.Event().wait(0.005)
         return real_persist(*args)
 
     def poll(_):
         start.wait(timeout=20)
         return obs.observe(replica, ledger, NOW)
 
+    monkeypatch.setattr(obs._Pending, "__init__", pending_init)
     monkeypatch.setattr(obs, "_snapshot", snapshot)
     monkeypatch.setattr(krn, "_ro", ro)
     monkeypatch.setattr(obs, "_persist", save)
@@ -74,6 +90,7 @@ def test_concurrent_snapshot_is_singleflight_outside_publication_lock(tmp_path, 
     assert statements
     assert sum(held for _, held in statements) == 0
     assert snapshots == [False]
+    assert len(persisted) == 1 and len(waiting) == CALLERS - 1  # one ledger pass; the rest took its answer
 
 
 def test_shared_snapshot_matches_uncached_path_across_changes(tmp_path, monkeypatch):
