@@ -22,12 +22,13 @@ from typing import Callable, Iterator, Optional
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
-from cron.lifecycle_guard_lines import _split_logical_lines  # newlines outside quotes
+from cron.lifecycle_guard_lines import (  # newlines outside quotes, word-start `#` comments
+    _split_logical_lines, join_line_continuations, strip_shell_comments,
+)
 
 # Lines a printer may print, walked as the sink's command (moved out for FILE_LINES).
 from cron.lifecycle_guard_printf import printed_argument_lines as _printed_argument_lines
 from cron.lifecycle_guard_printf import with_escapes_decoded as _with_escapes_decoded
-
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
 
@@ -217,7 +218,7 @@ def contains_host_interpreter_kill(text: str) -> bool:
     name-derived PID feed into one (`pgrep python | xargs kill`, `kill $(pidof python3)`,
     `Get-Process python | Stop-Process`). Segment-tokenized, so quoted/spliced spellings and Python
     argv lists resolve the same way the shell resolves them."""
-    normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
+    normalized = join_line_continuations(text)
     kill_verb_present = bool(_KILL_VERB_RE.search(normalized))
     for segment in _iter_command_segments(normalized):
         joined = " ".join(segment)
@@ -239,8 +240,8 @@ def contains_host_interpreter_kill(text: str) -> bool:
 # split across continuation lines (e.g. `launchctl submit \` / `  -l ai.hermes.gateway-... \` / `  -- ...`,
 # the exact reported shape in #62891) would otherwise slip past. Collapse continuations to a single space
 # before matching, mirroring what the shell itself does, rather than loosening `[^\n]*` and risking false
-# positives across genuinely separate lines.
-_SHELL_LINE_CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
+# positives across genuinely separate lines. `join_line_continuations` (cron/lifecycle_guard_lines.py)
+# does the collapse; a comment's trailing backslash continues nothing there, as in bash.
 
 # Python argv-list punctuation (`subprocess.run(["launchctl", "bootout", ...])`) separates exec'd
 # words with brackets/commas. Stripped only for the token-join re-scan, never from raw text.
@@ -448,7 +449,7 @@ def contains_gateway_lifecycle_command(text: str, *, mask_heredocs: bool = True)
 
     if mask_heredocs:
         text = strip_inert_heredoc_bodies(text)
-    normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
+    normalized = join_line_continuations(text)
     if _GATEWAY_LIFECYCLE_PATTERN.search(normalized):
         return True
     # Profile-flag form: blocked only when the named profile IS the one running the guard.
@@ -708,10 +709,11 @@ def _refuse_unreadable(budget: _LifecycleScanBudget, path: Path, reason: str) ->
 # --- shell tokenization -----------------------------------------------------------------------
 
 def _shlex_tokens(line: str) -> list[str]:
-    """POSIX-tokenize one shell line, honoring quotes and `#` comments; raises ValueError."""
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+    """POSIX-tokenize one shell line, honoring quotes and `#` comments; raises ValueError. Only a
+    word-start `#` comments (shlex's own commenters would also cut `a#b`, which bash keeps)."""
+    lexer = shlex.shlex(strip_shell_comments(line), posix=True, punctuation_chars=";&|()")
     lexer.whitespace_split = True
-    lexer.commenters = "#"
+    lexer.commenters = ""
     return list(lexer)
 
 
@@ -736,7 +738,7 @@ def _iter_command_token_lists(command: str) -> Iterator[list[str]]:
     """Yield the shell tokens of each logical line; a line shlex rejects (unbalanced quotes) falls
     back to per-physical-line tokenization. An unquoted ``<``/``>`` glued to a word starts a word
     of its own (``python3 -<f.py``), as in the shell."""
-    for line in _split_logical_lines(command.replace("\\\n", "")):
+    for line in _split_logical_lines(strip_shell_comments(command).replace("\\\n", "")):
         try:
             tokens = _shlex_tokens(split_glued_redirections(line))
         except ValueError:
@@ -1204,7 +1206,7 @@ def _lifecycle_command_scan_with_data_exemption(text: str, *, mask_heredocs: boo
     nothing), then re-scan with data-sink arguments masked; only a surviving match blocks."""
     if not contains_gateway_lifecycle_command(text, mask_heredocs=mask_heredocs):
         return False
-    normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
+    normalized = join_line_continuations(text)
     return contains_gateway_lifecycle_command(
         _mask_data_sink_arguments(normalized), mask_heredocs=mask_heredocs)
 
