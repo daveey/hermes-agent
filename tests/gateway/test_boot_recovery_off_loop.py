@@ -62,11 +62,18 @@ async def test_native_recovery_resolves_route_owners_off_the_loop(monkeypatch):
     calls = []
     authority = _Authority([{'target_session_id': 'root', 'status': 'queued'}], calls)
     loop_thread = threading.get_ident()
+    import gateway.session_native_recovery_routes as recovery_routes
 
+    def recovered_source(runner, owner_authority, entry, owner):
+        assert owner_authority is authority and owner == 'root'
+        calls.append(('recovered_source', threading.get_ident()))
+        return entry.origin + ':recovered'
+
+    monkeypatch.setattr(recovery_routes, 'recovered_native_source', recovered_source)
     assert await recover_profile_native_sessions(_runner(calls), authority) == {}
 
-    assert authority.bindings == [('root', 'origin-a', 'adapter:origin-a')]
-    assert {name for name, _ in calls} == {'read_all', 'list_sessions', 'logical_owner'}
+    assert authority.bindings == [('root', 'origin-a:recovered', 'adapter:origin-a:recovered')]
+    assert {name for name, _ in calls} == {'read_all', 'list_sessions', 'logical_owner', 'recovered_source'}
     assert [name for name, thread in calls if thread == loop_thread] == []
 
 
