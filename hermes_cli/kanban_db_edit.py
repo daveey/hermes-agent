@@ -106,6 +106,8 @@ def edit_task(
             """,
             (task_id,),
         ).fetchone()
+            from hermes_cli.kanban_completion_receipt import check_summary_edit
+            check_summary_edit(conn, task_id, None if run is None else int(run["id"]), handoff_summary)
             if metadata is not None:
                 from hermes_cli.kanban_completion_receipt import keep_admitted_receipt
                 metadata = keep_admitted_receipt(conn, None if run is None else int(run["id"]), metadata)

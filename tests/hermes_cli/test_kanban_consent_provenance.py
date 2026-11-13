@@ -312,3 +312,66 @@ def test_snapshot_uses_request_scoped_session_not_process_env(fleet, monkeypatch
     consent.enforce(f.w, from_b, op)
     with pytest.raises(requests.SupervisorRequestError, match="consent_stop"):
         consent.enforce(f.w, from_a, op)
+
+
+def _sessions(home, *chain):
+    """Compression lineage root -> ... -> tip in the throwaway state.db."""
+    from hermes_state import SessionDB
+    db = SessionDB(home / "state.db")
+    try:
+        parent = None
+        for sid in chain:
+            db.create_session(session_id=sid, source="cli", model="test", parent_session_id=parent)
+            parent = sid
+    finally:
+        db.close()
+
+
+def test_stop_survives_compression_rotation(fleet, monkeypatch, tmp_path):
+    """Compression rebinds the conversation to a child session id; its stops come along."""
+    from hermes_cli import kanban_consent as consent
+    f = fleet
+    home = tmp_path / "compressed-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _decide(f.target, "timeout", session="pre-compression")
+    _sessions(home, "pre-compression", "after-first", "after-second")
+    assert [s["targets"] for s in consent.session_stops("after-second")] == [[f.target]]
+    card = f.card(f.w, "created after compression", session_id="after-second")
+    with pytest.raises(requests.SupervisorRequestError, match="consent_stop"):
+        consent.enforce(f.w, card, [{"op": "operator", "action": "comment", "task_id": f.target}])
+    # An explicit approval later in the lineage still supersedes the inherited stop.
+    _decide(f.target, "once", session="after-second")
+    assert consent.session_stops("after-second") == []
+    # Control: a sibling lineage is not bound by this conversation's stop.
+    _sessions(home, "unrelated-root", "unrelated-tip")
+    assert consent.session_stops("unrelated-tip") == []
+
+
+def test_worker_kanban_comment_tool_honours_creation_stop(fleet, monkeypatch, tmp_path):
+    """A same-board child cannot comment the stopped target directly through kanban_comment."""
+    import json as _json
+    from hermes_cli import kanban_consent as consent
+    f = fleet
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "local-comment-home"))
+    sibling = f.card(f.w, "stopped same-board target")
+    _decide(sibling, "deny", session="local-chat")
+    child = f.card(f.w, "child of the stopped chat", session_id="local-chat")
+    assert consent.comment_refusal(f.w, child, None, sibling)
+    assert consent.comment_refusal(f.w, child, None, f.target) is None  # other target: no stop
+    assert consent.comment_refusal(f.w, None, "local-chat", sibling)    # the stopped session itself
+
+    import tools.kanban_tools as kt
+    from contextlib import contextmanager
+
+    @contextmanager
+    def board(_slug=None):
+        yield kb, f.w
+    monkeypatch.setattr(kt, "_board", board)
+    monkeypatch.setattr(kt, "_is_dispatcher_owned_worker", lambda: True)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", child)
+    out = _json.loads(kt._handle_comment({"task_id": sibling, "body": "must not land"}))
+    assert out.get("ok") is not True and "consent_stop" in _json.dumps(out), out
+    assert not f.w.execute("SELECT 1 FROM task_comments WHERE task_id=?", (sibling,)).fetchone()
+    # Control: the same worker may still comment an unstopped card.
+    other = f.card(f.w, "unstopped sibling")
+    assert _json.loads(kt._handle_comment({"task_id": other, "body": "fine"}))["ok"] is True

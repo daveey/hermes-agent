@@ -1371,6 +1371,10 @@ def _handle_comment(args: dict, **kw) -> str:
         # [daveey] This tool is always an agent: record it, so no reader guesses (agent-261aa31f49).
         from gateway.session_context import get_session_env
         writer_session = get_session_env("HERMES_SESSION_ID", "") or None
+        if own_task := os.environ.get("HERMES_KANBAN_TASK"):  # worker (or its child): honour the card's stops
+            from hermes_cli.kanban_consent import comment_refusal
+            if stopped := comment_refusal(conn, own_task, writer_session, str(tid)):
+                raise _Reject(stopped, "consent_stop")
         relayed = _krh.from_tool_args(conn, str(tid), args, writer_session, reject=_Reject)  # kanban-d1b921f32e
         cid = kb.add_comment(conn, tid, author=author, body=str(body), writer_kind="agent",
                              writer_session=writer_session, relayed_human=relayed)

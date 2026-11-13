@@ -8,9 +8,17 @@ Where stops are enforced: at submission (the requester card's created snapshot
 plus the submitting session's own host-local stops) and again at the home
 executor (the created snapshot, read from the replica; an unsynced created event
 is retried, then refused). Cards created by a session inherit its stops even when
-they carry another origin session_id. Known limit: a stop recorded in a session
-after a card was created does not reach that card, and the home cannot see a
-submitting session's host-local stops (only the submitting host checks them).
+they carry another origin session_id. A session's stops include its
+``parent_session_id`` ancestors, so context compression (which rotates the
+session id) keeps them. A dispatched worker's ``kanban_comment`` tool checks the
+same stops before a direct same-board comment (``comment_refusal``), and
+``kanban edit`` cannot add a delivery claim the completion gate would refuse.
+
+Known limits: a stop recorded in a session after a card was created does not
+reach that card; the home cannot see a submitting session's host-local stops
+(only the submitting host checks them); a chat's own ``kanban_comment`` calls
+are not fenced (its user is present to approve or stop the turn); a worker's
+terminal ``hermes kanban comment`` goes through command approval, not this check.
 """
 from __future__ import annotations
 
@@ -112,10 +120,34 @@ def session_stops(session):
     try:
         if not db._read_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_consent_stops'"):
             return []
+        lineage = _lineage(db, session)
         return _active([json.loads(r[0]) for r in db._read_all(
-            "SELECT payload FROM kanban_consent_stops WHERE origin_session=? ORDER BY id", (session,))])
+            f"SELECT payload FROM kanban_consent_stops WHERE origin_session IN ({','.join('?' * len(lineage))}) "
+            "ORDER BY id", tuple(lineage))])
     finally:
         db.close()
+
+
+_LINEAGE_MAX = 64
+
+
+def _lineage(db, session):
+    """*session* and its ``parent_session_id`` ancestors (compression rotates the id mid-conversation).
+
+    Decisions of the whole lineage replay in record order, so a stop recorded
+    before compression binds the tip and a later same-target approval still
+    supersedes it. Bounded and cycle-safe.
+    """
+    chain = [session]
+    if not db._read_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"):
+        return chain
+    while len(chain) < _LINEAGE_MAX:
+        row = db._read_one("SELECT parent_session_id FROM sessions WHERE id=?", (chain[-1],))
+        parent = row[0] if row else None
+        if not parent or parent in chain:
+            break
+        chain.append(parent)
+    return chain
 
 
 def _created_stops(conn, task_id):
@@ -151,6 +183,22 @@ def snapshot(conn, task_id, creator_task_id):
     for session in sessions:
         stops += session_stops(session)
     return list({json.dumps(s, sort_keys=True): s for s in stops}.values())
+
+
+def comment_refusal(conn, task_id, session, target):
+    """Refusal text when a direct board comment on *target* would bypass a stop, else None.
+
+    The ``kanban_comment`` tool of a dispatched worker checks its own card's
+    creation stops and its run session's stops (lineage included): a same-board
+    target needs no operator call, so this is that path's fence.
+    """
+    from hermes_cli.kanban_supervisor_requests import SupervisorRequestError
+    try:
+        _check(list(creation_stops(conn, task_id)) + session_stops(session),
+               [{"op": "operator", "action": "comment", "task_id": target}])
+    except SupervisorRequestError as exc:
+        return str(exc)
+    return None
 
 
 def _check(stops, ops):
