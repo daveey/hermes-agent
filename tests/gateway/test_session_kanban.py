@@ -74,6 +74,9 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = json.loads((tmp_path / 'state' / 'receipt.json').read_text())
     print(json.dumps(receipt))
+    # Neither the probe's claims nor its children read the account's real host policy or worker inventory.
+    policy = Path(receipt['policy_root'])
+    assert policy.is_relative_to(tmp_path) and any(policy.glob('child-*')), policy
     if mode == 'crash_contended':
         assert receipt['first_sweep_deferred']
         assert receipt['run_outcome'] == 'crashed' and receipt['failures'] == 1

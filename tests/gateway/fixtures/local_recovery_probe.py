@@ -110,6 +110,25 @@ def websocket(home, desc, **kw):
                    subprotocols=['hermes-gateway-v1', 'hermes-gateway-ticket.' + grant['ticket']], **kw)
 
 
+def isolate_host_policy(home):
+    """Point the host worker policy of this probe and every Python child it spawns at its disposable home.
+
+    ``worker_compute_capacity.policy_root()`` is the OS account's ``~/.hermes`` by design, independent of HOME
+    and HERMES_HOME, and conftest's patch of it does not reach a subprocess. On a worker host that root enables
+    ``worker_resources``: the probe's dispatcher claim registered its tmp board in the real account inventory
+    (which ``worker_account_boards`` refuses under test) and the gateway owner placed the card's worker in a
+    CPU slice the run never has. Children load ``host_policy/sitecustomize.py`` through ``PYTHONPATH``, so
+    call this before building the children's environment. Returns the root.
+    """
+    from hermes_cli import worker_compute_capacity as capacity
+    root = Path(home) / 'host-policy'
+    capacity.policy_root = lambda: root
+    os.environ['HERMES_PROBE_HOST_POLICY_ROOT'] = str(root)
+    hook = str(Path(__file__).resolve().parent / 'host_policy')
+    os.environ['PYTHONPATH'] = os.pathsep.join([hook, *filter(None, [os.environ.get('PYTHONPATH')])])
+    return str(capacity.policy_root())
+
+
 def seed_offline_models_dev(home):
     """A fresh HERMES_HOME has no models.dev cache, so the daemon's first session.create (tool
     availability -> vision check -> provider lookup) downloads the public registry in the foreground,

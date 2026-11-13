@@ -28,4 +28,8 @@ def test_owner_board_recovery(tmp_path, mode, contention):
                             cwd=repo, env=env, stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=180, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
-    print(json.dumps(json.loads((tmp_path / 'state/receipt.json').read_text())))
+    receipt = json.loads((tmp_path / 'state/receipt.json').read_text())
+    print(json.dumps(receipt))
+    # Neither the probe's claims nor its children read the account's real host policy or worker inventory.
+    policy = Path(receipt['policy_root'])
+    assert policy.is_relative_to(tmp_path) and any(policy.glob('child-*')), policy

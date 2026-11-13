@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from local_recovery_probe import daemon
+from local_recovery_probe import daemon, isolate_host_policy
 
 CONTINUE_PREFIX = '[Kanban run continued after a gateway restart]'
 
@@ -82,6 +82,7 @@ def main():
     home.mkdir(parents=True, exist_ok=True)
     Path(os.environ['HOME']).mkdir(parents=True, exist_ok=True)
     os.environ['HERMES_KANBAN_HOME'] = str(home)
+    policy_root = isolate_host_policy(home)
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
     peer.blocked, peer.release = threading.Event(), threading.Event()
@@ -105,7 +106,7 @@ def main():
         tid = kb.create_task(conn, title='RESTART_CONTINUE_SENTINEL', body='Acceptance: finish across a restart',
                              assignee='default', workspace_kind='dir', workspace_path=str(workspace))
     env = dict(os.environ)
-    receipt, clients = {'task_id': tid}, []
+    receipt, clients = {'task_id': tid, 'policy_root': policy_root}, []
     original_popen = subprocess.Popen
 
     def spawn(*args, **kwargs):

@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-from local_recovery_probe import daemon, websocket, rpc
+from local_recovery_probe import daemon, isolate_host_policy, websocket, rpc
 
 
 class Model(BaseHTTPRequestHandler):
@@ -65,6 +65,7 @@ def main():
     home.mkdir(parents=True, exist_ok=True)
     Path(os.environ['HOME']).mkdir(parents=True, exist_ok=True)
     os.environ['HERMES_KANBAN_HOME'] = str(home)
+    policy_root = isolate_host_policy(home)
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
     contended = os.environ.get('KANBAN_PROBE_MODE') == 'timeout_contended'
@@ -99,7 +100,8 @@ def main():
             goal_mode=peer.mode == 'complete', goal_max_turns=2,
             max_runtime_seconds=3600 if peer.mode == 'timeout' else None)
     env = dict(os.environ)
-    receipt, clients = {}, []
+    receipt: dict = {'policy_root': policy_root}
+    clients = []
     original_popen = subprocess.Popen
     original_set_pid = dispatch._set_worker_pid
     def set_pid(*args, **kwargs):

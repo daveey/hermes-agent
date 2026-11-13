@@ -41,6 +41,10 @@ def test_a_real_owner_restart_mid_turn_continues_the_same_run(tmp_path, mid_tool
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
     receipt = json.loads((tmp_path / 'state' / 'receipt.json').read_text())
     print(json.dumps(receipt))
+    # Neither the probe's claims nor its owners read the account's real host policy or worker inventory.
+    policy = Path(receipt['policy_root'])
+    assert policy.is_relative_to(tmp_path), policy
+    assert {f'child-{pid}' for pid in receipt['owner_pids']} <= {p.name for p in policy.iterdir()}, receipt
     assert receipt['owner_pids'][0] != receipt['owner_pids'][1]
     # The gap: the stopped owner checkpointed the turn and the run kept its claim and worker.
     assert receipt['checkpointed'] and receipt['client_alive_in_gap'], receipt

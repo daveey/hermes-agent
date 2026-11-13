@@ -13,7 +13,7 @@ import threading
 import time
 
 from kanban_owner_probe import Model as BaseModel
-from local_recovery_probe import daemon, websocket, rpc
+from local_recovery_probe import daemon, isolate_host_policy, websocket, rpc
 from tests.waiting import wait_until
 
 
@@ -51,6 +51,7 @@ def main():
     owner = home / 'profiles/assigned' if mode == 'cross_profile' else home
     owner.mkdir(parents=True, exist_ok=True)
     os.environ['HERMES_KANBAN_HOME'] = str(home / 'shared')
+    policy_root = isolate_host_policy(home)
     board_path = home / 'custom.sqlite' if mode == 'custom' else home / 'shared/kanban/boards/owned/kanban.db'
     os.environ['HERMES_KANBAN_DB'] = str(board_path)
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
@@ -77,7 +78,7 @@ def main():
     from hermes_cli import kanban_db as kb, kanban_db_dispatch as dispatch
     from hermes_cli.kanban_db_connect import connect
     os.environ['HERMES_KANBAN_CRASH_GRACE_SECONDS'] = '0'
-    clients, receipt = [], {'mode': mode}
+    clients, receipt = [], {'mode': mode, 'policy_root': policy_root}
     original_popen = subprocess.Popen
     def spawn(*args, **kwargs):
         if 'hermes_cli.kanban_worker_client' in args[0]:
