@@ -433,13 +433,13 @@ WORKER_SESSION = "local-reviewer-session"
 
 
 def _worker_shell_card(kb, monkeypatch, body, *, bound_pid=None, session=WORKER_SESSION, env_session=WORKER_SESSION,
-                       bound=True, spawn=None):
+                       bound=True, spawn=None, title="Independent exact-head review PR1349"):
     """``spawn=(pid, fingerprint)`` records the claim's spawned worker (``tasks.worker_pid``); ``bound=False`` leaves
     the run without a ``worker_bound`` event, so only that spawn pid can prove the shell."""
     import os
     from hermes_cli import kanban_db_connect as kbc
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="Independent exact-head review PR1349", body=body, assignee="test-worker")
+        tid = kb.create_task(conn, title=title, body=body, assignee="test-worker")
         kb.claim_task(conn, tid)
         run_id = kb._current_run_id(conn, tid)
         with kb.write_txn(conn):
@@ -472,6 +472,24 @@ def test_cli_from_the_cards_worker_shell_completes_its_own_run(board, monkeypatc
     row = _closing_run(board, tid)
     assert (row["id"], row["outcome"], row["status"]) == (run_id, "completed", "done")  # the record ship reads
     assert _runs(board, tid) == 1  # no synthesized run
+
+
+# The proof is card-agnostic (run_for's docstring): a plain, non-review card's proven worker shell also gets its run
+# id, so its no---force CLI completion is fenced to that run and closes it instead of hitting the live-claim refusal
+# (the recorded spawn pid is alive with its fingerprint, so without that run id complete_task raises LiveClaimError).
+
+def test_cli_worker_shell_completes_a_plain_card_without_force(board, monkeypatch):
+    import os
+    from hermes_cli import kanban_db_connect as kbc
+    tid, run_id = _worker_shell_card(board, monkeypatch, "Fix the sidebar scroll. Done when its tests pass.",
+                                     title="Fix the sidebar scroll", spawn=(os.getppid(), _fingerprint(os.getppid())))
+    with kbc.connect() as conn:  # precondition: without the run id this completion would be refused
+        assert board._claim_is_live(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+    assert _cli_complete(tid, {"changed_files": ["a.py"]}, force=False) == 0
+    assert _status(board, tid) == "done"
+    row = _closing_run(board, tid)
+    assert (row["id"], row["outcome"], row["status"]) == (run_id, "completed", "done")
+    assert _runs(board, tid) == 1
 
 
 def _foreign_pid():

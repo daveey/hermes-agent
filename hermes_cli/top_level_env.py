@@ -274,8 +274,15 @@ def _is_ancestor(pid: int, start: Optional[int] = None) -> bool:
 
 
 def descends_from_live_pid(pid) -> bool:
-    """Whether this process descends from ``pid`` while it is alive. pid 0/1 (and a non-integer) never
-    count: every process descends from init, so it vouches for nothing. [daveey]"""
+    """Whether this process descends from ``pid`` while it is alive. pid 0/1 never count: every process
+    descends from init, so it vouches for nothing. [daveey]
+
+    ``pid`` is coerced with ``int()``: a decimal string (``"4242"``) is accepted as that pid, and ``None``,
+    ``""`` or anything ``int()`` refuses is ``False`` rather than a ``TypeError``. This is deliberate: callers
+    pass pids read from board rows and JSON event payloads (``worker_bound``, ``tasks.worker_pid``), whose
+    type depends on the writer, and the proof is the live-ancestor check on that exact pid, so accepting
+    its string spelling vouches for nothing extra. Rejecting it would refuse a real worker's shell (or call
+    it a leaked env) over serialization alone."""
     try:
         pid = int(pid or 0)
     except (TypeError, ValueError):
