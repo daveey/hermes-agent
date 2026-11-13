@@ -316,6 +316,16 @@ def test_every_need_site_maps_access_names_to_their_attested_labels(name, label)
     assert kps.alarm_placement(M, machines, assignee="default", requires=(name,), now_ms=NOW)[0] == [f"machine:{X}"]
 
 
+@pytest.mark.parametrize("assignee", [None, ""])
+def test_a_card_with_no_assignee_needs_the_default_profile_like_the_board(assignee):
+    """t_01a1d3123e9d25fd: the Board's ``requiredLabels`` reads ``assignee || "default"``; ``_need`` built
+    ``profile:None`` / ``profile:``, which no worker carries, so the pool move looked ineligible."""
+    from hermes_cli import kanban_repin_notice as rn
+    row = {"requires": None, "assignee": assignee}
+    assert rp._need(row) == {"profile:default"} == set(rn.required_labels(row))
+    assert rp.pool_refusal(M, _pooled(), rp._need(row), NOW) is None
+
+
 def test_the_hub_lane_without_hub_write_is_a_valid_target(board):
     assert board.why(runs_on=["machine:hub"]) is None  # hub-write is the alarm's need, not the card's
 

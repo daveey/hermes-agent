@@ -142,7 +142,8 @@ def malformed_skills(target: Any) -> Optional[str]:
 
 def _need(target: Any) -> set:
     from hermes_cli.kanban_placement_coordination import requirement_label
-    return {requirement_label(r) for r in _requires(target)} | {f"profile:{target['assignee']}"}
+    # A NULL or empty assignee runs as ``default``, as in the Board's ``requiredLabels`` (``assignee || "default"``).
+    return {requirement_label(r) for r in _requires(target)} | {f"profile:{target['assignee'] or 'default'}"}
 
 
 def _pool_need(target: Any) -> set:
