@@ -107,7 +107,7 @@ def test_claim_with_disabled_policy_invalidates_proof_under_account_fence(board,
     _, intent = retirement.record_paths(board)
     monkeypatch.setattr(capacity, 'worker_enabled', lambda: False)
     monkeypatch.setattr('hermes_constants.get_default_hermes_root', lambda: board.parent)
-    monkeypatch.setattr(admission, '_final_hub_gate', lambda *a: (None, None))
+    monkeypatch.setattr(admission, '_final_hub_gate', lambda *a, **k: (None, None))
     with sqlite3.connect(board) as conn:
         with admission_lock(capacity.policy_root(), timeout=0):
             with admission.claim_transaction(conn) as accepted:

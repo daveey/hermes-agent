@@ -14,7 +14,7 @@ def account(monkeypatch, tmp_path):
     root.mkdir()
     monkeypatch.setattr(capacity, 'policy_root', lambda: root)
     monkeypatch.setattr(capacity, 'worker_enabled', lambda: True)
-    monkeypatch.setattr(admission, '_final_hub_gate', lambda *a: (None, None))
+    monkeypatch.setattr(admission, '_final_hub_gate', lambda *a, **k: (None, None))
     return root
 
 

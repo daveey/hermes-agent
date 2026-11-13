@@ -26,8 +26,11 @@ def test_collect_uses_one_config_and_one_census(monkeypatch, tmp_path):
             detail["pools"].update(regular=7, priority=1)
         return 8
 
+    from hermes_cli import worker_compute_capacity
     monkeypatch.setattr(config_backend, "read_config_doc_readonly", read)
     monkeypatch.setattr(mm, "active_card_runs", census)
+    # [daveey] The worker-resource policy is a separate account-root read; this test pins the hub tuple's one read.
+    monkeypatch.setattr(worker_compute_capacity, "worker_enabled", lambda: False)
     out = mm.collect(tmp_path)
     assert {key: out.get(key) for key in EXPECTED} == EXPECTED
     assert out["active_card_runs"] == 8
