@@ -103,20 +103,57 @@ def _title_tokens(title: str) -> list[str]:
     return [m.group(0) for m in _TOKEN.finditer(plain)]
 
 
+# A counter after one of these words numbers a re-issue of the same work, not a leg (PR #2429 review).
+_REISSUE_WORD = re.compile(r"(?:attempts?|rounds?|retry|retries|try|tries|take|v|rev|revision|pass|iteration)",
+                           re.IGNORECASE)
+_REISSUE_TOKEN = re.compile(r"(?:v|rev)\d+(?:\.\d+)*", re.IGNORECASE)  # "v2", "rev3"
+_ORDINAL = re.compile(r"\d+(?:st|nd|rd|th)", re.IGNORECASE)  # "2nd attempt"
+
+
+def _reissue_counter(tokens: list[str], i1: int, i2: int) -> bool:
+    """``tokens[i1:i2]`` holds a re-issue counter: a number right after a re-issue word (``attempt 2``,
+    ``round 1``), ``v3``, or an ordinal before one (``2nd attempt``)."""
+    for k in range(i1, i2):
+        tok = tokens[k]
+        if not _DIGIT_TOKEN.fullmatch(tok.lower()):
+            continue
+        if (_REISSUE_TOKEN.fullmatch(tok) or (k > 0 and _REISSUE_WORD.fullmatch(tokens[k - 1]))
+                or (_ORDINAL.fullmatch(tok) and k + 1 < len(tokens) and _REISSUE_WORD.fullmatch(tokens[k + 1]))):
+            return True
+    return False
+
+
+def _shape(marker: str) -> str:
+    """``w1-01`` -> ``a9-9``: two markers of one shape are the same index field."""
+    return re.sub(r"[a-z]+", "a", re.sub(r"\d+", "9", marker.lower()))
+
+
 def enumerated(title: str, theirs: str) -> Optional[tuple[frozenset[str], frozenset[str]]]:
     """``(mine, theirs)`` index markers that differ in the same place of both titles, else None.
 
     Only a replaced span counts, with a marker on both sides (``w1-01``/``w1-02``, ``1/3``/``3/3``, fixture
     ``A``/``B``, head ``5d2e512cbb``/``9baf8d8abc``). A marker only one title has (an added ``round 2``, an
-    appended sha, ``attempt 3``) is a re-issue of the same work, not a leg (PR #2329 review)."""
+    appended sha, ``attempt 3``) is a re-issue of the same work, not a leg (PR #2329 review), and so is a bumped
+    counter (``attempt 2``/``attempt 3``, ``round 1``/``round 2``, ``v2``/``v3``). A marker that moved (``w1-01
+    sleep probe``/``sleep probe w1-02``) is a deleted and an inserted span: it counts when both carry a marker of
+    the same shape (PR #2429 review)."""
     a, b = _title_tokens(title), _title_tokens(theirs)
     ops = SequenceMatcher(None, [t.lower() for t in a], [t.lower() for t in b], autojunk=False).get_opcodes()
+    deleted: set[str] = set()
+    inserted: set[str] = set()
     for tag, i1, i2, j1, j2 in ops:
-        if tag != "replace":
+        if tag == "equal" or _reissue_counter(a, i1, i2) or _reissue_counter(b, j1, j2):
             continue
         mine_m, their_m = markers(" ".join(a[i1:i2])), markers(" ".join(b[j1:j2]))
-        if mine_m and their_m and mine_m != their_m:
+        if tag == "replace" and mine_m and their_m and mine_m != their_m:
             return mine_m - their_m, their_m - mine_m
+        deleted |= mine_m if tag == "delete" else set()
+        inserted |= their_m if tag == "insert" else set()
+    moved = {_shape(m) for m in deleted} & {_shape(m) for m in inserted}
+    mine_m = frozenset(m for m in deleted - inserted if _shape(m) in moved)
+    their_m = frozenset(m for m in inserted - deleted if _shape(m) in moved)
+    if mine_m and their_m:
+        return mine_m, their_m
     return None
 
 

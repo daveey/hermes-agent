@@ -101,11 +101,28 @@ def test_an_added_number_is_not_an_enumeration(mine, theirs):
 
 
 @pytest.mark.parametrize("mine, theirs", [
+    ("Fix guard (attempt 2)", "Fix guard (attempt 3)"),
+    ("Fix guard (round 1)", "Fix guard (round 2)"),
+    ("Fix guard, retry 1", "Fix guard, retry 2"),
+    ("Fix guard v2", "Fix guard v3"),
+    ("Fix guard (2nd attempt)", "Fix guard (3rd attempt)"),
+    ("Fix guard (round 1)", "Round 2: fix guard"),
+])
+def test_a_bumped_reissue_counter_is_not_an_enumeration(mine, theirs):
+    """PR #2429 review: a counter after attempt/round/retry/v... is a re-issue of the same work, not a leg."""
+    from hermes_cli import kanban_overlap_own as own
+    card = {"title": theirs, "assignee": "default"}
+    assert own.own_distinct(mine, "default", card) is None
+
+
+@pytest.mark.parametrize("mine, theirs", [
     ("Sleep probe w1-01 (holds one slot)", "Sleep probe w1-02 (holds one slot)"),
     ("Victim scan on worker-2: live probes", "Victim scan on worker-3: live probes"),
     ("Energy filter 1/3, write the tool", "Energy filter 3/3, read the results"),
     ("Two-worker fixture A (idle hold)", "Two-worker fixture B (hostname only)"),
     ("Review PR #2110 at head 5d2e512cbb", "Review PR #2110 at head 9baf8d8abc"),
+    ("w1-01 sleep probe", "sleep probe w1-02"),  # PR #2429 review: a moved index is still an index
+    ("Fixture A: idle hold", "idle hold, fixture B"),
 ])
 def test_an_index_in_the_same_place_is_an_enumeration(mine, theirs):
     from hermes_cli import kanban_overlap_own as own

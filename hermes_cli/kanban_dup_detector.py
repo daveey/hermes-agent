@@ -29,10 +29,15 @@ _CARD = r"t_[0-9a-f]{8,16}"
 # "duplicate of t_X", "duplicates t_X", "DUPLICATE of t_X", "superseded by ... t_X", "Superseded: ... card t_X".
 _KEYWORD = re.compile(r"\b(?:duplicat\w*|supersed\w*)\b", re.IGNORECASE)
 _AFTER = re.compile(rf"[^.\n]{{0,120}}?\b({_CARD})\b")
-# A denial in the keyword's own clause, up to two words before it: "Not a duplicate of t_X", "No duplicates
-# found; parent t_X", "isn't a duplicate", "non-duplicate" (PR #2329 review). An earlier clause ("No code
-# changes; duplicate of t_X") does not deny it.
-_NEGATED = re.compile(r"\b(?:not|no|never|non|\w+n['\u2019]t)[\s-]+(?:[\w'\u2019]+\s+){0,2}$", re.IGNORECASE)
+# A denial that governs the keyword in its own clause: "Not a duplicate of t_X", "No duplicates found; parent
+# t_X", "isn't a duplicate", "non-duplicate", "0 duplicates" (PR #2329 review). Only an article or a hedge may
+# sit between, so "No-op as duplicate of t_X" and "no changes as duplicate of t_X" are not denials (PR #2429
+# review). An earlier clause ("No code changes; duplicate of t_X") does not deny it.
+_FILLER = r"(?:a|an|the|as|really|actually|truly|exactly|strictly|just|simply|considered|marked|being|been|be)"
+_NEGATED = re.compile(rf"(?:\b(?:not|no|never|non|zero|\w+n['\u2019]t)|(?<![\w.])0)[\s-]+(?:{_FILLER}\s+){{0,3}}$",
+                      re.IGNORECASE)
+# "Checked for duplicates: none", "Duplicates found: 0": a count of none right after the keyword.
+_NONE_AFTER = re.compile(r"\s*(?:found\s*)?[:=\-\u2013\u2014]?\s*(?:none|nil|zero|0)\b", re.IGNORECASE)
 _CLAUSE_END = re.compile(r"[.;:!?,\n]")
 
 
@@ -43,13 +48,18 @@ def _negated(text: str, start: int) -> bool:
 
 
 def sibling_named(text: str) -> list[str]:
-    """Card ids the text says this card duplicates or was superseded by, in order; a denied one is skipped."""
+    """Card ids the text says this card duplicates or was superseded by, in order; a denied one is skipped.
+
+    A keyword's forward window stops at the next keyword, so "Duplicate check: not a duplicate of t_X" is the
+    denied second keyword's, not the first one's (PR #2429 review)."""
     text = text or ""
     found = []
-    for kw in _KEYWORD.finditer(text):
-        if _negated(text, kw.start()):
+    keywords = list(_KEYWORD.finditer(text))
+    for i, kw in enumerate(keywords):
+        if _negated(text, kw.start()) or _NONE_AFTER.match(text, kw.end()):
             continue
-        card = _AFTER.match(text, kw.end())
+        stop = keywords[i + 1].start() if i + 1 < len(keywords) else len(text)
+        card = _AFTER.match(text, kw.end(), stop)
         if card:
             found.append(card.group(1))
     return list(dict.fromkeys(found))

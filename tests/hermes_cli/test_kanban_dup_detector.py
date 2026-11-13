@@ -95,6 +95,28 @@ def test_a_negation_in_an_earlier_clause_does_not_hide_a_duplicate():
     assert dd.sibling_named("No duplicates elsewhere, superseded by t_fedcba9876543210.") == ["t_fedcba9876543210"]
 
 
+@pytest.mark.parametrize("summary", [
+    "Duplicate check: not a duplicate of t_0123456789abcdef.",
+    "Checked for duplicates: none, parent t_0123456789abcdef.",
+    "Duplicates found: 0; parent t_0123456789abcdef owns the design.",
+    "Superseded check: wasn't superseded by t_0123456789abcdef.",
+])
+def test_a_keyword_does_not_reach_past_a_later_denied_keyword_or_a_none(summary):
+    """PR #2429 review: the forward window of an undenied keyword stops at the next keyword, and "none"/"0"
+    right after a keyword denies it."""
+    assert dd.sibling_named(summary) == []
+
+
+@pytest.mark.parametrize("summary", [
+    "No-op as duplicate of t_0123456789abcdef.",
+    "Done with no changes as duplicate of t_0123456789abcdef.",
+    "Closed with no further work, a duplicate of t_0123456789abcdef.",
+])
+def test_a_negator_that_does_not_govern_the_keyword_does_not_deny_it(summary):
+    """PR #2429 review: "no" denies only "no duplicate(s)" / "not a duplicate", not "no-op" or "no <noun> as"."""
+    assert dd.sibling_named(summary) == ["t_0123456789abcdef"]
+
+
 def test_a_closed_detector_card_lets_the_next_occurrence_open_a_new_one(conn):
     creator = kb.create_task(conn, title="creator", assignee="default")
     first, second = _pair(conn, creator)
