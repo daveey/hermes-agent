@@ -75,7 +75,8 @@ def _pool_sentence(place: dict[str, Any]) -> str:
     """The pool re-place sentence when a pool worker could start the card now, else ``""``. Kept out of
     :func:`_queue_words`: the notices print that clause in parentheses, and their advice already says not to run the
     work outside the dispatcher (PR #1821 review). Dropped from these notices before (kanban-e7a33105a4). [daveey]"""
-    if not place.get("pool_could_run"):
+    from hermes_cli.kanban_dispatch_skip import pool_replace_helps
+    if not place.get("pool_could_run") or not pool_replace_helps(place.get("skip")):  # a quota wall (PR #1835)
         return ""
     from hermes_cli.kanban_queue_position import pool_words
     return pool_words(place, advice=False)

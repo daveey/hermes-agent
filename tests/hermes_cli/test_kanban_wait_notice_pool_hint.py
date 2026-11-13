@@ -102,20 +102,20 @@ def test_kanban_show_keeps_the_pool_hint_under_the_admission_census():
 def test_kanban_show_keeps_the_recorded_skip_with_a_pool_hint_without_the_census():
     """PR #1829 review: without ``admission_pools``, ``local_words`` returned the pool hint before rendering the
     recorded skip, so the skip reason vanished there while the census branch kept it. One shape for both: the skip
-    framing first, the pool re-place as its advice."""
-    skip = {"reason": "pinned_quota_wall", "detail": "claude-opus-5-5 (anthropic)"}
+    framing first, then the skip's own advice after the pool re-place (PR #1835 review: the notices' rule)."""
+    skip = {"reason": "owner_down", "detail": "default:inactive"}
     place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
     from hermes_cli import kanban_dispatch_skip as skips
+    tail = kqp.pool_words(place, advice=False) + ". " + skips.advice(skip)
     words = kqp.local_words(place)
     assert words.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), words
     assert "(waiting for a local slot: ~16 ahead, 7/7 running)" in words, words
-    assert words.endswith(kqp.pool_words(place)), words  # the pool re-place is the advice, said once
+    assert words.endswith(tail), words  # the re-place, then the skip's advice; the warning said once
     _assert_pool_hint(words, "t_x")
-    assert skips.advice(skip) not in words
     pools = {"regular": 7, "regular_cap": 7, "priority": 0, "priority_cap": 2}
     census = kqp.local_words({**place, "admission_pools": pools, "admission_class": "normal"})
     assert census.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), census
-    assert census.endswith(kqp.pool_words(place)), census  # same shape on both branches
+    assert census.endswith(tail), census  # same shape on both branches
     unskipped = kqp.local_words({**place, "skip": None})
     assert unskipped.startswith("waiting for a local slot") and unskipped.endswith(kqp.pool_words(place))
     unpooled = kqp.local_words({**place, "pool_could_run": None})
@@ -159,6 +159,75 @@ def test_ready_hint_without_pool_keeps_the_unrecorded_advice(home, monkeypatch):
         tid = _waiting_card(conn)
         hint = pu.ready_hint(conn, kb.get_task(conn, tid))
     assert hint is not None and _UNRECORDED_CLAUSE in hint, hint
+
+
+_CENSUS = {"admission_pools": {"regular": 7, "regular_cap": 7, "priority": 0, "priority_cap": 2},
+           "admission_class": "normal"}
+
+
+def _record_skip(conn, tid: str, reason: str, detail: str, until=None) -> None:
+    from hermes_cli import kanban_dispatch_skip as skips
+    assert skips.record(conn, tid, reason, detail=detail, until=until)
+
+
+def test_recorded_skip_with_a_pool_hint_keeps_both_on_every_surface(home, pool):
+    """PR #1835 review: for a recorded non-ordering skip plus a pool hint, ``kanban show`` replaced the skip advice
+    with the re-place while the chat notices and ``ready_hint`` kept both. One rule now: a skip whose advice does not
+    contradict a re-place keeps it after the pool sentence, on every surface, and the dispatcher warning is said
+    once."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = {"reason": "owner_down", "detail": "default:inactive"}
+    tail = skips.advice(skip)
+    place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
+    for shown in (kqp.local_words(place), kqp.local_words({**place, **_CENSUS})):
+        assert shown.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), shown
+        assert kqp.pool_words(place, advice=False) + ". " + tail in shown, shown
+        assert shown.endswith(tail) and shown.count("outside the dispatcher") == 1, shown
+    with kbc.connect_closing() as conn:
+        tid = _waiting_card(conn)
+        _record_skip(conn, tid, "owner_down", "default:inactive")
+        hint = pu.ready_hint(conn, kb.get_task(conn, tid))
+        assert cw.sweep(conn) == 1
+        notice = cw.notice_text(_notice(conn, tid, cw.NOTICE_KIND))
+    assert hint is not None
+    for text in (hint, notice):
+        _assert_pool_hint(text, tid)
+        assert text.endswith(tail + "."), text
+        assert text.count("outside the dispatcher") == 1, text
+
+
+def test_pinned_quota_wall_skip_keeps_its_advice_and_drops_the_pool_re_place(home, pool):
+    """PR #1835 review: ``local_words`` advised a pool re-place for a ``pinned_quota_wall`` skip, dropping "starts
+    on its own when that wall resets / re-pin". ``_pool_could_run`` never reads the pool workers' quota, and a
+    re-place keeps the walled pin, so the quota-wall advice stands and no surface offers the re-place."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = {"reason": skips.PINNED_QUOTA_WALL, "detail": "claude-opus-5-5 (anthropic)"}
+    place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
+    for shown in (kqp.local_words(place), kqp.local_words({**place, **_CENSUS})):
+        assert shown.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), shown
+        assert shown.endswith(skips.advice(skip)), shown
+        assert "--runs-on" not in shown and "pool worker(s)" not in shown, shown
+    assert pu._pool_sentence(place) == ""
+    with kbc.connect_closing() as conn:
+        tid = _waiting_card(conn)
+        _record_skip(conn, tid, skips.PINNED_QUOTA_WALL, "claude-opus-5-5 (anthropic)", until=time.time() + 3600)
+        hint = pu.ready_hint(conn, kb.get_task(conn, tid))
+        assert cw.sweep(conn) == 1
+        payload = _notice(conn, tid, cw.NOTICE_KIND)
+    assert "pool_hint" not in payload and hint is not None
+    for text in (hint, cw.notice_text(payload)):
+        assert "--runs-on" not in text and "pool worker(s)" not in text, text
+        assert "starts on its own when that wall resets" in text, text
+
+
+def test_unrecorded_advice_variants_share_one_fact_sentence():
+    """PR #1835 review: ``UNRECORDED_POOL_ADVICE`` repeated ``UNRECORDED_ADVICE``'s fact sentence verbatim."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    assert skips.UNRECORDED_FACT.startswith(skips.UNRECORDED + ": ")
+    for text in (skips.UNRECORDED_ADVICE, skips.UNRECORDED_POOL_ADVICE):
+        assert text.startswith(skips.UNRECORDED_FACT + " "), text
+        assert text.endswith("Do not run its work outside the dispatcher"), text
+    assert skips.UNRECORDED_POOL_ADVICE == skips.UNRECORDED_FACT + " Do not run its work outside the dispatcher"
 
 
 def _assert_pool_sentence_outside_parens(text: str) -> None:

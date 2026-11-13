@@ -320,13 +320,20 @@ def advice(skip: dict[str, Any]) -> str:
             "Do not run its work outside the dispatcher")
 
 
-UNRECORDED_ADVICE = (f"{UNRECORDED}: slots are free, yet no tick recorded why it passed this card over. Read the live "
-                     "verdict (`hermes kanban dispatch --dry-run --json`) before changing anything; priority changes "
-                     "are not the fix. Do not run its work outside the dispatcher")
+def pool_replace_helps(skip: Optional[dict[str, Any]]) -> bool:
+    """False when a pool re-place cannot clear ``skip``, so no surface may offer one. [daveey] PR #1835 review: a
+    ``pinned_quota_wall`` hold follows the pin to any machine, and ``_pool_could_run`` never reads the pool workers'
+    quota; its own advice (wait for the reset, or re-pin) stands. Any other skip's advice is kept after the
+    re-place sentence (``kanban_queue_position.local_words`` and the notices' ``_options`` alike)."""
+    return not skip or skip.get("reason") != PINNED_QUOTA_WALL
+
+
+UNRECORDED_FACT = f"{UNRECORDED}: slots are free, yet no tick recorded why it passed this card over."
+UNRECORDED_ADVICE = (f"{UNRECORDED_FACT} Read the live verdict (`hermes kanban dispatch --dry-run --json`) before "
+                     "changing anything; priority changes are not the fix. Do not run its work outside the dispatcher")
 # After a pool re-place hint ("Re-place it ..."), "read the verdict before changing anything" contradicts the named
 # fix, so a notice carrying ``pool_hint`` keeps only the fact and the dispatcher warning (PR #1829 review). [daveey]
-UNRECORDED_POOL_ADVICE = (f"{UNRECORDED}: slots are free, yet no tick recorded why it passed this card over. "
-                          "Do not run its work outside the dispatcher")
+UNRECORDED_POOL_ADVICE = f"{UNRECORDED_FACT} Do not run its work outside the dispatcher"
 
 
 def unrecorded(place: Optional[dict[str, Any]], ready_seconds: Optional[float]) -> bool:
