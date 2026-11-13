@@ -26,7 +26,8 @@ import re
 import time
 from typing import Callable, Iterator, Optional, cast
 
-from cron.lifecycle_guard_printf_number import FLOAT_MODELS, X87, FloatModel, format_number, integer
+from cron.lifecycle_guard_printf_number import (
+    FLOAT_MODELS, X87, FloatModel, decimal_digits, format_number, integer)
 
 PRINTF_MAX_ROUNDS = 64
 # The guard's whole-walk scan budget (lifecycle_guard._MAX_LIFECYCLE_SCAN_BYTES, pinned equal by a
@@ -172,7 +173,7 @@ def printf_output(format_text: str, arguments: list[str], model: FloatModel = X8
 
     def star(value: str) -> Optional[int]:
         """A width or precision: digits, or `*` taking the next argument as a number."""
-        return integer(take() or "") if value == "*" else (int(value) if value else None)
+        return integer(take() or "") if value == "*" else (decimal_digits(value) if value else None)
 
     for _round in range(PRINTF_MAX_ROUNDS):
         start = position
@@ -260,7 +261,12 @@ def printed_argument_lines(name: str, arguments: list[str]) -> Iterator[str]:
         # floating conversion prints the same under all, and the caller dedupes the lines.
         models = FLOAT_MODELS if _FLOAT_CONVERSION_RE.search(arguments[start]) else (X87,)
         for model in models:
-            yield printf_output(arguments[start], arguments[start + 1 :], model)
+            try:
+                yield printf_output(arguments[start], arguments[start + 1 :], model)
+            except (ValueError, ArithmeticError):
+                # Fail closed: a model bug must not abort the guard's walk (its caller falls
+                # back to the direct scan); the variants around this one are still walked.
+                continue
     # Fail closed: also the earlier whole-argument walk (each conversion takes its argument as
     # written, format after every leading `-word`), so the model never yields less than it did.
     if index < len(arguments):

@@ -33,6 +33,12 @@ _HEX_FLOAT_RE = re.compile(r"0x([0-9a-f]*)\.?([0-9a-f]*)(?:p([-+]?[0-9]+))?")
 # Fraction, so `1e999999999` cannot allocate a huge integer.
 _BINARY_EXP_LIMIT = 16500
 _DECIMAL_EXP_LIMIT = 5000
+# Past 20 decimal digits a number is beyond 2**64, where strtoimax/strtoumax saturate and every
+# width, precision and exponent caller caps; Python's int() refuses a decimal string past 4300
+# digits (ValueError), which would abort the guard's whole walk, so longer ones saturate here.
+_SATURATED_DIGITS = 20
+_DECIMAL_EXPONENT_DIGITS = 12
+_DECIMAL_EXPONENT_RE = re.compile(r"(.*?)[eE]([-+]?)0*([0-9]+)")
 
 
 class FloatModel(NamedTuple):
@@ -55,6 +61,18 @@ Special = str  # "inf" or "nan"
 Real = tuple[bool, Fraction | Special]  # (negative, exact value or special)
 
 
+def decimal_digits(digits: str) -> int:
+    """``int(digits)`` of a decimal digit string, saturated to ``10**20`` past 20 significant
+    digits (see _SATURATED_DIGITS): never the ValueError of Python's int-string limit."""
+    digits = digits.lstrip("0")
+    return int(digits or "0") if len(digits) <= _SATURATED_DIGITS else 10**_SATURATED_DIGITS
+
+
+def _signed_digits(sign: Optional[str], digits: str) -> int:
+    value = decimal_digits(digits)
+    return -value if sign == "-" else value
+
+
 def integer(text: str) -> int:
     """``strtoimax`` of *text* as bash's printf reads a number: ``'c`` is the code of c, the
     longest numeric prefix counts (``12abc`` is 12, ``08`` is 0) and anything else is 0."""
@@ -68,8 +86,8 @@ def integer(text: str) -> int:
         value = int(digits, 0)
     elif digits.startswith("0"):
         value = int(digits, 8)
-    else:
-        value = int(digits)
+    else:  # base 8 and 16 have no int-string limit; base 10 does
+        value = decimal_digits(digits)
     return -value if match[1] == "-" else value
 
 
@@ -122,10 +140,19 @@ def _parse_real(text: str) -> Real:
     if hex_match:
         whole, fraction, exponent = hex_match.groups()
         mantissa = int(whole + fraction or "0", 16)
-        power = int(exponent or "0") - 4 * len(fraction)
-        if mantissa and abs(mantissa.bit_length() + power) > _BINARY_EXP_LIMIT:
+        if not mantissa:  # 0 at any exponent: `0x0p9999999999` must not build 2**9999999999
+            return negative, Fraction(0)
+        sign, exponent_digits = (exponent[:1], exponent[1:]) if exponent and exponent[0] in "+-" \
+            else ("", exponent or "0")
+        power = _signed_digits(sign, exponent_digits) - 4 * len(fraction)
+        if abs(mantissa.bit_length() + power) > _BINARY_EXP_LIMIT:
             return negative, "inf" if power > 0 else Fraction(0)
         return negative, mantissa * Fraction(2) ** power
+    exponent_match = _DECIMAL_EXPONENT_RE.fullmatch(word)
+    if exponent_match and len(exponent_match[3]) > _DECIMAL_EXPONENT_DIGITS:
+        # Decimal() refuses an exponent past ~10**18 (InvalidOperation, which would read as 0);
+        # 10**12 is already far past _DECIMAL_EXP_LIMIT, so the value is inf or 0 either way.
+        word = f"{exponent_match[1]}e{exponent_match[2]}{10**_DECIMAL_EXPONENT_DIGITS}"
     try:
         decimal = Decimal(word)
     except InvalidOperation:

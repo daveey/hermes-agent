@@ -16,6 +16,9 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 from tools.shell_heredoc import output_reaches_shell, strip_inert_heredoc_bodies
 
 _PRINT = "print('bash {big}')\n"
+# Past Python's 4300-digit int-string limit (int() raises ValueError there).
+_LONG_DIGITS = "9" * 4400
+_LONG_ZEROS = "0" * 4400
 # The reviewer's two repros verbatim (paths moved under tmp_path), then the other sinks the card
 # names.
 _SINK_SHAPES = {
@@ -83,6 +86,11 @@ _SINK_SHAPES = {
     "printf-v": "printf -v x '%s %s' bash {big}; echo $x | bash\n",
     "printf-v-dashdash": "printf -v x -- '%s %s' bash {big}; echo $x | bash\n",
     "printf-v-glued": "printf -vx -- '%s %s' bash {big}; echo $x | bash\n",
+    # Review 5897387636 (PR #2506): a >4300-digit decimal made Python's int() raise, which aborted
+    # the walk (direct-scan fallback: allowed). bash saturates the number and runs the script.
+    "printf-long-decimal": f"printf '%d\\n%s %s\\n' {_LONG_DIGITS} bash {{big}} | bash\n",
+    "printf-long-decimal-group": f"{{ printf '%d\\n%s %s\\n' {_LONG_DIGITS} bash {{big}}; }} | bash\n",
+    "printf-long-precision": f"printf '%.{_LONG_ZEROS}4s %s' bashrc {{big}} | bash\n",  # `bash`
     # Kept from the old opener peel (fails closed): a leading `in` is not read as the command.
     "echo-after-in": "for w\nin echo bash {big}; do :; done | bash\n",
     # Nit 3 (intended, fails closed): any later pipe word counts as the shell, a grep pattern too.
@@ -307,6 +315,12 @@ _BASH_PRINTF_CASES = [
     # Ties round half-even; a carry past 9.99… or past the significand's top bit renormalizes.
     ("%.0a|%.0a|%.1a|%.2e|%g|%a|%f|%e|", ["0x8.8p0", "0xa.8p0", "0x8.08p0", "9.999", "999999.5",
                                           "0x1.ffffffffffffffffp0", "1e4933", "-1e-5000"]),
+    # Review 5897387636 (PR #2506): numbers past Python's 4300-digit int() limit saturate as in
+    # C instead of raising (a literal precision's leading zeros too).
+    ("%d|%u|%i|%x|", [_LONG_DIGITS, "-" + _LONG_DIGITS, "1" + _LONG_ZEROS, _LONG_DIGITS]),
+    ("%f|%e|%a|%g|", ["1e" + _LONG_DIGITS, "1e-" + _LONG_DIGITS, "0x1p" + _LONG_DIGITS,
+                      "0x0p" + _LONG_DIGITS]),
+    ("%.*s|%d|%." + _LONG_ZEROS + "4s|", [_LONG_ZEROS + "3", "abcdef", "5", "bashrc"]),
 ]
 
 
@@ -348,6 +362,18 @@ def test_printf_lines_keep_the_whole_argument_walk():
     assert "xbashy /x/a.sh" in lines and "xbashrcy /x/a.sh" in lines  # model, whole arguments
     floats = set(printed_argument_lines("printf", ["%a", "1"]))
     assert {"0x8p-3", "0x1p+0"} <= floats  # x86's long double and a double (arm64 Mac)
+
+
+def test_a_printf_model_error_does_not_abort_the_walk(monkeypatch):
+    from cron import lifecycle_guard_printf
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("model bug")
+
+    monkeypatch.setattr(lifecycle_guard_printf, "printf_output", broken)
+    lines = list(lifecycle_guard_printf.printed_argument_lines(
+        "printf", ["%s %s", "bash", "/x/a.sh"]))
+    assert "bash /x/a.sh" in lines  # the variants around the model are still walked
 
 
 def test_long_double_rounding_carries_into_the_exponent():
