@@ -340,15 +340,31 @@ class ManagedWorker:
             self._signal_worker(kill=True)
         if self.writer.ident is not None:
             self.writer.join(timeout=5)
-        self.process.stdin.close()
+        # A control frame whose flush hit EPIPE (the child exited first) stays buffered, and close()
+        # flushes it again. As in Popen.communicate, that broken pipe is moot once the child is gone;
+        # the fd is closed either way.
+        with suppress(BrokenPipeError):
+            self.process.stdin.close()
         if self.reader is None:
-            self.process.stdout.close()
+            with suppress(OSError):
+                self.process.stdout.close()
         else:
             self.reader.join(timeout=5)
         if self.stderr_drain is not None:
             self.stderr_drain.join(timeout=5)  # EOF once the child is gone; the thread closes it
         elif self.process.stderr is not None:
-            self.process.stderr.close()
+            with suppress(OSError):
+                self.process.stderr.close()
+
+
+def close_quietly(close):
+    """Run a worker teardown whose OSError must never replace the turn's reply or its
+    ManagedExecutionUnknown: the turn's outcome was decided before cleanup began."""
+    try:
+        close()
+    except OSError as exc:
+        import logging
+        logging.getLogger(__name__).warning('Managed worker teardown failed: %s: %s', type(exc).__name__, exc)
 
 
 def interrupt_managed(authority, actor, ref, generation):
@@ -786,4 +802,4 @@ async def execute_managed(authority, ref, row, policy):
         raise ManagedExecutionUnknown('managed_worker_unknown') from exc
     finally:
         workers.pop(ref.session_id, None)
-        await asyncio.to_thread(close_worker)
+        await asyncio.to_thread(close_quietly, close_worker)

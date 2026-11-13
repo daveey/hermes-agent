@@ -38,7 +38,8 @@ async def close_and_book_restart_loss(authority, policy, worker):
     """
     if not policy.kanban_json or not _restart_stop(worker.stop_cause):
         return worker.close
-    await asyncio.to_thread(worker.close)
+    from gateway.session_managed_worker import close_quietly
+    await asyncio.to_thread(close_quietly, worker.close)
     logger.info('Kanban restart: not checkpointing the turn (managed worker lost before its result); '
                 'the run is requeued uncounted')
     await book_restart_interruption(authority, policy)
