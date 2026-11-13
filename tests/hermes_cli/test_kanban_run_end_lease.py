@@ -171,3 +171,32 @@ def test_a_rolled_back_end_keeps_the_lease(primary, lease_client):
     with kb.write_txn(primary):
         primary.execute("SELECT 1")
     assert _releases(lease_client) == []
+
+
+REQUEST = dict(action="Choose A. Unblock = proceed; archive = abandon.", why_human="Owner decision",
+               interaction="reply", scope="Fixture", evidence="Fixture decision")
+
+
+def test_a_human_block_releases_the_run_lease(primary, lease_client):
+    """A real ``blocked`` outcome (not the timed-park route ``kind="time"`` takes) frees the lease too."""
+    tid, run_uid = _claimed(primary, lease_client)
+    _stall_outbox(primary)
+    assert kb.block_task(primary, tid, reason="needs an answer", kind="needs_input", human_request=REQUEST)
+    run = primary.execute("SELECT outcome FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()
+    assert run["outcome"] == "blocked"
+    assert [r["run_uid"] for r in _releases(lease_client)] == [run_uid]
+
+
+def test_a_savepoint_rolled_back_end_keeps_the_lease(primary, lease_client):
+    """The txn commits, but a SAVEPOINT rollback undid the run end inside it: the run still holds its lease."""
+    tid, run_uid = _claimed(primary, lease_client)
+    _stall_outbox(primary)
+    with kb.write_txn(primary):
+        primary.execute("SAVEPOINT undo_end")
+        assert kb._end_or_synthesize_run(primary, tid, outcome="scheduled", status="scheduled",
+                                         synthesize=False) is not None
+        primary.execute("ROLLBACK TO undo_end")
+        primary.execute("RELEASE undo_end")
+    run = primary.execute("SELECT ended_at FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()
+    assert run["ended_at"] is None
+    assert _releases(lease_client) == []
