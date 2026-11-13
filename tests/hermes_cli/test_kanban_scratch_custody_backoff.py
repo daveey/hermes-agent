@@ -27,13 +27,13 @@ def archives(monkeypatch):
 
 def test_custody_refusal_backs_off_then_retries_a_changed_tree(env, remote, archives):
     tid, path, _ = evicted(env)
-    helpers._run("clone", "-q", "--bare", str(remote), str(path / "bare"))
+    helpers.refuse_forever(path)
     assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
     assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
     assert archives == [path], "refused custody tree re-archived inside its backoff"
     assert bo.Refusals("default").entries[f"custody:{tid}"]["count"] == 1
     import shutil
-    shutil.rmtree(path / "bare")
+    shutil.rmtree(path / "wt")
     helpers._run("clone", "-q", str(remote), str(path / "repo"))
     assert gc.gc_task_scratch(env.conn, older_than_days=7) == 1
     assert archives == [path, path] and not path.exists()

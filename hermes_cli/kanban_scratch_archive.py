@@ -42,13 +42,26 @@ the repo's meta.json says ``objects_omitted: "remote"`` with the restore steps,
 and ``kanban_scratch_archive_omit.restore`` rebuilds the tree from the remote.
 A full core clone archived to 0.7 % of its bytes this way (was 57-80 %).
 
-Anything it cannot prove safe keeps the workspace: a linked worktree or
-submodule (a ``.git`` gitlink file or symlink: the worktree GC owns those; a
-regular ``.git`` file with no ``gitdir:`` line, such as uv's empty cache
-marker, is plain data), a bare repository,
-a special file (fifo/socket/device), any scan error, source mutation during
-the archive, or any failed archive step. Symlinks are recorded, never
-followed.
+Shapes that used to refuse forever archive too (``kanban_scratch_archive_shapes``):
+
+* a bare repository: its refs (``--all`` minus remote-tracking refs) are
+  bundled like any repo's, and its meta.json says ``bare: true``;
+* a linked worktree or submodule (a ``.git`` gitlink file): a gitdir inside the
+  tree is archived as a nested repo; a gitdir outside it gets ``tracked.diff``,
+  ``untracked.tar`` and HEAD/branch in meta.json, read through a private copy of
+  its index so git never writes to the outside gitdir;
+* a fifo or socket: the manifest records its path, type and mode; it has no
+  content to archive;
+* refs whose tip the remote already holds (tags fetched from a promisor remote)
+  are no longer bundled, and a ref needing objects the promisor remote vouches
+  for is left to the payload (``promised_refs``).
+
+Anything it cannot prove safe keeps the workspace: a ``.git`` symlink, a gitlink
+whose gitdir is missing or empty, a device node, unpushed objects that are
+missing locally and vouched for by no promisor remote (reason
+``unrecoverable_objects``), any scan error, source mutation during the archive,
+or any failed archive step. A regular ``.git`` file with no ``gitdir:`` line
+(uv's empty cache marker) is plain data. Symlinks are recorded, never followed.
 """
 from __future__ import annotations
 
@@ -77,11 +90,13 @@ class ArchiveRefused(Exception):
 def find_repos(root: Path) -> list[Path]:
     """Standalone repos (a ``.git`` directory) below *root*, *root* included.
 
-    Raises :class:`ArchiveRefused` for a linked worktree/submodule, a bare
-    repository, a non-directory root, or any scan error. Traverses by directory
-    descriptor (never follows symlinks, ancestors included). A regular ``.git``
-    file that is not a ``gitdir:`` pointer (uv writes an empty one in each cache
-    dir) is plain data, archived in the payload like any other file.
+    Bare repositories and gitlinked worktrees are found by :func:`_discover`.
+    Raises :class:`ArchiveRefused` for a gitlink it cannot archive (missing or
+    empty gitdir, a ``.git`` symlink), a non-directory root, or any scan error.
+    Traverses by directory descriptor (never follows symlinks, ancestors
+    included). A regular ``.git`` file that is not a ``gitdir:`` pointer (uv
+    writes an empty one in each cache dir) is plain data, archived in the
+    payload like any other file.
     """
     return _find_repos(root)[0]
 
@@ -90,8 +105,9 @@ _GITLINK_PREFIX = b"gitdir:"
 _GITLINK_PROBE = 4096
 
 
-def _is_gitlink(dfd: int, directory: Path, st: os.stat_result) -> bool:
-    """True unless the regular file ``.git`` under *dfd* (lstat *st*) is provably not a gitlink.
+def _is_gitlink(dfd: int, directory: Path, st: os.stat_result):
+    """The pointer's bytes (truthy) unless the regular file ``.git`` under *dfd* (lstat *st*) is
+    provably not a gitlink, then False.
 
     Handles regular files only: the caller treats any other ``.git`` type
     (symlink, fifo, ...) as a gitlink without calling this. *dfd* is the scan's
@@ -107,23 +123,40 @@ def _is_gitlink(dfd: int, directory: Path, st: os.stat_result) -> bool:
         fst = os.fstat(fh.fileno())
         if not stat.S_ISREG(fst.st_mode) or _signature(fst) != _signature(st):
             raise ArchiveRefused(f"{directory / '.git'} changed during scan")
-        head = fh.read(_GITLINK_PROBE)
-    return head.lstrip().startswith(_GITLINK_PREFIX)
+        head = fh.read(_GITLINK_PROBE).lstrip()
+    return head if head.startswith(_GITLINK_PREFIX) else False
 
 
 def _in_git_metadata(rel: str) -> bool:
     return rel == ".git" or rel.endswith("/.git") or rel.startswith(".git/") or "/.git/" in rel
 
 
-def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
-    """``find_repos`` plus the signatures of the ``.git`` data files it judged.
+class _Layout:
+    """What :func:`_discover` found: repos by shape, plus the judged ``.git`` files' signatures."""
 
-    The caller re-checks those signatures against the payload snapshot, so a
-    marker rewritten into a gitlink after this judgement is refused. Each
-    regular ``.git`` file is judged during the scan, through the scan's own
-    descriptor for its directory.
+    def __init__(self):
+        self.repos: list[Path] = []  # standalone (a .git directory)
+        self.bare: list[Path] = []
+        self.linked: dict[Path, tuple[str, bool]] = {}  # worktree -> (gitdir as written, inside the tree)
+        self.markers: dict[str, list[int]] = {}  # every regular .git file judged (data or gitlink)
+
+
+def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
+    """``find_repos`` plus the signatures of the ``.git`` files it judged."""
+    layout = _discover(root)
+    return layout.repos, layout.markers
+
+
+def _discover(root: Path) -> _Layout:
+    """Every repo below *root* by shape, never descending into repository metadata.
+
+    The caller re-checks the judged ``.git`` files' signatures against the payload
+    snapshot, so a marker rewritten into a gitlink (or a pointer retargeted)
+    after this judgement is refused. Each regular ``.git`` file is judged during
+    the scan, through the scan's own descriptor for its directory.
     """
-    verdicts: dict[str, bool] = {}
+    from hermes_cli.kanban_scratch_archive_shapes import parse_gitlink
+    verdicts: dict[str, object] = {}
 
     def judge(dfd: int, gitrel: str, st: os.stat_result) -> None:
         rel = gitrel.rpartition("/")[0] or "."
@@ -131,7 +164,7 @@ def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
             verdicts[gitrel] = _is_gitlink(dfd, root if rel == "." else root / rel, st)
 
     found = _scan(root, on_git_file=judge)
-    markers: dict[str, list[int]] = {}
+    layout = _Layout()
     kids: dict[str, set[str]] = {".": set()}
     for rel, st in found.items():
         if rel == ".":
@@ -140,24 +173,37 @@ def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
         kids.setdefault(parent or ".", set()).add(name)
         if stat.S_ISDIR(st.st_mode):
             kids.setdefault(rel, set())
-    repos: list[Path] = []
+    bare = sorted(rel for rel, names in kids.items() if not _in_git_metadata(rel) and ".git" not in names
+                  and {"HEAD", "objects"} <= names and names & {"refs", "reftable"})
+
+    def in_bare(rel: str) -> bool:
+        return any((b == "." and rel != ".") or rel.startswith(b + "/") for b in bare)
+
     for rel, names in kids.items():
-        if _in_git_metadata(rel):
-            continue  # never descend into repository metadata
+        if _in_git_metadata(rel) or in_bare(rel):
+            continue  # never descend into repository metadata (a bare repo's included)
         directory = root if rel == "." else root / rel
+        if rel in bare:
+            layout.bare.append(directory)
+            continue
         if ".git" in names:
             gitrel = ".git" if rel == "." else f"{rel}/.git"
             gst = found[gitrel]
             if stat.S_ISDIR(gst.st_mode):
-                repos.append(directory)
+                layout.repos.append(directory)
                 continue
-            # A marker the scan never judged counts as a gitlink (fail closed).
-            if not stat.S_ISREG(gst.st_mode) or verdicts.get(gitrel, True):
-                raise ArchiveRefused(f"linked worktree or submodule at {directory / '.git'} (left to the worktree GC)")
-            markers[gitrel] = _signature(gst)  # plain data (e.g. uv's empty cache marker)
-        if {"HEAD", "objects"} <= names and names & {"refs", "reftable"}:
-            raise ArchiveRefused(f"bare repository at {directory}")
-    return sorted(repos), markers
+            # A marker the scan never judged counts as a gitlink nobody read (fail closed).
+            verdict = verdicts.get(gitrel, True) if stat.S_ISREG(gst.st_mode) else True
+            if verdict is True:
+                raise ArchiveRefused(f"linked worktree or submodule at {directory / '.git'} "
+                                     "(not a gitlink file the scan read)")
+            layout.markers[gitrel] = _signature(gst)
+            if verdict:  # a gitdir pointer: archived by its own shape
+                layout.linked[directory] = parse_gitlink(root, rel, verdict, found)
+            # else plain data (e.g. uv's empty cache marker)
+    layout.repos.sort()
+    layout.bare.sort()
+    return layout
 
 
 def _env(repo: Path) -> dict[str, str]:
@@ -179,10 +225,12 @@ def _env(repo: Path) -> dict[str, str]:
     return env
 
 
-def _git(repo: Path, env: dict[str, str], *args: str, ok=(0,)) -> subprocess.CompletedProcess:
+def _git(repo: Path, env: dict[str, str], *args: str, ok=(0,), stdin: Optional[bytes] = None
+         ) -> subprocess.CompletedProcess:
+    feed = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
     proc = subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, timeout=_GIT_TIMEOUT,
-        check=False, stdin=subprocess.DEVNULL, env=env,
+        check=False, env=env, **feed,
     )
     if proc.returncode not in ok:
         err = proc.stderr.decode("utf-8", "replace").strip()[:500]
@@ -262,13 +310,18 @@ def _write_remote_base(repo: Path, dest: Path, entries: list[dict]) -> list[str]
 
 
 def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional[int],
-                 omitted: Optional[dict] = None) -> dict:
+                 omitted: Optional[dict] = None, bare: bool = False,
+                 gitdir: Optional[tuple[str, bool]] = None) -> dict:
     """Write one repo's archive into *dest* (created). Raises on any failure.
 
     *omitted* is this repo's ``kanban_scratch_archive_omit`` record when the
     payload leaves out objects the remote holds; meta.json then says so and
-    lists the restore steps.
+    lists the restore steps. *bare* archives a bare repository (refs only).
+    *gitdir* ``(pointer, inside)`` marks a gitlinked worktree: inside the tree it
+    archives like a standalone repo; outside it, only the worktree diff,
+    untracked files and HEAD/branch are recorded, and git never writes there.
     """
+    from hermes_cli import kanban_scratch_archive_shapes as shapes
     env = _env(repo)
     dest.mkdir(parents=True, exist_ok=True)  # the root repo archives into the fresh partial dir
     head = _text(_git(repo, env, "rev-parse", "--verify", "-q", "HEAD^{commit}", ok=(0, 1))) or None
@@ -279,20 +332,55 @@ def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional
         if len(parts) >= 2:
             remotes.setdefault(parts[0], parts[1])
 
-    # Commits not reachable from any remote-tracking ref.
-    refs = [r for r in _text(_git(repo, env, "for-each-ref", "--format=%(refname)")).splitlines()
-            if r and not r.startswith("refs/remotes/")]
-    if head:
-        refs.append("HEAD")
-    unpushed = [r for r in refs
-                if _text(_git(repo, env, "rev-list", "-n1", r, "--not", "--remotes"))]
     files = ["meta.json"]
+    extra: dict = {}
+    outside = gitdir is not None and not gitdir[1]
+    if gitdir is not None:
+        extra.update(linked_gitdir=gitdir[0], gitdir_inside=gitdir[1])
+    if bare:
+        extra["bare"] = True
+        gitdir_of = _text(_git(repo, env, "rev-parse", "--absolute-git-dir"))
+        if os.path.normpath(gitdir_of) != os.path.normpath(os.path.abspath(repo)):
+            raise ArchiveRefused(f"{repo} looks like a bare repository but git resolves {gitdir_of}")
+    if omitted is not None:
+        from hermes_cli.kanban_scratch_archive_omit import RESTORE_STEPS
+        extra.update(objects_omitted=omitted["reason"], objects_restore=RESTORE_STEPS,
+                     omitted_remote_refs=omitted["remote_refs"], supplement_pack=omitted["pack"])
+    unpushed: list[str] = []
+    if not outside:  # an outside gitdir's commits stay in that repository
+        # Commits neither reachable from a remote-tracking ref nor fetched from a promisor remote.
+        unpushed, more = shapes.select_unpushed(repo, env, _git, head, partial=_is_partial_clone(repo, env))
+        extra.update(more)
     if unpushed:
         bundle = dest / "commits.bundle"
         _git(repo, env, "bundle", "create", str(bundle), *unpushed, "--not", "--remotes")
         _git(repo, env, "bundle", "verify", str(bundle))
         files.append(bundle.name)
+    if bare:
+        return _write_meta(dest, task_id, completed_at, repo, head, branch, remotes, unpushed, 0, files, extra)
+    if outside:
+        with shapes.private_index(repo, env, _git, dest) as private:
+            untracked = _archive_worktree(repo, dest, private, head, files, extra)
+    else:
+        untracked = _archive_worktree(repo, dest, env, head, files, extra)
+    return _write_meta(dest, task_id, completed_at, repo, head, branch, remotes, unpushed, len(untracked),
+                       files, extra)
 
+
+def _write_meta(dest: Path, task_id: str, completed_at: Optional[int], repo: Path, head, branch, remotes,
+                unpushed: list[str], untracked_count: int, files: list[str], extra: dict) -> dict:
+    meta = {
+        "task_id": task_id, "completed_at": completed_at, "source": str(repo),
+        "head": head, "branch": branch, "remotes": remotes, "unpushed_refs": unpushed,
+        "untracked_count": untracked_count, "files": files, "archived_at": int(time.time()), **extra,
+    }
+    (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    return meta
+
+
+def _archive_worktree(repo: Path, dest: Path, env: dict[str, str], head: Optional[str],
+                      files: list[str], extra: dict) -> list[str]:
+    """``tracked.diff``, remote-base records and ``untracked.tar`` of *repo*'s worktree; the untracked paths."""
     base = head or _text(_git(repo, env, "hash-object", "-t", "tree", "--stdin"))
     changes = _raw_changes(repo, env, base) if head and _is_partial_clone(repo, env) else []
     missing = _missing_objects(repo, env) if changes else set()
@@ -310,11 +398,6 @@ def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional
     if diff:
         (dest / "tracked.diff").write_bytes(diff)
         files.append("tracked.diff")
-    extra: dict = {}
-    if omitted is not None:
-        from hermes_cli.kanban_scratch_archive_omit import RESTORE_STEPS
-        extra.update(objects_omitted=omitted["reason"], objects_restore=RESTORE_STEPS,
-                     omitted_remote_refs=omitted["remote_refs"], supplement_pack=omitted["pack"])
     if remote_base:
         files.extend(_write_remote_base(repo, dest, remote_base))
         extra["remote_base_count"] = len(remote_base)
@@ -327,14 +410,7 @@ def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional
                 # Embedded repos are listed as directories; they are archived on their own.
                 tar.add(str(repo / rel.rstrip("/")), arcname=rel.rstrip("/"), recursive=False)
         files.append("untracked.tar")
-
-    meta = {
-        "task_id": task_id, "completed_at": completed_at, "source": str(repo),
-        "head": head, "branch": branch, "remotes": remotes, "unpushed_refs": unpushed,
-        "untracked_count": len(untracked), "files": files, "archived_at": int(time.time()), **extra,
-    }
-    (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-    return meta
+    return untracked
 
 
 PAYLOAD_DIR = ".hermes-complete-archive-v1"
@@ -351,6 +427,10 @@ _MANIFEST = "manifest.json"
 _GZIP_LEVEL = 1
 
 
+# Entries the manifest records (path, type, mode) with no tar member: they hold no content.
+_CONTENTLESS = ("fifo", "socket")
+
+
 def _kind(mode: int) -> str:
     if stat.S_ISREG(mode):
         return "file"
@@ -358,7 +438,11 @@ def _kind(mode: int) -> str:
         return "dir"
     if stat.S_ISLNK(mode):
         return "symlink"
-    raise ArchiveRefused("special file in workspace (fifo/socket/device)")
+    if stat.S_ISFIFO(mode):
+        return "fifo"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    raise ArchiveRefused("special file in workspace (device node)")
 
 
 def _signature(st: os.stat_result) -> list[int]:
@@ -449,6 +533,9 @@ def _scan(root: Path, tar: Optional[tarfile.TarFile] = None,
                     tar.addfile(info)
                     rec["link"] = info.linkname
                     entries[erel] = rec
+            elif kind in _CONTENTLESS:
+                if rec is not None:
+                    entries[erel] = rec  # recorded, never opened: reading a fifo could block or drain it
             elif info is not None:
                 if omit is not None and omit(dfd, name, erel, st):
                     continue
@@ -590,7 +677,7 @@ def verify_complete_archive(archive: Path) -> dict:
                         digest.update(block)
                     if digest.hexdigest() != rec["sha256"] or m.size != rec["size"]:
                         raise ArchiveRefused(f"payload content mismatch for {m.name!r}")
-        if seen != set(want):
+        if seen != {name for name, rec in want.items() if rec.get("type") not in _CONTENTLESS}:
             raise ArchiveRefused("payload is missing members")
     except (OSError, ValueError, KeyError, TypeError, tarfile.TarError, EOFError) as exc:
         raise ArchiveRefused(f"payload unreadable: {exc!r}") from exc
@@ -739,7 +826,8 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
     no half archive that looks complete. Raises :class:`ArchiveRefused` (or
     ``OSError``) on any failure; the caller then keeps the workspace.
     """
-    repos, markers = _find_repos(workspace)
+    layout = _discover(workspace)
+    repos, markers = layout.repos, layout.markers
     try:
         reserved = os.path.lexists(workspace / PAYLOAD_DIR)
     except OSError as exc:
@@ -757,6 +845,11 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
             rel = repo.relative_to(workspace)
             archive_repo(repo, partial / rel if rel.parts else partial,
                          task_id=task_id, completed_at=completed_at, omitted=records.get(repo))
+        for repo, kwargs in ([(r, {"bare": True}) for r in layout.bare]
+                             + [(w, {"gitdir": g}) for w, g in sorted(layout.linked.items())]):
+            rel = repo.relative_to(workspace)
+            archive_repo(repo, partial / rel if rel.parts else partial,
+                         task_id=task_id, completed_at=completed_at, **kwargs)
         omitter = None
         if plans:
             from hermes_cli.kanban_scratch_archive_omit import Omitter
@@ -765,7 +858,7 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
         snapshot = (_write_payload(workspace, payload, omitter, [records[r] for r in repos if r in records])
                     if plans else _write_payload(workspace, payload))
         if any(snapshot.get(rel) != sig for rel, sig in markers.items()):
-            raise ArchiveRefused("a .git data file changed after it was judged not a gitlink")
+            raise ArchiveRefused("a .git file changed after it was judged (data marker or gitlink)")
         if plans:
             from hermes_cli.kanban_scratch_archive_omit import check_files_unchanged
             check_files_unchanged(plans, snapshot)

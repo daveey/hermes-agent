@@ -271,7 +271,7 @@ def test_local_dependents_keep_custody_without_sync_events(env, control):
     assert before == [tuple(r) for r in env.conn.execute("SELECT * FROM kanban_sync_outbox")]
 
 
-def test_clone_archives_and_bare_is_preserved(env, remote):
+def test_clone_archives_and_unarchivable_tree_is_preserved(env, remote):
     tid, path, _ = evicted(env)
     helpers._run("clone", "-q", str(remote), str(path / "repo"))
     (path / "repo" / "tracked.txt").write_text("local change\n")
@@ -279,7 +279,7 @@ def test_clone_archives_and_bare_is_preserved(env, remote):
     dest = env.home / "archive" / "scratch" / "default" / tid / "repo"
     assert "local change" in (dest / "tracked.diff").read_text()
     _, path, _ = evicted(env)
-    helpers._run("clone", "-q", "--bare", str(remote), str(path / "bare"))
+    helpers.refuse_forever(path)
     assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
     assert path.exists()
 

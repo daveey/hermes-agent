@@ -40,9 +40,9 @@ def archives(monkeypatch):
     return calls
 
 
-def _bare_refused(remote):
+def _refused(remote):
     tid, path = _task(remote=remote)
-    _run("clone", "-q", "--bare", str(remote), str(path / "mirror.git"))
+    helpers.refuse_forever(path)
     return tid, path
 
 
@@ -57,11 +57,11 @@ def _expire(key):
 
 
 def test_refused_tree_is_not_rearchived_until_backoff_passes(remote, archives, caplog):
-    tid, path = _bare_refused(remote)
+    tid, path = _refused(remote)
     assert helpers._gc() == 0
     assert archives == [path]
     entry = _state()[tid]
-    assert entry["count"] == 1 and "bare repository" in entry["reason"]
+    assert entry["count"] == 1 and "linked worktree or submodule" in entry["reason"]
     assert entry["retry_at"] - entry["last_at"] == bo.BASE_S
 
     caplog.set_level(logging.INFO, logger="hermes_cli.kanban_scratch_backoff")
@@ -78,10 +78,10 @@ def test_refused_tree_is_not_rearchived_until_backoff_passes(remote, archives, c
 
 
 def test_changed_tree_is_retried_at_once_and_success_clears_the_entry(remote, archives):
-    tid, path = _bare_refused(remote)
+    tid, path = _refused(remote)
     assert helpers._gc() == 0
     import shutil
-    shutil.rmtree(path / "mirror.git")  # the root's mtime moves: a new fingerprint
+    shutil.rmtree(path / "wt")  # the root's mtime moves: a new fingerprint
     assert helpers._gc() == 0
     assert archives == [path, path]
     assert not path.exists()
@@ -137,7 +137,7 @@ def test_refusal_count_resets_when_the_refused_tree_changes(tmp_path, change):
 def test_unreadable_state_is_empty_and_never_blocks(remote, archives):
     bo._path("default").parent.mkdir(parents=True, exist_ok=True)
     bo._path("default").write_text("{not json")
-    tid, path = _bare_refused(remote)
+    tid, path = _refused(remote)
     assert helpers._gc() == 0
     assert archives == [path] and _state()[tid]["count"] == 1
 
@@ -150,9 +150,9 @@ def _write_entries(entries):
 def test_malformed_memo_entry_is_dropped_and_the_aged_pass_completes(remote, archives, caplog, capsys):
     """A JSON-valid memo whose entry has ``retry_at: "x"`` / ``count: null`` must not abort the pass."""
     import time
-    tid, path = _bare_refused(remote)
+    tid, path = _refused(remote)
     fp = bo.fingerprint(path, OLD)
-    good_tid, good_path = _bare_refused(remote)
+    good_tid, good_path = _refused(remote)
     now = time.time()
     _write_entries({
         tid: {"fingerprint": fp, "count": None, "last_at": now, "retry_at": "x", "reason": "r"},
@@ -163,7 +163,7 @@ def test_malformed_memo_entry_is_dropped_and_the_aged_pass_completes(remote, arc
     assert helpers._gc() == 0
     assert "GC complete" in capsys.readouterr().out
     assert archives == [path], "the malformed entry is no refusal; the valid one still backs off"
-    assert good_path.exists() and path.exists()  # bare repo: refused again, kept
+    assert good_path.exists() and path.exists()  # dangling gitlink: refused again, kept
     entry = _state()[tid]
     assert entry["count"] == 1 and isinstance(entry["retry_at"], float)
     assert caplog.text.count("dropped 1 malformed") == 1
