@@ -119,7 +119,9 @@ def _worktree(pattern, match, gateway, probe):
 
 def _state_path(pattern, match, gateway, probe):
     from hermes_cli import kanban_placement as kp
-    paths = [p for p in (_clean(m.group(0)) for m in _STATE.finditer(match.string))
+    # ``$HOME``/``${HOME}`` prefixes too (kp.HOME_PREFIX); a relative path after a cd home falls back to the hit.
+    state = re.compile(kp.HOME_PREFIX + _STATE.pattern[len(_HOME):])
+    paths = [p for p in (_clean(m.group(0)) for m in state.finditer(match.string))
              if re.match(kp.HERMES_STATE_PATH, p)]
     for raw in dict.fromkeys(paths) or [match.group(0)]:
         if art := _ARTIFACT.search(raw):

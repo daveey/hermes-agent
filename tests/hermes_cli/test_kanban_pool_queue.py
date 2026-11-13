@@ -1341,11 +1341,12 @@ def test_a_worker_keeps_a_card_naming_its_own_unpublished_tree(on_w2, tmp_path, 
     assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-worktree"
 
 
-def test_a_worker_keeps_a_card_naming_its_own_artifact(on_w2, tmp_path):
+@pytest.mark.parametrize("home", ["~", "$HOME", "${HOME}"])
+def test_a_worker_keeps_a_card_naming_its_own_artifact(on_w2, tmp_path, home):
     log = tmp_path / ".hermes" / "kanban" / "workspaces" / "t_0000000000000002" / "log.txt"
     log.parent.mkdir(parents=True)
     log.write_text("x\n")
-    out = _kept(on_w2.conn, _create(title="read ~/.hermes/kanban/workspaces/t_0000000000000002/log.txt"))
+    out = _kept(on_w2.conn, _create(title=f"read {home}/.hermes/kanban/workspaces/t_0000000000000002/log.txt"))
     assert "exists only on this worker" in out["note"], out
     assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-artifact"
 
