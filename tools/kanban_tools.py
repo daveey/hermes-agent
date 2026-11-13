@@ -1630,7 +1630,8 @@ def _handle_create(args: dict, **kw) -> str:
                 pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local", "runs_on": runs_on}
         # [daveey] Refuse a second owner: open cards on every board/gateway, not this chat's links.
-        refused, after_create = kanban_overlap.check(conn, args, courier=origin_intent is not None,
+        refused, after_create = kanban_overlap.check(conn, {**args, "assignee": str(assignee)},
+                                                     courier=origin_intent is not None,
                                                      title=str(title).strip(), session_id=session_id,
                                                      self_tid=self_tid, parents=parents)
         if refused:

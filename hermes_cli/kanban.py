@@ -23,6 +23,7 @@ from typing import Optional
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_overlap
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_operator as kbo
 from hermes_cli import kanban_swarm as ks
@@ -372,16 +373,7 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
 
 
 def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
-    """Print a ``create_overlap`` refusal (JSON with ``--json``, else a summary on stderr); exit code 2."""
-    if getattr(args, "json", False):
-        print(refused)
-    else:
-        ref = json.loads(refused)
-        print(f"kanban: {ref['code']}: {ref['note']}", file=sys.stderr)
-        for m in ref["matches"]:
-            print(f"  {m['id']}  {m['gateway']}/{m['board']}  ({m['status']})  {m['title']}  — {m['why']}",
-                  file=sys.stderr)
-    return 2
+    return kanban_overlap.print_cli(refused, as_json=bool(getattr(args, "json", False)))
 
 
 @publication_scope
@@ -447,7 +439,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli import kanban_overlap
         board = getattr(args, "board", None) or kb.get_current_board()
         refused, after_create = kanban_overlap.check(
-            conn, {"body": body, "idempotency_key": idem_key,
+            conn, {"body": body, "idempotency_key": idem_key, "assignee": getattr(args, "assignee", None),
                    "board": None if board == kb.DEFAULT_BOARD else board,
                    "distinct_from": getattr(args, "distinct_from", None) or [],
                    "distinct_reason": getattr(args, "distinct_reason", None)},

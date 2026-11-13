@@ -36,7 +36,7 @@ from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, ka
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
-from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
+from hermes_cli import kanban_dup_detector as _dup_detector, kanban_placement_forward as _placement_fwd  # no cycle
 from hermes_cli import kanban_run_end_lease as _run_end_lease  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
@@ -2580,9 +2580,9 @@ def complete_task(
         _append_event(conn, task_id, "completed", completion_payload, run_id=run_id)
         _placement_fwd.record_cancel_intent(conn, task_id, "completed", settled=placement_settled)  # [daveey]
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
+    _dup_detector.note_completion(conn, task_id, summary, result)  # [daveey] counts same-creator duplicates
     _placement_fwd.forward_completion(conn, task_id, settled=placement_settled)
-    # Success wipes the breaker counter (history stays on the event log).
-    _clear_failure_counter(conn, task_id)
+    _clear_failure_counter(conn, task_id)  # success wipes the breaker counter (history stays on the event log)
     recompute_ready(conn)  # separate txn so children see ``done``
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)

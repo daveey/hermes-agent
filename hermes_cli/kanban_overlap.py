@@ -30,14 +30,17 @@ equals a board slug does not count.
 Closed cards never match (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
 ``<profile>/<board>/<id>`` twin). Heuristic exemptions (singletons ignore these, except the waiting card a
 capability-owner create quotes and a card bound to it, :func:`_bound_to`): the creator's own card, the new
-card's parents, cards the same chat or the same worker created (fan-out), the waiting card a capability-owner
+card's parents, cards the same chat created (fan-out), the waiting card a capability-owner
 create quotes, a local card bound to that
 waiting card (its deferred-placement origin, or a card parked on it: :func:`_bound_to`), and another capability-owner
 card for that same waiting card, a card the new one parks/waits/depends on (:func:`waits_on`), a card whose failed
 execution the new one recovers (:func:`recovers`: ``self-heal: kanban card t_X ... failed 2x``), and a card that
 names a different target (:func:`distinct_target`: another repo, host or process, an inverted check at another
 revision, or another work role, :func:`work_role`: implement vs measure vs deliver; a newer sha or another
-ticket number alone is not a different target). Admitted look-alikes
+ticket number alone is not a different target). A card the same worker created is NOT exempt: it meets
+the same match, then the same-creator admits and the shared-fix-site match in
+:mod:`hermes_cli.kanban_overlap_own`; a near-identical re-issue in the same run returns the first card
+(``deduplicated``) instead of creating a second. Admitted look-alikes
 are logged. Each card counts once per gateway. A missing or unreadable replica is skipped and logged, never a block.
 ``kanban.create_overlap_check: false`` turns the check off.
 
@@ -55,6 +58,8 @@ import re
 import sqlite3
 from pathlib import Path
 from typing import Callable, Iterable, NamedTuple, Optional
+
+from hermes_cli import kanban_overlap_own as _own
 
 _log = logging.getLogger(__name__)
 
@@ -557,7 +562,8 @@ def _board_cards(c: sqlite3.Connection, slug: str, self_gw: Optional[str], *,
     # ``placed_as``: the card on another gateway this one was forwarded to (deferred placement); ``awaits``: the
     # card its latest park waits on. Either binds this card's completion to that card (:func:`_bound_to`).
     rows = c.execute(
-        "SELECT t.id, t.title, t.body, t.status, t.session_id, (SELECT json_extract(e.payload, "
+        "SELECT t.id, t.title, t.body, t.status, t.assignee, t.created_at, t.session_id, "
+        "(SELECT json_extract(e.payload, "
         "'$.creator_task_id') FROM task_events e WHERE e.task_id = t.id AND e.kind = 'created' "
         "LIMIT 1), t.idempotency_key, (SELECT json_extract(e.payload, '$.remote_task_id') FROM task_events e "
         "WHERE e.kind = 'placement_forwarded' AND e.task_id = t.id AND json_extract(e.payload, "
@@ -575,12 +581,13 @@ def _board_cards(c: sqlite3.Connection, slug: str, self_gw: Optional[str], *,
     for tid, sess in links:
         chats.setdefault(tid, set()).add(sess)
     return [{"id": tid, "board": slug, "gateway": self_gw or "local", "status": status, "title": title,
-             "body": body or "",
+             "body": body or "", "assignee": assignee, "created_at": created_at,
              "session_id": sess, "creator_task_id": creator, "local": True, "key_family": key_family(key),
+             "has_key": bool(key),
              "placed_as": placed if isinstance(placed, str) else None,
              "awaits": awaits if isinstance(awaits, str) and status == "scheduled" else None,
              "chats": sorted(chats.get(tid, set()) | ({sess} if sess else set()))}
-            for tid, title, body, status, sess, creator, key, placed, awaits in rows]
+            for tid, title, body, status, assignee, created_at, sess, creator, key, placed, awaits in rows]
 
 
 def _local_cards(self_gw: Optional[str]) -> Iterable[dict]:
@@ -633,6 +640,7 @@ def _replica_cards(self_gw: Optional[str]) -> Iterable[dict]:
         sessions = [s for s in (t.get("sessions") or []) if isinstance(s, dict)]
         yield {"id": t["id"], "board": t.get("board") or "default", "gateway": t.get("gateway") or gw,
                "status": t.get("status"), "title": t.get("title") or "", "body": t.get("body") or "",
+               "assignee": t.get("assignee") if isinstance(t.get("assignee"), str) else None,
                "local": False,
                "session_id": next((s.get("session") for s in sessions if s.get("rel") == "created"), None),
                # hermes-hub client >= 1.9.27 publishes the key; per-host automation keyed by one creator on two
@@ -702,16 +710,22 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
 
 def _find(*, title: str, body: str, target_board: str, session_id: Optional[str], self_tid: Optional[str],
           parents: Iterable[str], family: Optional[str] = None, self_gw: Optional[str] = None,
-          cards: Optional[list[dict]] = None, gateways: Optional[set[str]] = None) -> tuple[list[dict], set[str]]:
+          cards: Optional[list[dict]] = None, gateways: Optional[set[str]] = None,
+          assignee: Optional[str] = None, run_started: Optional[int] = None,
+          shared_code: bool = True) -> tuple[list[dict], set[str]]:
     """:func:`find` over ``cards`` (default: every local board and the replica) -> ``(matches, gateways)``.
     ``gateways`` (default: those the cards name) feeds the board-reference and host rules; the in-transaction
-    re-check passes the first check's set so both reads judge a card the same way. Raises on a broken read."""
+    re-check passes the first check's set so both reads judge a card the same way. Raises on a broken read.
+    A card ``self_tid`` created is compared too (:mod:`hermes_cli.kanban_overlap_own`): ``assignee`` feeds its
+    admits, ``run_started`` (the creator's current run) its same-run re-issue, and ``shared_code`` its shared
+    fix-site match (off for the in-transaction re-check, which reads too few cards to tell a rare identifier)."""
     skip = set(parents) | ({self_tid} if self_tid else set())
     waiting = capability_owner_waiting_id(title, body)
     new_words = words(title)
     job = singleton_job(title)
     failure = failure_identity(title, body)
     out, seen, mine = [], set(), None
+    common: Optional[frozenset[str]] = None
     if cards is None:
         cards = [*_local_cards(self_gw), *_replica_cards(self_gw)]
     if gateways is None:
@@ -726,14 +740,20 @@ def _find(*, title: str, body: str, target_board: str, session_id: Optional[str]
         # Keep other mirror owners visible; do not exempt a whole family or envelope.
         if waiting and (card["id"] == waiting or _bound_to(card, waiting)):
             continue
+        own = bool(self_tid and card.get("creator_task_id") == self_tid)
         if not singleton and (card["id"] in skip
                 or (waiting and _sibling_owner(card.get("title") or "", waiting))
-                or (session_id and card["session_id"] == session_id)
-                or (self_tid and card["creator_task_id"] == self_tid)
+                or (session_id and card["session_id"] == session_id and not own)
                 or (family and card.get("key_family") == family)):
             continue
         seen.add((card["gateway"], card["id"]))
         reasons, score = _reasons(card, new_words, title, body, target_board, gateways, failure)
+        if not reasons and own and shared_code:
+            score = _own.title_score(new_words, words(card.get("title") or ""))
+            if common is None:
+                common = _own.common_ids(_own.code_ids(title, body), cards)
+            why = _own.shared_code_reason(title, body, card, common, score)
+            reasons = [why] if why else []
         if not reasons:
             continue
         if mine is None:
@@ -741,16 +761,21 @@ def _find(*, title: str, body: str, target_board: str, session_id: Optional[str]
         admit = (f"waits on {card['id']}" if waits_on(card["id"], title, body)
                  else f"recovers {card['id']}" if recovers(card["id"], title, card.get("title") or "")
                  # A failure- or file-only match the new card cites by id was written knowing that owner.
-                 else f"cites {card['id']}" if (all(_failure_reason(r) or _file_reason(r) for r in reasons)
+                 else f"cites {card['id']}" if (all(_failure_reason(r) or _file_reason(r) or _own.is_reason(r)
+                                                    for r in reasons)
                                                 and cites(card["id"], title, body))
                  else _distinct(mine, _identity(card.get("title") or "", card.get("body") or "", gateways)))
+        if own and not admit:
+            admit = _own.own_distinct(title, assignee, card)
         if admit and not singleton:
             # Logged so an audit can tell an admitted look-alike from a missed one.
             _log.info("kanban create overlap: admitted %r despite %s/%s/%s (%s): %s", title, card["gateway"],
                       card["board"], card["id"], "; ".join(reasons), admit)
         else:
             out.append({**{k: card[k] for k in ("id", "board", "gateway", "status", "title", "chats")},
-                        "why": "; ".join(reasons), "_score": score, "_local": card["local"]})
+                        "why": "; ".join(reasons), "_score": score, "_local": card["local"],
+                        "_reissue": own and not any(_own.is_reason(r) for r in reasons)
+                        and _own.reissue(card, self_tid, run_started, score)})
     out.sort(key=lambda m: (-m["_score"], m["status"] not in ("running", "ready", "scheduled"), m["id"]))
     return out, gateways
 
@@ -784,6 +809,48 @@ def refusal(matches: list[dict], distinct_from: list[str], reason: str, entry: s
 
 def covered(matches: list[dict], distinct_from: list[str], reason: str) -> bool:
     return bool(reason.strip()) and all(m["id"] in distinct_from for m in matches[:MAX_SHOWN])
+
+
+DEDUP_CODE = "create_deduplicated"
+
+
+def reissued(matches: list[dict]) -> Optional[dict]:
+    """The creator's own keyless card from this same run that the new create re-issues, if one matched."""
+    return min((m for m in matches if m.get("_reissue")), key=lambda m: m["id"], default=None)
+
+
+def deduplicated(card: dict) -> dict:
+    """The answer to a same-run re-issue: the first card, nothing created (:func:`kanban_overlap_own.reissue`)."""
+    return {"ok": True, "created": False, "deduplicated": True, "code": DEDUP_CODE, "task_id": card["id"],
+            "note": f"No card was created: you already created {card['id']} ({card['status']}) for this in this "
+                    "run. Use that card. If this really is separate work, call kanban_create again with "
+                    f"distinct_from=['{card['id']}'] and distinct_reason='<why it is separate>'."}
+
+
+def verdict(matches: list[dict], distinct_from: list[str], reason: str, entry: str = "tool") -> dict:
+    """Refusal JSON for uncovered ``matches``, or the dedup answer when one is a same-run re-issue."""
+    first = reissued(matches)
+    return deduplicated(first) if first else refusal(matches, distinct_from, reason, entry)
+
+
+def print_cli(refused: str, *, as_json: bool) -> int:
+    """``hermes kanban create``'s answer to :func:`check`'s JSON: a refusal prints JSON (``--json``) or a summary on
+    stderr, exit code 2; a same-run re-issue (``deduplicated``) prints the first card's id, exit code 0."""
+    import sys
+    ref = json.loads(refused)
+    if ref.get("deduplicated"):
+        print(refused if as_json else ref["task_id"])
+        if not as_json:
+            print(f"kanban: {ref['note']}", file=sys.stderr)
+        return 0
+    if as_json:
+        print(refused)
+        return 2
+    print(f"kanban: {ref['code']}: {ref['note']}", file=sys.stderr)
+    for m in ref["matches"]:
+        print(f"  {m['id']}  {m['gateway']}/{m['board']}  ({m['status']})  {m['title']}  — {m['why']}",
+              file=sys.stderr)
+    return 2
 
 
 def log_path():
@@ -857,10 +924,12 @@ class AfterCreate:
                  session_id: Optional[str] = None,
                  self_tid: Optional[str] = None, parents: Iterable[str] = (), family: Optional[str] = None,
                  self_gw: Optional[str] = None, gateways: Optional[set[str]] = None, matches: Iterable[dict] = (),
-                 distinct: Iterable[str] = (), reason: str = "", own: bool = False, entry: str = "tool"):
+                 distinct: Iterable[str] = (), reason: str = "", own: bool = False, entry: str = "tool",
+                 assignee: Optional[str] = None, run_started: Optional[int] = None):
         self._conn, self._since, self._board, self._title, self._body = conn, since, board, title, body
         self._find_kw = {"title": title, "body": body, "target_board": target_board, "session_id": session_id,
-                         "self_tid": self_tid, "parents": list(parents), "family": family, "self_gw": self_gw}
+                         "self_tid": self_tid, "parents": list(parents), "family": family, "self_gw": self_gw,
+                         "assignee": assignee, "run_started": run_started}
         self._gateways, self._matches = gateways, list(matches)
         self._distinct, self._reason, self._own, self._entry = list(distinct), reason, own, entry
         self._session_id, self._self_tid = session_id, self_tid
@@ -877,7 +946,8 @@ class AfterCreate:
     def _recheck(self, conn: sqlite3.Connection) -> None:
         try:
             cards = _board_cards(conn, self._board, self._find_kw["self_gw"], since=self._since)
-            matches = _find(**self._find_kw, cards=cards, gateways=self._gateways)[0] if cards else []
+            matches = (_find(**self._find_kw, cards=cards, gateways=self._gateways, shared_code=False)[0]
+                       if cards else [])
         except Exception:  # health: allow BLE001 -- a broken re-check must never block creating a card
             _log.warning("kanban create overlap: in-transaction re-check failed; creating without it", exc_info=True)
             return
@@ -892,9 +962,11 @@ class AfterCreate:
                   self._title, ", ".join(m["id"] for m in fresh))
 
         def settle() -> str:
-            record(self._conn if self._own else None, self._self_tid, outcome="refused", title=self._title,
+            out = verdict(fresh, self._distinct, self._reason, self._entry)
+            record(self._conn if self._own else None, self._self_tid,
+                   outcome="deduplicated" if out.get("deduplicated") else "refused", title=self._title,
                    matches=fresh, session_id=self._session_id)
-            return json.dumps(refusal(fresh, self._distinct, self._reason, self._entry))
+            return json.dumps(out)
 
         raise OverlapRefused(settle)
 
@@ -927,8 +999,10 @@ def check(conn: sqlite3.Connection, args: dict, *, courier: bool, title: str, se
     body = str(args.get("body") or "")
     target_board = args.get("board") or kb.DEFAULT_BOARD
     own = bool(self_tid) and not args.get("board")  # the creator's card is on the board this call opened
+    assignee = args.get("assignee") if isinstance(args.get("assignee"), str) else None
     find_kw = {"title": title, "body": body, "target_board": target_board, "session_id": session_id,
-               "self_tid": self_tid, "parents": parents, "family": key_family(key)}
+               "self_tid": self_tid, "parents": parents, "family": key_family(key),
+               "assignee": assignee, "run_started": _run_started(conn, self_tid)}
     try:
         self_gw = reg.self_gateway()
         matches, gateways = _find(**find_kw, self_gw=self_gw)
@@ -945,6 +1019,19 @@ def check(conn: sqlite3.Connection, args: dict, *, courier: bool, title: str, se
     if covered(matches, distinct, reason):
         pending._matches = list(matches)
         return None, pending
-    record(conn if own else None, self_tid, outcome="refused", title=title, matches=matches,
-           session_id=session_id)
-    return json.dumps(refusal(matches, distinct, reason, entry)), _no_override
+    out = verdict(matches, distinct, reason, entry)
+    record(conn if own else None, self_tid, outcome="deduplicated" if out.get("deduplicated") else "refused",
+           title=title, matches=matches, session_id=session_id)
+    return json.dumps(out), _no_override
+
+
+def _run_started(conn: sqlite3.Connection, self_tid: Optional[str]) -> Optional[int]:
+    """When the creator's current run began (None outside a worker, or when the read fails)."""
+    if not self_tid:
+        return None
+    try:
+        row = conn.execute("SELECT r.started_at FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+                           "WHERE t.id = ?", (self_tid,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return _own._epoch(row[0]) if row else None
