@@ -1347,6 +1347,8 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     from hermes_cli.kanban_sync_omissions import without_held
     cols = _local_fields(conn, table, without_held(conn, table, ch.uid, ch.fields), task_id)
     if table == "task_events" and "origin_gateway" in table_columns(conn, table):
+        # Authority, not provenance only: kanban_review_release.released() honours a promoted event's
+        # review_release stamp only when this column names the card's home, so it must come from the wire. [daveey]
         cols["origin_gateway"] = ch.origin_gateway or None
     if table == "task_links":
         return conn.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
