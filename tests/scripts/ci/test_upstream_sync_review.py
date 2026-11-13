@@ -418,6 +418,58 @@ def test_an_unexpected_ship_tool_error_refuses_naming_it(world, land_stub, monke
     assert "REFUSED: " in out and "review gate failed: RuntimeError: ship tool fault" in out, out
 
 
+def test_all_upstream_urls_must_be_genuine(world, land_stub, capsys):
+    root, checkout = world
+    head = conflict_sync(root, checkout)
+    before = main_of(root)
+    actions = staged_green(root, checkout, head)
+    fork_url = "https://github.com/someone/hermes-agent.git"
+    git(checkout, "config", "--add", "remote.upstream.url", fork_url)
+    assert git(checkout, "config", "--get-all", "remote.upstream.url").splitlines() == [
+        "https://github.com/NousResearch/hermes-agent.git", fork_url,
+    ]
+    capsys.readouterr()
+
+    assert gate(checkout, head, actions) == sync.REFUSED
+    out = capsys.readouterr().out
+    assert "not github.com/NousResearch/hermes-agent" in out and fork_url in out
+    assert main_of(root) == before
+    assert land_stub.read()["gates"] == []
+
+
+def test_mixed_case_genuine_upstream_url_is_accepted(world, land_stub):
+    root, checkout = world
+    upstream_commit(root, {"u.txt": "u\n"}, "upstream change")
+    head = merge_upstream(checkout)
+    before = main_of(root)
+    actions = staged_green(root, checkout, head)
+    url = "https://github.com/nOuSrEsEaRcH/HeRmEs-AgEnT.git"
+    git(checkout, "config", f"url.{root / 'upstream.git'}.insteadOf", url)
+    git(checkout, "remote", "set-url", "upstream", url)
+
+    assert gate(checkout, head, actions) == sync.LANDED
+    assert landed_by_merge(root, head, before)
+    assert land_stub.read()["gates"] == []
+
+
+def test_import_time_runtime_error_in_ship_tool_refuses(world, land_stub, monkeypatch, tmp_path, capsys):
+    root, checkout = world
+    head = conflict_sync(root, checkout)
+    before = main_of(root)
+    actions = staged_green(root, checkout, head)
+    broken = tmp_path / "import-broken-land"
+    broken.write_text('raise RuntimeError("ship import fault")\n')
+    monkeypatch.setenv("HERMES_CORE_WT_LAND", str(broken))
+    capsys.readouterr()
+
+    assert gate(checkout, head, actions) == sync.REFUSED
+    out = capsys.readouterr().out
+    assert "review gate unavailable: cannot load" in out
+    assert "RuntimeError" in out and "ship import fault" in out
+    assert main_of(root) == before
+    assert land_stub.read()["gates"] == []
+
+
 def test_impl_task_comes_from_the_flag_only(world, land_stub, monkeypatch):
     """--impl-task (ShipReview(impl_task=...)) is the only source; no HERMES_* env var duplicates it."""
     root, checkout = world
