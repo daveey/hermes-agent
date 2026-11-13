@@ -65,6 +65,49 @@ def note_missing_parents(
     return True
 
 
+# The newest of these on a blocked child must be the detector's own block for it to be cleared automatically.
+_LIFECYCLE_EVENTS = ("blocked", "unblocked", "gave_up", "block_loop_detected", "dependency_wait", "status",
+                     "supervisor_escalated", "changes_requested", "review_reopened")
+
+
+def clear_found_parents(conn: sqlite3.Connection, row, *, remote: bool) -> str:
+    """Inside the readiness transaction: return a child the detector blocked (:func:`note_missing_parents`) to
+    ``todo`` once :func:`kanban_db.parent_states` shows every parent again (the local row synced in, or the
+    remote-parent mirror now has it). Returns the readiness ``row``'s status after the call (``todo`` when it
+    cleared the block); the caller then runs its ``todo`` path, which writes ``parent_found`` and promotes the
+    child when every parent is done.
+
+    Only the detector's own block is cleared: the child's newest lifecycle event must be the ``blocked`` with
+    ``source`` 'parent_missing', with no human request on the card. A later hand, policy or
+    breaker block, or a block from any other source, stays for its owner. The repair card is left to finish.
+    2026-11-13, David-MBP: t_01a1d0ea6db6c158 stayed blocked hours after its parent was mirrored done. [daveey]"""
+    from hermes_cli import kanban_db as kb
+
+    task_id, status = row["id"], row["status"]
+    if status != "blocked":
+        return status
+    last = conn.execute(
+        f"SELECT id, payload FROM task_events WHERE task_id = ? AND kind IN "
+        f"({', '.join('?' * len(_LIFECYCLE_EVENTS))}) ORDER BY id DESC LIMIT 1", (task_id, *_LIFECYCLE_EVENTS),
+    ).fetchone()
+    if last is None or _event_field(last["payload"], "source") != "parent_missing":  # only the detector's block
+        return status
+    states = kb.parent_states(conn, task_id, remote=remote)
+    if not states or any(st is None for _pid, st in states):
+        return status
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'blocked' AND human_request IS NULL", (task_id,),
+    )
+    if cur.rowcount != 1:
+        return status
+    kb._append_event(conn, task_id, "unblocked", {
+        "status": "todo", "source": "parent_found", "cleared_block": "parent_missing",
+        "blocked_event_id": last["id"], "parents": _event_field(last["payload"], "parents"),
+        "repair_task_id": _event_field(last["payload"], "repair_task_id"),
+    })
+    return "todo"
+
+
 def report_deferred_pass(conn: sqlite3.Connection, fresh: dict) -> None:
     """After a readiness pass: the children :func:`note_missing_parents` deferred because the replica is not at the
     feed head get one INFO line per board per stale replica stamp (``kanban_replica_freshness.report_deferred``)."""

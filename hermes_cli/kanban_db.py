@@ -1948,8 +1948,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             # publish a second promotion or expire the owner's missing streak.
             if task_id in copies:
                 continue
-            cur_status = row["status"]
-            if recovery_held(conn, row, failure_limit):
+            cur_status = _graph.clear_found_parents(conn, row, remote=remote)  # parent_missing block, parents back: todo
+            if cur_status == row["status"] and recovery_held(conn, row, failure_limit):
                 continue
             states = parent_states(conn, task_id, remote=remote)
             # Inside this txn, for a ``todo`` child: start/close a missing-parent streak (``parent_missing`` /
