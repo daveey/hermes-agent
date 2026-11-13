@@ -173,7 +173,7 @@ def all_quiet_deferred(results: Iterable[Optional[Any]]) -> bool:
         return False
     other = ("spawned", "claim_deferred", "capsule_refused", "respawn_guarded", "skipped_ineligible", "owner_down",
              "skipped_per_profile_capped", "skipped_unassigned", "rate_limited", "no_progress_held",
-             "pinned_quota_held", "auto_blocked")
+             "pinned_quota_held", "auto_blocked", "admission_deferred")
     return not any(getattr(res, name, None) for res in ran for name in other) and not any(
         res.at_capacity or res.memory_pressure for res in ran)
 

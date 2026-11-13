@@ -146,6 +146,7 @@ def test_stuck_diagnostics_recognize_quiet_narrowly():
     for other in (kbd.DispatchResult(claim_deferred=[("t_b", "lease_held")]),
                   kbd.DispatchResult(capsule_refused=[("t_b", "capsule_unregistered")]),
                   kbd.DispatchResult(owner_down=[("t_b", "p", "failed")]),
+                  kbd.DispatchResult(admission_deferred=["t_b"]),
                   kbd.DispatchResult(at_capacity="max_in_progress=1/1"),
                   kbd.DispatchResult(memory_pressure="critical")):
         assert not kbd.all_quiet_deferred([quiet, other])
