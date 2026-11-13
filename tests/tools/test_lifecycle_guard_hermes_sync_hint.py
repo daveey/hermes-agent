@@ -105,3 +105,65 @@ def test_hint_names_the_root_sync_log_from_a_profile_gateway(tmp_path, monkeypat
 
     assert "~/.hermes/logs/hermes-sync.log" in error
     assert "profiles" not in error
+
+
+# PR #2128 review nits: the hint must survive shell options that take a value and the reserved
+# words that may precede a command (each case dropped the hint before executes_command_named).
+@pytest.mark.parametrize("template", [
+    "bash -o pipefail {script} mods-pull",
+    "sh +o errexit -- {script} mods-pull",
+    "bash -O extglob {script} mods-pull",
+])
+def test_hint_survives_shell_options_with_values(tmp_path, monkeypatch, template):
+    script = _script(tmp_path, "hermes-sync", _RESTART)
+
+    error = _refuse(tmp_path, monkeypatch, template.format(script=script))
+
+    assert _ROUTE in error
+
+
+# The referenced-script walk does not yet peel reserved words, so these are not refused today
+# (follow-up card); the hint itself must already name the route once they are.
+@pytest.mark.parametrize("template", [
+    "time {script} mods-pull",
+    "time -p {script} mods-pull",
+    "! {script} mods-pull",
+    "if true; then {script} mods-pull; fi",
+    "if {script} mods-pull; then echo ok; fi",
+    "while false; do {script} mods-pull; done",
+    "{{ {script} mods-pull; }}",
+])
+def test_hint_survives_reserved_words(tmp_path, template):
+    from tools.terminal_tool_guards import _refusal_hint
+
+    script = _script(tmp_path, "hermes-sync", _RESTART)
+
+    assert _ROUTE in _refusal_hint(template.format(script=script))
+
+
+def test_a_shell_option_value_is_not_the_script(tmp_path, monkeypatch):
+    # `-o` consumes `pipefail`; deploy.sh is the script and hermes-sync only its argument.
+    deploy = _script(tmp_path, "deploy.sh", _RESTART)
+
+    error = _refuse(tmp_path, monkeypatch, f"bash -o pipefail {deploy} hermes-sync")
+
+    assert "hermes gateway restart" in error
+    assert _ROUTE not in error
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("hermes-sync mods-pull", True),
+    ("bash -O extglob /x/hermes-sync", True),
+    ("time -p -- hermes-sync", True),
+    ("then sudo -u ubuntu hermes-sync", True),
+    ("bash -c 'if true; then hermes-sync; fi'", True),
+    ("python3 /x/hermes-sync", True),
+    ("bash -c 'echo hermes-sync'", False),
+    ("grep hermes-sync log", False),
+    ("echo time hermes-sync", False),
+    ("fi hermes-sync", False),
+])
+def test_executes_command_named(command, expected):
+    from cron.lifecycle_guard import executes_command_named
+
+    assert executes_command_named(command, "hermes-sync") is expected

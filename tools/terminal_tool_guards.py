@@ -582,39 +582,14 @@ def _session_aliases_for_guard(env: Any) -> Optional[frozenset[str]]:
 # gateway (by lifecycle content, or because the script is over the scan budget). The generic
 # "separate shell" advice made agents wrap it in systemd-run/nohup; name the sanctioned route.
 _HERMES_SYNC = "hermes-sync"
-_HERMES_SYNC_PAYLOAD_DEPTH = 4
 
 
-def _runs_hermes_sync(command: str, depth: int = 0) -> bool:
-    """Whether *command* EXECUTES hermes-sync: as a segment's command word (env assignments and
-    wrappers such as sudo/nohup/systemd-run peeled), as the script a shell or Python interpreter
-    runs, or inside an ``sh -c`` payload. A mere mention (``grep x hermes-sync``) does not count."""
-    from cron.lifecycle_guard import (
-        _SHELL_EXECUTABLES,
-        _executable_name,
-        _executed_command_index,
-        _is_interpreter_image,
-        _iter_command_segments,
-        _iter_shell_command_payloads,
-        lifecycle_scan_root_within_budget,
-    )
+def _runs_hermes_sync(command: str) -> bool:
+    """Whether *command* EXECUTES hermes-sync (a mere mention such as ``grep x hermes-sync`` does
+    not count); see ``cron.lifecycle_guard.executes_command_named``."""
+    from cron.lifecycle_guard import executes_command_named
 
-    if _HERMES_SYNC not in command or not lifecycle_scan_root_within_budget(command):
-        return False
-    for segment in _iter_command_segments(command):
-        index = _executed_command_index(segment)
-        if index is None:
-            continue
-        name = _executable_name(segment[index])
-        if name == _HERMES_SYNC:
-            return True
-        if name in _SHELL_EXECUTABLES or _is_interpreter_image(name):
-            script = next((t for t in segment[index + 1:] if not t.startswith("-")), None)
-            if script is not None and _executable_name(script) == _HERMES_SYNC:
-                return True
-    if depth >= _HERMES_SYNC_PAYLOAD_DEPTH:
-        return False
-    return any(_runs_hermes_sync(p, depth + 1) for p in _iter_shell_command_payloads(command))
+    return executes_command_named(command, _HERMES_SYNC)
 
 
 def _refusal_hint(command: str) -> str:

@@ -891,6 +891,78 @@ def contains_launchctl_submit_command(command: str) -> bool:
     return False
 
 
+# Reserved words that may precede a simple command in the same segment (`if hermes-sync`,
+# `then x`, `! x`, `time -p x`, `{ x; }`); `fi`/`done`/`}` close a list and run nothing.
+_COMMAND_PREFIX_KEYWORDS = frozenset({
+    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{",
+})
+_MAX_EXECUTES_NAMED_DEPTH = 4
+
+
+def _peel_command_keywords(segment: list[str]) -> list[str]:
+    """*segment* without its leading reserved words (and ``time``'s ``-p``/``--``)."""
+    index = 0
+    while index < len(segment) and segment[index] in _COMMAND_PREFIX_KEYWORDS:
+        word = segment[index]
+        index += 1
+        if word == "time":
+            while index < len(segment) and segment[index] in ("-p", "--"):
+                index += 1
+    return segment[index:]
+
+
+def _shell_script_operand(arguments: list[str]) -> Optional[str]:
+    """The script a POSIX shell runs from *arguments*, skipping options and the values of
+    ``-o``/``-O``/``+o``/``+O``; ``None`` for ``-c`` (inline source) or no operand."""
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            index += 1
+            break
+        if argument in _SHELL_COMMAND_FLAGS:
+            return None
+        if argument in _SHELL_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if argument.startswith(("-", "+")):
+            index += 1
+            continue
+        break
+    return arguments[index] if index < len(arguments) else None
+
+
+def executes_command_named(command: str, name: str, *, _depth: int = 0) -> bool:
+    """Whether *command* EXECUTES a program whose basename is *name*: as a segment's command word
+    (shell keywords such as ``if``/``then``/``time``/``!``, env assignments and wrappers such as
+    sudo/nohup/systemd-run peeled), as the script a shell or Python interpreter runs, or inside an
+    ``sh -c`` payload. A mere mention (``grep x name``) does not count. A command over the scan
+    budget answers False, so callers must not use this as a refusal gate (it serves hints)."""
+    if name not in command or not lifecycle_scan_root_within_budget(command):
+        return False
+    for raw_segment in _iter_command_segments(command):
+        segment = _peel_command_keywords(raw_segment)
+        index = _executed_command_index(segment)
+        if index is None:
+            continue
+        executable = _executable_name(segment[index])
+        if executable == name:
+            return True
+        arguments = segment[index + 1 :]
+        if executable in _SHELL_EXECUTABLES:
+            script = _shell_script_operand(arguments)
+        elif _is_interpreter_image(executable):
+            script = next((t for t in arguments if not t.startswith("-")), None)
+        else:
+            continue
+        if script is not None and _executable_name(script) == name:
+            return True
+    if _depth >= _MAX_EXECUTES_NAMED_DEPTH:
+        return False
+    return any(executes_command_named(payload, name, _depth=_depth + 1)
+               for payload in _iter_shell_command_payloads(command))
+
+
 def _mask_data_sink_arguments(text: str) -> str:
     """Replace data-sink executables' arguments with a neutral placeholder.
 
