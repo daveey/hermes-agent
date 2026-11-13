@@ -22,6 +22,11 @@ from hermes_constants import get_hermes_home
 logger = logging.getLogger("tools.process_registry")
 
 _TAIL_SECONDS = 0.2
+# A quiet process is polled less often: each empty read doubles the wait up to this cap, and the next byte
+# it writes resets it (picked up on the next poll). A poll()/wait() reconcile still ends the wait at once:
+# it sets ``_reader_finish_requested``, which the wait is on. Measured on the hub (t_01a1d59ed9eb75fe): a
+# fixed 0.2 s tail cost ~0.16% of a core per idle reader. [daveey]
+_IDLE_TAIL_MAX_SECONDS = 2.0
 # After the process ended: an orphaned grandchild may keep appending; stop draining after this.
 _FINAL_DRAIN_MAX_BYTES = 1 << 20
 
@@ -189,11 +194,13 @@ class ProcessOutputLogMixin:
         try:
             with open(session.output_log, "rb") as stream:
                 drained = 0
+                idle_wait = _TAIL_SECONDS
                 while True:
                     # Decided BEFORE the read: once the process is gone every byte it wrote is readable.
                     alive = running()
                     chunk = stream.read(65536)
                     if chunk:
+                        idle_wait = _TAIL_SECONDS
                         if text := decoder.decode(chunk):
                             ingest(text)
                         drained += 0 if alive else len(chunk)
@@ -201,7 +208,8 @@ class ProcessOutputLogMixin:
                             continue
                     if not alive:
                         break
-                    time.sleep(_TAIL_SECONDS)
+                    session._reader_finish_requested.wait(idle_wait)
+                    idle_wait = min(idle_wait * 2, _IDLE_TAIL_MAX_SECONDS)
         except OSError as exc:
             logger.warning("Process output log %s unreadable: %s", session.output_log, exc)
         ingest(decoder.decode(b"", final=True), final=True)
