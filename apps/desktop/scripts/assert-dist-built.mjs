@@ -103,9 +103,16 @@ export function checkDistBuilt(distDir) {
 // A false failure costs a whole rebuild; a real stall only costs this wait, so err long.
 export const DEFAULT_CHUNK_CHECK_TIMEOUT_MS = 30 * 60_000
 
+// The override is an environment variable, not a config key, because this is a build-script knob:
+// the script runs under `pnpm run build` (and the unattended prebuild) before any Hermes runtime or
+// config is loaded, and only whoever runs the build needs to turn it. Same precedent as
+// HERMES_DESKTOP_LIFECYCLE_TIMEOUT_MS in test-desktop.mjs.
+//
+// Only a positive integer counts: spawnSync's `timeout` throws ERR_OUT_OF_RANGE on a fraction
+// (e.g. 1500.5), which would escape checkDistBuilt as an exception instead of a verdict.
 export function chunkCheckTimeoutMs(env = process.env) {
   const raw = Number(env.HERMES_CHUNK_CHECK_TIMEOUT_MS)
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CHUNK_CHECK_TIMEOUT_MS
+  return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_CHUNK_CHECK_TIMEOUT_MS
 }
 
 // Renderer chunks are emitted as ESM (`<script type="module">` in index.html).
@@ -190,6 +197,9 @@ function main() {
       console.error("  This is a failure of the CHECK, not of the bundle: node did not run to")
       console.error("  completion. On Windows that is usually a stalled process creation")
       console.error("  (antivirus/EDR interference, memory pressure) and clears on a retry.")
+      console.error("  An ETIMEDOUT on a throttled or contended host (a background-QoS")
+      console.error("  prebuild, a loaded box) means the check was slow, not broken: raise")
+      console.error("  HERMES_CHUNK_CHECK_TIMEOUT_MS (milliseconds) or build when it is idle.")
       console.error("  If it repeats, check the node binary and any AV exclusion for the")
       console.error(`    build tree, then re-run: cd ${desktopRoot} && pnpm run build\n`)
       process.exit(1)

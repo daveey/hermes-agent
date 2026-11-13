@@ -20,6 +20,34 @@ describe('renderer chunk check budget', () => {
     }
   })
 
+  test('a non-integer budget falls back to the default instead of crashing spawnSync', async () => {
+    // spawnSync's `timeout` must be an integer: 1500.5 throws ERR_OUT_OF_RANGE out of checkDistBuilt.
+    const { chunkCheckTimeoutMs } = await import(checker)
+    for (const bad of ['1500.5', '0.5', '1e-3']) {
+      const ms = chunkCheckTimeoutMs({ HERMES_CHUNK_CHECK_TIMEOUT_MS: bad })
+      expect(ms).toBe(chunkCheckTimeoutMs({}))
+      expect(Number.isInteger(ms)).toBe(true)
+    }
+    expect(chunkCheckTimeoutMs({ HERMES_CHUNK_CHECK_TIMEOUT_MS: '1500.0' })).toBe(1500)
+  })
+
+  test('a fractional budget in the environment still lets checkDistBuilt return a verdict', async () => {
+    const { checkDistBuilt } = await import(checker)
+    const root = mkdtempSync(join(tmpdir(), 'renderer-check-fraction-'))
+    const saved = process.env.HERMES_CHUNK_CHECK_TIMEOUT_MS
+    try {
+      mkdirSync(join(root, 'assets'))
+      writeFileSync(join(root, 'index.html'), '<!doctype html>')
+      writeFileSync(join(root, 'assets', 'index-fixture.js'), 'export const value = 1')
+      process.env.HERMES_CHUNK_CHECK_TIMEOUT_MS = '1500.5'
+      expect(checkDistBuilt(root)).toEqual({ ok: true })
+    } finally {
+      if (saved === undefined) delete process.env.HERMES_CHUNK_CHECK_TIMEOUT_MS
+      else process.env.HERMES_CHUNK_CHECK_TIMEOUT_MS = saved
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 120_000)
+
   test.skipIf(process.platform === 'win32')('a slow node passes within the budget; only overrunning it is a harness failure', () => {
     const root = mkdtempSync(join(tmpdir(), 'renderer-check-budget-'))
     try {
