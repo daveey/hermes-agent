@@ -20,7 +20,8 @@ lineage)`` rows and skips ``observe`` (the first-seen times are in the rows; the
 recorded them in the ledger). Any other answer (no file, a stale key, a corrupt file, a busy file) is a miss: the
 caller computes locally exactly as before and then offers its result (:func:`publish`). Nothing here ever waits:
 reads use a zero busy timeout, and publishing takes a NON-blocking ``flock`` and is skipped when another process
-is publishing. Both run outside ``kanban_remote_notices._lock``.
+is publishing or a reader keeps the file busy (only a corrupt file is recreated). Both run outside
+``kanban_remote_notices._lock``.
 
 A publish writes only the rows whose replica ``seq`` or observation changed (per-seq deltas), so its cost follows
 the change, like the incremental in-process build it replaces.
@@ -53,7 +54,9 @@ VERSION = 1
 LEASE = "kanban-remote-index"
 LEASE_INTERVAL_S = 5.0
 REFRESH_POLL_S = 1.0
+BACKOFF_MAX_S = 60.0  # longest wait between holder retries while its refreshes keep failing
 _MEMO_MAX = 512
+_clock = time.monotonic
 
 _memo_lock = threading.Lock()  # guards the dicts below only; never held across I/O
 _keys: dict[tuple, tuple] = {}  # (hub, ledger) -> (stamp, replica key or None)
@@ -61,7 +64,7 @@ _answers: dict[tuple, Optional[tuple]] = {}  # (hub, ledger, stamp, profile, sid
 _published: dict[tuple, tuple] = {}  # (hub, ledger) -> (key, ledger file id) this process published or found
 _decoded: dict[tuple, tuple] = {}  # (replica base, owner, key) -> (seq, task): payloads this process parsed
 _DECODED_MAX = 20_000
-_holders: dict[tuple, threading.Event] = {}
+_holders: dict[tuple, tuple] = {}  # (hub, ledger) -> (stop event, role priority) of this process's refresher
 stats = {"hits": 0, "misses": 0, "publishes": 0, "busy": 0, "rows_written": 0}
 
 
@@ -232,8 +235,38 @@ _SCHEMA = (
 )
 
 
+_CORRUPT_CODES = (11, 26)  # SQLITE_CORRUPT, SQLITE_NOTADB (primary result codes)
+_BUSY_CODES = (5, 6)  # SQLITE_BUSY, SQLITE_LOCKED
+
+
+def _primary(exc: sqlite3.Error) -> Optional[int]:
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code & 0xFF if isinstance(code, int) else None
+
+
+def _busy(exc: sqlite3.Error) -> bool:
+    code = _primary(exc)
+    if code is not None:
+        return code in _BUSY_CODES
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _corrupt(exc: sqlite3.Error) -> bool:
+    """True only for a damaged file. 'database is locked' / busy (a reader's transaction blocking the switch to
+    WAL, say) is an ``OperationalError`` too, and recreating then would delete a healthy copy."""
+    code = _primary(exc)
+    if code is not None:
+        return code in _CORRUPT_CODES
+    text = str(exc).lower()
+    return "file is not a database" in text or "malformed" in text
+
+
 def _open_rw(db: Path) -> sqlite3.Connection:
-    """The index, created or (corrupt) recreated. Only the build-lock holder calls this, so nothing waits."""
+    """The index, created or (corrupt) recreated. Only the build-lock holder calls this, so nothing waits.
+
+    A busy or locked file raises (the publish is skipped and readers compute locally); only real corruption
+    unlinks and recreates it."""
     for attempt in (0, 1):
         conn = sqlite3.connect(str(db), timeout=0.0)
         try:
@@ -243,9 +276,9 @@ def _open_rw(db: Path) -> sqlite3.Connection:
                 conn.execute(sql)
             conn.execute("SELECT COUNT(*) FROM cards").fetchone()
             return conn
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as exc:
             conn.close()
-            if attempt:
+            if attempt or not _corrupt(exc):
                 raise
             logger.warning("remote notice index %s unreadable; recreating it", db, exc_info=True)
             for suffix in ("", "-wal", "-shm"):
@@ -291,7 +324,10 @@ def publish(hub: Path, ledger: Path, key: str, me: str, index: dict, observed: d
             stats["publishes"] += 1
             stats["rows_written"] += written
         return True
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error) as exc:
+        if isinstance(exc, sqlite3.Error) and _busy(exc):
+            with _memo_lock:
+                stats["busy"] += 1
         logger.debug("remote notice index %s not published", db, exc_info=True)
         return False
     finally:
@@ -381,10 +417,14 @@ def refresh(hub: Path, ledger: Path, now: Optional[float] = None) -> bool:
 
 
 def _hold(lease, hub: Path, ledger: Path, stop: threading.Event, poll: float = REFRESH_POLL_S) -> None:
-    """Change-driven refresher: one ``PRAGMA data_version`` per ``poll`` while held, a rebuild per replica change."""
+    """Change-driven refresher: one ``PRAGMA data_version`` per ``poll`` while held, a rebuild per replica change.
+
+    A refresh that does not leave the copy current (publishing fails, the replica has no key) is retried after a
+    backoff that doubles up to :data:`BACKOFF_MAX_S`, whatever the stamp, not on every poll: readers compute
+    locally on a miss meanwhile. A success resets it and remembers the stamp, so that state is not rebuilt."""
     from tui_gateway.kanban_replica_observer import fingerprint
 
-    last = None
+    last, retry_at, delay = None, 0.0, poll
     try:
         while not stop.wait(poll):
             if not lease.held():
@@ -392,24 +432,34 @@ def _hold(lease, hub: Path, ledger: Path, stop: threading.Event, poll: float = R
                 continue
             try:
                 stamp = fingerprint(hub) if hub.is_file() else None
-                if stamp is not None and stamp != last and refresh(hub, ledger):
-                    last = stamp
+                if stamp is not None and stamp != last and _clock() >= retry_at:
+                    if refresh(hub, ledger):
+                        last, retry_at, delay = stamp, 0.0, poll
+                    else:
+                        retry_at, delay = _clock() + delay, min(delay * 2, BACKOFF_MAX_S)
             except Exception:  # health: allow BLE001 -- the readers compute on a miss; the holder must not die
                 logger.debug("remote notice index refresh failed", exc_info=True)
+                retry_at, delay = _clock() + delay, min(delay * 2, BACKOFF_MAX_S)
             lease.beat()
     finally:
         lease.release()
 
 
 def ensure_holder(role: str) -> None:
-    """Start this process's refresher for the root home's ledger once (it runs only while it holds the lease).
+    """Start this process's refresher for the root home's ledger (it runs only while it holds the lease).
+
+    One refresher per process and ledger, under the highest role any caller claimed: a gateway's claim after a
+    'serve' one (``collect`` ran first in the gateway process) stops the 'serve' refresher and starts a 'gateway'
+    one, so the gateway outranks Desktop backends however its calls are ordered. Without ``fcntl`` nothing
+    starts: publishing needs ``flock``, so a holder could never publish and would rebuild every poll.
 
     Not under pytest: a refresher left running by one test would rebuild that test's replica through the shared
     in-process memos while later tests run. Tests drive :func:`refresh` and :func:`_hold` directly."""
+    from hermes_cli.host_loop_lease import ROLE_PRIORITY
     from hermes_constants import get_default_hermes_root, get_hermes_home
     from tui_gateway.kanban_remote_notices import hub_db_path, ledger_path
 
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if os.environ.get("PYTEST_CURRENT_TEST") or fcntl is None:
         return
     try:
         if os.path.realpath(get_hermes_home()) != os.path.realpath(get_default_hermes_root()):
@@ -417,11 +467,15 @@ def ensure_holder(role: str) -> None:
         hub, ledger = hub_db_path(), ledger_path()
     except (OSError, ValueError):
         return
-    slot = _slot(hub, ledger)
+    slot, rank = _slot(hub, ledger), ROLE_PRIORITY.get(role, 0)
     with _memo_lock:
-        if slot in _holders:
+        held = _holders.get(slot)
+        if held is not None and held[1] >= rank:
             return
-        stop = _holders[slot] = threading.Event()
+        if held is not None:
+            held[0].set()  # the lower-role refresher stops after its current pass and releases its lease
+        stop = threading.Event()
+        _holders[slot] = (stop, rank)
     from agent.memory_provider import spawn_context_thread
     from hermes_cli.host_loop_lease import HostLoopLease
 
@@ -438,6 +492,6 @@ def reset() -> None:
         _decoded.clear()
         for name in stats:
             stats[name] = 0
-        for stop in _holders.values():
+        for stop, _rank in _holders.values():
             stop.set()
         _holders.clear()

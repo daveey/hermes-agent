@@ -174,7 +174,7 @@ def _collect(runner: Any, authority: Any, lives: list) -> list[tuple]:
     if not krn.hub_db_path().is_file():
         return []
     from tui_gateway.kanban_remote_index import ensure_holder
-    ensure_holder("gateway")  # the gateway outranks Desktop backends for the remote index refresher lease
+    ensure_holder("gateway")  # outranks Desktop backends; upgrades a 'serve' refresher collect started here first
     profile = _profile(runner, authority)
     out = []
     for logical, live in lives:

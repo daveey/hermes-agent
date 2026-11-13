@@ -619,7 +619,7 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
         sids = (session_key, *lineage)
         if hub_db is None and ledger is None:  # the host's own replica: keep its published copy current
             from tui_gateway.kanban_remote_index import ensure_holder
-            ensure_holder("serve")  # once per process; a gateway claimed its own role earlier
+            ensure_holder("serve")  # once per process; a gateway's own later claim upgrades the role
         me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids)
         cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:

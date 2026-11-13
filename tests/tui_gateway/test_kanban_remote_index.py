@@ -266,3 +266,97 @@ def test_replica_without_seq_has_no_key_and_never_publishes(tmp_path):
     assert kri.replica_key(replica) is None
     assert len(_collect(replica, ledger)) == 4
     assert not kri.index_path(ledger).exists()
+
+
+def test_busy_index_is_skipped_not_deleted_as_corrupt(tmp_path):
+    """A mode=ro reader's read transaction on a not-yet-WAL copy makes ``journal_mode=WAL`` raise 'database is
+    locked': that is busy (skip, the reader computes locally), not corruption, so the healthy copy survives."""
+    replica, ledger = _home(tmp_path, _cards())
+    db = kri.index_path(ledger)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db) as conn:  # rollback-journal copy, e.g. written by an older build
+        conn.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT INTO meta VALUES ('marker', 'kept')")
+    ident = os.stat(db).st_ino
+    key = kri.replica_key(replica)
+    assert key is not None
+    reader = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.0)
+    try:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT v FROM meta WHERE k = 'marker'").fetchone() == ("kept",)
+        assert kri.publish(replica, ledger, key, "macbook", {}, {}, {}) is False
+        assert kri.stats["busy"] == 1
+    finally:
+        reader.close()
+    assert os.stat(db).st_ino == ident
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT v FROM meta WHERE k = 'marker'").fetchone() == ("kept",)
+    assert kri.publish(replica, ledger, key, "macbook", {}, {}, {})  # the reader gone, the same file is upgraded
+    assert os.stat(db).st_ino == ident and kri.published_key(ledger) == key
+
+
+def test_holder_backs_off_while_publishing_fails(tmp_path, monkeypatch):
+    """A refresh that never succeeds (an unwritable index, a replica with no key) is not rerun every poll: the
+    holder retries after a doubling backoff, and once current it does not rebuild the same stamp again."""
+    replica, ledger = _home(tmp_path, _cards())
+    clock, calls, result = [1000.0], [], [False]
+    monkeypatch.setattr(kri, "_clock", lambda: clock[0])
+    monkeypatch.setattr(kri, "refresh", lambda hub, led: calls.append(1) or result[0])
+    lease, stop = _Lease(True), threading.Event()
+    thread = threading.Thread(target=kri._hold, args=(lease, replica, ledger, stop, 0.01), daemon=True)
+    thread.start()
+    try:
+        wait_until(lambda: lease.beats > 30, what="failing passes")
+        assert len(calls) == 1  # frozen clock: still backing off
+        clock[0] += 0.015
+        wait_until(lambda: len(calls) == 2, what="retry after the first backoff")
+        beats = lease.beats
+        clock[0] += 0.015  # the backoff doubled: not due yet
+        wait_until(lambda: lease.beats > beats + 10, what="passes inside the doubled backoff")
+        assert len(calls) == 2
+        result[0] = True
+        clock[0] += 0.03
+        wait_until(lambda: len(calls) == 3, what="retry after the doubled backoff")
+        beats = lease.beats
+        wait_until(lambda: lease.beats > beats + 10, what="passes on a current copy")
+        assert len(calls) == 3  # the stamp it published is not refreshed again
+    finally:
+        stop.set()
+        thread.join(5)
+
+
+def _spawns(monkeypatch):
+    import agent.memory_provider as mp
+    spawned = []
+
+    class _Thread:
+        def __init__(self, args):
+            self.args = args
+
+        def start(self):
+            spawned.append(self.args)
+
+    monkeypatch.setattr(mp, "spawn_context_thread", lambda target, name, args: _Thread(args))
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    return spawned
+
+
+def test_no_holder_without_flock(monkeypatch):
+    spawned = _spawns(monkeypatch)
+    monkeypatch.setattr(kri, "fcntl", None)
+    kri.ensure_holder("serve")
+    assert spawned == [] and not kri._holders
+
+
+def test_gateway_claim_upgrades_a_serve_holder(monkeypatch):
+    """The role is not whichever call came first: a gateway's later claim replaces a 'serve' refresher."""
+    spawned = _spawns(monkeypatch)
+    kri.ensure_holder("serve")
+    kri.ensure_holder("serve")
+    assert [args[0].role for args in spawned] == ["serve"]
+    kri.ensure_holder("gateway")
+    assert [args[0].role for args in spawned] == ["serve", "gateway"]
+    assert spawned[0][3].is_set() and not spawned[1][3].is_set()  # the serve refresher stops
+    kri.ensure_holder("serve")
+    kri.ensure_holder("gateway")
+    assert len(spawned) == 2
