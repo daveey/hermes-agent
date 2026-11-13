@@ -847,3 +847,86 @@ def test_keyword_led_subshells_still_execute_scripts(tmp_path, shape):
     _assert_bash_marker(tmp_path, command)
     unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
     assert unsafe is True and refusal is not None and "scan cap" in refusal
+
+
+def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp_path):
+    """Card comment 10718 item 2: a seeded sample of the product of shell option words (``-s``
+    before, after, bundled or absent) x stdin wrappers x nesting forms x payloads. Real bash runs
+    every case; whenever it ran the walk-only payload and origin/main refuses the command (the
+    checked-in verdicts), this tree must refuse it too. The six rows of review 5887281618 are in
+    the sample. Regenerate the main verdicts with the CLI in ``heredoc_shape_corpus``."""
+    import time
+    import warnings
+
+    from tests.cron import heredoc_shape_corpus as corpus
+
+    fixture, main_refuses = corpus.load_main_verdicts()
+    full = corpus.generate_full_corpus()
+    assert fixture["corpus_digest"] == corpus.corpus_digest(full), (
+        "corpus changed: regenerate main_verdicts.json from origin/main (see heredoc_shape_corpus)")
+    cases = corpus.generate_cases()
+    for dimension, values in (("wrapper", corpus.WRAPPERS), ("nesting", corpus.NESTINGS),
+                              ("shell", corpus.SHELLS), ("payload", tuple(corpus.PAYLOADS))):
+        for value in values:
+            for position in ("before", "after", "bundled", "none"):
+                assert any(getattr(case, dimension) == value and case.s_position == position
+                           for case in cases), (dimension, value, position)
+    for option in corpus.OPTIONS:
+        for position in ("before", "after", "none"):
+            assert any(option in case.words and case.s_position == position for case in cases), (
+                option, position)
+    review = [case for case in cases if case.s_position == "review"]
+    assert len(review) == len(corpus.REVIEW_ROWS)
+
+    started = time.monotonic()
+    results = corpus.evaluate(tmp_path, cases)
+    elapsed = time.monotonic() - started
+    bad = corpus.violations(results, main_refuses)
+    assert not bad, "\n".join(case.command for case in bad[:10])
+    ran = {case.key for case, executed, _refused in results if executed}
+    allowed = sum(not refused for _case, _executed, refused in results)
+    # Not vacuous: the history review rows run their payload on any bash. Startup-file rows need
+    # bash to source the test's `$HOME` files, which some hosts' system login files prevent.
+    assert all(case.key in ran for case in review if case.payload == "history")
+    missed = [case.command.split("\n", 1)[0] for case in review if case.key not in ran]
+    probe = ""
+    if missed:  # why this host's login shell skipped the test's `$HOME` startup files
+        import subprocess
+
+        probe = subprocess.run(
+            ["/bin/bash", "-l", "-s"], text=True, capture_output=True, timeout=20, check=False,
+            input='shopt login_shell; echo "HOME=$HOME BASH_ENV=$BASH_ENV"; ls -a "$HOME"; '
+                  'cat "$FAKE_BIN/startup-ran" 2>&1 | head -3; ls /etc/profile.d 2>&1\n',
+            env={**corpus.prepare(tmp_path), "MARKER": str(tmp_path / "probe")}, cwd=tmp_path,
+        ).stdout[-600:]
+    warnings.warn(f"shape corpus: {len(cases)} cases in {elapsed:.1f}s, bash ran the payload in "
+                  f"{len(ran)}, guard allows {allowed}, 0 violations; review rows without an "
+                  f"execution proof on this host: {missed} {probe!r}", stacklevel=1)
+
+
+_LIVE_SSH_BODY = (
+    "export A=1\n"
+    "hermes kanban comment t_x --author default \"$(cat /tmp/f.md)\"\n"
+    "python3 - <<'EOF'\nimport sqlite3, os\n"
+    "db = sqlite3.connect(\"file:\" + os.path.expanduser(\"~/.hermes/kanban.db\") + \"?mode=ro\", uri=True)\n"
+    "EOF\n"
+)
+
+
+@pytest.mark.parametrize("remote", ["bash -l -s", "bash -s"])
+def test_live_ssh_body_reading_kanban_db(tmp_path, monkeypatch, remote):
+    """Card comment (23:13 PT): main refused this on the MacBook, naming the local kanban.db the
+    remote body only reads. Expected verdict here: allowed. The nested python3 body stays visible
+    (`bash -l` sources the remote's login files, which may rewrite it, and neither `scp` nor
+    `export` is a proven non-reading unit), but `~/.hermes/kanban.db` appears only as a call
+    argument (`expanduser("…")`), so it is a mention: read when readable, never refused."""
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    home = tmp_path / "home"
+    _big_sqlite(home / ".hermes" / "kanban.db")
+    monkeypatch.setenv("HOME", str(home))
+    command = (f"scp -q f.md host:/tmp/f.md && timeout 90 ssh -o BatchMode=yes host '{remote}' "
+               f"<<'EOS' 2>&1 | grep -av X | cut -c1-220\n{_LIVE_SSH_BODY}EOS\n")
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
