@@ -18,6 +18,10 @@ from typing import Any, Optional
 from hermes_cli import kanban_sync_client as ksc
 
 FENCED = {"status", "current_run_uid", "result", "started_at", "completed_at"}
+# rows.ts RUN_FENCED / FENCED_EVENT_KINDS (hermes-hub #111): a non-holder's run handoff and lifecycle events.
+RUN_FENCED = ("status", "outcome", "ended_at", "summary", "metadata")
+FENCED_EVENT_KINDS = frozenset({"completed", "blocked", "unblocked", "scheduled", "review_requested",
+                                "changes_requested", "reclaimed", "archived", "status"})
 
 
 def _js_number(x: float) -> str:
@@ -178,6 +182,30 @@ class FakeService:
         b["changes"][-1]["fields"] = copy.deepcopy(cur)
         return cur
 
+    @staticmethod
+    def child_fence(b: dict, table: str, uid: str, f: dict, gw: str) -> Optional[dict]:
+        """As rows.ts rowFence for child rows: while another gateway holds the card's lease, a run upsert that changes
+        a RUN_FENCED column (or creates the run) and a FENCED_EVENT_KINDS event are rejected ``live_claim`` with the
+        Board's row (None for a row it never stored)."""
+        if table not in ("task_runs", "task_events"):
+            return None
+        cur = b["rows"].get(table, {}).get(uid)
+        if cur is not None and cur.get("deleted_at"):
+            return None
+        lease = b["leases"].get(f.get("task_id") or (cur or {}).get("task_id"))
+        if not lease or lease["holder"] == gw:
+            return None
+        same = lambda a, z: (None if a is None else str(a)) == (None if z is None else str(z))
+        if table == "task_runs":
+            hit = any(k in f and (cur is None or not same(f[k], cur.get(k))) for k in RUN_FENCED)
+        else:
+            kind = f.get("kind", (cur or {}).get("kind"))
+            hit = kind in FENCED_EVENT_KINDS and (cur is None or not same(kind, cur.get("kind")))
+        if not hit:
+            return None
+        return {"status": "rejected", "reason": "live_claim",
+                "detail": f"task is running under {lease['holder']}'s live lease", "row": cur}
+
     def row_op(self, b: dict, op: dict, gw: str) -> dict:
         table, uid, kind = op["table"], op["uid"], op["op"]
         rows = b["rows"].setdefault(table, {})
@@ -188,6 +216,9 @@ class FakeService:
             self._emit(b, table, uid, "delete", None, gw, op["client_op_id"])
             return {"status": "applied"}
         f = dict(op["fields"])
+        fenced = self.child_fence(b, table, uid, f, gw)
+        if fenced is not None:
+            return fenced
         if table == "tasks":
             cur = rows.get(uid)
             if cur is None:

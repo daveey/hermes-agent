@@ -32,13 +32,18 @@ def record_rejection(conn: sqlite3.Connection, row: dict, reason: str) -> None:
     from hermes_cli import kanban_db as kb
     fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"] or "{}")
     tid = row["row_uid"] if row["table_name"] == "tasks" else fields.get("task_id")
+    if tid is None and row["table_name"] in ("task_runs", "task_events"):  # a delta op names only what changed
+        hit = conn.execute(f"SELECT task_id FROM {row['table_name']} WHERE uid = ?", (row["row_uid"],)).fetchone()
+        tid = hit[0] if hit else None
     if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (tid,)).fetchone() is None:
         return
     # A diagnostic event must not recursively generate diagnostic events on an older Board.
     if row["table_name"] == "task_events" and fields.get("kind") == "sync_rejected":
         return
-    kb._append_event(conn, tid, "sync_rejected",
-                     {"reason": reason[:300], "fields": sorted(fields), "op_id": row["op_id"]})
+    payload = {"reason": reason[:300], "fields": sorted(fields), "op_id": row["op_id"]}
+    if row["table_name"] != "tasks" and reason.startswith("live_claim"):  # refused handoff/event (hub #111) [daveey]
+        payload.update(table=row["table_name"], uid=str(row["row_uid"]))
+    kb._append_event(conn, tid, "sync_rejected", payload)
 
 
 def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict) -> bool | str:

@@ -653,11 +653,6 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     return out
 
 
-def _record_live_claim_rejection(conn: sqlite3.Connection, row: dict, reason: str) -> None:
-    from hermes_cli.kanban_sync_compat import record_rejection
-    record_rejection(conn, row, reason)
-
-
 @dataclass
 class PushResult:
     sent: int = 0
@@ -679,6 +674,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
     it once the completion is pulled). See ``kanban_sync_backlog.sendable_before_head``; ``seen`` is its Board-read
     cache (one per round, shared by both sends)."""
     from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli import kanban_sync_live_claim as _live_claim
     refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out, seen = PushResult(), {} if seen is None else seen
     for _ in range(max_batches):
@@ -754,8 +750,9 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                         sent_op = next(op for op in wire if op["client_op_id"] == op_id)
                         if enqueue_retry(conn, row, sent_op, res) != VIRTUAL_DROPPED:
                             record_rejection(conn, row, reason)
-                    elif row["table_name"] == "tasks" and res.get("reason") == "live_claim":
-                        _record_live_claim_rejection(conn, row, reason)
+                    elif _live_claim.is_live_claim(row, res):  # task row, run handoff, lifecycle event (hub #111)
+                        if _live_claim.refused(conn, row, res, reason, primary, authoritative):
+                            continue
                     if primary and res.get("row"):
                         authoritative.append(_row_change(row["table_name"], res["row"]))
         if authoritative:
