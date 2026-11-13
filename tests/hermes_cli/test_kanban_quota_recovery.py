@@ -201,6 +201,23 @@ def test_broken_proof_gate_fails_open(monkeypatch, tmp_path):
     assert complete.call_count == 2
 
 
+def test_failed_gate_release_logs_debug_and_never_raises(monkeypatch, caplog):
+    """A locked gate in a proof thread's done-callback leaves its row, logged at DEBUG, not raised."""
+    import logging
+    import sqlite3
+    from hermes_cli import kanban_quota_recovery as recovery
+
+    def locked(path):
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr(recovery, '_gate_connect', locked)
+    with caplog.at_level(logging.DEBUG, logger=recovery.__name__):
+        recovery._release_proof('anthropic', 'model', _entry(id='acct1'), path='unused.db')
+    [record] = [r for r in caplog.records if r.name == recovery.__name__]
+    assert record.levelno == logging.DEBUG and 'release failed' in record.getMessage()
+    assert record.exc_info and isinstance(record.exc_info[1], sqlite3.OperationalError)
+
+
 @pytest.mark.parametrize('data,ok', [
     ('data: {"type":"response.created"}\n\n', False),
     ('data: {"type":"response.failed"}\n\n', False),

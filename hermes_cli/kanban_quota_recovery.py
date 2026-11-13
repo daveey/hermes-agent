@@ -235,13 +235,23 @@ def _reserve_proofs(provider, model, entries, now, *, path=None):
 
 
 def _release_proof(provider, model, entry, *, path=None):
-    """A verified proof clears its reservation so the next bench of this account probes at once."""
+    """Drop an account's reservation so its next bench probes at once.
+
+    Called for every reservation that must not stand for the cooldown window: a successful proof
+    (before or after the deadline), a cancelled proof, and an entry left unprobed because the
+    deadline passed after the reserve. Idempotent (a DELETE). Best effort: a locked or broken gate
+    (0.25 s sqlite timeout) is logged at debug and swallowed, leaving the row to expire.
+    """
     from contextlib import closing
     key = _proof_key(provider, model, entry)
     if key is None:
         return
-    with contextlib.suppress(Exception), closing(_gate_connect(path or _proof_gate_path())) as conn, conn:
-        conn.execute('DELETE FROM proofs WHERE key=?', (key,))
+    try:
+        with closing(_gate_connect(path or _proof_gate_path())) as conn, conn:
+            conn.execute('DELETE FROM proofs WHERE key=?', (key,))
+    except Exception:  # health: allow BLE001 -- runs in a proof thread's done-callback; never raise
+        import logging
+        logging.getLogger(__name__).debug('quota proof gate release failed; row expires', exc_info=True)
 
 
 def _eligible(entry, provider, model, now, disabled):
@@ -313,6 +323,8 @@ def recover(provider, model, *, seconds=None):
                     break
                 if not future.exception() and future.result() and time.monotonic() < deadline:
                     observed = futures[future]
+                    # Intentional, though settle() also releases: done-callbacks run after
+                    # as_completed's waiter wakes, so only this release is done before we return.
                     _release_proof(provider, model, observed)
                     if pool.clear_verified_model_cooldown(observed, model):
                         cleared = True
