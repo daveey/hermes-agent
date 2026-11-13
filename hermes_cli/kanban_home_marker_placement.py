@@ -118,6 +118,13 @@ def _worktree(pattern, match, gateway, probe):
             yield "queue", "worktree-not-here", root, (), NOTES["path"].format(hit=root, gateway=gateway)
 
 
+def _last_rel_state(match):
+    # ``_REL_STATE`` at the span's last ``.hermes/``, found on the original text: ``str.lower()`` can change the
+    # length (``"\u0130".lower()`` is 2 code points), which would shift an offset taken on a lowered copy.
+    last = [m.start() for m in re.finditer(r"\.hermes/", match.group(0), re.IGNORECASE)][-1:]
+    return _REL_STATE.match(match.string, match.start() + last[0]) if last else None
+
+
 def _state_path(pattern, match, gateway, probe):
     from hermes_cli import kanban_placement as kp
     # ``$HOME``/``${HOME}`` prefixes too (kp.HOME_PREFIX). Every relative ``.hermes/<p>`` after a cd home reads as
@@ -127,11 +134,10 @@ def _state_path(pattern, match, gateway, probe):
     state = re.compile(kp.HOME_PREFIX + _STATE.pattern[len(_HOME):])
     found = [m.group(0) for m in state.finditer(text)]
     for m in re.finditer(kp.HERMES_STATE_PATH, text, re.IGNORECASE):
-        if re.match(kp._CD_HOME, m.group(0)) and (rel := _REL_STATE.match(
-                text, m.start() + m.group(0).lower().rfind(".hermes/"))):
+        if re.match(kp._CD_HOME, m.group(0)) and (rel := _last_rel_state(m)):
             found.append("~/" + rel.group(0))
     paths = [p for p in map(_clean, found) if re.match(kp.HERMES_STATE_PATH, p)]
-    rel = _REL_STATE.match(text, match.start() + match.group(0).lower().rfind(".hermes/"))
+    rel = _last_rel_state(match)
     for raw in dict.fromkeys(paths) or [_clean("~/" + rel.group(0)) if rel else match.group(0)]:
         if art := _ARTIFACT.search(raw):
             # health: allow HX001 -- the card text names ~/.hermes literally; probe that same path on this worker

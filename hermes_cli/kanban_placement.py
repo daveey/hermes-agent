@@ -586,7 +586,8 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # or ``cd .hermes`` after a cd home) counts too (review 5895947424). A bare ``~/.hermes`` anywhere else does not:
 # "the hermes-agent tree under ~/.hermes" is ordinary repo work and must reach the worker pool (9328cbc2d9b).
 HOME_PREFIX = r"(?:~|/home/[^/\s]+|\$HOME\b|\$\{HOME\}|\"\$HOME\"|\"\$\{HOME\}\")"
-_CMD_END = r"(?=[ \t]*(?:$|[\n;&|)>])|[ \t]+#)"
+# ``cd ~ 2>/dev/null`` ends the cd too (an fd-numbered redirect); ``cd ~2>x`` is a dir word, not a redirect.
+_CMD_END = r"(?=[ \t]*(?:$|[\n;&|)>])|[ \t]+(?:#|\d+>))"
 _CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)" + _CMD_END)
 _CHDIR = r"(?<![\w./-])(?-i:cd|pushd|popd)(?![\w.-])(?![ \t]+[\"']?(?:\./)?\.hermes(?![\w.-]))"
 _CD_INTO = r"(?<![\w./-])(?-i:cd|pushd)[ \t]+[\"']?"
