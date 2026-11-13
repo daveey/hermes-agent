@@ -190,9 +190,10 @@ def launch_body() -> Iterator[None]:
 @contextlib.contextmanager
 def launch_profile_runtime_scope(launch_home: str | Path) -> Iterator[None]:
     """Bind the launch profile's own runtime scope for one body: HERMES_HOME override naming the
-    launch home, ``launch_secret_scope``, and its terminal policy over the frozen launch
-    ``TERMINAL_*`` overlay. For hosts whose launch-profile bodies are not RPC sessions (the
-    standalone messaging gateway after a hosted room activated multiplexing, #112878).
+    launch home, ``launch_secret_scope``, and its terminal policy over the launch
+    ``TERMINAL_*`` overlay (frozen once multiplexing is active, the live env before). For hosts
+    whose launch-profile bodies are not RPC sessions (the standalone messaging gateway after a
+    hosted room activated multiplexing, #112878).
 
     The home override is bound even though the launch home IS the process home: under multiplexing
     "override unset" is the fail-closed signal for an UNBOUND context (``serves_routed_profile``,
@@ -203,7 +204,7 @@ def launch_profile_runtime_scope(launch_home: str | Path) -> Iterator[None]:
     from agent.runtime_scope import bind_state, scope_for_profile
 
     home = Path(launch_home)
-    # Own home: secrets unstamped (no foreign-home stamp), terminal policy over the frozen overlay.
+    # Own home: secrets unstamped (no foreign-home stamp), terminal policy over the launch overlay.
     tokens = bind_state(scope_for_profile(home), secrets=launch_secret_scope(home), stamp_home=False,
                         env_overlay=launch_terminal_env())
     try:

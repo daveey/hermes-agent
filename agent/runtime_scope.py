@@ -91,7 +91,8 @@ def bind_state(
     A hosted scope binds the scope with no home, secrets or terminal policy: its state lives
     behind the storage ports, not in a directory. For a local scope: the home override names the
     agent's home; the secret scope is *secrets*, or ``owner_secret_scope`` (the launch home's
-    frozen env plus ``.env``, any other home's own files) with external sources hydrated first
+    env plus ``.env``: frozen once multiplexing is active, the live env before; any other home's
+    own files) with external sources hydrated first
     unless ``hydrate_secrets=False``, stamped with the home unless ``stamp_home=False`` (unstamped marks the process's own profile); the terminal policy
     is built from the profile's config over *env_overlay* (the refusal scope if it cannot be
     read), or *terminal_policy* when the caller already built it off the event loop
