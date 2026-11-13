@@ -663,13 +663,15 @@ def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
             "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
 
 
-def _machine_picks_up(name: str) -> bool:
+def _machine_picks_up(name: str | tuple[str, ...]) -> bool:
     """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
     pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
     and worker-1 included, though both claim ``runs_on`` cards), so a missing field counts as on:
     ``heavy_route`` naming the worker is the operator saying it picks up. A pool label (:func:`is_pool_label`) is
-    live when some such machine carries it."""
+    live when some such machine carries it; a label tuple (queue label + coordination labels) when one carries all."""
     from hermes_cli import kanban_worker_node as wn
+    if isinstance(name, (tuple, list, set, frozenset)):
+        return bool(label_machines(name))
     if is_pool_label(name):
         return bool(label_machines(name))
     entry = ((wn.registry() or {}).get("machines") or {}).get(name)

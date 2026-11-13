@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -949,6 +950,63 @@ def test_pool_worker_keeps_a_mac_marker_card_when_no_live_machine_holds_every_la
     # A group that adds no label still queues: only the unmet label set falls back.
     out = _create(title="read the dashboard in Chrome")
     assert _runs_on(w2.conn, out["task_id"]) == [POOL], out
+
+
+HUB_WRITE = "capability:hub-write"
+# worker_pools names worker-5: portability attests coordination labels on those members, not on the queue's machines.
+POOLS_CFG = {**CFG, "worker_pools": {HUB: ["worker-5"]}}
+
+
+def _hub_write_registry(kind):
+    machines = _machines()  # worker-1/2: linux + pool:worker, no hub-write attestation
+    machines["worker-5"] = {**W1, "name": "worker-5", "labels": ["linux", HUB_WRITE]}  # no queue label
+    if kind == "held":
+        machines["worker-1"] = {**machines["worker-1"], "labels": ["linux", POOL, HUB_WRITE], "hold": True}
+    elif kind == "joint":
+        machines["worker-1"] = {**machines["worker-1"], "labels": ["linux", POOL, HUB_WRITE]}
+    seen = int(time.time() * 1000)  # coordination attestation only counts fresh members
+    listed = [{**m, "last_seen": seen} for m in machines.values()]
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": listed})
+
+
+# 11-13 review nit 3 (t_01a1d38bd571fd44): with no local-marker hit, queue_decision checked only the queue label, so
+# a card whose coordination label the attested pool members hold, but no live queue machine also holds, queued where
+# nobody could claim it.
+@pytest.mark.parametrize("kind", ["none", "held", "joint"])
+def test_no_marker_card_queues_only_when_one_live_machine_holds_queue_and_coordination_labels(hub, kind):
+    from hermes_cli import kanban_worker_placement as wp
+    _hub_write_registry(kind)
+    args = {"title": "summarise CI", "requires": ["hub:write"], "assignee": "default"}
+    assert kp.portable_reason(args, POOLS_CFG) is None  # worker-5 attests hub-write: portable
+    out = wp.queue_decision(args, POOLS_CFG, HUB, "")
+    if kind == "joint":
+        assert out is not None and out["runs_on"] == [POOL, HUB_WRITE], out
+    else:
+        assert out is None, out  # today's local keep (worker-first enrollment) instead of an unclaimable queue
+    # A card with no coordination label still queues on the queue label alone.
+    plain = wp.queue_decision({"title": "summarise CI", "assignee": "default"}, POOLS_CFG, HUB, "")
+    assert plain is not None and plain["runs_on"] == [POOL], plain
+
+
+# Review nit 1: the injected machine_ok seam is the one liveness source for the whole label set, on both paths.
+def test_machine_ok_seam_judges_the_whole_label_set_on_both_paths(w2, monkeypatch):
+    from hermes_cli import kanban_worker_placement as wp
+    seen = []
+
+    def ok(labels):
+        seen.append(labels)
+        return True
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+    _hub_write_registry("none")  # the real registry has no joint holder; the seam says there is one
+    out = wp.queue_decision({"title": "summarise CI", "requires": ["hub:write"]}, POOLS_CFG, HUB, "", machine_ok=ok)
+    assert out is not None and out["runs_on"] == [POOL, HUB_WRITE] and seen == [(POOL, HUB_WRITE)], (out, seen)
+    seen.clear()
+    w2_cfg = {"worker_queue": {"worker-2": POOL}}
+    _on(monkeypatch, "worker-2", w2_cfg, _no_live_tailnet_pool_worker("none"))
+    keychain = {"title": "rotate the CI token in the Keychain"}
+    out = wp.queue_decision(keychain, w2_cfg, "worker-2", "", machine_ok=ok)
+    assert out is not None and out["runs_on"] == [POOL, TAILNET] and seen == [(POOL, TAILNET)], (out, seen)
+    assert wp.queue_decision(keychain, w2_cfg, "worker-2", "", machine_ok=lambda _labels: False) is None
 
 
 def test_every_built_in_local_marker_has_a_group():

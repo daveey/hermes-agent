@@ -108,8 +108,9 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``,
     non-portable work, or when no active, unheld machine carries the label. Courier and origin-bound creates queue
     too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). On a pool worker a built-in local-marker
-    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`), but only when one active, unheld
-    machine holds the whole label set (queue, group and coordination labels); else the local keep stands. [daveey]
+    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`). Either way the card queues only
+    when one active, unheld machine holds the whole label set (queue, group and coordination labels), judged by
+    ``machine_ok`` (given the label tuple) or the registry; else the local keep stands. [daveey]
     """
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
@@ -126,14 +127,18 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     elif reason:
         return None
     extra = coordination.required_labels(args, cfg)
-    if extra is None or not (machine_ok or placement._machine_picks_up)(label):
+    if extra is None:
+        return None
+    if unmet is not None:
+        extra = extra | unmet["labels"]
+    runs_on = [label, *sorted(extra - {label})]
+    # One liveness source for the whole set, marker hit or not: an active, unheld pickup machine must hold every
+    # label, else nobody could claim the card and today's local keep stands. The machine_ok seam sees the set.
+    if not (machine_ok or placement._machine_picks_up)(label if len(runs_on) == 1 else tuple(runs_on)):
         return None
     if unmet is None:
-        return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}
-    extra = extra | unmet["labels"]
-    if not placement.label_machines([label, *extra]):
-        return None  # no live machine holds every label: nobody could claim it, so keep today's local keep
-    return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "note": unmet["note"],
+        return {"where": "local", "runs_on": runs_on, "why": QUEUED_WHY.format(label=label)}
+    return {"where": "local", "runs_on": runs_on, "note": unmet["note"],
             "why": QUEUED_WHY.format(label=label) + UNMET_WHY.format(hit=unmet["hit"], gateway=gateway)}
 
 
