@@ -201,3 +201,19 @@ def test_local_backend_reports_snapshot_aliases_and_terminal_guard_refuses(tmp_p
         finally:
             env.cleanup()
     assert result is not None and "scan cap" in json.loads(result)["error"]
+
+
+# Second instance on the card (MacBook 07:24): a `python3 - <<'PY'` body that only json.load()s a
+# spilled tool result with a 148 KB line was refused at the per-line scan cap. Same root cause: a
+# benign session alias made the open() argument an executed script.
+@pytest.mark.parametrize("in_ssh", [False, True])
+def test_heredoc_body_reading_an_over_cap_data_file_is_not_refused(tmp_path, in_ssh):
+    spill = tmp_path / "toolu_013aj8Q6jjdUWMQcjrcZZJSX.txt"
+    spill.write_text('{"a": "' + "x" * 148396 + '"}\n')
+    body = f"python3 - <<'PY'\nimport json\nd = json.load(open('{spill}'))\nprint(len(d))\nPY\n"
+    command = ("ssh -o BatchMode=yes ubuntu@h 'bash -ls' <<'EOF'\n" + body + "EOF") if in_ssh else body
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=_STOCK_ALIASES) == (
+        False, None)
+    # Control: unknown session aliases still fail closed on the same text.
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=None)
+    assert unsafe is True and refusal is not None and "scan cap" in refusal
