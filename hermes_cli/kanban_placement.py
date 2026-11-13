@@ -89,7 +89,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 from hermes_cli import kanban_capability_registry as reg
 
@@ -274,7 +274,7 @@ def route_labels(dest: str) -> list[str]:
     return [dest] if is_pool_label(dest) else [f"machine:{dest}"]
 
 
-def label_machines(label, machines: Optional[dict] = None) -> list[str]:
+def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) -> list[str]:
     """Active, unheld registry machines that carry ``label`` (or every label of a list/set) and pick up other
     gateways' cards (sorted)."""
     from hermes_cli import kanban_worker_node as wn
