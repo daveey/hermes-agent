@@ -26,7 +26,7 @@ export interface ProcessRow {
   id: string
   /** Seconds since exit; 0 while running. */
   sinceExitSeconds: number
-  status: 'done' | 'failed' | 'killed' | 'lost' | 'running'
+  status: 'done' | 'failed' | 'killed' | 'lost' | 'running' | 'unknown'
 }
 
 /** A finished process stays on the dock long enough to read its exit line, then
@@ -43,7 +43,14 @@ export function applyProcessSnapshot(sid: string | null, processes: ProcessEntry
   }
 }
 
-const REASON_STATUS: Record<string, ProcessRow['status']> = { failed_start: 'failed', killed: 'killed', lost: 'lost' }
+// A re-adopted job whose status was never recorded settles `unknown` (or `watcher_lost`): not a success.
+const REASON_STATUS: Record<string, ProcessRow['status']> = {
+  failed_start: 'failed',
+  killed: 'killed',
+  lost: 'lost',
+  unknown: 'unknown',
+  watcher_lost: 'unknown'
+}
 
 export const processStatus = (entry: ProcessEntry): ProcessRow['status'] => {
   if (entry.status !== 'exited') {
@@ -70,7 +77,12 @@ export const processVerdict = (row: ProcessRow, exitCode: number | null | undefi
     return row.detail ? `last: ${row.detail}` : 'starting'
   }
 
-  const verdict = row.status === 'killed' || row.status === 'lost' ? row.status : `exit ${exitCode ?? '?'}`
+  const verdict =
+    row.status === 'killed' || row.status === 'lost'
+      ? row.status
+      : row.status === 'unknown'
+        ? 'status unknown'
+        : `exit ${exitCode ?? '?'}`
 
   return `${verdict} · ${row.sinceExitSeconds}s ago`
 }

@@ -2327,6 +2327,7 @@ cli:
     exit_code: "код виходу {code}"
     verdict_killed: "зупинено"
     verdict_lost: "втрачено"
+    verdict_unknown: "статус невідомий"
     verdict_ago: "{verdict} · {seconds} с тому"
     process_gone: "Цей процес більше не відстежується."
     no_output: "Виводу ще немає."

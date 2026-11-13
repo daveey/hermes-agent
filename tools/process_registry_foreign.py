@@ -101,8 +101,10 @@ def _running(registry, entry: dict[str, Any]) -> bool:
 
 
 def _exit_fields(entry: dict[str, Any]) -> dict[str, Any]:
-    from tools.process_registry_output_log import adoptable_log, recorded_exit_code
+    from tools.process_registry_output_log import adoptable_log, recorded_exit_code, recorded_kill_source
     log = adoptable_log(entry.get("output_log"))
+    if log and (killed_by := recorded_kill_source(log)):
+        return {"exit_code": -15, "completion_reason": "killed", "termination_source": killed_by}
     code = recorded_exit_code(log) if log else None
     if code is None:
         return {"exit_code": None, "completion_reason": "unknown",
@@ -172,17 +174,31 @@ def foreign_wait(registry, entry: dict[str, Any], timeout: Optional[int]) -> dic
 
 def foreign_kill(registry, entry: dict[str, Any]) -> dict[str, Any]:
     """Signal the job's tree (and stop its scope) without taking it over: the supervisor's reader
-    sees the exit and records it. A recycled or gone PID is never signalled."""
+    sees the exit and records it. A recycled or gone PID is never signalled. A kill marker beside the
+    job's log, written before the signal, tells that reader the exit was this kill (its notice says
+    killed, as for a local kill, not "status unknown"); a kill that leaves the job alive withdraws it."""
     from tools.process_registry import _stop_systemd_unit
+    from tools.process_registry_output_log import adoptable_log, clear_kill, record_kill
     if not _running(registry, entry):
         return {**_head(registry, entry, False), **_exit_fields(entry), "status": "already_exited"}
+    log = adoptable_log(entry.get("output_log"))
+    if log:
+        try:
+            record_kill(log, "process.kill")
+        except OSError:
+            log = ""  # the supervisor then reports "status unknown"; the kill itself still goes ahead
     registry._terminate_host_pid(entry["pid"], entry.get("host_start_time"))
     unit = entry.get("systemd_unit") or ""
     if unit and not _stop_systemd_unit(unit):
+        alive = _running(registry, entry)
+        if log and alive:
+            clear_kill(log)
         return {"status": "error", "error": f"Kill incomplete: systemd scope {unit} did not stop",
-                "session_id": entry["session_id"], "scope_stop_failed": unit, "process_running": _running(registry, entry)}
+                "session_id": entry["session_id"], "scope_stop_failed": unit, "process_running": alive}
     survivors = registry._post_kill_survivors(registry._session_from_entry(entry))
     if survivors:
+        if log and _running(registry, entry):
+            clear_kill(log)
         alive = ", ".join(map(str, survivors))
         return {"status": "error", "error": f"Kill incomplete: {len(survivors)} process(es) still alive ({alive})",
                 "session_id": entry["session_id"], "survivors": survivors, "process_running": True}

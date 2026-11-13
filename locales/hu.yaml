@@ -2344,6 +2344,7 @@ cli:
     exit_code: "kilépés {code}"
     verdict_killed: "leállítva"
     verdict_lost: "elveszett"
+    verdict_unknown: "állapot ismeretlen"
     verdict_ago: "{verdict} · {seconds} mp-cel ezelőtt"
     process_gone: "Ezt a folyamatot már nem követjük."
     no_output: "Még nincs kimenet."

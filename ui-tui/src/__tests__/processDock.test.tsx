@@ -75,6 +75,17 @@ it('keeps running processes, ages finished ones out after the retention window, 
   expect(buildProcessRows([{ ...exited('x', 1), exited_at: null }], NOW * 1000)).toEqual([])
 })
 
+it('never paints a re-adopted job whose exit status was not recorded as done', () => {
+  for (const reason of ['unknown', 'watcher_lost']) {
+    const [row] = buildProcessRows(
+      [{ ...exited('proc_unknown', 3), completion_reason: reason, exit_code: null }],
+      NOW * 1000
+    )
+
+    expect(row).toMatchObject({ status: 'unknown', detail: 'status unknown · 3s ago' })
+  }
+})
+
 it('paints a Processes block under the agents without letting either block hide the other', () => {
   const agents = Array.from({ length: 6 }, (_, i) => agent(`child-${i}`))
   const processes = buildProcessRows([running, exited('fresh', 5)], NOW * 1000)

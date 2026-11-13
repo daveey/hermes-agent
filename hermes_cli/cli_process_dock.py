@@ -15,8 +15,10 @@ from agent.i18n import t
 # leaves; the completion notification in the transcript is the durable record.
 RETAIN_SECONDS = 60
 
-# Reader-thread exits report "exited"; `kill_process` / `kill_all` stamp "killed".
-_STATUS_BY_REASON = {"killed": "killed", "lost": "lost", "failed_start": "failed"}
+# Reader-thread exits report "exited"; `kill_process` / `kill_all` stamp "killed". A re-adopted job
+# whose status was never recorded settles "unknown" (or "watcher_lost"): not a success. [daveey]
+_STATUS_BY_REASON = {"killed": "killed", "lost": "lost", "failed_start": "failed",
+                     "unknown": "unknown", "watcher_lost": "unknown"}
 
 
 def _last_output_line(buffer: str) -> str:
@@ -72,10 +74,11 @@ def process_rows(now: float | None = None) -> list:
     return rows
 
 
-_GLYPH = {"running": "⚙", "done": "✔", "failed": "✘", "killed": "✘", "lost": "?"}
+_GLYPH = {"running": "⚙", "done": "✔", "failed": "✘", "killed": "✘", "lost": "?", "unknown": "?"}
 # Finished-status id → catalog key of the exit verdict (looked up at paint time).
 _VERDICT_KEYS = {"done": "cli.dock.exit_code", "failed": "cli.dock.exit_code",
-                 "killed": "cli.dock.verdict_killed", "lost": "cli.dock.verdict_lost"}
+                 "killed": "cli.dock.verdict_killed", "lost": "cli.dock.verdict_lost",
+                 "unknown": "cli.dock.verdict_unknown"}
 
 
 def process_activity(row: dict) -> str:

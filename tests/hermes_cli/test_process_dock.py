@@ -77,3 +77,16 @@ def test_monitor_controls_stop_processes_and_never_steer_them():
         assert any(r['id'] == slow_id and r['status'] == 'killed' for r in dock.processes)
     finally:
         process_registry.kill_process(slow_id)
+
+
+def test_unrecorded_exit_status_is_never_painted_as_done():
+    """A re-adopted job that settled ``unknown`` (no status recorded) or ``watcher_lost`` is not a success."""
+    from hermes_cli import cli_process_dock as dock
+
+    for reason in ('unknown', 'watcher_lost'):
+        status = dock.process_status({'status': 'exited', 'completion_reason': reason, 'exit_code': None})
+        assert status == 'unknown'
+        row = {'status': status, 'exit_code': None, 'since_exit': 4}
+        assert dock.process_glyph(row) == '?'
+        assert dock.process_activity(row) == t('cli.dock.verdict_ago', verdict=t('cli.dock.verdict_unknown'), seconds=4)
+    assert t('cli.dock.verdict_unknown') == 'status unknown'

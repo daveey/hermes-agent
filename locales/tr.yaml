@@ -2327,6 +2327,7 @@ cli:
     exit_code: "çıkış {code}"
     verdict_killed: "sonlandırıldı"
     verdict_lost: "kayboldu"
+    verdict_unknown: "durum bilinmiyor"
     verdict_ago: "{verdict} · {seconds} sn önce"
     process_gone: "Bu süreç artık izlenmiyor."
     no_output: "Henüz çıktı yok."

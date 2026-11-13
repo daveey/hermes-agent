@@ -9,7 +9,8 @@ export const PROCESS_GLYPH: Record<ProcessRow['status'], { color: (t: Theme) => 
   done: { color: t => t.color.statusGood, glyph: '✔' },
   failed: { color: t => t.color.error, glyph: '✘' },
   killed: { color: t => t.color.warn, glyph: '✘' },
-  lost: { color: t => t.color.muted, glyph: '?' }
+  lost: { color: t => t.color.muted, glyph: '?' },
+  unknown: { color: t => t.color.muted, glyph: '?' }
 }
 
 export const processGlyph = (status: ProcessRow['status'], t: Theme): { color: string; glyph: string } => {

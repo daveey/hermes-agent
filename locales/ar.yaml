@@ -2327,6 +2327,7 @@ cli:
     exit_code: "خروج {code}"
     verdict_killed: "أُنهيت"
     verdict_lost: "مفقودة"
+    verdict_unknown: "الحالة غير معروفة"
     verdict_ago: "{verdict} · قبل {seconds} ث"
     process_gone: "هذه العملية لم تعد مُتابَعة."
     no_output: "لا مخرجات بعد."

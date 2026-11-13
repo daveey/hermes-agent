@@ -2327,6 +2327,7 @@ cli:
     exit_code: "salida {code}"
     verdict_killed: "detenido"
     verdict_lost: "perdido"
+    verdict_unknown: "estado desconocido"
     verdict_ago: "{verdict} · hace {seconds}s"
     process_gone: "Este proceso ya no se rastrea."
     no_output: "Aún no hay salida."

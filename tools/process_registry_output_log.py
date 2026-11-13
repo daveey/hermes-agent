@@ -42,13 +42,14 @@ def worker_output_log(session_id: str, *, persist: bool = False) -> Optional[Pat
     directory = output_dir()
     make_user_dir(directory, mode=0o700, parents=True, exist_ok=True)
     from tools.process_registry_results import RESULT_RETENTION_SECONDS
-    # Only a recorded exit retires a log: a quiet process can run longer than the retention.
+    # Only a recorded exit (or kill) retires a log: a quiet process can run longer than the retention.
     cutoff = time.time() - RESULT_RETENTION_SECONDS
-    for exited in directory.glob("proc_*.exit"):
+    for exited in [*directory.glob("proc_*.exit"), *directory.glob("proc_*.killed")]:
         with suppress(FileNotFoundError):
             if exited.stat().st_mtime < cutoff:
                 exited.with_suffix(".log").unlink(missing_ok=True)
-                exited.unlink()
+                for suffix in (".exit", ".killed"):
+                    exited.with_suffix(suffix).unlink(missing_ok=True)
     return directory / f"{session_id}.log"
 
 
@@ -87,10 +88,16 @@ def record_exit_command(log: Path, command: str) -> str:
     own shell was removable by the command: ``exec`` replaced that shell and a user ``trap ... EXIT``
     overwrote it (both then settled as lost, -1), and a SIGTERM to the job ran it with ``$?`` 0
     (a false success). A shell killed by a signal records nothing, so the adopter reports the
-    status as unknown. [daveey]"""
+    status as unknown.
+
+    The child ``eval``s the command text rather than having it pasted inline: an inline compound is
+    parsed whole before it runs, so a syntax error (or an unterminated heredoc eating the closing
+    ``)``) killed the recording shell itself with status 2 and recorded nothing (settled as unknown).
+    Under ``eval`` the parse error ends only the child, and the recorder writes its 2; the command
+    is parsed one command at a time, exactly as ``bash -c`` runs it unwrapped. [daveey]"""
     import shlex
     target = shlex.quote(_exit_path(log).as_posix())
-    return (f"__hermes_exit_file={target}\n(\n{command}\n)\n__hermes_rc=$?\n"
+    return (f"__hermes_exit_file={target}\n(eval {shlex.quote(command)})\n__hermes_rc=$?\n"
             "printf '%s\\n' \"$__hermes_rc\" > \"$__hermes_exit_file\"\nexit \"$__hermes_rc\"")
 
 
@@ -108,6 +115,36 @@ def recorded_exit_code(log) -> Optional[int]:
         return int(_exit_path(log).read_text(encoding="utf-8-sig").strip())
     except (OSError, ValueError):
         return None
+
+
+def _kill_path(log) -> Path:
+    return Path(log).with_suffix(".killed")
+
+
+def record_kill(log, source: str) -> None:
+    """Mark beside the log that a ``process_manage kill`` from another Hermes process is ending the
+    job, so its supervisor (which only sees the PID go, with no status recorded) settles it as
+    killed instead of "status unknown". Written before the signal. [daveey]"""
+    path = _kill_path(log)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(source or "process.kill")
+
+
+def clear_kill(log) -> None:
+    """Withdraw a kill marker: the kill left the job running."""
+    with suppress(OSError):
+        _kill_path(log).unlink()
+
+
+def recorded_kill_source(log) -> str:
+    """The termination source of a kill another process recorded for this job's log, or ``""``."""
+    if not log:
+        return ""
+    try:
+        return _kill_path(log).read_text(encoding="utf-8-sig").strip() or "process.kill"
+    except OSError:
+        return ""
 
 
 class ProcessOutputLogMixin:
@@ -168,6 +205,14 @@ class ProcessOutputLogMixin:
         except OSError as exc:
             logger.warning("Process output log %s unreadable: %s", session.output_log, exc)
         ingest(decoder.decode(b"", final=True), final=True)
+        if killed_by := recorded_kill_source(session.output_log):
+            # Another Hermes process's process_manage kill ended it (process_registry_foreign): report
+            # the kill, as a local kill_process does, not the signal's "status unknown". [daveey]
+            if proc is not None:
+                with suppress(ChildProcessError, OSError):
+                    proc.wait()
+            self._finish_exited(session, -15, reason="killed", source=killed_by)
+            return
         if proc is not None:
             self._finish_reader(session, decoder, ingest, "Log", proc.wait, lambda: proc.returncode)
             return

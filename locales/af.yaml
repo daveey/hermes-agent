@@ -2327,6 +2327,7 @@ cli:
     exit_code: "uitgang {code}"
     verdict_killed: "doodgemaak"
     verdict_lost: "verlore"
+    verdict_unknown: "status onbekend"
     verdict_ago: "{verdict} · {seconds}s gelede"
     process_gone: "Hierdie proses word nie meer gevolg nie."
     no_output: "Nog geen uitvoer nie."

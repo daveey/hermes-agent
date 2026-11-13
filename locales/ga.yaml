@@ -2327,6 +2327,7 @@ cli:
     exit_code: "scor {code}"
     verdict_killed: "maraithe"
     verdict_lost: "caillte"
+    verdict_unknown: "stádas anaithnid"
     verdict_ago: "{verdict} · {seconds}s ó shin"
     process_gone: "Ní rianaítear an próiseas seo a thuilleadh."
     no_output: "Gan aschur fós."

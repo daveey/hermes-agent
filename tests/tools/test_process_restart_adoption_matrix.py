@@ -62,6 +62,7 @@ import json, sys
 from pathlib import Path
 import tools.process_registry as pr
 from tools import process_registry_output_log as logs
+from tools.process_registry_notifications import format_process_notification
 pr.CHECKPOINT_PATH = Path(sys.argv[1])
 logs.output_dir = lambda: Path(sys.argv[2])
 registry = pr.ProcessRegistry()
@@ -72,7 +73,9 @@ sys.stdin.readline()
 session = registry.get(sys.argv[3])
 done = session is not None and session._completion_event.wait(20)
 print(json.dumps({"done": bool(done), "events": [
-    {k: e.get(k) for k in ("session_id", "exit_code", "completion_reason")} for e in events]}), flush=True)
+    {k: e.get(k) for k in ("session_id", "exit_code", "completion_reason")} for e in events],
+    "sources": [e.get("termination_source") for e in events],
+    "notices": [format_process_notification(e) for e in events]}), flush=True)
 '''
 
 
@@ -115,7 +118,19 @@ _CASES = {
     "heredoc": ("sh <<'EOF'\nprintf 'heredoc\\n'\nexit 5\nEOF", 5),
     # A command's own EXIT trap replaced the recorder's.
     "own_exit_trap": ("trap 'echo bye' EXIT; exit 6", 6),
+    # A parse error killed the recording shell itself (the inline compound was parsed whole before
+    # it ran), so nothing was recorded and the job settled as unknown instead of bash's 2.
+    "syntax_error": ("printf 'before\\n'; if then", 2),
+    # Unterminated: it ate the compound's closing paren (unknown). Unwrapped, bash warns and runs it.
+    "unterminated_heredoc": ("sh <<EOF\nexit 5", 5),
 }
+
+
+@pytest.mark.parametrize("case", ["syntax_error", "unterminated_heredoc"])
+def test_parse_failure_cases_match_the_unwrapped_command(case):
+    """The expected codes are what the same text exits with under a plain ``bash -c``."""
+    body, expected = _CASES[case]
+    assert subprocess.run(["bash", "-c", body], capture_output=True, timeout=10, check=False).returncode == expected
 
 
 @pytest.mark.parametrize("exit_while_down", [False, True])
@@ -254,6 +269,83 @@ def test_owner_chat_kills_a_job_another_process_adopted(adopted_elsewhere):
     killed = _call("kill", job["id"])
     assert killed["status"] == "killed", killed
     assert registry._detached_host_fate(job["pid"], job["entry"]["host_start_time"]) != "running"
+    # Until the supervisor's receipt lands, this chat's own poll reports the kill too.
+    polled = _call("poll", job["id"])
+    assert (polled["completion_reason"], polled["exit_code"]) == ("killed", -15), polled
     report = _adopter_report(adopter)
-    assert report["done"] and len(report["events"]) == 1
-    assert report["events"][0]["completion_reason"] == "unknown"
+    # The supervisor's one notice agrees with the kill result (it said "status unknown").
+    assert report["done"] and report["events"] == [
+        {"session_id": job["id"], "exit_code": -15, "completion_reason": "killed"}]
+    assert report["sources"] == ["process.kill"]
+    assert "terminated by process.kill" in report["notices"][0]
+    assert "status unknown" not in report["notices"][0]
+
+
+@pytest.mark.parametrize("failure", ["survivors", "scope_stop"])
+def test_foreign_kill_that_leaves_the_job_alive_withdraws_its_kill_marker(adopted_elsewhere, monkeypatch, failure):
+    """A kill that did not end the job must not make its later natural exit read as killed."""
+    job, adopter, gate, registry = adopted_elsewhere
+    if failure == "scope_stop" and not job["entry"].get("systemd_unit"):
+        pytest.skip("this host runs the job without a systemd scope")
+    monkeypatch.setattr(registry, "_terminate_host_pid", lambda *a, **k: None)
+    monkeypatch.setattr("tools.process_registry._stop_systemd_unit", lambda unit: failure != "scope_stop")
+    monkeypatch.setattr(registry, "_post_kill_survivors", lambda session: [job["pid"]])
+    killed = _call("kill", job["id"])
+    assert killed["status"] == "error" and killed["process_running"] is True, killed
+    assert not Path(job["log"]).with_suffix(".killed").exists()
+    gate.touch()
+    report = _adopter_report(adopter)
+    assert report["events"] == [{"session_id": job["id"], "exit_code": 7, "completion_reason": "exited"}]
+
+
+def test_foreign_wait_gets_the_masked_success_hint_like_a_local_one(monkeypatch):
+    """The foreign fallback's poll/wait result runs through the same post-processing as a local one."""
+    import tools.process_registry_foreign as foreign
+    failure = "Traceback (most recent call last)\n  File \"run.py\"\nValueError: boom"
+    head = {"status": "exited", "session_id": "proc_feedface0001", "exit_code": 0,
+            "command": "python3 run.py 2>&1 | tail -5"}
+    for action, key in (("wait", "output"), ("poll", "output_preview")):
+        result = {**head, key: failure}
+        monkeypatch.setattr(foreign, "foreign_action", lambda registry, a, sid, args, r=result: dict(r))
+        answered = _call(action, "proc_feedface0001")
+        assert answered["exit_code"] == 0 and "NOT of the command before the pipe" in answered.get("hint", ""), answered
+
+
+def test_foreign_kill_of_a_job_its_spawner_still_supervises_settles_as_killed(checkpoint, tmp_path, monkeypatch):
+    """The supervisor can be the live spawner itself (it holds the Popen): its reader honours the
+    kill marker too instead of reporting the signal's bare exit."""
+    import tools.process_registry_foreign as foreign
+    monkeypatch.setattr("tools.process_registry_output_log.output_dir", lambda: tmp_path)
+    registry = ProcessRegistry()
+    session = registry.spawn_local("printf 'started\\n'; sleep 30", cwd=str(tmp_path), session_key=TUI_KEY,
+                                   owner_task_id=TUI_KEY, persist_on_release=True)
+    try:
+        assert session.process is not None and session.output_log
+        deadline = time.monotonic() + 10
+        while "started" not in Path(session.output_log).read_text():
+            assert time.monotonic() < deadline, "job never started"
+            threading.Event().wait(0.02)
+        registry._write_checkpoint()
+        entry = next(e for e in json.loads(checkpoint.read_text()) if e["session_id"] == session.id)
+        assert foreign.foreign_kill(registry, entry)["status"] == "killed"
+        assert session._completion_event.wait(10)
+        assert (session.exit_code, session.completion_reason, session.termination_source) == (
+            -15, "killed", "process.kill")
+    finally:
+        if session._reader_thread:
+            session._reader_thread.join(5)
+        registry.kill_process(session.id)
+
+
+def test_a_kill_marker_retires_its_log_like_a_recorded_exit(tmp_path, monkeypatch):
+    """A killed job records no ``.exit``: its kill marker ages its log out instead (it never would)."""
+    from tools import process_registry_output_log as logs
+    from tools.process_registry_results import RESULT_RETENTION_SECONDS
+    monkeypatch.setattr(logs, "output_dir", lambda: tmp_path)
+    old = time.time() - RESULT_RETENTION_SECONDS - 60
+    for name in ("proc_killed", "proc_live"):
+        (tmp_path / f"{name}.log").write_text("x")
+    logs.record_kill(tmp_path / "proc_killed.log", "process.kill")
+    os.utime(tmp_path / "proc_killed.killed", (old, old))
+    logs.worker_output_log("proc_new", persist=True)
+    assert sorted(p.name for p in tmp_path.glob("proc_*")) == ["proc_live.log"]
