@@ -49,6 +49,25 @@ if (( is_fetch )); then
     cat "$LINT_BUG_TEXT" >&2
     exit 128
   fi
+  if [[ -z $LINT_FAIL ]]; then
+    # Healthy mode must succeed on every host git, but the runner's real git 2.55 hits the BUG
+    # itself here: answer that one fetch without promisor mode, invisibly to the step.
+    err=$(mktemp); rc=0
+    "$LINT_REAL_GIT" "$@" 2>"$err" || rc=$?
+    if (( rc )) && grep -q should_include_obj "$err"; then
+      saved=()
+      for k in remote.origin.promisor remote.origin.partialclonefilter extensions.partialclone; do
+        saved+=("$k=$("$LINT_REAL_GIT" config --get "$k" || true)")
+        "$LINT_REAL_GIT" config --unset "$k" || true
+      done
+      args=(); for a in "$@"; do [[ $a == --filter=* ]] || args+=("$a"); done
+      rc=0; "$LINT_REAL_GIT" "${args[@]}" || rc=$?
+      for kv in "${saved[@]}"; do [[ -n ${kv#*=} ]] && "$LINT_REAL_GIT" config "${kv%%=*}" "${kv#*=}"; done
+    else
+      cat "$err" >&2
+    fi
+    rm -f "$err"; exit "$rc"
+  fi
 fi
 exec "$LINT_REAL_GIT" "$@"
 """
