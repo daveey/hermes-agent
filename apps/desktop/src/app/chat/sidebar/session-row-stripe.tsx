@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
-import type { SessionInfo } from '@/hermes'
+import { reportSessionStripeRemote, type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { outcomeHasCrons, outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
@@ -14,14 +14,24 @@ import { stuckOnPausedQueue } from '@/store/owner-queue-landed'
 import { $pausedQueueSessionIds } from '@/store/owner-queue-reconcile'
 import { $sessions } from '@/store/session'
 import {
-
   kanbanStripeCounts,
   outcomePaintsStripe,
   recordStripeTransition,
   type SessionDotState,
   sessionStatusStripe,
-  type SessionStatusStripe
+  type SessionStatusStripe,
+  setStripeReasonReporter
 } from '@/store/session-dot-state'
+
+// [daveey] Every red edge (with its reasons) also goes to the session's own gateway, where the agent can read it.
+setStripeReasonReporter((row, stripe, previous, reasons) =>
+  reportSessionStripeRemote(
+    { connection_id: row.connection_id, id: row.id, profile: row.profile },
+    stripe,
+    previous,
+    reasons
+  )
+)
 
 /**
  * [daveey] The sidebar row's left stripe: the session's status. Green = its turn is done and waiting on you (stays

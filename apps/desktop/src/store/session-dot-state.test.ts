@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import type { SessionInfo } from '@/types/hermes'
 
+import { $queuedPromptsBySession } from './composer-queue'
 import { $kanbanObservationTick } from './kanban-observation'
 import {
   $cronSessions,
@@ -31,8 +32,10 @@ import {
   recordStripeTransition,
   resetStripeTransitionLog,
   sessionStatusStripe,
+  setStripeReasonReporter,
   showsRunningArc,
   STRIPE_TRANSITION_LOG_CAP_PER_MIN,
+  stuckReasons,
   takeSessionListRefreshReason,
   unreadSessionCount,
   withoutBackgroundProcess,
@@ -917,5 +920,95 @@ describe('recordStripeTransition', () => {
     recordStripeTransition(row, 'stuck', 'stalled', 70_000)
     expect(logLine).toHaveBeenCalledTimes(STRIPE_TRANSITION_LOG_CAP_PER_MIN + 1)
     expect(String(logLine.mock.lastCall?.[0])).toContain('suppressed=4')
+  })
+})
+
+// [daveey] selfheal desktop-54ae373894 (t_01a1d3142a47913f): a chat sat red with no blocked card and no visible
+// question, and its agent, asked "why are you red", guessed wrong. Every red verdict now carries its inputs.
+describe('stuckReasons and the red report', () => {
+  const report = vi.fn()
+  const logLine = vi.fn()
+  let previousBridge: unknown
+  const row = { connection_id: 'hub-ec2', id: 'red-chat', profile: 'default' }
+
+  beforeEach(() => {
+    resetStripeTransitionLog()
+    report.mockReset()
+    logLine.mockReset()
+    setStripeReasonReporter(report)
+    previousBridge = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    ;(window as unknown as { hermesDesktop?: unknown }).hermesDesktop = { logLine }
+  })
+
+  afterEach(() => {
+    setStripeReasonReporter(null)
+    ;(window as unknown as { hermesDesktop?: unknown }).hermesDesktop = previousBridge
+    clearAllSessionStates()
+    $queuedPromptsBySession.set({})
+    setSessions([])
+    resetStripeTransitionLog()
+  })
+
+  it('names the runtime holding the prompt, a paused queue, or says unknown', () => {
+    publishSessionState('rt-dead', { ...createClientSessionState('red-chat'), needsInput: true })
+    publishSessionState('rt-other', { ...createClientSessionState('other-chat'), needsInput: true })
+    expect(stuckReasons(row, 'needs-input')).toEqual(['needs-input:prompt runtime=rt-dead'])
+
+    $queuedPromptsBySession.set({ 'red-chat': [{ attachments: [], id: 'q1', serverStatus: 'unknown', text: 'hi' }] } as never)
+    expect(stuckReasons(row, 'needs-input')).toEqual(['needs-input:prompt runtime=rt-dead', 'needs-input:paused-queue'])
+
+    clearAllSessionStates()
+    $queuedPromptsBySession.set({})
+    expect(stuckReasons(row, 'needs-input')).toEqual(['needs-input:unknown'])
+  })
+
+  it('names a quiet turn, blocked cards with their ids, a review wait and a decision outcome', () => {
+    expect(stuckReasons(row, 'stalled')).toEqual(['stalled'])
+    expect(
+      stuckReasons({ ...row, kanban_blocked: 1, kanban_blocked_on: ['default/t_a'], kanban_held: 2 }, 'background')
+    ).toEqual(['kanban-blocked:3 on=default/t_a held=2'])
+    expect(stuckReasons({ ...row, review_wait: 'stuck', review_wait_pr: 'o/r#9' }, 'idle')).toEqual(['review:o/r#9'])
+    expect(stuckReasons({ ...row, review_wait: 'stuck' }, 'idle')).toEqual(['review:?'])
+    expect(stuckReasons({ ...row, outcome: { kind: 'decision' } } as never, 'idle')).toEqual(['outcome:decision'])
+    // A working turn beats cards, reviews and the stored outcome, exactly as sessionStatusStripe does.
+    expect(
+      stuckReasons({ ...row, kanban_blocked: 1, outcome: { kind: 'decision' }, review_wait: 'stuck' } as never, 'working')
+    ).toEqual([])
+    expect(stuckReasons({ ...row, review_wait: 'parked', outcome: { kind: 'done' } } as never, 'idle')).toEqual([])
+  })
+
+  it('reports a red first sighting, each new red cause, and the way out; logs the reasons', () => {
+    publishSessionState('rt-dead', { ...createClientSessionState('red-chat'), needsInput: true })
+
+    recordStripeTransition(row, 'stuck', 'needs-input', 1_000)
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(report.mock.calls[0].slice(1)).toEqual(['stuck', null, ['needs-input:prompt runtime=rt-dead']])
+    expect(logLine).not.toHaveBeenCalled() // first sightings stay out of the log, as before
+
+    recordStripeTransition(row, 'stuck', 'needs-input', 1_500) // same cause: nothing
+    expect(report).toHaveBeenCalledTimes(1)
+
+    recordStripeTransition({ ...row, kanban_blocked: 1, kanban_blocked_on: ['t_b'] }, 'stuck', 'background', 2_000)
+    expect(report).toHaveBeenCalledTimes(2)
+    expect(report.mock.calls[1].slice(1)).toEqual(['stuck', 'stuck', ['kanban-blocked:1 on=t_b']])
+    expect(String(logLine.mock.lastCall?.[0])).toContain('stuck->stuck')
+    expect(String(logLine.mock.lastCall?.[0])).toContain('stuck=[kanban-blocked:1_on=t_b]')
+
+    recordStripeTransition(row, 'done', 'idle', 3_000)
+    expect(report.mock.calls[2].slice(1)).toEqual(['done', 'stuck', []])
+
+    recordStripeTransition(row, 'waiting', 'background', 4_000) // not red on either side: log only
+    expect(report).toHaveBeenCalledTimes(3)
+    expect(logLine).toHaveBeenCalledTimes(3)
+  })
+
+  it('never reports an offline-cached row and survives a throwing reporter', () => {
+    recordStripeTransition({ ...row, offline_cached: true }, 'stuck', 'stalled', 1_000)
+    expect(report).not.toHaveBeenCalled()
+
+    setStripeReasonReporter(() => {
+      throw new Error('boom')
+    })
+    expect(() => recordStripeTransition({ ...row, id: 'x' }, 'stuck', 'stalled', 1_000)).not.toThrow()
   })
 })

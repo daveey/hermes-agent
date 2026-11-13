@@ -472,6 +472,29 @@ export function setSessionMutedRemote(
   })
 }
 
+/** [daveey] Tell the row's own gateway why the sidebar painted it (red `stuck` reasons), so an agent asked "why are
+ *  you red" reads the real inputs (`hermes sessions outcome <id>`) instead of guessing. Fire-and-forget: an older
+ *  backend without the route 404s and the caller drops it. */
+export function reportSessionStripeRemote(
+  row: Pick<SessionInfo, 'connection_id' | 'id' | 'profile'>,
+  stripe: null | string,
+  previous: null | string,
+  reasons: readonly string[]
+): Promise<{ ok: boolean }> {
+  const owner = sessionWriteProfile(row.profile)
+
+  const scope: ProfileScope = row.connection_id
+    ? { connectionId: row.connection_id, profile: owner ?? 'default' }
+    : owner
+
+  return hermesApi<{ ok: boolean }>({
+    ...sessionScoped(scope),
+    path: `/api/sessions/${encodeURIComponent(row.id)}/stripe-report`,
+    method: 'POST',
+    body: { previous, reasons: [...reasons], stripe, ...(owner ? { profile: owner } : {}) }
+  })
+}
+
 // Full-text search over one profile's sessions. Pass the profile the caller is
 // showing: an unscoped request lands on the primary backend, which searches
 // its launch profile's state.db whatever profile the sidebar is on. `null`

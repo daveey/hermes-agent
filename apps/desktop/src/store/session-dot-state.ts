@@ -690,6 +690,8 @@ const STRIPE_TRANSITION_WINDOW_MS = 60_000
 
 interface StripeTraceEntry {
   stripe: null | SessionStatusStripe
+  /** The red reasons last logged (`stuckReasons` joined); empty unless `stuck`. */
+  reasonsKey: string
   emitted: number[]
   suppressed: number
 }
@@ -710,9 +712,11 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
       | 'background_active'
       | 'connection_id'
       | 'cron_active'
+      | 'execution_observations'
       | 'goal_active'
       | 'kanban_active'
       | 'kanban_blocked'
+      | 'kanban_blocked_on'
       | 'kanban_held'
       | 'kanban_observed_at'
       | 'kanban_parked'
@@ -723,6 +727,8 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
       | 'outcome'
       | 'offline_synced_at'
       | 'profile'
+      | 'review_wait'
+      | 'review_wait_pr'
     >
   >
 
@@ -744,13 +750,119 @@ function rowListSource(row: StripeTraceRow): string {
   return row.offline_synced_at !== undefined ? 'fallback' : 'project-tree'
 }
 
+/** [daveey] WHY a row's stripe is red (`stuck`), one entry per input that holds, in the same terms as
+ *  `sessionStatusStripe`: `needs-input:prompt runtime=<ids>` (a blocking prompt on those runtimes),
+ *  `needs-input:paused-queue`, `stalled` (a quiet turn), `kanban-blocked:<n> on=<cards>` (+ `held=` / `asks=`),
+ *  `review:<pr>`, `outcome:decision`. Agents could not see the renderer-only half of this and guessed
+ *  (selfheal desktop-54ae373894), so every red edge is logged and reported to the session's gateway with it. */
+export function stuckReasons(
+  row: StripeTraceRow,
+  dotState: SessionDotState,
+  nowSeconds: number = Date.now() / 1000
+): string[] {
+  const reasons: string[] = []
+
+  if (dotState === 'needs-input') {
+    const aliases = new Set(lineageAliases(row.id, $sessions.get()))
+    aliases.add(row.id)
+
+    const runtimes = Object.entries($sessionStates.get())
+      .filter(([runtimeId, s]) => s?.needsInput && aliases.has(s.storedSessionId ?? runtimeId))
+      .map(([runtimeId]) => runtimeId)
+
+    const paused = $pausedQueueSessionIds.get().some(id => aliases.has(id))
+
+    if (runtimes.length > 0) {
+      reasons.push(`needs-input:prompt runtime=${runtimes.join(',')}`)
+    }
+
+    if (paused) {
+      reasons.push('needs-input:paused-queue')
+    }
+
+    if (!runtimes.length && !paused) {
+      reasons.push('needs-input:unknown')
+    }
+  }
+
+  if (dotState === 'stalled') {
+    reasons.push('stalled')
+  }
+
+  if (dotState !== 'working') {
+    const counts = kanbanStripeCounts(row, nowSeconds)
+
+    if (counts.blocked > 0) {
+      const exec = rowExecution(row, nowSeconds)
+      const parts = [`kanban-blocked:${counts.blocked}`]
+
+      if (row.kanban_blocked_on?.length) {
+        parts.push(`on=${row.kanban_blocked_on.join(',')}`)
+      }
+
+      if ((row.kanban_held ?? 0) > 0) {
+        parts.push(`held=${row.kanban_held}`)
+      }
+
+      if (exec && Math.max(exec.needsUser, exec.outstanding) > 0) {
+        parts.push(`asks=${Math.max(exec.needsUser, exec.outstanding)}`)
+      }
+
+      reasons.push(parts.join(' '))
+    }
+
+    if (row.review_wait === 'stuck') {
+      reasons.push(`review:${row.review_wait_pr ?? '?'}`)
+    }
+  }
+
+  if (!hasOwnLiveTurn(dotState) && outcomeStripe(row.outcome) === 'stuck') {
+    reasons.push(`outcome:${row.outcome?.kind}`)
+  }
+
+  return reasons
+}
+
+/** Where a red edge goes besides desktop.log: the session's own gateway (`POST /api/sessions/<id>/stripe-report`),
+ *  which keeps it for `hermes sessions outcome <id>`. Set by the sidebar; a no-op until then (tests, early boot). */
+export type StripeReasonReporter = (
+  row: StripeTraceRow,
+  stripe: null | SessionStatusStripe,
+  previous: null | SessionStatusStripe,
+  reasons: readonly string[]
+) => Promise<unknown> | void
+
+let stripeReasonReporter: null | StripeReasonReporter = null
+
+export const setStripeReasonReporter = (reporter: null | StripeReasonReporter): void => {
+  stripeReasonReporter = reporter
+}
+
+function reportStripeReason(
+  row: StripeTraceRow,
+  stripe: null | SessionStatusStripe,
+  previous: null | SessionStatusStripe,
+  reasons: readonly string[]
+): void {
+  if (!stripeReasonReporter || row.offline_cached) {
+    return
+  }
+
+  try {
+    void Promise.resolve(stripeReasonReporter(row, stripe, previous, reasons)).catch(() => undefined)
+  } catch {
+    // Diagnostics only.
+  }
+}
+
 /** Build the desktop.log line for one transition. Exported for tests. */
 export function formatStripeTransition(
   row: StripeTraceRow,
   from: null | SessionStatusStripe,
   to: null | SessionStatusStripe,
   dotState: SessionDotState,
-  suppressed = 0
+  suppressed = 0,
+  reasons: readonly string[] = []
 ): string {
   const fields: [string, unknown][] = [
     ['conn', row.connection_id ?? 'primary'],
@@ -777,6 +889,10 @@ export function formatStripeTransition(
     fields.push(['suppressed', suppressed])
   }
 
+  if (reasons.length > 0) {
+    fields.push(['stuck', `[${reasons.map(r => r.replace(/\s+/g, '_')).join(';')}]`])
+  }
+
   return `stripe-transition ${row.id} ${from ?? 'none'}->${to ?? 'none'} ${fields
     .map(([key, value]) => `${key}=${traceValue(value)}`)
     .join(' ')}`
@@ -795,19 +911,29 @@ export function recordStripeTransition(
   try {
     const key = `${row.connection_id ?? ''}\u0000${row.profile ?? ''}\u0000${row.id}`
     const entry = stripeTrace.get(key)
+    const reasons = stripe === 'stuck' ? stuckReasons(row, dotState, now / 1000) : []
+    const reasonsKey = reasons.join('|')
 
     if (!entry) {
-      stripeTrace.set(key, { emitted: [], stripe, suppressed: 0 })
+      stripeTrace.set(key, { emitted: [], reasonsKey, stripe, suppressed: 0 })
+
+      // [daveey] A row already red when first seen (after a restart, a reconnect) is exactly the red nobody can
+      // explain later: report it, though the log still skips first sightings.
+      if (stripe === 'stuck') {
+        reportStripeReason(row, stripe, null, reasons)
+      }
 
       return
     }
 
-    if (entry.stripe === stripe) {
+    // A red row whose cause changed (the prompt answered but a card blocked) is a new red: log and report it.
+    if (entry.stripe === stripe && (stripe !== 'stuck' || entry.reasonsKey === reasonsKey)) {
       return
     }
 
     const from = entry.stripe
     entry.stripe = stripe
+    entry.reasonsKey = reasonsKey
     entry.emitted = entry.emitted.filter(at => now - at < STRIPE_TRANSITION_WINDOW_MS)
 
     if (entry.emitted.length >= STRIPE_TRANSITION_LOG_CAP_PER_MIN) {
@@ -817,8 +943,12 @@ export function recordStripeTransition(
     }
 
     entry.emitted.push(now)
-    const line = formatStripeTransition(row, from, stripe, dotState, entry.suppressed)
+    const line = formatStripeTransition(row, from, stripe, dotState, entry.suppressed, reasons)
     entry.suppressed = 0
+
+    if (stripe === 'stuck' || from === 'stuck') {
+      reportStripeReason(row, stripe, from, reasons)
+    }
 
     if (typeof window !== 'undefined') {
       const win = new URLSearchParams(window.location.search).get('win') || 'main'

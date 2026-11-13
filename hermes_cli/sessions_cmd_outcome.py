@@ -74,11 +74,33 @@ def cmd_outcome(db, args):
     if not sid:
         return 1
     outcome = refresh_outcome(sid, "manual", db=db) if args.refresh else get_outcome(sid, db=db)
+    stripe = _stripe_report(db, sid)
     if args.json:
-        print(json.dumps({"session_id": sid, "outcome": outcome}, indent=2, ensure_ascii=False))
+        print(json.dumps({"session_id": sid, "outcome": outcome, "desktop_stripe": stripe}, indent=2,
+                         ensure_ascii=False))
     else:
         print(f"{sid}  {_describe(outcome)}")
+        if stripe:
+            # [daveey] Why the Desktop painted the row (red inputs only the renderer holds): t_01a1d3142a47913f.
+            from hermes_cli.desktop_stripe_report import describe
+
+            print(f"{' ' * len(sid)}  {describe(stripe)}")
     return None
+
+
+def _stripe_report(db, sid: str):
+    """The Desktop's latest stripe report for the chat's lineage (``desktop_stripe_report``), or None."""
+    import sqlite3
+    from pathlib import Path
+
+    from hermes_cli.desktop_stripe_report import latest
+    from hermes_state_outcome import _lineage_ids
+
+    try:
+        ids = _lineage_ids(db, sid)
+    except sqlite3.Error:  # a lineage read failure falls back to the exact id
+        ids = [sid]
+    return latest(Path(db.db_path).parent, [sid, *ids])
 
 
 def sidebar_rows(db, limit: int = AUDIT_DEFAULT_LIMIT) -> list[dict[str, Any]]:

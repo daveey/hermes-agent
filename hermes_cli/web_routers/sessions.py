@@ -36,7 +36,7 @@ from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_server_sessions import _session_latest_descendant
 from hermes_cli.web_models import (
     BackgroundProcessStop, BulkDeleteSessions, SessionImport, SessionMute, SessionOwnerBackfill, SessionPrune,
-    SessionRename)
+    SessionRename, SessionStripeReport)
 from hermes_cli.web_routers._common import (
     CORRUPT_STORE_DETAIL, corrupt_store_as_status, log as _log, destructive_profile, http_failure,
 )
@@ -1207,6 +1207,20 @@ async def mute_session_endpoint(session_id: str, body: SessionMute, request: Req
         return {"ok": True, "muted": body.muted, "outcome": set_muted(sid, body.muted, db=db)}
 
     return await _write_on_owner(request, body.profile, _mute)
+
+
+@manage_router.post("/api/sessions/{session_id}/stripe-report")
+async def stripe_report_endpoint(session_id: str, body: SessionStripeReport):
+    """[daveey] The Desktop's reason for painting this row (red ``stuck`` inputs), kept for the agent and the log."""
+    from hermes_cli import desktop_stripe_report
+
+    def _record(db):
+        sid = _resolve_session_id(db, session_id) or session_id
+        entry = desktop_stripe_report.record(Path(db.db_path).parent, sid, body.stripe, body.reasons,
+                                             previous=body.previous)
+        return {"ok": True, "report": entry}
+
+    return await asyncio.to_thread(_with_db, body.profile, _record, read_only=True)
 
 
 @manage_router.get("/api/sessions/{session_id}/outcome")

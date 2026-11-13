@@ -302,6 +302,14 @@ class SessionMute(BaseModel):
     profile: Optional[str] = None
 
 
+class SessionStripeReport(BaseModel):
+    """POST /api/sessions/{id}/stripe-report: why the Desktop painted the row (its red reasons). [daveey]"""
+    stripe: Optional[str] = None
+    previous: Optional[str] = None
+    reasons: list[str] = Field(default_factory=list, max_length=64)
+    profile: Optional[str] = None
+
+
 class SessionOwnerBackfill(BaseModel):
     """POST /api/sessions/owner-backfill (legacy migration). ``profile`` scopes WHICH state.db is
     stamped; the stamped value is always that store's own serving-profile identity — the caller
