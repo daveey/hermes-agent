@@ -1326,9 +1326,7 @@ def _redecorate_prompt_cache_for_provider(
             static_system_prefix=static if isinstance(static, str) else None,
             cache_full_system=getattr(agent, "_cache_full_system", False),
             session_system_prompt=agent._cached_system_prompt,
-            direct_native_tool_cache=getattr(
-                agent, "_direct_native_anthropic_tool_cache_capability", lambda: False
-            )(),
+            direct_native_tool_cache=getattr(agent, "_direct_native_anthropic_tool_cache_capability", lambda: False)(),
             # LiteLLM-style envelope routes forward part-level markers into
             # tool_result.content[] → non-retryable 400 (#89886).
             tool_part_markers=envelope_tool_part_cache_markers_supported(
