@@ -591,20 +591,27 @@ def test_refused_scripts_verbatim_are_not_refused(tmp_path, monkeypatch, script,
 
 
 # Independent review: prove execution with a fake hermes, never a real gateway.
-def _assert_bash_marker(tmp_path, command):
+def _run_bash_marker(tmp_path, command):
+    """Run `command` in real Bash with a fake `hermes`; return (marker written, stderr)."""
     import os
     import subprocess
 
     marker = tmp_path / "marker"
+    marker.unlink(missing_ok=True)
     hermes = tmp_path / "hermes"
     hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
     hermes.chmod(0o755)
     result = subprocess.run(
         ["/bin/bash"], input=command, text=True, capture_output=True, timeout=10, check=False,
-        env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "MARKER": str(marker),
-             "BASH_ENV": "", "ENV": ""}, cwd=tmp_path,
+        env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "FAKE_BIN": str(tmp_path),
+             "MARKER": str(marker), "BASH_ENV": "", "ENV": ""}, cwd=tmp_path,
     )
-    assert marker.read_text() == "called", result.stderr
+    return marker.exists() and marker.read_text() == "called", result.stderr
+
+
+def _assert_bash_marker(tmp_path, command):
+    called, stderr = _run_bash_marker(tmp_path, command)
+    assert called, stderr
 
 
 @pytest.mark.parametrize("depth", [0, 1])
@@ -692,7 +699,8 @@ def test_keyword_operands_before_parens_still_execute_scripts(tmp_path, prefix):
     assert unsafe is True and "scan cap" in refusal
 
 
-_REWRITE_STARTUP = "unset BASH_ENV\nexec 0< <(sed s/python3/bash/)\n"
+# A system /etc/profile may reset PATH (Debian's does); put the fake-hermes dir back first.
+_REWRITE_STARTUP = 'PATH="$FAKE_BIN:$PATH"\nunset BASH_ENV\nexec 0< <(sed s/python3/bash/)\n'
 _WALK_ONLY_BODY = "python3 - <<'PY'\nbash -c 'hermes gateway \"restart\"'\nPY\n"
 
 
@@ -727,7 +735,15 @@ def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path
     command = opener + " <<'R'\n" + _WALK_ONLY_BODY + "R\n"
     if shape == "nested":
         command = "bash -s <<'OUTER'\n" + command + "OUTER\n"
-    _assert_bash_marker(tmp_path, command)
+    called, stderr = _run_bash_marker(tmp_path, command)
+    if not called:
+        # Control: the same opener with a body that runs `hermes` directly. Only when even that
+        # leaves no marker do this host's system startup files (/etc/profile*) break the
+        # execution proof; then only the guard verdicts below are checked.
+        control_called, control_stderr = _run_bash_marker(
+            tmp_path, command.replace(_WALK_ONLY_BODY, "hermes\n"))
+        assert not control_called, stderr
+        print(f"execution proof unavailable on this host: {control_stderr[-500:]!r}")
     assert strip_inert_heredoc_bodies(command, nested=True) == command
     assert guard(command, cwd=str(tmp_path)) is True
 
