@@ -249,6 +249,62 @@ def materialized(key: tuple, path: str, build: Callable[[], T],
     return rows
 
 
+def content_version(path: str) -> Optional[tuple]:
+    """Content-only revision for switcher counts, with commit-key fallback on legacy boards."""
+    from hermes_cli import kanban_task_change
+
+    ver = version(path)
+    if ver is None:
+        return None
+    with _lock:
+        obs = _observers.get(str(path))
+    if obs is None:
+        return None
+    with obs.lock:
+        _, cursor = kanban_task_change.changed_since(obs.conn, None)
+    return (ver[0], cursor) if cursor is not None else ver
+
+
+def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> dict:
+    """Read cursor, delta and volatile overlay in ONE snapshot on the guarded observer.
+
+    Serialize a board's refreshes through its observer lock, so concurrent readers cannot
+    publish an older result over a newer cursor. No transaction survives a call.
+    """
+    from hermes_cli import kanban_task_change
+
+    ver = version(path)
+    with _lock:
+        obs = _observers.get(str(path)) if ver is not None else None
+    if obs is None:
+        return fallback()
+    cache_key = (*key, "p2")
+    with obs.lock:
+        with _lock:
+            current = _observers.get(str(path)) is obs
+            hit = _entries.get(cache_key)
+        if not current:
+            return fallback()
+        conn = obs.conn
+        factory = conn.row_factory
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("BEGIN")
+            changed, cursor = kanban_task_change.changed_since(conn, hit[0] if hit else None)
+            rows = build(conn, hit[1] if hit else None, changed)
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.row_factory = factory
+        with _lock:
+            if _observers.get(str(path)) is obs:
+                _entries[cache_key] = (cursor, rows)
+                _entries.move_to_end(cache_key)
+                while len(_entries) > MAX_ENTRIES:
+                    _entries.popitem(last=False)
+        return rows
+
+
 def clear() -> None:
     """Close every observer and drop all rows (tests, shutdown)."""
     with _lock:

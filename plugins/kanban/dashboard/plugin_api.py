@@ -256,32 +256,13 @@ def get_board(
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key"),
     done_limit: int = Query(_BOARD_DONE_LIMIT, ge=0, le=10000, description="Newest done cards to include. 0 returns the whole column."),
 ):
-    """Full board grouped by status column; omitting ``board`` uses the active board
-    (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``).
+    """Exact board grouped by status: P2 deltas plus fresh bookkeeping on every GET.
 
-    A signature hit is reused. A miss that already has a snapshot returns it and
-    refreshes off this request so a slow read cannot time out the Desktop poll.
+    Do not serve the former stale snapshot here: it hides heartbeats and own writes.
+    The coalesced endpoint still joins simultaneous polls for the same board.
     """
-    from plugins.kanban.dashboard import board_rows
-    from plugins.kanban.dashboard.board_snapshot import file_sig, serve
-
-    resolved = _resolve_board(board)
-    sig = key = None
-    try:
-        path = str(kanban_db.kanban_db_path(board=resolved))
-        key = (path, tenant, include_archived, workflow_template_id, current_step_key, int(done_limit))
-        # Open the row observer first: on a board without a -wal it creates one, which
-        # would move the signature taken before this read.
-        board_rows.version(path)
-        sig = file_sig(path)  # before the read: a commit during it is read again next time
-    except Exception:
-        pass
-
-    def read():
-        return _get_board_uncached(
-            tenant, include_archived, resolved, workflow_template_id, current_step_key, int(done_limit))
-
-    return serve(key, sig, read, now=time.monotonic())
+    return _get_board_uncached(
+        tenant, include_archived, board, workflow_template_id, current_step_key, int(done_limit))
 
 
 def _get_board_uncached(tenant, include_archived, board, workflow_template_id, current_step_key, done_limit=_BOARD_DONE_LIMIT):
@@ -292,19 +273,27 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
     board = _resolve_board(board)
     done_limit = int(done_limit or 0)
 
-    def build(prev=None):
+    def build(conn, prev=None, changed=None):
+        with _la.pass_("kanban.board.rows") as span:
+            rows = board_read.materialize(conn, tenant, include_archived, workflow_template_id, current_step_key,
+                                          done_limit, diagnostic_inputs=_diagnostic_inputs, prev=prev, changed=changed)
+            span.fallback(not rows["_memo"].get("delta", False))
+            span.change(bool(changed))
+            span.rows(len(changed) if isinstance(changed, (set, frozenset)) else len(rows["cards"]))
+            return rows
+
+    def fallback():
         with closing(_conn(board=board)) as conn:
-            return board_read.materialize(conn, tenant, include_archived, workflow_template_id, current_step_key,
-                                          done_limit, diagnostic_inputs=_diagnostic_inputs, prev=prev)
+            return build(conn)
 
     try:
         path = str(kanban_db.kanban_db_path(board=board))
     except Exception:  # health: allow BLE001 -- no path to observe: read uncached, as before
-        rows = build()
+        rows = fallback()
     else:
-        rows = board_rows.materialized(
-            (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit), path, build,
-            update=build)
+        rows = board_rows.incremental(
+            (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit),
+            path, build, fallback)
     return board_read.project(rows, include_archived, _diagnostics_from_inputs)
 
 
@@ -1546,6 +1535,7 @@ def list_kanban_projects():
 
 
 @router.get("/boards")
+@_la.accounted("route/kanban.boards")
 def list_boards(include_archived: bool = Query(False)):
     """Every board on disk with task counts and the active slug."""
     boards = kanban_db.list_boards(include_archived=include_archived)

@@ -40,7 +40,7 @@ def board_counts(slug: str) -> dict[str, int]:
     try:
         path = kanban_db.kanban_db_path(board=slug)
         key = str(path)
-        ver = board_rows.version(key)
+        ver = board_rows.content_version(key)
         if ver is not None:
             with _lock:
                 hit = _cached.get(key)

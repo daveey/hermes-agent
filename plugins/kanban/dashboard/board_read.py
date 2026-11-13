@@ -131,19 +131,30 @@ def preview_list_body(task: dict) -> None:
 
 
 def _done_trim(conn, filters: dict, done_limit) -> tuple[str, list, int]:
+    return _done_state(conn, filters, done_limit)[:3]
+
+
+def _done_state(conn, filters: dict, done_limit) -> tuple[str, list, int, frozenset, tuple]:
     """``(extra_where, params, done total)`` for list_tasks. Done cards past ``done_limit`` never reach
     the payload, so they are ranked on a narrow read and never fetched whole (4.2k of the hub's 4.4k
     rows: parsing them was half of every board read). Same order as the done column below:
     completed_at DESC NULLS LAST, id DESC, on the values Task.from_row parses."""
     done = kanban_db.list_task_rows(conn, status="done", columns="rowid AS _rowid, id, completed_at", **filters)
     done_cap = int(done_limit or 0)
+    done_ids = frozenset(kanban_db._lossy_text(r["id"]) for r in done)
     if not 0 < done_cap < len(done):
-        return "", [], len(done)
+        window = ()
+        if done_cap > 0:  # the delta path's ranked window: every done card, newest first
+            from plugins.kanban.dashboard.board_incremental import rank_key
+            window = tuple(sorted(((kanban_db._lossy_text(r["id"]), kanban_db._to_epoch(
+                kanban_db._lossy_text(r["completed_at"]))) for r in done), key=rank_key))
+        return "", [], len(done), done_ids, window
     epoch = {r["_rowid"]: kanban_db._to_epoch(kanban_db._lossy_text(r["completed_at"])) for r in done}
     ranked = sorted(sorted(done, key=lambda r: kanban_db._lossy_text(r["id"]), reverse=True),
                     key=lambda r: (epoch[r["_rowid"]] is None, -(epoch[r["_rowid"]] or 0)))
     keep = [r["_rowid"] for r in ranked[:done_cap]]
-    return f"status != 'done' OR rowid IN ({_placeholders(keep)})", keep, len(done)
+    window = tuple((kanban_db._lossy_text(r["id"]), epoch[r["_rowid"]]) for r in ranked[:done_cap])
+    return f"status != 'done' OR rowid IN ({_placeholders(keep)})", keep, len(done), done_ids, window
 
 
 def _diag_memo(rows, events_by_task, runs_by_task, marks) -> dict:
@@ -179,20 +190,30 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
 
 
 def materialize(conn, tenant, include_archived, workflow_template_id, current_step_key, done_limit, *,
-                diagnostic_inputs: Callable = diagnostic_inputs, prev: Optional[dict] = None) -> dict:
+                diagnostic_inputs: Callable = diagnostic_inputs, prev: Optional[dict] = None,
+                changed=None) -> dict:
     """Everything the board payload reads from SQL, and nothing that depends on the clock,
     config, profiles on disk or the replica. Retained across refreshes: never mutate it.
 
     ``prev`` (the last rows for the same query) makes it incremental: a task whose row values are
     unchanged keeps its parsed Task, and only tasks whose row, runs or events moved re-read their
-    events. Every row is still read, so a committed write is never missed; only parsing is saved."""
+    events. Every displayed row is still read, so unmarked bookkeeping writes are never missed.
+    ``prev`` with ``changed`` (a frozenset of task ids from ``kanban_task_change.changed_since``, taken in the
+    same snapshot as this read) takes ``board_incremental.delta``: displayed IDs union marked IDs are
+    read by primary key, with bounded done history. ``changed`` omitted, ``FULL`` or a set the delta cannot vouch for reads in
+    full, exactly as before."""
     filters = dict(tenant=tenant, include_archived=include_archived,
                    workflow_template_id=workflow_template_id, current_step_key=current_step_key)
-    extra_where, extra_params, done_total = _done_trim(conn, filters, done_limit)
+    if prev is not None and isinstance(changed, (set, frozenset)):
+        from plugins.kanban.dashboard import board_incremental
+        rows = board_incremental.delta(conn, filters, done_limit, diagnostic_inputs, prev, changed)
+        if rows is not None:
+            return rows
+    extra_where, extra_params, done_total, done_ids, done_window = _done_state(conn, filters, done_limit)
     old = (prev or {}).get("_memo")
     old_tasks = old["tasks"] if old is not None else {}
     parsed: dict[tuple, tuple] = {}
-    task_rows, fields = [], []
+    task_rows, fields, raw_keys = [], [], []
 
     def parse(r):
         raw = (tuple(r.keys()), tuple(r))  # column names too: a migration re-parses every row
@@ -203,11 +224,12 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
         parsed[raw] = hit
         task_rows.append(r)
         fields.append(hit[1])
+        raw_keys.append(raw)
         return hit[0]
 
     tasks = kanban_db.list_tasks(conn, extra_where=extra_where, extra_params=extra_params, parse=parse, **filters)
     if len(task_rows) != len(tasks):  # a list_tasks that bypassed ``parse``: nothing to reuse
-        task_rows, fields, parsed, old = [], [asdict(t) for t in tasks], {}, None
+        task_rows, fields, raw_keys, parsed, old = [], [asdict(t) for t in tasks], [], {}, None
     # Link / comment / progress rollups are each one aggregate query rather than N per-task lookups.
     link_counts: dict[str, dict[str, int]] = {}
     for row in conn.execute("SELECT parent_id, child_id FROM task_links").fetchall():
@@ -253,13 +275,18 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
             "managing_session_id": managers.get(t.id) or (t.session_id or None),
         }))
     tenants = [r["tenant"] for r in conn.execute("SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant")]
+    from plugins.kanban.dashboard.board_incremental import filters_key
+    inc = None
+    if raw_keys and int(done_limit or 0) > 0:  # what a later ``changed`` read starts from
+        inc = {"filters": filters_key(filters), "cap": int(done_limit), "done_ids": done_ids, "window": done_window,
+               "raw": {t.id: k for t, k in zip(tasks, raw_keys)}}
     return {
         "cards": tuple(cards), "diag_inputs": diag_inputs, "done_total": done_total,
         "latest_event_id": int(latest_event_id), "tenants": tuple(tenants),
         # The SQL half of kanban_db.known_assignees; profiles on disk are added per projection.
         "task_assignees": frozenset(kanban_db._counts_by_assignee(conn)),
         # What the next read of the same query diffs against (``prev``); never part of the payload.
-        "_memo": {"tasks": parsed, "diag": diag_memo},
+        "_memo": {"tasks": parsed, "diag": diag_memo, "inc": inc},
     }
 
 
