@@ -133,8 +133,11 @@ def test_refusal_warning_names_who_retries(env, caplog):
 
     warnings = [r.getMessage() for r in caplog.records if "never started" in r.getMessage()]
     assert len(warnings) == 2
-    assert warnings[0].endswith("rescheduling through its pause watcher")
-    assert warnings[1].endswith("rescheduling after 30s")
+    assert warnings[0].endswith(f"rescheduling through its pause watcher (re-arm 1/{server.REFUSED_REARM_MAX})")
+    # Nothing re-polls a crash continuation: the warning names who does retry, not a timer that does not exist.
+    assert warnings[1].endswith(
+        "not rescheduled here (30s backoff): the next resume, boot sweep or refused-turn timer retries")
+    assert "rescheduling after" not in warnings[1]
 
 
 @pytest.mark.parametrize("flag", ["_closing", "_finalized"])
@@ -224,3 +227,79 @@ def test_watcher_whose_continuation_is_refused_hands_off_to_a_rearmed_watcher(en
     assert env.ran == [(up.pause_note("fix the flaky test"), 1)]
     assert rearmed == ["session-key"]
     assert any("continuation of session-key never started" in r.getMessage() for r in caplog.records)
+
+
+_KICKOFF_KEYS = ("_auto_continue_attempt", "_auto_continue_prompt", "_auto_continue_pauses",
+                 "_auto_continue_killed_jobs", "_marker_until_tool")
+
+
+@pytest.mark.parametrize("result", ["refused", "raises"])
+def test_kickoff_that_never_started_leaves_no_marker_inputs(env, monkeypatch, result):
+    """The kickoff sets the marker inputs a started turn reads back (_record_turn_marker pops them). A submit that
+    was refused, or a dispatch that raised, must drop them: the next turn to record (a user's) would otherwise
+    write its crash marker with the paused prompt, its attempt count and the at-most-once flag."""
+    record_turn_start(env.home, "session-key", "the paused prompt", attempts=1, until_tool=True)
+    mark_turn_paused(env.home, "session-key", up.PAUSE_REASON, killed_jobs=[{"id": "job-1"}])
+    session = _session()
+    seen = {}
+
+    def submit(rid, sid, s, text, **kw):
+        seen.update({k: s.get(k) for k in _KICKOFF_KEYS})
+        if result == "raises":
+            raise RuntimeError("boom")
+        return False
+
+    monkeypatch.setattr(server, "_run_prompt_submit", submit)
+    server._maybe_schedule_auto_continue("sid", session, "session-key")
+
+    assert seen["_auto_continue_prompt"] == "the paused prompt" and seen["_marker_until_tool"] is True  # were set
+    assert [k for k in _KICKOFF_KEYS if k in session] == []
+
+
+def test_persistently_refused_paused_continuation_stops_rearming_at_the_cap(env, caplog):
+    """Each re-arm starts a fresh watcher with a fresh budget, so a refusal that never clears would loop every
+    ~10-15 s until the marker aged out. The re-arms are capped per pause; past the cap the refusal backs off like
+    any other and the next resume, boot sweep or refused-turn timer retries."""
+    import logging
+    caplog.set_level(logging.WARNING)
+    record_turn_start(env.home, "session-key", "the prompt")
+    mark_turn_paused(env.home, "session-key", up.PAUSE_REASON)
+    session = _session()
+
+    for _ in range(server.REFUSED_REARM_MAX + 3):
+        session.pop("_auto_continue_retry_after", None)  # the backoff elapses before the next poll
+        server._maybe_schedule_auto_continue("sid", session, "session-key")
+
+    assert len(env.watchers) == server.REFUSED_REARM_MAX
+    assert session["_auto_continue_retry_after"] > time.monotonic() + 20.0  # the 30 s backoff past the cap
+    assert not session.get("_auto_continue_scheduled")
+    last = [r.getMessage() for r in caplog.records if "never started" in r.getMessage()][-1]
+    assert f"re-arm cap {server.REFUSED_REARM_MAX} reached" in last and "not rescheduled here" in last
+    assert read_turn_marker(env.home, "session-key") is not None
+
+    # A later pause of the turn is a new pause: its continuation gets its own re-arms.
+    mark_turn_paused(env.home, "session-key", up.PAUSE_REASON)
+    session.pop("_auto_continue_retry_after", None)
+    server._maybe_schedule_auto_continue("sid", session, "session-key")
+    assert len(env.watchers) == server.REFUSED_REARM_MAX + 1
+
+
+def test_paused_continuation_refused_for_ownership_does_not_rearm(env, monkeypatch, caplog):
+    """An ownership refusal at _admit_prompt_turn (the chat moved to another gateway) does not lift when a hold
+    does: no watcher waits it out, so the refusal backs off instead of re-arming."""
+    import logging
+    caplog.set_level(logging.WARNING)
+    record_turn_start(env.home, "session-key", "the prompt")
+    mark_turn_paused(env.home, "session-key", up.PAUSE_REASON)
+    session = _session()
+
+    def submit(rid, sid, s, text, **kw):
+        s["_turn_owner_refusal"] = "SESSION_MOVED"  # what _admit_prompt_turn records on its ownership fence
+        return False
+
+    monkeypatch.setattr(server, "_run_prompt_submit", submit)
+    server._maybe_schedule_auto_continue("sid", session, "session-key")
+
+    assert env.watchers == []
+    assert session["_auto_continue_retry_after"] > time.monotonic() + 20.0
+    assert any("owner refusal SESSION_MOVED" in r.getMessage() for r in caplog.records)

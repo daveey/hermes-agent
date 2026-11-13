@@ -304,7 +304,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         # Running the continuation anyway would be the double-writer this fence exists to prevent. See
         # #94778.
         # A paused continuation takes over only an idle detached sibling: one mid-turn (a notice, another
-        # reader's continuation) keeps the slot and this retries after the 30 s backoff below.
+        # reader's continuation) keeps the slot; this backs off 30 s below and the next resume, boot sweep or
+        # refused-turn timer retries (nothing re-polls).
         slot_error = (_ensure_active_session_slot(sid, session, takeover_idle_only=True) if paused
                       else _ensure_active_session_slot(sid, session))
         if slot_error is not None:
@@ -348,10 +349,11 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
             _notif_release_turn(session)  # rebound from session_notifications
+            _drop_kickoff_marker_inputs(session, marker)
             return
         if accepted is False:
             _notif_release_turn(session)  # rebound from session_notifications
-            _auto_continue_refused(sid, session, session_key, paused, "submit refused at admission")
+            _auto_continue_refused(sid, session, session_key, paused, "submit refused at admission", marker)
     if _start_session_work(kickoff, name=f"auto-continue-{sid}", home=session.get("profile_home")) is None:
         session["_auto_continue_scheduled"] = False
         return None
@@ -361,19 +363,53 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
 
 
-def _auto_continue_refused(sid: str, session: dict, session_key: str, paused: bool, cause: str) -> None:
+_KICKOFF_MARKER_INPUTS = ("_auto_continue_attempt", "_auto_continue_prompt", "_auto_continue_pauses",
+                          "_auto_continue_killed_jobs")
+# Re-arms of the pause watcher for one pause whose continuation keeps being refused: each re-arm is a fresh
+# watcher with a fresh budget, so a refusal that persists would otherwise loop every ~10-15 s.
+REFUSED_REARM_MAX = 6
+
+
+def _drop_kickoff_marker_inputs(session: dict, marker: dict) -> None:
+    """[daveey] The kickoff's marker inputs are read back only by a started turn (``_record_turn_marker``). A
+    submit that never started leaves them for whatever turn records next: a user turn would write its crash
+    marker with the paused prompt, its attempt count and the at-most-once flag. ``_marker_until_tool`` is
+    dropped only when the kickoff set it True (False is the default, and the key is shared with user turns)."""
+    with session["history_lock"]:
+        for key in _KICKOFF_MARKER_INPUTS:
+            session.pop(key, None)
+        if marker.get("until_tool") and session.get("_marker_until_tool") is True:
+            session.pop("_marker_until_tool", None)
+
+
+def _auto_continue_refused(sid: str, session: dict, session_key: str, paused: bool, cause: str,
+                           marker: dict) -> None:
     """[daveey] The kickoff's submit was refused before its turn started (admission re-held during the agent
-    build): "scheduled" is not "started", so the continuation keeps an owner. The claim is released; a
-    core-update pause re-arms the in-place watcher (it waits out the hold and schedules again after a short
-    backoff, no attempt used), anything else retries after the 30 s backoff. The marker is untouched: it is
-    still the turn's record. The WARNING is the detection signal: no continuation is dropped silently."""
-    rearm = paused and not (session.get("_closing") or session.get("_finalized"))
+    build): "scheduled" is not "started", so the continuation keeps an owner. The claim and the kickoff's
+    marker inputs are released. A core-update pause re-arms the in-place watcher (it waits out the hold and
+    schedules again after a short backoff, no attempt used), at most REFUSED_REARM_MAX times per pause and
+    never for an ownership refusal (another backend owns the chat: no watcher waits that out). Anything else
+    only backs off 30 s: nothing re-polls, so the next resume, boot sweep or refused-turn timer retries, as
+    after a slot refusal. The marker is untouched: it is still the turn's record. The WARNING is the
+    detection signal: no continuation is dropped silently."""
+    _drop_kickoff_marker_inputs(session, marker)
+    owner_refusal = session.get("_turn_owner_refusal")  # set by _admit_prompt_turn's ownership fence
+    pause_id = (session_key, marker.get("started_at"), marker.get("pauses"))
     with session["history_lock"]:
         session["_auto_continue_scheduled"] = False
+        last = session.get("_auto_continue_refusals")
+        count = last[1] + 1 if isinstance(last, tuple) and last[0] == pause_id else 1
+        session["_auto_continue_refusals"] = (pause_id, count)
+        rearm = (paused and not (session.get("_closing") or session.get("_finalized"))
+                 and not owner_refusal and count <= REFUSED_REARM_MAX)
         # Paused: short, so a hold that lifted is not waited on, yet a refusal that persists cannot spin.
         session["_auto_continue_retry_after"] = time.monotonic() + (10.0 if rearm else 30.0)
-    logger.warning("auto-continue: continuation of %s never started (%s); rescheduling %s", session_key, cause,
-                   "through its pause watcher" if rearm else "after 30s")
+    why = (f"owner refusal {owner_refusal}" if owner_refusal and paused
+           else f"re-arm cap {REFUSED_REARM_MAX} reached" if paused and count > REFUSED_REARM_MAX else "")
+    logger.warning("auto-continue: continuation of %s never started (%s); %s", session_key, cause,
+                   f"rescheduling through its pause watcher (re-arm {count}/{REFUSED_REARM_MAX})" if rearm
+                   else "not rescheduled here (" + (why + "; " if why else "")
+                   + "30s backoff): the next resume, boot sweep or refused-turn timer retries")
     if rearm:
         from tui_gateway import update_pause
         update_pause.start_in_place_watcher(sid, session, session_key)
