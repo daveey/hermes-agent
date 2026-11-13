@@ -1751,16 +1751,6 @@ def _walk_candidates(
         yield path, False, True
 
 
-def _visit_key(resolved: Path, *, python_source: bool) -> object:
-    """A shell walk of a file subsumes its Python regex scan, never the reverse, so the two are
-    keyed apart in ``visited``."""
-    return (resolved, "python") if python_source else resolved
-
-
-def _already_visited(visited: set[object], resolved: Path, *, python_source: bool) -> bool:
-    return resolved in visited or _visit_key(resolved, python_source=python_source) in visited
-
-
 def _contains_unsafe_gateway_action(
     command: str, *, cwd: Optional[str], depth: int, visited: set[object], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
@@ -1800,7 +1790,8 @@ def _contains_unsafe_gateway_action(
                     else command)
 
     # A nested startup-file shell's input is walked first, with unknown alias names (nit 1).
-    from cron.lifecycle_guard_nested_shells import collect_nested_shell_inputs, shell_scope
+    from cron.lifecycle_guard_nested_shells import (
+        collect_nested_shell_inputs, shell_scope, unvisited_scopes)
 
     nested_texts, nested_scripts = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget)
@@ -1825,13 +1816,15 @@ def _contains_unsafe_gateway_action(
                 )
             continue
         resolved = _resolve_lenient(script_path)
-        if _already_visited(visited, resolved, python_source=python_source):
+        scopes = unvisited_scopes(visited, budget, resolved, python_source=python_source,
+                                  nested=resolved in nested_scripts)
+        if not scopes:
             continue
         if not budget.charge_path():
             if candidate_executed:
                 return _budget_exhausted(budget, "paths", depth)
             continue  # an alias may make a later call-argument entry executed
-        visited.add(_visit_key(resolved, python_source=python_source))
+        visited.update(itertools.chain.from_iterable((key, key[:2]) for _nested, key in scopes))
         # Never read more than the walk can still afford to tokenize; a file larger than the
         # remainder fails closed exactly like an oversized one.
         script_text, unsafe = _read_referenced_script(script_path, max_bytes=budget.bytes_remaining)
@@ -1860,10 +1853,10 @@ def _contains_unsafe_gateway_action(
         if not script_text:
             continue
         # Relative references inside a script resolve against that script's directory, not the cwd.
-        if recurse(
+        if any(recurse(
             script_text, _resolve_script_directory(str(resolved)) or cwd, candidate_executed,
-            f"`{script_path}`", python_source, nested=resolved in nested_scripts,
-        ):
+            f"`{script_path}`", python_source, nested=nested,
+        ) for nested, _key in scopes):
             return True
     return False
 

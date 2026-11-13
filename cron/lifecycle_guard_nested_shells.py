@@ -53,6 +53,28 @@ def shell_scope(budget: _LifecycleScanBudget, nested: bool) -> contextlib.Abstra
     return nested_shell_scope(budget) if nested else contextlib.nullcontext()
 
 
+def unvisited_scopes(
+    visited: set[object], budget: _LifecycleScanBudget, resolved: Path, *, python_source: bool,
+    nested: bool,
+) -> list[tuple[bool, tuple]]:
+    """``(nested, visit key)`` for each scope *resolved* still needs a walk in. A shell walk
+    depends on its scope (alias names, heredoc masking), so ``visited`` keys carry it: a path one
+    reference hands to a nested shell and another to the session shell is walked in both scopes
+    (review 5897863903 B1), the session one exactly as before. A shell walk in any scope subsumes
+    the file's Python regex scan, never the reverse; the caller also records ``key[:2]``, the
+    scope-free ``(resolved, "shell")`` mark, for that."""
+    if python_source:
+        seen = (resolved, "python") in visited or (resolved, "shell") in visited
+        return [] if seen else [(False, (resolved, "python"))]
+    wanted = [(False, (budget.alias_names, budget.mask_heredocs))]
+    if nested:
+        wanted.append((True, (None, True)))  # nested_shell_scope's state
+    keys: dict[tuple, bool] = {}
+    for flag, scope in wanted:
+        keys.setdefault((resolved, "shell", scope), flag)
+    return [(flag, key) for key, flag in keys.items() if key not in visited]
+
+
 def collect_nested_shell_inputs(
     command: str, walk_command: str, *, cwd: Optional[str], budget: _LifecycleScanBudget,
 ) -> tuple[list[str], set[Path]]:

@@ -305,3 +305,20 @@ def test_nested_shell_input_shapes():
     assert found == []  # *walk_command* holds the segments; *command* only its heredocs
     text = "bash -l -c 'x ( y )'; bash -c 'z'"
     assert list(_iter_nested_shell_inputs(text, text, cwd="/")) == [("x ( y )", None)]
+
+
+# PR #2560 review 5897863903 B1: one script referenced both by a nested login shell and by the
+# session shell must be walked in both scopes. A path-keyed `visited` let the masked nested walk
+# suppress the session walk, whose `alias python3=...` keeps the heredoc body visible.
+@pytest.mark.parametrize("shape", [
+    ". s.sh",
+    "bash -l s.sh; . s.sh",
+    ". s.sh; bash -l s.sh",
+    "bash -l -c 'bash s.sh'; . s.sh",
+    "bash -l -c '. s.sh'; source s.sh",
+])
+def test_script_shared_by_nested_and_session_scope_is_walked_in_both(tmp_path, shape):
+    (tmp_path / "s.sh").write_text(_FN_BODY)
+    unsafe, _refusal = scan_gateway_lifecycle(
+        shape, cwd=str(tmp_path), session_aliases=frozenset({"python3"}))
+    assert unsafe is True, shape
