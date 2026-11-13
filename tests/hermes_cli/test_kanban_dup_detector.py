@@ -137,6 +137,10 @@ def test_a_negator_that_does_not_govern_the_keyword_does_not_deny_it(summary):
     "Not closed as a duplicate of t_0123456789abcdef.",
     "Not being a duplicate of t_0123456789abcdef, it stays open.",
     "Checked for duplicates: none found, parent t_0123456789abcdef.",
+    # PR #2535 review 5896481270: not/never right before "as" denies, as it did before #2535.
+    "Closed, not as duplicate of t_0123456789abcdef.",
+    "Not as duplicate of t_0123456789abcdef.",
+    "Never as a duplicate of t_0123456789abcdef.",
 ])
 def test_a_negator_two_words_before_the_keyword_still_denies_it(summary):
     """PR #2481 review: a hedge or adjective between the negator and the keyword keeps the denial."""
