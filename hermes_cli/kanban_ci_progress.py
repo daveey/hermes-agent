@@ -291,17 +291,23 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None) -> list[st
 
 def _sweep_db(db_path: str, home: str) -> list[str]:
     """:func:`sweep` on a pool thread with the dispatching ``home`` bound: a pool thread does not inherit the
-    caller's context-local home, so ``dispatcher_gh_argv`` would read the launch home's gh_command_prefix."""
+    caller's context-local home, so ``dispatcher_gh_argv`` would read the launch home's gh_command_prefix.
+    Never raises: a refused bind (``ScopeSwitchRefused``) or connect error would land in the future, and the
+    wake-check tick's ``fut.result`` loop only catches timeouts, so it would escape the tick."""
     from pathlib import Path
 
     from agent.runtime_scope import bind_profile_scope
     from hermes_cli import kanban_db_connect as kbc
-    with bind_profile_scope(home, hydrate_secrets=False):
-        conn = kbc.connect(Path(db_path))
-        try:
-            return sweep(conn)
-        finally:
-            conn.close()
+    try:
+        with bind_profile_scope(home, hydrate_secrets=False):
+            conn = kbc.connect(Path(db_path))
+            try:
+                return sweep(conn)
+            finally:
+                conn.close()
+    except Exception:
+        logger.warning("kanban ci run progress: sweep of %s for home %s failed", db_path, home, exc_info=True)
+        return []
 
 
 def submit_sweep(conn: sqlite3.Connection, pool) -> Optional[Future]:

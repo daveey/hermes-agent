@@ -349,16 +349,52 @@ def test_sweep_on_a_pool_thread_uses_the_dispatching_homes_prefix(kanban_home, t
 
 
 def test_no_credential_warning_is_per_home(kanban_home, tmp_path, no_login, monkeypatch, caplog) -> None:
-    """One home's hourly no-credential WARNING must not hide another home's in the same process."""
+    """One home's hourly no-credential WARNING must not hide another home's in the same process. Both homes
+    read the same board db (the default board is the root ``kanban.db``), so only the home half of the
+    ``_WARNED_AT`` key tells them apart: a key on the board db alone warns once (PR #2068 review)."""
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     other = _other_home(tmp_path)
-    warned = []
+    warned, dbs = [], []
     for home in (kanban_home, other):
         _tid, db = _park_stuck_card_in(home, monkeypatch, no_login)
+        dbs.append(db)
         token = set_hermes_home_override(home)
         try:
             with kbc.connect_closing(Path(db)) as conn:
                 warned.append(_sweep_warnings(caplog, conn))
         finally:
             reset_hermes_home_override(token)
+    assert dbs[0] == dbs[1], dbs
     assert [len(w) for w in warned] == [1, 1], warned
+
+
+def test_refused_scope_bind_does_not_escape_the_wake_check_tick(kanban_home, fake_gh, monkeypatch, caplog) -> None:
+    """PR #2068 review: ``_sweep_db`` binds the dispatching home before ``sweep``'s never-raises guard. A refused
+    bind (``ScopeSwitchRefused``) raised out of the pool future, and ``run_due_wake_checks(wait=True)`` only
+    catches timeouts there, so it escaped the tick."""
+    from contextlib import contextmanager
+
+    from agent import runtime_scope
+    from hermes_cli import kanban_ci_progress as kcp
+    from hermes_scope import ScopeSwitchRefused
+
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        assert _park_on_run().get("status") == "scheduled"
+        monkeypatch.delenv("HERMES_KANBAN_TASK")
+        fake_gh.serve(age=20 * 60)
+        kcp._LAST_CHECK.clear()
+
+        @contextmanager
+        def refused(home, **_kw):
+            raise ScopeSwitchRefused("refused inside a hosted scope")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(runtime_scope, "bind_profile_scope", refused)
+        with caplog.at_level("WARNING", logger=kcp.logger.name):
+            out = kwc.run_due_wake_checks(conn, wait=True)
+        assert isinstance(out, dict), out
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert any("ci run progress" in r.getMessage() and r.exc_info for r in caplog.records), caplog.text
