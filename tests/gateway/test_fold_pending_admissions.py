@@ -47,9 +47,9 @@ async def _harness(tmp_path, monkeypatch, behave):
     live = authority.sessions[ref.session_id]
     adapter = runner._adapter_for_source(live.source)
 
-    async def notice(text, producer):
+    async def notice(text, producer, metadata=None):
         from gateway.session_automation import admit_route_wake
-        assert await admit_route_wake(runner, adapter, live.source, text, producer) is True
+        assert await admit_route_wake(runner, adapter, live.source, text, producer, metadata) is True
 
     def rows():
         from hermes_state_runtime import list_session_admissions
@@ -243,5 +243,74 @@ async def test_a_queued_prompt_is_never_jumped_and_never_extended(tmp_path, monk
         await _idle(h, 4)
         assert [event.text for event in h.seen][1:] == [
             '[kanban] Task t_1 blocked.', 'my question', '[IMPORTANT: Background process proc_a completed (exit 0)]']
+    finally:
+        await h.close()
+
+
+@pytest.mark.asyncio
+async def test_a_result_never_folds_into_a_diagnostic_turn(tmp_path, monkeypatch):
+    """A diagnostic head's turn is muted when warnings are hidden: a result completion folded into it would
+    settle 'steered' unseen. Only rows of the head's own notification category join it (the admission
+    fold's rule, ``session_automation._waiting_completion``); a diagnostic row joins a diagnostic head."""
+    from gateway.warning_notifications import diagnostic_wake_muted
+    gate = asyncio.Event()
+    muted = []
+
+    async def behave(n, event):
+        muted.append(diagnostic_wake_muted(event, {'display': {'suppress_warning_notifications': True}}))
+        if n == 1:
+            await gate.wait()
+        return _completed()
+
+    h = await _harness(tmp_path, monkeypatch, behave)
+    diagnostic = {'notification_category': 'diagnostic'}
+    result, d1, d2 = ('[IMPORTANT: Background process proc_a completed (exit 0)]', '[kanban] Task t_1 stale.',
+                      '[kanban] Task t_2 stale.')
+    try:
+        from tests.waiting import async_wait_until
+        await h.notice('[kanban] Task t_0 completed.', 'kanban-wake')
+        await async_wait_until(lambda: len(h.seen) == 1, timeout=10, what='the first turn')
+        await h.notice(d1, 'kanban-wake', diagnostic)
+        await h.notice(result, 'completion')
+        await h.notice(d2, 'kanban-wake', diagnostic)
+        gate.set()
+        await _idle(h, 3)
+        assert [event.text for event in h.seen][1:] == [f'{d1}\n\n{d2}', result]
+        assert muted[1:] == [True, False]
+        rows = h.rows()
+        assert [rows[text]['outcome'] for text in (d1, result, d2)] == ['completed', 'completed', 'steered']
+    finally:
+        await h.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_fold_error_never_fails_the_head(tmp_path, monkeypatch):
+    """The fold is optional: a storage or check error stops folding, the head runs as it would have, and
+    the pending row keeps its own turn (nothing settles 'failed', nothing is lost)."""
+    from gateway import session_fold_pending
+    gate = asyncio.Event()
+
+    async def behave(n, event):
+        if n == 1:
+            await gate.wait()
+        return _completed()
+
+    async def broken(*args):
+        raise OSError('disk I/O error')
+
+    h = await _harness(tmp_path, monkeypatch, behave)
+    monkeypatch.setattr(session_fold_pending, '_check', broken)
+    k, result = '[kanban] Task t_1 blocked.', '[IMPORTANT: Background process proc_a completed (exit 0)]'
+    try:
+        from tests.waiting import async_wait_until
+        await h.notice('[kanban] Task t_0 completed.', 'kanban-wake')
+        await async_wait_until(lambda: len(h.seen) == 1, timeout=10, what='the first turn')
+        await h.notice(k, 'kanban-wake')
+        await h.notice(result, 'completion')
+        gate.set()
+        await _idle(h, 3)
+        assert [event.text for event in h.seen][1:] == [k, result]
+        rows = h.rows()
+        assert [rows[text]['outcome'] for text in (k, result)] == ['completed', 'completed']
     finally:
         await h.close()

@@ -55,10 +55,19 @@ def accepts_fold(row):
     return bool(row.get('update_resume')) or (bool(_automation(payload)) and _producer(row) in FOLDABLE_PRODUCERS)
 
 
-def _foldable(row):
+def _category(row):
+    return _automation(row['payload']).get('notification_category', 'result')
+
+
+def _foldable(row, category):
     payload = row['payload']
     descriptor = _automation(payload)
     if not descriptor or _producer(row) not in FOLDABLE_PRODUCERS or not isinstance(payload.get('text'), str):
+        return False
+    # The turn's mute is the head's (a diagnostic wake hides its turn when warnings are off): a result
+    # folded into a muted turn would settle 'steered' unseen, so only the head's own category joins it
+    # (the admission fold's rule, ``session_automation._waiting_completion``).
+    if descriptor.get('notification_category', 'result') != category:
         return False
     # A remote Kanban notice is acked by the keys its own turn's user row carries: it keeps its own turn.
     return not descriptor.get('kanban_event_keys')
@@ -69,13 +78,13 @@ def candidates(authority, ref, head):
     producer rows (liveness ticks, loop ticks) are passed over; the first human input ends the scan, so a
     notice never jumps a prompt queued before it."""
     from gateway.session_notifier_drain import eligible
-    picked = []
+    picked, category = [], _category(head)
     for row in list_session_admissions(authority.db, session_id=ref.session_id):
         if row['status'] != 'queued' or row['admission_id'] == head['admission_id']:
             continue
         if not _automation(row['payload']):
             break
-        if eligible(row) and _foldable(row):
+        if eligible(row) and _foldable(row, category):
             picked.append(row)
     return picked
 
@@ -112,13 +121,24 @@ async def fold_pending(authority, ref, live, row, event):
     from gateway.session_runtime_workers import tracked_write
     from hermes_state_runtime import steer_session_input
     generation, sid, taken, texts = row['generation'], ref.session_id, [], []
-    for candidate in await asyncio.to_thread(candidates, authority, ref, row):
+    # The fold is optional: an unexpected error stops it and the head runs as it would have (never
+    # 'failed' for a row it only tried to carry). The rows not taken keep their own FIFO turns.
+    try:
+        pending = await asyncio.to_thread(candidates, authority, ref, row)
+    except Exception:
+        logger.warning('Fold scan failed; the turn runs alone: session=%s', sid, exc_info=True)
+        pending = []
+    for candidate in pending:
         try:
             await _check(authority, ref, live, candidate)
+            payload = dict(candidate['payload'])
+            await asyncio.to_thread(_refresh, payload)
         except RuntimeStoreError:
             continue  # its own claim refuses it in FIFO order
-        payload = dict(candidate['payload'])
-        await asyncio.to_thread(_refresh, payload)
+        except Exception:
+            logger.warning('Fold check failed; folding stops: session=%s admission=%s', sid,
+                           candidate['admission_id'], exc_info=True)
+            break
         with live.event_stream.lock:
             _register(authority, sid, generation, candidate['admission_id'])
         try:
@@ -129,6 +149,12 @@ async def fold_pending(authority, ref, live, row, event):
             with live.event_stream.lock:
                 _unregister(authority, sid, generation, candidate['admission_id'])
             continue
+        except Exception:
+            # Maybe committed: the fence stays undelivered, so the claim's settlement requeues the row
+            # (a no-op when nothing committed), as ``steer_queued`` does.
+            logger.warning('Fold transfer failed; folding stops: session=%s admission=%s', sid,
+                           candidate['admission_id'], exc_info=True)
+            break
         if not fresh:
             continue
         taken.append(candidate['admission_id'])
