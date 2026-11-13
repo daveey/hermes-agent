@@ -87,6 +87,13 @@ def test_a_410_on_the_live_file_sweeps_own_rows_the_board_deleted_and_keeps_loca
     _board_deletes(svc, ("task_comments", dropped), ("tasks", gone))
     svc.compact(BOARD)  # the deletes are below the floor now: the live cursor gets 410
     assert int(sync.sync_state(live)["cursor"]) < svc.board(BOARD)["floor"]
+    # The rows were written well before the rebuild: on a fast runner the 410 round can begin in the same second they
+    # were created, and the `created_at < since` guard rightly spares a row written in the second the rebuild began.
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying = 1")
+        live.execute("UPDATE tasks SET created_at = created_at - 60")
+        live.execute("UPDATE task_comments SET created_at = created_at - 60")
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
 
     local = kb.create_task(live, title="unpushed local card")  # its op waits in the outbox
     _picked_up_foreign_copy(live, "t_foreign_copy")
