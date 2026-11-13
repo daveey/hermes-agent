@@ -160,7 +160,33 @@ def overlap_exclusions(conn, task_id: str) -> list[str]:
         ref = str(awaiting.get("ref") or "")
         if _TASK_ID.fullmatch(ref):
             stack.append(ref)
-    return seen
+    return seen + [b for b in bound_cards(conn, task_id) if b not in seen]
+
+
+# The footer kanban_placement_forward.remote_args writes on a card it places on another gateway.
+_PLACED_FROM = re.compile(r"^This card was \S+ card (t_[0-9a-f]{8,32}); it completes there when this one is done\.$",
+                          re.MULTILINE)
+
+
+def bound_cards(conn, task_id: str) -> list[str]:
+    """Cards whose completion is bound to ``task_id``: they wait on it, so they never do its work.
+
+    The origin placeholder of a placed card (named in the forward's footer; it lives on the gateway that
+    placed it and is parked on this card) and local cards whose current park waits on it. The owner title
+    quotes the waiting card's title, which these cards share, so the holder's create_overlap check matched
+    the origin placeholder and refused the owner (hub t_01a1d49003c65ca4 -> macbook t_01a1d48f676074bc).
+    """
+    out: list[str] = []
+    row = conn.execute("SELECT body FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    for tid in _PLACED_FROM.findall((row[0] if row else "") or ""):
+        if tid != task_id and tid not in out:
+            out.append(tid)
+    rows = conn.execute(
+        "SELECT t.id FROM tasks t WHERE t.status = 'scheduled' AND t.id != ? AND (SELECT json_extract(e.payload, "
+        "'$.awaiting.ref') FROM task_events e WHERE e.kind IN ('scheduled', 'continued') AND e.task_id = t.id "
+        "ORDER BY e.id DESC LIMIT 1) = ? LIMIT 16", (task_id, task_id)).fetchall()
+    out += [r[0] for r in rows if r[0] not in out]
+    return out
 
 
 def _strip_overlap_options(argv: list[str]) -> list[str]:
@@ -924,10 +950,35 @@ def _local_owner(conn, task, entry: dict, *, need: str, rid: str, self_gw: str, 
     return 1, f"{rid} -> local owner {owner} (this gateway holds {need})"
 
 
+def _rejected(rid: str) -> Optional[str]:
+    """The holder's refusal when request ``rid`` ended in a terminal state other than done, else None.
+
+    A rejected owner request will never make a card, so the waiting card must not keep probing it: wait-check
+    wakes the card at once with this text (exit 0), never the "cannot tell" exit 2 that only woke it after three
+    strikes as ``wake_check_broken`` (hub t_01a1d49003c65ca4: create_overlap on macbook, woken 4 min later with
+    nothing done and no rejection shown)."""
+    from hermes_cli.kanban_placement import FAILED_STATES, remote_rejection
+    why = remote_rejection(rid)
+    if not why or why.get("state") not in FAILED_STATES:
+        return None
+    matches = ", ".join(f"{m.get('id')} on {m.get('gateway') or '?'} ({m.get('status') or '?'})"
+                        for m in (why.get("matches") or [])[:3])
+    gw = ((_sent(rid) or {}).get("body") or {}).get("to_gw") or "the holder"
+    return (f"capability owner request {rid} was {why['state']} by {gw} ({why.get('code') or why['state']}"
+            + (f": matches {matches}" if matches else "") + f"): {str(why.get('error') or '')[:400]}. "
+            "No owner card exists, so this card was woken to re-plan. Blocking again with the same needs routes "
+            "one fresh request (a new generation); if the refusal names a card that really owns this work, "
+            "continue that card instead.")
+
+
 def wait_check(target: str) -> tuple[int, str]:
     rids = [r for r in (target or "").split(",") if r.strip()]
     if not rids:
         return 2, "error: no request id"
+    rejected = [msg for msg in (_rejected(r.strip()) for r in rids) if msg]
+    if rejected:
+        # Terminal: wake now with the refusal (a pending sibling request does not hold the card on a dead one).
+        return 0, "; ".join(rejected)
     results = [owner_status(r.strip()) for r in rids]
     rc = 2 if any(r[0] == 2 for r in results) else (0 if all(r[0] == 0 for r in results) else 1)
     return rc, "; ".join(m for _, m in results)
