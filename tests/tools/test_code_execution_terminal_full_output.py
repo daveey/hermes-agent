@@ -115,21 +115,25 @@ def test_window_without_spill_reports_truncated():
 WINDOW = "AAA\n\n... [OUTPUT TRUNCATED - 1,500 chars omitted out of 2,006 total] ...\n\nBBB"
 
 
-def _file_rpc_result(monkeypatch, tool_result: dict) -> tuple[dict, int]:
-    """One terminal call through the remote file-RPC poller (modal/daytona/vercel/ssh
+def _file_rpc_result(monkeypatch, tool_result: dict, tool: str = "terminal",
+                     log: list | None = None) -> tuple[dict, int]:
+    """One *tool* call through the remote file-RPC poller (modal/daytona/vercel/ssh
     transport); returns the decoded res_ payload and the size of the shipped stdin."""
     import base64
     import threading
     from tools import code_execution_rpc
 
     monkeypatch.setattr(code_execution_rpc, "_default_dispatch",
-                        lambda task_id: lambda name, args: json.dumps(tool_result))
-    stop, shipped = threading.Event(), {}
-    request = json.dumps({"seq": 1, "tool": "terminal", "token": "tok", "args": {"command": "cat big"}})
+                        lambda task_id: lambda name, args: json.dumps(tool_result, ensure_ascii=False))
+    stop, shipped, polls = threading.Event(), {}, [0]
+    request = json.dumps({"seq": 1, "tool": tool, "token": "tok", "args": {"command": "cat big"}})
 
     class Env:
         def execute(self, cmd, cwd=None, timeout=None, stdin_data=None):
             if cmd.startswith("ls "):
+                polls[0] += 1
+                if polls[0] > 3:  # a ship that raised never answers: stop, don't spin forever
+                    stop.set()
                 return {"output": "" if shipped else "/rpc/req_000001\n", "returncode": 0}
             if cmd.startswith("cat "):
                 return {"output": request, "returncode": 0}
@@ -138,10 +142,81 @@ def _file_rpc_result(monkeypatch, tool_result: dict) -> tuple[dict, int]:
                 stop.set()
             return {"output": "", "returncode": 0}
 
-    code_execution_rpc._rpc_poll_loop(Env(), "/rpc", "t-file-rpc", [], [0], 50,
-                                      frozenset({"terminal"}), stop, "tok")
+    code_execution_rpc._rpc_poll_loop(Env(), "/rpc", "t-file-rpc", [] if log is None else log,
+                                      [0], 50, frozenset({tool}), stop, "tok")
+    assert "stdin" in shipped, "the poller never shipped a result"
     payload = shipped["stdin"]
     return json.loads(base64.b64decode(payload).decode("utf-8")), len(payload)
+
+
+def test_remote_file_rpc_ships_a_lone_surrogate(monkeypatch):
+    """read_file decodes undecodable bytes with surrogateescape; strict UTF-8 refused the
+    result, so the poller raised and never answered. It now arrives as the same text."""
+    content = "head \udc80 tail \ud800"
+    r, _ = _file_rpc_result(monkeypatch, {"content": content, "total_lines": 1}, tool="read_file")
+    assert r == {"content": content, "total_lines": 1}
+
+
+def test_remote_terminal_cap_measures_what_ships(tmp_path, monkeypatch):
+    """The encoded cap measures the bytes _remote_write ships: a surrogate costs a 6-byte
+    escape there, not the 3 bytes surrogatepass counted, so this result stays windowed
+    (surrogatepass: 650 KB whole, inlined; shipped: 1.1 MB whole, 900 KB windowed)."""
+    spill = tmp_path / "out.log"
+    spill.write_text("s" * 200_000)
+    r, shipped = _file_rpc_result(monkeypatch, {
+        "output": WINDOW, "exit_code": 0, "error": None, "full_output_path": str(spill),
+        "command": "\udc80" * 150_000})
+    assert r["output"] == WINDOW
+    assert r["truncated"] is True
+    assert r["command"] == "\udc80" * 150_000
+    assert shipped < 2 * 1024 * 1024
+
+
+def test_remote_file_rpc_bounds_a_large_non_terminal_result(monkeypatch):
+    """Not only terminal(): any file-RPC result over the cap becomes an error naming its
+    size instead of a multi-MB payload embedded in a heredoc command."""
+    log: list = []
+    r, shipped = _file_rpc_result(monkeypatch, {"content": "x" * (3 * 1024 * 1024)},
+                                  tool="read_file", log=log)
+    assert set(r) == {"error", "result_bytes", "limit_bytes"}
+    assert r["result_bytes"] > r["limit_bytes"] == 1024 * 1024
+    assert "read_file result is" in r["error"] and "offset/limit" in r["error"]
+    assert shipped < 2 * 1024 * 1024
+    assert log[-1]["tool"] == "read_file" and "limit" in log[-1]["error"]
+    # A result within the cap ships unchanged.
+    r, _ = _file_rpc_result(monkeypatch, {"content": "x" * 1000}, tool="read_file")
+    assert r == {"content": "x" * 1000}
+
+
+def test_local_socket_ships_a_lone_surrogate():
+    """The local socket transport encoded strictly too; the surrogate now round-trips."""
+    import socket
+    import threading
+    from tools.code_execution_rpc import _rpc_server_loop
+
+    content = "a \udc9f b"
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    stop = threading.Event()
+    t = threading.Thread(target=_rpc_server_loop, args=(
+        server, "t-sock", [], [0], 50, frozenset({"read_file"}), stop, "tok"),
+        kwargs={"dispatch": lambda name, args: json.dumps({"content": content}, ensure_ascii=False)},
+        daemon=True)
+    t.start()
+    try:
+        with socket.create_connection(server.getsockname(), timeout=10) as client:
+            client.sendall(json.dumps({"tool": "read_file", "token": "tok", "args": {}}).encode() + b"\n")
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = client.recv(65536)
+                assert chunk, "server closed without answering"
+                buf += chunk
+        assert json.loads(buf.decode("utf-8")) == {"content": content}
+    finally:
+        stop.set()
+        t.join(10)
+        server.close()
 
 
 def test_remote_file_rpc_caps_shipped_full_output(tmp_path, monkeypatch):
