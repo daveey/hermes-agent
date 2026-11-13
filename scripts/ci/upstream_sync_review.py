@@ -18,6 +18,8 @@ points. Replica discovery only supplies candidate IDs, never approval. A host wi
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import importlib.machinery
 import importlib.util
 import inspect
@@ -100,9 +102,68 @@ _DIFF_PATH = re.compile(r"^diff --git a/(.+?) b/(.+)$")
 _CONFLICT_PATH = re.compile(r"^remerge CONFLICT \([^)]*\): .*? in (.+)$")
 
 
+_REFUSED_BLOB = re.compile(r"(?:not our ref |could not fetch )([0-9a-f]{40})(?![0-9a-f])")
+_MAX_RECOVERED_BLOBS = 32
+
+
+def _recover_blob(repo, oid: str) -> None:
+    """GitHub sometimes serves a promised blob over REST but refuses it over upload-pack.
+
+    Decode JSON/base64 rather than raw text (blobs need not be UTF-8). Verify the Git object identity before
+    writing anything. Only the configured GitHub origin/upstream are queried, through the gate's broker route.
+    """
+    if __package__:
+        from .upstream_sync import gh_cli
+    else:  # standalone updater: scripts/ci, not the repository root, is on sys.path
+        from upstream_sync import gh_cli
+
+    for remote in ("origin", UPSTREAM_REMOTE):
+        url = _git(repo, "config", "--get", f"remote.{remote}.url").stdout.strip()
+        match = _GITHUB_URL.fullmatch(url)
+        if not match:
+            continue
+        proc = gh_cli("api", "-H", "Accept: application/vnd.github+json",
+                      f"repos/{match[1]}/git/blobs/{oid}", reason="upstream sync: recover promised merge blob")
+        if proc.returncode:
+            continue
+        try:
+            payload = json.loads(proc.stdout)
+            if payload["encoding"] != "base64":
+                raise ValueError("not base64")
+            data = base64.b64decode("".join(payload["content"].split()), validate=True)
+        except (ValueError, KeyError, TypeError, AttributeError, binascii.Error) as exc:
+            raise ClassifyError(f"invalid REST blob {oid}: {exc}") from exc
+        cmd = ["git", "-C", str(repo), "hash-object", "--stdin"]
+        hashed = subprocess.run(cmd, input=data, capture_output=True, timeout=30, check=False)
+        if hashed.returncode or hashed.stdout.strip() != oid.encode("ascii"):
+            raise ClassifyError(f"REST blob {oid} failed object identity verification")
+        stored = subprocess.run([*cmd, "-w"], input=data, capture_output=True, timeout=30, check=False)
+        if stored.returncode or stored.stdout.strip() != oid.encode("ascii"):
+            raise ClassifyError(f"cannot store REST blob {oid}")
+        return
+    raise ClassifyError(f"promised blob {oid} unavailable from configured GitHub remotes")
+
+
+def _remerge_diff(repo, merge: str) -> str:
+    recovered = set()
+    while True:
+        proc = _git(repo, "show", "--remerge-diff", "--no-color", "--no-ext-diff", "--format=", merge)
+        if not proc.returncode:
+            return proc.stdout
+        missing = set(_REFUSED_BLOB.findall(proc.stderr)) - recovered
+        if not missing or len(recovered | missing) > _MAX_RECOVERED_BLOBS:
+            raise ClassifyError(f"git show --remerge-diff failed: {proc.stderr.strip()[-300:]}")
+        try:
+            for oid in sorted(missing):
+                _recover_blob(repo, oid)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ClassifyError(f"promised blob recovery failed: {exc}") from exc
+        recovered.update(missing)
+
+
 def remerge_files(repo, merge: str) -> list[str]:
     """Files whose committed content differs from git's own re-merge of ``merge``'s parents ([] = mechanical)."""
-    text = _out(repo, "show", "--remerge-diff", "--no-color", "--no-ext-diff", "--format=", merge)
+    text = _remerge_diff(repo, merge)
     if not text.strip():
         return []
     files = set()
