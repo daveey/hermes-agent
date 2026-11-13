@@ -267,3 +267,22 @@ def test_host_builds_the_session_agent_with_the_frame_login(monkeypatch):
     assert captured["auth_user_id"] == "basic:alice"
     assert session["auth_user_id"] == "basic:alice"
     assert server._session_auth_user_id(session) == "basic:alice"
+
+
+@pytest.mark.parametrize("frame_origin,expected", [({"input_origin": "agent"}, "agent"), ({}, "")])
+def test_turn_start_runs_the_turn_with_the_forwarded_input_origin(turn_env, frame_origin, expected):
+    """[daveey] The parent's prompt.submit classified the submit; the remote turn's pre_llm_call reads it too."""
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, heartbeat_secs=0)
+    agent = _agent(["ok"])
+    seen = []
+    run = agent.run_conversation
+    agent.run_conversation = lambda *a, **kw: seen.append(getattr(agent, "_input_origin", "<unset>")) or run(*a, **kw)
+    server._sessions["s-origin"] = _session(agent)
+    try:
+        host.handle_frame({"type": "turn.start", "sid": "s-origin", "request_id": "t", "prompt": "hi", **frame_origin})
+        _wait(out, lambda f: f["type"] == "turn.end")
+    finally:
+        server._sessions.pop("s-origin", None)
+        host.close()
+    assert seen == [expected]

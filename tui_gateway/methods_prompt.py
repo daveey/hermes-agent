@@ -1015,12 +1015,17 @@ def _dispatch_admitted_prompt(rid, sid, session, text, turn_isolation, turn_auth
         # (#85303 review: the early return made _reopen_if_finalized unreachable on
         # this path). Best-effort like the helper: a failed read never blocks the send.
         _reopen_before_isolated_submit(sid, session)
+        # [daveey] The remote turn consumes this submit's origin (prompt.submit's stash); a failed dispatch hands it
+        # back for the inline fallback's _run_after_agent_ready.
+        input_origin = session.pop("_submit_input_origin", "")
         isolated_response = _submit_prompt_to_compute_host(
-            rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata)
+            rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
+            input_origin=input_origin)
         if not isolated_response.get("error"):
             # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
             return isolated_response
+        session["_submit_input_origin"] = input_origin
         # An ordinal/id alone is not consent. A client that carries a leftover ordinal into an ORDINARY
         # submit sends a request that is indistinguishable, field by field, from a real rewind — same
         # method, same shape, an in-range target — and the cut it asks for is a destructive

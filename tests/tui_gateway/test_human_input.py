@@ -64,9 +64,81 @@ def test_input_origin_agent_for_an_agent_transport():
     assert human_input.input_origin("r", {}, "hi", transport=_transport("renderer")) == "human"
 
 
-@pytest.mark.parametrize("session", [{"agent_created": True}, {"pending_hidden": True}])
-def test_input_origin_agent_for_agent_created_or_hidden_sessions(session):
+@pytest.mark.parametrize("session", [{"agent_created": True}, {"room_plumbing": True}])
+def test_input_origin_agent_for_agent_created_or_room_plumbing_sessions(session):
     assert human_input.input_origin("r", {}, "hi", session=session) == "agent"
+
+
+def _stored(tmp_path, key, *, title, hidden, model_config=None):
+    """A session dict whose row lives in its own profile ``state.db`` (no ``room_plumbing``/``pending_hidden`` in
+    memory: a resumed session, or one whose transient ``pending_hidden`` was already applied and popped)."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(key, source="desktop", model_config=model_config)
+        db.set_session_title(key, title)
+        db.set_session_hidden(key, hidden)
+    finally:
+        db.close()
+    return {"session_key": key, "profile_home": str(tmp_path)}
+
+
+@pytest.mark.parametrize("title,model_config", [("Group: standup", None), ("renamed", {"room_plumbing": True})])
+def test_input_origin_agent_for_every_submit_into_a_stored_room_plumbing_row(tmp_path, title, model_config):
+    session = _stored(tmp_path, "plumb", title=title, hidden=True, model_config=model_config)
+    assert [human_input.input_origin("r", {}, "hi", session=session) for _ in range(2)] == ["agent", "agent"]
+
+
+@pytest.mark.parametrize("row,expected", [
+    (None, False), ({}, False),
+    ({"model_config": {"room_plumbing": True}}, True), ({"model_config": '{"room_plumbing": true}'}, True),
+    ({"model_config": "not json", "hidden": 1, "title": "Bot Chat"}, False), ({"model_config": "[1]"}, False),
+    ({"model_config": "  "}, False), ({"hidden": 1, "title": "  Group: a"}, True), ({"hidden": 0, "title": "Group: a"}, False),
+])
+def test_row_is_room_plumbing(row, expected):
+    assert human_input._row_is_room_plumbing(row) is expected
+
+
+@pytest.mark.parametrize("session", [{"pending_hidden": True}, {"pending_hidden": False}])
+def test_hidden_alone_is_no_authorship_signal(session):
+    """Bot Mode's canonical Bot Chat is born hidden and David types into it, so hidden != agent (first submit
+    included): only plumbing markers are."""
+    assert human_input.input_origin("r", {}, "hi", session=session) == "human"
+
+
+def test_input_origin_human_in_a_stored_hidden_bot_chat(tmp_path):
+    session = _stored(tmp_path, "dm", title="Bot Chat", hidden=True)
+    assert [human_input.input_origin("r", {}, "hi", session=session) for _ in range(2)] == ["human", "human"]
+    assert human_input.input_origin("r", {}, "hi", session=_stored(tmp_path, "g", title="Group: x", hidden=False)) \
+        == "human", "a visible row titled like a room is a user's chat"
+
+
+def test_input_origin_row_lookup_failure_falls_back_to_human(monkeypatch):
+    def boom(session):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(server, "_session_db", boom)
+    assert human_input.input_origin("r", {}, "hi", session={"session_key": "k"}) == "human"
+
+
+def test_input_origin_row_lookup_needs_a_key_and_an_open_db(monkeypatch, caplog):
+    import contextlib
+    import logging
+
+    opened = []
+
+    @contextlib.contextmanager
+    def no_db(session):
+        opened.append(session.get("session_key"))
+        yield None
+
+    monkeypatch.setattr(server, "_session_db", no_db)
+    with caplog.at_level(logging.DEBUG, logger=human_input.logger.name):
+        assert human_input.input_origin("r", {}, "hi", session={"cols": 80}) == "human"
+        assert human_input.input_origin("r", {}, "hi", session={"session_key": "k"}) == "human"
+    assert opened == ["k"], "a keyless (unpersisted) session has no row to read"
+    assert "row read failed" not in caplog.text, "an unavailable store is a plain miss, not an error"
 
 
 @pytest.mark.parametrize("params", [
@@ -107,7 +179,7 @@ def test_note_submit_returns_the_origin_and_stamps_only_humans(monkeypatch, tmp_
     stamps = []
     monkeypatch.setattr(human_input, "record_human_input", lambda sid="", home=None: stamps.append(sid))
     assert human_input.note_submit("r", {"session_id": "a"}, "hi", transport=_transport("agent")) == "agent"
-    assert human_input.note_submit("r", {"session_id": "b"}, "hi", session={"pending_hidden": True}) == "agent"
+    assert human_input.note_submit("r", {"session_id": "b"}, "hi", session={"room_plumbing": True}) == "agent"
     assert human_input.note_submit(None, {"session_id": "c"}, "hi") == ""
     assert human_input.note_submit("r", {"session_id": "d"}, "hi", transport=_transport()) == "human"
     assert stamps == ["d"]
@@ -213,6 +285,56 @@ def test_prompt_submit_consumes_the_stashed_origin(turn_env):
     session = _session(make_agent())
     _submit_on("agent", session)
     assert seen == ["agent"] and "_submit_input_origin" not in session, "read once, never left for a later turn"
+
+
+# ── compute-host isolated dispatch forwards (and consumes) the origin ─────────────────────────────────────
+
+
+def _isolated_dispatch(monkeypatch, session, response):
+    calls = []
+    monkeypatch.setattr(server, "_reopen_before_isolated_submit", lambda sid, session: None)
+    monkeypatch.setattr(server, "_submit_prompt_to_compute_host",
+                        lambda rid, sid, session, text, **kw: calls.append(kw) or response)
+    session["_submit_input_origin"] = "agent"
+    return calls
+
+
+def test_isolated_dispatch_forwards_and_consumes_the_origin(monkeypatch):
+    session = _session(None)
+    calls = _isolated_dispatch(monkeypatch, session, server._ok("r1", {"status": "streaming"}))
+    resp = server._dispatch_admitted_prompt("r1", "sid", session, "hi", True, None, None, None, {}, None)
+    assert resp["result"]["status"] == "streaming"
+    assert calls[0].get("input_origin") == "agent"
+    assert "_submit_input_origin" not in session, "the remote turn consumed it: nothing lingers for the next turn"
+
+
+def test_isolated_dispatch_failure_keeps_the_origin_for_the_inline_fallback(monkeypatch):
+    session = _session(None)
+    _isolated_dispatch(monkeypatch, session, server._err("r1", 5019, "compute-host dispatch failed: x"))
+    monkeypatch.setattr(server, "_persist_session_row_for_submit", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *a, **k: True)
+    seen = []
+    monkeypatch.setattr(server, "_start_session_work", lambda fn, **kw: seen.append(session.get("_submit_input_origin")))
+    server._dispatch_admitted_prompt("r1", "sid", session, "hi", True, None, None, None, {}, None)
+    assert seen == ["agent"], "the inline turn (_run_after_agent_ready) still reads this submit's origin"
+
+
+def test_compute_host_turn_frame_carries_the_origin():
+    session = _session(None)
+    assert server._compute_host_turn_frame("r", "sid", session, "hi", input_origin="agent")["input_origin"] == "agent"
+    assert "input_origin" not in server._compute_host_turn_frame("r", "sid", session, "hi")
+
+
+def test_compute_host_dispatch_sends_the_origin_in_its_frame(monkeypatch):
+    frames = []
+
+    class _Supervisor:
+        def submit_turn(self, frame, *, on_complete=None):
+            frames.append(frame)
+
+    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: _Supervisor())
+    resp = server._submit_prompt_to_compute_host("r1", "sid", _session(None), "hi", input_origin="agent")
+    assert resp["result"]["status"] == "streaming" and frames[0]["input_origin"] == "agent"
 
 
 # ── prompt.admit (in-process owner services) never inherits a client submit's origin ─────────────────────
