@@ -105,6 +105,31 @@ def test_consumer_output_fed_to_a_shell_fails_closed(tmp_path, shape):
     assert unsafe is True and refusal is not None and "scan cap" in refusal, refusal
 
 
+# Review 5896107359 (PR #2506): a number printf prints can name the script, so its digits must be
+# C's (`%#x` of 0 is `0`, not Python's `0x0`) and floats the long double's: (command, the file
+# bash runs in `{dir}`). The float rows hold on every host because each long double is walked.
+_NUMBER_SINK_SHAPES = {
+    "printf-alt-hex-zero": ("printf 'bash {dir}/%#x.sh' 0 | bash\n", "0.sh"),
+    "printf-alt-octal-zero-precision": ("printf 'bash {dir}/%#.0o.sh' 0 | bash\n", "0.sh"),
+    "printf-plus-zero-precision": ("printf 'bash {dir}/%+.0d.sh' 0 | bash\n", "+.sh"),
+    "printf-long-double-f": ("printf 'bash {dir}/%.0f.sh' 0x20000000000001p0 | bash\n",
+                             "9007199254740993.sh"),  # 2**53 + 1: x86's long double keeps it
+    "printf-double-f": ("printf 'bash {dir}/%.0f.sh' 0x20000000000001p0 | bash\n",
+                        "9007199254740992.sh"),  # a double (arm64 Mac) rounds it down
+    "printf-x87-hex-float": ("printf 'bash {dir}/%a.sh' 1 | bash\n", "0x8p-3.sh"),  # glibc x86
+    "printf-double-hex-float": ("printf 'bash {dir}/%a.sh' 1 | bash\n", "0x1p+0.sh"),  # arm64 Mac
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_NUMBER_SINK_SHAPES))
+def test_printed_number_naming_the_script_fails_closed(tmp_path, shape):
+    command, name = _NUMBER_SINK_SHAPES[shape]
+    big = _big(tmp_path).rename(tmp_path / "x" / name)
+    unsafe, refusal = scan_gateway_lifecycle(command.replace("{dir}", str(big.parent)),
+                                             cwd=str(tmp_path))
+    assert unsafe is True and refusal is not None and "scan cap" in refusal, refusal
+
+
 def test_review_function_repro_is_not_masked_for_the_walk(tmp_path):
     command = _SINK_SHAPES["review-function"].replace("{big}", str(_big(tmp_path)))
     assert strip_inert_heredoc_bodies(command, nested=True) == command
@@ -268,12 +293,27 @@ _BASH_PRINTF_CASES = [
     ("%.1Q|%Q|%.2Q|%.2q|%(%Y-%m)T|", ["a b", "it's", "a b", "a b", "1296000"]),  # Jan 1970
     ("%.*s|%d|%i|", ["-1", "abcdef", "99999999999999999999", "-99999999999999999999"]),
     ("%f|%.1f|%g|%e|", ["'a", "0x10", "inf", "1.5x"]),
+    # Review 5896107359 (PR #2506): C's integer corners, not Python's `%`.
+    ("%#x|%#X|%#o|%#.0o|%#.0x|%+.0d|% .0d|%05.2d|%-#6x|%#08x|%08.3x|",
+     ["0"] * 6 + ["7", "7", "255", "255", "9"]),
+    ("%+u|% x|%u|%o|%x|", ["5", "5", "-18446744073709551616", "-1", "18446744073709551616"]),
+    # bash's floats are x86 long doubles (64-bit significand, exponent to ±16383).
+    ("%.0f|%.0f|%.25f|%.3e|%g|%#g|%.0e|%#.0f|", ["18446744073709551615", "0x20000000000001p0",
+                                               "0.1", "1e400", "1e-4950", "2", "2.5", "3"]),
+    ("%05f|%-6f|%+F|%010.2e|%G|%.0g|%#.3g|%g|", ["inf", "nan", "-inf", "-0", "1e-5", "0", "1",
+                                                "100000"]),
+    ("%a|%A|%.0a|%.3a|%#.0a|%010a|%.1a|%a|", ["1", "0.1", "255", "0.1", "1", "1", "0x8.18p0",
+                                              "0"]),
+    # Ties round half-even; a carry past 9.99… or past the significand's top bit renormalizes.
+    ("%.0a|%.0a|%.1a|%.2e|%g|%a|%f|%e|", ["0x8.8p0", "0xa.8p0", "0x8.08p0", "9.999", "999999.5",
+                                          "0x1.ffffffffffffffffp0", "1e4933", "-1e-5000"]),
 ]
 
 
 @pytest.mark.parametrize(("format_text", "arguments"), _BASH_PRINTF_CASES)
 def test_printf_output_matches_real_bash(format_text, arguments):
     from cron.lifecycle_guard_printf import printf_output
+    from cron.lifecycle_guard_printf_number import FLOAT_MODELS
 
     bash = shutil.which("bash") or ""
     if not bash:
@@ -284,7 +324,40 @@ def test_printf_output_matches_real_bash(format_text, arguments):
         pytest.skip(f"bash {version}: the model follows bash 5's printf")
     real = subprocess.run([bash, "-c", 'printf "$@"', "printf", format_text, *arguments],
                           capture_output=True, check=False, env={"LC_ALL": "C"}).stdout
-    assert printf_output(format_text, arguments).encode("latin-1") == real
+    # The host's long double is one of the models the walk prints floats under.
+    modelled = {printf_output(format_text, arguments, model).encode("latin-1")
+                for model in FLOAT_MODELS}
+    assert real in modelled
+
+
+def test_printf_output_stops_past_the_scan_budget():
+    from cron import lifecycle_guard
+    from cron.lifecycle_guard_printf import PRINTF_MAX_OUTPUT, printf_output
+
+    assert PRINTF_MAX_OUTPUT == lifecycle_guard._MAX_LIFECYCLE_SCAN_BYTES
+    printed = printf_output("<%4096s>" * 5000, [])  # 20 MB in bash, from a 30 KB command
+    assert PRINTF_MAX_OUTPUT < len(printed) < 2 * PRINTF_MAX_OUTPUT  # stopped soon after the cap
+    many = printf_output("%s" * 30000, ["x" * 40] * 30000)  # 1.2 MB of plain arguments
+    assert PRINTF_MAX_OUTPUT < len(many) <= PRINTF_MAX_OUTPUT + 40
+
+
+def test_printf_lines_keep_the_whole_argument_walk():
+    from cron.lifecycle_guard_printf import printed_argument_lines
+
+    lines = list(printed_argument_lines("printf", ["x%.4sy %s", "bashrc", "/x/a.sh"]))
+    assert "xbashy /x/a.sh" in lines and "xbashrcy /x/a.sh" in lines  # model, whole arguments
+    floats = set(printed_argument_lines("printf", ["%a", "1"]))
+    assert {"0x8p-3", "0x1p+0"} <= floats  # x86's long double and a double (arm64 Mac)
+
+
+def test_long_double_rounding_carries_into_the_exponent():
+    from fractions import Fraction
+
+    from cron.lifecycle_guard_printf_number import X87, real
+
+    assert real("0x1.ffffffffffffffffp0", X87) == (False, Fraction(2))  # 65 bits round up
+    assert real("0x1.ffffffffffffffffp16383", X87) == (False, "inf")  # bash: inf, too
+    assert real("-0x1.fffffffffffffffep16383", X87)[1] != "inf"  # the largest long double
 
 
 def test_printf_output_stops_after_the_round_cap():

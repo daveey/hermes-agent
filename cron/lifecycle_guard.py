@@ -1502,8 +1502,10 @@ def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
     every quoted string literal (``print('bash /x/big.sh')``) and the argument line of every
     ``echo``/``printf`` (``echo bash /x/big.sh``, also without leading option words:
     ``echo -n bash /x/big.sh``), each also with ``\\n``-style escapes turned into
-    newlines. Their paths are executed, not mentions. Single and double quotes are matched
-    independently, so a literal nested in the other kind (``python3 -c "print('bash x')"``) is
+    newlines and decoded the way printf, ``%b`` and ``echo -e`` decode them
+    (with_escapes_decoded). Their paths are executed, not mentions. Single and double quotes
+    are matched independently, so a literal nested in the other kind
+    (``python3 -c "print('bash x')"``) is
     yielded too, and every span between two consecutive quotes of a kind is yielded, so a stray
     apostrophe (``print("it's")``) cannot pair the quotes around a later literal the wrong way.
 

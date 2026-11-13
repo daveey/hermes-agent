@@ -2,7 +2,7 @@
 
 Under an output sink (``printf FORMAT ARGS | bash``) the guard walks a producer's output as an
 executed command, so the walk needs the text bash really prints. Taking every conversion's
-argument whole is not enough, because three printf features change which words come out:
+argument whole is not enough, because these printf features change which words come out:
 
 - ``*`` as the width or precision takes an argument (``printf '%*s %s' 5 bash X`` prints
   ``    bash X``; the whole-argument walk read ``5 bash`` and lost X).
@@ -10,22 +10,28 @@ argument whole is not enough, because three printf features change which words c
 - ``%b`` decodes ``\\xHH``, ``\\0NNN`` and friends in its argument and stops all output at
   ``\\c`` (``printf '%b %s' 'ba\\x73h' X`` prints ``bash X``); the format decodes its own escapes
   too (``printf 'ba\\x73h %s' X``).
+- Numbers print as C prints them (``printf 'bash D/%#x.sh' 0`` prints ``bash D/0.sh``): see
+  ``lifecycle_guard_printf_number``.
+- ``-v NAME`` takes an operand, so the format is the word after NAME (printed_argument_lines).
 
 The model follows bash 5's ``printf.def``: flags ``#'-+ 0``, a width and a precision (digits or
 ``*``), the ignored length modifiers ``hjlLtz``, then one of ``csbqQdiouxXeEfFgGaA``, ``%(FMT)T``
-or ``%%``. An invalid conversion stops the output there, as in bash. Numeric conversions parse
-the argument the way ``strtoimax``/``strtold`` do (``'c`` is the character's code, ``12abc``
-is 12, a non-number is 0) and print through Python's ``%``, which is C's for these. ``%a`` and
-the ``#o`` corner cases are approximate: digits cannot form a command name, so they matter only
-inside a path. Callers also walk the arguments without the format, so the model is one
-variant among several and never the only text scanned.
+or ``%%``. An invalid conversion stops the output there, as in bash. Output past the guard's scan
+budget is cut short (the guard refuses it as oversized anyway). Callers also walk the arguments
+without the format and the earlier whole-argument substitution, so the model is one variant
+among several and never the only text scanned.
 """
 
 import re
 import time
 from typing import Callable, Iterator, Optional, cast
 
+from cron.lifecycle_guard_printf_number import FLOAT_MODELS, X87, FloatModel, format_number, integer
+
 PRINTF_MAX_ROUNDS = 64
+# The guard's whole-walk scan budget (lifecycle_guard._MAX_LIFECYCLE_SCAN_BYTES, pinned equal by a
+# test; importing it here would be circular). Output past it is refused as oversized either way.
+PRINTF_MAX_OUTPUT = 1 << 20
 _MAX_FIELD = 4096  # width and numeric precision cap: `printf '%999999999s'` cannot eat memory
 
 _OCTAL_DIGITS = "01234567"
@@ -42,15 +48,8 @@ _SPEC_RE = re.compile(r"([#'\-+ 0]*)(\*|[0-9]*)(?:\.(\*|[0-9]*))?[hjlLtz]*(?:\((
 _STRING_CONVERSIONS = frozenset("csbqQT")
 _INTEGER_CONVERSIONS = frozenset("diouxX")
 _FLOAT_CONVERSIONS = frozenset("eEfFgGaA")
+_FLOAT_CONVERSION_RE = re.compile(r"%[#'\-+ 0-9.*hjlLtz]*[eEfFgGaA]")
 _CONVERSIONS = _STRING_CONVERSIONS | _INTEGER_CONVERSIONS | _FLOAT_CONVERSIONS
-_INTEGER_PREFIX_RE = re.compile(r"\s*([-+]?)(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)?")
-_FLOAT_PREFIX_RE = re.compile(
-    r"\s*[-+]?(?:inf(?:inity)?|nan|0[xX](?:[0-9a-fA-F]+\.?[0-9a-fA-F]*|\.[0-9a-fA-F]+)"
-    r"(?:[pP][-+]?[0-9]+)?|(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)",
-    re.IGNORECASE,
-)
-_INT64 = 1 << 63
-_UINT64 = 1 << 64
 _SAFE_CHAR_RE = re.compile(r"[A-Za-z0-9_@%+=:,./-]")
 
 
@@ -107,69 +106,8 @@ def _decode(text: str, *, echo_style: bool) -> tuple[str, bool]:
     return "".join(out), False
 
 
-def _integer(text: str) -> int:
-    """``strtoimax`` of *text* as bash's printf reads a number: ``'c`` is the code of c, the
-    longest numeric prefix counts (``12abc`` is 12, ``08`` is 0) and anything else is 0."""
-    if text[:1] in ("'", '"'):
-        return ord(text[1]) if len(text) > 1 else 0
-    match = _INTEGER_PREFIX_RE.match(text)
-    if not match or not match[2]:
-        return 0
-    digits = match[2]
-    if digits[:2] in ("0x", "0X"):
-        value = int(digits, 0)
-    elif digits.startswith("0"):
-        value = int(digits, 8)
-    else:
-        value = int(digits)
-    return -value if match[1] == "-" else value
-
-
-def _float(text: str) -> float:
-    if text[:1] in ("'", '"'):
-        return float(ord(text[1])) if len(text) > 1 else 0.0
-    match = _FLOAT_PREFIX_RE.match(text)
-    if not match:
-        return 0.0
-    word = match[0].strip()
-    try:
-        if "x" in word.lower() and "n" not in word.lower():
-            return float.fromhex(word)
-        return float(word)
-    except (ValueError, OverflowError):
-        return 0.0
-
-
 def _pad(text: str, flags: str, width: int) -> str:
     return text.ljust(width) if "-" in flags else text.rjust(width)
-
-
-def _format_number(conversion: str, flags: str, width: int, precision: Optional[int],
-                   argument: str) -> str:
-    python_flags = flags.replace("'", "")
-    if precision is not None:
-        precision = min(precision, _MAX_FIELD)  # past the cap only more leading zeros or digits
-    if conversion in _INTEGER_CONVERSIONS:
-        value = _integer(argument)
-        if conversion in "di":
-            value = max(-_INT64, min(_INT64 - 1, value))
-        else:
-            value = min(value, _UINT64 - 1) % _UINT64
-            python_flags = python_flags.replace("+", "").replace(" ", "")  # C: signed only
-        if precision == 0 and value == 0:
-            return _pad("", flags, width)
-        if conversion == "o" and "#" in python_flags:
-            python_flags = python_flags.replace("#", "")
-            precision = max(precision or 0, len(f"{value:o}") + (value != 0))
-        conversion = "d" if conversion in "iu" else conversion
-    else:
-        value = _float(argument)
-        if conversion in "aA":
-            text = value.hex() if conversion == "a" else value.hex().upper()
-            return _pad(text, flags, width)
-    spec = "%" + python_flags + (str(width) if width else "") + (
-        "" if precision is None else f".{precision}")
-    return (spec + conversion) % value
 
 
 def _quoted(text: str) -> str:
@@ -186,7 +124,7 @@ def _decoded(text: str, precision: Optional[int], _time_format: str
 
 
 def _strftime(text: str, time_format: str) -> str:
-    seconds = _integer(text) if text else -1
+    seconds = integer(text) if text else -1
     try:
         return time.strftime(time_format, time.localtime(None if seconds < 0 else seconds))
     except (ValueError, OverflowError, OSError):
@@ -216,12 +154,14 @@ def _format_string(conversion: str, flags: str, width: int, precision: Optional[
     return _pad(text, flags, width), stop
 
 
-def printf_output(format_text: str, arguments: list[str]) -> str:
+def printf_output(format_text: str, arguments: list[str], model: FloatModel = X87) -> str:
     """What ``printf FORMAT ARGUMENTS`` prints in bash: conversions per the module docstring, the
     format's escapes decoded, and the format repeated while arguments remain and the last round
-    consumed one (at most ``PRINTF_MAX_ROUNDS`` rounds). Missing arguments print as empty or 0."""
+    consumed one (at most ``PRINTF_MAX_ROUNDS`` rounds). Missing arguments print as empty or 0.
+    Floats print under *model*, the host's ``long double``."""
     out: list[str] = []
     position = 0
+    size = 0  # characters in `out` (counted at each conversion and each round's end)
 
     def take() -> Optional[str]:
         nonlocal position
@@ -232,7 +172,7 @@ def printf_output(format_text: str, arguments: list[str]) -> str:
 
     def star(value: str) -> Optional[int]:
         """A width or precision: digits, or `*` taking the next argument as a number."""
-        return _integer(take() or "") if value == "*" else (int(value) if value else None)
+        return integer(take() or "") if value == "*" else (int(value) if value else None)
 
     for _round in range(PRINTF_MAX_ROUNDS):
         start = position
@@ -267,15 +207,20 @@ def printf_output(format_text: str, arguments: list[str]) -> str:
                 precision = None
             argument = take()
             if conversion in _STRING_CONVERSIONS:
-                text, stop = _format_string(conversion, flags, width, precision, argument,
-                                            time_format or "")
-                out.append(text)
-                if stop:
-                    return "".join(out)  # `%b`'s `\c`: no further output at all
+                piece, stop = _format_string(conversion, flags, width, precision, argument,
+                                             time_format or "")
             else:
-                out.append(_format_number(conversion, flags, width, precision, argument or ""))
+                piece, stop = format_number(conversion, flags, width, precision, argument or "",
+                                            max_field=_MAX_FIELD, model=model), False
+            out.append(piece)
+            size += len(piece)
+            # `%b`'s `\c` ends all output. Past PRINTF_MAX_OUTPUT the text already exceeds the
+            # guard's whole-walk scan budget, which refuses it: building more only costs memory.
+            if stop or size > PRINTF_MAX_OUTPUT:
+                return "".join(out)
             index = match.end()
-        if position >= len(arguments) or position == start:
+        size = sum(map(len, out))
+        if position >= len(arguments) or position == start or size > PRINTF_MAX_OUTPUT:
             break
     return "".join(out)
 
@@ -311,7 +256,39 @@ def printed_argument_lines(name: str, arguments: list[str]) -> Iterator[str]:
     start = _printf_format_index(arguments)
     if start < len(arguments):
         yield " ".join(arguments[start + 1 :])
-        yield printf_output(arguments[start], arguments[start + 1 :])
+        # Under each platform's long double (the host's is one of them); a format without a
+        # floating conversion prints the same under all, and the caller dedupes the lines.
+        models = FLOAT_MODELS if _FLOAT_CONVERSION_RE.search(arguments[start]) else (X87,)
+        for model in models:
+            yield printf_output(arguments[start], arguments[start + 1 :], model)
+    # Fail closed: also the earlier whole-argument walk (each conversion takes its argument as
+    # written, format after every leading `-word`), so the model never yields less than it did.
+    if index < len(arguments):
+        yield " ".join(arguments[index + 1 :])
+        yield _whole_argument_output(arguments[index], arguments[index + 1 :])
+
+
+# One printf conversion (flags, width, precision, conversion letter) or a literal `%%`.
+_WHOLE_CONVERSION_RE = re.compile(r"%(%|[-+ #0]*[0-9*]*(?:\.[0-9*]*)?[a-zA-Z])")
+
+
+def _whole_argument_output(format_text: str, arguments: list[str]) -> str:
+    """*format_text* with each conversion replaced by the next argument as written, repeated
+    while arguments remain: only a walk variant beside printf_output."""
+    remaining = list(arguments)
+    rounds: list[str] = []
+
+    def convert(match: re.Match[str]) -> str:
+        if match[1] == "%":
+            return "%"
+        return remaining.pop(0) if remaining else ""
+
+    while len(rounds) < PRINTF_MAX_ROUNDS:
+        before = len(remaining)
+        rounds.append(_WHOLE_CONVERSION_RE.sub(convert, format_text))
+        if not remaining or len(remaining) == before:
+            break
+    return "".join(rounds)
 
 
 def _printf_format_index(arguments: list[str]) -> int:
