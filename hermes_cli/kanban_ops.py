@@ -348,10 +348,14 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     wt_days = retention_days() if wt_days is None else wt_days
     if wt_days < 0:
         return _err("kanban gc: worktree retention days must be >= 0", 2)
+    from hermes_cli.kanban_scratch_backoff import DEFAULT_BUDGET_S, Budget
+    budget_s = getattr(args, "scratch_budget_seconds", None)
+    # One budget for the whole workspace pass: the wrapper's kill covers it all.
+    budget = Budget(DEFAULT_BUDGET_S if budget_s is None else budget_s)
     with kbc.connect_closing() as conn:
         removed_ws = gc_task_worktrees(conn, older_than_days=wt_days)
     with kbc.connect_closing() as conn:
-        removed_ws += gc_task_scratch(conn, older_than_days=wt_days)
+        removed_ws += gc_task_scratch(conn, older_than_days=wt_days, budget=budget)
 
     removed_events = 0
     if event_days:

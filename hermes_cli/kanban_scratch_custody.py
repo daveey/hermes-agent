@@ -305,7 +305,7 @@ def _restore_detached(conn, tid, path, trash, exc):
               tid, path, receipt, exc)
 
 
-def _remove(conn, receipt, owner, days, board):
+def _remove(conn, receipt, owner, days, board, refusals=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_scratch_archive as sa
     tid, path = receipt["task_id"], Path(receipt["workspace_path"])
@@ -317,8 +317,20 @@ def _remove(conn, receipt, owner, days, board):
     before = path.stat()
     archive = None
     if not ws._scratch_tree_removable(path):
-        archive = sa.archive_workspace(path, kb.kanban_home() / "archive" / "scratch" / board / tid,
-                                       task_id=tid, completed_at=owner["completed_at"])
+        key = f"custody:{tid}"
+        if refusals is not None:
+            from hermes_cli.kanban_scratch_backoff import skip_logged
+            if skip_logged(refusals, key, path, owner["completed_at"], tid):
+                return 0
+        try:
+            archive = sa.archive_workspace(path, kb.kanban_home() / "archive" / "scratch" / board / tid,
+                                           task_id=tid, completed_at=owner["completed_at"])
+        except (OSError, ValueError, sa.ArchiveRefused, subprocess.SubprocessError) as exc:
+            if refusals is not None:
+                refusals.record(key, path, owner["completed_at"], str(exc))
+            raise
+        if refusals is not None:
+            refusals.clear(key)
     if archive is not None:
         ws.release_lsp_clients(str(path))
 
@@ -356,8 +368,11 @@ def _remove(conn, receipt, owner, days, board):
     return 1
 
 
-def gc_custody(conn, days):
-    """Scheduled scratch GC backstop; authority reads never run in a write transaction."""
+def gc_custody(conn, days, *, budget=None, refusals=None):
+    """Scheduled scratch GC backstop; authority reads never run in a write transaction.
+
+    *budget* / *refusals* (``kanban_scratch_backoff``) bound the pass: once the budget
+    is spent the remaining receipts wait for the next pass, untouched."""
     from hermes_cli import kanban_sync_client as client
     from hermes_cli.kanban_worktree_gc import _board_slug
     from hermes_cli.kanban_scratch_archive import ArchiveRefused
@@ -382,6 +397,9 @@ def gc_custody(conn, days):
                     log.warning("Scratch custody preserved: task=%s path=%s reason=run_unverified "
                                 "eligible_at=None", receipt["task_id"], receipt["workspace_path"])
                     continue
+                if budget is not None and budget.exhausted():
+                    budget.defer()
+                    continue
                 try:
                     owner = _terminal(hub, board, receipt["task_id"])
                 except (OSError, client.SyncUnavailable, client.Resync) as exc:
@@ -391,7 +409,7 @@ def gc_custody(conn, days):
                                 receipt["workspace_path"], exc)
                     break
                 if owner:
-                    removed += _remove(conn, receipt, owner, days, board)
+                    removed += _remove(conn, receipt, owner, days, board, refusals)
                 else:
                     log.warning("Scratch custody preserved: task=%s path=%s reason=terminal_unverified "
                                 "eligible_at=None", receipt["task_id"], receipt["workspace_path"])

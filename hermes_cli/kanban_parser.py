@@ -693,6 +693,9 @@ _SPECS = [
              help="Delete task_events older than N days for terminal tasks (default: 30; 0 disables)"),
         _arg("--log-retention-days", type=_nonnegative_int, default=30,
              help="Delete worker log files older than N days (default: 30; 0 disables)"),
+        _arg("--scratch-budget-seconds", type=_nonnegative_int, default=None,
+             help="Start no new scratch archive after N seconds; the rest wait for the next pass "
+                  "(default: 1200; 0 = no limit)"),
     ], help="Garbage-collect archived-task workspaces, old events, and old logs"),
     _cmd("sync", children=("sync_action", [
         _cmd("status", [_json_flag()], help="Mode, service board, cursor, outbox depth and last error"),

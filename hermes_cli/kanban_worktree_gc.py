@@ -52,7 +52,8 @@ def retention_days() -> float:
         return 0
 
 
-def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None = None) -> int:
+def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None = None,
+                    budget=None) -> int:
     """Retry terminal scratch cleanup, failing closed on any unreadable board.
 
     Only task records establish ownership; never infer it from directory names.
@@ -65,6 +66,9 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None =
     and then removed once its card finished more than *older_than_days* ago
     (default ``retention_days()``: ``kanban.worktree_retention_hours`` / 24 when
     set, else ``kanban.worktree_retention_days``; 0 disables). [daveey]
+
+    *budget* (a ``kanban_scratch_backoff.Budget``; default unlimited) stops starting
+    new archives once spent; archive refusals back off per tree across passes.
     """
     import shutil
 
@@ -133,10 +137,19 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None =
         if os.path.lexists(trash):
             log.warning("Scratch GC left detached tree %s (from %s) after a partial removal", trash, path)
     # Archiving runs git for minutes on big clones: never hold the board's write lock for it.
-    for task_id, path, completed_at in aged:
-        removed += _archive_and_remove_scratch(conn, task_id, path, completed_at)
+    # Oldest first; a tree refused recently waits out its backoff, and once the pass budget is
+    # spent the rest wait for the next pass (kanban_scratch_backoff), so the pass ends in time.
+    from hermes_cli.kanban_scratch_backoff import Budget, Refusals
+    budget = budget if budget is not None else Budget()
+    refusals = Refusals(_board_slug(conn))
+    for task_id, path, completed_at in sorted(aged, key=lambda a: (a[2] or 0, a[0])):
+        if budget.exhausted():
+            budget.defer()
+            continue
+        removed += _archive_and_remove_scratch(conn, task_id, path, completed_at, refusals)
     from hermes_cli.kanban_scratch_custody import gc_custody
-    removed += gc_custody(conn, days)
+    removed += gc_custody(conn, days, budget=budget, refusals=refusals)
+    budget.report("aged scratch tree(s) or custody receipt(s)")
     return removed
 
 
@@ -252,10 +265,12 @@ def _board_slug(conn: sqlite3.Connection) -> str:
 
 
 def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Path,
-                                completed_at: int | None) -> int:
+                                completed_at: int | None, refusals=None) -> int:
     """Archive every git repo in an aged scratch tree, then remove it; 1 when removed.
 
-    Any refusal or failure keeps the workspace and logs why. The owner is
+    Any refusal or failure keeps the workspace and logs why; with *refusals*
+    (``kanban_scratch_backoff.Refusals``) an archive refusal is remembered and the
+    tree is not re-archived until its backoff passes or it changes. The owner is
     re-checked under the write lock after archiving, and the tree is renamed
     away inside that lock so a resumed card can never see it half-deleted.
     """
@@ -267,11 +282,19 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
     owner = conn.execute("SELECT workspace_kind, workspace_path, completed_at FROM tasks WHERE id=?",
                          (task_id,)).fetchone()
     archive_dir = kb.kanban_home() / "archive" / "scratch" / _board_slug(conn) / task_id
+    if refusals is not None:
+        from hermes_cli.kanban_scratch_backoff import skip_logged
+        if skip_logged(refusals, task_id, path, completed_at, task_id):
+            return 0
     try:
         final = sa.archive_workspace(path, archive_dir, task_id=task_id, completed_at=completed_at)
     except (sa.ArchiveRefused, OSError, subprocess.SubprocessError, ValueError) as exc:
         log.info("Keeping aged scratch workspace for task %s: %s (%s)", task_id, path, exc)
+        if refusals is not None:
+            refusals.record(task_id, path, completed_at, str(exc))
         return 0
+    if refusals is not None:
+        refusals.clear(task_id)
     ws.release_lsp_clients(str(path))
 
     def _row_path(row):
