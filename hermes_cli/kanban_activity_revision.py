@@ -82,8 +82,10 @@ _EPOCH_RE = re.compile(r"/\* kanban-activity-epoch:(\d+) \*/")
 # The task(s) a row belongs to. Every other watched table names it in ``task_id``.
 TASK_KEYS: dict[str, tuple[str, ...]] = {"tasks": ("id",), "task_links": ("parent_id", "child_id")}
 CHANGE_INDEX = f"idx_{CHANGE_TABLE}_rev"
+# A rowid table, not WITHOUT ROWID: generic every-table readers (``SELECT * ... ORDER BY rowid`` snapshots, recovery
+# scans) expect a rowid on every board table, and the cost difference on a one-row-per-task table is noise.
 _CHANGE_DDL = (f"CREATE TABLE IF NOT EXISTS {CHANGE_TABLE} (task_id TEXT PRIMARY KEY NOT NULL, "
-               "rev INTEGER NOT NULL) WITHOUT ROWID",
+               "rev INTEGER NOT NULL)",
                f"CREATE INDEX IF NOT EXISTS {CHANGE_INDEX} ON {CHANGE_TABLE}(rev)")
 
 

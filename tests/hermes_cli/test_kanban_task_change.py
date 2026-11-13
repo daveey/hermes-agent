@@ -360,6 +360,15 @@ def test_a_missing_change_table_reads_full_and_init_repairs_it(board):
     assert first is FULL and fresh is not None
 
 
+def test_the_change_table_has_a_rowid_like_every_board_table(board, shadow):
+    """Generic every-table readers (``SELECT * FROM t ORDER BY rowid`` snapshots in the remote-lease tests, recovery
+    scans) must keep working on boards and shadows once the change table exists."""
+    tid = kb.create_task(board, title="a", assignee="w")
+    for conn in (board, shadow):
+        rows = conn.execute(f"SELECT rowid, task_id FROM {rev.CHANGE_TABLE} ORDER BY rowid").fetchall()
+        assert conn is shadow or tid in [r[1] for r in rows]
+
+
 def test_ensure_revision_repairs_a_dropped_change_index(board):
     with kbc.write_txn(board):
         board.execute(f"DROP INDEX {rev.CHANGE_INDEX}")
