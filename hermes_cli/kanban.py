@@ -23,7 +23,6 @@ from typing import Optional
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
-from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_operator as kbo
 from hermes_cli import kanban_swarm as ks
@@ -53,7 +52,8 @@ from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
 from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release
-from hermes_cli.kanban_source_cli import claim_refusal as _source_claim_refusal, cmd_source_release as _cmd_source_release
+from hermes_cli.kanban_claim_cli import cmd_claim as _cmd_claim  # moved; re-exported for callers
+from hermes_cli.kanban_source_cli import cmd_source_release as _cmd_source_release
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_admission_explain import cmd_queue as _cmd_queue
 from hermes_cli.kanban_assignees_cli import cmd_assignees as _cmd_assignees  # moved; re-exported for callers
@@ -1041,23 +1041,6 @@ def _cmd_unlink(args: argparse.Namespace) -> int:
 def _cmd_supervisor_requests(args: argparse.Namespace) -> int:
     from hermes_cli.kanban_supervisor_requests import cli_command  # [daveey]
     return cli_command(args)
-
-
-def _cmd_claim(args: argparse.Namespace) -> int:
-    with kbc.connect_closing() as conn:
-        if refusal := _source_claim_refusal(conn, args.task_id):
-            return _err(refusal)
-        task = kb.claim_task(conn, args.task_id, ttl_seconds=args.ttl)
-        if task is None:
-            existing = kb.get_task(conn, args.task_id)
-            if existing is None:
-                return _err(f"no such task: {args.task_id}")
-            return _err(f"cannot claim {args.task_id}: status={existing.status} "
-                        f"lock={existing.claim_lock or '(none)'}")
-        workspace = kbw.resolve_workspace(task)
-        kbw.set_workspace_path(conn, task.id, str(workspace))
-    print(f"Claimed {task.id}\nWorkspace: {workspace}")
-    return 0
 
 
 def _cmd_comment(args: argparse.Namespace) -> int:
