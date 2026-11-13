@@ -250,7 +250,9 @@ def test_a_push_ack_after_the_inputs_read_is_credited(live, svc, kanban_home, mo
         live.execute("UPDATE tasks SET title = 'pushed' WHERE id = ?", (child,))
     clock[0] += 1
     assert not _round(kanban_home, svc).repair_deferred
-    assert marks[-1][2] >= 1 and marks[-1][1] != marks[-1][0], f"the push must ack and move the revision: {marks}"
+    # The round pushes before its pulls (t_01a1d36ddcea59fe) and again after them: whichever sent it must ack.
+    assert any(sent >= 1 and after != before for before, after, sent in marks), \
+        f"the push must ack and move the revision: {marks}"
     assert calls["repair_divergence"] == 1, calls
     # An apply-only round after the pushing round: the ack is credited, so it defers.
     clock[0] += 1

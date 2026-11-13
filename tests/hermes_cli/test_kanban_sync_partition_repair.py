@@ -25,6 +25,10 @@ def _consumed_link(live, svc, kanban_home, monkeypatch):
         ksc._pull_replica(BOARD, svc.hub(ME), ME)
         ksc.pull(live, svc.hub(ME), BOARD, observers=False, partition=ME)
     assert not live.execute("SELECT 1 FROM task_links WHERE child_id = ?", (child,)).fetchone()
+    # The next round runs the full pass: these tests pin what it heals, not when. (It used to be due only by
+    # accident: the child's own feed echo stepped the live revision outside the round. A round now pushes before it
+    # pulls, so that echo lands inside the creating round, t_01a1d36ddcea59fe.)
+    monkeypatch.setattr(ksc, "REPLICA_REPAIR_MIN_S", 0.0)
     return child
 
 

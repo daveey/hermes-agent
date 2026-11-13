@@ -6,6 +6,7 @@ import logging
 import math
 import sqlite3
 import time
+from contextlib import ExitStack
 
 logger = logging.getLogger(__name__)
 
@@ -346,11 +347,12 @@ def local_refusals(conn, status):
     return {row["id"]: reason for row in rows if (reason := execution_refusal(conn, row))}
 
 
-def reevaluate(conn, hub, board, gateway, *, cfg=None):
+def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
     """Reserve acknowledged origin-owned ready work, then read authoritative feed.
 
     No lease (even apparently expired) is moved here. A lost reply is retried with
     the same revision; a successful reply is never itself permission to execute.
+    ``may_pull=False`` (a sync round holds the board and pulls this file) reads no feed here.
     """
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_placement as placement
@@ -371,7 +373,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
 
     attempted = 0
     last = None
-    pulled = []  # at most one feed pull per tick for not_claimable pickups (shared network budget)
+    pulled = [] if may_pull else [True]  # at most one feed pull per tick for not_claimable pickups (shared budget)
     # Every reserve below is made from this pre-loop copy, so a refusal is judged against it even after an in-loop
     # pull moved a later row on: the refused row (fence) and the reservation it was waiting on.
     before = {r["id"]: (queue.snapshot(conn, r["id"]), _reserved_machine(queue, conn, r["id"])) for r in rows}
@@ -452,7 +454,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             with write_txn(conn):
                 conn.execute("UPDATE kanban_sync_state SET worker_reserve_cursor=? WHERE board_id=? AND gateway_id=?",
                              (last, board, gateway))
-    if attempted:
+    if attempted and may_pull:
         client.pull(conn, hub, board, observers=True, partition=gateway)
     return attempted
 
@@ -634,17 +636,42 @@ def dispatch_tick(conn):
         ident = client.load_identity()
         if ident.gateway != state.get("gateway_id"):
             return
-        hub = client.Hub(ident, timeout=DISPATCH_NETWORK_BUDGET_S,
-                         deadline=time.monotonic() + DISPATCH_NETWORK_BUDGET_S)
         from hermes_cli import kanban_queue_reason as queue
-        try:
-            client.pull(conn, hub, state["board_id"], observers=True, partition=ident.gateway)
-        except (client.HubError, client.SyncUnavailable, client.Resync, OSError) as exc:
-            queue.try_record(queue.record_pull_error, conn, ident.gateway, error=exc)
-            return
-        queue.clear_pull_streaks(ident.gateway)  # a feed-pull failure streak is no longer consecutive
-        reevaluate(conn, hub, state["board_id"], ident.gateway, cfg=cfg)
+        with ExitStack() as stack:
+            # One live puller per board (t_01a1d36ddcea59fe): a sync round holding the board pulls this file, so
+            # the tick reserves from it as it stands. The Board judges every reserve at its acknowledged revision.
+            own = _hold_board(stack, sync._db_key(conn))
+            hub = _tick_hub(client, ident)
+            if own:
+                try:
+                    client.pull(conn, hub, state["board_id"], observers=True, partition=ident.gateway)
+                except TimeoutError:  # BoardBudgetExhausted or a page slower than the budget
+                    # A backlog outlasts the budget (a 500-change page took 4.5 s on David-MBP): the pages applied
+                    # stay, and reservation still runs on a fresh budget instead of waiting for the full catch-up.
+                    hub = _tick_hub(client, ident)
+                except (client.HubError, client.SyncUnavailable, client.Resync, OSError) as exc:
+                    queue.try_record(queue.record_pull_error, conn, ident.gateway, error=exc)
+                    return
+                else:
+                    queue.clear_pull_streaks(ident.gateway)  # a feed-pull failure streak is no longer consecutive
+            reevaluate(conn, hub, state["board_id"], ident.gateway, cfg=cfg, may_pull=own)
     except (client.HubError, client.SyncUnavailable, client.Resync, OSError):
         # Offline origin cannot remove the queue fence or manufacture an assignment.
         return
 
+
+def _tick_hub(client, ident):
+    return client.Hub(ident, timeout=DISPATCH_NETWORK_BUDGET_S, deadline=time.monotonic() + DISPATCH_NETWORK_BUDGET_S)
+
+
+def _hold_board(stack, path) -> bool:
+    """Take the board's sync lock for this tick without waiting; False when a sync round holds it."""
+    from pathlib import Path
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy, board_sync_lock
+    if path is None:
+        return True  # an in-memory board: nothing else pulls it
+    try:
+        stack.enter_context(board_sync_lock(Path(path)))
+    except SyncRoundBusy:
+        return False
+    return True

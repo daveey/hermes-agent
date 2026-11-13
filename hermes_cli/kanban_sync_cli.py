@@ -87,17 +87,26 @@ def _import(args: argparse.Namespace) -> int:
 def _diff(args: argparse.Namespace) -> int:
     slug = _board(args)
     ident = ksc.load_identity()
+    # Refresh first, before opening the replica: a rebuild replaces its file. Only when no sync round holds the
+    # board (one replica puller per board per host); a busy round's replica is compared as it stands.
+    refresh_error = None
+    pulled = ksc.Pulled()
+    try:
+        pulled = ksc._pull_replica(slug, ksc.Hub(ident), ident.gateway, _path(slug))
+    except (ksc.HubError, ksc.Resync, OSError) as exc:
+        refresh_error = str(exc)
+    else:
+        if pulled.more:
+            refresh_error = (f"the replica is still behind the feed head after {ksc.PULL_PAGE_BUDGET} pages; the "
+                             "sync loop is catching up, rerun later")
     live = kbc.connect(_path(slug))
     shadow = ksc.open_shadow(slug, ident.gateway)
     try:
-        refresh_error = None
-        try:  # compare against the service's current state, not the replica's last round
-            ksc.pull(shadow, ksc.Hub(ident), slug, observers=False)
-        except (ksc.HubError, ksc.Resync, OSError) as exc:
-            refresh_error = str(exc)
         report = ksc.diff(live, shadow, ident.gateway)
         if refresh_error is not None:
             report.update(clean=False, unavailable=True, refresh_error=refresh_error)
+        elif pulled.busy:
+            report["refresh_skipped"] = "a sync round holds the board; compared against its replica as it stands"
     finally:
         live.close()
         shadow.close()

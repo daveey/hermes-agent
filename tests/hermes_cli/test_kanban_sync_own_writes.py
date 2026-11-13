@@ -117,7 +117,8 @@ def test_another_connections_write_during_the_round_still_repairs(live, svc, kan
     done = []
 
     def push_and_race(conn, *a, **k):
-        if not done:
+        # On the round's send after its inputs read (it also sends before its pulls, t_01a1d36ddcea59fe).
+        if not done and not k.get("before_pull"):
             done.append(1)
             credit._uncaptured_edit(live, child, "raced")
         return real_push(conn, *a, **k)

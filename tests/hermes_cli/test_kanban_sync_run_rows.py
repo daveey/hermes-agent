@@ -255,11 +255,12 @@ def test_the_dispatcher_closes_a_dangling_run_and_the_board_follows(live, kanban
     is no longer its card's current run is closed once it is old enough to have settled."""
     tid, uid = _claimed(live, kanban_home, svc, "dangling")
     _round(kanban_home, svc)
-    # What the race left on every host: the card moved on, the run row did not.
+    _live_tid, live_uid = _claimed(live, kanban_home, svc, "live run")  # a current run must never be touched
+    # What the race left on every host: the card moved on, the run row did not. Made after the last round: a round
+    # pushes before it pulls (t_01a1d36ddcea59fe), so the Board's lease release would end the run properly first.
     with kbc.write_txn(live):
         live.execute("UPDATE tasks SET status = 'blocked', claim_lock = NULL, claim_expires = NULL, "
                      "current_run_id = NULL WHERE id = ?", (tid,))
-    _live_tid, live_uid = _claimed(live, kanban_home, svc, "live run")  # a current run must never be touched
     young = kb.create_task(live, title="young", assignee="worker")
     with kbc.write_txn(live):
         live.execute("INSERT INTO task_runs (task_id, status, started_at) VALUES (?, 'running', ?)",

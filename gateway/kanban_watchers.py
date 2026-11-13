@@ -435,6 +435,8 @@ class GatewayKanbanWatchersMixin:
                                      else 0)
                     from hermes_cli import kanban_hub_cpu_alert  # one card per stale-advisory incident [daveey]
                     await _to_thread_process_service(kanban_hub_cpu_alert.check)
+                    from hermes_cli import kanban_sync_outbox_age  # one card per stalled-outbox incident [daveey]
+                    await _to_thread_process_service(kanban_sync_outbox_age.check)
                     now = int(time.time())
                     # Only an ungated tick can be "stuck": an estop or drain hold spawns 0 on purpose.
                     if gate is None and bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:

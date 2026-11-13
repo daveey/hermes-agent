@@ -36,12 +36,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_replica_lag as lag  # pushed rows the replica holds only after its next pull
+from hermes_cli import kanban_sync_backlog as backlog  # page budget per pull; boards the loop reruns at once
+from hermes_cli import kanban_sync_outbox_age as outbox_age  # oldest pending op: status, WARNING, defect card
+from hermes_cli.kanban_sync_backlog import PULL_PAGE_BUDGET, Pulled
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
@@ -53,6 +56,7 @@ from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-wi
 )
 from hermes_cli.kanban_sync_own_writes import credited, reset as reset_own_writes, take as take_credited
 from hermes_cli.kanban_sync_links_inputs import ledger_slices, links_signature
+from hermes_cli.kanban_sync_pickup_publish import publish_pickup_if_changed, reset_published_pickup  # moved out, re-exported
 
 _log = logging.getLogger(__name__)
 
@@ -664,8 +668,12 @@ class PushResult:
 
 
 def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primary: bool,
-         max_batches: int = MAX_BATCHES_PER_ROUND) -> PushResult:
-    """Drain pending outbox rows in FIFO batches. A transport failure leaves them pending (retried next round)."""
+         max_batches: int = MAX_BATCHES_PER_ROUND, before_pull: bool = False) -> PushResult:
+    """Drain pending outbox rows in FIFO batches. A transport failure leaves them pending (retried next round).
+
+    ``before_pull`` (the send a round makes before its pulls, t_01a1d36ddcea59fe) stops at the first run row: a run
+    row is sent whole and the Board keeps the last write, so a pending startup sent before this round's pull could
+    overwrite an end the Board already holds (``_local_row_is_newer`` lets that end land locally first)."""
     from hermes_cli.kanban_db_connect import write_txn
     refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out = PushResult()
@@ -673,6 +681,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' AND (retry_after IS NULL OR retry_after <= ?) "
             "ORDER BY created_at, rowid LIMIT ?", (int(time.time()), PUSH_BATCH))]
+        run_at = next((i for i, r in enumerate(rows) if r["table_name"] == "task_runs"), None) if before_pull else None
+        rows = rows if run_at is None else rows[:run_at]  # FIFO order is kept: nothing after the run row goes first
         if not rows:
             break
         with write_txn(conn):
@@ -837,14 +847,18 @@ def _child_task(conn: sqlite3.Connection, table: str, uid: str) -> Optional[str]
 
 
 def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
-         partition: Optional[str] = None) -> int:
-    """Apply every feed page after this file's cursor. Returns the number of changes read. On a board with an
-    outbox (primary), fields with an unanswered local edit are not overwritten; ``partition`` (a gateway name)
-    keeps only that gateway's cards. [daveey]"""
+         partition: Optional[str] = None, max_pages: Optional[int] = PULL_PAGE_BUDGET) -> Pulled:
+    """Apply the feed pages after this file's cursor, at most ``max_pages`` (None: to the head). Returns the number
+    of changes read; its ``more`` is true when the budget ran out before the head. On a board with an outbox
+    (primary), fields with an unanswered local edit are not overwritten; ``partition`` (a gateway name) keeps only
+    that gateway's cards. [daveey]"""
     from hermes_cli.kanban_sync_stop import checkpoint
-    total = 0
+    total = pages = 0
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
     while True:
+        if max_pages is not None and pages >= max_pages:
+            return Pulled(total, more=True)  # unbounded, a backlog starved the round's push for hours
+        pages += 1
         checkpoint()
         page = hub.changes(board, cursor)
         checkpoint()
@@ -857,7 +871,7 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             # An idle poll: no change, same cursor. The apply would only rewrite ``applying`` and ``cursor`` to
             # the values they hold, a write transaction (WAL frame, fsync, observer wake) every round on every
             # board for nothing. [daveey]
-            return total
+            return Pulled(total)
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
         sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
@@ -865,7 +879,7 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
         total += len(page.get("changes", []))
         cursor = nxt
         if not page.get("more"):
-            return total
+            return Pulled(total)
 
 
 def _applying(conn: sqlite3.Connection) -> bool:
@@ -914,6 +928,7 @@ class RoundResult:
     repaired: dict[str, list[str]] = field(default_factory=dict)  # cards re-pushed by repair_divergence
     rejection_resolutions: list[dict] = field(default_factory=list)
     repair_deferred: bool = False  # a replica-only change waits for the repair window (see ``decide``)
+    behind: bool = False  # a pull stopped at its page budget: the loop runs this board again at once
 
 
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
@@ -928,7 +943,7 @@ def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
 
 
 @contextmanager
-def _pulled_replica(slug: str, hub: Hub, gateway: str):
+def _pulled_replica(slug: str, hub: Hub, gateway: str, max_pages: Optional[int] = PULL_PAGE_BUDGET):
     """Borrow the pulled replica for this round; retention rebuilds discard the old handle."""
     path = shadow_path(slug)
     with ExitStack() as stack:
@@ -936,7 +951,7 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
         rebuilt = False
         generation = lag.pull_started(path)  # done only below: a failed pull leaves this gateway's pushes lagging
         try:
-            pulled = pull(replica, hub, slug, observers=False)
+            pulled = pull(replica, hub, slug, observers=False, max_pages=max_pages)
         except Resync:
             _log.warning("kanban sync: %s replica cursor below the retention floor; rebuilding from a snapshot", slug)
             stack.close()
@@ -944,21 +959,43 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
             path.unlink(missing_ok=True)
             replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
-            pulled = resync(replica, hub, slug, observers=False)
-        lag.pull_done(path, generation)
-        try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
-            sync.mark_pulled(replica)
-        except sqlite3.Error as exc:
-            _log.warning("kanban sync: %s replica pull not stamped (%s)", slug, exc)
+            pulled = Pulled(resync(replica, hub, slug, observers=False))
+        if not pulled.more:  # both mean "holds everything up to the feed head", not "a page was read"
+            lag.pull_done(path, generation)
+            try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
+                sync.mark_pulled(replica)
+            except sqlite3.Error as exc:
+                _log.warning("kanban sync: %s replica pull not stamped (%s)", slug, exc)
         from hermes_cli.kanban_sync_attachments import transfer_pending
         transfer_pending(replica, hub, slug)
         yield replica, pulled, rebuilt
 
 
-def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
-    """Pull the whole replica for standalone callers that do not run repairs."""
-    with _pulled_replica(slug, hub, gateway) as (_, pulled, _rebuilt):
-        return pulled
+def _pull_replica(slug: str, hub: Hub, gateway: str, live_path: Optional[Path] = None,
+                  max_pages: Optional[int] = PULL_PAGE_BUDGET) -> Pulled:
+    """Pull the replica for standalone callers that do not run repairs, only while no sync round holds the board:
+    one replica puller per board per host (a ``sync diff`` beside the gateway once wrote the cursor backwards,
+    t_01a1d36ddcea59fe). A busy round returns ``busy`` without pulling; the caller reads the replica as-is.
+    ``live_path`` defaults to the board's configured file."""
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy, board_sync_lock
+    if live_path is None:
+        live_path = dict(board_paths()).get(slug)
+    with ExitStack() as stack:
+        try:
+            if live_path is not None:
+                stack.enter_context(board_sync_lock(Path(live_path)))
+        except SyncRoundBusy:
+            return Pulled(busy=True)
+        with _pulled_replica(slug, hub, gateway, max_pages) as (_, pulled, _rebuilt):
+            return pulled
+
+
+def _replica_at_head(slug: str, hub: Hub, gateway: str, live_path: Path) -> None:
+    """Pull the replica to the feed head (reconcile reads tombstones from it). A sync round holding the board
+    raises :class:`SyncRoundBusy`: a reconcile against a replica another puller is moving would be unsound."""
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy
+    if _pull_replica(slug, hub, gateway, live_path, max_pages=None).busy:
+        raise SyncRoundBusy("a kanban sync round holds this board; rerun the reconcile after it finishes")
 
 
 def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
@@ -975,6 +1012,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
     # Dropped first, so a round that fails or finds nothing to repair never leaves a stale deferral that would
     # make the sync loop reselect this board without waiting; a deferring round sets it again.
     _REPAIR_DEFERRED.pop(str(path), None)
+    backlog.note(path, False)  # likewise: only a round that completes behind the head reruns at once
     with connection(path, lambda: _connect(path)) as live:
         mode = sync.board_mode(live)
         result = RoundResult(board=slug, mode=mode)
@@ -982,13 +1020,18 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             return result
         refuse_if_schema_ahead(live)  # before pull/repair: an older core must not act on a newer board [daveey]
         ensure_identity(live, slug, gateway)
+        # Send before pulling as well as after: a pull backlog never holds local edits back (9 h, t_01a1d36ddcea59fe).
+        # Safe: the Board merges on base_version + field HLC, an acked task's sync_version fences off older feed
+        # copies of it, and rejections are resolved here as after the pulls.
+        _send(live, hub, slug, gateway, mode, result)
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
+            result.behind = pulled.more
             applies: Optional[list] = []  # credited revision steps (kanban_sync_own_writes); None = a rebuild
             if mode == "primary":
                 try:
                     with credited(live):
-                        pull(live, hub, slug, observers=True, partition=gateway)
+                        result.behind |= pull(live, hub, slug, observers=True, partition=gateway).more
                 except Resync:
                     _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
                     applies = None
@@ -1035,59 +1078,27 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                 heal_clobbered_completions(live)
                 from hermes_cli.kanban_sync_divergence import heal_running_over_ended_run
                 heal_running_over_ended_run(live)
-        with credited(live):  # acknowledgements and the Board's merged rows: sync bookkeeping, not local edits
-            result.push = push(live, hub, slug, gateway, primary=mode == "primary")
-        from hermes_cli.kanban_sync_attachments import transfer_pending
-        transfer_pending(live, hub, slug)
-        from hermes_cli.kanban_sync_rejections import resolve_rejections
-        result.rejection_resolutions = resolve_rejections(live, hub, slug)
+        _send(live, hub, slug, gateway, mode, result, attachments=True)
         if mode == "primary":
             from hermes_cli.kanban_worker_placement import reevaluate
             with credited(live):  # reservation observations and the feed pull after them
                 reevaluate(live, hub, slug, gateway)
+        backlog.note(path, result.behind)
         return result
 
 
-_UNPUBLISHED = object()
-_PICKUP_STATE: dict[str, Any] = {"value": _UNPUBLISHED, "retry_at": 0.0}
-_PICKUP_UNSUPPORTED_S = 600.0
-
-
-def reset_published_pickup() -> None:
-    """Tests: forget the last posted pickup so the next round posts again."""
-    _PICKUP_STATE["value"] = _UNPUBLISHED
-    _PICKUP_STATE["retry_at"] = 0.0
-
-
-def publish_pickup_if_changed(hub: Any, *, now: Optional[float] = None) -> bool:
-    """Post :func:`hermes_cli.kanban_worker_node.pickup_mode` (None → null) once per sync round, and only when it
-    changed. A failed post is retried next round. An older Board (404/405) stays quiet for 10 minutes. Never
-    raises into the sync loop. A hub without ``report_pickup`` (test fakes) is a no-op."""
-    from hermes_cli.kanban_worker_node import pickup_mode
-    mode = pickup_mode()
-    if _PICKUP_STATE["value"] == mode:
-        return False
-    clock = time.monotonic() if now is None else now
-    if clock < float(_PICKUP_STATE["retry_at"]):
-        return False
-    poster = getattr(hub, "report_pickup", None)
-    if poster is None:
-        return False
-    try:
-        poster(mode)
-    except HubError as exc:
-        if exc.status in (404, 405):
-            _PICKUP_STATE["retry_at"] = clock + _PICKUP_UNSUPPORTED_S
-            _log.info("kanban sync: board has no pickup route yet (%s); retrying later", exc.status)
-        else:
-            _log.warning("kanban sync: pickup publish failed (%s)", exc)
-        return False
-    except OSError as exc:
-        _log.warning("kanban sync: pickup publish failed (%s)", exc)
-        return False
-    _PICKUP_STATE["value"] = mode
-    _PICKUP_STATE["retry_at"] = 0.0
-    return True
+def _send(live: sqlite3.Connection, hub: Hub, slug: str, gateway: str, mode: str, result: RoundResult, *,
+          attachments: bool = False) -> None:
+    """Push the outbox and resolve rejections, adding to ``result`` (a round does this before and after pulling;
+    ``attachments`` marks the send after them)."""
+    with credited(live):  # acknowledgements and the Board's merged rows: sync bookkeeping, not local edits
+        pushed = push(live, hub, slug, gateway, primary=mode == "primary", before_pull=not attachments) or PushResult()
+    result.push = pushed if result.push is None else PushResult(*map(sum, zip(astuple(result.push), astuple(pushed))))
+    if attachments:
+        from hermes_cli.kanban_sync_attachments import transfer_pending
+        transfer_pending(live, hub, slug)
+    from hermes_cli.kanban_sync_rejections import resolve_rejections
+    result.rejection_resolutions += resolve_rejections(live, hub, slug)
 
 
 def sync_all_once(hub: Optional[Hub] = None, *,
@@ -1409,6 +1420,8 @@ def reset_board_watch() -> None:
     _WATCH.reset()
     reset_repair_window()
     reset_own_writes()
+    backlog.reset()
+    outbox_age.reset()
     _LINKS_DONE.clear()
 
 
@@ -1522,6 +1535,8 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                     watchers[slug].start()
             selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
             selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
+            selected += [b for b in backlog.due(boards) if b not in selected]  # a pull backlog drains round by round
+            outbox_age.round_started()
             results = sync_all_once(hub, boards=selected)
             ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
             if ahead:
@@ -1534,10 +1549,11 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 if r.push and (r.push.sent or r.push.rejected):
                     _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                               r.push.sent, r.push.rejected)
+            outbox_age.after_round(results, boards)  # WARNING: an unsent edit older than 10 min after a good round
             if time.monotonic() >= next_links and links.request(boards):  # busy: ask again next iteration
                 next_links = time.monotonic() + LINKS_EVERY_S
             sync_timing.report(sender.loop_report)
-            remaining = max(0.0, work.deadline - time.monotonic())
+            remaining = 0.0 if backlog.due(boards) else max(0.0, work.deadline - time.monotonic())
             deferred_due = next_deferred_repair(boards)
             if deferred_due is not None:
                 remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
@@ -1664,7 +1680,7 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
         # its snapshot is compared, or the row would be "restored" here), then refresh the replica: rows the
         # service deleted on purpose (its event GC of done cards, deletes) come back as tombstones there.
         push(live, hub, slug, ident.gateway, primary=mode == "primary")
-        _pull_replica(slug, hub, ident.gateway)
+        _replica_at_head(slug, hub, ident.gateway, Path(path))
         shadow = open_shadow(slug, ident.gateway)
         try:
             tombstoned: dict[str, set[str]] = {}
@@ -1709,7 +1725,7 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
         queued = import_board(live, only=missing)
         queued.pop("cleared_rejected", None)
         pushed = push(live, hub, slug, ident.gateway, primary=mode == "primary")
-        _pull_replica(slug, hub, ident.gateway)
+        _replica_at_head(slug, hub, ident.gateway, Path(path))
         shadow = open_shadow(slug, ident.gateway)
         try:
             report = diff(live, shadow, ident.gateway)
@@ -1737,7 +1753,8 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
     mode = sync.board_mode(conn)
     out = {"mode": mode, "board_id": st.get("board_id"), "gateway": st.get("gateway_id"),
            "cursor": st.get("cursor"), "pending": counts.get("pending", 0), "rejected": counts.get("rejected", 0),
-           "last_error": last_error}
+           "oldest_pending_age_s": round(age) if st and (age := outbox_age.oldest_pending_age_s(conn)) is not None
+           else None, "last_error": last_error}
     if mode != "off":
         # A refused start writes no outbox row, so ``last_error`` alone read a stalled board as healthy. [daveey]
         from hermes_cli import kanban_sync_runstate as runstate
