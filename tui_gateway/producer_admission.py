@@ -148,7 +148,7 @@ def deliver_pending(sid: str, session: dict) -> str:
             server._notif_release_turn(session)
 
 
-def _profile_home(profile: Optional[str]) -> Optional[Path]:
+def _profile_home(profile: Optional[str]) -> Path:
     from hermes_constants import get_default_hermes_root
     root = Path(get_default_hermes_root())
     return root if not profile else root / "profiles" / profile
@@ -163,28 +163,132 @@ def _live(server, key: str, profile: Optional[str]):
     return None
 
 
+# Change gate (design t_01a1d563324d7e8e §3 card J). Opening every profile's SessionDB each pass was 13 of 17
+# samples of this loop (~0.7 s CPU per 15 s pass on the hub). Each profile store keeps ONE read-only observer
+# connection; a pass reads its ``PRAGMA data_version`` (moves on every commit by any other connection, this
+# process's writers included) and file identity. A store is skipped only when that key is unchanged AND its last
+# pass found no pending owner: a pending row is due again every pass (a refused resume or a busy owner retries on
+# the next tick), so it never waits on a commit. path -> ((dev, ino), conn); path -> (key, had_pending).
+_observers: dict[str, tuple[tuple[int, int], sqlite3.Connection]] = {}
+_last_pass: dict[str, tuple[tuple, bool]] = {}
+_observers_lock = threading.Lock()
+_PENDING_OWNERS_SQL = "SELECT DISTINCT owner FROM producer_admissions WHERE status IN (?, ?)"
+
+
+def _drop_observer(path: str) -> None:
+    entry = _observers.pop(path, None)
+    _last_pass.pop(path, None)
+    if entry is not None:
+        with contextlib.suppress(sqlite3.Error):
+            entry[1].close()
+
+
+def reset_observers() -> None:
+    """Close every kept observer connection (tests, shutdown)."""
+    with _observers_lock:
+        for path in list(_observers):
+            _drop_observer(path)
+        _last_pass.clear()
+
+
+def _observe(path: Path) -> tuple[tuple, sqlite3.Connection]:
+    """``(key, conn)`` for ``path``'s store: key = (dev, ino, data_version) on the kept observer connection,
+    reopened when the file was replaced. Raises OSError/sqlite3.Error when the store cannot be read."""
+    from hermes_state_holders import read_only_db_uri
+    st = path.stat()
+    identity = (st.st_dev, st.st_ino)
+    entry = _observers.get(str(path))
+    if entry is not None and entry[0] != identity:
+        _drop_observer(str(path))
+        entry = None
+    if entry is None:
+        # Tracked: a long-held fd must be visible to has_live_connection()/offline_file_access() (restores, header
+        # byte probes), like every other state.db opener.
+        from hermes_cli.sqlite_safe_read import connect_tracked
+        conn = connect_tracked(read_only_db_uri(path), tracking_path=path, uri=True, check_same_thread=False,
+                               isolation_level=None, timeout=0.5)
+        entry = _observers[str(path)] = (identity, conn)
+    version = entry[1].execute("PRAGMA data_version").fetchone()[0]
+    return (*identity, version), entry[1]
+
+
+def _pending_owners_on(conn: sqlite3.Connection) -> list[str]:
+    """``pa.pending_owners`` on the observer connection (autocommit: reads the latest committed state)."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='producer_admissions'").fetchone() is None:
+        return []
+    return [r[0] for r in conn.execute(_PENDING_OWNERS_SQL, pa.PENDING).fetchall()]
+
+
+def _gate(path: Path) -> Optional[tuple]:
+    """None to skip ``path`` this pass; else ``(key, owners)`` where ``owners`` is None when the observer could not
+    answer (the caller then takes today's full path). Called under ``_observers_lock``."""
+    try:
+        key, conn = _observe(path)
+    except (OSError, sqlite3.Error):
+        _drop_observer(str(path))
+        return (None, None)
+    last = _last_pass.get(str(path))
+    if last is not None and last[0] == key and not last[1]:
+        return None
+    try:
+        return key, _pending_owners_on(conn)
+    except sqlite3.Error:
+        _drop_observer(str(path))
+        return (None, None)
+
+
 @_la.accounted("producer_admission.sweep", rows=True)
 def sweep_once() -> list[dict]:
     """One pass over every profile store: wake each cold chat that holds an undelivered completion, then deliver.
-    Returns one record per owner it acted on. Never raises."""
+    Returns one record per owner it acted on. Never raises. A store whose commit key is unchanged since a pass
+    that found nothing pending is skipped without opening it (see ``_observers``)."""
     server = _server()
     out: list[dict] = []
-    for profile in server._readopt_wake_profiles():
-        try:
-            db = pa.open_profile_db(_profile_home(profile))
-        except (sqlite3.Error, OSError):
-            logger.warning("producer admission: store of profile %s unavailable", profile, exc_info=True)
-            continue
-        if db is None:
-            continue
-        try:
-            for owner in pa.pending_owners(db):
-                out.append(_sweep_owner(server, db, profile, owner))
-        except Exception:
-            logger.warning("producer admission sweep failed for profile %s", profile, exc_info=True)
-        finally:
-            db.close()
+    profiles = [(profile, _profile_home(profile)) for profile in server._readopt_wake_profiles()]
+    with _observers_lock:
+        live = {str(home / "state.db") for _profile, home in profiles}
+        for path in [p for p in _observers if p not in live]:
+            _drop_observer(path)
+    for profile, home in profiles:
+        path = home / "state.db"
+        with _la.pass_("producer_admission.profile") as acct, _observers_lock:
+            gate = _gate(path)
+            if gate is None:
+                acct.skip()
+                continue
+            key, owners = gate
+            acct.change(key is not None)
+            if owners is not None and not owners:
+                _last_pass[str(path)] = (key, False)
+                continue
+            acct.fallback(owners is None)
+        had_pending = _sweep_profile(server, profile, home, out)
+        if key is not None:
+            with _observers_lock:
+                _last_pass[str(path)] = (key, had_pending)
     return out
+
+
+def _sweep_profile(server, profile: Optional[str], home: Path, out: list) -> bool:
+    """Today's full pass over one store. True unless it proved nothing is pending (an error counts as pending,
+    so the next pass retries)."""
+    try:
+        db = pa.open_profile_db(home)
+    except (sqlite3.Error, OSError):
+        logger.warning("producer admission: store of profile %s unavailable", profile, exc_info=True)
+        return True
+    if db is None:
+        return False
+    try:
+        owners = pa.pending_owners(db)
+        for owner in owners:
+            out.append(_sweep_owner(server, db, profile, owner))
+        return bool(owners)
+    except Exception:
+        logger.warning("producer admission sweep failed for profile %s", profile, exc_info=True)
+        return True
+    finally:
+        db.close()
 
 
 def _sweep_owner(server, db, profile: Optional[str], owner: str) -> dict:

@@ -756,12 +756,12 @@ def _check_gateway_running(profile_dir: Path) -> bool:
     Primary signal is ``gateway.pid`` verified against the runtime lock (fails closed when
     the lock isn't held by *this* reader: dashboard as a separate s6 service, launch-service
     gateways with no live PID file); fallback validates the PID in ``gateway_state.json``
-    against the process table, matching ``/api/status``."""
-    from gateway.status import get_running_pid, resolve_gateway_liveness
+    against the process table, matching ``/api/status``. The PID-file rung is memoized (``gateway.status_pid_memo``):
+    this runs per profile on every polled profile list."""
+    from gateway.status import resolve_gateway_liveness
+    from gateway.status_pid_memo import running_pid
     # cleanup_stale=False: a status probe for ANOTHER profile must never unlink its PID file.
-    return resolve_gateway_liveness(
-        profile_dir=profile_dir, use_cache=False,
-        pid_probe=lambda path: get_running_pid(path, cleanup_stale=False)).running
+    return resolve_gateway_liveness(profile_dir=profile_dir, use_cache=False, pid_probe=running_pid).running
 
 
 def _served_by_running_multiplexer(profile_name: str) -> bool:
