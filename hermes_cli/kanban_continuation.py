@@ -310,6 +310,9 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
             continue
         resume = payload.get("resume_status") if payload.get("resume_status") in ("ready", "review") else "ready"
         with kb.write_txn(conn):
+            from hermes_cli.kanban_terminal_guard import skip_wake
+            if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=wake_at):
+                continue  # a stale copy: the card completed after it parked (t_01a1c7b27ca3b496) [daveey]
             landing = kb._landing_status_after_parents(conn, tid)
             new_status = "review" if landing == "ready" and resume == "review" else landing
             cur = conn.execute(
@@ -374,6 +377,9 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
     if info["wake_at"] > now:
         return False
     with kb.write_txn(conn):
+        from hermes_cli.kanban_terminal_guard import skip_wake
+        if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=info["wake_at"]):
+            return False
         landing = kb._landing_status_after_parents(conn, tid)
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL WHERE id = ? AND status = 'scheduled'",

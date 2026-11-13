@@ -432,6 +432,9 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
             st = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
             if st is None or st[0] != "scheduled" or get_state(conn, tid) is not None:
                 continue
+            from hermes_cli.kanban_terminal_guard import skip_wake
+            if skip_wake(conn, tid, RESTORED_EVENT, park_event_id=park_id):
+                continue  # worker-1's six done cards came back through this restore (11-11) [daveey]
             restored = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",
                                     (tid, park_id, RESTORED_EVENT)).fetchone()[0]
             if not restored:
@@ -942,6 +945,9 @@ def _wake(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> O
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_continuation import pending_wake
 
+    from hermes_cli.kanban_terminal_guard import skip_wake
+    if skip_wake(conn, task_id, kind):  # a stale scheduled copy of a done card: no wake [daveey]
+        return None
     park = pending_wake(conn, task_id) or {}
     resume = park.get("resume_status") if park.get("resume_status") in ("ready", "review") else "ready"
     landing = kb._landing_status_after_parents(conn, task_id)

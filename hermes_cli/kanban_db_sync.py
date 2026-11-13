@@ -1220,6 +1220,10 @@ class ApplyResult:
     # committed (None: no table or row). The sync client credits a live revision change made only by applies.
     revision_before: Optional[int] = None
     revision_after: Optional[int] = None
+    # [daveey] Cards this page moved out of done/archived, and cards it brought a reopen event for
+    # (``kanban_terminal_guard.enforce_after_apply``, run at the end of the page in the same transaction).
+    left_terminal: list[tuple[str, str]] = field(default_factory=list)
+    reopened: set[str] = field(default_factory=set)
 
 
 def _repair_revision(conn: sqlite3.Connection) -> Optional[int]:
@@ -1262,6 +1266,9 @@ def apply_remote_changes(
             own = _state(conn)["gateway_id"]
             for change in changes:
                 _apply_one(conn, change, own, result)
+            if result.left_terminal or result.reopened:  # a wake never reopens a done card [daveey]
+                from hermes_cli.kanban_terminal_guard import enforce_after_apply
+                enforce_after_apply(conn, result.left_terminal, result.reopened)
         # Cursor-only pages have no capture triggers to suppress. Avoid dirtying
         # the state row at all when both persisted values already match.
         conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0 "
@@ -1352,6 +1359,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         note_restored_task(conn, ch.uid, cols.get("created_on"), own)  # our own card back from the Board
     else:
         changed = {c for c, v in cols.items() if old[c] != v}
+        if "status" in changed and old["status"] in ("done", "archived") and cols["status"] not in ("done", "archived"):
+            result.left_terminal.append((ch.uid, old["status"]))
         assignments = ", ".join(f"{c} = ?" for c in cols)
         conn.execute(f"UPDATE tasks SET {assignments}{', ' if cols else ''}sync_version = ? WHERE id = ?",
                      (*cols.values(), ch.version, ch.uid))
@@ -1453,6 +1462,10 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     names = ["uid", *cols]
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))
+    if table == "task_events" and task_id:
+        from hermes_cli.kanban_terminal_guard import is_reopen
+        if is_reopen({"kind": cols.get("kind"), "payload": cols.get("payload")}):
+            result.reopened.add(str(task_id))
     if table == "task_events" and ch.fields.get("kind") in ("archive_requested", "capability_owner_archive_requested"):
         result.wake_dispatcher = True  # a stop request (kanban_remote_stop) or forwarded owner archive to apply
     if table == "task_chat_links":
