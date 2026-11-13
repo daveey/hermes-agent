@@ -17,6 +17,11 @@ DISPATCH_NETWORK_BUDGET_S = 2.0
 # Re-asking at the same revision every dispatcher tick only repeats the refusal; wait for a new revision instead.
 NOT_CLAIMABLE_BACKOFF_S = 600.0
 _refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (refused revision, retry after)
+# (board, task) -> revision at which the Board refused the worker-first self-check's repin (any code but
+# not_claimable, which _refused covers). While the card stays at that revision it goes back to the reserve rather
+# than re-asking a repin the Board already refused; a new revision asks again. Explicit kanban_move repins never
+# fall back: a reserve would hand the run's move straight back to the pool.
+_selfcheck_refused: dict[tuple[str, str], int] = {}
 # No assigned keepalive exists here. Sixty seconds bounds queue probes while still discovering
 # registry-only capacity changes without waiting for a task revision. Assigned renewals are unchanged.
 RESERVE_KEEPALIVE_S = 60.0
@@ -364,7 +369,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             if len(_refused) > 1024:  # cards that left the query never come back to clear their entry
                 for stale in [k for k, (_, until) in _refused.items() if until <= now]:
                     del _refused[stale]
-            labels, why = (None, None) if mode else _move_target(conn, row, gateway, cfg)
+            labels, why = (None, None) if mode else _selfcheck_unrefused(
+                key, row, *_move_target(conn, row, gateway, cfg))
             stage = "recover" if mode else ("reserve" if labels is None else "repin")
             held = _queued.get(key)
             identity = _local_identity(conn, row["id"]) if labels is None else None
@@ -402,6 +408,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     logger.info("Board recovery endpoint unavailable; backing off for %ss", recovery.RECOVERY_RETRY_S)
                     continue
                 fence = None
+                _remember_selfcheck_refusal(key, row["sync_version"], why, exc)
                 if rejection_code(exc) == "not_claimable":
                     # The Board already has it leased or not ready: our copy is behind. Back off at this revision.
                     _refused[key] = (row["sync_version"], now + NOT_CLAIMABLE_BACKOFF_S)
@@ -504,6 +511,26 @@ def _move_target(conn, row, gateway, cfg):
         return labels, None
     from hermes_cli.kanban_worker_first_selfcheck import pool_target
     return pool_target(conn, row, gateway, cfg) or (None, None)
+
+
+def _selfcheck_unrefused(key, row, labels, why):
+    """``(labels, why)``, except a self-check repin (``why`` set) the Board refused at this revision becomes the
+    reserve ``(None, None)``. A new revision clears the refusal so the repin is asked again."""
+    if why is None:
+        return labels, why
+    if _selfcheck_refused.get(key) == row["sync_version"]:
+        return None, None
+    _selfcheck_refused.pop(key, None)
+    return labels, why
+
+
+def _remember_selfcheck_refusal(key, revision, why, exc):
+    """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead)."""
+    if why is None or rejection_code(exc) == "not_claimable":
+        return
+    _selfcheck_refused[key] = revision  # popped by _selfcheck_unrefused first, so this is the newest entry
+    if len(_selfcheck_refused) > 1024:  # cards that left the query never come back to clear theirs
+        del _selfcheck_refused[next(iter(_selfcheck_refused))]
 
 
 def _record_repin(conn, task_id, gateway, labels, reply, *, reason=None):
