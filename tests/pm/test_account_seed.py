@@ -341,19 +341,21 @@ def test_other_opt_out_values_keep_borrowing(tmp_path, monkeypatch, value):
     assert environments.account_home_root() == tmp_path / ".hermes"
 
 
-def _run_tests_seed_function() -> str:
-    script = (Path(__file__).resolve().parents[2] / "scripts" / "run_tests.sh").read_text(encoding="utf-8")
-    store = script[script.index("_account_tool_store() {") :]
-    assert "  _account_seed_enabled || return 1\n" in store[: store.index("\n}\n")]
-    start = script.index("_account_seed_enabled() {")
-    return script[start : script.index("\n}\n", start) + 3]
+_ACTIVATION = Path(__file__).resolve().parents[2] / "scripts" / "_activation.sh"
+
+
+def test_borrowing_consults_the_opt_out():
+    library = _ACTIVATION.read_text(encoding="utf-8")
+    borrow = library[library.index("hermes_borrow_account_store() {") :]
+    assert "    hermes_account_seed_enabled || return 1\n" in borrow[: borrow.index("\n}\n")]
 
 
 @pytest.mark.parametrize(
     "value", ["", "1", "yes", "0", "off", "False", "NO", " no ", "\toff\n", "  0", "n o", "0x"]
 )
 def test_run_tests_opt_out_matches_pm(monkeypatch, value):
-    """scripts/run_tests.sh decides tool-store borrowing with the same opt-out pm uses.
+    """scripts/run_tests.sh and run-in-hermes-env (scripts/_activation.sh) decide tool-store
+    borrowing with the same opt-out pm uses.
 
     Regression: its ``case`` skipped pm's whitespace strip, so ``' no '`` stopped pm borrowing
     but not run_tests.sh's."""
@@ -361,7 +363,7 @@ def test_run_tests_opt_out_matches_pm(monkeypatch, value):
 
     monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", value)
     shell = subprocess.run(
-        ["bash", "-c", _run_tests_seed_function() + "_account_seed_enabled"],
+        ["bash", "-c", '. "$1" && hermes_account_seed_enabled', "bash", str(_ACTIVATION)],
         env={"PATH": os.environ.get("PATH", ""), "HERMES_PM_ACCOUNT_SEED": value},
         check=False,
     )

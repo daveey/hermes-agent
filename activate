@@ -177,5 +177,6 @@ __HERMES_KEY_LIST="$_hermes_keys"
 
 # The composition library is not part of the user's shell.
 unset -f hermes_sync hermes_bootstrap_python hermes_compose_env hermes_apply_env \
-         hermes_activation_current hermes_ensure_env
+         hermes_activation_current hermes_ensure_env hermes_borrow_account_store \
+         hermes_account_seed_enabled hermes_store_has_pins
 unset _HERMES_REPO _hermes_script _hermes_keys _hermes_k _hermes_top

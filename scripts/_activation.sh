@@ -7,6 +7,8 @@
 #   hermes_apply_env SCRIPT         evaluate a composed `sh` script into this shell
 #   hermes_activation_current REPO  is the inherited environment still REPO's?
 #   hermes_ensure_env REPO          sync, compose and apply unless it is current
+#   hermes_borrow_account_store REPO  provision a faked home from the account's
+#                                   tool store (run_tests.sh, run-in-hermes-env)
 #
 # pm records, beside the installed-state file named by __HERMES_ACTIVATED, one
 # stamp per dependency input carrying the exact mtime that input had when the
@@ -46,6 +48,66 @@ hermes_bootstrap_python() {
         done
     done
     return 1
+}
+
+# hermes_borrow_account_store REPO: when this process's Hermes root is not the
+# OS account's -- a faked HOME (worktree lanes, probe homes, a review card's
+# scratch home) or a HERMES_HOME outside the account root (a card's fake home
+# for a cloned checkout) -- export HERMES_RUNTIME_DIR (and, when it holds the
+# pinned minor, UV_PYTHON_INSTALL_DIR) so provisioning reuses the account's
+# tool store instead of downloading ~1.5 GB of tools into every temporary
+# home, but only while that store already records REPO's pins
+# (hermes_store_has_pins). Status 1 and nothing exported otherwise. The check
+# runs unlocked before `pm install` takes the store's install lock, so it keeps
+# runs that START on different pins apart; it does not cover the window in
+# between, where the account's own `hermes update` (or a run on other pins) can
+# re-point facts.json and this run's `pm install` then re-stages its pins over
+# them. An explicit HERMES_RUNTIME_DIR, the account's own root (or a profile of
+# it), a root that already holds a store, or an account without a usable store
+# keep the per-home layout; tool_store_pins.py resolves the root exactly as PM
+# does. scripts/run_tests.sh and scripts/run-in-hermes-env both call it.
+hermes_borrow_account_store() {
+    local repo="$1" account py_minor
+    [ -z "${HERMES_RUNTIME_DIR:-}" ] || return 1
+    hermes_account_seed_enabled || return 1
+    account="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+    [ -n "$account" ] || account="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')"
+    [ -n "$account" ] && [ -d "$account" ] || return 1
+    # Fast path for the owner's own runs, which never borrow: no Python spawn.
+    if [ -z "${HERMES_HOME:-}" ]; then
+        [ ! "$account" -ef "$HOME" ] || return 1
+    else
+        [ ! "$HERMES_HOME" -ef "$account/.hermes" ] || return 1
+    fi
+    [ -f "$account/.hermes/tools/facts.json" ] && [ -w "$account/.hermes/tools" ] || return 1
+    py_minor="$(hermes_store_has_pins "$repo" "$account/.hermes/tools")" || return 1
+    export HERMES_RUNTIME_DIR="$account/.hermes/tools"
+    # setup-hermes.sh's uv-managed bootstrap interpreter is the same kind of
+    # cache, but only reused: a missing pinned minor would download into it.
+    if [ -z "${UV_PYTHON_INSTALL_DIR:-}" ] && [ -w "$account/.local/share/uv/python" ] \
+        && compgen -G "$account/.local/share/uv/python/cpython-$py_minor[.-]*" >/dev/null; then
+        export UV_PYTHON_INSTALL_DIR="$account/.local/share/uv/python"
+    fi
+    echo "▶ borrowed Hermes root: using the account's tool store $HERMES_RUNTIME_DIR" >&2
+}
+
+# hermes_account_seed_enabled: the same opt-out as
+# pm.environments.account_seed_enabled (pm/AGENTS.md), which strips
+# surrounding whitespace and ignores case before matching.
+hermes_account_seed_enabled() {
+    local value="${HERMES_PM_ACCOUNT_SEED:-}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in 0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) return 1 ;; esac
+}
+
+# hermes_store_has_pins REPO STORE: check, read-only for STORE, that it already
+# records REPO's pins (scripts/tool_store_pins.py says why and what counts, and
+# the one write: the borrower's own decline record); prints the Python minor.
+hermes_store_has_pins() {
+    local python
+    python="$(HERMES_RUNTIME_DIR="$2" hermes_bootstrap_python "$1")" || return 1
+    PYTHONHOME= "$python" -I -B "$1/scripts/tool_store_pins.py" "$1" "$2" 2>/dev/null
 }
 
 # hermes_compose_env REPO DIALECT: print the environment of the installed state
