@@ -1,7 +1,7 @@
 """``kanban.workspace_source`` defaults (workspace_source v1). Import-free so ``config_defaults`` can embed them.
 
-- ``enabled``: portable worktree sources. Refused (warned, treated false) until the protocol ships
-  (``kanban_workspace_source.SOURCE_PROTOCOL_COMPLETE``).
+- ``enabled``: portable worktree sources (default off; opt in per machine). Honoured since core PR-2
+  completed the protocol (``kanban_workspace_source.SOURCE_PROTOCOL_COMPLETE``).
 - ``clones``: ``{"<owner>/<name>": "<abs path>"}`` dedicated clones (never the live checkout), proven at gateway start
   and on every registry heartbeat and attested to the Board.
 - ``publish_on_park``: publish the task branch when a run parks (schedule/block/continue/review), not only on complete.

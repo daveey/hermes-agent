@@ -694,19 +694,19 @@ that home may claim — anything else lands in the dispatcher's
 `skipped_nonspawnable` bucket instead of spawning, and no longer counts as
 spawnable work for the gateway's wake-up probe.
 
-### Portable worktree sources (`kanban.workspace_source`, preview)
+### Portable worktree sources (`kanban.workspace_source`)
 
 A synced board can move a branch-backed card between machines: the Board keeps a
 manifest (`repository`, `branch`, exact `commit`) and custody (`source_holder`,
 `state`), and a machine that picks the card up materializes that exact branch
-and commit in a dedicated registered clone. This release ships the client half
-**inert**: setting `enabled: true` logs a warning and is ignored until the
-publish protocol lands.
+and commit in a dedicated registered clone. Off by default; every machine that
+enables it needs a core with the full protocol and a Board that knows the source
+actions (an older Board is detected and the host falls back to legacy behaviour).
 
 ```yaml
 kanban:
   workspace_source:
-    enabled: false            # ignored (warns) until the protocol is complete
+    enabled: false            # opt in per machine
     clones:                   # GitHub "owner/name" -> absolute path of a dedicated clone
       acme/widget: /home/me/code/_src/widget
     publish_on_park: true     # push the task branch when a run parks or ends
@@ -714,6 +714,38 @@ kanban:
     preflight_timeout_s: null    # null = push_timeout_s + 30
     materialize_timeout_s: null  # null = claim ttl / 3 - 30 s
 ```
+
+**Lifecycle.** The dispatcher's claim asks the Board for custody cards, resolves
+the source, then attaches the run to custody *before* the worker starts
+(`HERMES_KANBAN_SOURCE_COMMIT/PATH/BRANCH` are set in its environment and a
+`workspace_source_materialized` event records where it ran). A legacy worktree
+card is adopted by its creator on its first enabled run. If the worker never
+starts, the run is released with an `unchanged` receipt so custody goes back
+exactly as it was.
+
+**Publishing.** Every voluntary ending (complete, block, schedule, review
+handoff, request changes, continue/move) first publishes the task branch: it
+must be the card's own branch (`wt/<task>` or `<slug>/<task>`, never a protected
+or shared one), clean, free of private ignored files, LFS and submodules, and
+every new commit passes a secret scan (diffs, messages and denylisted paths such
+as `.env*` or `*.pem`). The push is a hook-free fast-forward with
+`--force-with-lease`, after a lease renewal; the Board then records the new
+manifest. An unchanged branch publishes nothing. A refusal or timeout never stops
+the ending: custody simply stays `retained` on this machine and the event
+`workspace_source_publish_refused` names why. Crashes and timeouts publish
+nothing, so the source stays with the machine that has it.
+
+**Moving.** `dir` cards never move. A worktree card moves only with portable
+custody (`published`/`unchanged` at the manifest's revision); moving a running
+card publishes first and checks that result. `hermes kanban move --reclaim`
+refuses source cards (a reclaim cannot publish), and `hermes kanban claim`
+refuses cards under custody (`source_cli_claim_refused`). A portable worktree
+card does not need `host_repo` on its target.
+
+**Freeing a stuck source.** When the holder is gone, an operator on the hub runs
+`hermes kanban source-release <task> --to published` (Board admin key). It first
+checks that the branch on GitHub equals the manifest commit, and the Board
+refuses while a lease is live.
 
 A clone is proven before it is used or attested to the Board: its root, a
 GitHub `origin` with no `pushurl` or `url.*` rewrite, a reachable remote, and a
