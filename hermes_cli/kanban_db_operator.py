@@ -5,7 +5,6 @@ which sqlite-live-guard refuses. [daveey]"""
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import time
 from typing import Any, Optional
@@ -41,9 +40,9 @@ def edit_operator_fields(
     if goal_mode is not None:
         wanted["goal_mode"] = 1 if goal_mode else 0
     if review_required is not None:
-        worker = os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK")
-        if not review_required and worker:
-            raise KanbanEditRefused("review_required can only be disabled by an orchestrator, not a worker")
+        from hermes_cli.kanban_review_required import OPERATOR, worker_identity
+        if not review_required and worker_identity():  # any worker run, orchestrators included
+            raise KanbanEditRefused(f"review_required can only be disabled by {OPERATOR}")
         wanted["review_required"] = int(bool(review_required))
     if session_id is not None:
         sid = str(session_id).strip()

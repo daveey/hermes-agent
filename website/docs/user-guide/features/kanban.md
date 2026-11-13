@@ -1264,6 +1264,7 @@ hermes kanban create "<title>" [--body ...] [--assignee <profile>]
                                 [--max-runtime 30m|2h|1d|<seconds>]
                                 [--max-retries N]
                                 [--goal] [--goal-max-turns N]
+                                [--review-required]
                                 [--reasoning-effort low|medium|high|none]
                                 [--skill <name>]...
                                 [--json]
@@ -1276,6 +1277,7 @@ hermes kanban assign <id> <profile>                    # or 'none' to unassign
 hermes kanban reassign <id>... <profile>               # bulk re-assign tasks to a profile
 hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body / priority in place
         [--priority N]
+        [--review-required on|off]                     # 'off' is operator-only (see below)
 hermes kanban promote <id>...                          # move todo/blocked/triage tasks to ready (recovery)
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
@@ -1319,6 +1321,15 @@ hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-colu
 hermes kanban gc [--event-retention-days N] [--worktree-retention-days N] # workspaces + old events + old logs
         [--log-retention-days N]                       #   (negative N is rejected; 0 disables that sweep)
 ```
+
+A card created with `--review-required` (tool: `review_required=true`) cannot be
+completed by its implementer, even with `--force`: the implementer calls
+`kanban_request_review`, and a reviewer that claims the review run approves it.
+Only an operator (outside a kanban worker run: neither `HERMES_KANBAN_TASK` nor
+`HERMES_KANBAN_WORKER_TASK` is set) may approve a card pending in `review`
+without claiming it, or turn the requirement off with
+`hermes kanban edit <id> --review-required off`. Every kanban worker run,
+dispatched orchestrator workers included, is refused both.
 
 Worktree GC also covers done, failed, and cancelled tasks. After
 `kanban.worktree_retention_days` (default 7, overridden by the GC flag), clean

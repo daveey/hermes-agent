@@ -97,7 +97,7 @@ def test_cli_edit_worker_cannot_disable(home, monkeypatch, capsys, identity):
     tid = make(True)
     monkeypatch.setenv(identity, tid)
     assert kc._cmd_edit(parse("edit", tid, "--review-required", "off")) != 0
-    assert "orchestrator" in capsys.readouterr().err
+    assert "an operator (outside a kanban worker run)" in capsys.readouterr().err
     assert flag(tid) is True
 
 

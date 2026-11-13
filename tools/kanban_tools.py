@@ -873,7 +873,7 @@ def _handle_list(args: dict, **kw) -> str:
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
     carries a ``rejection`` class from ``COMPLETE_REJECTION_CLASSES``."""
-    from hermes_cli.kanban_review_required import ReviewRequiredError
+    from hermes_cli.kanban_review_required import ReviewRequiredError, require_review
     try:
         tid = _worker_guard("kanban_complete", args)
     except _Reject as e:
@@ -904,13 +904,17 @@ def _handle_complete(args: dict, **kw) -> str:
         from hermes_cli import kanban_review_contract as _krc  # [daveey] a review ship would refuse: refuse it now
         if refused := _krc.completion_refusal(getattr(task, "body", None), metadata, _worker_run_id(tid)):
             raise _Reject(*refused)
+        run_id = _worker_run_id(tid)
+        if run_id is not None and _kc.parked_by_own_run(conn, tid, run_id):
+            # This worker parked its card with kanban_block, then edited its own edges (kanban_unlink):
+            # its run is over but nothing has claimed the card since, so it may still close its own card.
+            run_id = None
+        try:  # deterministic review_required refusal before the goal judge spends a call
+            require_review(conn, tid, run_id)
+        except ReviewRequiredError as review_err:
+            return tool_error(str(review_err), rejection="review_required")
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), conn=conn)
         try:
-            run_id = _worker_run_id(tid)
-            if run_id is not None and _kc.parked_by_own_run(conn, tid, run_id):
-                # This worker parked its card with kanban_block, then edited its own edges (kanban_unlink):
-                # its run is over but nothing has claimed the card since, so it may still close its own card.
-                run_id = None
             event_mark = _kc.event_mark(conn, tid)  # a refusal's own pr_acceptance event lands above it
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
