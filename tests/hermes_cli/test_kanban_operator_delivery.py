@@ -317,6 +317,20 @@ def test_negation_outside_the_claim_verb_still_needs_a_receipt(fleet, summary):
     ("Comment to t_0123456789abcdef --- not posted.", False),
     ("Comment to t_0123456789abcdef -not posted.", False),
     ("The note to t_0123456789abcdef was never re-posted.", False),
+    # A hyphen-joined prefix is part of the verb, so be/being still governs it; alone it stays a claim.
+    ("The note is to be re-posted to t_0123456789abcdef.", False),
+    ("The note is to be cross-posted to t_0123456789abcdef.", False),
+    ("The note to t_0123456789abcdef is being soon re-sent.", False),
+    ("Cross-posted the note to t_0123456789abcdef.", True),
+    # Common -ly nouns, verbs and adjectives are no adverbs: be/being does not govern across them (fail closed).
+    ("Being early posted to t_0123456789abcdef.", True),
+    ("Being family posted to t_0123456789abcdef.", True),
+    ("To be supply posted to t_0123456789abcdef.", True),
+    ("Queued to be manually re-posted to t_0123456789abcdef.", False),
+    # A run of 2+ hyphens is a dash even glued on both sides; a single intra-word hyphen is not.
+    ("Not done--posted to t_0123456789abcdef.", True),
+    ("Not done---posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef--not posted.", False),
 ])
 def test_claimed_targets_scopes_negation_to_the_verb(text, claimed):
     from hermes_cli.kanban_operator_delivery import claimed_targets

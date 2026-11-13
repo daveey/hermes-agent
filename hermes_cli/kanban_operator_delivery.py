@@ -20,16 +20,22 @@ _GOVERN_WINDOW = 3  # words before the verb: "has not yet been posted", "will la
 # A comma, ':', a dash, '(' or a conjunction ends the governing span: "filed no card, so I posted ..." and "No
 # longer pending - posted to ..." are claims. A dash is an em/en dash, U+2212, or an ASCII hyphen run of any length
 # that touches a space or the clause edge on either side ("pending - posted", "pending --- posted", "pending -posted",
-# "pending- posted"); an intra-word hyphen ("re-posted") is no dash.
+# "pending- posted"), or a run of 2+ hyphens even glued on both sides ("pending--posted"); a single intra-word
+# hyphen ("re-posted") is no dash.
 _BOUNDARY = frozenset({",", ":", "—", "–", "−", "(", "so", "and", "but", "then", "after", "before",
                        "because", "which", "while", "that"})
-_WORD = re.compile(r"[\w’']+|[,:—–−(]|(?<!\S)-+|-+(?!\S)")
+# Group 1 is a word glued by one hyphen to the next ("re" in "re-posted", "cross" in "cross-posted").
+_WORD = re.compile(r"([\w’']+)-(?=[\w’'])|[\w’']+|[,:—–−(]|(?<!\S)-+|-+(?!\S)|-{2,}")
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{8}(?:[0-9a-f]{8})?\b")
 _BE = ("be", "being")
 # Only adverbs may stand between be/being and the verb for it to govern ("to be soon posted", "is being quickly
 # sent"); "To be safe I posted ..." and "Being thorough I posted ..." stay claims (fail closed).
 _ADVERBS = frozenset({"soon", "later", "eventually", "still", "also", "again", "just", "now", "only", "first",
                       "properly", "manually", "automatically"})
+# Common -ly words that are no adverbs: be/being does not govern across them ("Being early posted to t_X" is a
+# claim, fail closed). Known fail-open: any other -ly non-adverb between be/being and the verb still governs.
+_NOT_ADVERBS = frozenset({"reply", "supply", "apply", "comply", "imply", "multiply", "rely", "ally", "rally",
+                          "family", "assembly", "anomaly", "early", "friendly", "costly", "timely", "july", "italy"})
 
 
 def _is_boundary(w):
@@ -37,18 +43,20 @@ def _is_boundary(w):
 
 
 def _adverb(w):
-    return w in _ADVERBS or (len(w) > 3 and w.endswith("ly"))
+    return w in _ADVERBS or (len(w) > 3 and w.endswith("ly") and w not in _NOT_ADVERBS)
 
 
-def _governed(words, i):
+def _governed(words, i, glued=frozenset()):
     lo = max(0, i - _GOVERN_WINDOW)
     for j in range(i - 1, -1, -1):
         # "to be posted", "will be sent", "is being posted", "to be later posted": an infinitive, future or
         # progressive form is never a past claim, whatever boundary cuts it from its queue word ("Queued: to be
         # posted to ..."). Known fail-open: the rare past-tense infinitive "it turned out to be posted twice to
-        # t_X" is not a claim.
+        # t_X" is not a claim. A hyphen-joined prefix is part of the word after it ("to be re-posted").
         if words[j] in _BE:
             return True
+        if j in glued:
+            continue
         if not _adverb(words[j]):
             break
     for w in reversed(words[lo:i]):
@@ -68,8 +76,10 @@ def claimed_targets(text):
     """
     targets = set()
     for clause in re.split(r"[.!?;\n]", text if isinstance(text, str) else ""):
-        words = [w.lower() for w in _WORD.findall(clause)]
-        if any(w in _CLAIM and not _governed(words, i) for i, w in enumerate(words)):
+        matches = list(_WORD.finditer(clause))
+        words = [(m.group(1) or m.group(0)).lower() for m in matches]
+        glued = frozenset(i for i, m in enumerate(matches) if m.group(1))
+        if any(w in _CLAIM and not _governed(words, i, glued) for i, w in enumerate(words)):
             targets.update(_TASK_ID.findall(clause))
     return targets
 
