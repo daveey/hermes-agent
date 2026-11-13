@@ -336,3 +336,86 @@ def test_synthesized_turn_over_a_paused_marker_arms_the_mid_tool_cancel_and_clar
     session["running"] = True
     assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
     assert armed == ["session-key"] and stopped == ["session-key"] and clarify == [True]
+
+
+# --- PR #1870 review (t_01a1d331f7c35630): the carried turn's pause is announced like any pause, a user Stop of
+# that turn after its hook paid the pause keeps the paused request (it was not the Stop's turn), and the
+# continuation names the notification turn that the pause interrupted.
+
+def _hook_pauses(agent, seen):
+    seen["reason"] = reason = agent.step_boundary_pause()
+    return {"final_response": "", "messages": [], "interrupted": bool(reason), "completed": not reason,
+            "paused_for_update": reason}
+
+
+def test_a_carried_turn_paused_for_the_update_is_announced(env, monkeypatch):
+    announced = []
+    monkeypatch.setattr(up, "announce_pause", lambda sid, payload: announced.append(sid))
+    session = _paused_session(env.home)
+    announced.clear()  # the paused turn's own announcement
+    env.watchers.clear()
+
+    session["agent"].run_conversation = lambda message, **kw: _run_with_window(env, session, _hook_pauses)
+    session["running"] = True
+    assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+
+    assert announced == ["ui-sid"], "Desktop got a plain message.complete for a turn paused for the update"
+    assert env.watchers == [("ui-sid", "session-key")], "exactly one watcher continues the paused turn"
+
+
+def _run_with_window(env, session, during_turn, seen=None):
+    af.set_hold(env.home)
+    af.request_pause(env.home, expires_at=time.time() + 120)
+    try:
+        return during_turn(session["agent"], {} if seen is None else seen)
+    finally:
+        af.clear_pause_request(env.home)
+        af.clear_hold(env.home)
+
+
+def test_a_user_stop_of_a_carried_turn_after_its_hook_paused_keeps_the_paused_request(env):
+    seen = {}
+    session = _paused_session(env.home)
+    server._sessions["ui-sid"] = session
+
+    def _turn(agent, seen):
+        seen["reason"] = agent.step_boundary_pause()
+        assert session.get("_update_pause_marker_key") == "session-key"  # the hook paid the carried pause
+        seen["stop_wins"] = up.user_stop_wins(session)
+        reply = server._methods["session.interrupt"]("rid-stop", {"session_id": "ui-sid", "origin": "stop_button"})
+        seen["stop"] = reply.get("result", {}).get("status")
+        return {"final_response": "", "messages": [], "interrupted": True, "completed": False}  # the Stop won
+
+    session["agent"].run_conversation = lambda message, **kw: _run_with_window(env, session, _turn, seen)
+    session["agent"].interrupt = lambda *a, **k: None
+    session["running"] = True
+    try:
+        assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+    finally:
+        server._sessions.pop("ui-sid", None)
+
+    assert seen["reason"] == up.PAUSE_REASON and seen["stop"] == "interrupted"
+    assert seen["stop_wins"] is False, "a Stop of the carried turn dropped the paused turn's pause"
+    marker = read_turn_marker(env.home, "session-key")
+    assert marker is not None and marker["reason"] == up.PAUSE_REASON and marker["prompt"] == "the long task"
+    assert env.watchers[-1] == ("ui-sid", "session-key")
+    assert not session.get("running")
+    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "resume"
+
+
+def test_the_continuation_of_a_pause_a_carried_turn_paid_names_the_interrupted_notification_turn(env, monkeypatch):
+    _session, seen = _carried_turn_with_window(env, _hook_pauses)
+    assert seen["reason"] == up.PAUSE_REASON
+    marker = read_turn_marker(env.home, "session-key")
+    assert marker is not None and marker.get("carried_turn_paused") is True
+    note = up.pause_note(marker["prompt"], marker.get("killed_jobs"), carried=True)
+    assert note.endswith(up.CARRIED_TURN_NOTE) and "the long task" in note
+    assert up.CARRIED_TURN_NOTE not in up.pause_note("the long task")
+    from tests.tui_gateway.test_update_pause_user_stop import _fresh_backend_continues
+    assert _fresh_backend_continues(env, monkeypatch) == [note]  # what the next backend really sends
+
+
+def test_a_pause_the_paused_turn_paid_itself_does_not_name_a_notification_turn(env):
+    _paused_session(env.home)
+    marker = read_turn_marker(env.home, "session-key")
+    assert marker is not None and not marker.get("carried_turn_paused")

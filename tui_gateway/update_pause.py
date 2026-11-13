@@ -279,11 +279,13 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
         killed = list(jobs.values())
         # Write-ahead journal: even a crash during kill or a later disk failure leaves an
         # explicit uncertain-outcome record. Never claim an unverified kill succeeded.
-        if not mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed,
-                                increment=marker.get("reason") != PAUSE_REASON):
+        carried = marker.get("reason") == PAUSE_REASON  # a synthesized turn over the paused marker pays it
+        if not mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=not carried,
+                                carried=carried):
             return None
         def save() -> bool:
-            return mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=False)
+            return mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=False,
+                                    carried=carried)
         try:
             if not stop_owned_jobs_for_update_pause(killed, save):
                 return None
@@ -335,6 +337,26 @@ def user_stop_wins(session: dict) -> bool:
         _drop_pause(session)
     logger.info("core-update pause: session %s was stopped by the user; its pause is dropped", key)
     return True
+
+
+def effective_pause_key(session: dict, marker_key: str) -> str:
+    """[daveey] The key a turn pauses under: its own marker key, else the paused turn's marker key a synthesized
+    turn runs over (``prompt_turn._carry_paused_marker``), else "".
+
+    Such a turn writes no marker of its own, but it still holds an admission reservation, and hermes-sync's
+    drainer skips ``core_update_pause`` markers, so it never waits on it. Without a step-boundary hook it ran
+    straight through the next drain window, and an instant apply (which refuses a reservation no gateway
+    publishes) deferred until it ended: hermes-hub 2026-11-13, one notification turn ran 12 min and the core
+    update stayed deferred for over an hour (t_01a1d3083b2dae09). Keyed on this, it gets the hook, the mid-tool
+    cancel, the clarify withdrawal and the pause announcement like any turn. The pause it lands on is the one it
+    carries: ``mark_turn_paused`` does not count it again and stamps ``carried_turn_paused``, so the continuation
+    (the paused request, unchanged) also names the interrupted notification turn (``CARRIED_TURN_NOTE``), and
+    ``prompt_turn._rearm_carried_pause_watcher`` continues it after the window. A user Stop of that turn keeps the
+    pause (``user_stop_wins``: not that turn's own), so the paused request still continues."""
+    if marker_key:
+        return marker_key
+    with session["history_lock"]:
+        return str(session.get("_paused_marker_carried") or "")
 
 
 def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
@@ -454,7 +476,13 @@ def install_clarify_pause_provider() -> None:
         _clarify_provider_installed = True
 
 
-def pause_note(prompt: str, killed_jobs: list | None = None) -> str:
+# [daveey] The continuation resumes the paused request only; a notification turn that ran over the pause and was
+# itself paused for a later window survives as transcript context, so the note points the model at it.
+CARRIED_TURN_NOTE = ("[A notification turn that ran after this pause was itself paused for the update before it "
+                     "finished; its partial work is above. Finish what it still needs too.]")
+
+
+def pause_note(prompt: str, killed_jobs: list | None = None, *, carried: bool = False) -> str:
     from tui_gateway.session_history import _AUTO_CONTINUE_NOTE_PREFIX
     note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "
             "tool result above is complete; continue with the next step and don't redo finished steps. "
@@ -462,7 +490,8 @@ def pause_note(prompt: str, killed_jobs: list | None = None) -> str:
             "may itself be one of those changes. "
             f"The paused request was:]\n\n{prompt}")
     report = killed_jobs_report(killed_jobs, "Background jobs stopped for this Hermes update:")
-    return f"{note}\n\n{report}" if report else note
+    note = f"{note}\n\n{report}" if report else note
+    return f"{note}\n\n{CARRIED_TURN_NOTE}" if carried else note
 
 
 def killed_jobs_report(killed_jobs: list | None, heading: str) -> str:

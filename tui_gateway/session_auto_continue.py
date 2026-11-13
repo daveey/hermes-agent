@@ -266,7 +266,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         attempt, text = marker["attempts"], marker["prompt"]
     elif paused:
         from tui_gateway.update_pause import pause_note
-        attempt, text = marker["attempts"], pause_note(marker["prompt"], marker.get("killed_jobs"))
+        attempt, text = marker["attempts"], pause_note(marker["prompt"], marker.get("killed_jobs"),
+                                                 carried=bool(marker.get("carried_turn_paused")))
     elif receipt:
         attempt, text = marker["attempts"], jobs_stopped_note(marker.get("killed_jobs"))
     else:

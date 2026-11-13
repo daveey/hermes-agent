@@ -233,20 +233,6 @@ def _carry_paused_marker(session: dict, home, marker_key: str) -> bool:
     return True
 
 
-def _carried_pause_key(session: dict) -> str:
-    """[daveey] The paused turn's marker key a synthesized turn runs over (``_carry_paused_marker``), or "".
-
-    Such a turn writes no marker of its own, but it still holds an admission reservation, and hermes-sync's
-    drainer skips ``core_update_pause`` markers, so it never waits on it. Without a step-boundary hook it ran
-    straight through the next drain window, and an instant apply (which refuses a reservation no gateway
-    publishes) deferred until it ended: hermes-hub 2026-11-13, one notification turn ran 12 min and the core
-    update stayed deferred for over an hour (t_01a1d3083b2dae09). With the hook it ends at its next step
-    boundary like any turn; the pause it lands on is the one it carries (``mark_turn_paused`` does not count it
-    again), and ``_rearm_carried_pause_watcher`` continues the paused turn after the window."""
-    with session["history_lock"]:
-        return str(session.get("_paused_marker_carried") or "")
-
-
 def _rearm_carried_pause_watcher(sid: str, session: dict, st) -> None:
     """[daveey] A synthesized turn that ran over a core-update-paused marker re-arms the in-place watcher however
     it ended (complete, raised, refused at prepare): otherwise, on a backend that already restarted, nothing
@@ -1026,8 +1012,9 @@ def _invoke_agent(
         "session.title", sid, {"session_id": _k, "title": t})
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
     # [daveey] Core-update pause: consulted by the agent loop at each step boundary of this turn only.
-    from tui_gateway.update_pause import boundary_pause_hook, install_clarify_pause_provider, start_mid_tool_cancel
-    pause_key = st.marker_key or _carried_pause_key(session)
+    from tui_gateway.update_pause import boundary_pause_hook, effective_pause_key, install_clarify_pause_provider, \
+        start_mid_tool_cancel
+    pause_key = effective_pause_key(session, st.marker_key)
     agent.step_boundary_pause = boundary_pause_hook(session, pause_key) if pause_key else None
     # [daveey] t_01a1d31bf400d56c: a continuation may yield before its first model request (it redoes nothing).
     agent.update_pause_first_request = bool(st.marker_key) and display_kind == "auto_continue"
@@ -1464,12 +1451,14 @@ def _run_admitted_prompt(
             # Payload construction may yield to Stop. Decide and publish under the same lock
             # that drops the pause, rather than carrying a pre-construction pause snapshot.
             with update_pause.publication_lock(session):
-                paused_for_update = update_pause.pause_stands(session, st.marker_key, st.result)
+                # [daveey] A carried turn's pause is announced too; its watcher is re-armed in the finally.
+                pause_key = update_pause.effective_pause_key(session, st.marker_key)
+                paused_for_update = update_pause.pause_stands(session, pause_key, st.result)
                 if paused_for_update:
                     update_pause.announce_pause(sid, payload)
                 _record_stop_notice(session, status)
                 _emit("message.complete", sid, payload)
-                if paused_for_update:
+                if paused_for_update and st.marker_key:
                     update_pause.start_in_place_watcher(sid, session, st.marker_key)
             from tui_gateway.turn_outcome import turn_sid, concluding_turn_identity
             concluding = concluding_turn_identity(st.agent, st.own_marker)

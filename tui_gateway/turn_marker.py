@@ -283,17 +283,18 @@ def mark_turn_tool_started(home: Path | str, session_key: str) -> bool:
 
 
 def mark_turn_paused(home: Path | str, session_key: str, reason: str,
-                     *, killed_jobs: list | None = None, increment: bool = True) -> bool:
+                     *, killed_jobs: list | None = None, increment: bool = True, carried: bool = False) -> bool:
     """[daveey] Stamp a live turn's marker as paused at a step boundary for a core update: ``reason``,
     ``paused_at``, ``pauses`` + 1, and this process as its writer. ``auto_continue`` stays as recorded.
     ``killed_jobs`` are the jobs this pause actually stopped; they ride the same write so a resume
-    after restart can list them. True when a marker existed to stamp."""
+    after restart can list them. ``carried``: a synthesized turn running over this paused marker paid the
+    pause (``carried_turn_paused``, read by the continuation note). True when a marker existed to stamp."""
     def mutate(entries):
         entry = entries.get(session_key)
         if not isinstance(entry, dict):
             return None
         entry.update(reason=str(reason), paused_at=time.time(), pauses=int(entry.get("pauses") or 0) + int(increment),
-                     **_writer_identity())
+                     **_writer_identity(), **({"carried_turn_paused": True} if carried else {}))
         if killed_jobs:
             entry["killed_jobs"] = list(killed_jobs)
         return entries
@@ -381,6 +382,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 **({"parked_at": float(entry["parked_at"])} if entry.get("parked_at") else {}),
                 **({"paused_at": float(entry["paused_at"])} if entry.get("paused_at") else {}),
                 **({"until_tool": True} if entry.get("until_tool") else {}),
+                **({"carried_turn_paused": True} if entry.get("carried_turn_paused") else {}),
                 **({"notification_category": "diagnostic"}
                    if entry.get("notification_category") == "diagnostic" else {}),
                 **({"killed_jobs": killed} if killed else {})}
