@@ -122,6 +122,7 @@ def test_a_bumped_reissue_counter_is_not_an_enumeration(mine, theirs):
     ("Two-worker fixture A (idle hold)", "Two-worker fixture B (hostname only)"),
     ("Review PR #2110 at head 5d2e512cbb", "Review PR #2110 at head 9baf8d8abc"),
     ("w1-01 sleep probe", "sleep probe w1-02"),  # PR #2429 review: a moved index is still an index
+    ("Pass 1 of 3: parser", "Pass 2 of 3: parser"),  # PR #2481 review: a staged pass is a leg
     ("Fixture A: idle hold", "idle hold, fixture B"),
 ])
 def test_an_index_in_the_same_place_is_an_enumeration(mine, theirs):

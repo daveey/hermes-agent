@@ -104,7 +104,8 @@ def _title_tokens(title: str) -> list[str]:
 
 
 # A counter after one of these words numbers a re-issue of the same work, not a leg (PR #2429 review).
-_REISSUE_WORD = re.compile(r"(?:attempts?|rounds?|retry|retries|try|tries|take|v|rev|revision|pass|iteration)",
+# "pass"/"take"/"try" are left out: "Pass 1 of 3: parser" / "Pass 2 of 3: parser" are staged legs (PR #2481 review).
+_REISSUE_WORD = re.compile(r"(?:attempts?|rounds?|retry|retries|v|rev|revision|iterations?)",
                            re.IGNORECASE)
 _REISSUE_TOKEN = re.compile(r"(?:v|rev)\d+(?:\.\d+)*", re.IGNORECASE)  # "v2", "rev3"
 _ORDINAL = re.compile(r"\d+(?:st|nd|rd|th)", re.IGNORECASE)  # "2nd attempt"

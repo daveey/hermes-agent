@@ -117,6 +117,31 @@ def test_a_negator_that_does_not_govern_the_keyword_does_not_deny_it(summary):
     assert dd.sibling_named(summary) == ["t_0123456789abcdef"]
 
 
+@pytest.mark.parametrize("summary", [
+    "Not a real duplicate of t_0123456789abcdef.",
+    "No other duplicates, parent t_0123456789abcdef owns it.",
+    "No known duplicates; parent t_0123456789abcdef.",
+    "No open duplicates; see t_0123456789abcdef.",
+    "No obvious duplicate of t_0123456789abcdef.",
+    "Not an exact duplicate; parent t_0123456789abcdef.",
+    "Not marked as duplicate of t_0123456789abcdef.",
+    "Checked for duplicates: none found, parent t_0123456789abcdef.",
+])
+def test_a_negator_two_words_before_the_keyword_still_denies_it(summary):
+    """PR #2481 review: a hedge or adjective between the negator and the keyword keeps the denial."""
+    assert dd.sibling_named(summary) == []
+
+
+@pytest.mark.parametrize("summary", [
+    "Closed as duplicate (not superseded) of t_0123456789abcdef.",
+    "Duplicate: none other than t_0123456789abcdef.",
+    "Closed (duplicate of t_0123456789abcdef).",
+])
+def test_an_aside_or_a_none_that_does_not_end_the_clause_keeps_the_card(summary):
+    """PR #2481 review: a keyword-only aside is not a later keyword, and "none other than" is not a count."""
+    assert dd.sibling_named(summary) == ["t_0123456789abcdef"]
+
+
 def test_a_closed_detector_card_lets_the_next_occurrence_open_a_new_one(conn):
     creator = kb.create_task(conn, title="creator", assignee="default")
     first, second = _pair(conn, creator)
