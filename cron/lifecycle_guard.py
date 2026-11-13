@@ -497,7 +497,7 @@ class _LifecycleScanBudget:
     cloud placeholder) so the caller can tell the model the real reason (#113944)."""
 
     __slots__ = (
-        "aliases_possible",
+        "alias_names",
         "bytes_remaining",
         "lines_remaining",
         "mask_heredocs",
@@ -522,18 +522,24 @@ class _LifecycleScanBudget:
         # Message-only: newlines a caller added when joining the root text (cron's empty-prompt
         # join). Charged like any line, never reported as the text's own; spent on the first charge.
         self.separator_lines = separator_lines
-        # Sticky for the whole walk: any walked text (the command, an eval payload, a sourced
-        # script) that may define an alias makes `NAME ( … )` possibly a keyword-led subshell. So do
-        # aliases the command's shell already holds (*session_aliases*, see `scan_gateway_lifecycle`).
-        self.aliases_possible = session_aliases is None or bool(session_aliases)
+        # Alias names that may expand in walked text: the ones the command's shell already holds
+        # (*session_aliases*, see `scan_gateway_lifecycle`), or ``None`` when any name may be an
+        # alias: unknown session names, or (sticky for the whole walk) any walked text (the
+        # command, an eval payload, a sourced script) that may define one. An alias can make
+        # `NAME ( … )` a keyword-led subshell; only a `(` whose opener holds one of these names
+        # (or any `(`, when ``None``) may be one (t_01a1d565699c975b: a lone `alias ll='ls -l'`
+        # once made `expanduser("~/.hermes/kanban.db")` an executed script).
+        self.alias_names: Optional[frozenset[str]] = (
+            session_aliases if isinstance(session_aliases, frozenset)
+            and all(isinstance(name, str) for name in session_aliases) else None)
         # False when a session alias may shadow a heredoc consumer, wrapper or shell name
         # (`alias python3=bash`): then no heredoc body is provably inert, so none is masked.
         self.mask_heredocs = not _session_aliases_shadow_consumers(session_aliases)
 
     def note_aliases(self, text: str) -> None:
         """Record (sticky) that walked *text* may define or enable an alias."""
-        if not self.aliases_possible:
-            self.aliases_possible = _may_define_alias(text)
+        if self.alias_names is not None and _may_define_alias(text):
+            self.alias_names = None
 
     def charge_text(self, text: str) -> bool:
         """Charge *text* before tokenization; False when it does not fit (``overrun`` says why)."""
@@ -838,14 +844,20 @@ def _session_aliases_shadow_consumers(session_aliases: Optional[frozenset[str]])
                for name in session_aliases)
 
 
-def _iter_segment_contexts(command: str) -> Iterator[tuple[list[str], bool, list[str]]]:
+def _iter_segment_contexts(
+    command: str, alias_names: frozenset[str] = frozenset(),
+) -> Iterator[tuple[list[str], bool, list[str]]]:
     """``(segment, call_argument, piped_files)``: whether the segment is the argument list of a
     call (the segment right after a ``(`` that follows an ordinary word), and the files a ``cat``
     pipes into its stdin (``cat f.sh | bash``), through groups, compound commands and process
-    substitution too (``{ cat f; } | bash``, ``cat f | if …; fi``, ``bash <(cat f)``)."""
+    substitution too (``{ cat f; } | bash``, ``cat f | if …; fi``, ``bash <(cat f)``). A ``(``
+    whose opener holds any word in *alias_names* is never a call: the alias may expand to a
+    keyword prefix (``alias t='time '``)."""
+    def opens_call(segment: list[str]) -> bool:
+        return _opens_call_arguments(segment) and alias_names.isdisjoint(segment)
     for tokens in _iter_command_token_lists(command):
         yield from iter_line_segment_contexts(
-            tokens, cat_operands=_cat_operands, opens_call_arguments=_opens_call_arguments,
+            tokens, cat_operands=_cat_operands, opens_call_arguments=opens_call,
             peel_reserved_words=_peel_reserved_words)
 
 
@@ -1359,14 +1371,16 @@ def _references_at(
 
 def _iter_referenced_shell_scripts(
     command: str, *, cwd: Optional[str] = None, call_arguments: bool = False,
+    alias_names: frozenset[str] = frozenset(),
 ) -> Iterator[Path]:
     """Yield scripts executed directly or through a POSIX shell. Each segment is read at the
     original token AND at the peeled wrapper target, both with and without leading reserved words
     (`time`, `!`, `then`, `{`, …) — additive on purpose: peeling must never REMOVE
     a reference (a local ``./timeout`` is a script, not the coreutils wrapper). With
     *call_arguments* the same discovery runs over call-argument segments instead
-    (``expanduser("~/x")``): paths there are interpreter string literals, i.e. mentions."""
-    for segment, is_call_argument, piped in _iter_segment_contexts(command):
+    (``expanduser("~/x")``): paths there are interpreter string literals, i.e. mentions.
+    A ``(`` led by one of *alias_names* opens no call (see ``_iter_segment_contexts``)."""
+    for segment, is_call_argument, piped in _iter_segment_contexts(command, alias_names):
         if is_call_argument != call_arguments:
             continue
         for view in _command_segment_views(segment):
@@ -1703,31 +1717,35 @@ def _walk_candidates(
     trip them. Executed candidates come first so a mention never starves a real script's budget. A
     path in interpreter call syntax (`expanduser("~/x")`, `connect('/d/x.db')`) is a string
     literal the shell never runs: a mention too, read and scanned but never a fail-closed verdict,
-    unless an alias may turn its `NAME (` into a subshell (`alias T=' '; T ( bash big.sh )`). That
-    is decided lazily, when the entry is reached: the executed candidates before it (a sourced
-    script may define the alias) have been walked by then.
+    unless an alias may turn its `NAME (` into a subshell (`alias T=' '; T ( bash big.sh )`). A
+    `(` led by a known session alias name is never a call (the executed view). Otherwise it is
+    decided lazily, when the entry is reached: the executed candidates before it (a sourced
+    script may define an alias, making every name a possible alias) have been walked by then.
 
     A file run as ``python3 <file>`` (masked or not) comes last, as ``python_source``: regex-scanned
     only, never walked as shell, and never failed closed. A file the scan cannot read (oversized, a
     stream such as ``/dev/stdin``, a device) ran before this scan existed, so only a lifecycle
     command actually found in it blocks.
     """
+    names = budget.alias_names or frozenset()
     entries = [
-        (path, executed, False) for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd)
+        (path, executed, False)
+        for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd, alias_names=names)
     ]
     entries += [
         (path, executed, True)
-        for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd, call_arguments=True)
+        for path in _iter_referenced_shell_scripts(
+            walk_command, cwd=cwd, call_arguments=True, alias_names=names)
     ]
     if walk_command != command:
         entries += [
             (path, False, False)
             for call_arguments in (False, True)
             for path in _iter_referenced_shell_scripts(
-                command, cwd=cwd, call_arguments=call_arguments)
+                command, cwd=cwd, call_arguments=call_arguments, alias_names=names)
         ]
     for path, candidate_executed, call_argument in entries:
-        yield path, candidate_executed and (budget.aliases_possible or not call_argument), False
+        yield path, candidate_executed and (budget.alias_names is None or not call_argument), False
     # Python candidates are never executed (fail-closed) entries, so the unmasked text, a superset
     # of the masked view, finds them all.
     for path in _iter_python_interpreter_scripts(command, cwd=cwd):
@@ -1858,8 +1876,9 @@ def scan_gateway_lifecycle(
     *session_aliases* are the alias names the shell running *command* already holds before its
     first line, outside the walked text: the terminal backend sources a login snapshot holding
     ``alias -p`` and ``shopt -s expand_aliases`` (``tools/environments/base_session_env.py``).
-    ``None`` means it may hold aliases with unknown names. Any session alias makes ``NAME ( … )``
-    possibly a keyword-led subshell (``alias t='time '``), and one that may rename a heredoc
+    ``None`` means it may hold aliases with unknown names. A session alias name in the words before
+    a ``(`` makes ``NAME ( … )`` possibly a keyword-led subshell (``alias t='time '``); unknown names
+    make every such ``(`` one. A session alias that may rename a heredoc
     consumer, wrapper or shell (``alias python3=bash``) leaves every heredoc body visible.
 
     Total by construction: never raises. Direct scans are pure string ops; the referenced-script
