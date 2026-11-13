@@ -44,14 +44,11 @@ _DISPLAY_LIMIT = 2000  # session_automation._DISPLAY_TEXT_LIMIT
 _lock = threading.Lock()
 # (ledger session, ref, state) -> {"claim", "key", "ids", "tip"} for claims this process admitted or adopted.
 _admitted: dict[tuple, dict] = {}
-_next_at = 0.0
 
 
 def _reset_for_tests() -> None:
-    global _next_at
     with _lock:
         _admitted.clear()
-    _next_at = 0.0
 
 
 def _claim_id(claim: dict) -> tuple:
@@ -249,12 +246,9 @@ async def _admit(runner: Any, adapter: Any, live: Any, ids: frozenset, tip: str,
     return True
 
 
-async def tick(runner: Any, *, force: bool = False) -> list[dict]:
-    """One pass (at most every ``INTERVAL_S``); the admitted notices. Never raises."""
-    global _next_at
-    if not force and time.monotonic() < _next_at:
-        return []
-    _next_at = time.monotonic() + INTERVAL_S
+async def tick(runner: Any) -> list[dict]:
+    """One pass; the admitted notices. Never raises. The caller sets the cadence (the gateway's remote owner
+    watcher, every ``INTERVAL_S`` by default)."""
     try:
         from gateway.config import Platform
         from gateway.kanban_tui_owner import _launch_authority

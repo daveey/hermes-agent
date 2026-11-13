@@ -193,7 +193,7 @@ class GatewayKanbanWatchersMixin:
         interval = kanban_remote_owner.INTERVAL_S if interval is None else interval
         await asyncio.sleep(self._KANBAN_WATCHER_START_DELAY)  # as the notifier: let adapters wire up first
         while self._running:
-            await kanban_remote_owner.tick(self, force=True)  # never raises
+            await kanban_remote_owner.tick(self)  # never raises
             await self._sleep_between_ticks(interval)
 
     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> Any:

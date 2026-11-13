@@ -223,7 +223,7 @@ def _ledger(tid, gw="worker-2"):
 
 
 def _tick(runner):
-    return asyncio.run(kro.tick(runner, force=True))
+    return asyncio.run(kro.tick(runner))
 
 
 def test_n1_busy_owned_chat_admits_on_first_pass_and_row_lands_at_next_boundary(env, caplog):
@@ -839,9 +839,15 @@ def test_remote_owner_watcher_honours_notify_in_gateway(env, monkeypatch):
     from hermes_cli import config as hc
     _hub, runner, _authority, _fifo, _db = env
     runner._running = True
+    runner._KANBAN_WATCHER_START_DELAY = 0.0  # a gate regression fails on ``calls``, not on the 2 s timeout
     calls = []
+
+    async def tick(*a, **k):
+        calls.append(a)
+        runner._running = False  # one pass, so a gate regression fails on ``calls`` below
+        return []
     monkeypatch.setattr(hc, "load_config", lambda: {"kanban": {"notify_in_gateway": False}})
-    monkeypatch.setattr(kro, "tick", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(kro, "tick", tick)
     asyncio.run(asyncio.wait_for(runner._kanban_remote_owner_watcher(interval=1), 2))
     assert calls == []
 
