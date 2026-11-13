@@ -591,8 +591,7 @@ async def _start_gateway_shutdown_tail(
     try:
         verdict = _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
     except SystemExit as exc:
-        exit_deadline.bound_post_tail(
-            0 if exc.code is None else exc.code if isinstance(exc.code, int) else 1, _exit_after_graceful_shutdown)
+        exit_deadline.bound_post_tail(_unwind_exit_code(exc), _exit_after_graceful_shutdown)
         raise
     exit_deadline.bound_post_tail(
         _unwind_exit_code(unwinding) if unwinding is not None else 0 if verdict else 1,

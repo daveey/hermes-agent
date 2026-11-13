@@ -167,11 +167,16 @@ def bound_post_tail(exit_code: int, exit_fn: Callable[[int], None], *,
                              target_reason=_state.get("target_reason"), phases=phases())
         try:
             exit_fn(exit_code)
-        except Exception:  # health: allow BLE001 -- hand the exit back to the main thread's funnel
-            logger.exception("Post-tail exit bound: the exit funnel failed")
+        # BaseException too (e.g. a SystemExit out of the funnel): dying here still holding exit_owner
+        # would park the main thread's funnel until the hard deadline.
+        except BaseException as exc:  # health: allow BLE001 -- hand the exit back to the main thread's funnel
+            with contextlib.suppress(Exception):
+                logger.exception("Post-tail exit bound: the exit funnel failed")
             with _lock:
                 _state.pop("exit_owner", None)
             _handback.set()  # a main thread parked in enter_exit_funnel wakes and runs the funnel
+            if not isinstance(exc, Exception):
+                raise
 
     try:
         threading.Thread(target=_watch, daemon=True, name=POST_TAIL_THREAD_NAME).start()

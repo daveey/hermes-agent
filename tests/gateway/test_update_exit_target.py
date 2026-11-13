@@ -307,7 +307,11 @@ def test_post_tail_bound_writes_an_exit_diag_record_before_the_funnel(monkeypatc
     assert "post_tail_bound" in records[0]["phases"] and records[0]["over_target_s"] >= 0
 
 
-def test_exit_funnel_wakes_when_the_bound_hands_the_exit_back():
+@pytest.mark.parametrize("failure", [
+    RuntimeError("funnel failed"),
+    SystemExit(1),  # a BaseException: the bound must not die still holding exit_owner
+])
+def test_exit_funnel_wakes_when_the_bound_hands_the_exit_back(failure):
     """The bound took the exit, the main thread parked in the funnel, then the bound's funnel failed:
     the parked main thread wakes and runs the funnel instead of waiting for the hard deadline."""
     owned, release = threading.Event(), threading.Event()
@@ -315,7 +319,7 @@ def test_exit_funnel_wakes_when_the_bound_hands_the_exit_back():
     def failing_funnel(_code):
         owned.set()
         release.wait(5)
-        raise RuntimeError("funnel failed")
+        raise failure
 
     exit_deadline.set_exit_target(time.monotonic() + 0.05, "test")
     assert exit_deadline.bound_post_tail(0, failing_funnel, grace_s=0.05)
