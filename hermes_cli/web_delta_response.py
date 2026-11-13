@@ -61,6 +61,8 @@ DELTA_MEDIA_TYPE = "application/vnd.hermes.delta+zstd"
 MIN_BYTES = 16 * 1024
 MAX_BYTES = 8 * 1024 * 1024
 STORE_MAX_BYTES = 64 * 1024 * 1024
+FRAMES_MAX_BYTES = 8 * 1024 * 1024
+FRAMES_MAX_ENTRIES = 512
 ZSTD_LEVEL = 3
 CREDENTIAL_HEADERS = ("x-hermes-session-token", "authorization", "cookie")
 VARY_ON = ("X-Hermes-Delta-Accept", "X-Hermes-Delta-Base")
@@ -93,13 +95,43 @@ def encode_delta(body: bytes, base: bytes) -> bytes:
 
 
 class BodyStore:
-    """Recently served bodies by hash, least recently used first out, bounded by total bytes."""
+    """Recently served bodies by hash, least recently used first out, bounded by total bytes.
 
-    def __init__(self, max_bytes: int = STORE_MAX_BYTES):
+    It also remembers recent delta frames by (namespace, base hash, body hash): a client polling an unchanged
+    route names the same base for the same body every time, so the zstd encode runs once per change, not once
+    per poll (t_01a1d59ed9eb75fe). The body hash is the route's change key; a new body is a new key, encoded
+    on the request that first sees it. [daveey]"""
+
+    def __init__(self, max_bytes: int = STORE_MAX_BYTES, frames_max_bytes: int = FRAMES_MAX_BYTES):
         self._max_bytes = max_bytes
         self._bodies: OrderedDict[str, bytes] = OrderedDict()
         self._bytes = 0
+        self._frames_max_bytes = frames_max_bytes
+        self._frames: OrderedDict[str, Optional[bytes]] = OrderedDict()
+        self._frames_bytes = 0
         self._lock = threading.Lock()
+
+    def frame(self, key: str) -> tuple[bool, Optional[bytes]]:
+        """(remembered, frame); a remembered ``None`` is an encode that came out no smaller than its body."""
+        with self._lock:
+            if key not in self._frames:
+                return False, None
+            self._frames.move_to_end(key)
+            return True, self._frames[key]
+
+    def put_frame(self, key: str, frame: Optional[bytes]) -> None:
+        size = len(frame) if frame is not None else 0
+        with self._lock:
+            if key in self._frames or size > self._frames_max_bytes:
+                return
+            self._frames[key] = frame
+            self._frames_bytes += size
+            while self._frames_bytes > self._frames_max_bytes and self._frames:
+                _, dropped = self._frames.popitem(last=False)
+                self._frames_bytes -= len(dropped) if dropped is not None else 0
+            while len(self._frames) > FRAMES_MAX_ENTRIES:
+                _, dropped = self._frames.popitem(last=False)
+                self._frames_bytes -= len(dropped) if dropped is not None else 0
 
     def get(self, digest: str) -> Optional[bytes]:
         with self._lock:
@@ -139,14 +171,25 @@ def _eligible(message: Message) -> bool:
 
 
 def _encode(body: bytes, base_digest: str, namespace: str, store: BodyStore) -> tuple[str, Optional[bytes]]:
-    """(hash of body, delta frame or None). Runs off the event loop: hashing and zstd release the GIL."""
-    digest = body_hash(body)
-    base = store.get(f"{namespace}:{base_digest}") if base_digest else None
-    store.put(f"{namespace}:{digest}", body)
-    if base is None:
-        return digest, None
-    frame = encode_delta(body, base)
-    return digest, frame if len(frame) < len(body) else None
+    """(hash of body, delta frame or None). Runs off the event loop: hashing and zstd release the GIL.
+    P1 pass ``delta.encode``: a skip is a frame served from the memo."""
+    from hermes_cli import loop_accounting as la
+    with la.pass_("delta.encode") as p:
+        digest = body_hash(body)
+        base = store.get(f"{namespace}:{base_digest}") if base_digest else None
+        store.put(f"{namespace}:{digest}", body)
+        if base is None:
+            return digest, None
+        key = f"{namespace}:{base_digest}:{digest}"
+        remembered, frame = store.frame(key)
+        if remembered:
+            p.skip()
+        else:
+            p.change()
+            frame = encode_delta(body, base)
+            frame = frame if len(frame) < len(body) else None
+            store.put_frame(key, frame)
+        return digest, frame
 
 
 def _merge_vary(headers: MutableHeaders) -> None:
