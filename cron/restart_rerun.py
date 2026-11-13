@@ -178,7 +178,9 @@ def _future_slot_pending(job: dict[str, Any], now: str) -> bool:
 def _marker(job: dict[str, Any], record: dict[str, Any], now: str, deferred: bool,
             reruns: int = 1) -> dict[str, Any]:
     """The loop guard written with a reschedule. A deferral marks itself ``deferred`` so it spends no
-    rerun, except when it defers a pending rerun: that keeps the rerun's time, still unsettled.
+    rerun, except when it defers a pending rerun: that keeps the rerun's time, still unsettled, and
+    records the re-armed fire's own instant as ``fire_at`` (``pending_rerun`` reads it), so the
+    deferred rerun is still held in a DarkWake and exempt from the one-shot grace gate.
     ``reruns`` counts the reruns this original cut has spent (written only past the first)."""
     if not deferred:
         marker: dict[str, Any] = {"execution_id": record["id"], "at": now}
@@ -188,7 +190,7 @@ def _marker(job: dict[str, Any], record: dict[str, Any], now: str, deferred: boo
     prior = job.get(MARKER_KEY)
     if (isinstance(prior, dict) and not prior.get("deferred") and not prior.get("settled")
             and _parse(prior.get("at")) is not None):
-        kept = {"execution_id": record["id"], "at": prior["at"]}
+        kept = {"execution_id": record["id"], "at": prior["at"], "fire_at": now}
         if prior.get("reruns"):
             kept["reruns"] = prior["reruns"]
         return kept
@@ -221,13 +223,14 @@ def _apply(job: dict[str, Any], record: dict[str, Any], now: str, deferred: bool
 
 
 def pending_rerun(job: dict[str, Any]) -> bool:
-    """Whether the job's queued fire is a restart rerun no run has claimed yet."""
+    """Whether the job's queued fire is a restart rerun no run has claimed yet. A deferred pending
+    rerun keeps the rerun's ``at`` and is queued at its re-arm instant ``fire_at`` (``_marker``)."""
     from cron import extra_fire
 
     marker = job.get(MARKER_KEY)
     if not isinstance(marker, dict) or marker.get("settled") or marker.get("deferred"):
         return False
-    at = marker.get("at")
+    at = marker.get("fire_at") or marker.get("at")
     if not at or job.get("next_run_at") != at:
         return False
     if (job.get("schedule") or {}).get("kind") == "once":

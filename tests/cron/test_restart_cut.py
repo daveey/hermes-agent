@@ -25,6 +25,8 @@ FAR_FUTURE = "0 0 1 1 *"
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr("cron.executions._end_interrupted_sessions", lambda _records: None)
+    # A pending rerun is held while the host is not fully awake: a MacBook on battery is no DarkWake.
+    monkeypatch.setattr("cron.restart_rerun.host_fully_awake", lambda: True)
     scheduler._running_job_ids.clear()
     scheduler._running_fire_owners.clear()
     scheduler._interrupted_job_ids.clear()
@@ -121,7 +123,6 @@ def test_owner_cut_of_a_rerun_the_host_slept_through_is_rerun_again(home, monkey
     rerun was cut by the same sleep after ~30 awake seconds in an hour. That rerun never ran, so it
     is re-armed (rerun 2 of 3), not dropped."""
     job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
-    monkeypatch.setattr("cron.restart_rerun.host_fully_awake", lambda: True, raising=False)
     monkeypatch.setattr(scheduler, "run_job", _cut_with_clock(900, 900))
     first = jobs.claim_job_for_fire(job["id"], force=True, return_job=True)
     assert scheduler.run_one_job(first) is True
