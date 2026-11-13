@@ -1910,20 +1910,24 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote dependency waits and recoverable stops in an IMMEDIATE txn.
+    """Promote dependency waits and recoverable failure stops; returns the count.
 
-    Call OUTSIDE any write txn. Guard holds/sticky blocks require explicit resolution.
-    Failure limit: max_retries > failure_limit > DEFAULT_FAILURE_LIMIT; the
-    dependency-review release is precomputed outside the transaction and fenced inside.
+    Opens its own IMMEDIATE txn: call OUTSIDE any write txn. Agent-triage failure-budget
+    stops get the same recovery as legacy blocked stops; guard holds and other triage
+    reasons still need explicit resolution. ``kanban_block_routing.recovery_held`` skips a
+    sticky stop (a worker ``kanban_block`` stays blocked until ``kanban_unblock``, #28712) and
+    one at the breaker limit (``max_retries`` > ``failure_limit`` > DEFAULT_FAILURE_LIMIT; else
+    the breaker could never trip). The dependency-review release is
+    precomputed outside the txn (same skips: no GitHub reads for held cards), fenced inside.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
-    from hermes_cli.kanban_block_routing import has_sticky_block
+    from hermes_cli.kanban_block_routing import recovery_held
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli import kanban_review_release
     promoted = 0
     remote = _sync.has_remote_parents(conn)
-    from hermes_cli import kanban_review_release
-    releases = kanban_review_release.prepare(conn)
+    releases = kanban_review_release.prepare(conn, failure_limit)
     with write_txn(conn):
         copies = foreign_ids(conn)
         todo_rows = conn.execute(
@@ -1942,8 +1946,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             if task_id in copies:
                 continue
             cur_status = row["status"]
-            if cur_status in ("blocked", "triage") and has_sticky_block(conn, task_id):
-                # Explicit human-intervention block; only ``unblock_task`` may exit it.
+            if recovery_held(conn, row, failure_limit):
                 continue
             states = parent_states(conn, task_id, remote=remote)
             if cur_status == "todo" and _note_missing_parents(conn, task_id, states):
@@ -1952,17 +1955,6 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                 resume_status = _resume_status_from_events(conn, task_id)
                 promotion_payload = kanban_review_release.promotion_payload(conn, task_id, resume_status, releases)
                 if cur_status in ("blocked", "triage"):
-                    # At the breaker limit, no auto-recovery (else block ->
-                    # recover -> respawn -> exhaust -> block forever). The
-                    # counter is preserved so it accumulates across cycles.
-                    failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
-                    )
-                    if failures >= effective_limit:
-                        continue
                     conn.execute(
                         "UPDATE tasks SET status = ? "
                         "WHERE id = ? AND status = ?", (resume_status, task_id, cur_status),

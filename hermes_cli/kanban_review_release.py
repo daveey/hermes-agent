@@ -29,14 +29,21 @@ def _snapshot(conn, task_id):
     return parents, kb.parent_states(conn, task_id), rows, [dict(r) if r is not None else None for r in results]
 
 
-def prepare(conn):
-    """Precompute only home-owned waiting cards, outside the writer lock."""
+def prepare(conn, failure_limit=None):
+    """Precompute only home-owned waiting cards, outside the writer lock.
+
+    Applies ``recompute_ready``'s skips first: a sticky or breaker-held card is
+    never promoted this tick, so it gets no GitHub read and no snapshots.
+    """
+    from hermes_cli.kanban_block_routing import recovery_held
     from hermes_cli.kanban_wake_check import foreign_ids
+    limit = kb.DEFAULT_FAILURE_LIMIT if failure_limit is None else failure_limit
     copies = foreign_ids(conn)
     prepared = {}
-    for row in conn.execute("SELECT id FROM tasks WHERE status IN ('todo','blocked')"):
-        tid = row[0]
-        if tid in copies or kb.unsatisfied_parents(conn, tid):
+    for row in conn.execute("SELECT id, status, consecutive_failures, max_retries FROM tasks "
+                            "WHERE status IN ('todo','blocked')").fetchall():
+        tid = row["id"]
+        if tid in copies or recovery_held(conn, row, limit) or kb.unsatisfied_parents(conn, tid):
             continue
         try:
             _park(conn, tid)
@@ -114,67 +121,66 @@ def released(conn, task_id, pr_urls):
     parents = kb.parent_ids(conn, task_id)
     if kb.unsatisfied_parents(conn, task_id) or owner_faulted_since(conn, task_id, parked):
         return False
-    for event in conn.execute("SELECT * FROM task_events WHERE task_id=? "
-                              "AND kind='promoted' ORDER BY id DESC LIMIT 1", (task_id,)):
-        origin = event["origin_gateway"] if "origin_gateway" in event.keys() else None
-        home = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
-        # A foreign copy always has a truthy home, so a missing origin differs.
-        if origin != home:
+    event = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='promoted' "
+                         "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    if event is None:
+        return False
+    origin = event["origin_gateway"] if "origin_gateway" in event.keys() else None
+    home = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+    # A foreign copy always has a truthy home, so a missing origin differs.
+    if origin != home:
+        return False
+    if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? "
+                    "AND kind='descendant_invalidated' LIMIT 1", (task_id, event["id"])).fetchone():
+        return False
+    stamp = kb._json_dict(event["payload"]).get("review_release")
+    if not isinstance(stamp, dict):
+        return False
+    if (stamp.get("version") != 1 or stamp.get("scope") != "one_continuation"
+            or stamp.get("merge_authorized") is not False
+            or not review._checkpoint_matches_run(stamp.get("park"), run)
+            or "run_uid" not in stamp["park"]
+            or stamp.get("parents") != parents
+            or stamp.get("checkpoint") != {k: checkpoint.get(k) for k in ("parents", "awaited", "prs")}
+            or (kb._to_epoch(event["created_at"]) or 0) < parked):
+        return False
+    captured = checkpoint.get("prs")
+    if not isinstance(captured, list) or not all(isinstance(u, str) for u in captured):
+        return False
+    urls = {norm_pr(u) for u in captured}
+    if stamp.get("prs") != sorted(urls) or not set(map(norm_pr, pr_urls)).issubset(urls):
+        return False
+    discharged = stamp.get("discharged")
+    proofs = stamp.get("reviews")
+    if (not isinstance(discharged, list) or not all(isinstance(u, str) for u in discharged)
+            or not set(discharged).issubset(urls) or not isinstance(proofs, list)):
+        return False
+    covered = set()
+    for proof in proofs:
+        if not isinstance(proof, dict):
             return False
-        if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? "
-                        "AND kind='descendant_invalidated' LIMIT 1", (task_id, event["id"])).fetchone():
+        data = proof.get("metadata")
+        named = proof.get("prs")
+        head = proof.get("head")
+        if (not isinstance(data, dict) or not isinstance(head, str) or not review._SHA.fullmatch(head)
+                or head not in [data.get(k) for k in ("reviewed_sha", "head", "exact_head")]
+                or proof.get("parent") not in parents or not isinstance(named, list)
+                or not all(isinstance(u, str) for u in named) or not set(named).issubset(urls)):
             return False
-        stamp = kb._json_dict(event["payload"]).get("review_release")
-        if not isinstance(stamp, dict):
-            continue
-        if (stamp.get("version") != 1 or stamp.get("scope") != "one_continuation"
-                or stamp.get("merge_authorized") is not False
-                or not review._checkpoint_matches_run(stamp.get("park"), run)
-                or "run_uid" not in stamp["park"]
-                or stamp.get("parents") != parents
-                or stamp.get("checkpoint") != {k: checkpoint.get(k) for k in ("parents", "awaited", "prs")}
-                or (kb._to_epoch(event["created_at"]) or 0) < parked):
-            continue
-        captured = checkpoint.get("prs")
-        if not isinstance(captured, list) or not all(isinstance(u, str) for u in captured):
-            continue
-        urls = {norm_pr(u) for u in captured}
-        if stamp.get("prs") != sorted(urls) or not set(map(norm_pr, pr_urls)).issubset(urls):
-            continue
-        discharged = stamp.get("discharged")
-        proofs = stamp.get("reviews")
-        if (not isinstance(discharged, list) or not all(isinstance(u, str) for u in discharged)
-                or not set(discharged).issubset(urls) or not isinstance(proofs, list)):
-            continue
-        covered = set()
-        for proof in proofs:
-            if not isinstance(proof, dict):
-                break
-            data = proof.get("metadata")
-            named = proof.get("prs")
-            head = proof.get("head")
-            if (not isinstance(data, dict) or not isinstance(head, str) or not review._SHA.fullmatch(head)
-                    or head not in [data.get(k) for k in ("reviewed_sha", "head", "exact_head")]
-                    or proof.get("parent") not in parents or not isinstance(named, list)
-                    or not all(isinstance(u, str) for u in named) or not set(named).issubset(urls)):
-                break
-            latest = conn.execute("SELECT * FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
-                                  (proof["parent"],)).fetchone()
-            if latest is not None and not review._checkpoint_matches_run(proof.get("result"), latest):
-                break
-            if latest is not None:
-                current = kb._json_dict(latest["metadata"])
-                # Absent replica evidence is allowed; explicit changed review
-                # identity is not. Verdict changes can still authorize repair.
-                identity_keys = ("reviewed_sha", "head", "exact_head", "pr", "reviewed_pr")
-                if any(k in current and current[k] != data.get(k) for k in identity_keys):
-                    break
-            explicit = review._named_prs(data, urls)
-            if explicit is not None and set(named) != explicit:
-                break
-            covered.update(named)
-        else:
-            remaining = urls - set(discharged)
-            if remaining and remaining.issubset(covered):
-                return True
-    return False
+        latest = conn.execute("SELECT * FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                              (proof["parent"],)).fetchone()
+        if latest is not None and not review._checkpoint_matches_run(proof.get("result"), latest):
+            return False
+        if latest is not None:
+            current = kb._json_dict(latest["metadata"])
+            # Absent replica evidence is allowed; explicit changed review
+            # identity is not. Verdict changes can still authorize repair.
+            identity_keys = ("reviewed_sha", "head", "exact_head", "pr", "reviewed_pr")
+            if any(k in current and current[k] != data.get(k) for k in identity_keys):
+                return False
+        explicit = review._named_prs(data, urls)
+        if explicit is not None and set(named) != explicit:
+            return False
+        covered.update(named)
+    remaining = urls - set(discharged)
+    return bool(remaining) and remaining.issubset(covered)

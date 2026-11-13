@@ -150,6 +150,45 @@ def test_remote_review_change_during_precompute_drops_stamp(board, monkeypatch):
     monkeypatch.setattr(release.review, "_completed_review_run", lookup)
 
 
+@pytest.mark.parametrize("hold,evaluated", [
+    ("sticky", False), ("breaker", False), ("task_breaker", False), ("task_headroom", True), ("none", True),
+    ("todo_at_limit", True)])
+def test_held_card_gets_no_external_evaluation(board, monkeypatch, hold, evaluated):
+    # recompute_ready never promotes a sticky or breaker-held card, so its precompute
+    # must not spend GitHub reads or snapshots on it either. The breaker binds only
+    # blocked/triage stops: a todo dependency wait at the limit still promotes.
+    import json
+    from hermes_cli.kanban_block_routing import has_sticky_block
+    task, reviews = helpers.parked(board)
+    limit = kb.DEFAULT_FAILURE_LIMIT
+    status = "todo" if hold == "todo_at_limit" else "blocked"
+    failures, retries = {"breaker": (limit, None), "task_breaker": (1, 1), "todo_at_limit": (limit, None),
+                         "task_headroom": (limit, limit + 1)}.get(hold, (0, None))
+    board.execute("UPDATE tasks SET status=?, consecutive_failures=?, max_retries=? WHERE id=?",
+                  (status, failures, retries, task))
+    if hold == "sticky":
+        kb._append_event(board, task, "blocked", {"reason": "explicit"})
+    board.commit()
+    assert has_sticky_block(board, task) is (hold == "sticky")
+    reads = []
+    monkeypatch.setattr(prs, "pr_state", lambda url: reads.append(url) or "OPEN")
+    for review in reviews:
+        kb.claim_task(board, review)
+        run = kb.get_task(board, review).current_run_id
+        assert kb.complete_task(board, review, summary="Review complete", expected_run_id=run,
+                                metadata={"verdict": "changes_required", "pr": PR, "reviewed_sha": "a" * 40})
+    board.execute("UPDATE tasks SET status=? WHERE id=?", (status, task))
+    board.commit()
+    reads.clear()
+    kb.recompute_ready(board)
+    assert bool(reads) is evaluated
+    promoted = board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='promoted'",
+                             (task,)).fetchall()
+    assert bool(promoted) is evaluated
+    if evaluated:
+        assert "review_release" in json.loads(promoted[-1]["payload"])
+
+
 def test_home_never_honours_its_own_stamp(board):
     # The home holds the evidence and keeps deciding with resumes_review, so a
     # later change to that evidence re-holds there; only a replica uses the stamp.
