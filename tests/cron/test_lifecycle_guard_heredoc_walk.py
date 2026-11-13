@@ -716,6 +716,8 @@ _WALK_ONLY_BODY = "python3 - <<'PY'\nbash -c 'hermes gateway \"restart\"'\nPY\n"
 def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path, shape):
     """Review 5882059941 #1: login/interactive shells source `$HOME` startup files and run
     PROMPT_COMMAND before each line; either can rewrite the stdin script (main refuses)."""
+    import warnings
+
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
     home = tmp_path / "home"
@@ -749,7 +751,9 @@ def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path
         # all that is checked. A startup file that ran yet failed to rewrite stdin still fails.
         ran = startup_ran.read_text() if startup_ran.exists() else ""
         assert shape != "prompt-command" and not ran, f"startup file: {ran!r}\n{stderr}"
-        print(f"execution proof unavailable on this host (startup file not sourced): {stderr[-500:]!r}")
+        # A warning (not a print, which pytest captures) so a CI log shows the proof was skipped.
+        warnings.warn(f"{shape}: execution proof unavailable on this host (startup file not "
+                      f"sourced); guard verdicts only: {stderr[-300:]!r}", stacklevel=1)
     assert strip_inert_heredoc_bodies(command, nested=True) == command
     assert guard(command, cwd=str(tmp_path)) is True
 
@@ -767,12 +771,52 @@ def test_startup_reading_shells_are_not_verbatim_stdin_shells(opener):
     assert strip_inert_heredoc_bodies(command, nested=True) == command
 
 
-@pytest.mark.parametrize("opener", ["bash -s", "bash -e -s", "sh -eu", "bash --norc --noprofile -s"])
+@pytest.mark.parametrize("opener", [
+    "bash -s", "bash -e -s", "sh -eu", "bash --norc --noprofile -s",
+    "bash -s -o pipefail", "bash -o errexit -s -u", "bash -s -- -i", "T=1 bash -s x -i -l",
+    "ssh h 'bash -s -o pipefail'",
+])
 def test_plain_stdin_shells_still_nest_mask(opener):
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
     command = opener + " <<'R'\npython3 - <<'PY'\nx\nPY\nR\n"
     assert strip_inert_heredoc_bodies(command, nested=True) != command
+
+
+@pytest.mark.parametrize("opener", [
+    "bash -s -i", "bash -s -l", "bash -s --login", "bash -s -H", "bash -s -k", "bash -es -il",
+    "bash -o history -o histexpand -s", "bash -s -o history -o histexpand", "bash -s -H -o history",
+    "bash -s -o keyword", "bash -s +o interactive-comments", "bash -s -o vi", "bash -s -o",
+    "bash -s -O expand_aliases", "bash -s -", "ssh h 'bash -o history -o histexpand -s'",
+    "ssh h 'bash -s -i'",
+])
+def test_options_after_dash_s_are_still_validated(opener):
+    """Review 5887281618: bash keeps parsing options after `-s`, so `-s` must not end the check,
+    and `-o`/`+o` operands are allowlisted (main refuses these shapes)."""
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    command = opener + " <<'R'\npython3 - <<'PY'\nx\nPY\nR\n"
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("opener", [
+    "bash -o history -o histexpand -s", "bash -s -o history -o histexpand", "bash -s -H -o history",
+    "ssh h 'bash -o history -o histexpand -s'",
+])
+def test_history_expansion_after_dash_s_runs_walk_only_body(tmp_path, opener):
+    """Review 5887281618: with history expansion on, `timeout !!:1-3 python3 -` runs
+    `timeout 5 bash -s python3 -`, so the inner body is shell, not Python. Real-Bash proof."""
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    ssh = tmp_path / "ssh"
+    # Local SSH transport control; no network access.
+    ssh.write_text('#!/bin/sh\nshift\nexec /bin/sh -c "$*"\n')
+    ssh.chmod(0o755)
+    command = (opener + " <<'R'\n: 5 bash -s\ntimeout !!:1-3 python3 - <<'PY'\n"
+               "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
+    _assert_bash_marker(tmp_path, command)
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+    assert guard(command, cwd=str(tmp_path)) is True
 
 
 def _keyword_led_subshell_command(tmp_path, shape):

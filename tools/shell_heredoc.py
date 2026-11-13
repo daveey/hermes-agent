@@ -60,6 +60,14 @@ _STDIN_SHELLS = frozenset({"bash", "sh", "dash", "ksh"})
 # rewrite the stdin script; ``-H`` (history expansion) and ``-k`` (keyword assignments) change how
 # its lines are read. No word containing them, alone or combined, is a verbatim stdin shell.
 _SHELL_FLAG_RE = re.compile(r"[-+][abefhmnpstuvxBCEPT]+|--(?:noprofile|norc|posix)")
+# ``-o``/``+o`` operands with the same effect as the letters above (plus pipefail/posix).
+# ``history``, ``histexpand``, ``keyword``, ``interactive-comments``, ``emacs``/``vi`` and the
+# rest are excluded: they change how the stdin script's lines are read.
+_SHELL_SET_OPTIONS = frozenset({
+    "allexport", "notify", "errexit", "noglob", "hashall", "monitor", "noexec", "privileged",
+    "onecmd", "nounset", "verbose", "xtrace", "braceexpand", "noclobber", "errtrace", "physical",
+    "functrace", "pipefail", "posix",
+})
 _SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
 _SSH_FLAG_OPTIONS = frozenset("46AaCgKkMnqTtVvXxYy")
 _PURE_EXPANSION_RE = re.compile(r"^\$(?:\{[A-Za-z_]\w*(?::?[-=+?][^}]*)?\}|[A-Za-z_]\w*)$")
@@ -152,14 +160,22 @@ def _is_stdin_shell(words: list[str]) -> bool:
     peeled = _peeled_command(words)
     if peeled is None or peeled[1] not in _STDIN_SHELLS:
         return False
+    # Bash keeps parsing options after `-s` until the first non-option word or `--`, so every
+    # option word up to there is validated (`bash -s -i`, `bash -s -o history` are not verbatim).
+    reads_stdin = False
     arguments = iter(words[peeled[0] + 1:])
     for word in arguments:
         if word in ("-o", "+o"):
-            next(arguments, None)
+            if next(arguments, None) not in _SHELL_SET_OPTIONS:
+                return False  # `-o history`/`histexpand`/`keyword`/…, or a bare `-o` listing
+        elif word == "--":
+            return reads_stdin  # `bash -s -- args`; `bash -- file` runs the file
+        elif word[:1] not in ("-", "+"):
+            return reads_stdin  # positional parameters after `-s`, else a script-file operand
         elif not _SHELL_FLAG_RE.fullmatch(word):
-            return False  # `--`, `-c`, or a script-file operand: stdin is not the script
-        elif not word.startswith("--") and "s" in word:
-            return True  # `-s`: the remaining words are positional parameters
+            return False  # `-c`, `-i`, `-l`, `-H`, `-O shopt`, …: stdin is not run verbatim
+        elif word.startswith("-") and not word.startswith("--") and "s" in word:
+            reads_stdin = True
     return True
 
 

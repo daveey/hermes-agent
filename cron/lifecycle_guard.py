@@ -774,7 +774,11 @@ def _opens_call_arguments(segment: list[str]) -> bool:
 def _may_define_alias(text: str) -> bool:
     """Whether *text* may define or enable an alias (``alias T=' '``, ``BASH_ALIASES[T]=…``,
     ``shopt -s expand_aliases``), even quote-split (``al''ias``) or ANSI-C quoted (``$'…'``).
-    An alias can expand to a keyword prefix, so ``T ( bash big.sh )`` may run a subshell."""
+    An alias can expand to a keyword prefix, so ``T ( bash big.sh )`` may run a subshell.
+
+    Deliberately broad: any "alias" substring (a path, ``BASH_ALIASES``, prose) counts. A false
+    positive only makes call-argument paths executed again (fail closed); narrowing it to whole
+    words or ``alias NAME=`` would let quote-split or ``$'…'`` spellings fail open. Do not tighten."""
     # Dropping every quote and backslash rejoins quote-split words (`al''ias`, `al\ias`).
     return "alias" in re.sub(r"[\"'\\\\]", "", text).lower() or "$'" in text
 
