@@ -270,10 +270,15 @@ def test_a_queued_worker_delivery_is_drained_before_the_next_housekeeping_tick(t
 def test_the_watch_settles_after_the_drain_wrote_its_outcome(tmp_path, monkeypatch):
     """The drain's own status write wakes exactly one more (empty) pass; a stable queue
     never wakes it again, so the housekeeping thread does not spin on its own writes."""
+    import time
+
     from cron import delivery_queue
+    from gateway import run_delivery_queue_watch as queue_watch
     from gateway.run_delivery_queue_watch import DeliveryQueueWatch
 
     monkeypatch.setattr(delivery_queue, "DELIVERY_DB", tmp_path / "deliveries.db")
+    later_ns = [0]
+    monkeypatch.setattr(queue_watch, "_now_ns", lambda: time.time_ns() + later_ns[0])
     passes = []
     watch = DeliveryQueueWatch(
         lambda: [None],
@@ -287,6 +292,9 @@ def test_the_watch_settles_after_the_drain_wrote_its_outcome(tmp_path, monkeypat
     status = delivery_queue.get_status("exec-1")
     assert status is not None and status["status"] == "delivered"
 
+    # The next look comes a poll later. The drain's write may share the enqueue's mtime granule
+    # (the size does not move), so the wake is owed to the racy stamp the enqueue left.
+    later_ns[0] = 10 * queue_watch.MTIME_GRANULARITY_NS
     assert watch.changed() is True, "the delivered status was written to the queue"
     watch.drain()
     assert passes == [1, 0]
@@ -296,3 +304,32 @@ def test_the_watch_settles_after_the_drain_wrote_its_outcome(tmp_path, monkeypat
     # Hosts whose SQLite runs the queue in WAL mode write to the -wal file first.
     (tmp_path / "deliveries.db-wal").write_bytes(b"frame")
     assert watch.changed() is True
+
+
+def test_a_write_in_the_same_mtime_granule_still_wakes_the_watch(tmp_path, monkeypatch):
+    """A status update rewrites a page in place (same size) and a coarse file clock can give it
+    the mtime the watch already saw. A stamp seen that soon after its mtime must not be trusted:
+    CI saw the drain's own write vanish this way, and a worker's enqueue could too."""
+    import os
+
+    from cron import delivery_queue
+    from gateway import run_delivery_queue_watch as queue_watch
+    from gateway.run_delivery_queue_watch import DeliveryQueueWatch
+
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", tmp_path / "deliveries.db")
+    queue = tmp_path / "deliveries.db"
+    queue.write_bytes(b"pending!")
+    mtime_ns = os.stat(queue).st_mtime_ns
+    now_ns = [mtime_ns]
+    monkeypatch.setattr(queue_watch, "_now_ns", lambda: now_ns[0])
+    watch = DeliveryQueueWatch(lambda: [None], lambda: None)
+
+    queue.write_bytes(b"settled!")
+    os.utime(queue, ns=(mtime_ns, mtime_ns))
+    assert watch.changed() is True, "a same-size write within the granule went unseen"
+
+    # Seen a granule after its mtime the stamp is trustworthy: no wake without a write.
+    now_ns[0] = mtime_ns + 2 * queue_watch.MTIME_GRANULARITY_NS
+    assert watch.changed() is True, "the previous look was still racy"
+    assert watch.changed() is False
+    assert watch.changed() is False
