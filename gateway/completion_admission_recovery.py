@@ -13,7 +13,10 @@ Two halves close it:
   each async delegation they carried through ``requeue_admitted_completion``. A delegation whose
   Desktop row (``async_delegation_complete`` stamped with its id) is in the parent counts as
   delivered, and the reopen records the admission it was made for (``recovered_admission_id``), so a
-  (delegation, admission) pair is reopened at most once across starts. The ledger stays the
+  (delegation, admission) pair is reopened at most once across starts. That marker keeps only the
+  last admission, which is exact while completion_admission reuses one admission per completion
+  identity (one per delegation); were there two, the attempt budget and replay cap bound the
+  alternation. The ledger stays the
   gate: the reopened row is claimed (``claim_completion_delivery``, one attempt each) like any pending
   result, and a row past its attempts or its replay age is dropped there with a logged reason.
 - ``deliver_admitted`` is the claimed offer's step when the result already has an admission: a

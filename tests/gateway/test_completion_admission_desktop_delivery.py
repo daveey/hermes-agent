@@ -45,6 +45,16 @@ def _batch_row(authority, target):
                                 display_metadata={'display_text': 'Background work finished'})
 
 
+def _fresh_gateway_start():
+    """Forget this process's in-memory offer history, as a restarted gateway would. Without it the
+    ``_offered`` dedupe alone makes a repeat reopen offer nothing, hiding the durable marker."""
+    with delegation._orphan_lock:
+        delegation._offered.clear()
+        delegation._offered_at.clear()
+        delegation._startup_replayed.clear()
+        delegation._reoffered_at.clear()
+
+
 def _deliver_by_batch(events):
     for evt in events:
         claim = delegation.claim_event_delivery(evt, 'tui-completion-batch')
@@ -99,6 +109,7 @@ async def test_reopened_admission_delivered_by_batch_is_reopened_once(tmp_path, 
         _batch_row(authority, target)
         assert _ledger('deleg_batch')[0] == 'delivered'
 
+        _fresh_gateway_start()  # only the durable recovered_admission_id may stop the second reopen
         assert reconcile_failed_completion_admissions(authority, offers) == 0
         assert _offered(offers) == []
         assert _ledger('deleg_batch')[0] == 'delivered'

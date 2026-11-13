@@ -847,7 +847,12 @@ def requeue_admitted_completion(delegation_id: str, target_queue,
     ``recovered_admission_id``: the failed admission a start-up reconcile reopens the row for. It is
     stored in the reopening transaction, and a row already reopened for that admission is left as it
     is, so a result delivered by a consumer that leaves no trace the reconcile can read is never
-    offered again at the next start."""
+    offered again at the next start.
+
+    The marker holds only the LAST admission a row was reopened for. Two failed admissions for one
+    delegation would overwrite each other and could alternate past the once-per-admission rule. That
+    does not happen today: completion_admission reuses one admission per completion identity, so a
+    delegation has at most one. The attempt budget and the replay age cap still bound it if it did."""
     now = time.time()
     with _DB_LOCK, _transaction() as conn:
         if recovered_admission_id is not None and conn.execute(
