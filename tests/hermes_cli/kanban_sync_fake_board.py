@@ -195,9 +195,12 @@ class FakeService:
 
     @classmethod
     def release_inputs(cls, op: dict) -> Optional[dict]:
-        """releaseTask's post-fence validation, before any write, in its order: ``op.extra ?? {}`` that is not an
-        object is ``invalid`` ("failure extra must be an object"), then :meth:`release_diagnostic`. Returns the
-        diagnostic, or None when the caller refuses the release ``invalid``."""
+        """Part of releaseTask's post-fence validation, before any write. The real order is ``failure_limit``
+        (a positive safe integer when present), ``block_kind`` (transient | assignment | capability), ``op.extra ??
+        {}``, then releaseDiagnostic. The fake models neither ``failure_limit`` nor ``block_kind`` validation (a bad
+        value is not refused here); of the rest, in that order: an ``extra`` that is not an object is ``invalid``
+        ("failure extra must be an object"), then :meth:`release_diagnostic`. Returns the diagnostic, or None when
+        the caller refuses the release ``invalid``."""
         extra = op.get("extra")
         if extra is not None and not isinstance(extra, dict):
             return None
@@ -220,14 +223,13 @@ class FakeService:
         """As transitions.ts releaseTask: only the lease holder's run is released; the Board ends that run, emits
         its one outcome event (carrying :meth:`release_evidence`) and books a charged outcome exactly once.
         Not modelled: the protocol-violation streak (a ``protocol_violation`` crash is charged like any crash), and
-        ``spawn_failed`` (endCustody + recordTaskFailure(releaseClaim, endRun)), refused with NotImplementedError
-        as on the leases route."""
+        ``spawn_failed`` (endCustody + recordTaskFailure(releaseClaim, endRun)). As in releaseTask, a spawn_failed
+        release is fenced and its inputs validated first (a stale lease is ``lease_lost``, a non-object extra or
+        diagnostic ``invalid``, nothing changed); one that passes both raises NotImplementedError, as on the leases
+        route."""
         task, run = op["task"], op["run_uid"]
         if op.get("outcome", "released") not in self.RELEASE_OUTCOMES:
             return {"status": "rejected", "reason": "invalid"}
-        if op.get("outcome") == "spawn_failed":
-            raise NotImplementedError("FakeService.release_op: spawn_failed release (endCustody + "
-                                      "recordTaskFailure) is not modelled")
         lease = b["leases"].get(task)
         if not lease or lease["holder"] != gw or lease["run_uid"] != run:
             return {"status": "rejected", "reason": "lease_lost"}
@@ -235,6 +237,9 @@ class FakeService:
         diagnostic = self.release_inputs(op)
         if diagnostic is None:
             return {"status": "rejected", "reason": "invalid"}
+        if op.get("outcome") == "spawn_failed":
+            raise NotImplementedError("FakeService.release_op: spawn_failed release (endCustody + "
+                                      "recordTaskFailure) is not modelled")
         outcome, op_id = op.get("outcome", "released"), op["client_op_id"]
         clock = f"{9_999_999_999_999:013d}-0002-board"
         error = str(op.get("error") or outcome)[:500]
@@ -392,9 +397,6 @@ class FakeHub:
             if str(body.get("outcome") or "released") not in self.svc.RELEASE_OUTCOMES:
                 # releaseTask checks the outcome before its fence: an unknown one (a test typo) is ``invalid``.
                 return {"status": "rejected", "reason": "invalid", "lease": cur}
-            if self.svc.lease_runs and body.get("outcome") == "spawn_failed":
-                raise NotImplementedError("FakeHub.leases: spawn_failed release (endCustody + recordTaskFailure) is "
-                                          "not modelled; see _release_run")
             if self.svc.lease_runs and (not cur or cur["holder"] != gw or cur["run_uid"] != run):
                 # releaseTask's fence(): a release that does not name this gateway's live lease run is refused and
                 # changes nothing (the card keeps its lease and mirror).
@@ -404,6 +406,11 @@ class FakeHub:
             diagnostic = self.svc.release_inputs(body)
             if diagnostic is None:
                 return {"status": "rejected", "reason": "invalid", "lease": cur}
+            if body.get("outcome") == "spawn_failed":
+                # As release_op: fenced and validated first (releaseTask's order), then refused loudly whatever
+                # lease_runs says, before any write.
+                raise NotImplementedError("FakeHub.leases: spawn_failed release (endCustody + recordTaskFailure) is "
+                                          "not modelled; see _release_run")
             b["leases"].pop(task, None)
             runs, card = b["rows"].get("task_runs", {}), b["rows"].get("tasks", {}).get(task)
             if self.svc.lease_runs and card is not None:
@@ -438,8 +445,9 @@ class FakeHub:
 
         Not modelled: failure accounting (recordTaskFailure: consecutive_failures, failure_finalized, the breaker,
         the protocol-violation streak); :meth:`FakeService.release_op` covers it for the ops path. ``spawn_failed``
-        is refused with NotImplementedError by :meth:`leases`: the real releaseTask hands it to endCustody +
-        recordTaskFailure(releaseClaim, endRun), whose run/event shape is that accounting."""
+        is refused with NotImplementedError by :meth:`leases` after its fence (with ``lease_runs``) and input checks,
+        as releaseTask orders them: the real releaseTask hands it to endCustody + recordTaskFailure(releaseClaim,
+        endRun), whose run/event shape is that accounting."""
         gw, svc = self.gateway, self.svc
         outcome = str(body.get("outcome") or "released")
         error = str(body.get("error") or outcome)[:500]

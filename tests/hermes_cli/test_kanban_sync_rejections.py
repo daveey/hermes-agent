@@ -552,10 +552,10 @@ def test_fake_release_diagnostic_counts_numbers_like_json_stringify(number, lite
     assert FakeService.release_diagnostic({"v": number, "tail": "x" * (fill + 1)}) == {"diagnostic_truncated": True}
 
 
-@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("ops", True)])
+@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("leases", False), ("ops", True)])
 def test_fake_release_spawn_failed_is_not_modelled(live, kanban_home, route, lease_runs):
-    """releaseTask hands spawn_failed to endCustody + recordTaskFailure; the fake refuses it loudly on both
-    routes and changes nothing."""
+    """releaseTask hands spawn_failed to endCustody + recordTaskFailure; the fake refuses it loudly on every
+    route and changes nothing."""
     svc = FakeService(lease_runs=lease_runs)
     hub, tid = _leased(live, svc)
     before = copy.deepcopy(svc.board(BOARD))
@@ -563,6 +563,32 @@ def test_fake_release_spawn_failed_is_not_modelled(live, kanban_home, route, lea
         _release(route, svc, hub, tid, outcome="spawn_failed")
     assert svc.board(BOARD) == before
     assert svc.board(BOARD)["leases"][tid]["run_uid"] == RUN
+
+
+@pytest.mark.parametrize("route", ["leases", "ops"])
+def test_fake_release_spawn_failed_is_fenced_first(live, kanban_home, route):
+    """releaseTask runs fence() before the spawn_failed branch: a stale-lease spawn_failed is ``lease_lost``
+    (not the fake's NotImplementedError) and changes nothing."""
+    svc = FakeService(lease_runs=True)
+    hub, tid = _leased(live, svc)
+    svc.board(BOARD)["leases"][tid]["run_uid"] = "run-newer"
+    before = copy.deepcopy(svc.board(BOARD))
+    res = _release(route, svc, hub, tid, outcome="spawn_failed")
+    assert (res["status"], res["reason"]) == ("rejected", "lease_lost")
+    assert svc.board(BOARD) == before
+
+
+@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("leases", False), ("ops", True)])
+@pytest.mark.parametrize("bad", [{"extra": "host"}, {"diagnostic": "boom"}])
+def test_fake_release_spawn_failed_validates_inputs_first(live, kanban_home, route, lease_runs, bad):
+    """releaseTask validates extra and the diagnostic before the spawn_failed branch: a bad one is ``invalid``
+    and changes nothing."""
+    svc = FakeService(lease_runs=lease_runs)
+    hub, tid = _leased(live, svc)
+    before = copy.deepcopy(svc.board(BOARD))
+    res = _release(route, svc, hub, tid, outcome="spawn_failed", **bad)
+    assert (res["status"], res["reason"]) == ("rejected", "invalid")
+    assert svc.board(BOARD) == before
 
 
 def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):
