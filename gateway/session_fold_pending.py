@@ -80,13 +80,14 @@ def candidates(authority, ref, head):
     producer rows (liveness ticks, loop ticks) are passed over; the first human input ends the scan, so a
     notice never jumps a prompt queued before it."""
     from gateway.session_notifier_drain import eligible
+    from gateway.session_completion_notes import completion_is_note
     picked, category = [], _category(head)
     for row in list_session_admissions(authority.db, session_id=ref.session_id):
         if row['status'] != 'queued' or row['admission_id'] == head['admission_id']:
             continue
         if not _automation(row['payload']):
             break
-        if eligible(row) and _foldable(row, category):
+        if eligible(row) and _foldable(row, category) and not completion_is_note(authority, ref, row):
             picked.append(row)
     return picked
 

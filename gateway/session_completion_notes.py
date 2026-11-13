@@ -74,7 +74,7 @@ def _closed_by_user(authority, session_id):
     return bool(row.get('ended_at')) and row.get('end_reason') not in _RECOVERABLE_END_REASONS
 
 
-def _wakes_unviewed_parent(authority, session_id, live, descriptor):
+def _wakes_unviewed_parent(authority, session_id, live, descriptor, *, consume=True):
     """A result the parent carries on from (``resumes_parent``) or a failed async delegation
     (``wakes_parent``) with no viewer attached: the parent dispatched that work and is waiting on it,
     so it runs as the parent's turn instead of stalling until a human returns. Not in a chat the user
@@ -87,14 +87,29 @@ def _wakes_unviewed_parent(authority, session_id, live, descriptor):
     if not (failed or closed):
         return True
     if closed or live.unattended_wakes >= UNATTENDED_WAKE_LIMIT:
-        if failed:
+        if failed and consume:
             import logging
             logging.getLogger(__name__).warning(
                 'parent %s not woken: failed delegation result kept as a note (%s)', session_id,
                 'its chat was closed' if closed else f'{UNATTENDED_WAKE_LIMIT} unattended wakes in a row')
         return False
-    live.unattended_wakes += 1
+    if consume:
+        live.unattended_wakes += 1
     return True
+
+
+def completion_is_note(authority, ref, row, *, consume=False):
+    """Share the claim's note decision with fold scans without spending a wake on a read.
+
+    Only the row's own claim consumes its failed-result wake allowance.
+    """
+    live = authority.sessions.get(ref.session_id)
+    if not noted_completion(row) or live is None:
+        return False
+    descriptor = row['payload']['local_automation_v1']
+    if live.subscribers and _producer(descriptor['identity']) not in _ALWAYS_NOTED:
+        return False
+    return not _wakes_unviewed_parent(authority, ref.session_id, live, descriptor, consume=consume)
 
 
 async def reopen_for_turn(authority, ref):
@@ -121,8 +136,7 @@ async def note_if_unviewed(authority, ref, row):
         return None
     from gateway.session_runtime_workers import tracked_write
     descriptor = row['payload']['local_automation_v1']
-    if (live is None or (live.subscribers and _producer(descriptor['identity']) not in _ALWAYS_NOTED)
-            or _wakes_unviewed_parent(authority, ref.session_id, live, descriptor)):
+    if not completion_is_note(authority, ref, row, consume=True):
         # The claim left a closed row closed for a note; the turn reopens it as any first turn does.
         await reopen_for_turn(authority, ref)
         return None
