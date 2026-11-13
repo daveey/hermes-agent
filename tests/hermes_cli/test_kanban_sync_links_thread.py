@@ -76,3 +76,56 @@ def test_a_failed_links_pass_does_not_stop_later_passes(monkeypatch):
     _run_loop(monkeypatch, reconcile=flaky, sync_all_once=lambda *a, **k: [], wait=wait,
               keep_running=lambda: iterations["n"] < 3)
     assert len(calls) == 3, calls
+    assert ksc._LINKS_RUNNER is None, "the stopped loop's runner is still published"
+
+
+def test_a_restarted_loop_never_runs_a_pass_beside_the_stopped_loops(monkeypatch):
+    """``stop`` waits only ``JOIN_S``: a slow pass outlives its loop. A same-process restart must not start a second
+    ``reconcile_links`` beside it (both share ``_LINKS_DONE``; review of PR #1882)."""
+    from hermes_cli.kanban_sync_links_pass import LinksPass
+    monkeypatch.setattr(LinksPass, "JOIN_S", 0.05)
+    release, entered = threading.Event(), threading.Event()
+    lock = threading.Lock()
+    state = {"active": 0, "max": 0}
+    calls: list[threading.Thread] = []
+
+    def reconcile(boards, gateway, **kwargs):
+        with lock:
+            calls.append(threading.current_thread())
+            state["active"] += 1
+            state["max"] = max(state["max"], state["active"])
+        entered.set()
+        try:
+            release.wait(10)
+        finally:
+            with lock:
+                state["active"] -= 1
+
+    first = {"n": 0}
+
+    def first_wait(*args):
+        first["n"] += 1
+        assert entered.wait(10), "the first loop's pass never started"
+
+    _run_loop(monkeypatch, reconcile=reconcile, sync_all_once=lambda *a, **k: [], wait=first_wait,
+              keep_running=lambda: first["n"] < 2)
+    assert len(calls) == 1 and calls[0].is_alive() and state["active"] == 1, "the first pass must outlive its loop"
+    slow = calls[0]
+
+    second = {"n": 0, "calls_while_blocked": None}
+
+    def second_wait(*args):
+        second["n"] += 1
+        if second["n"] == 3:  # three requests refused while the stopped loop's pass ran
+            second["calls_while_blocked"] = len(calls)
+            release.set()
+            slow.join(10)
+        elif second["n"] > 3:
+            assert ksc._LINKS_RUNNER.wait_idle(10)
+
+    _run_loop(monkeypatch, reconcile=reconcile, sync_all_once=lambda *a, **k: [], wait=second_wait,
+              keep_running=lambda: len(calls) < 2 and second["n"] < 10)
+    release.set()
+    assert second["calls_while_blocked"] == 1, f"the restarted loop ran a pass beside the stopped one: {calls}"
+    assert state["max"] == 1, f"{state['max']} concurrent reconcile_links passes"
+    assert len(calls) == 2 and calls[1] is not slow, "the restarted loop never ran its own pass"

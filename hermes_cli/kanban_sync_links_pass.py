@@ -6,15 +6,23 @@ queued on ``_links_lock`` behind Desktop readers) and the replica went 13 min st
 cards did not promote (t_01a1d2cc49634a78). The loop asks for a pass on its cadence; a request while one is running
 is refused and asked again on a later iteration, so passes never pile up. The thread owns its own connection scope
 and never calls the loop's ``keep_running`` (callers count its calls); the loop stops it.
+
+``stop`` waits only ``JOIN_S`` for a running pass, so a slow pass can outlive its loop. Passes are serialized per
+process (``_PASS_LOCK``): a restarted loop's runner refuses requests while a stopped runner's pass still runs, and
+never runs ``reconcile_links`` alongside it (both would share ``kanban_sync_client._LINKS_DONE``).
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
 from pathlib import Path
 from typing import Optional
 
 _log = logging.getLogger("hermes_cli.kanban_sync_client")
+
+# Held for the length of one ``reconcile_links`` call by whichever runner (live, or stopped but still running) owns it.
+_PASS_LOCK = threading.Lock()
 
 
 class LinksPass:
@@ -30,15 +38,17 @@ class LinksPass:
         self._thread: Optional[threading.Thread] = None
 
     def request(self, boards: list[tuple[str, Path]]) -> bool:
-        """Start a pass over ``boards`` unless one is running. True when it started."""
-        if not self._idle.is_set():
+        """Start a pass over ``boards`` unless one is running: this runner's, or an earlier loop's that outlived its
+        ``stop``. True when it started."""
+        if not self._idle.is_set() or _PASS_LOCK.locked():
             return False
         self._boards = list(boards)
         self._idle.clear()
         self._want.set()
         if self._thread is None or not self._thread.is_alive():
-            from agent.memory_provider import spawn_context_thread
-            self._thread = spawn_context_thread(self._run, name="kanban-sync-links")
+            # The loop's contextvars (profile scope) cross into the thread; no agent.memory_provider dependency.
+            self._thread = threading.Thread(target=contextvars.copy_context().run, args=(self._run,),
+                                            name="kanban-sync-links", daemon=True)
             self._thread.start()
         return True
 
@@ -63,7 +73,9 @@ class LinksPass:
                     if self._stopped:
                         break
                     try:
-                        client.reconcile_links(self._boards, self._gateway, skip_unchanged=True)
+                        with _PASS_LOCK:  # a request that raced past ``request``'s check waits here, never overlaps
+                            if not self._stopped:
+                                client.reconcile_links(self._boards, self._gateway, skip_unchanged=True)
                     except Exception as exc:  # health: allow BLE001 -- a failed pass must not end the thread
                         _log.warning("kanban sync: chat links pass failed (%s: %s)", type(exc).__name__, exc)
                     finally:

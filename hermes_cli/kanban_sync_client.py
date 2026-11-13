@@ -1199,7 +1199,7 @@ def _links_pass_clock() -> float:
     return time.monotonic()
 
 
-# The running loop's links pass (tests wait on it to observe a pass deterministically).
+# The running loop's links pass (tests wait on it to observe a pass deterministically); None once the loop exits.
 _LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop runs
 
 
@@ -1542,6 +1542,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
     finally:
         links.stop()
+        _LINKS_RUNNER = None  # no stale runner for the next loop's tests to wait on
         sender.close()
         sampler.close()
     runstate.record_down(runstate.STOPPED)
