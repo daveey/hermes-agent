@@ -234,6 +234,13 @@ def parse_custody(value: Any) -> Optional[Custody]:
 SNAPSHOT_KEYS = ("workspace_source", "workspace_custody")
 
 
+def source_columns(conn: sqlite3.Connection) -> str:
+    """The replica's source columns for a SELECT list. They are added by the sync schema (kanban_db_sync), so a board
+    that never synced has neither: no card there has custody, so both read as NULL."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    return ", ".join(k if k in have else f"NULL AS {k}" for k in SNAPSHOT_KEYS)
+
+
 @dataclass(frozen=True)
 class SourceSnapshot:
     """``workspace_source``/``workspace_custody`` as of the grant (same Board transaction), from the lease response

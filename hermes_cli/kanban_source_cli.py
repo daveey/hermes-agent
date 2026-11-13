@@ -24,7 +24,7 @@ CLAIM_REFUSED = "source_cli_claim_refused"
 
 
 def claim_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    row = conn.execute("SELECT workspace_source, workspace_custody FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    row = conn.execute(f"SELECT {ws.source_columns(conn)} FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return None
     if row[0] is not None or ws.parse_custody(row[1]) is not None:
@@ -65,7 +65,7 @@ def source_release(conn: sqlite3.Connection, task_id: str, to_state: str, *, by:
                    hub: Any = None) -> dict:
     if to_state not in ("published", "unchanged"):
         return {"ok": False, "reason_code": "invalid", "error": "--to must be published or unchanged"}
-    row = conn.execute("SELECT workspace_source FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    row = conn.execute(f"SELECT {ws.source_columns(conn)} FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return {"ok": False, "reason_code": "not_found", "error": f"no such task: {task_id}"}
     try:

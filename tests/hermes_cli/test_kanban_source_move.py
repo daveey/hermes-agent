@@ -178,6 +178,19 @@ def test_cli_claim_command_refuses(conn, kanban_home, capsys):
     assert kb.get_task(conn, tid).status != "running"
 
 
+def test_unsynced_board_without_source_columns_claims_and_moves(kanban_home, capsys):
+    """A board that never synced lacks the source columns: the CLI claim, the move/reclaim checks and source-release
+    read them as NULL instead of failing on the missing column."""
+    from hermes_cli import kanban as kcli
+    with kbc.connect_closing() as plain:
+        assert "workspace_source" not in {r[1] for r in plain.execute("PRAGMA table_info(tasks)")}
+        tid = kb.create_task(plain, title="plain", assignee="worker")
+        assert ksm.parked_refusal(plain, tid, me="hub") is None and ksm.reclaim_refusal(plain, tid) is None
+        assert cli.source_release(plain, tid, "published", by="op", head=lambda *_: None, hub=_Hub())["ok"] is False
+    assert kcli._cmd_claim(SimpleNamespace(task_id=tid, ttl=60)) == 0
+    assert f"Claimed {tid}" in capsys.readouterr().out
+
+
 class _Hub:
     def __init__(self):
         self.calls = []

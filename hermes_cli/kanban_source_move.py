@@ -22,7 +22,7 @@ PORTABLE_STATES = ("published", "unchanged")
 
 
 def _row(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.Row]:
-    return conn.execute("SELECT workspace_kind, workspace_path, workspace_source, workspace_custody FROM tasks "
+    return conn.execute(f"SELECT workspace_kind, workspace_path, {ws.source_columns(conn)} FROM tasks "
                         "WHERE id = ?", (task_id,)).fetchone()
 
 
