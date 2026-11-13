@@ -53,6 +53,24 @@ def howto(own: str) -> str:
             f"this alarm lists, only while they are ready and pinned to {own}, and never back to {own}.")
 
 
+def held_default_howto(own: str) -> str:
+    """:func:`howto` for a ``held-default`` alarm (:mod:`hermes_cli.kanban_pickup_stall_held`): its targets are
+    default-placement cards created on ``own``, not pins."""
+    pool = pool_label()
+    return (f"To re-place a listed card off {own}: the cards were created on {own}, so send "
+            "kanban_supervisor_request(ops=[{\"op\": \"operator\", \"action\": \"move\", \"task_id\": \"<listed card>\", "
+            f"\"runs_on\": [\"{pool}\"], \"reason\": \"{own} held; default placement stranded\"}}]); {own}'s "
+            "dispatcher applies it (a hold stops claims, not operator calls). Only the cards this alarm lists, only "
+            f"while they are ready, unclaimed and still default placement (runs_on unset), and never back to {own}.")
+
+
+def is_held_default(alarm: Any, own: str) -> bool:
+    """``alarm`` is the host-wide held-creator alarm about ``own`` (key ``pickup-stall:<own>:held-default:``)."""
+    from hermes_cli import kanban_pickup_stall as kps
+    from hermes_cli.kanban_pickup_stall_held import SLUG
+    return (alarm["idempotency_key"] or "").startswith(f"{kps.KEY_PREFIX}{own}:{SLUG}:")
+
+
 def _cols(row: Any) -> set:
     return set(row.keys()) if row is not None else set()
 
@@ -181,8 +199,11 @@ def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: An
     if target["status"] != "ready" or any(target[c] for c in ("claim_lock", "lease_holder", "current_run_id")
                                           if c in cols):
         return f"{target['id']} is {target['status']} or claimed; only a ready, unclaimed card is re-placed"
-    if f"machine:{own}" not in (wn._parse(target["runs_on"]) or []):
-        return f"{target['id']} is no longer pinned to machine:{own}"
+    pins = wn._parse(target["runs_on"])
+    if f"machine:{own}" not in (pins or []):
+        # A held-default alarm lists default-placement cards created on its machine (kanban_pickup_stall_held).
+        if not (is_held_default(alarm, own) and pins is None and _stored(target, "created_on") == own):
+            return f"{target['id']} is no longer pinned to machine:{own}"
     try:
         labels = list(wn.normalize_runs_on(runs_on) or [])
     except ValueError as exc:

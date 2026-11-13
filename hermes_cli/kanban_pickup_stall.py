@@ -232,7 +232,7 @@ def _minutes(since_ms: int, now_ms: int) -> int:
     return max(0, (now_ms - since_ms) // 60000)
 
 
-def _tail(conn, own: str) -> str:
+def _tail(conn, own: str, howto: Optional[str] = None) -> str:
     """The repair runs on another machine (:func:`alarm_placement`), so name where ``own``'s machine-local
     evidence lives instead of saying "on this host"."""
     from hermes_cli import kanban_pickup_stall_repin as repin
@@ -247,9 +247,9 @@ def _tail(conn, own: str) -> str:
             "Board row from any machine: `Hub(load_identity()).row_evidence(<board>, 'tasks', <card>)`. Check "
             "`kanban.sync.pickup`, the machine registry entry (labels, hold, pickup), profiles, capabilities and "
             "dispatcher capacity, fix the cause (or re-place the card on a machine that can run it), and verify the "
-            "card is imported and claimed. " + repin.howto(own) + " Do not claim a cause the recorded evidence "
-            "does not show, and never lift or shorten a registry hold you did not set. This is agent-owned repair, "
-            "not a human decision.")
+            "card is imported and claimed. " + (howto or repin.howto(own)) + " Do not claim a cause the recorded "
+            "evidence does not show, and never lift or shorten a registry hold you did not set. This is agent-owned "
+            "repair, not a human decision.")
 
 
 # --- where the alarm runs ------------------------------------------------------------------------------------
@@ -371,7 +371,7 @@ def _replace_stranded(conn, task_id: str, own: str, machines, runs_on: list[str]
 
 
 def _create(conn, *, key: str, title: str, body: str, tenant: Optional[str], own: str, now_ms: int,
-            priority: int = 0) -> str:
+            priority: int = 0, howto: Optional[str] = None) -> str:
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_worker_node as wn
     from hermes_cli.kanban_triage_sweep import _supervisor_profile
@@ -386,7 +386,8 @@ def _create(conn, *, key: str, title: str, body: str, tenant: Optional[str], own
     # A repair closed long ago is replaced, so the key carries the creation time (create_task returns any
     # non-archived task with an equal key, done ones included).
     return kb.create_task(conn, title=title, body=body + f"\n\nPlaced with runs_on {runs_on}: {why}."
-                          + _tail(conn, own), assignee=assignee, created_by=DETECTOR, workspace_kind="scratch",
+                          + _tail(conn, own, howto), assignee=assignee, created_by=DETECTOR,
+                          workspace_kind="scratch",
                           tenant=tenant, requires=list(_REQUIRES), idempotency_key=f"{key}{_now_ms()}",
                           runs_on=runs_on, priority=priority)
 
@@ -623,15 +624,17 @@ def sweep(conn, *, now: Optional[float] = None) -> list[str]:
     if dispatch_paused():
         return []  # a draining gateway runs no pickup, so it writes no fresh evidence to judge a stall by
     _prune(conn, _now_ms(now))
+    own = wn._own(conn)
+    from hermes_cli import kanban_pickup_stall_held as held  # own default-placement cards on a held machine
+    stranded = held.sweep(conn, own, now_ms=_now_ms(now))
     replica = wn.open_replica(conn)
     if replica is None:
-        return []
+        return stranded
     try:
-        own = wn._own(conn)
         cards = stalled(conn, replica, own, now=now)
     finally:
         replica.close()
-    return file_repairs(conn, own, cards, now=now) if cards else []
+    return stranded + (file_repairs(conn, own, cards, now=now) if cards else [])
 
 
 def safe_sweep(conn) -> list[str]:
