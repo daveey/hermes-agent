@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import threading
 import time
 from datetime import UTC, datetime
@@ -66,21 +67,52 @@ def normalize(reply):
 
 
 def _stored(conn, task_id):
+    """The last recorded transition (event)."""
     # Origin timestamps travel with the payload; replica-local insertion IDs do not.
     rows = conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
         "ORDER BY COALESCE(json_extract(payload, '$.recorded_at_ms'), created_at * 1000) DESC, "
         "payload DESC LIMIT 1", (task_id, EVENT)).fetchall()
+    return _loads(rows[0][0]) if rows else None
+
+
+def _loads(text):
     try:
-        value = json.loads(rows[0][0]) if rows else None
+        value = json.loads(text)
         return value if isinstance(value, dict) else None
     except (TypeError, ValueError):
         return None
 
 
-def latest(conn, task_id):
-    """Read the last transition, qualifying it against current task lifecycle state."""
+# A volatile-only change (see ``VOLATILE_REASONS``) is no transition: it replaces this origin-local row instead of
+# appending an event and a comment, so ``latest()`` stays the newest observation. No row = the event is newest.
+# Local only (never synced): a replica's ``latest()`` is the origin's last transition, as before.
+LATEST_TABLE = "kanban_queue_latest"
+
+
+def _newest(conn, task_id):
+    """The newest observation: the local volatile-only one when it postdates the last transition."""
     value = _stored(conn, task_id)
+    try:
+        row = conn.execute(f"SELECT payload FROM {LATEST_TABLE} WHERE task_id=?", (task_id,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return value  # nothing newer than the event was ever stored here (a replica, or no flap yet)
+    local = _loads(row[0]) if row else None
+    if local is None or (value is not None and not (_ms_of(local) > _ms_of(value))):
+        return value
+    return local
+
+
+def _ms_of(value) -> float:
+    ms = value.get("recorded_at_ms")
+    return float(ms) if _number(ms) else 0.0
+
+
+def latest(conn, task_id):
+    """Read the newest observation, qualifying it against current task lifecycle state."""
+    value = _newest(conn, task_id)
     if value is None:
         return None
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -135,6 +167,52 @@ def _signature(value):
     elif value.get("state") == "queued" and "lifecycle" in value:
         signature["lifecycle"] = {**value["lifecycle"], "runs_on": None}
     return signature
+
+
+# Admission reasons the Board re-samples on every reserve (load, run caps, a held reservation slot, a heartbeat
+# sample): they flip between ~10 s replies with no change in what the card waits for. t_01a1d5386cb55abf (11-13) got
+# 79 comments in 18 min from these flips alone. Anything else (missing labels, capability, draining, liveness, an
+# unknown reason) is structural and still a transition.
+VOLATILE_REASONS = frozenset({"load_threshold", "memory_threshold", "max_card_runs_reached",
+                              "reserved_capacity_held", "last_seen_invalid"})
+# At most one volatile-only event + comment per card per this window, and only for a different picture.
+REFRESH_MS = 600_000
+
+
+def _meaning(value):
+    """``_signature`` without volatile reasons or the reserved machine: what the card waits for.
+
+    Whether any candidate is eligible stays in it, so all candidates going ineligible (or one coming back) is a
+    transition even when only volatile reasons caused it."""
+    signature = _signature(value)
+    candidates = signature.get("candidates") or []
+    signature["eligible"] = any(not c.get("reasons") for c in candidates)
+    signature["candidates"] = [{**c, "reasons": [r for r in c.get("reasons") or [] if r not in VOLATILE_REASONS]}
+                               for c in candidates]
+    if value.get("state") == "assigned":
+        signature.pop("machine", None)
+        if "lifecycle" in signature:
+            signature["lifecycle"] = {**signature["lifecycle"], "runs_on": None}
+    return signature
+
+
+def _reserved(value):
+    return value.get("machine") if value.get("state") == "assigned" else None
+
+
+def _write(previous, value, now_ms):
+    """``(event, comment)`` for an observation that differs from the last transition ``previous``.
+
+    A reservation handed to another worker is an event without a comment: pickup-stall reads the events as "seen
+    not pinned here" sightings (``kanban_pickup_stall._seen_unpinned_here_ms``), and the thread text would only
+    repeat the last comment."""
+    if previous is None or _meaning(previous) != _meaning(value):
+        return True, True
+    if _reserved(previous) != _reserved(value):
+        return True, False
+    if now_ms - _ms_of(previous) >= REFRESH_MS and _signature(previous) != _signature(value):
+        return True, True
+    return False, False
 
 
 def _stamp(ms):
@@ -214,11 +292,11 @@ def _owned_row(conn, task_id, gateway, fence):
 
 
 def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
-    """Append one change-only observation and its thread comment.
+    """Append one change-only observation and its thread comment, or store a volatile-only one (``_write``).
 
     ``fence`` (from ``snapshot``) checks the row the Board request was made from instead of the current one: a
     refusal answered against that row stays recorded after a feed pull moved the row on, exactly as it was before
-    the placement tick learned to pull on ``not_claimable``.
+    the placement tick learned to pull on ``not_claimable``. Returns whether an event was appended.
     """
     from hermes_cli import kanban_db as kb
 
@@ -227,14 +305,21 @@ def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
         if row is None:
             return False
         value = {**value, "lifecycle": fence["lifecycle"] if fence is not None else _lifecycle(conn, task_id, row)}
-        previous = _stored(conn, task_id)
-        if previous and _signature(previous) == _signature(value):
+        newest = _newest(conn, task_id)
+        if newest and _signature(newest) == _signature(value):
             return False
-        previous_ms = (previous or {}).get("recorded_at_ms", 0)
+        previous_ms = (newest or {}).get("recorded_at_ms", 0)
         recorded_ms = max(int(time.time() * 1000), int(previous_ms) + 1 if _number(previous_ms) else 0)
         value = {**value, "recorded_at_ms": recorded_ms}
+        event, commented = _write(_stored(conn, task_id), value, recorded_ms)
+        if not event:
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {LATEST_TABLE} (task_id TEXT PRIMARY KEY "
+                         "REFERENCES tasks(id) ON DELETE CASCADE, payload TEXT NOT NULL)")
+            conn.execute(f"INSERT OR REPLACE INTO {LATEST_TABLE} (task_id, payload) VALUES (?, ?)",
+                         (task_id, json.dumps(value, ensure_ascii=False)))
+            return False
         kb._append_event(conn, task_id, EVENT, value)
-        if comment:  # a card no pool worker can run gets the owner's repin notice as its thread comment instead
+        if comment and commented:  # a card no pool worker can run gets the owner's repin notice as its comment
             kb.add_comment(conn, task_id, "worker-placement", describe(value), origin_gateway=gateway)
         return True
 
