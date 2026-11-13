@@ -177,6 +177,22 @@ def _index(path: Path) -> tuple[str, dict]:
     return me, index
 
 
+def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple) -> tuple[str, dict[str, Any], dict]:
+    """``(me, {sid: [card, ...]}, observed)`` for one chat: the host's published copy when it is of the replica's
+    current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]"""
+    from tui_gateway import kanban_remote_index as published
+    from tui_gateway.kanban_replica_observer import fingerprint
+
+    ledger_file = Path(ledger) if ledger is not None else ledger_path()
+    stamp = fingerprint(path)
+    hit = published.lookup(path, ledger_file, stamp, profile, sids)
+    if hit is not None:
+        return hit
+    me, index, observed = published.compute(path, ledger, ledger_file, now,
+                                            published.current_key(path, ledger_file, stamp))
+    return me, {sid: index.get((profile, sid), ()) for sid in sids}, observed
+
+
 def _linked_chats(task: dict, me: str) -> list[tuple[str, str]]:
     """``(profile, session)`` of this gateway's chats a remote card notifies: its unreleased shepherd links, and
     the origin chat of every origin binding (``kanban_origin_adopt``) naming this gateway. [daveey]
@@ -600,13 +616,12 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
     now = time.time() if now is None else now
     profile = profile or "default"
     try:
-        with _lock:
-            me, index = _index(path)
-        from tui_gateway.kanban_remote_observations import observe
-        fresh_times = observe(path, ledger, now)
-        cards = []
-        for sid in (session_key, *lineage):
-            cards.extend(dict(c, sid=sid) for c in index.get((profile, sid), ()))
+        sids = (session_key, *lineage)
+        if hub_db is None and ledger is None:  # the host's own replica: keep its published copy current
+            from tui_gateway.kanban_remote_index import ensure_holder
+            ensure_holder("serve")  # once per process; a gateway claimed its own role earlier
+        me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids)
+        cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
             return []
         out: list[dict] = []
@@ -859,6 +874,8 @@ def _reset_for_tests() -> None:
     from tui_gateway.remote_sweep_projection import reset as reset_projection
 
     from tui_gateway.remote_index_projection import reset as reset_index_projection
+    from tui_gateway.kanban_remote_index import reset as reset_published_index
+    reset_published_index()
     reset_projection()
     reset_index_projection()
     global _index_memo, _sweep_memo

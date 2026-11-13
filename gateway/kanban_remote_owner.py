@@ -173,6 +173,8 @@ def _collect(runner: Any, authority: Any, lives: list) -> list[tuple]:
     _reconcile(db)
     if not krn.hub_db_path().is_file():
         return []
+    from tui_gateway.kanban_remote_index import ensure_holder
+    ensure_holder("gateway")  # the gateway outranks Desktop backends for the remote index refresher lease
     profile = _profile(runner, authority)
     out = []
     for logical, live in lives:
