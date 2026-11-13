@@ -20,6 +20,14 @@ def _local(conn, table, uid):
     return row
 
 
+def _release_run(op):
+    """The run uid a rejected lease ``release`` op tried to end, or None for any other op."""
+    if op["table_name"] != "tasks" or op["op"] != "release":
+        return None
+    run = json.loads(op["fields"]).get("run_uid")
+    return run if isinstance(run, str) and run else None
+
+
 def _inputs(conn, rejected):
     """Include translated references and pending/tombstone guards in the compare-and-delete snapshot."""
     from hermes_cli import kanban_sync_client as client
@@ -31,6 +39,11 @@ def _inputs(conn, rejected):
     identities = {(table, uid)}
     if task:
         identities.add(("tasks", task))
+    run = _release_run(rejected)
+    run_row = None
+    if run:
+        identities.add(("task_runs", run))
+        run_row = conn.execute("SELECT * FROM task_runs WHERE uid=?", (run,)).fetchone()
     pending, tombs = [], []
     for tab, key in sorted(identities):
         pending.extend(tuple(r) for r in conn.execute(
@@ -42,7 +55,7 @@ def _inputs(conn, rejected):
         "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=?", (task,))] if task else []
     return {"row": dict(row) if row else None, "fields": fields, "task": task,
             "parent": dict(parent) if parent else None, "parent_ops": parent_ops,
-            "pending": pending, "tombstones": tombs}
+            "pending": pending, "tombstones": tombs, "run": dict(run_row) if run_row else None}
 
 
 def _evidence(hub, board, table, uid):
@@ -53,10 +66,32 @@ def _evidence(hub, board, table, uid):
     return e
 
 
-def _classify(op, before, evidence, parent_evidence):
+def _moot_release(op, before, evidence, run_evidence):
+    """A ``lease_lost`` release is moot once the Board itself ended that run and no longer leases the card to it.
+
+    The Board refuses a release from a run that does not hold the lease, so the op can never apply; the run's
+    authoritative end (reclaim, owner restart, another release) already won. Proof needs fresh rows for both the
+    card and the run, the run belonging to that card, and no local copy of the run that is still open."""
+    run = _release_run(op)
+    if not run or run_evidence is None or not str(op.get("last_error") or "").startswith("lease_lost"):
+        return False
+    task_row, run_row, local_run = evidence.get("row"), run_evidence.get("row"), before.get("run")
+    return bool(
+        evidence.get("state") == "live" and task_row and task_row.get("uid") == op["row_uid"]
+        and run not in (task_row.get("lease_run_uid"), task_row.get("current_run_uid"))
+        and run_evidence.get("state") == "live" and run_row and run_row.get("uid") == run
+        and run_row.get("task_id") == op["row_uid"] and run_row.get("ended_at") is not None
+        and (local_run is None or local_run.get("ended_at") is not None))
+
+
+def _classify(op, before, evidence, parent_evidence, run_evidence=None):
     from hermes_cli import kanban_sync_client as client
     if before["pending"] or before["tombstones"]:
         return "unresolved", "pending local work or local tombstone"
+    if op["op"] == "release":
+        if _moot_release(op, before, evidence, run_evidence):
+            return "moot", "authoritative run already ended and does not hold the card's lease; nothing to release"
+        return "unresolved", "no proof the released run already ended off this card's lease"
     fields = client._wire_fields(op["table_name"], json.loads(op["fields"]))
     remote, local = evidence.get("row"), before["row"]
     if op["op"] in ("upsert", "import") and evidence.get("state") == "live" and remote and local:
@@ -104,13 +139,17 @@ def resolve_rejections(conn: sqlite3.Connection, hub, board: str) -> list[dict]:
             evidence = _evidence(hub, board, op["table_name"], op["row_uid"])
             parent = _evidence(hub, board, "tasks", before["task"]) if (
                 op["table_name"] == "task_chat_links" and before["task"]) else None
+            run_uid = _release_run(op)
+            run = _evidence(hub, board, "task_runs", run_uid) if run_uid else None
         except (HubError, SyncUnavailable, OSError, AttributeError, ValueError) as exc:
             report["proof"] = f"authoritative evidence unavailable: {exc}"
             continue
         report["evidence"] = evidence
         if parent:
             report["parent_evidence"] = parent
-        classification, proof = _classify(op, before, evidence, parent)
+        if run:
+            report["run_evidence"] = run
+        classification, proof = _classify(op, before, evidence, parent, run)
         report.update(classification=classification, proof=proof)
         if classification == "unresolved":
             continue
