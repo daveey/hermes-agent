@@ -280,6 +280,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self.home_path = Path(self.scope_key)
         self._discovery_lock = threading.RLock()
         self._discovered: bool = False
+        self._nowait_last: dict[str, frozenset[str]] = {}  # [daveey] last live *_nowait answers (_nowait_plugin_set)
         # [daveey] Inputs the last completed sweep read (``plugins_snapshot.fingerprint`` / ``precheck``,
         # taken pre-sweep): ``refresh_if_inputs_changed`` compares against them at a session boundary.
         self._swept_fingerprint: Optional[str] = None
@@ -955,23 +956,53 @@ def _join_background_discovery(timeout: float = 30.0) -> bool:
 
 def _nowait_plugin_set(cache_field: str, live: Callable[[PluginManager], set[str]]) -> set[str]:
     """Shared body of the ``*_nowait`` probes: an active recorded snapshot (plugins_snapshot.serving),
-    else live registry, else last launch's cache, else block."""
+    else live registry, else this process's last live answer or last launch's cache, else block.
+
+    [daveey] A sweep another thread holds (a force reload unloads first, so ``_discovered`` is False
+    meanwhile) is never waited on: that parked the gateway loop 36 s (kanban_run -> build_policy).
+    Blocking stays only for a process with no known set, off the event loop."""
     snapshot = plugins_snapshot.active()
     if snapshot is not None:
         return set(snapshot.toolset_keys if cache_field == "toolset_keys" else snapshot.portable_mcp)
     manager = get_plugin_manager()
     t = _background_discovery_thread
     in_flight = t is not None and t.is_alive()
-    if manager._discovered and not in_flight:
-        return live(manager)
-    if in_flight:
-        with suppress(Exception):
-            blob = json.loads(plugins_snapshot._cache_path(get_hermes_home()).read_text(encoding="utf-8-sig"))
-            values = blob.get(cache_field) if isinstance(blob, dict) else None
-            if isinstance(values, list) and all(isinstance(v, str) for v in values):
-                return set(values)
+    remembered = getattr(manager, "_nowait_last", None)
+    if not isinstance(remembered, dict):  # test doubles: remember nothing
+        remembered = {}
+    lock = getattr(manager, "_discovery_lock", None)
+    if not in_flight and (lock is None or lock.acquire(blocking=False)):
+        try:  # RLock: the sweep's own thread re-enters here and reads its partial registry, as before
+            if manager._discovered:
+                values = set(live(manager))
+                remembered[cache_field] = frozenset(values)
+                return values
+        finally:
+            if lock is not None:
+                lock.release()
+        if cache_field not in remembered or not _on_event_loop():
+            discover_plugins()  # idle and undiscovered: first sweep, or a retry after a failed one
+            return live(manager)
+    # A sweep is busy elsewhere (or a retry would run on the event loop): serve the last known set.
+    if cache_field in remembered:
+        return set(remembered[cache_field])
+    with suppress(Exception):
+        blob = json.loads(plugins_snapshot._cache_path(get_hermes_home()).read_text(encoding="utf-8-sig"))
+        values = blob.get(cache_field) if isinstance(blob, dict) else None
+        if isinstance(values, list) and all(isinstance(v, str) for v in values):
+            return set(values)
+    if _on_event_loop():
+        return set()  # nothing known yet; the next probe after the sweep reads the live set
     discover_plugins()
     return live(manager)
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def get_plugin_toolset_keys_nowait() -> set[str]:
