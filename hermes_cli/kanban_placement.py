@@ -637,11 +637,14 @@ _EVIDENCE = re.compile(re.escape(EVIDENCE_OPEN) + r".*?" + re.escape(EVIDENCE_CL
 # The "Existing work checked" record ask-gate's superseding_work rule asks every creator to write is evidence too: a
 # past search ("`hermes-hub tasks` (all boards) had no open card ..."), never work the card must do. Scanned as work,
 # its `hermes-hub tasks` read as a home coordination action, so two MacBook cards (t_01a1d5386cb55abf,
-# t_01a1d54acc8c8e54, 11-13) could run nowhere. A heading section runs to the next heading; a bold-label paragraph
-# to the next blank line. [daveey]
+# t_01a1d54acc8c8e54, 11-13) could run nowhere. Only the record's first paragraph is stripped: a heading, any blank
+# lines after it, then lines up to the next blank line or heading; a bold label runs to the next blank line. Running a
+# heading section to the next heading also swallowed later heading-less steps ("None open.\n\nThen open Chrome on
+# the MacBook"), hiding their host markers (fail-open, PR #2339 review). A longer record is scanned: fails closed.
+_RECORD_LINE = r"\n(?![ \t]*$|[ \t]*#{1,6}[ \t]).*"
 _EXISTING_WORK = re.compile(
-    r"^[ \t]*(?:#{1,6}[ \t]+Existing work checked\b[^\n]*(?:\n(?![ \t]*#{1,6}[ \t]).*)*"
-    r"|\*\*Existing work checked\b[^\n]*(?:\n(?![ \t]*\n|[ \t]*#{1,6}[ \t]).*)*)",
+    r"^[ \t]*(?:#{1,6}[ \t]+Existing work checked\b[^\n]*(?:\n[ \t]*$)*(?:" + _RECORD_LINE + r")*"
+    r"|\*\*Existing work checked\b[^\n]*(?:" + _RECORD_LINE + r")*)",
     re.IGNORECASE | re.MULTILINE)
 
 

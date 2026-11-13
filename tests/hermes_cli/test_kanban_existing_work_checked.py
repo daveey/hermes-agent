@@ -6,7 +6,8 @@
 coordination action, so ``queue_decision`` returned None (``required_labels`` None). ``creation_decision`` then fell
 back to worker-first-v1 from the MacBook's stale ``worker_pools`` list, and every reserved worker's
 ``claim_refusal`` refused the same text. Three fixes, one test group each: the record is evidence, not work; a
-coordination-refused card is never enrolled; a ``worker_queue`` gateway never falls back to worker-first.
+coordination-refused card is never enrolled; ``creation_decision`` on a ``worker_queue`` gateway never falls back to
+worker-first (the hub's admission judge may still route a card it denies worker-first via ``pool_route``).
 """
 from __future__ import annotations
 
@@ -64,6 +65,18 @@ def test_an_existing_work_record_is_stripped_up_to_the_next_heading_or_paragraph
     assert "hermes-hub" not in text and "Summarise the CI failures." in text
 
 
+@pytest.mark.parametrize("body", [
+    "## Existing work checked\nNone open.\n\nThen open Chrome on the MacBook and sign in.\n",
+    "## Existing work checked\n\nNone open.\n\nThen open Chrome on the MacBook and sign in.\n",
+    "## Existing work checked\nNone open.\n\n- Then open Chrome on the MacBook and sign in.\n",
+])
+def test_heading_less_text_after_the_record_paragraph_is_still_scanned(body):
+    # RED before: the heading section ran to the next heading, so the trailing step vanished (fail-open).
+    text = kp.without_evidence(body)
+    assert "None open." not in text and "open Chrome on the MacBook" in text
+    assert kp.portable_reason(_args(body, title="sign in")) == "local marker"  # the host marker still binds
+
+
 def test_the_same_action_outside_the_record_still_stays_home():
     body = BODY.replace("## Decided fix\n", "## Decided fix\nRun `hermes-hub tasks` to list every board.\n")
     assert coordination.required_labels(_args(body), POOLS) is None
@@ -101,7 +114,7 @@ def test_a_claimable_card_still_enrolls_on_a_pool_gateway_without_a_queue():
     assert out is not None and out["placement_policy"] == wp.POLICY, out
 
 
-# --- a worker_queue gateway never falls back to worker-first ----------------------------------------------------
+# --- creation_decision on a worker_queue gateway never falls back to worker-first -------------------------------
 
 def test_a_queue_gateway_keeps_a_queue_miss_home_instead_of_worker_first():
     cfg = {**POOLS, **QUEUE}

@@ -167,8 +167,9 @@ def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, q
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
     if placement._Cfg(cfg).queue_label(gateway):
-        # A worker_queue gateway never falls back to worker-first: a queue miss (no live labelled machine, a
-        # non-primary board) stays home under legacy routing. The fallback reserved one machine at a time from a
+        # On a worker_queue gateway this decision never falls back to worker-first: a queue miss (no live labelled
+        # machine, a non-primary board) stays home under legacy routing (the hub's admission judge may still route a
+        # card it denies worker-first via pool_route). The fallback reserved one machine at a time from a
         # stale worker_pools list (MacBook t_01a1d5386cb55abf: worker-2..4 only, 140 reservations). [daveey]
         return None
     pools = cfg.get("worker_pools")
@@ -232,7 +233,9 @@ def db_placement(fields):
 
     Same outcome as the front doors: a portable card of a ``worker_queue`` gateway queues for the pool label on a
     Board primary (``runs_on`` is a Board placement field); a queue miss there, or off a primary, stays home
-    (:func:`creation_decision` never falls back to worker-first on a queue gateway). Only a gateway without a
+    (:func:`creation_decision` itself never falls back to worker-first on a queue gateway; on the hub a queue miss
+    goes to the admission judge, and a card it denies can still get worker-first from
+    :func:`kanban_hub_admission_placement.pool_route`). Only a gateway without a
     ``worker_queue`` keeps worker-pool enrollment. Judging the queue but keeping only ``placement_policy`` (11-12)
     dropped both. [daveey]
     """
