@@ -431,21 +431,32 @@ def test_desktop_row_with_its_providers_native_endpoint_still_moves_off_the_wall
     assert agent.model_routing['walled_from']['model'] == ASTRA
 
 
-@pytest.mark.parametrize('case', ['explicit switch', 'short wall', 'no session id', 'own endpoint', 'own key'])
-def test_desktop_wall_still_refuses_when_the_pin_must_not_move(home, case):
+@pytest.mark.parametrize('case', ['explicit switch', 'short wall', 'no session id', 'own endpoint',
+                                  'other provider endpoint', 'own key'])
+def test_desktop_wall_still_refuses_when_the_pin_must_not_move(home, monkeypatch, case):
     """Controls: David's own switch, a wall under the reroute threshold, a build with no session identity
-    (the readiness probe) and a session that overrides its endpoint or key all keep the refusal."""
+    (the readiness probe) and a session that overrides its endpoint or key all keep the refusal. A KNOWN
+    other provider's stock endpoint (Anthropic's URL on a Codex row) is an override too, not only an unknown
+    host. A refusal the session's own key or endpoint holds is logged with that reason, as the gateway does."""
     from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     from hermes_cli.auth_constants import DEFAULT_CODEX_BASE_URL
+    from hermes_cli.route_identity import provider_owns_route
     from tui_gateway.server import _resolve_runtime_or_defer_wall
+    logged = []
+    monkeypatch.setattr('agent.model_routing_walls.log_not_deferred', lambda wall, reason: logged.append(reason))
     _legacy_row(home, dict(LEGACY_ECHO, reason='explicit-switch') if case == 'explicit switch' else LEGACY_ECHO)
     _wall(home, 'openai-codex', ASTRA, 2 if case == 'short wall' else 33)
     overrides = {'own endpoint': {'base_url': 'https://proxy.example/v1'},
+                 'other provider endpoint': {'base_url': 'https://api.anthropic.com'},
                  'own key': {'base_url': DEFAULT_CODEX_BASE_URL, 'api_key': '***'}}.get(case, {})
+    if case == 'other provider endpoint':  # known, and owned by someone else: not the "unknown host" branch
+        assert provider_owns_route('openai-codex', overrides['base_url'], {}) is False
     session = None if case == 'no session id' else SID
     with pytest.raises(SubscriptionQuotaUnavailable):
         _resolve_runtime_or_defer_wall({'requested': 'openai-codex', 'target_model': ASTRA}, ASTRA,
                                        'openai-codex', overrides, session)
+    expected = {'own endpoint': ['endpoint'], 'other provider endpoint': ['endpoint'], 'own key': ['key']}
+    assert [r for r in logged if r in ('key', 'endpoint')] == expected.get(case, [])
 
 
 @pytest.mark.parametrize('session', [None, ''], ids=['none', 'empty'])
