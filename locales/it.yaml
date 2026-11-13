@@ -3309,6 +3309,7 @@ cli:
     removed: "➖ Rimossi: {names}"
     tools_available: "🔧 {tools} strumenti disponibili da {servers} server"
     agent_updated: "✅ Agente aggiornato — {count} strumenti disponibili"
+    agent_updated_count_unknown: "✅ MCP ricaricato — numero di strumenti sconosciuto ({error})"
   reload_skills:
     reloading: "🔄 Ricaricamento delle skill..."
     total: "📚 {count} skill disponibili"
