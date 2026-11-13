@@ -214,11 +214,14 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
 
     The launch home (``launch_home``, default ``get_process_hermes_home()``) gets its launch secret
     scope with no home override or terminal scope (an enclosing secondary's are unbound for the
-    body), or the full :func:`launch_profile_runtime_scope` once the process multiplexes. Any other
+    body), or the full :func:`launch_profile_runtime_scope` once the process multiplexes. Inside a
+    bound scope (which refuses those unbinds) it binds the launch profile's whole scope. Any other
     home gets only its own files, stamped as foreign. No external-source hydration.
     """
+    from agent.runtime_scope import bind_state, scope_for_profile
     from agent.secret_scope import build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope
     from hermes_constants import get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from hermes_scope import current_scope
     from tools.terminal_scope import install_profile_terminal_scope, reset_terminal_scope, set_terminal_scope
 
     home = Path(home)
@@ -227,6 +230,13 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
         if home.resolve() == launch.resolve():
             if is_multiplex_active():
                 stack.enter_context(launch_profile_runtime_scope(launch))
+            elif current_scope() is not None:
+                # A bound scope (kanban dispatch, a scoped turn) refuses the unbinds below: bind the
+                # launch profile whole instead, from the LIVE env (single-profile: freezing it here
+                # would capture it before activation, see ``_launch_env``).
+                stack.enter_context(bind_state(
+                    scope_for_profile(launch), secrets=launch_secret_scope(launch), stamp_home=False,
+                    env_overlay={k: v for k, v in _launch_env().items() if k.startswith("TERMINAL_")}))
             else:
                 # Unbind an enclosing secondary's home and terminal, or the launch secrets would
                 # pair with that profile's config. Unset resolves to the process home, which is the

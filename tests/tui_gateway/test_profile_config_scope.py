@@ -70,3 +70,39 @@ def test_the_launch_home_keeps_the_launch_rules(homes):
         else:
             assert (get_hermes_home_override(), get_terminal_scope()) == (None, None)
     assert (get_hermes_home_override(), current_secret_scope(), get_terminal_scope()) == (None, None, None)
+
+
+@pytest.mark.parametrize("bound", ["launch", "work"])
+def test_the_launch_home_inside_a_bound_scope_binds_the_launch_scope(homes, bound):
+    """A kanban dispatch or scoped gateway turn binds a whole profile scope (``bind_profile_scope``);
+    unbinding its terminal policy is refused there, so the launch home binds its own scope."""
+    from agent.runtime_scope import bind_profile_scope
+    from hermes_scope import current_scope
+
+    launch, work, multiplex = homes
+    frozen_before = policy._snapshot
+    with bind_profile_scope(launch if bound == "launch" else work, hydrate_secrets=False) as outer:
+        with policy.profile_config_scope(launch, launch_home=launch):
+            assert Path(current_scope().agent) == launch
+            assert get_hermes_home() == launch
+            assert current_secret_scope_home() is None
+            assert _secrets() == {"LAUNCH_FILE_KEY": "launch-file", "LAUNCH_ENV_ONLY": "env-only", "WORK_KEY": None,
+                                  "SHARED_KEY": "launch"}
+            assert (get_terminal_scope() or {}).get("TERMINAL_ENV") == "local"
+        assert current_scope() == outer
+        assert get_hermes_home() == (launch if bound == "launch" else work)
+    assert (get_hermes_home_override(), current_secret_scope(), get_terminal_scope()) == (None, None, None)
+    if bound == "work" and not multiplex:
+        assert policy._snapshot is frozen_before is None  # a single-profile host's launch env is not frozen early
+
+
+def test_a_secondary_home_inside_a_bound_launch_scope_gets_only_its_own_files(homes):
+    from agent.runtime_scope import bind_profile_scope
+
+    launch, work, _ = homes
+    with bind_profile_scope(launch, hydrate_secrets=False):
+        with policy.profile_config_scope(work, launch_home=launch):
+            assert get_hermes_home() == work
+            assert _secrets() == {"LAUNCH_FILE_KEY": None, "LAUNCH_ENV_ONLY": None, "WORK_KEY": "work", "SHARED_KEY": "work"}
+            assert (get_terminal_scope() or {}).get("TERMINAL_ENV") == "docker"
+        assert get_hermes_home() == launch
