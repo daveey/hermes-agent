@@ -28,7 +28,9 @@ log = logging.getLogger(__name__)
 # A restart gap is seconds; a copy older than this describes a backend that has been down, not one restarting.
 MAX_AGE_S = 300.0
 _PARTS = 11
-_VERSION = 1
+# [daveey] 2: lists and dicts are wrapped as ``{"l"}``/``{"d"}`` (PR #2200). A version 1 copy is ignored (one cold
+# start), and an older core ignores a version 2 copy instead of seeding the wrappers as data.
+_VERSION = 2
 
 
 # Off under the test harness, where many tests share one scope and a copy would leak between them; the copy's own
@@ -90,7 +92,7 @@ def _path(scope: tuple[str, ...]) -> Path:
 
 def _encode(value: Any) -> Any:
     # [daveey] Lists, tuples and nested dicts keep their own type, so a decoded copy equals the read exactly (the
-    # execution part's evidence dicts hold lists); a copy written before kept lists as "t" and still decodes.
+    # execution part's evidence dicts hold lists).
     if isinstance(value, (set, frozenset, tuple, list)):
         items = [_encode(v) for v in value]
         if isinstance(value, (set, frozenset)):

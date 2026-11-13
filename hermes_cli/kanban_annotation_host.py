@@ -20,7 +20,10 @@ for the same scope: ``kanban_session_activity._refresh_annotation_locked`` was 1
   so a source the fingerprint cannot see is never served from another process.
 * **Holder** (lease ``kanban-annotation``, ``host_loop_lease``): one process per home runs a demand-driven refresher
   for every scope it can reproduce that any process polled (``<scope>.demand`` touched) in the last
-  ``DEMAND_WINDOW_S``, so the copy is current when the others poll. A miss anywhere still refreshes locally as before:
+  ``DEMAND_WINDOW_S``, so the copy is current when the others poll. It reads each scope's demand inside that scope's
+  own context (a serve hosting several profiles keeps each profile's demand under its own home), and renews a copy
+  past ``HOLDER_REFRESH_AGE_S`` with a real read (bypassing the counts cache), so a fresh ``read_at`` is published
+  before adopters drop the copy at ``_COUNTS_MAX_AGE_S``. A miss anywhere still refreshes locally as before:
   no added latency, and ``HERMES_ANNOTATION_HOST_COPY=0`` turns publishing and adopting off.
 """
 
@@ -330,9 +333,6 @@ def _holder_pass() -> int:
     another input's, or aging. Returns how many it refreshed."""
     refreshed = 0
     for scope, ctx in list(_known.items()):
-        age = _disk.demand_age(scope)
-        if age is None or age > DEMAND_WINDOW_S:
-            continue
         try:
             refreshed += bool(ctx.run(_holder_refresh, scope))
         except Exception:  # health: allow BLE001 -- one scope's failed read must not stop the others
@@ -341,20 +341,27 @@ def _holder_pass() -> int:
 
 
 def _holder_refresh(scope: tuple[str, ...]) -> bool:
+    """Runs inside ``scope``'s own context: its demand file and copy live under that profile's home."""
     from hermes_cli import kanban_session_activity as _ksa
 
-    if _ksa._origin_scope() != scope:
-        return False  # this context no longer reproduces the scope
+    age = _disk.demand_age(scope)
+    if age is None or age > DEMAND_WINDOW_S or _ksa._origin_scope() != scope:
+        return False  # nobody polled it lately, or this context no longer reproduces the scope
     copy = _disk.load_host(scope)
-    if copy is not None and time.time() - copy[1] < HOLDER_REFRESH_AGE_S:
+    renew = copy is not None and time.time() - copy[1] >= HOLDER_REFRESH_AGE_S
+    if copy is not None and not renew:
         _local, _full, _wall, fp = _inputs_now(scope)
         if fp is not None and fp[0] == copy[0]:
             return False
     if not _ksa._annotate_refresh_lock.acquire(blocking=False):
         return False  # a poll here is already reading (it publishes)
+    # [daveey] An aging copy is renewed by a real read: the counts cache would answer the unchanged inputs with the
+    # old read, republishing its ``read_at`` until the copy expires for every adopter at ``_COUNTS_MAX_AGE_S``.
+    _ksa._revalidate.force_read.scope = scope if renew else None
     try:
         _ksa._refresh_annotation_locked(scope)
     finally:
+        _ksa._revalidate.force_read.scope = None
         _ksa._annotate_refresh_lock.release()
     return True
 

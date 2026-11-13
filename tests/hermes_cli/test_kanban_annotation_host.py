@@ -210,3 +210,55 @@ def test_holder_refreshes_a_demanded_scope_once_per_change(world):
     _other_process()
     after, _ = _poll()
     assert after[0]["kanban_active"] == 3 and world["calls"]["recompute"] == 2  # adopted the holder's read
+
+
+def test_holder_refreshes_a_scope_demanded_on_another_profile(world, tmp_path, monkeypatch):
+    """One serve hosts several profiles: a non-launch profile's demand file lives under that profile's home, so the
+    holder reads its age inside the scope's own context (PR #2200 review nit 1)."""
+    import contextvars
+
+    import hermes_scope
+    from hermes_constants import get_hermes_home_override
+
+    other_home = tmp_path / "profiles" / "other"
+    other_home.mkdir(parents=True)
+    other = ("annotation-host-test", "other")
+    monkeypatch.setattr(ksa, "_origin_scope",
+                        lambda: other if get_hermes_home_override() == str(other_home) else SCOPE)
+    token = hermes_scope.push_state(home=str(other_home))
+    try:
+        host._known[other] = contextvars.copy_context()
+        disk.touch_demand(other)
+        assert disk.demand_age(other) is not None
+    finally:
+        hermes_scope.pop_state(token)
+    assert disk.demand_age(other) is None  # the launch home holds no demand for it
+    assert host._holder_pass() == 1
+    token = hermes_scope.push_state(home=str(other_home))
+    try:
+        assert disk.load_host(other) is not None  # published under the other profile's home
+    finally:
+        hermes_scope.pop_state(token)
+
+
+def test_holder_renews_the_copy_before_adopters_would_miss(world):
+    """Under steady demand the holder publishes a fresh ``read_at`` before the copy reaches ``_COUNTS_MAX_AGE_S``:
+    its re-read at ``HOLDER_REFRESH_AGE_S`` really reads instead of taking the still-revalidatable counts cache and
+    republishing the old ``read_at`` (PR #2200 review nit 2)."""
+    import contextvars
+
+    host._known[SCOPE] = contextvars.copy_context()
+    disk.touch_demand(SCOPE)
+    assert host._holder_pass() == 1
+    ages = []
+    for _ in range(int(3 * ksa._COUNTS_MAX_AGE_S / host.HOLDER_INTERVAL_S)):
+        _advance(world, host.HOLDER_INTERVAL_S)
+        copy = disk.load_host(SCOPE)
+        assert copy is not None
+        ages.append(world["wall"] - copy[1])  # what an adopter polling now finds
+        host._holder_pass()
+    assert max(ages) <= host.HOLDER_REFRESH_AGE_S + host.HOLDER_INTERVAL_S < ksa._COUNTS_MAX_AGE_S, ages
+    reads = world["calls"]["recompute"]
+    _other_process()
+    _poll()
+    assert world["calls"]["recompute"] == reads  # an adopter at any moment finds a current copy
