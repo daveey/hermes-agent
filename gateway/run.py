@@ -1397,8 +1397,8 @@ _AUTO_CONTINUE_FALLBACK_PREFIX = "[System note: A new message"
 
 def _is_auto_continue_noise(content: Any) -> bool:
     """Return True if this user-message content is a gateway-injected auto-continue note (never replay it)."""
-    return isinstance(content, str) and content.startswith(
-        (_AUTO_CONTINUE_NOTE_PREFIX, _AUTO_CONTINUE_FALLBACK_PREFIX))
+    return isinstance(content, str) and content.startswith(  # + tui_gateway.update_pause.PAUSE_REPLAY_NOTE_PREFIX
+        (_AUTO_CONTINUE_NOTE_PREFIX, _AUTO_CONTINUE_FALLBACK_PREFIX, "[System note: A turn of yours paused for a"))
 
 
 def _strip_auto_continue_noise(content: Any) -> Any:

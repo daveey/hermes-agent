@@ -317,6 +317,24 @@ def clear_carried_turn_paused(home: Path | str, session_key: str) -> bool:
     return bool(session_key) and _update(home, session_key, mutate, "unstamp carried pause")
 
 
+def retire_paused_marker(home: Path | str, session_key: str, paused_at: float | None) -> bool:
+    """[daveey] Drop a core-update pause whose continuation was handed to the chat's owner or retired
+    (t_01a1d4920ce3cbf4). Compare and delete under one lock: only the pause stamped ``paused_at`` goes, so a
+    later turn's own marker or a newer pause of the same turn survives. True when it was removed."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict) or entry.get("reason") != "core_update_pause":
+            return None
+        try:
+            if paused_at is None or float(entry.get("paused_at") or 0.0) != float(paused_at):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return {k: v for k, v in entries.items() if k != session_key}
+
+    return bool(session_key) and _update(home, session_key, mutate, "retire pause")
+
+
 def mark_turn_parked(home: Path | str, session_key: str) -> bool:
     """[daveey] Restamp ``parked_at`` on a core-update pause its live writer keeps idle between drain
     windows (``update_pause.drain_retry_pending``). Reason, prompt and counters untouched."""

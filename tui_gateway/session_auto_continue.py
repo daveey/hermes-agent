@@ -265,9 +265,11 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if held:
         attempt, text = marker["attempts"], marker["prompt"]
     elif paused:
-        from tui_gateway.update_pause import pause_note
-        attempt, text = marker["attempts"], pause_note(marker["prompt"], marker.get("killed_jobs"),
-                                                 carried=bool(marker.get("carried_turn_paused")))
+        from tui_gateway.update_pause import later_turns_since, pause_note
+        attempt, text = marker["attempts"], pause_note(
+            marker["prompt"], marker.get("killed_jobs"), carried=bool(marker.get("carried_turn_paused")),
+            paused_at=marker.get("paused_at"),
+            later_turns=later_turns_since(session, session_key, marker.get("paused_at")))
     elif receipt:
         attempt, text = marker["attempts"], jobs_stopped_note(marker.get("killed_jobs"))
     else:
@@ -310,6 +312,16 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         slot_error = (_ensure_active_session_slot(sid, session, takeover_idle_only=True) if paused
                       else _ensure_active_session_slot(sid, session))
         if slot_error is not None:
+            try:
+                handed = paused and _paused_turn_to_ledger_owner(sid, session, session_key, marker, slot_error)
+            except Exception:  # health: allow BLE001 -- fall back to the backoff below; never strand the claim
+                logger.warning("core-update pause: hand-off of %s to its owner failed", session_key, exc_info=True)
+                handed = False
+            if handed:
+                with session["history_lock"]:
+                    session["running"] = False
+                    session["_auto_continue_scheduled"] = False
+                return
             logger.info("auto-continue for %s refused: session has another live owner", session_key)
             with session["history_lock"]:
                 session["running"] = False
@@ -364,6 +376,45 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                 "reader pid %s)", session_key, attempt, ", core-update pause" if paused else "", age,
                 marker.get("writer_pid"), writer_state, os.getpid())
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
+
+
+def _paused_turn_to_ledger_owner(sid: str, session: dict, session_key: str, marker: dict, refusal) -> bool:
+    """[daveey] A paused continuation refused because the gateway's durable ledger owns the chat
+    (t_01a1d4920ce3cbf4). This legacy backend can never run a turn while that ledger holds work, and the readers
+    defer to this live writer, so waiting only ends in a stale replay: on David-MBP the pause was refused every
+    2-3 min for 87 min while the gateway ran 9 turns. One owner, one FIFO (owner_forward): forwardable work gets
+    the continuation queued behind it in the owner's FIFO, which runs it exactly once; work no running gateway will
+    finish (``unknown``, no owner) retires the pause with the reason logged. Either way the marker goes.
+    False for any other refusal (a sibling backend mid-turn): the caller's backoff applies, as before."""
+    status = getattr(refusal, "ledger_status", None)
+    if status is None:
+        return False
+    from tui_gateway import owner_forward
+    from tui_gateway.update_pause import later_turns_since, pause_note, retire_paused_turn
+    if read_turn_marker(_session_home(session), session_key) != marker:
+        return True  # another path continued or replaced this pause meanwhile: nothing left to hand over
+    if status not in owner_forward.FORWARDABLE_LEDGER_STATES:
+        retire_paused_turn(session, session_key, marker, f"the gateway's ledger holds {status} work for the chat, "
+                           "which only Discard or a gateway resume resolves; nothing will run the continuation here")
+        return True
+    # It runs after the owner's queued turns, so it is never worded as the chat's previous turn.
+    text = pause_note(marker["prompt"], marker.get("killed_jobs"), carried=bool(marker.get("carried_turn_paused")),
+                      paused_at=marker.get("paused_at"), queued=True,
+                      later_turns=later_turns_since(session, session_key, marker.get("paused_at")))
+    try:
+        receipt = owner_forward.forward_prompt(sid, session, text)
+    except owner_forward.OwnerUnconfirmed:
+        retire_paused_turn(session, session_key, marker, "went to the gateway that owns the chat, which did not "
+                           "confirm it in time (it may be queued there)")
+        return True
+    except Exception as exc:  # health: allow BLE001 -- every owner failure is the same named, logged retirement
+        why = str(exc) if isinstance(exc, owner_forward.OwnerUnavailable) else type(exc).__name__
+        retire_paused_turn(session, session_key, marker, f"the gateway owns the chat ({status} work in its ledger) "
+                           f"and did not take the continuation: {why}")
+        return True
+    retire_paused_turn(session, session_key, marker, "queued in the FIFO of the gateway that owns the chat "
+                       f"(admission {receipt.get('admission_id')}); it runs there after the current turn", handed=True)
+    return True
 
 
 _KICKOFF_MARKER_INPUTS = ("_auto_continue_attempt", "_auto_continue_prompt", "_auto_continue_pauses",
