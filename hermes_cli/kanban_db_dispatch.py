@@ -2305,11 +2305,11 @@ def _dispatch_once_locked(
             sweep_stale_triage(conn, default_assignee=_resolve_default_assignee(default_assignee))
         except Exception:
             _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
-    _kb._sync.worker_pickup(conn, pickup_budget(result, spawn_budget), dry_run, _profile_exists_fn)  # worker node
+    unjudged = _kb._sync.worker_pickup(conn, pickup_budget(result, spawn_budget), dry_run, _profile_exists_fn) or ()
     # Cards this machine cannot lease (runs_on for another machine, ...) are never candidates: before 10-28 a
     # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
     # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
-    all_ready = lane_rows(conn, "ready")
+    all_ready = [row for row in lane_rows(conn, "ready") if row["id"] not in unjudged]  # hub: judged next tick
     from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
     # Review rows are enumerated up front so the budget split can see whether

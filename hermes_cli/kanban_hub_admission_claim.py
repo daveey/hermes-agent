@@ -16,6 +16,10 @@ every hub run passes, so before the hub claims a ready, label-less card with no 
   wake_check, or no worker queue fits): the verdict carries ``kept: <reason>`` and the card is claimed as before;
 * judge unavailable: claimed as before, warning logged, nothing recorded (judged at its next ready). Failing open
   here keeps a judge outage from freezing the hub; only pre-gate cards reach this path.
+* deferred (``Counts.deferred_ids``, left out of this tick's claims and judged next tick): a card edited while the
+  judge ran (its verdict belongs to a stale snapshot, so none is recorded), and every card past
+  :data:`MAX_JUDGED_PER_TICK` judge calls (each may take the judge's 30 s timeout; a ~27-card backlog at rollout
+  would hold that tick's claims for minutes). Neither is ever claimed unjudged.
 
 A card with any verdict (forced or skipped included) makes no model call. :func:`unjudged_claims` is the
 detector: this gateway's claims of a card that had no verdict yet (``hermes doctor`` reports it on the hub).
@@ -27,7 +31,7 @@ import logging
 import re
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
@@ -35,6 +39,7 @@ _log = logging.getLogger(__name__)
 ENTRY = "claim"
 NO_QUEUE = "no worker queue fits"
 WINDOW_SECONDS = 7 * 86400
+MAX_JUDGED_PER_TICK = 3  # judge calls per dispatcher tick; the rest wait, unclaimed, for the next tick
 # A wake_check that reads hub-local state (Hermes home, a hub worktree) is probed where the card lives.
 _HUB_PATH = r"(?:~|\$HOME|\$\{HOME\}|/home/[^/\s]+)/\.hermes/"
 
@@ -46,10 +51,16 @@ class Counts:
     moved: int = 0
     kept: int = 0
     unavailable: int = 0
+    deferred: int = 0
+    deferred_ids: frozenset = field(default_factory=frozenset)  # not claimable this tick: judged next tick
+
+    def defer(self, tid: str) -> None:
+        self.deferred += 1
+        self.deferred_ids = self.deferred_ids | {tid}
 
     def line(self) -> str:
         return ("hub admission: claim screen judged={judged} denied={denied} moved={moved} kept={kept} "
-                "unavailable={unavailable}").format(**asdict(self))
+                "unavailable={unavailable} deferred={deferred}").format(**asdict(self))
 
 
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -90,8 +101,9 @@ def _event_head(conn: sqlite3.Connection, tid: str) -> int:
     return conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ?", (tid,)).fetchone()[0]
 
 
-def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None) -> Counts:
-    """Judge this hub's ready, label-less, unjudged cards before the claim pass; see the module docstring."""
+def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int = MAX_JUDGED_PER_TICK) -> Counts:
+    """Judge this hub's ready, label-less, unjudged cards before the claim pass; see the module docstring.
+    The caller must leave ``deferred_ids`` out of this tick's claims."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_hub_admission as judge
     from hermes_cli import kanban_hub_admission_pickup as pickup
@@ -105,6 +117,7 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None) -> Counts:
         return counts
     board = sync.board_slug_for_path(sync._db_key(conn) or "")
     down = False
+    calls = 0
     for card in _candidates(conn):
         tid = card["id"]
         event_head = _event_head(conn, tid)
@@ -113,6 +126,10 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None) -> Counts:
         if down:
             counts.unavailable += 1
             continue
+        if calls >= budget:
+            counts.defer(tid)
+            continue
+        calls += 1
         fields = pickup._fields(card, board)
         try:
             found = judge.admit({"title": fields["title"], "body": fields["body"]})
@@ -138,7 +155,9 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None) -> Counts:
         applied = _apply(conn, own, tid, audit, target, expected=card, event_head=event_head)
         if applied:
             counts.moved += 1
-        elif applied is False and "kept" in audit:
+        elif applied is None:
+            counts.defer(tid)  # edited while judged: no verdict, so never claimed unjudged this tick
+        elif "kept" in audit:
             counts.kept += 1
     if counts != Counts():
         _log.info(counts.line())
@@ -167,12 +186,14 @@ def _apply(conn: sqlite3.Connection, own: str, tid: str, audit: dict, target: Op
     return True
 
 
-def safe_screen(conn: sqlite3.Connection) -> None:
-    """Dispatcher seam: a failed screen never stops the tick (the cards are claimed as before)."""
+def safe_screen(conn: sqlite3.Connection) -> frozenset:
+    """Dispatcher seam: the ids this tick must not claim. A failed screen never stops the tick (the cards are
+    claimed as before)."""
     try:
-        screen(conn)
+        return screen(conn).deferred_ids
     except Exception:  # health: allow BLE001 -- claim-time admission is a backstop; local dispatch continues
         _log.warning("hub admission: claim screen failed", exc_info=True)
+        return frozenset()
 
 
 def unjudged_claims(conn: sqlite3.Connection, own: str, *, now: Optional[float] = None,

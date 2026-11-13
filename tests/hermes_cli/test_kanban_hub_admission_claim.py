@@ -270,6 +270,67 @@ def test_a_card_changed_while_judged_is_left_to_its_new_owner(gws, monkeypatch, 
     assert after == (before if "runs_on" not in change else '["linux"]'), change
 
 
+def _no_board_promotion(monkeypatch):
+    """A Board without the recovery endpoint: a deferred legacy card stays a hub candidate between ticks (the
+    fake Board has no ``recover``; with it, the sync round may promote a portable card to the worker queue)."""
+    from hermes_cli import kanban_placement_recovery as recovery
+    monkeypatch.setattr(recovery, "endpoint_available", lambda *a: False)
+
+
+def test_a_card_edited_while_judged_is_not_claimed_this_tick_and_is_judged_next_tick(gws, hub_judge, monkeypatch):
+    """The skipped verdict must not leave the card claimable unjudged in the same tick (review of #1637)."""
+    hub, _worker, svc = gws
+    _no_board_promotion(monkeypatch)
+    tid = _hub_card(hub)
+    fake = judge.admit
+
+    def edit_during_the_call(card, hub_reason=None):
+        if not hub_judge.calls:  # only the first call races an edit
+            hub.conn.execute("UPDATE tasks SET body = 'edited while judged' WHERE id = ?", (tid,))
+            hub.conn.commit()
+        return fake(card, hub_reason=hub_reason)
+    monkeypatch.setattr(judge, "admit", edit_during_the_call)
+    _tick(hub)
+    assert _holder(svc, tid) != HUB and kb.get_task(hub.conn, tid).status == "ready"
+    assert _events(hub.conn, tid, "hub_admission") == []  # no verdict for the stale snapshot
+    _tick(hub)  # judged on its new body, then claimed
+    assert [c["card"]["body"] for c in hub_judge.calls] == ["Portable repo work: edit, test, PR.",
+                                                            "edited while judged"]
+    [verdict] = _events(hub.conn, tid, "hub_admission")
+    assert verdict["admit"] is True and verdict["entry"] == "claim"
+    assert _holder(svc, tid) == HUB
+    hub.round()
+    assert tid not in [t for t, _at in hac.unjudged_claims(hub.conn, HUB)]
+
+
+def test_judge_calls_are_capped_per_tick_and_the_rest_wait_unclaimed(gws, hub_judge, monkeypatch):
+    hub, _worker, svc = gws
+    _no_board_promotion(monkeypatch)
+    n = hac.MAX_JUDGED_PER_TICK + 2
+    tids = [_hub_card(hub, title=f"backlog card {i}") for i in range(n)]
+    _tick(hub)
+    assert len(hub_judge.calls) == hac.MAX_JUDGED_PER_TICK
+    judged = {tid for tid in tids if _events(hub.conn, tid, "hub_admission")}
+    assert len(judged) == hac.MAX_JUDGED_PER_TICK
+    for tid in set(tids) - judged:  # over the budget: deferred, never claimed unjudged
+        assert _holder(svc, tid) != HUB and kb.get_task(hub.conn, tid).status == "ready", tid
+    _tick(hub)  # the deferred cards are judged on the next tick
+    assert len(hub_judge.calls) == n
+    assert all(_events(hub.conn, tid, "hub_admission") for tid in tids)
+    hub.round()
+    assert hac.unjudged_claims(hub.conn, HUB) == []
+
+
+def test_screen_reports_deferred_ids(gws, hub_judge):
+    hub, _worker, _svc = gws
+    tids = [_hub_card(hub, title=f"card {i}") for i in range(3)]
+    hub.enter()
+    counts = hac.screen(hub.conn, budget=1)
+    assert len(hub_judge.calls) == 1 and counts.judged == 1
+    assert counts.deferred == 2 and counts.deferred_ids == frozenset(tids[1:])
+    assert "deferred=2" in counts.line()
+
+
 @pytest.mark.parametrize("kind,payload", [
     ("scheduled", {"wake_check": "test -f ~/.hermes/cache/new-probe"}),
     ("hub_admission", {"admit": True, "entry": "move", "why": "new decision"}),
