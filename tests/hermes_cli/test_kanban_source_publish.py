@@ -6,6 +6,7 @@ PR-1 resolver tests). The Board is :class:`FakeSourceBoard`; the GitHub identity
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -197,6 +198,107 @@ def _pem(kind: str) -> str:
 @pytest.mark.parametrize("name", ["deploy/id_ed25519", "deploy/notes.txt", "deploy/server.cert"])
 def test_multiline_private_key_refused(card, name):
     commit(card.path, name, _pem("OPENSSH "))
+    _refused(card, "secret_scan_refused")
+
+
+def test_replace_graft_cannot_hide_a_pushed_commit(card):
+    """``git replace --graft`` makes a later commit look parentless to plain git; the push still sends the real
+    parent. The scan reads with replace refs off, so the secret commit A is scanned (review 5890513430)."""
+    base = git(card.path, "rev-parse", "HEAD")
+    commit(card.path, "config.py", f"KEY = '{SECRET}'\n")
+    head = commit(card.path, "config.py", "KEY = None\n")
+    git(card.path, "replace", "--graft", head, base)
+    _refused(card, "secret_scan_refused")
+
+
+def test_info_grafts_file_cannot_hide_a_pushed_commit(card):
+    base = git(card.path, "rev-parse", "HEAD")
+    commit(card.path, "config.py", f"KEY = '{SECRET}'\n")
+    head = commit(card.path, "config.py", "KEY = None\n")
+    common = Path(git(card.path, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    (common / "info").mkdir(exist_ok=True)
+    (common / "info" / "grafts").write_text(f"{head} {base}\n")
+    _refused(card, "secret_scan_refused")
+
+
+@pytest.mark.parametrize("line", ["++ token = {s}", "+++ token = {s}", "--- token = {s}", "@@ -1 +1 @@ {s}",
+                                  "diff --git a/x b/x {s}"])
+def test_added_line_that_looks_like_a_diff_header_is_scanned(card, line):
+    """Content is read as a raw blob, so a line shaped like a patch header is still content."""
+    commit(card.path, "notes.txt", "intro\n" + line.format(s=SECRET) + "\n")
+    _refused(card, "secret_scan_refused")
+
+
+@pytest.mark.parametrize("codec", ["utf-16", "utf-16-le", "utf-16-be", "utf-8-sig", "utf-32"])
+def test_non_utf8_text_encodings_are_scanned(card, codec):
+    (card.path / "wide.txt").write_bytes(f"token = {SECRET}\n".encode(codec))
+    git(card.path, "add", "wide.txt")
+    git(card.path, "commit", "-q", "-m", "wide")
+    _refused(card, "secret_scan_refused")
+
+
+def test_key_inside_binary_blob_is_scanned(card):
+    (card.path / "blob.bin").write_bytes(b"\x00\x01\xff\xfe" * 64 + _pem("RSA ").encode() + b"\x00\x9f" * 32)
+    git(card.path, "add", "blob.bin")
+    git(card.path, "commit", "-q", "-m", "bin")
+    _refused(card, "secret_scan_refused")
+
+
+def test_global_config_cannot_reshape_the_scan_or_push(card, world, monkeypatch):
+    """The scan and the push ignore global config (attributes file, hooks path); a global pre-push hook never runs."""
+    hooks = world.tmp / "global-hooks"
+    hooks.mkdir()
+    marker = world.tmp / "hook-ran"
+    (hooks / "pre-push").write_text(f"#!/bin/sh\ntouch {marker}\n")
+    (hooks / "pre-push").chmod(0o755)
+    (world.tmp / "attrs").write_text("* -diff binary\n")
+    gc = Path(os.environ["GIT_CONFIG_GLOBAL"])
+    gc.write_text(gc.read_text() + f"[core]\n\thooksPath = {hooks}\n\tattributesFile = {world.tmp / 'attrs'}\n")
+    head = commit(card.path, "feature.txt", "work")
+    assert card.receipt()["state"] == "published" and card.remote() == head
+    assert not marker.exists()
+
+
+def test_benign_unchanged_denylisted_file_on_base_is_not_refused(card, world):
+    """Only additions count: a base-tree ``.env.example`` carried unchanged in a new tree is not re-refused."""
+    author = world.tmp / "author"
+    commit(author, ".env.example", "PLACEHOLDER=1\n")
+    git(author, "push", "-q", "origin", "main")
+    git(card.path, "fetch", "-q", "origin")
+    git(card.path, "merge", "-q", "--ff-only", "origin/main")
+    head = commit(card.path, "feature.txt", "work")
+    assert card.receipt()["state"] == "published" and card.remote() == head
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_property_random_secret_in_any_new_object_is_refused(card, seed):
+    """A random credential placed in a new blob, a commit message or a path name, behind 0-3 benign commits and
+    then removed again, is always refused and never pushed."""
+    import random
+    rng = random.Random(seed)
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789"
+    secret = "sk-" + "".join(rng.choice(alphabet) for _ in range(rng.randint(24, 40)))
+    for i in range(rng.randint(0, 3)):
+        commit(card.path, f"pad{i}/f{rng.randint(0, 99)}.txt", f"benign {i}\n")
+    where = rng.choice(["blob", "message", "path", "deep-blob"])
+    folder = "/".join(f"d{rng.randint(0, 9)}" for _ in range(rng.randint(0, 3)))
+    prefix = f"{folder}/" if folder else ""
+    if where in ("blob", "deep-blob"):
+        name = f"{prefix}{'x/y/' if where == 'deep-blob' else ''}cfg{seed}.txt"
+        commit(card.path, name, "a\n" * rng.randint(0, 5) + f"key: {secret}\n" + "b\n" * rng.randint(0, 5))
+        commit(card.path, name, "redacted\n")
+    elif where == "message":
+        (card.path / f"m{seed}.txt").write_text("m")
+        git(card.path, "add", f"m{seed}.txt")
+        git(card.path, "commit", "-q", "-m", f"subject\n\nbody {secret} tail")
+    else:
+        name = f"{prefix}{secret}.txt"
+        (card.path / name).parent.mkdir(parents=True, exist_ok=True)
+        (card.path / name).write_text("plain\n")
+        git(card.path, "add", name)
+        git(card.path, "commit", "-q", "-m", "add a file")  # the message must not carry the name
+        git(card.path, "rm", "-q", name)
+        git(card.path, "commit", "-q", "-m", "drop")
     _refused(card, "secret_scan_refused")
 
 

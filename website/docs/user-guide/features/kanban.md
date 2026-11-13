@@ -727,8 +727,12 @@ exactly as it was.
 handoff, request changes, continue/move) first publishes the task branch: it
 must be the card's own branch (`wt/<task>` or `<slug>/<task>`, never a protected
 or shared one), clean, free of private ignored files, LFS and submodules, and
-every new commit passes a secret scan (diffs, messages and denylisted paths such
-as `.env*` or `*.pem`). The push is a hook-free fast-forward with
+every object the push would send passes a secret scan: each new blob's raw bytes
+(UTF-8, UTF-16/32 or binary), each new commit's message and each new path name,
+including denylisted names such as `.env*` or `*.pem`. The scan and the push run
+in one isolated git environment (no system or global config, replace refs,
+grafts, attributes or hooks), and the push sends the exact scanned commit as a
+fast-forward with
 `--force-with-lease`, after a lease renewal; the Board then records the new
 manifest. An unchanged branch publishes nothing. A refusal or timeout never stops
 the ending: custody simply stays `retained` on this machine and the event
