@@ -379,3 +379,63 @@ async def test_restart_cut_reports_the_attempts_awake_and_wall_clock(tmp_path, m
     flags = authority.pending_results[row['admission_id']]['result']['cron_job_flags']
     assert flags.get(RESTART_CUT_FLAG) is True
     assert flags.get(AWAKE_FLAG) == {'awake': 50.0, 'wall': 900.0}
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error_name', ['CronRunCancelled', 'CronShutdownInterrupted', 'RuntimeError'])
+async def test_requested_cron_stop_is_not_an_admitted_turn_failure(tmp_path, monkeypatch, caplog, error_name):
+    """A deliberate stop (remove_job / ``hermes cron cancel``: CronRunCancelled; this gateway's own
+    shutdown: CronShutdownInterrupted) already logs one ``cron.scheduler`` WARNING. The admitted turn
+    that carried it must not add ``ERROR gateway.session_authority: Admitted turn … failed`` with a
+    traceback; a real failure (lost ownership: a plain RuntimeError) keeps it. Composed through
+    ``_execute_claimed`` and the real ``session_cron.execute``; the turn still settles ``failed``."""
+    from contextlib import nullcontext
+    import json
+    import logging
+    from cron import cancellation, scheduler
+    from gateway import run, session_cron, session_finite
+    from gateway.session_authority import LiveSession, SessionAuthority
+    from gateway.session_contract import SessionRef
+    from hermes_state import SessionDB
+    from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    db = SessionDB(tmp_path / 'state.db')
+    db.create_session('s', source='cron')
+    authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id='p', instance_id='test', db=db,
+                                 epoch=begin_runtime_epoch(db, instance_id='test'))
+    live = authority.sessions['s'] = LiveSession(SimpleNamespace(platform=None, user_id='cron-owner'), 'route')
+    monkeypatch.setattr(run, '_profile_runtime_scope', lambda home: nullcontext())
+    error = getattr(cancellation, error_name, RuntimeError)
+
+    def run_job(job, *, extra_prompt, execution_id, cancel_event):
+        # run_job's own except-branch: the scheduler's message and log for the raised stop.
+        exc = error("Cron job 'probe' was stopped: job removed while running")
+        message = scheduler._job_error_message(exc)
+        if not scheduler._log_expected_stop('probe', message, exc):
+            scheduler.logger.error("Job '%s' failed: %s", 'probe', message)
+        return (False, 'doc', '', message)
+    monkeypatch.setattr(scheduler, 'run_job', run_job)
+    policy = SimpleNamespace(request_json=json.dumps({
+        'extra_prompt': None, 'request_id': 'cron:job:fire', 'cron_job': {'id': 'job', 'name': 'probe'}}))
+
+    async def execute_finite_admission(authority, ref, row):
+        return await session_cron.execute(authority, ref, row, policy)
+    monkeypatch.setattr(session_finite, 'execute_finite_admission', execute_finite_admission)
+    caplog.set_level(logging.DEBUG, logger='gateway.session_authority')
+
+    with db:
+        admit_session_input(db, epoch=authority.epoch, principal_id='cron-owner', session_id='s',
+                            request_id='cron:job:fire', payload={'text': ''})
+        row = claim_session_input(db, epoch=authority.epoch, session_id='s')
+        response, outcome = await authority._execute_claimed(SessionRef('p', 's'), live, row)
+    assert (response, outcome) == ('The admitted turn failed.', 'failed')
+    assert authority.pending_results[row['admission_id']]['result']['failed'] is True
+    records = [r for r in caplog.records if r.name == 'gateway.session_authority']
+    if error is RuntimeError:
+        assert [(r.levelno, bool(r.exc_info)) for r in records] == [(logging.ERROR, True)], records
+        return
+    assert len(records) <= 1, records
+    assert all(r.levelno <= logging.WARNING and not r.exc_info for r in records), records
+    assert all('failed' not in r.getMessage() for r in records), records

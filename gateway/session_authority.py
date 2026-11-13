@@ -1420,9 +1420,12 @@ class SessionAuthority:
                 return None, 'settled_unknown'
             self._pause(ref, 'unknown_execution')
             raise
-        except Exception:
+        except Exception as exc:
             import logging
-            logging.getLogger(__name__).exception('Admitted turn %s failed', row['admission_id'])
+            if getattr(exc, 'expected_stop', False):  # a requested/shutdown cron stop: no traceback
+                logging.getLogger(__name__).info('Admitted turn %s stopped: %s', row['admission_id'], exc)
+            else:
+                logging.getLogger(__name__).exception('Admitted turn %s failed', row['admission_id'])
             return 'The admitted turn failed.', 'failed'
 
     async def _drain(self, ref):
