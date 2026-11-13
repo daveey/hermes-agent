@@ -22,7 +22,7 @@ from gateway.session_runtime_workers import cron_turn_count, kanban_managed_coun
 # Only the update's post-grace Kanban wait: human turns retain their normal budget.
 CORE_UPDATE_KANBAN_WAIT_S = 15.0
 CORE_UPDATE_KANBAN_STOP_LEASH_S = 40.0  # 15 wait + 40 stop + 5 poll allowance = 60s admission
-# Under a checkpoint intent (``"checkpoint": true``) hermes-sync's instant drainer has already spent its own wait
+# Under an unfenced checkpoint intent that cuts cron (``_intent_is_checkpoint``) hermes-sync's instant drainer has already spent its own wait
 # on this work and decided to apply over it: the cards are preserved by the checkpoint and the cron runs are cut.
 # hermes-hub 2026-11-13: every instant swap sat the full 15 s here on a managed card that then restarted anyway
 # (journal 21:06:18 -> 21:06:33). A short settle only; the bounds above stay the upper limit.
@@ -113,14 +113,17 @@ class GatewayRestartWaitMixin:
         return False
 
     def _intent_is_checkpoint(self, intent: Optional[Path]) -> bool:
-        """The update intent is a negotiated checkpoint (``"checkpoint": true``): the drainer already waited and
+        """The update intent is an unfenced instant checkpoint that cuts cron: the drainer already waited and
         applies over the work left. Re-read each poll like ``_intent_cuts_cron``; missing or unreadable is False,
         which keeps the full wait."""
         if intent is None:
             return False
         with suppress(Exception):
             data = json.loads(Path(intent).read_text(encoding="utf-8-sig"))
-            return isinstance(data, dict) and data.get("checkpoint") is True
+            # The same shape gateway.restart.checkpoint_cron_grace_spent requires: an unfenced instant checkpoint
+            # that also cuts cron. A fenced (Mac) intent or a checkpoint without the cron cut keeps the full wait.
+            return (isinstance(data, dict) and data.get("kind") == "unfenced"
+                    and data.get("checkpoint") is True and data.get("cron_cut") is True)
         return False
 
     def _log_cut_cron_runs(self) -> None:

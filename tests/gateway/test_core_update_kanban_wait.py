@@ -52,8 +52,10 @@ def test_real_managed_counts_reach_the_short_wait(tmp_path):
 
 
 @pytest.mark.parametrize('body, expires_at', [
-    ('{"checkpoint": true, "cron_cut": true}', 2.0),   # the drainer already waited: short settle
-    ('{"checkpoint": false}', 15.0), ('{"cron_cut": true}', 15.0), ('{"checkpoint": "true"}', 15.0),
+    ('{"kind": "unfenced", "checkpoint": true, "cron_cut": true}', 2.0),   # the drainer already waited: short settle
+    ('{"kind": "fenced", "checkpoint": true, "cron_cut": true}', 15.0),    # a Mac's fenced intent keeps the wait
+    ('{"checkpoint": true, "cron_cut": true}', 15.0), ('{"kind": "unfenced", "checkpoint": true}', 15.0),
+    ('{"kind": "unfenced", "checkpoint": 1, "cron_cut": true}', 15.0), ('{"kind": "unfenced", "cron_cut": true}', 15.0),
     ('[]', 15.0), ('not json', 15.0), (None, 15.0)])   # anything else keeps the full wait
 def test_checkpoint_intent_shortens_only_the_kanban_wait(tmp_path, body, expires_at):
     from gateway.session_managed_worker import ManagedWorker
