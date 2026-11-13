@@ -216,7 +216,7 @@ of every suite that reads it.
 | ↳ `Run tests (1/2, 2/2)` | | always inside `tests.yml` | |
 | ↳ `e2e` | | `e2e` lane (release or dispatch) | every PR and every push to `main` |
 | ↳ `e2e-upgrade-plan`, `e2e-upgrade (shard)` | | `e2e_upgrade` lane (release or dispatch) | every PR and every push |
-| OS-specific tests | `tests-os.yml` | `python` or `desktop_updater` or `e2e` or `e2e_upgrade` | none of those |
+| OS-specific tests | `tests-os.yml` | **never in this fork** (`if: false`, no GitHub-hosted macOS/Windows runner); upstream: `python` or `desktop_updater` or `e2e` or `e2e_upgrade`. The macOS selection runs on a schedule instead: `macos-os-tests.yml` ([Scheduled monitors](#scheduled-monitors)) | always (fork) |
 | ↳ macOS (2 slices), Windows x64, Windows arm64 (2 slices) | | always inside `tests-os.yml`; the real Windows hand-off tests only with `desktop_updater` | |
 | ↳ Windows install + update E2E | `windows-install-update-e2e.yml` | `e2e_upgrade` (release or dispatch) | PRs and pushes |
 | ↳ Windows E2E (real processes) | | `e2e` (release or dispatch) | PRs and pushes |
@@ -366,6 +366,7 @@ branch protection.
 | `skills-index-freshness.yml` | every 4 h | dispatch | Upstream only. Opens an issue if `/docs/api/skills-index.json` is more than 26 h stale, missing, or a source collapsed. Also checks CORS on `/docs/api/plugins.json`. |
 | `docs-search-monitor.yml` | every 6 h at :17 | `workflow_run` after every **Deploy Site**; dispatch | Upstream only. Live Algolia and headless-browser probe of docs search. A red run is the alert. |
 | `osv-scanner.yml` | Mondays 09:00 | dispatch | OSV scan of `uv.lock`, `pnpm-lock.yaml` and the nested `package-lock.json` files. Results go to the Security tab. Advisory (does not fail on vulnerabilities). Intentionally not per-PR. |
+| `macos-os-tests.yml` | 00:37, 12:37 | dispatch; push `macos-os-probe/**` | The platforms("macos"/"posix") selection of `tests-os.yml`'s macOS row, on the mini's self-hosted runner (`hermes-state` label), because `tests-os` is off in this fork. Not a PR lane, not required. A Linux `gate` job (`scripts/ci/macos_os_tests_gate.py`) skips a scheduled slot while any mini job waits for the runner; dispatch is never gated. A red run is the alert (hub `ci_main_watch.py` SCHEDULED). |
 | `sandbox-image.yml` | Mondays 04:23 | PR (paths), `workflow_run` after Stable Release, dispatch | Upstream only. Rebuilds `nousresearch/hermes-sandbox:desktop` without layer cache so base-image and apt security fixes land between releases. See [standalone](#standalone-pr--main-checks). |
 
 ---
@@ -578,6 +579,7 @@ gh workflow run windows-install-update-e2e.yml --ref <branch> -f strict_acceptan
 | `label-rerun.yml` | Label rerun | PR labeled | none |
 | `lint.yml` | Lint (ruff + ty) | R | ci |
 | `live-providers.yml` | Live provider canaries | tags `v*`, dispatch | none |
+| `macos-os-tests.yml` | macOS OS-marked tests (scheduled) | cron 00:37/12:37, dispatch, push `macos-os-probe/**` | none |
 | `nix.yml` | Nix flake check | PR, main, call | stable |
 | `osv-scanner.yml` | OSV-Scanner | cron Mon 09:00, dispatch | none |
 | `plugin-catalog-ci.yml` | Plugin Catalog CI | PR (paths) | none |

@@ -1,0 +1,103 @@
+name: macOS OS-marked tests (scheduled)
+
+# Runs the platforms("macos") / platforms("posix") tests on a real macOS host,
+# on a schedule, against main. CI's tests-os lane (tests-os.yml) is off in this
+# fork (ci.yaml `if: false`: no GitHub-hosted macOS/Windows runner), so without
+# this nothing outside tests/hermes_state/ and the six Native memory paths ever
+# ran those tests on Darwin. Decision: kanban t_01a1d5b9382b24ad, option B
+# (scheduled, non-required; not a PR lane).
+#
+# Runner: the Mac mini's self-hosted runner (labels self-hosted, macOS,
+# hermes-state), the same one that serves the REQUIRED hermes_state (macOS)
+# and Native memory PR lanes and is already saturated by them. So this lane:
+#   * never runs on a pull request and is not part of "All required checks
+#     pass (v2)";
+#   * runs twice a day, 00:37 and 12:37 UTC (00-01 UTC had the fewest PR runs
+#     on 2026-11-11/12; agent PRs land around the clock, so the gate below,
+#     not the hour, is what keeps it out of the way);
+#   * yields: a `gate` job on Linux skips the slot when any job for the mini's
+#     label is already waiting for a runner (scripts/ci/macos_os_tests_gate.py);
+#     the next slot tries again. A manual dispatch is never gated;
+#   * runs at utility QoS with 2 workers, like the hermes_state lane.
+# A skipped slot leaves the run green with the test job skipped.
+#
+# Alerting: a red run is read by the hub's main-CI watcher (hermes-state
+# hosts/hermes-hub/ci-watch/ci_main_watch.py, SCHEDULED), which opens one ci-red
+# Kanban fix card per red streak. Renaming or moving this file needs that
+# SCHEDULED entry updated too.
+#
+# Probe the lane before merging a change to it by pushing a
+# `macos-os-probe/**` branch (deliberately not ci-probe/**, which also starts
+# the hermes_state lane on the same runner).
+
+on:
+  schedule:
+    - cron: '37 0,12 * * *'
+  workflow_dispatch:
+  push:
+    branches: ['macos-os-probe/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run at a time; a newer slot waits rather than cancelling a running one.
+  group: macos-os-tests-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Yield to waiting mini jobs
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci/macos_os_tests_gate.py
+          sparse-checkout-cone-mode: false
+      - name: Check the mini's queue
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/macos_os_tests_gate.py
+
+  macos-os-tests:
+    name: macOS-only tests (mini)
+    needs: gate
+    if: needs.gate.outputs.run == 'true' && github.repository == 'softmax-universe/daveey-hermes'
+    runs-on: [self-hosted, macOS, hermes-state]
+    # ~590 files at 2 workers on a shared host, plus cold environment provisioning.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Run macOS-marked tests
+        # Same selection as tests-os.yml's macOS row: the helper narrows which
+        # files are imported; `-m "platforms and not integration"` decides which
+        # tests run (conftest skips foreign-OS specs). run_tests.sh fails the
+        # run when nothing was collected, so an empty selection is never green.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c "import sys; assert sys.platform == 'darwin'"
+          HERMES_HOME="$(mktemp -d "${RUNNER_TEMP:-/tmp}/macos-os-home.XXXXXX")"
+          export HERMES_HOME
+          LIST="$(mktemp "${RUNNER_TEMP:-/tmp}/macos-os-files.XXXXXX")"
+          trap 'rm -rf "$HERMES_HOME" "$LIST"' EXIT
+          /usr/bin/python3 scripts/ci/list_os_marked_tests.py macos > "$LIST"
+          test -s "$LIST"
+          echo "selected $(wc -l < "$LIST" | tr -d ' ') file(s)"
+          taskpolicy -c utility scripts/run_tests.sh --files-from "$LIST" -j 2 -- \
+            -m "platforms and not integration" --tb=short
+        env:
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
