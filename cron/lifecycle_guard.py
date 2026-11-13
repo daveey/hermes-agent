@@ -835,7 +835,8 @@ def _iter_segment_contexts(
     for tokens in _iter_command_token_lists(command):
         yield from iter_line_segment_contexts(
             tokens, cat_operands=_cat_operands, opens_call_arguments=opens_call,
-            peel_reserved_words=_peel_reserved_words)
+            peel_reserved_words=_peel_reserved_words,
+            stdin_redirections=lambda words: _split_redirections(words)[1])
 
 
 def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
