@@ -204,6 +204,65 @@ def test_an_unreadable_preflight_refuses_rather_than_passing(home, monkeypatch):
     assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists()
 
 
+@pytest.mark.parametrize("entrypoint", ["check", "hold"])
+def test_inconsistent_gateway_admission_refuses_without_lease_or_cooldown(
+        home, tmp_path, monkeypatch, capsys, entrypoint):
+    from gateway import control_socket
+
+    doc = {"admitted": True, "reasons": ["code:unknown"]}
+    calls = []
+
+    def query(root, verb, **kwargs):
+        calls.append((root, verb, kwargs))
+        return doc
+
+    monkeypatch.setattr(control_socket, "query_gateway_control", query)
+    marker = tmp_path / "ran"
+    observer = _script(tmp_path, "mark.py", "import sys; open(sys.argv[1], 'w').write('x')")
+    if entrypoint == "check":
+        code = kq.check(home)
+    else:
+        code = kq.hold(30, "r", [sys.executable, observer, str(marker)])
+    assert code == kq.EXIT_CHECK_REFUSED
+    assert calls == [(home, "quiet-observe-check", {"params": {"schema": 1}, "report_unsupported": True})]
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"home": str(home), **doc}
+    assert not marker.exists(), "refused admission must not start the observer"
+    assert cq.inspect().state == "inactive"
+    assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists()
+    # Refusal must leave an immediate acquisition possible, not merely release an acquired lease.
+    with cq.acquire(max_s=30, reason="retry"):
+        assert cq.read_active() is not None
+
+
+def test_raising_gateway_query_proceeds_to_observer_with_start_authoritative(
+        home, tmp_path, monkeypatch, capsys):
+    from gateway import control_socket
+
+    calls = []
+
+    def query(root, verb, **kwargs):
+        calls.append((root, verb, kwargs))
+        raise OSError("gateway query failed")
+
+    monkeypatch.setattr(control_socket, "query_gateway_control", query)
+    report = tmp_path / "report.json"
+    observer = _script(tmp_path, "observer.py", INSPECT)
+    # A nonzero observer result must remain authoritative, rather than a preflight refusal.
+    code = kq.hold(30, "r", [sys.executable, observer, str(report), "7"])
+    assert code == kq.EXIT_OBSERVER_FAILED
+    assert calls == [(home, "quiet-observe-check", {"params": {"schema": 1}, "report_unsupported": True})]
+    assert json.loads(report.read_text())["env"][kq.ENV_MAX_S] == "30"
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "gateway check unavailable (OSError); proceeding, start stays authoritative" in output.err
+    assert "status 7" in output.err
+    assert cq.inspect().state == "inactive"
+    assert (home / "kanban" / "claim-quiet" / "last-started.json").exists()
+    with pytest.raises(cq.QuietCooldownError):
+        cq.acquire(max_s=30, reason="retry")
+
+
 def _held_on():
     return True
 
