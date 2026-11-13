@@ -317,6 +317,63 @@ def test_n4_busy_owned_tui_only_chat_never_holds_a_legacy_claim(env):
     assert _notices(adapter, admitted, tid) == 1
 
 
+def test_n4_compressed_owned_chat_with_ledger_work_on_the_root_never_holds_a_legacy_claim(env, monkeypatch):
+    """N4 on a compressed chat: the tui row sits on the tip, the gateway's admission on the lineage root (review
+    t_01a1d1543b9d13cf, blocking finding of review 5881224107)."""
+    runner, authority, adapter, admitted = env
+    tid = _card(local=False)
+    session = _session()
+    session["running"] = True
+    _complete(tid)
+    _legacy_collect(session)
+    assert len(session["_kanban_pending"]) == 1 and _row(tid)[1] is not None
+
+    monkeypatch.setattr(server, "_session_lineage", lambda key, limit=8: ("root",) if key == CHAT else ())
+    monkeypatch.setattr(authority, "logical_owner", lambda chat: "root")
+    authority.sessions["root"] = _Live(CHAT)
+    authority.db.work("root")  # the gateway's ledger keys the chat by its lineage root
+    server._notif_poll_kanban_scoped("sid", session, prepared=([], []))
+    assert session["_kanban_pending"] == [] and session["_kanban_claims"] == []
+    assert _row(tid)[1] is None
+
+    _gateway_tick(runner)
+    assert [a["chat"] for a in admitted] == [CHAT]
+    assert _legacy_collect(session) == []
+    assert _notices(adapter, admitted, tid) == 1
+
+
+def test_n4_a_gateway_turn_lease_hands_the_chat_back_like_ledger_work(env, monkeypatch):
+    """The gateway owner also claims while its process holds the chat's turn lease (``_gateway_holds_work``); the
+    legacy poller must hand back on the same condition, and only for the live gateway's pid."""
+    from tui_gateway import kanban_leg_custody as custody
+    tid = _card(local=False)
+    session = _session()
+    session["running"] = True
+    _complete(tid)
+    _legacy_collect(session)
+    assert len(session["_kanban_pending"]) == 1
+
+    holder = {"value": "pid=424242:gateway-turn"}
+
+    class _Db:
+        def session_turn_lease_owner(self, sid):
+            return {"holder": holder["value"]} if sid == CHAT else None
+
+    @contextlib.contextmanager
+    def fake_db(_session):
+        yield _Db()
+
+    monkeypatch.setattr(server, "_session_db", fake_db)
+    monkeypatch.setattr(custody, "_live_gateway_pid", lambda: 31337)
+    server._notif_poll_kanban_scoped("sid", session, prepared=([], []))
+    assert len(session["_kanban_pending"]) == 1, "a lease held by a non-gateway process is not the gateway's"
+
+    monkeypatch.setattr(custody, "_live_gateway_pid", lambda: 424242)
+    server._notif_poll_kanban_scoped("sid", session, prepared=([], []))
+    assert session["_kanban_pending"] == [] and session["_kanban_claims"] == []
+    assert _row(tid)[1] is None
+
+
 def test_legacy_only_idle_chat_still_delivers_once(env):
     runner, _authority, adapter, admitted = env
     tid = _card(local=False)
@@ -354,3 +411,43 @@ def test_notify_sub_records_the_event_it_was_created_at(env):
     finally:
         conn.close()
     assert row[0] == row[1] and row[0] >= completed
+
+
+def test_a_settled_claim_recovered_before_the_buffer_check_is_still_resolved_after_archive(env, monkeypatch):
+    """N3 with recovery first: the wake settles the buffered claim through its end, the card is archived, the next
+    tick clears the empty claim and drains the local row, and only then does the busy holder check custody
+    (review t_01a1d154902ba0a7)."""
+    runner, _, adapter, _ = env
+    tid = _card()
+    _complete(tid)
+    session = _session()
+    with monkeypatch.context() as m:
+        m.setattr(sibling, "DEFER_MAX_S", -1.0)
+        _legacy_collect(session)
+    _gateway_tick(runner)
+    assert len(adapter.turns) == 1
+    _archive(tid)
+    _gateway_tick(runner)  # drain and ack the archived local row
+    assert _row(tid, "local") is None
+    server._kb_settle_held(session)
+    assert session["_kanban_pending"] == [], "already delivered buffered notice survived reaper + archive"
+    assert session.get("_kanban_claims") in (None, []), "the resolved claim is re-checked forever"
+    _gateway_tick(runner)
+    assert len(adapter.turns) == 1
+
+
+def test_a_root_local_wake_settles_the_tip_tui_leg_across_archive(env, monkeypatch):
+    runner, authority, adapter, admitted = env
+    tid = _card(tui=False, local=False)
+    _sub(tid, "local", "notify+wake", chat="root")
+    _sub(tid, "tui", "notify", chat=CHAT)
+    _complete(tid)
+    monkeypatch.setattr(authority, "logical_owner", lambda chat: "root")
+    authority.sessions[CHAT] = _Live(CHAT)
+    authority.db.work(CHAT)
+    _gateway_tick(runner)
+    assert len(adapter.turns) == 1
+    _archive(tid)
+    _gateway_tick(runner)  # drain and ack the archived local row
+    _gateway_tick(runner)
+    assert admitted == [], "tip tui leg delivered after root local leg and archive"

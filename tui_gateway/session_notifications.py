@@ -1247,17 +1247,14 @@ def _notif_collect_kanban(session: dict) -> tuple:
     return texts, claims
 
 
-def _kb_gateway_owns(session: dict) -> bool:
-    from tui_gateway.kanban_leg_custody import gateway_owns
-    return gateway_owns(session, _canonical_ledger_refusal)
+def _kb_gateway_owns(session: dict) -> bool:  # the gateway's collector admits this chat's tui rows [daveey]
+    from tui_gateway.kanban_leg_custody import legacy_gateway_owns
+    return legacy_gateway_owns(session, _canonical_ledger_refusal, _session_lineage, _session_db)
 
 
 def _kb_settle_held(session: dict) -> None:  # a buffered claim the chat's wake delivered meanwhile [daveey]
-    from tui_gateway.kanban_leg_custody import settle_held
-    lineage: tuple = ()
-    with contextlib.suppress(Exception):
-        lineage = _session_lineage(str(session.get("session_key") or ""))
-    settle_held(session, lineage, _notif_log_failure)
+    from tui_gateway.kanban_leg_custody import legacy_settle_held
+    legacy_settle_held(session, _session_lineage, _notif_log_failure)
 
 
 def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:

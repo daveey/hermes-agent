@@ -58,7 +58,8 @@ def covered(ev: Any) -> bool:
 def local_since(conn: Any, row: Any) -> int:
     """The last event of the card written before this ``local`` row existed: the row never delivers it or anything
     earlier (it starts caught up). ``created_event_id`` (stamped at insert, ``trg_notify_sub_created_event``); a
-    row from before that column is dated by ``created_at``, an event in its own second counting as after it.
+    row from before that column is dated by ``created_at``, an event in its own second counting as before it (the
+    tui leg keeps it: a duplicate beats a lost notice).
 
     A cursor that is past an event only because the row was created later is not a delivery: t_01a1ce412fbf6e7f's
     local row was created at 04:39:43 with its cursor at 240205, past the completion 239624, and silencing the
@@ -67,7 +68,7 @@ def local_since(conn: Any, row: Any) -> int:
     if created is not None:
         return int(created)
     try:
-        found = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id = ? AND created_at < ?",
+        found = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id = ? AND created_at <= ?",
                              (row["task_id"], int(row["created_at"] or 0))).fetchone()
     except sqlite3.Error:
         return 2 ** 62  # undatable: it covers nothing (a duplicate beats a lost notice)
