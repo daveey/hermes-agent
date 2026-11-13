@@ -930,6 +930,27 @@ def test_direct_create_task_of_a_keychain_card_on_a_pool_worker_joins_the_pool(o
     assert _runs_on(on_w2.conn, tid) == sorted([POOL, TAILNET])
 
 
+def _no_live_tailnet_pool_worker(kind):
+    machines = _machines()  # worker-1/2: linux + pool:worker, no tailnet attestation
+    if kind == "held":
+        machines["worker-1"] = {**machines["worker-1"], "labels": ["linux", POOL, TAILNET], "hold": True}
+    elif kind == "split":  # a live machine has the tailnet label but not the queue label
+        machines["worker-5"] = {**W1, "name": "worker-5", "labels": ["linux", TAILNET]}
+    return machines
+
+
+# 11-13 review nit (t_01a1d28879d22917): queue_decision checked only that the queue label is live, so a Mac-group
+# card queued as [pool:worker, capability:tailnet-exec] even when no live machine holds both: nobody could claim it.
+@pytest.mark.parametrize("kind", ["none", "held", "split"])
+def test_pool_worker_keeps_a_mac_marker_card_when_no_live_machine_holds_every_label(w2, monkeypatch, kind):
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}}, _no_live_tailnet_pool_worker(kind))
+    out = _create(title="rotate the CI token in the Keychain")
+    assert _runs_on(w2.conn, out["task_id"]) is None and out["placement"]["why"].startswith("local marker"), out
+    # A group that adds no label still queues: only the unmet label set falls back.
+    out = _create(title="read the dashboard in Chrome")
+    assert _runs_on(w2.conn, out["task_id"]) == [POOL], out
+
+
 def test_every_built_in_local_marker_has_a_group():
     assert set(kp.DEFAULT_LOCAL_MARKERS) | set(kp.DEFAULT_LOCAL_SKILL_MARKERS) <= set(kp.LOCAL_MARKER_GROUPS)
     assert set(kp.LOCAL_MARKER_GROUPS.values()) <= {"mac", "desktop", "browser", "sso", "context"}
