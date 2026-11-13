@@ -13,6 +13,7 @@ import http from 'node:http'
 import https from 'node:https'
 import os from 'node:os'
 import path from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 import tls from 'node:tls'
 import { pathToFileURL } from 'node:url'
 
@@ -324,6 +325,7 @@ import { snapHudBounds } from './hud-snap'
 import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
 import { linuxOzoneBackend, resolveHudWindowing } from './hud-windowing'
+import { attachIdleMotionPause } from './idle-motion-pause'
 import { INSTALL_STAMP, installShape } from './install-stamp'
 import type { InstallStamp } from './install-stamp'
 import { fetchJsonWith, fetchPublicJsonWith, type JsonFetchDeps } from './json-fetch'
@@ -2425,10 +2427,6 @@ function ensureWslWindowsFonts() {
   } catch (error) {
     rememberLog(`[fonts] WSL font setup skipped: ${error.message}`)
   }
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function clampBootProgress(value) {
@@ -17568,6 +17566,7 @@ app.whenReady().then(() => {
   keepAwake.restore()
   void minimizeToTray.start()
   mainProcessLagWatchdog.start()
+  attachIdleMotionPause({ app, BrowserWindow, powerMonitor, log: rememberLog }) // [daveey] no 60 Hz spinners when away
   f12Blocked = readPersistedDisableF12()
 
   // [daveey] Sidebar boot snapshot (cold start): hub.db sessions + the last projects tree,
