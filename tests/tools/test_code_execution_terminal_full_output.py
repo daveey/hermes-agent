@@ -180,12 +180,36 @@ def test_remote_file_rpc_bounds_a_large_non_terminal_result(monkeypatch):
                                   tool="read_file", log=log)
     assert set(r) == {"error", "result_bytes", "limit_bytes"}
     assert r["result_bytes"] > r["limit_bytes"] == 1024 * 1024
-    assert "read_file result is" in r["error"] and "offset/limit" in r["error"]
+    assert "result is" in r["error"] and "offset/limit" in r["error"]
+    # The tool already ran: the error must not read as a failed call to retry.
+    assert "read_file ran" in r["error"] and "only its result was dropped" in r["error"]
+    assert "do not repeat" in r["error"]
     assert shipped < 2 * 1024 * 1024
     assert log[-1]["tool"] == "read_file" and "limit" in log[-1]["error"]
     # A result within the cap ships unchanged.
     r, _ = _file_rpc_result(monkeypatch, {"content": "x" * 1000}, tool="read_file")
     assert r == {"content": "x" * 1000}
+
+
+def test_file_ship_refuses_a_lone_surrogate():
+    """Only RPC results (JSON strings) escape surrogates: a shipped file (script.py,
+    hermes_tools.py, kernel_runner.py, the env file) would carry a literal \\udcXX that
+    means something else in a raw/bytes literal, a comment or a shell-quoted value, so a
+    lone surrogate there still fails loudly before anything is written."""
+    from tools.code_execution_tool import _ship_file_to_remote
+
+    calls = []
+
+    class Env:
+        def execute(self, cmd, cwd=None, timeout=None, stdin_data=None):
+            calls.append(cmd)
+            return {"output": "", "returncode": 0}
+
+    with pytest.raises(UnicodeEncodeError):
+        _ship_file_to_remote(Env(), "/sandbox/script.py", "print(r'\udc80')\n")
+    assert calls == []
+    _ship_file_to_remote(Env(), "/sandbox/script.py", "print('ok \u00e9')\n")
+    assert len(calls) == 1
 
 
 def test_local_socket_ships_a_lone_surrogate():

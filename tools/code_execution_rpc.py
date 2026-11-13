@@ -60,17 +60,24 @@ def _execute_checked(env, cmd: str, what: str, *, timeout: int, **kwargs) -> dic
 
 
 def _wire_bytes(text: str) -> bytes:
-    """The UTF-8 bytes an RPC transport ships for *text*, and what a size cap must measure.
-    Tool results can hold lone surrogates (file reads decode undecodable bytes with
-    surrogateescape), which strict UTF-8 refuses: each becomes its ``\\uXXXX`` escape, which
-    inside a JSON string (where ``json.dumps`` puts every one) decodes back to the same text."""
+    """The UTF-8 bytes an RPC transport ships for a JSON-encoded RPC result *text*, and what
+    a size cap must measure. Tool results can hold lone surrogates (file reads decode
+    undecodable bytes with surrogateescape), which strict UTF-8 refuses: each becomes its
+    ``\\uXXXX`` escape, which inside a JSON string (where ``json.dumps`` puts every one)
+    decodes back to the same text. Only for RPC results: a shipped file (script, env file)
+    stays strict, since there the escape would be literal text."""
+    # Exact for lone surrogates only: a high+low pair held as two code points would ship as
+    # two escapes that json.loads joins into one astral char. surrogateescape yields only
+    # low surrogates (U+DC80..U+DCFF), so a tool result never holds such a pair.
     return text.encode("utf-8", "backslashreplace")
 
 
 def _remote_write(env, remote_path: str, content: str, *, atomic: bool = False,
-                  timeout: int = 30, check: bool = False):
+                  timeout: int = 30, check: bool = False, rpc_result: bool = False):
     """Write *content* owner-only to *remote_path*; returns the execute() result
-    (``check=True`` raises on failure via _execute_checked).
+    (``check=True`` raises on failure via _execute_checked). ``rpc_result=True`` (a JSON
+    RPC response) ships lone surrogates as escapes via _wire_bytes; anything else is
+    strict UTF-8, so a lone surrogate in a shipped file raises before anything is written.
 
     The base64 payload always travels as ``stdin_data``: pipe-mode backends
     (ssh, docker, local: the real shared-host ones) deliver it on
@@ -79,7 +86,8 @@ def _remote_write(env, remote_path: str, content: str, *, atomic: bool = False,
     for heredoc-mode backends (modal, daytona, vercel), and managed_modal
     forwards it as ``stdinData``, the same contract ``_write_to_sandbox``
     relies on."""
-    encoded = base64.b64encode(_wire_bytes(content)).decode("ascii")
+    raw = _wire_bytes(content) if rpc_result else content.encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii")
     target = shlex.quote(remote_path)
     write = (f"base64 -d > {target}.tmp && mv -f {target}.tmp {target}"
              if atomic else f"base64 -d > {target}")
@@ -131,10 +139,14 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
     if full_output_cap is not None and isinstance(result, str):
         size = len(_wire_bytes(result))
         if size > full_output_cap:
+            # The call already ran: say so, or a side-effecting tool (patch, write_file) with a
+            # big result reads as failed and invites a retry of a change that landed.
             result = tool_error(
-                f"{tool_name} result is {size:,} bytes, over the {full_output_cap:,}-byte limit "
-                "of this remote sandbox's tool transport; ask for less (read_file offset/limit, "
-                "a narrower search_files pattern or limit, a shorter web_extract char_limit)",
+                f"{tool_name} ran, but its result is {size:,} bytes, over the "
+                f"{full_output_cap:,}-byte limit of this remote sandbox's tool transport, so "
+                "only its result was dropped: any change the call made stands, do not repeat it "
+                "to get the result. To read data, ask for less (read_file offset/limit, a "
+                "narrower search_files pattern or limit, a shorter web_extract char_limit)",
                 result_bytes=size, limit_bytes=full_output_cap)
     entry = {"tool": tool_name, "args_preview": str(tool_args)[:80],
              "duration": round(time.monotonic() - call_start, 2)}
@@ -344,7 +356,7 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
                 # Atomic (tmp + rename) and owner-only; results carry tool output
                 # on a shared-host backend.
                 _remote_write(env, f"{rpc_dir}/res_{seq:06d}", tool_result,
-                              atomic=True, timeout=60)
+                              atomic=True, timeout=60, rpc_result=True)
                 env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
         except Exception as e:
             if not stop_event.is_set():
