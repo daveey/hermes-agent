@@ -160,10 +160,19 @@ def installed(agent: Any, scope: UpdatePauseScope | None = None, *,
     if scope is not None and scope.message_id is not _MISSING:
         if message_id is _MISSING or message_id is None or message_id != scope.message_id:
             scope = None
+    from agent.update_pause_cancel import BEFORE_TURN_ATTR
+    if scope is not None and not scope.eligible and scope.claim_held is not None:
+        # [daveey] t_01a1d4d4c30c7e43: a held-class claim whose scope cannot checkpoint (a detached route's wake)
+        # still yields before it starts: the unstarted re-queue needs no boundary. No hook, never update_pausable.
+        vars(agent)[BEFORE_TURN_ATTR] = before_turn_gate(agent, scope.claim_held)
+        try:
+            yield False
+        finally:
+            vars(agent).pop(BEFORE_TURN_ATTR, None)
+        return
     if scope is None or not scope.eligible:
         yield False
         return
-    from agent.update_pause_cancel import BEFORE_TURN_ATTR
     prior = vars(agent).get(_HOOK_ATTR, _MISSING)
     root = fence_root(scope.home)
     setattr(agent, _HOOK_ATTR, boundary_hook(agent, root))

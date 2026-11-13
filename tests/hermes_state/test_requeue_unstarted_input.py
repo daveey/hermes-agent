@@ -76,3 +76,43 @@ def test_refused_after_settlement(claimed):
     with pytest.raises(rt.RuntimeStoreError) as exc:
         _requeue(db, epoch, row)
     assert exc.value.reason == 'stale_generation'
+
+
+def _steered(db, epoch, row):
+    """[daveey] t_01a1d4d4c30c7e43: the human row queued behind the wake, transferred to its claim (a steer committed
+    while the claimed turn waited on the session turn lease)."""
+    later = next(r for r in rt.list_session_admissions(db, session_id='s') if r['request_id'] == 'later')
+    transfer, fresh = rt.steer_session_input(db, epoch=epoch, admission_id=later['admission_id'],
+                                             generation=row['generation'])
+    assert fresh and (transfer['status'], transfer['outcome']) == ('terminal', rt.STEERING)
+    return later['admission_id']
+
+
+def test_an_undelivered_steer_transfer_goes_back_with_the_wake_in_the_same_write(claimed):
+    db, epoch, row = claimed
+    steer = _steered(db, epoch, row)
+    queued = _requeue(db, epoch, row, transfers={steer: False})
+    assert (queued['status'], queued['generation']) == ('queued', None)
+    pending = rt.list_session_admissions(db, session_id='s')
+    assert [(r['admission_id'], r['status'], r['outcome'], r['generation']) for r in pending] == [
+        (row['admission_id'], 'queued', None, None), (steer, 'queued', None, None)]  # each in its own FIFO place
+    again = rt.claim_session_input(db, epoch=epoch, session_id='s')
+    assert again['admission_id'] == row['admission_id']
+
+
+def test_a_steer_transfer_the_turn_took_refuses_the_requeue(claimed):
+    db, epoch, row = claimed
+    steer = _steered(db, epoch, row)
+    with pytest.raises(rt.RuntimeStoreError) as exc:
+        _requeue(db, epoch, row, transfers={steer: True})
+    assert (exc.value.reason, exc.value.detail) == ('invalid_checkpoint', 'steering transfer delivered')
+    assert rt.get_session_admission(db, admission_id=row['admission_id'])['status'] == 'started'
+    assert rt.get_session_admission(db, admission_id=steer)['outcome'] == rt.STEERING
+
+
+def test_a_steer_transfer_with_no_transfer_read_still_refuses(claimed):
+    db, epoch, row = claimed
+    _steered(db, epoch, row)
+    with pytest.raises(rt.RuntimeStoreError) as exc:
+        _requeue(db, epoch, row)
+    assert exc.value.detail == 'steering transfer exists'

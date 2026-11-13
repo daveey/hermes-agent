@@ -178,14 +178,20 @@ def resume_session_checkpoint(db, *, epoch, admission_id, _guard=None):
     return db._execute_write(write)
 
 
-def requeue_unstarted_input(db, *, epoch, admission_id, generation, transcript_mark):
+def requeue_unstarted_input(db, *, epoch, admission_id, generation, transcript_mark, transfers=None):
     """[daveey] t_01a1d49d50e4c656: hand an exact started generation that never began its turn back to its FIFO place.
 
     The claim held no proof of a boundary because the turn wrote nothing: refused (``invalid_checkpoint``) once any
     transcript row of the conversation's chain postdates the claim's ``transcript_mark``, or once a worker, a
     steering transfer or a checkpoint exists for it. ``seq`` is untouched, so the row is the FIFO head again and
     the next claim re-validates it (a held notifier wake then waits queued). The old generation is fenced: its
-    status is no longer started, so its settlement and checkpoint writes refuse."""
+    status is no longer started, so its settlement and checkpoint writes refuse.
+
+    [daveey] t_01a1d4d4c30c7e43: ``transfers`` (``{admission_id: delivered}``, the owner's ``steer_transfers`` read
+    after the execution returned) hands back, in this write, every steering transfer bound to the generation that
+    no drain of the turn took (``_requeue_transfer``, its own FIFO place): a steer committed while the turn waited
+    on the session turn lease must not cost the wake its re-queue. Refused (``steering transfer delivered``) when
+    one reached the turn; without ``transfers`` any transfer refuses, as before."""
     _text(admission_id)
     def write(conn):
         _epoch(conn, epoch)
@@ -199,10 +205,13 @@ def requeue_unstarted_input(db, *, epoch, admission_id, generation, transcript_m
         from hermes_state_runtime_workers import worker_states
         if worker_states(conn, logical):
             _refuse('worker execution is live or uncertain')
-        if conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? AND status='terminal' "
-                        "AND outcome='steering' AND owner_epoch=? AND generation=? LIMIT 1",
-                        (logical, epoch, generation)).fetchone():
+        steering = [r[0] for r in conn.execute(
+            "SELECT admission_id FROM session_admissions WHERE target_session_id=? AND status='terminal' "
+            "AND outcome='steering' AND owner_epoch=? AND generation=? ORDER BY seq", (logical, epoch, generation))]
+        if steering and transfers is None:
             _refuse('steering transfer exists')
+        if any((transfers or {}).get(steer) for steer in steering):
+            _refuse('steering transfer delivered')
         if conn.execute('SELECT 1 FROM state_meta WHERE key=?', (CHECKPOINT_PREFIX + admission_id,)).fetchone():
             _refuse('checkpoint exists')
         from hermes_state_local_lineage import local_physical_target
@@ -213,6 +222,9 @@ def requeue_unstarted_input(db, *, epoch, admission_id, generation, transcript_m
             _refuse('turn wrote its transcript')
         conn.execute("UPDATE session_admissions SET status='queued',generation=NULL WHERE admission_id=? "
                      "AND status='started'", (admission_id,))
+        from hermes_state_runtime import _requeue_transfer
+        for steer in steering:
+            _requeue_transfer(conn, admission_id=steer, epoch=epoch, generation=generation)
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (logical,))
         return _row(_admission(conn, admission_id))
     return db._execute_write(write)

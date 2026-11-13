@@ -166,12 +166,19 @@ async def requeue_unstarted(authority, live, ref, row):
     from gateway.session_runtime_workers import tracked_write, persist_work_count
     from hermes_state_runtime import RuntimeStoreError
     from hermes_state_update_pause import requeue_unstarted_input
+    from gateway.session_settlement_recovery import _transfers
+    # [daveey] t_01a1d4d4c30c7e43: read after execution returned (no steer can reach the turn now); each
+    # undelivered transfer goes back to its own FIFO place in the same write, behind the wake.
+    transfers = _transfers(authority, live, row) or {}
     try:
         await tracked_write(authority, partial(requeue_unstarted_input, authority.db, epoch=authority.epoch,
-            admission_id=row['admission_id'], generation=row['generation'], transcript_mark=row['transcript_mark']))
+            admission_id=row['admission_id'], generation=row['generation'], transcript_mark=row['transcript_mark'],
+            transfers=transfers))
     except RuntimeStoreError as exc:
+        detail = getattr(exc, 'detail', None)
         logging.getLogger(__name__).warning('Unstarted gateway turn could not be re-queued for update: session=%s '
-                                            'admission=%s (%s)', ref.session_id, row['admission_id'], exc)
+                                            'admission=%s (%s%s)', ref.session_id, row['admission_id'], exc,
+                                            f': {detail}' if detail else '')
         return None
     authority.pending_results.pop(row['admission_id'], None)
     previous = authority.update_claims.pop(ref.session_id, None)
@@ -180,8 +187,12 @@ async def requeue_unstarted(authority, live, ref, row):
     with live.event_stream.lock:
         live.event_stream.execution = {}
         authority.adopted.pop(ref.session_id, None)
+        entry = authority.steer_transfers.get(ref.session_id)
+        if entry is not None and entry[0] == row['generation']:
+            authority.steer_transfers.pop(ref.session_id, None)
     logging.getLogger(__name__).info('Re-queued unstarted gateway turn for update hold: session=%s admission=%s '
-                                     'generation=%s', ref.session_id, row['admission_id'], row['generation'])
+                                     'generation=%s%s', ref.session_id, row['admission_id'], row['generation'],
+                                     f' (with {len(transfers)} steer transfer(s))' if transfers else '')
     authority._publish_pending(ref)
     persist_work_count(authority)
     return True

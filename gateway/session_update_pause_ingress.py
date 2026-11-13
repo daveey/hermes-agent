@@ -59,7 +59,15 @@ def claim_hold_gate(row):
     """[daveey] t_01a1d49d50e4c656: the claim's own hold test for this row's class, re-asked at turn start (None:
     the claim never holds the row). A notifier wake waits queued under a core-update claim hold
     (``session_notifier_drain.eligible``); one claimed before the hold may start long after it (a session turn
-    lease wait), so its turn re-asks and, held, the admission goes back to its FIFO place (``requeue_unstarted``)."""
+    lease wait), so its turn re-asks and, held, the admission goes back to its FIFO place (``requeue_unstarted``).
+
+    [daveey] t_01a1d4d4c30c7e43: installed whether or not the scope is ``supported`` (``installed`` then sets only
+    this gate). An unsupported notifier wake (a detached route's ``local_automation_v1`` wake) is not exempt from
+    the drain: ``active_work`` lists its turn as a chat unit with ``update_pausable`` False, which the reclaim
+    preflight never waits out (hermes-sync ``_parkable_gateway_chat``) and refuses as ``unmatched gateway work``.
+    The re-queue writes no checkpoint, so it needs no checkpoint-capable scope. ``noted_completion`` rows are no
+    notifier wakes (their producers are never ``kanban-wake``). A managed-worker session never binds a scope
+    (``admit_managed`` runs before ``pause_scope``): out of scope here."""
     from gateway import session_notifier_drain
     if row.get('update_resume') or not session_notifier_drain.notifier_wake(row):
         return None
