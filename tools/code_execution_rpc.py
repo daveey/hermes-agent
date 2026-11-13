@@ -142,12 +142,28 @@ def _read_full_output(path) -> str | None:
     return None if _SPILL_CAPPED_MARK in text[-200:] else text.strip()
 
 
+def _looks_windowed(body: dict) -> bool:
+    """True when a terminal result's ``output`` is a cut window even though no spill file
+    came with it: it carries the truncation marker, or the reported total exceeds it."""
+    from tools.tool_output_truncate import contains_truncation_notice
+    output = body["output"]
+    total = body.get("output_total_chars")
+    if isinstance(total, int) and not isinstance(total, bool) and total > len(output):
+        return True
+    return bool(body.get("truncation_note")) or contains_truncation_notice(output)
+
+
 def _complete_terminal_output(result):
     """Give code the complete stdout of a sandbox ``terminal()`` call. The terminal tool
     renders a head+tail window sized for the chat; a script that writes ``output`` to disk
     as data must not get that window (defect agent-7ac9c5fa93: a checksum manifest shipped
     the truncation marker). The spill file is already ANSI-stripped and redacted by the
-    terminal tool. ``truncated`` tells the script whether ``output`` is whole."""
+    terminal tool. ``truncated`` tells the script whether ``output`` is whole: without a
+    readable spill (managed_modal, artifacts off, a failed spill redaction, a suffix that
+    pushed the text over the limit) a windowed ``output`` still reports ``truncated: True``.
+    When the spill replaces the window, notes the terminal tool appended after collection
+    (timeout/interrupt text, the sudo notice, a transform hook's rewrite) are not carried;
+    ``exit_code`` and ``exit_code_meaning`` still report a timeout or interrupt."""
     try:
         body = json.loads(result)
     except (TypeError, ValueError):
@@ -161,7 +177,9 @@ def _complete_terminal_output(result):
     if full is not None:
         body["output"] = full
         body.pop("truncation_note", None)
-    body["truncated"] = bool(spill_path) and full is None
+        body["truncated"] = False
+    else:
+        body["truncated"] = bool(spill_path) or _looks_windowed(body)
     return json.dumps(body, ensure_ascii=False)
 
 

@@ -101,6 +101,17 @@ def test_capped_spill_reports_truncated(tmp_path):
     assert r["truncated"] is True
 
 
+def test_window_without_spill_reports_truncated():
+    """managed_modal / artifacts off / dropped spill handle: no full_output_path, yet the
+    output is a cut window, so it must not be reported complete."""
+    window = "AAA\n\n... [OUTPUT TRUNCATED - 1,500 chars omitted out of 2,006 total] ...\n\nBBB"
+    r = _rpc({"output": window, "exit_code": 0, "error": None})
+    assert r["output"] == window
+    assert r["truncated"] is True
+    r = _rpc({"output": "short head", "exit_code": 0, "error": None, "output_total_chars": 50_074})
+    assert r["truncated"] is True
+
+
 def test_short_output_is_marked_complete():
     r = _rpc({"output": "hello", "exit_code": 0, "error": None})
     assert r["output"] == "hello"
