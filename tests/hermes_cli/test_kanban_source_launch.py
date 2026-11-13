@@ -178,6 +178,34 @@ def test_workspace_record_failure_releases_the_claim_instead_of_raising(conn, bo
     assert "source_attach" not in board.actions()
 
 
+def test_local_workspace_record_failure_ends_the_run_and_counts_infrastructure(conn, dispatcher, monkeypatch):
+    """Off a primary Board the local failure accounting owns the release: the claimed run ends ``released``, the
+    claim is cleared back to ``ready`` and the failure is counted as infrastructure (no breaker tick)."""
+    from hermes_cli import kanban_db_dispatch as d
+    from hermes_cli import kanban_db_sync as kds
+
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(d._kbw, "set_workspace_path", boom)
+    assert kds.board_mode(conn) != "primary"
+    spawned = []
+    tid, result, used = dispatcher.run(lambda task, path: spawned.append(task.id))
+    assert not used and spawned == []
+    assert ("workspace_prepare_failed:OSError" in [code for _, code in result.respawn_guarded])
+    task = conn.execute("SELECT status, claim_lock, claim_expires, consecutive_failures, last_failure_error, "
+                        "current_run_id FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert task["status"] == "ready" and task["claim_lock"] is None and task["claim_expires"] is None
+    assert task["current_run_id"] is None and task["consecutive_failures"] == 0
+    assert "workspace record refused (OSError: disk full)" in task["last_failure_error"]
+    runs = conn.execute("SELECT outcome, status, ended_at, metadata FROM task_runs WHERE task_id=?",
+                        (tid,)).fetchall()
+    assert len(runs) == 1 and runs[0]["outcome"] == "released" and runs[0]["ended_at"] is not None
+    assert json.loads(runs[0]["metadata"]).get("infrastructure") is True
+    events = [json.loads(r[0]) for r in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='released'", (tid,))]
+    assert len(events) == 1 and events[0]["infrastructure"] is True and events[0]["failures"] == 0
+
+
 def test_grant_carries_source_protocol_only_from_dispatcher(conn, board):
     tid = kb.create_task(conn, title="cli", assignee="worker")
     assert kb.claim_task(conn, tid, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
