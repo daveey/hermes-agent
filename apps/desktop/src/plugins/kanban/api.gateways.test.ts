@@ -390,6 +390,56 @@ describe('gateway routing', () => {
     ])
   })
 
+  // [daveey] Every board refetch (socket frame, poll, retry) used to read the
+  // routed gateway's full `/boards` list (per-board counts) first, only to learn
+  // `current`. On a slow link that doubled the hub reads: 297 `/boards`
+  // timeouts in 30 min on 2026-11-13, paired 1:1 with `/board` reads.
+  it("reads the routed gateway's /boards once for the '' alias, not before every board read", async () => {
+    registry('local', 'mini')
+    await bind(call =>
+      call.path === '/boards' ? { boards: [{ slug: 'work' }], current: 'work' } : board({ ready: [] })
+    )
+
+    vi.useFakeTimers()
+    await Promise.all([fetchBoard(false), fetchBoard(false), fetchBoard(true)])
+    await fetchBoard(false)
+
+    expect(calls.filter(c => c.path === '/boards')).toHaveLength(1)
+    // Every remote read still names the routed gateway's current board.
+    expect(
+      calls.filter(c => c.opts?.connectionId === 'mini' && c.path.startsWith('/board?')).every(c =>
+        c.path.includes('board=work')
+      )
+    ).toBe(true)
+
+    // Past the boards list's own freshness window it is read again.
+    await vi.advanceTimersByTimeAsync(31_000)
+    await fetchBoard(false)
+    expect(calls.filter(c => c.path === '/boards')).toHaveLength(2)
+  })
+
+  it("keeps the last known current board when the routed /boards read fails, and retries it next time", async () => {
+    registry('local', 'mini')
+    let down = false
+    await bind(call => {
+      if (call.path === '/boards') {
+        return down ? new Error('Timed out connecting to Hermes backend after 20000ms') : { boards: [], current: 'work' }
+      }
+
+      return board({ ready: [] })
+    })
+
+    vi.useFakeTimers()
+    await fetchBoard(false)
+    await vi.advanceTimersByTimeAsync(31_000)
+    down = true
+    calls = []
+    await fetchBoard(false)
+
+    expect(calls.filter(c => c.path === '/boards')).toHaveLength(1)
+    expect(calls).toContainEqual(expect.objectContaining({ path: '/board?board=work', opts: expect.objectContaining({ connectionId: 'mini' }) }))
+  })
+
   it('does not let a hung gateway stall the board, and cools it down', async () => {
     registry('local', 'cloud')
     await bind(call =>

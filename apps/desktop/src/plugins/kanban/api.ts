@@ -441,6 +441,9 @@ export const logKey = (scope: string, slug: string, id: string, owner?: TaskOwne
   owner ? ['kanban', 'log', owner.gateway, owner.board, id, owner.profile] as const
     : ['kanban', 'log', scope, slug, id] as const
 export const boardsKey = (scope: string) => ['kanban', 'boards', scope] as const
+/** [daveey] The routed gateway's server-current board slug (the '' alias), see resolvedSlug. */
+const currentBoardKey = (scope: string) => ['kanban', 'current-board', scope] as const
+const CURRENT_BOARD_STALE_MS = 30_000
 export const profilesKey = (scope: string, owner?: TaskOwner) =>
   owner ? ['kanban', 'profiles', owner.gateway, owner.profile] as const : ['kanban', 'profiles', scope] as const
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
@@ -612,12 +615,26 @@ async function resolvedSlug(): Promise<string> {
     return slug
   }
 
-  try {
-    const boards = await call<BoardsResponse>('/boards')
+  // [daveey] Every board refetch (socket frame, poll, retry) lands here, so the
+  // answer is cached per routed scope for CURRENT_BOARD_STALE_MS and concurrent
+  // callers share one in-flight read. Re-reading the full `/boards` list (per-board
+  // counts) before each board read doubled the routed gateway's traffic: 297 `/boards`
+  // timeouts in 30 min on a slow link, 2026-11-13. A failed read keeps the last answer.
+  const queryKey = currentBoardKey(routedScope())
 
-    return typeof boards.current === 'string' ? boards.current : ''
+  try {
+    return await queryClient.fetchQuery({
+      queryFn: async () => {
+        const boards = await call<BoardsResponse>('/boards')
+
+        return typeof boards.current === 'string' ? boards.current : ''
+      },
+      queryKey,
+      retry: false,
+      staleTime: CURRENT_BOARD_STALE_MS
+    })
   } catch {
-    return ''
+    return queryClient.getQueryData<string>(queryKey) ?? ''
   }
 }
 
