@@ -536,19 +536,21 @@ def _is_home(conn: sqlite3.Connection, own: str, target: str) -> bool:
     return bool(row and row[0] and row[0] == own and kcr.card_home(conn, target) is None)
 
 
-def _caller_refusal(rep: sqlite3.Connection, board: str, event: dict, payload: dict) -> tuple[Optional[str], bool]:
-    """``(refusal, retry)``: None when the caller is proven; ``retry`` when the Board could not be read."""
+def _caller_replica_refusal(rep: sqlite3.Connection, event: dict, payload: dict) -> Optional[str]:
+    """The caller checks that need only the replica (no Board read): None when they pass."""
     caller = payload.get("caller") or {}
     gw, task, run_uid = caller.get("gateway"), caller.get("task_id"), caller.get("run_uid")
     at = payload.get("requested_at")
     if not gw or not task or not run_uid or not isinstance(at, (int, float)):
-        return "caller_unproven: the request names no caller gateway, card, run uid and time", False
+        return "caller_unproven: the request names no caller gateway, card, run uid and time"
+    if at > time.time() + SKEW_S:
+        return "caller_unproven: the request time is in the future"
     if event["task_id"] != task:
-        return "caller_unproven: the request event is not on the caller's card", False
+        return "caller_unproven: the request event is not on the caller's card"
     run = rep.execute("SELECT started_at, ended_at FROM task_runs WHERE task_id = ? AND uid = ?",
                       (task, run_uid)).fetchone()
     if run is None or not run[0] or int(run[0]) > at + SKEW_S or (run[1] and int(run[1]) < at - SKEW_S):
-        return f"caller_unproven: run {run_uid} of {task} was not live when the call was made", False
+        return f"caller_unproven: run {run_uid} of {task} was not live when the call was made"
     claimed = False
     for (raw,) in rep.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'claimed'", (task,)):
         try:
@@ -559,9 +561,18 @@ def _caller_refusal(rep: sqlite3.Connection, board: str, event: dict, payload: d
             claimed = True
             break
     if not claimed:
-        return f"caller_unproven: the Board never leased run {run_uid} of {task} to {gw}", False
+        return f"caller_unproven: the Board never leased run {run_uid} of {task} to {gw}"
     if not event.get("uid"):
-        return "caller_unproven: the request event has no Board uid", False
+        return "caller_unproven: the request event has no Board uid"
+    return None
+
+
+def _caller_refusal(rep: sqlite3.Connection, board: str, event: dict, payload: dict) -> tuple[Optional[str], bool]:
+    """``(refusal, retry)``: None when the caller is proven; ``retry`` when the Board could not be read."""
+    refusal = _caller_replica_refusal(rep, event, payload)
+    if refusal is not None:
+        return refusal, False
+    gw, task, at = payload["caller"]["gateway"], payload["caller"]["task_id"], payload["requested_at"]
     try:
         ev = _evidence(board, event["uid"])
     except Exception as exc:  # health: allow BLE001 -- unreachable Board: retry next tick
@@ -699,6 +710,37 @@ def _scan_start(conn: sqlite3.Connection, board: str, rep: sqlite3.Connection) -
     return 0
 
 
+def _incoming(conn: sqlite3.Connection, own: str, raw: Optional[str]) -> Optional[dict]:
+    """The request payload when this gateway executes it and has not yet; None otherwise."""
+    from hermes_cli import kanban_operator_labels as kol
+    try:
+        payload = json.loads(raw or "{}")
+    except ValueError:
+        return None
+    uid, target = payload.get("request_uid"), payload.get("target_task_id")
+    if payload.get("action") == LABEL_PUBLISH:
+        # A machine has no home card: the call names its executor, and only that gateway takes it.
+        if not uid or own != kol.HOME or payload.get("home") != own:
+            return None
+    elif not uid or not target or not _is_home(conn, own, target):
+        return None
+    if conn.execute("SELECT 1 FROM operator_calls WHERE request_uid = ? AND side = 'execute'", (uid,)).fetchone():
+        return None
+    return payload
+
+
+def _home_check(rep: sqlite3.Connection, event: dict, payload: dict, target) -> tuple[Optional[str], bool]:
+    """``home_refusal`` (unsynced created event: retry, then refuse), only for a caller the replica proves.
+
+    Replica-only caller checks run first: an unproven caller is refused, never deferred, so a forged call (one
+    with a future requested_at too) cannot pin the watermark and page the whole request tail every tick.
+    """
+    if _caller_replica_refusal(rep, event, payload) is not None:
+        return None, False  # _caller_refusal refuses it
+    from hermes_cli.kanban_consent import home_refusal
+    return home_refusal(rep, payload, target)
+
+
 def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     """Home side, each dispatcher tick: execute calls naming this gateway's own cards. Returns (uid, outcome)."""
     from hermes_cli import kanban_db as kb
@@ -718,7 +760,6 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             with kb.write_txn(conn):
                 ensure_schema(conn)
         last = _scan_start(conn, board, rep)
-        from hermes_cli.kanban_consent import home_refusal
         handled = 0
         hold = None  # below the first call deferred for creation sync lag
         cursor, stop = last, False
@@ -728,25 +769,16 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             full = len(rows) >= SCAN_BATCH
             hi = rows[-1][0] if full else rep.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
             for eid, euid, etask, raw in rows:
-                try:
-                    payload = json.loads(raw or "{}")
-                except ValueError:
+                payload = _incoming(conn, own, raw)
+                if payload is None:
                     continue
-                uid, target = payload.get("request_uid"), payload.get("target_task_id")
+                uid, target = payload["request_uid"], payload.get("target_task_id")
                 labels = payload.get("action") == LABEL_PUBLISH
-                if labels:
-                    # A machine has no home card: the call names its executor, and only that gateway takes it.
-                    if not uid or own != kol.HOME or payload.get("home") != own:
-                        continue
-                elif not uid or not target or not _is_home(conn, own, target):
-                    continue
-                if conn.execute("SELECT 1 FROM operator_calls WHERE request_uid = ? AND side = 'execute'",
-                                (uid,)).fetchone():
-                    continue
                 if handled >= MAX_PER_TICK:
                     hi, stop = eid - 1, True
                     break
-                home = home_refusal(rep, payload, target)  # unsynced created event: retry, then refuse
+                event = {"id": eid, "uid": euid, "task_id": etask}
+                home = _home_check(rep, event, payload, target)
                 if home[1]:
                     # Only this caller lags: keep the watermark below it (retried next tick) and go on with the
                     # rest. A deferral takes no tick slot and no Board read; calls handled meanwhile are logged,
@@ -754,7 +786,6 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
                     hold = eid - 1 if hold is None else min(hold, eid - 1)
                     continue
                 handled += 1
-                event = {"id": eid, "uid": euid, "task_id": etask}
                 refusal, retry = _caller_refusal(rep, board, event, payload)
                 if retry:  # unreachable Board: every later call would retry too
                     hi, stop = eid - 1, True

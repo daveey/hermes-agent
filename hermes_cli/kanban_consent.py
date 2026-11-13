@@ -222,6 +222,7 @@ def enforce(conn, requester, ops, session=None):
 
 # How long the home waits for a caller's created event to reach its replica before refusing.
 CREATION_SYNC_GRACE_S = 600
+CREATION_SYNC_SKEW_S = 120  # clock skew allowed on a deferred call's requested_at
 
 
 def home_refusal(rep, payload, target):
@@ -240,7 +241,8 @@ def home_refusal(rep, payload, target):
     stops = _created_stops(rep, caller)
     if stops is None:
         at = payload.get("requested_at")
-        if isinstance(at, (int, float)) and time.time() - at <= CREATION_SYNC_GRACE_S:
+        # A requested_at in the future (beyond clock skew) never defers: it would hold the watermark for good.
+        if isinstance(at, (int, float)) and -CREATION_SYNC_SKEW_S <= time.time() - at <= CREATION_SYNC_GRACE_S:
             return None, True
         return (f"consent_unproven: the created event of {caller} never reached this replica, so its "
                 "approval stops cannot be checked"), False

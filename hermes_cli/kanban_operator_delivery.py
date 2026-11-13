@@ -15,20 +15,22 @@ _CLAIM = frozenset({"posted", "sent", "delivered", "commented", "relayed"})
 # claim, so it still needs the exact receipt (fail closed).
 _NOT_CLAIM = frozenset({"not", "never", "no", "nothing", "none", "neither", "nor", "without", "queued", "pending",
                         "failed", "refused", "rejected", "unable", "will", "would", "could", "should", "may",
-                        "might", "if", "once", "until", "awaiting", "waiting", "yet"})
+                        "might", "if", "once", "until", "awaiting", "waiting", "yet", "be", "being"})
 _GOVERN_WINDOW = 3  # words before the verb: "has not yet been posted", "will later be sent"
-# A comma, ':', a dash (a standalone spaced '-' too, never an intra-word hyphen), '(' or a conjunction ends the
-# governing span: "filed no card, so I posted ..." and "No longer pending - posted to ..." are claims.
-_BOUNDARY = frozenset({",", ":", "—", "–", "-", "(", "so", "and", "but", "then", "after", "before", "because", "which",
-                       "while", "that"})
-_WORD = re.compile(r"[\w’']+|[,:—–(]|(?<!\S)-(?!\S)")
+# A comma, ':', a dash (a standalone spaced '-' or '--' too, never an intra-word hyphen; U+2212 minus), '(' or a
+# conjunction ends the governing span: "filed no card, so I posted ..." and "No longer pending - posted to ..." are
+# claims.
+_BOUNDARY = frozenset({",", ":", "—", "–", "−", "-", "--", "(", "so", "and", "but", "then", "after", "before",
+                       "because", "which", "while", "that"})
+_WORD = re.compile(r"[\w’']+|[,:—–−(]|(?<!\S)--?(?!\S)")
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{8}(?:[0-9a-f]{8})?\b")
 
 
 def _governed(words, i):
-    if i and words[i - 1] == "be":
-        # "to be posted", "will be sent": an infinitive/future form is never a past claim, whatever boundary
-        # cuts it from its queue word ("Queued: to be posted to ...").
+    if i and words[i - 1] in ("be", "being"):
+        # "to be posted", "will be sent", "is being posted": an infinitive, future or progressive form is never a
+        # past claim, whatever boundary cuts it from its queue word ("Queued: to be posted to ..."). Known
+        # fail-open: the rare past-tense infinitive "it turned out to be posted twice to t_X" is not a claim.
         return True
     for w in reversed(words[max(0, i - _GOVERN_WINDOW):i]):
         if w in _BOUNDARY:

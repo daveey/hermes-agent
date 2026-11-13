@@ -377,6 +377,48 @@ def test_caller_refusal_wins_over_a_deferral_refusal(fleet, monkeypatch, tmp_pat
     assert "consent_unproven" not in request["result"][0]["detail"]
 
 
+@pytest.mark.parametrize("ahead", [0, 3600])
+def test_unproven_caller_is_refused_not_deferred(fleet, monkeypatch, ahead):
+    """A forged call whose caller is unproven and whose created event is missing is refused at once (a future
+    requested_at too): it must never be deferred (that would pin the watermark and page the tail every tick)."""
+    import time
+
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    other = f.card(f.h, "unrelated hub card")
+    ghost = "t_" + "9" * 16  # no created event anywhere: home_refusal alone would defer it
+    with kb.write_txn(f.h):
+        kb._append_event(f.h, other, kox.REQUEST_KIND, {
+            "request_uid": "future-forged", "board": "default", "action": "comment", "target_task_id": other,
+            "args": {"text": "spoofed"}, "caller": {"gateway": "worker-5", "task_id": ghost, "run_id": 1,
+                                                     "run_uid": "x"}, "requested_at": int(time.time()) + ahead})
+    f.board()
+    kox.apply_incoming(f.h)
+    row = next((r for r in helpers._log(f.h, "execute") if r["request_uid"] == "future-forged"), None)
+    assert row is not None, "the unproven call was deferred instead of refused"
+    assert row["outcome"] == "refused" and "caller_unproven" in row["detail"], row
+    assert not f.h.execute("SELECT 1 FROM task_comments WHERE task_id = ?", (other,)).fetchone()
+
+
+def test_future_requested_at_never_defers_a_home_refusal():
+    """home_refusal defers only within the grace window: a future time beyond skew is refused, not deferred."""
+    import sqlite3
+    import time
+
+    from hermes_cli import kanban_consent as consent
+    rep = sqlite3.connect(":memory:")
+    rep.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, uid TEXT)")
+    payload = {"action": "comment", "caller": {"task_id": "t_" + "9" * 16}}
+    now = time.time()
+    assert consent.home_refusal(rep, {**payload, "requested_at": now}, "t_x")[1] is True
+    refusal, defer = consent.home_refusal(rep, {**payload, "requested_at": now + 3600}, "t_x")
+    assert defer is False and "consent_unproven" in refusal
+    from hermes_cli import kanban_operator_call as kox
+    caller = {"gateway": "worker-5", "task_id": "t_" + "9" * 16, "run_uid": "x"}
+    assert "in the future" in kox._caller_replica_refusal(
+        rep, {"task_id": caller["task_id"]}, {"caller": caller, "requested_at": now + 3600})
+
+
 def test_without_a_deferral_one_tick_reads_one_batch(fleet, monkeypatch):
     """Paging past a full batch is only for a held watermark; otherwise the next tick resumes after it."""
     from hermes_cli import kanban_operator_call as kox

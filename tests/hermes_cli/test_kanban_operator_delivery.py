@@ -294,6 +294,14 @@ def test_negation_outside_the_claim_verb_still_needs_a_receipt(fleet, summary):
     ("Done (to be delivered to t_0123456789abcdef).", False),
     ("Has been posted to t_0123456789abcdef.", True),
     ("Posted to t_0123456789abcdef as it should be.", True),
+    # A spaced ASCII double hyphen and U+2212 are dashes as well.
+    ("Not done -- posted to t_0123456789abcdef.", True),
+    ("Not done − posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef -- not posted.", False),
+    # "be"/"being" govern from inside the window too: adverbs and the progressive are not claims.
+    ("Queued: to be later posted to t_0123456789abcdef.", False),
+    ("Queued: to be eventually sent to t_0123456789abcdef.", False),
+    ("The note to t_0123456789abcdef is being posted.", False),
 ])
 def test_claimed_targets_scopes_negation_to_the_verb(text, claimed):
     from hermes_cli.kanban_operator_delivery import claimed_targets
