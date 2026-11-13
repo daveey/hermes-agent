@@ -206,6 +206,7 @@ class HostChangeFeed:
         self.name = name
         self._lock = threading.Lock()
         self._keys: Optional[dict[str, object]] = None  # None until the baseline probe
+        self._seeds: dict[str, object] = {}  # state seeds subscribed before the baseline probe committed
         self._subs: list[Subscription] = []
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -222,9 +223,8 @@ class HostChangeFeed:
         seeds = {t: self._read_state(t) for t in fresh}
         with self._lock:
             self._subs.append(sub)
-            if self._keys is not None:
-                for topic, key in seeds.items():
-                    self._keys.setdefault(topic, key)
+            for topic, key in seeds.items():
+                (self._seeds if self._keys is None else self._keys).setdefault(topic, key)
         if self.autostart:
             self.start()
         return sub
@@ -238,7 +238,10 @@ class HostChangeFeed:
 
     def _state_topics(self) -> set[str]:
         with self._lock:
-            return {t for s in self._subs for t in s.topics if t.startswith(STATE_PREFIX) and not t.endswith("*")}
+            return self._state_topics_locked()
+
+    def _state_topics_locked(self) -> set[str]:
+        return {t for s in self._subs for t in s.topics if t.startswith(STATE_PREFIX) and not t.endswith("*")}
 
     def unsubscribe(self, sub: Subscription) -> None:
         with self._lock:
@@ -259,11 +262,20 @@ class HostChangeFeed:
             logger.debug("host change feed probe failed", exc_info=True)
             with self._lock:
                 current = {t: UNKNOWN for t in (self._keys or {}) if not t.startswith(STATE_PREFIX)}
-        for topic in self._state_topics():
+        polled = self._state_topics()
+        for topic in polled:
             current[topic] = self._read_state(topic)
         with self._lock:
             self.probes += 1
-            previous, self._keys = self._keys, current
+            previous = self._keys
+            # A state topic subscribed after the snapshot above was not read by this probe: keep the seed its
+            # subscribe() recorded, or this commit would drop it and wake that subscriber twice for nothing.
+            seeds = self._seeds if previous is None else previous
+            for topic in self._state_topics_locked() - polled:
+                if topic in seeds:
+                    current[topic] = seeds[topic]
+            self._seeds = {}
+            self._keys = current
             if previous is None:
                 return frozenset()
             moved = frozenset(t for t in current.keys() | previous.keys()

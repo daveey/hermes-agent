@@ -341,3 +341,36 @@ def test_probe_thread_is_detached_from_the_first_subscribers_scope(tmp_path):
     finally:
         token.reset()
         feed.stop()
+
+
+# ---- subscribe() racing an in-flight probe keeps its seed (PR #2682 review nit) ------------------------------
+
+
+def _racing_feed(baseline_first: bool):
+    """A feed whose read of ``state:/a`` subscribes ``state:/b`` once: that subscribe lands after the poll took
+    its state-topic snapshot and before it commits (the probe thread's window)."""
+    keys = {"/a": 1, "/b": 5}
+    late: list[hcf.Subscription] = []
+
+    def state_probe(path):
+        if str(path) == "/a" and armed and not late:
+            late.append(feed.subscribe("late", ["state:/b"]))
+        return keys[str(path)]
+
+    armed = False
+    feed = hcf.HostChangeFeed(_Source(replica=1), autostart=False, state_probe=state_probe)
+    if not baseline_first:
+        feed.poll_once()
+    feed.subscribe("early", ["state:/a"])
+    armed = True
+    return feed, late
+
+
+@pytest.mark.parametrize("baseline_first", [False, True], ids=["after-baseline", "during-baseline"])
+def test_subscribe_during_an_in_flight_probe_keeps_its_seed(baseline_first):
+    feed, late = _racing_feed(baseline_first)
+    assert feed.poll_once() == frozenset()  # the racing poll commits without dropping the new topic's seed
+    assert late, "the probe did not subscribe mid-read"
+    assert feed.keys()["state:/b"] == 5
+    assert feed.poll_once() == frozenset()  # and the next probe wakes nobody for it
+    assert late[0].wait(0.0) == frozenset()
