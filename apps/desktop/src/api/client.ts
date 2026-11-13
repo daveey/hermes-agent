@@ -10,7 +10,7 @@ import { map, type MapStore } from 'nanostores'
 
 import type { HermesApiRequest } from '@/global'
 
-import { CanonicalDesktopProtocol, canonicalProfile, canonicalPromptParams, canonicalSessionKey, openGatewaySocket, recordCanonicalOwner, splitRewindSubmit } from './canonical-protocol'
+import { CanonicalDesktopProtocol, canonicalProfile, canonicalPromptParams, canonicalSessionKey, isBackendWriteMethod, openGatewaySocket, recordCanonicalOwner, splitRewindSubmit } from './canonical-protocol'
 import { DialReadiness, GATEWAY_NOT_CONNECTED_MESSAGE, remainingRequestBudget } from './dial-readiness'
 import { dialWithLinkLimit } from './gateway-link-dial'
 
@@ -92,6 +92,11 @@ function requestDeadline(timeoutMs: number | undefined): number {
 }
 
 export type GatewaySessionWire = 'canonical' | 'legacy'
+
+// [daveey] Main's REST read sharing hears of a WS-RPC write as it leaves and once it settles (no bridge: no-op).
+function noteBackendWrite(): void {
+  if (typeof window !== 'undefined') { window.hermesDesktop?.noteBackendWrite?.() }
+}
 
 export class HermesGateway extends JsonRpcGatewayClient {
   private canonical = false
@@ -423,6 +428,20 @@ export class HermesGateway extends JsonRpcGatewayClient {
   }
 
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+    if (!isBackendWriteMethod(method)) { return this.requestOnWire<T>(method, params, timeoutMs, signal) }
+
+    // [daveey] Main shares identical in-flight REST reads; a write it cannot see is announced as it leaves and
+    // again once it settles, so a list refetch after a rename never joins a list read sent before it.
+    noteBackendWrite()
+
+    try {
+      return await this.requestOnWire<T>(method, params, timeoutMs, signal)
+    } finally {
+      noteBackendWrite()
+    }
+  }
+
+  private async requestOnWire<T>(method: string, params: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     const generation = this.connectionGeneration
     const deadline = requestDeadline(timeoutMs)
 

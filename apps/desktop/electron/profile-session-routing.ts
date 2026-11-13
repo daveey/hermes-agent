@@ -1606,6 +1606,15 @@ async function allProfilesSidebar(url: URL, profiles: readonly string[], fetchPa
   return body
 }
 
+/** The profile names a `/api/profiles` listing names, in order (anything unnamed is skipped). */
+export function profileNamesOf(listing: unknown): string[] {
+  const profiles = (listing as { profiles?: unknown } | null)?.profiles
+
+  return (Array.isArray(profiles) ? profiles : [])
+    .map(profile => profile?.name)
+    .filter((name): name is string => typeof name === 'string' && Boolean(name))
+}
+
 /** An all-profiles session list (`/api/profiles/sessions` or the batched sidebar) assembled
  *  from one read per profile.
  *

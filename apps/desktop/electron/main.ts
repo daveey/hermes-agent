@@ -485,6 +485,7 @@ import {
   isRemoteSessionRequestPath,
   mergeRegistrySessionRows,
   primaryRowsOwnerTag,
+  profileNamesOf,
   type RegistrySessionSource,
   remoteOwnerRoutePath,
   remoteProfileQueryScope,
@@ -14816,7 +14817,7 @@ async function getJsonForBackend(descriptor, path, opts: any = {}) {
 // Any-method REST call against a resolved backend descriptor, the one sink for renderer-routed paths (so the
 // join refuses any path that would move the credentials off the backend origin). OAuth backends prefer a native
 // bearer (cookieless RFC 8252) and fall back to the cookie partition; token/local use the session-token header.
-// [daveey] read-coalescing.ts: an identical read already in flight is shared, not sent again.
+// [daveey] read-coalescing.ts: an identical read in flight is shared; WS-RPC writes announce themselves (below).
 function fetchJsonForBackend(descriptor: any, path: string, opts: BackendReadOpts = {}): Promise<any> {
   return coalescedBackendRead(backendReadCoalescer, descriptor, path, opts, fetchJsonForBackendOnce)
 }
@@ -14831,11 +14832,8 @@ async function fetchJsonForBackendOnce(descriptor: any, path: string, opts: Back
     const sessions = isAllProfilesSessionListRequest(opts.method, path)
 
     if (sessions || isAllProfilesAggregateRequest(opts.method, path)) {
-      const listing = (await fetchJsonForBackend(descriptor, '/api/profiles', { timeoutMs: opts.timeoutMs })) as any
-
-      const profiles = (Array.isArray(listing?.profiles) ? listing.profiles : [])
-        .map(profile => profile?.name)
-        .filter(name => typeof name === 'string' && name)
+      const listing = await fetchJsonForBackend(descriptor, '/api/profiles', { timeoutMs: opts.timeoutMs })
+      const profiles = profileNamesOf(listing)
 
       const readProfile = (_profile, scoped) =>
         fetchJsonForBackend(descriptor, scoped, { method: opts.method, body: opts.body, timeoutMs: opts.timeoutMs, profileScoped: true })
@@ -14890,6 +14888,7 @@ async function fetchJsonForBackendOnce(descriptor: any, path: string, opts: Back
   return answer
 }
 
+ipcMain.on('hermes:backend:note-write', () => backendReadCoalescer.noteWriteEverywhere())
 ipcMain.handle('hermes:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl))
 ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, rawOpts) => {
   // Capability-gated login (RFC 8252). Probe the gateway's public /api/status
