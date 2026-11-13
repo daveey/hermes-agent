@@ -133,3 +133,32 @@ it('a red row whose prompt moved to another runtime is re-reported with the new 
     setStripeReasonReporter(null)
   }
 })
+
+// [daveey] PR #1892 review: only a `needs-input` row reads the prompt inputs, so another runtime's prompt moving must
+// not re-render every other sidebar row.
+it('a row that is not needs-input does not re-render when a prompt moves', () => {
+  const prompt = (needsInput: boolean) => ({
+    ...createClientSessionState(null),
+    needsInput,
+    storedSessionId: 'red-chat'
+  })
+
+  const session = row('quiet-chat')
+  let renders = 0
+
+  setSessions([session, row('red-chat')])
+  publishSessionState('rt-a', prompt(true))
+  renderHook(() => {
+    renders += 1
+
+    return useSessionRowStripe(session, 'idle', true)
+  })
+  const before = renders
+
+  act(() => {
+    publishSessionState('rt-a', prompt(false))
+    publishSessionState('rt-b', prompt(true))
+  })
+
+  expect(renders).toBe(before)
+})

@@ -107,6 +107,23 @@ describe('a blocking prompt on a runtime the backend replaced', () => {
     expect($attentionSessionIds.get()).toEqual(['s1'])
   })
 
+  // PR #1892 review: a sibling left turn-live (after Stop, before its terminal event) when the backend restarted
+  // never gets that event; reconnect must downgrade it so the new runtime's turn can retire its dead prompt.
+  it('retires a prompt whose runtime was only turn-live when the backend restarted', () => {
+    recordSessionEventScope({ ...HUB, session_id: 'rt-old' })
+    publishSessionState('rt-old', state({ needsInput: true, turnLive: true }))
+
+    reconcileBusyStatesOnReconnect(HUB_SCOPE)
+    expect($sessionStates.get()['rt-old']).toMatchObject({ needsInput: true, turnLive: false })
+
+    recordSessionEventScope({ ...HUB, session_id: 'rt-new' })
+    publishSessionState('rt-new', state({ busy: true, turnLive: true }))
+    publishSessionState('rt-new', state({ busy: false }))
+
+    expect($sessionStates.get()['rt-old']?.needsInput).toBe(false)
+    expect($attentionSessionIds.get()).toEqual([])
+  })
+
   it('never pairs runtimes that have no stored session yet', () => {
     publishSessionState('rt-old', state({ needsInput: true, storedSessionId: null }))
     publishSessionState('rt-new', state({ busy: true, storedSessionId: null }))

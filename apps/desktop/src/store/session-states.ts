@@ -992,7 +992,7 @@ export function clearAllSessionStates() {
  *  terminal `busy: false` publish — the runtime id it would arrive under is
  *  dead. Left alone, that state keeps its session in $workingSessionIds
  *  forever: the sidebar running arc and agents-panel "running" chrome lie for
- *  hours after the turn actually ended (#53902, #73082 — stale-flag half).
+ *  hours after the turn actually ended (#53902, #73082 — stale-flag half). [daveey] A turnLive-only claim counts too.
  *
  *  `scope` picks which socket's sessions to reconcile, keyed by the event-
  *  source scope recorded at fan-in: a SECONDARY (registry or local secondary)
@@ -1035,7 +1035,7 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
 
   try {
     for (const [runtimeId, state] of Object.entries(states)) {
-      if (!state || (!state.busy && !state.awaitingResponse)) {
+      if (!state || (!state.busy && !state.awaitingResponse && !state.turnLive)) {
         continue
       }
 
@@ -1054,7 +1054,7 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
       // Re-read — the write path may have republished (and released) this entry.
       const published = $sessionStates.get()[runtimeId]
 
-      if (published?.busy || published?.awaitingResponse) {
+      if (published?.busy || published?.awaitingResponse || published?.turnLive) {
         publishSessionState(runtimeId, {
           ...published,
           awaitingResponse: false,

@@ -355,7 +355,7 @@ export function useSessionTileDelegate({
       retireBusyClaim: runtimeId => {
         const cached = sessionStateByRuntimeIdRef.current.get(runtimeId)
 
-        if (!cached || (!cached.busy && !cached.awaitingResponse)) {
+        if (!cached || (!cached.busy && !cached.awaitingResponse && !cached.turnLive)) {
           return false
         }
 

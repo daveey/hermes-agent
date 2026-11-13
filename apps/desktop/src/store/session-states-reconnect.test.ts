@@ -40,7 +40,7 @@ function tileDelegate(cache: Map<string, ClientSessionState>): SessionTileDelega
     retireBusyClaim: runtimeId => {
       const cached = cache.get(runtimeId)
 
-      if (!cached || (!cached.busy && !cached.awaitingResponse)) {
+      if (!cached || (!cached.busy && !cached.awaitingResponse && !cached.turnLive)) {
         return false
       }
 
