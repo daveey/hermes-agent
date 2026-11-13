@@ -517,3 +517,151 @@ def test_snapshot_reports_cpu_of_exited_threads():
     t.start()
     t.join()
     assert la.snapshot()["process"]["exited_threads_cpu_s"] >= 0.05
+
+
+# -- exited-tid fold paths and fork clocks, from the #2630 post-merge check (t_01a1d6fffa79f116) ---------------
+
+
+def _stale_exit_queued_for(tid: int, cpu: float) -> None:
+    """A thread that accounted ``cpu`` under ``tid`` has exited and queued its fold; this live thread now has
+    the same native id (Linux reuses tids)."""
+    with la._lock:
+        la._thread_accounted[tid] = cpu
+    la._exited_tids.append(tid)
+
+
+def test_span_open_folds_a_queued_exit_before_reading_the_baseline(monkeypatch):
+    """span_open must fold first: a stale baseline makes span_close book the exited thread's CPU again."""
+    clock = [100.0]
+    monkeypatch.setattr(la, "_thread_time", lambda: clock[0])
+    me = la._own_tid()
+    _stale_exit_queued_for(me, 5.0)
+    token = la.span_open("lease.reused")
+    with la.pass_("inside"):  # an outermost pass inside the span: its exit folds the queue
+        clock[0] += 1.0
+    clock[0] += 2.0
+    assert la.span_close(token) is True
+    with la._lock:
+        assert la._thread_accounted[me] == pytest.approx(3.0)  # the span's CPU, once
+        assert la._state["exited_accounted"] == pytest.approx(5.0)
+
+
+def test_thread_cpu_folds_a_queued_exit_before_reporting_accounted_cpu():
+    me = la._own_tid()
+    _stale_exit_queued_for(me, 5.0)
+    rows = {r["tid"]: r for r in la.thread_cpu()}
+    assert rows.get(me, {}).get("accounted_cpu_s", 0.0) == 0.0  # not the exited thread's 5 s
+    assert la._state["exited_accounted"] == pytest.approx(5.0)
+
+
+def test_snapshot_folds_an_exit_queued_after_it_listed_the_threads(monkeypatch):
+    """A thread can exit between snapshot's thread listing and its lock: its tid is live in the listing (reused),
+    so only snapshot's own fold moves its CPU to exited instead of counting it as this live thread's."""
+    me = la._own_tid()
+    with la._lock:
+        la._thread_accounted[me] = 5.0
+    real_thread_cpu = la.thread_cpu
+
+    def listing_then_exit():
+        rows = real_thread_cpu()
+        la._exited_tids.append(me)
+        return rows
+
+    monkeypatch.setattr(la, "thread_cpu", listing_then_exit)
+    snap = la.snapshot()
+    with la._lock:
+        assert me not in la._thread_accounted
+    assert la._state["exited_accounted"] == pytest.approx(5.0)
+    assert snap["process"]["accounted_cpu_s"] == pytest.approx(5.0)
+
+
+def test_after_fork_child_starts_with_an_empty_exit_queue():
+    """The child must not inherit the parent's queued exits (nor the one its own hook queues by dropping the
+    forking thread's exit mark): they are the parent's tids, not the child's."""
+    la._exited_tids.extend([111, 222])
+    la._own_tid()
+    la._after_fork_child()
+    assert not la._exited_tids
+
+
+def test_reset_clears_the_exit_queue():
+    la._exited_tids.extend([111, 222])
+    la.reset()
+    assert not la._exited_tids
+
+
+def test_an_exit_mark_for_another_tid_is_replaced_so_the_thread_folds_its_own_tid():
+    """A mark left under a tid this thread no longer has (a fork child without the at-fork hook) would queue the
+    wrong tid at exit, so a later thread given this tid inherits the exited thread's CPU."""
+    seen: list = []
+
+    def worker():
+        la._local.exit_mark = la._ThreadExit(999_999_001)
+        seen.append(threading.get_native_id())
+        la.record("w", cpu_s=2.0)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    la.thread_cpu()  # folds the exits queued so far
+    with la._lock:
+        assert seen[0] not in la._thread_accounted
+    assert la._state["exited_accounted"] == pytest.approx(2.0)
+
+
+def test_fork_child_does_not_book_negative_cpu_for_pre_fork_passes(monkeypatch):
+    """The child's thread clock restarts at the fork: passes open across it book only the child's CPU and wall
+    since the fork, never parent mark minus child clock (live probe: outer cpu_s -0.115 s)."""
+    clock = [50.0]
+    monkeypatch.setattr(la, "_thread_time", lambda: clock[0])
+    me = threading.get_native_id()
+    with la.pass_("outer"):
+        with la.pass_("inner"):
+            clock[0] = 0.0  # the child's thread clock
+            la._after_fork_child()  # what os.fork runs in the child, here on this thread
+            clock[0] += 0.25
+        clock[0] += 0.5
+    c = la.counters()
+    assert c["inner"]["cpu_s"] == pytest.approx(0.25)
+    assert c["outer"]["cpu_s"] == pytest.approx(0.75)
+    assert c["outer"]["wall_s"] >= 0.0 and c["inner"]["wall_s"] >= 0.0
+    with la._lock:
+        assert la._thread_accounted[me] == pytest.approx(0.75)
+    with la.pass_("after"):  # a pass opened in the child measures from its own mark
+        clock[0] += 1.0
+    assert la.counters()["after"]["cpu_s"] == pytest.approx(1.0)
+
+
+def _fork_inside_nested_passes() -> int:
+    with la.pass_("outer"):
+        _burn(0.1)  # the parent's thread clock is well past the child's at the fork
+        with la.pass_("inner"):
+            pid = os.fork()
+            if pid == 0:
+                _burn(0.01)
+    return pid
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_real_fork_child_books_no_negative_cpu_for_pre_fork_passes():
+    read_fd, write_fd = os.pipe()
+    pid = _fork_inside_nested_passes()
+    if pid == 0:  # child: report, then leave without running any more of pytest
+        code = 1
+        try:
+            os.close(read_fd)
+            c = la.counters()
+            snap = la.snapshot()
+            os.write(write_fd, json.dumps({"outer": c["outer"]["cpu_s"], "inner": c["inner"]["cpu_s"],
+                                           "accounted": snap["process"]["accounted_cpu_s"]}).encode())
+            code = 0
+        finally:
+            os._exit(code)
+    os.close(write_fd)
+    with os.fdopen(read_fd, "rb") as fh:
+        raw = fh.read()
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    child = json.loads(raw)
+    assert min(child.values()) >= 0.0, child
+    assert child["inner"] >= 0.005, child  # the child's own CPU inside the pass is booked
