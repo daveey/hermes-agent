@@ -309,24 +309,50 @@ def read_local() -> Optional[dict]:
         return None
 
 
+# (config/file signature, observation time, next refresh due). Only a not-due
+# record is retained; a failed refresh leaves no success memo and retries next tick.
+_refresh_gate: Optional[tuple] = None
+
+
+def _refresh_key() -> tuple:
+    from hermes_cli.kanban_sweep_gate import config_key
+
+    path = registry_path()
+    try:
+        st = path.stat()
+        stamp = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+    except FileNotFoundError:
+        stamp = None
+    return (str(path), config_key(), stamp)
+
+
 def maybe_refresh_async(*, now: Optional[float] = None) -> bool:
     """Start a background refresh when the file is older than ``refresh_seconds``. Never waits,
     never raises: the dispatcher tick calls this."""
-    global _thread
+    global _thread, _refresh_gate
     try:
         if os.environ.get("HERMES_TEST_ISOLATION"):
             return False  # never run real probes (gh, sudo, ssh) from the test suite
-        cfg = _config()
-        if cfg.get("enabled") is False:
-            return False
         now = time.time() if now is None else now
-        local = read_local()
-        if local and now - float(local.get("refreshed_at") or 0) < _seconds(cfg, "refresh_seconds",
-                                                                              DEFAULT_REFRESH_SECONDS):
-            return False
         with _lock:
             if _thread is not None and _thread.is_alive():
                 return False
+            key = _refresh_key()  # before reading: a racing replacement invalidates the next tick
+            held = _refresh_gate
+            if held is not None and held[0] == key and held[1] <= now < held[2]:
+                return False
+            _refresh_gate = None
+            cfg = _config()
+            if cfg.get("enabled") is False:
+                _refresh_gate = (key, now, float("inf"))
+                return False
+            local = read_local()
+            if local:
+                due = float(local.get("refreshed_at") or 0) + _seconds(
+                    cfg, "refresh_seconds", DEFAULT_REFRESH_SECONDS)
+                if now < due:
+                    _refresh_gate = (key, now, due)
+                    return False
             _thread = threading.Thread(target=_safe_refresh, args=(cfg,), name="kanban-capabilities",
                                        daemon=True)
             _thread.start()
