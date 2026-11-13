@@ -414,15 +414,34 @@ def test_desktop_session_with_router_picked_astra_builds_on_opus(home):
     assert (agent.model, agent.provider) == (OPUS, 'anthropic')
 
 
-@pytest.mark.parametrize('case', ['explicit switch', 'short wall', 'no session id', 'own endpoint'])
+def test_desktop_row_with_its_providers_native_endpoint_still_moves_off_the_wall(home):
+    """A resumed row keeps the base_url/api_mode its last turn ran on. Codex's own endpoint and wire override
+    nothing, so the Desktop build defers like the messaging gateway (``overrides_endpoint``) and lands on Opus;
+    the row's stale codex wire must not ride along onto the rerouted runtime."""
+    from hermes_cli.auth_constants import DEFAULT_CODEX_BASE_URL
+    from tui_gateway.server import _resolve_agent_model_runtime  # agent_factory binds into the server namespace
+    _legacy_row(home, LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 33)
+    row = dict(DESKTOP_ROW, base_url=DEFAULT_CODEX_BASE_URL, api_mode='codex_responses')
+    model, runtime = _resolve_agent_model_runtime(row, None, SID)
+    assert 'quota is out until' in runtime.pop('_fallback_notice'), runtime
+    assert runtime.get('base_url') != DEFAULT_CODEX_BASE_URL and runtime.get('api_mode') != 'codex_responses', runtime
+    agent = _desktop_agent(model, runtime)
+    assert (agent.model, agent.provider) == (OPUS, 'anthropic')
+    assert agent.model_routing['walled_from']['model'] == ASTRA
+
+
+@pytest.mark.parametrize('case', ['explicit switch', 'short wall', 'no session id', 'own endpoint', 'own key'])
 def test_desktop_wall_still_refuses_when_the_pin_must_not_move(home, case):
     """Controls: David's own switch, a wall under the reroute threshold, a build with no session identity
-    (the readiness probe) and a session that overrides its endpoint all keep the refusal."""
+    (the readiness probe) and a session that overrides its endpoint or key all keep the refusal."""
     from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from hermes_cli.auth_constants import DEFAULT_CODEX_BASE_URL
     from tui_gateway.server import _resolve_runtime_or_defer_wall
     _legacy_row(home, dict(LEGACY_ECHO, reason='explicit-switch') if case == 'explicit switch' else LEGACY_ECHO)
     _wall(home, 'openai-codex', ASTRA, 2 if case == 'short wall' else 33)
-    overrides = {'base_url': 'https://proxy.example/v1'} if case == 'own endpoint' else {}
+    overrides = {'own endpoint': {'base_url': 'https://proxy.example/v1'},
+                 'own key': {'base_url': DEFAULT_CODEX_BASE_URL, 'api_key': '***'}}.get(case, {})
     session = None if case == 'no session id' else SID
     with pytest.raises(SubscriptionQuotaUnavailable):
         _resolve_runtime_or_defer_wall({'requested': 'openai-codex', 'target_model': ASTRA}, ASTRA,

@@ -541,15 +541,23 @@ def _resolve_runtime_or_defer_wall(resolve_kwargs, model, provider, overrides, s
     ("Subscription quota unavailable ... gpt-6-astra", 187 times) although claude-opus-5-5 and claude-fable-5-2
     in the same class were available. The reroute for that case (agent/model_routing_walls.py) was wired into
     the messaging gateway's pre-build lookup only; this resolver has no session identity, so the wall was
-    final here. A session's own override of endpoint or key is never deferred, like the gateway's."""
+    final here. A session's own key or foreign endpoint is never deferred; the provider's own base_url and an
+    api_mode a resumed row persisted override nothing (``overrides_endpoint``, the gateway's predicate). On a
+    deferral *overrides* is cleared: the row's endpoint and wire belong to the walled route, not the new one."""
     from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     try:
         return _resolve_runtime_with_fallback(resolve_kwargs)
     except SubscriptionQuotaUnavailable as wall:
+        from agent.model_routing_managed import overrides_endpoint
+        from agent.model_routing_walls import log_not_deferred
         from tui_gateway.class_routing import walled_pin_deferral
-        deferred = None if any(overrides.values()) else walled_pin_deferral(wall, model, provider, session_id)
+        if overrides.get("api_key") or overrides_endpoint(provider, overrides.get("base_url"), _load_cfg()):
+            log_not_deferred(wall, "key" if overrides.get("api_key") else "endpoint")
+            raise
+        deferred = walled_pin_deferral(wall, model, provider, session_id)
         if deferred is None:
             raise
+        overrides.clear()
         return _RuntimeFallbackResolution(deferred, None, False)
 
 
