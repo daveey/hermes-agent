@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // The socket must start at the snapshot's tail, and a late snapshot must not
 // reopen a board the user already left. The cursor is per connection.
 
-const { $boardSlug, bindApi, boardKey, EVENTS_BOARD_REFRESH_MIN_MS } = await import('./api')
+const { $boardSlug, bindApi, blockedKey, boardKey, EVENTS_BOARD_REFRESH_MIN_MS } = await import('./api')
 const { setConnection } = await import('@/store/session')
 
 const BOARD = (latest_event_id: number) => ({
@@ -286,6 +286,191 @@ describe('kanban event cursor', () => {
 
       unsubscribe()
       dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // [daveey] #2289 follow-up (t_01a1d595575df431): the coalescing state is per binding. A disposed binding's trailing
+  // refresh must not fire into the next one, and a fresh binding's first frame re-reads at once.
+  const bindWithFrames = () => {
+    const frames: Array<(data: unknown) => void> = []
+
+    const dispose = bindApi(
+      async () => {
+        throw new Error('cached snapshot must not refetch')
+      },
+      storage('ops'),
+      vi.fn((_path: string, onMessage: (data: unknown) => void) => {
+        frames.push(onMessage)
+
+        return vi.fn()
+      })
+    )
+
+    const frame = (id: number) =>
+      frames.at(-1)!({ cursor: id, events: [{ id, kind: 'heartbeat', task_id: `t_${id}` }] })
+
+    return { dispose, frame }
+  }
+
+  const spyInvalidate = () => vi.spyOn(queryClient, 'invalidateQueries')
+
+  const boardInvalidations = (spy: ReturnType<typeof spyInvalidate>) =>
+    spy.mock.calls.filter(([filters]) => filters?.queryKey?.[1] === 'board').length
+
+  it('drops a pending trailing board refresh when the binding is disposed', () => {
+    vi.useFakeTimers()
+
+    try {
+      queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(10))
+      const binding = bindWithFrames()
+      const invalidate = spyInvalidate()
+
+      binding.frame(11)
+      binding.frame(12) // inside the interval: one trailing refresh is now pending
+      expect(boardInvalidations(invalidate)).toBe(1)
+
+      binding.dispose()
+      vi.advanceTimersByTime(10 * EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(boardInvalidations(invalidate)).toBe(1)
+
+      invalidate.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-reads the board on the first frame of a new binding even inside the last binding interval', () => {
+    vi.useFakeTimers()
+
+    try {
+      queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(10))
+      // A binding the host never disposed (a re-register over a live one) must not hand its interval on either.
+      const first = bindWithFrames()
+      const invalidate = spyInvalidate()
+
+      first.frame(11)
+      expect(boardInvalidations(invalidate)).toBe(1)
+
+      const second = bindWithFrames()
+
+      second.frame(12)
+      expect(boardInvalidations(invalidate)).toBe(2)
+
+      invalidate.mockRestore()
+      second.dispose()
+      first.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // [daveey] #2336 follow-ups (t_01a1d595575df431, from t_01a1d59498376333): the in-flight wait is one per key, it
+  // restarts the interval, and the Blocked section read is never cancelled either.
+  const slowReads = (queryKey: readonly unknown[]) => {
+    const reads: Array<{ resolve: (value: unknown) => void; signal: AbortSignal }> = []
+
+    const observer = new QueryObserver(queryClient, {
+      queryFn: ({ signal }) =>
+        new Promise<unknown>(resolve => {
+          reads.push({ resolve, signal })
+        }),
+      queryKey,
+      staleTime: Infinity
+    })
+
+    return { reads, unsubscribe: observer.subscribe(() => undefined) }
+  }
+
+  it('waits on a slow board read once however many trailing refreshes land during it', async () => {
+    vi.useFakeTimers()
+
+    try {
+      queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(10))
+      const binding = bindWithFrames()
+      const { reads, unsubscribe } = slowReads(boardKey('local', 'ops', false))
+
+      binding.frame(11)
+      await vi.advanceTimersByTimeAsync(1000)
+      binding.frame(12)
+      await vi.advanceTimersByTimeAsync(2000)
+      binding.frame(13)
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(reads).toHaveLength(1)
+
+      reads[0].resolve(BOARD(11))
+      await vi.advanceTimersByTimeAsync(10 * EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(2)
+
+      reads[1].resolve(BOARD(13))
+      await vi.advanceTimersByTimeAsync(10 * EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(2)
+
+      unsubscribe()
+      binding.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('starts the interval over when a deferred re-read begins', async () => {
+    vi.useFakeTimers()
+
+    try {
+      queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(10))
+      const binding = bindWithFrames()
+      const { reads, unsubscribe } = slowReads(boardKey('local', 'ops', false))
+
+      binding.frame(11)
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS / 2)
+      binding.frame(12)
+      // The trailing refresh fires at MIN_MS and waits; the slow read outlives the whole interval.
+      await vi.advanceTimersByTimeAsync(2 * EVENTS_BOARD_REFRESH_MIN_MS)
+      reads[0].resolve(BOARD(11))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(reads).toHaveLength(2)
+      reads[1].resolve(BOARD(12))
+      await vi.advanceTimersByTimeAsync(0)
+
+      binding.frame(13)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(reads).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(3)
+
+      unsubscribe()
+      binding.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('neither cancels nor duplicates a Blocked section read still in flight', async () => {
+    vi.useFakeTimers()
+
+    try {
+      queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(10))
+      const binding = bindWithFrames()
+      const { reads, unsubscribe } = slowReads(blockedKey('local'))
+
+      binding.frame(11)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(reads).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS / 2)
+      binding.frame(12)
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(1)
+      expect(reads[0].signal.aborted).toBe(false)
+
+      reads[0].resolve({ tasks: [] })
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(2)
+
+      unsubscribe()
+      binding.dispose()
     } finally {
       vi.useRealTimers()
     }

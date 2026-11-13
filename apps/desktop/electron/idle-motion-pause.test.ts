@@ -55,6 +55,19 @@ class FakeContents implements IdleMotionTarget {
   }
 }
 
+/** `removeInsertedCSS` that throws synchronously instead of rejecting (a webContents torn down mid-call). */
+class ThrowingRemoveContents extends FakeContents {
+  throwOnRemove = false
+
+  override removeInsertedCSS(key: string) {
+    if (this.throwOnRemove) {
+      throw new Error('removeInsertedCSS threw synchronously')
+    }
+
+    return super.removeInsertedCSS(key)
+  }
+}
+
 const flush = () => new Promise(resolve => setTimeout(resolve, 0))
 
 function harness(windows: FakeContents[]) {
@@ -214,6 +227,49 @@ describe('IdleMotionPause', () => {
     h.pause.noteLoaded(win)
     h.setIdle(0)
     h.pause.check() // input arrives before the stale removal and the re-insert settle
+    await flush()
+    expect(win.live).toEqual([])
+  })
+
+  // [daveey] #2323 follow-up (t_01a1d595575df431): a stale-key removal that throws synchronously is swallowed like a
+  // rejection, so the reload's re-apply still runs instead of rejecting the chain and leaving the page unpaused.
+  it('re-applies after a reload whose stale-sheet removal throws synchronously', async () => {
+    const win = new ThrowingRemoveContents(1)
+    const h = harness([win])
+
+    h.setIdle(IDLE_MOTION_PAUSE_AFTER_SECONDS)
+    h.pause.check()
+    await flush()
+
+    win.restartRenderer()
+    win.throwOnRemove = true
+    h.pause.noteLoaded(win)
+    await flush()
+    await flush()
+    expect(win.live).toEqual([IDLE_MOTION_PAUSE_CSS])
+
+    win.throwOnRemove = false
+    h.setIdle(0)
+    h.pause.check()
+    await flush()
+    expect(win.live).toEqual([])
+  })
+
+  // [daveey] #2337 follow-up (t_01a1d595575df431, from t_01a1d59498376333): a window that loads while the user is
+  // active gets no sheet, even after an earlier pause.
+  it('a window that loads after resume stays unpaused', async () => {
+    const win = new FakeContents(1)
+    const h = harness([win])
+
+    h.setIdle(IDLE_MOTION_PAUSE_AFTER_SECONDS)
+    h.pause.check()
+    await flush()
+    h.setIdle(0)
+    h.pause.check()
+    await flush()
+
+    h.pause.noteLoaded(win)
+    await flush()
     await flush()
     expect(win.live).toEqual([])
   })

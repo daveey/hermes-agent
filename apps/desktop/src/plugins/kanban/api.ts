@@ -301,8 +301,8 @@ function resetBoardRefresh(): void {
 
 /** One live `task_events` frame → precise cache invalidation: the board
  *  (coalesced, see EVENTS_BOARD_REFRESH_MIN_MS), plus each touched task's
- *  detail. The polls (8s board / 4s drawer) stay as the fallback — the socket
- *  just makes the board feel instant. */
+ *  detail. The polls stay as the fallback (board 15 s when it spans gateways, else 60 s; drawer task 30 s, its log
+ *  3 s while running, else 15 s); the socket just makes the board feel instant. */
 function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug = slug): void {
   const frame = data as { cursor?: unknown; events?: CompletionEvent[] }
 
