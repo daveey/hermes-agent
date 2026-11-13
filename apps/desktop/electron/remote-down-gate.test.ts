@@ -9,6 +9,7 @@ import {
   isRemoteTransportFailure,
   REMOTE_DOWN_INITIAL_BACKOFF_MS,
   REMOTE_DOWN_MAX_BACKOFF_MS,
+  REMOTE_DOWN_TRIAL_DEADLINE_MS,
   RemoteDownGate
 } from './remote-down-gate'
 
@@ -278,8 +279,154 @@ describe('remote down gate', () => {
   })
 })
 
+// [daveey] 2026-11-12: a trial on a ~1-2 Mbps link held the slot from 22:47:46 to 22:51:13; every hub call meanwhile
+// failed fast with "reconnect in progress" although the tunnel answered /api/health in 0.44 s.
+describe('remote down gate: trial deadline', () => {
+  const TRIAL_DEADLINE_MS = 60
+
+  function downHarness() {
+    const h = harness()
+    h.gate.markDown(KEY, 'reset')
+    h.time.advance(REMOTE_DOWN_INITIAL_BACKOFF_MS)
+
+    const runTrial = (connect: () => Promise<{ baseUrl: string }>, request: () => Promise<unknown>) =>
+      dispatchThroughRemoteDownGate({
+        gate: h.gate,
+        key: KEY,
+        connect,
+        request,
+        forgetAnswer: h.forgetAnswer,
+        log: h.log,
+        trialDeadlineMs: TRIAL_DEADLINE_MS
+      })
+
+    return { ...h, runTrial }
+  }
+
+  async function settleWithin(promise: Promise<unknown>, ms: number) {
+    return Promise.race([
+      promise.then(
+        value => ({ value }),
+        (error: Error) => ({ error })
+      ),
+      new Promise<{ pending: true }>(resolve => setTimeout(() => resolve({ pending: true }), ms))
+    ]) as Promise<{ error?: Error; pending?: true; value?: unknown }>
+  }
+
+  it('defaults to a 20 s trial budget', () => {
+    expect(REMOTE_DOWN_TRIAL_DEADLINE_MS).toBe(20_000)
+  })
+
+  it('a trial whose connect hangs frees the slot by its deadline and the next trial runs', async () => {
+    const h = downHarness()
+
+    const hung = h.runTrial(
+      () => new Promise(() => {}),
+      async () => 'never'
+    )
+
+    // While the trial is in flight, others fail fast.
+    await expect(h.run(async () => 'other')).rejects.toSatisfy(isRemoteBackendDownError)
+
+    const outcome = await settleWithin(hung, 1_000)
+    expect(outcome.pending).toBeUndefined()
+    expect(String(outcome.error?.message)).toMatch(/Timed out connecting to Hermes backend/)
+    expect(h.gate.isDown(KEY)).toBe(true)
+
+    // A failed trial escalates the backoff (2x), then admits the next trial.
+    h.time.advance(REMOTE_DOWN_INITIAL_BACKOFF_MS)
+    await expect(h.run(async () => 'x')).rejects.toSatisfy(isRemoteBackendDownError)
+    h.time.advance(REMOTE_DOWN_INITIAL_BACKOFF_MS)
+    await expect(
+      h.runTrial(
+        async () => ({ baseUrl: BASE_URL }),
+        async () => 'back'
+      )
+    ).resolves.toBe('back')
+    expect(h.gate.isDown(KEY)).toBe(false)
+  })
+
+  it('a trial whose request hangs frees the slot by its deadline and the next trial runs', async () => {
+    const h = downHarness()
+
+    const hung = h.runTrial(
+      async () => ({ baseUrl: BASE_URL }),
+      () => new Promise(() => {})
+    )
+
+    const outcome = await settleWithin(hung, 1_000)
+    expect(outcome.pending).toBeUndefined()
+    expect(String(outcome.error?.message)).toMatch(/Timed out connecting to Hermes backend/)
+    expect(h.forgetAnswer).toHaveBeenCalledWith(BASE_URL)
+
+    h.time.advance(2 * REMOTE_DOWN_INITIAL_BACKOFF_MS)
+    await expect(
+      h.runTrial(
+        async () => ({ baseUrl: BASE_URL }),
+        async () => 'back'
+      )
+    ).resolves.toBe('back')
+    expect(h.gate.isDown(KEY)).toBe(false)
+  })
+
+  it('a late failure from the abandoned trial cannot escalate the backoff again', async () => {
+    const h = downHarness()
+
+    let failLate: (error: Error) => void = () => {}
+
+    const hung = h.runTrial(
+      async () => ({ baseUrl: BASE_URL }),
+      () => new Promise((_r, reject) => (failLate = reject))
+    )
+
+    await settleWithin(hung, 1_000)
+    failLate(reset())
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    // Still the 2x backoff from the deadline, not 4x.
+    h.time.advance(2 * REMOTE_DOWN_INITIAL_BACKOFF_MS)
+    await expect(
+      h.runTrial(
+        async () => ({ baseUrl: BASE_URL }),
+        async () => 'back'
+      )
+    ).resolves.toBe('back')
+  })
+
+  it('a non-trial request is not cut by the trial deadline', async () => {
+    const h = harness()
+
+    const slow = dispatchThroughRemoteDownGate({
+      gate: h.gate,
+      key: KEY,
+      connect: h.connect,
+      request: () => new Promise(resolve => setTimeout(() => resolve('slow'), 3 * TRIAL_DEADLINE_MS)),
+      trialDeadlineMs: TRIAL_DEADLINE_MS
+    })
+
+    await expect(slow).resolves.toBe('slow')
+  })
+})
+
 describe('main.ts wiring', () => {
   const main = readFileSync(join(__dirname, 'main.ts'), 'utf8')
+
+  it('fetchJson and fetchPublicJson start the total deadline before http.request and arm it on the request', () => {
+    for (const name of ['function fetchJson(', 'function fetchPublicJson(']) {
+      const body = main.slice(main.indexOf(name), main.indexOf(name) + 9000)
+      const start = body.indexOf('startRequestDeadline(timeoutMs)')
+
+      expect(start).toBeGreaterThan(0)
+      expect(start).toBeLessThan(body.indexOf('client.request('))
+      expect(body).toMatch(/deadline\.arm\(req, reject\)/)
+    }
+  })
+
+  it('fetchJson picks the probe pool when asked and fetchJsonForBackend forwards it', () => {
+    expect(main).toMatch(/jsonAgentFor\(parsed\.protocol, options\.pool === 'probe' \? 'probe' : 'json'\)/)
+    const body = main.slice(main.indexOf('async function fetchJsonForBackend('))
+    expect(body.slice(0, 4000)).toMatch(/pool: opts\.pool/)
+  })
 
   it('routes registry requests to remote connections through the gate', () => {
     const body = main.slice(main.indexOf('async function dispatchRegistryApiRequest('))

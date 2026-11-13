@@ -51,8 +51,10 @@ import {
   htmlResponseError,
   httpStatusError,
   jsonAgentFor,
+  multipartBody,
   readJsonErrorBody,
   readStatusCode,
+  startRequestDeadline,
   withRetry
 } from './api-transport'
 import { appIconCandidates, resolveAppIcon, shouldOverrideDockIcon } from './app-icon'
@@ -5211,32 +5213,15 @@ async function ensureRuntime(
   throw new Error(`Unexpected bootstrap backend: ${backend.kind}`)
 }
 
-// Assemble a single-file multipart/form-data body (FastAPI `UploadFile`
-// endpoints, e.g. kanban attachments). Hand-rolled because node's http has no
-// FormData and the payload is one file — a dependency would be overkill.
-function multipartBody(upload) {
-  const boundary = `----hermes-${crypto.randomBytes(12).toString('hex')}`
-  const filename = String(upload.filename || 'file').replace(/["\r\n]/g, '_')
-
-  const body = Buffer.concat([
-    Buffer.from(
-      `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
-        `Content-Type: ${upload.contentType || 'application/octet-stream'}\r\n\r\n`
-    ),
-    Buffer.from(upload.bytes),
-    Buffer.from(`\r\n--${boundary}--\r\n`)
-  ])
-
-  return { body, contentType: `multipart/form-data; boundary=${boundary}` }
-}
-
 function fetchJson(url, token, options: any = {}) {
   // Retry policy lives in api-transport.ts: idempotent verbs retry on any
   // transient transport error; POST/PUT/DELETE only when the request provably
   // never reached the server (see shouldRetryRequest) — never double-submit.
   return withRetry(
     async (requestState: any) => {
+      // [daveey] Total per-attempt deadline from here: covers grant minting, Agent queue wait, connect and response.
+      const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+      const deadline = startRequestDeadline(timeoutMs)
       // Mint inside each retry: a grant authorizes exactly one HTTP request.
       const nativeHeaders = options.gatewayDescriptor
         ? await nativeGatewayHttpHeaders(options.gatewayDescriptor, url, HERMES_HOME, options.method || 'GET', options.upload ? undefined : options.body)
@@ -5252,8 +5237,8 @@ function fetchJson(url, token, options: any = {}) {
 
         const parsed = new URL(url)
         const client = parsed.protocol === 'https:' ? https : http
-        const agent = jsonAgentFor(parsed.protocol)
-        const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+        // The dispatch health probe rides its own small pool (pool: 'probe') so a saturated JSON pool can't fail it.
+        const agent = jsonAgentFor(parsed.protocol, options.pool === 'probe' ? 'probe' : 'json')
 
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
@@ -5341,9 +5326,7 @@ function fetchJson(url, token, options: any = {}) {
         )
 
         req.on('error', reject)
-        req.setTimeout(timeoutMs, () => {
-          req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-        })
+        deadline.arm(req, reject)
 
         // From here the request goes on the wire: a later transport error can no
         // longer prove the server didn't process it, so non-idempotent verbs must
@@ -5370,6 +5353,8 @@ function fetchPublicJson(url, options: any = {}) {
   return withRetry(
     (requestState: any) =>
       new Promise((resolve, reject) => {
+        const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+        const deadline = startRequestDeadline(timeoutMs)
         const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body))
         let parsed
 
@@ -5383,7 +5368,6 @@ function fetchPublicJson(url, options: any = {}) {
 
         const client = parsed.protocol === 'https:' ? https : http
         const agent = jsonAgentFor(parsed.protocol)
-        const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
@@ -5446,9 +5430,7 @@ function fetchPublicJson(url, options: any = {}) {
         )
 
         req.on('error', reject)
-        req.setTimeout(timeoutMs, () => {
-          req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-        })
+        deadline.arm(req, reject)
 
         // Past this point the request is on the wire — see fetchJson.
         requestState.bodySent = true
@@ -15065,7 +15047,15 @@ async function getJsonForBackend(descriptor, path, opts: any = {}) {
 async function fetchJsonForBackend(
   descriptor,
   path,
-  opts: { method?: string; body?: unknown; upload?: unknown; timeoutMs?: number; profileScoped?: boolean } = {}
+  opts: {
+    method?: string
+    body?: unknown
+    upload?: unknown
+    timeoutMs?: number
+    profileScoped?: boolean
+    // 'probe' = the dispatch health probe's dedicated socket pool (api-transport.ts).
+    pool?: 'json' | 'probe'
+  } = {}
 ) {
   const url = `${descriptor.baseUrl}${path}`
 
@@ -15111,7 +15101,7 @@ async function fetchJsonForBackend(
 
     const answer = await requestWithOauthFallback(descriptor.baseUrl, {
       ensureNativeAccessToken,
-      requestWithBearer: (bearer: string) => fetchJson(url, null, { ...options, bearer }),
+      requestWithBearer: (bearer: string) => fetchJson(url, null, { ...options, bearer, pool: opts.pool }),
       requestWithCookie: () => fetchJsonViaOauthSession(url, options)
     })
 
@@ -15126,6 +15116,7 @@ async function fetchJsonForBackend(
     upload: opts.upload,
     timeoutMs,
     headers: descriptor.headers,
+    pool: opts.pool,
     gatewayDescriptor: descriptor.gatewayEndpoint ? descriptor : undefined
   })
 

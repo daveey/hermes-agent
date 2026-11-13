@@ -117,7 +117,9 @@ export class RemoteRevalidationCoordinator {
 interface EnsureHealthyPooledRemoteBackendForDispatchOptions<TConnection extends RemoteConnectionDescriptor> {
   connectionPromise: Promise<TConnection>
   currentConnectionPromise: () => null | Promise<TConnection>
-  probe: (connection: TConnection, path: string, options: { timeoutMs: number }) => Promise<unknown>
+  // The probe asks for pool 'probe': its own small socket pool, so a JSON pool saturated by a slow link can't fail
+  // the health verdict and tear down a tunnel that answers.
+  probe: (connection: TConnection, path: string, options: { timeoutMs: number; pool?: 'probe' }) => Promise<unknown>
   reconnect: () => Promise<TConnection>
   retire: (error: unknown) => Promise<void> | void
   // Skip the probe when the backend answered within skipWindowMs (0 forces it, e.g. the prewarm keepalive).
@@ -171,7 +173,8 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
 
     try {
       await probe(connection, '/api/health', {
-        timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
+        timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS,
+        pool: 'probe'
       })
     } catch (healthError) {
       // A remote that predates /api/health would otherwise 404 every dispatch,
@@ -182,7 +185,8 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
       }
 
       await probe(connection, '/api/status', {
-        timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
+        timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS,
+        pool: 'probe'
       })
     }
   } catch (error) {

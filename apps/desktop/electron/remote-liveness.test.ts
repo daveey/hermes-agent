@@ -287,7 +287,8 @@ describe('ensureHealthyPooledRemoteBackendForDispatch', () => {
     ).resolves.toBe(healthy)
 
     expect(probe).toHaveBeenCalledWith(healthy, '/api/health', {
-      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
+      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS,
+      pool: 'probe'
     })
     expect(retire).not.toHaveBeenCalled()
     expect(reconnect).not.toHaveBeenCalled()
@@ -412,7 +413,8 @@ describe('ensureHealthyPooledRemoteBackendForDispatch', () => {
     ).resolves.toBe(replacement)
 
     expect(probe).toHaveBeenCalledWith(stale, '/api/health', {
-      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
+      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS,
+      pool: 'probe'
     })
     expect(retire).toHaveBeenCalledOnce()
     expect(reconnect).toHaveBeenCalledOnce()
@@ -442,7 +444,8 @@ describe('ensureHealthyPooledRemoteBackendForDispatch', () => {
     ).resolves.toBe(legacy)
 
     expect(probe).toHaveBeenCalledWith(legacy, '/api/status', {
-      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
+      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS,
+      pool: 'probe'
     })
     expect(retire).not.toHaveBeenCalled()
     expect(reconnect).not.toHaveBeenCalled()

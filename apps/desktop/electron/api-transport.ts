@@ -33,6 +33,7 @@
  *        caller. When in doubt, don't retry a non-idempotent request.
  */
 
+import crypto from 'node:crypto'
 import http from 'node:http'
 import https from 'node:https'
 
@@ -45,7 +46,23 @@ const HTTPS_JSON_AGENT = new https.Agent({ keepAlive: true, maxSockets: 50 })
 const HTTP_DOWNLOAD_AGENT = new http.Agent({ keepAlive: true, maxSockets: 8 })
 const HTTPS_DOWNLOAD_AGENT = new https.Agent({ keepAlive: true, maxSockets: 8 })
 
-function jsonAgentFor(protocol) {
+// [daveey] Probe pool: the dispatch-time /api/health probe of a pooled remote
+// (ensureHealthyPooledRemoteBackendForDispatch). On a slow link the JSON pool
+// filled up (51 sockets to one tunnel on 2026-11-12), the probe queued behind
+// it for minutes, failed, and tore down a tunnel that was answering fine.
+// Its own tiny pool keeps the health verdict about the remote, not about our
+// local socket queue.
+const PROBE_POOL_MAX_SOCKETS = 2
+const HTTP_PROBE_AGENT = new http.Agent({ keepAlive: true, maxSockets: PROBE_POOL_MAX_SOCKETS })
+const HTTPS_PROBE_AGENT = new https.Agent({ keepAlive: true, maxSockets: PROBE_POOL_MAX_SOCKETS })
+
+export type JsonRequestPool = 'json' | 'probe'
+
+function jsonAgentFor(protocol: string, pool: JsonRequestPool = 'json') {
+  if (pool === 'probe') {
+    return protocol === 'https:' ? HTTPS_PROBE_AGENT : HTTP_PROBE_AGENT
+  }
+
   return protocol === 'https:' ? HTTPS_JSON_AGENT : HTTP_JSON_AGENT
 }
 
@@ -56,8 +73,76 @@ function downloadAgentFor(protocol) {
 // Close pooled sockets so lingering keep-alive connections can't hold the
 // process open (or leak FDs) across quit. Wired to app 'will-quit' in main.ts.
 function destroyKeepaliveAgents() {
-  for (const agent of [HTTP_JSON_AGENT, HTTPS_JSON_AGENT, HTTP_DOWNLOAD_AGENT, HTTPS_DOWNLOAD_AGENT]) {
+  for (const agent of [
+    HTTP_JSON_AGENT,
+    HTTPS_JSON_AGENT,
+    HTTP_PROBE_AGENT,
+    HTTPS_PROBE_AGENT,
+    HTTP_DOWNLOAD_AGENT,
+    HTTPS_DOWNLOAD_AGENT
+  ]) {
     agent.destroy()
+  }
+}
+
+function requestTimeoutError(timeoutMs: number): Error {
+  return new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`)
+}
+
+// Assemble a single-file multipart/form-data body (FastAPI `UploadFile`
+// endpoints, e.g. kanban attachments). Hand-rolled because node's http has no
+// FormData and the payload is one file — a dependency would be overkill.
+function multipartBody(upload: any) {
+  const boundary = `----hermes-${crypto.randomBytes(12).toString('hex')}`
+  const filename = String(upload.filename || 'file').replace(/["\r\n]/g, '_')
+
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+        `Content-Type: ${upload.contentType || 'application/octet-stream'}\r\n\r\n`
+    ),
+    Buffer.from(upload.bytes),
+    Buffer.from(`\r\n--${boundary}--\r\n`)
+  ])
+
+  return { body, contentType: `multipart/form-data; boundary=${boundary}` }
+}
+
+/**
+ * [daveey] Bound one JSON request by a TOTAL deadline, not only an idle one.
+ *
+ * `req.setTimeout` is a per-socket idle timer that starts only once the Agent
+ * hands the request a socket, so time spent queued behind a full pool is
+ * unbounded, and a response that trickles bytes never trips it. On a slow link
+ * (2026-11-12, MacBook on a 1-2 Mbps guest network) that let a 10 s health
+ * probe run 227 s and a down-gate trial hold its slot for 3.5 min.
+ *
+ * Call this BEFORE `http.request` so the clock starts at call time, then
+ * `arm(req, reject)` right after: on expiry the caller's promise rejects with
+ * the usual "Timed out connecting to Hermes backend" error FIRST (so down-gate
+ * and retry classification are unchanged: a timeout is not a transient
+ * transport error) and only then is the request destroyed, so a socket error
+ * raised by the destroy can't win the race. The idle timeout is kept too.
+ */
+function startRequestDeadline(timeoutMs: number, now: () => number = Date.now) {
+  const startedAt = now()
+
+  return {
+    arm(req: http.ClientRequest, onTimeout: (error: Error) => void): void {
+      const expire = () => {
+        const error = requestTimeoutError(timeoutMs)
+        onTimeout(error)
+        req.destroy(error)
+      }
+
+      const timer = setTimeout(expire, Math.max(0, timeoutMs - (now() - startedAt)))
+      const clear = () => clearTimeout(timer)
+
+      req.once('close', clear)
+      req.once('response', (res: http.IncomingMessage) => res.once('close', clear))
+      req.setTimeout(timeoutMs, expire)
+    }
   }
 }
 
@@ -276,8 +361,11 @@ export {
   isIdempotentMethod,
   isTransientTransportError,
   jsonAgentFor,
+  multipartBody,
   readJsonErrorBody,
   readStatusCode,
+  requestTimeoutError,
   shouldRetryRequest,
+  startRequestDeadline,
   withRetry
 }

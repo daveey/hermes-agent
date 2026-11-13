@@ -24,6 +24,7 @@ import {
   isTransientTransportError,
   jsonAgentFor,
   shouldRetryRequest,
+  startRequestDeadline,
   withRetry
 } from './api-transport'
 
@@ -411,5 +412,175 @@ describe('htmlResponseError', () => {
     expect(
       htmlResponseError('https://gateway.example.com/api/profiles', 302, 'https://gateway.example.com/login').message
     ).toMatch(/authentication proxy/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// [daveey] Total request deadline + dedicated probe pool (2026-11-12: MacBook on a
+// 1-2 Mbps link held 51 sockets to the hub tunnel; requests queued in the full
+// Agent with no bound, a 10 s health probe ran 227 s and tore down a healthy
+// tunnel).
+// ---------------------------------------------------------------------------
+
+/** One GET shaped exactly like main.ts fetchJson: deadline started before http.request, armed right after. */
+function deadlineJsonGet(url: string, agent: http.Agent, timeoutMs: number): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const deadline = startRequestDeadline(timeoutMs)
+
+    const req = http.request(new URL(url), { agent, method: 'GET' }, res => {
+      const chunks: Buffer[] = []
+      res.on('error', reject)
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null')))
+    })
+
+    req.on('error', reject)
+    deadline.arm(req, reject)
+    req.end()
+  })
+}
+
+/** Settles with the outcome, or 'still pending' once `ms` passed (so a RED run fails instead of hanging). */
+function settleWithin<T>(promise: Promise<T>, ms: number): Promise<{ error?: Error; pending?: true; value?: T }> {
+  return Promise.race([
+    promise.then(
+      value => ({ value }),
+      error => ({ error })
+    ),
+    new Promise<{ pending: true }>(resolve => setTimeout(() => resolve({ pending: true }), ms))
+  ])
+}
+
+/** Server whose /hang requests never answer (held until cleanup) and whose /api/health answers at once. */
+function hangingServer() {
+  const held: http.ServerResponse[] = []
+
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end('{"ok":true}')
+
+      return
+    }
+
+    if (req.url === '/trickle') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.write(' ')
+      const tick = setInterval(() => res.write(' '), 20)
+      res.on('close', () => clearInterval(tick))
+      held.push(res)
+
+      return
+    }
+
+    held.push(res)
+  })
+
+  const close = async () => {
+    for (const res of held) {
+      res.destroy()
+    }
+
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+  }
+
+  return { close, held, server }
+}
+
+describe('live: total request deadline (startRequestDeadline)', () => {
+  it('rejects a request queued behind a full Agent by its deadline, not after a socket frees up', async () => {
+    const { close, held, server } = hangingServer()
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+
+    try {
+      // Occupy the only socket with a request the server never answers.
+      const blocker = deadlineJsonGet(`${base}/hang`, agent, 10_000)
+      blocker.catch(() => {})
+      await new Promise<void>(resolve => {
+        const wait = () => (held.length > 0 ? resolve() : setTimeout(wait, 5))
+        wait()
+      })
+
+      const startedAt = performance.now()
+      const outcome = await settleWithin(deadlineJsonGet(`${base}/api/health`, agent, 150), 1_500)
+
+      expect(outcome.pending).toBeUndefined()
+      expect(String(outcome.error?.message)).toBe('Timed out connecting to Hermes backend after 150ms')
+      expect(performance.now() - startedAt).toBeLessThan(1_000)
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+
+  it('rejects a trickling response by its deadline (an idle timer alone never fires)', async () => {
+    const { close, server } = hangingServer()
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 4 })
+
+    try {
+      const outcome = await settleWithin(deadlineJsonGet(`${base}/trickle`, agent, 200), 1_500)
+
+      expect(outcome.pending).toBeUndefined()
+      expect(String(outcome.error?.message)).toBe('Timed out connecting to Hermes backend after 200ms')
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+
+  it('a request that answers in time is not destroyed when its deadline would have passed', async () => {
+    const { close, server } = hangingServer()
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+
+    try {
+      await expect(deadlineJsonGet(`${base}/api/health`, agent, 100)).resolves.toEqual({ ok: true })
+      await new Promise(resolve => setTimeout(resolve, 150))
+      // The kept-alive socket survived (no late destroy): the next request reuses it and answers.
+      await expect(deadlineJsonGet(`${base}/api/health`, agent, 100)).resolves.toEqual({ ok: true })
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+})
+
+describe('live: dispatch probe pool', () => {
+  it('the probe answers while the JSON pool is saturated with hung requests to the same tunnel', async () => {
+    const { close, held, server } = hangingServer()
+    const base = await listen(server)
+    const jsonPool = jsonAgentFor('http:')
+    const hung: Promise<unknown>[] = []
+
+    try {
+      for (let i = 0; i < 50; i += 1) {
+        const pending = deadlineJsonGet(`${base}/hang`, jsonPool, 10_000)
+        pending.catch(() => {})
+        hung.push(pending)
+      }
+
+      await new Promise<void>(resolve => {
+        const wait = () => (held.length >= 50 ? resolve() : setTimeout(wait, 5))
+        wait()
+      })
+
+      // Control: the JSON pool is full, so a health check there just queues.
+      const queued = await settleWithin(deadlineJsonGet(`${base}/api/health`, jsonPool, 200), 1_500)
+      expect(String(queued.error?.message)).toContain('Timed out connecting to Hermes backend')
+
+      // The dispatch probe's own pool is not behind that queue.
+      const probe = await settleWithin(
+        deadlineJsonGet(`${base}/api/health`, jsonAgentFor('http:', 'probe'), 1_000),
+        1_500
+      )
+
+      expect(probe.error).toBeUndefined()
+      expect(probe.value).toEqual({ ok: true })
+    } finally {
+      await close()
+    }
   })
 })
