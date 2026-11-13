@@ -313,6 +313,8 @@ _ReadRemoteScriptFn = Callable[[str], Optional[str]]
 _TRANSPARENT_COMMAND_PREFIXES = frozenset({
     "sudo", "doas", "env", "nohup", "setsid", "nice", "ionice", "stdbuf",
     "timeout", "exec", "command", "builtin", "eatmydata",
+    # time(1) (`/usr/bin/time x`, `command time x`); the `time` keyword is peeled separately.
+    "time",
     # Privilege and namespace wrappers: options, then the command they run.
     "pkexec", "su", "runuser", "setpriv", "systemd-run", "nsenter", "unshare",
 })
@@ -326,6 +328,7 @@ _TRANSPARENT_PREFIX_VALUE_OPTIONS = {
     "ionice": {"-c", "-n", "-p", "--class", "--classdata"},
     "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
     "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "time": {"-f", "--format", "-o", "--output"},
     "pkexec": {"--user"},
     "su": {"-s", "--shell", "-g", "--group", "-G", "--supp-group"},
     "runuser": {"-u", "--user", "-s", "--shell", "-g", "--group", "-G", "--supp-group"},
@@ -882,7 +885,7 @@ def contains_launchctl_submit_command(command: str) -> bool:
 
     See #62891.
     """
-    for segment in _iter_command_segments(command):
+    for segment in _iter_command_segment_views(command):
         index = _executed_command_index(segment)
         if index is not None and _executable_name(segment[index]) == "launchctl":
             arguments = segment[index + 1 :]
@@ -892,15 +895,17 @@ def contains_launchctl_submit_command(command: str) -> bool:
 
 
 # Reserved words that may precede a simple command in the same segment (`if hermes-sync`,
-# `then x`, `! x`, `time -p x`, `{ x; }`); `fi`/`done`/`}` close a list and run nothing.
+# `then x`, `! x`, `time -p x`, `{ x; }`, `coproc x`); `fi`/`done`/`}` close a list and run nothing.
 _COMMAND_PREFIX_KEYWORDS = frozenset({
-    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{",
+    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{", "coproc",
 })
 _MAX_EXECUTES_NAMED_DEPTH = 4
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _peel_command_keywords(segment: list[str]) -> list[str]:
-    """*segment* without its leading reserved words (and ``time``'s ``-p``/``--``)."""
+    """*segment* without its leading reserved words (and ``time``'s ``-p``/``--``, and the NAME of
+    ``coproc NAME { … }``)."""
     index = 0
     while index < len(segment) and segment[index] in _COMMAND_PREFIX_KEYWORDS:
         word = segment[index]
@@ -908,7 +913,25 @@ def _peel_command_keywords(segment: list[str]) -> list[str]:
         if word == "time":
             while index < len(segment) and segment[index] in ("-p", "--"):
                 index += 1
+        elif (word == "coproc" and index + 1 < len(segment) and segment[index + 1] == "{"
+              and _SHELL_NAME.fullmatch(segment[index])):
+            index += 1
     return segment[index:]
+
+
+def _command_segment_views(segment: list[str]) -> list[list[str]]:
+    """*segment* as written, then without its leading reserved words when it has any. Callers
+    read every view, so peeling only ever ADDS a reference. Without the peeled view `time ./x.sh`,
+    `if true; then ./x.sh; fi` and `{ ./x.sh; }` read the keyword as the command and never open
+    ``./x.sh``."""
+    peeled = _peel_command_keywords(segment)
+    return [segment, peeled] if peeled and len(peeled) != len(segment) else [segment]
+
+
+def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
+    """Every ``_command_segment_views`` view of every segment of *command*."""
+    for segment in _iter_command_segments(command):
+        yield from _command_segment_views(segment)
 
 
 def _shell_script_operand(arguments: list[str]) -> Optional[str]:
@@ -1168,20 +1191,22 @@ def _iter_referenced_shell_scripts(
     command: str, *, cwd: Optional[str] = None, call_arguments: bool = False,
 ) -> Iterator[Path]:
     """Yield scripts executed directly or through a POSIX shell. Each segment is read at the
-    original token AND at the peeled wrapper target — additive on purpose: peeling must never REMOVE
+    original token AND at the peeled wrapper target, both with and without leading reserved words
+    (`time`, `!`, `then`, `{`, …) — additive on purpose: peeling must never REMOVE
     a reference (a local ``./timeout`` is a script, not the coreutils wrapper). With
     *call_arguments* the same discovery runs over call-argument segments instead
     (``expanduser("~/x")``): paths there are interpreter string literals, i.e. mentions."""
     for segment, is_call_argument in _iter_positioned_command_segments(command):
         if is_call_argument != call_arguments:
             continue
-        index = _command_token_index(segment)
-        if index is None:
-            continue
-        yield from _references_at(segment, index, cwd)
-        peeled = _peel_transparent_prefixes(segment, index)
-        if peeled != index:
-            yield from _references_at(segment, peeled, cwd)
+        for view in _command_segment_views(segment):
+            index = _command_token_index(view)
+            if index is None:
+                continue
+            yield from _references_at(view, index, cwd)
+            peeled = _peel_transparent_prefixes(view, index)
+            if peeled != index:
+                yield from _references_at(view, peeled, cwd)
 
 
 # CPython short options that take a value (glued `-Wignore` or the next token), and the ones after
@@ -1222,7 +1247,7 @@ def _iter_python_interpreter_scripts(command: str, *, cwd: Optional[str] = None)
     """Yield files a segment runs as ``python3 [options] <file>`` (also behind wrappers:
     ``/usr/bin/env python3 <file>``). An interpreter is never itself a wrapper, so only the
     executed command is read."""
-    for segment in _iter_command_segments(command):
+    for segment in _iter_command_segment_views(command):
         index = _executed_command_index(segment)
         if index is None or not _INTERPRETER_IMAGE_RE.match(_executable_name(segment[index]).lower()):
             continue
@@ -1241,8 +1266,8 @@ def _python_source_is_unsafe(text: str, budget: _LifecycleScanBudget) -> bool:
 
 def _iter_shell_command_payloads(command: str) -> Iterator[str]:
     """Yield code passed through ``sh|bash|... -c`` (and ``su -c`` / ``env -S``) for recursive
-    scanning."""
-    for segment in _iter_command_segments(command):
+    scanning; reserved words before the shell (`time bash -c …`) are peeled."""
+    for segment in _iter_command_segment_views(command):
         index = _command_token_index(segment)
         if index is None:
             continue

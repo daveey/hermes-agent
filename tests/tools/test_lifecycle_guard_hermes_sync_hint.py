@@ -122,8 +122,6 @@ def test_hint_survives_shell_options_with_values(tmp_path, monkeypatch, template
     assert _ROUTE in error
 
 
-# The referenced-script walk does not yet peel reserved words, so these are not refused today
-# (follow-up card); the hint itself must already name the route once they are.
 @pytest.mark.parametrize("template", [
     "time {script} mods-pull",
     "time -p {script} mods-pull",
@@ -132,13 +130,14 @@ def test_hint_survives_shell_options_with_values(tmp_path, monkeypatch, template
     "if {script} mods-pull; then echo ok; fi",
     "while false; do {script} mods-pull; done",
     "{{ {script} mods-pull; }}",
+    "coproc {script} mods-pull",
 ])
-def test_hint_survives_reserved_words(tmp_path, template):
-    from tools.terminal_tool_guards import _refusal_hint
-
+def test_hint_survives_reserved_words(tmp_path, monkeypatch, template):
     script = _script(tmp_path, "hermes-sync", _RESTART)
 
-    assert _ROUTE in _refusal_hint(template.format(script=script))
+    error = _refuse(tmp_path, monkeypatch, template.format(script=script))
+
+    assert _ROUTE in error
 
 
 def test_a_shell_option_value_is_not_the_script(tmp_path, monkeypatch):
@@ -158,6 +157,9 @@ def test_a_shell_option_value_is_not_the_script(tmp_path, monkeypatch):
     ("then sudo -u ubuntu hermes-sync", True),
     ("bash -c 'if true; then hermes-sync; fi'", True),
     ("python3 /x/hermes-sync", True),
+    ("coproc hermes-sync", True),
+    ("coproc SYNC { hermes-sync; }", True),
+    ("/usr/bin/time -f %e hermes-sync", True),
     ("bash -c 'echo hermes-sync'", False),
     ("grep hermes-sync log", False),
     ("echo time hermes-sync", False),
