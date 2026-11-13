@@ -944,12 +944,12 @@ def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
 
 def _cat_operands(segment: Optional[list[str]]) -> list[str]:
     """Files a ``cat`` segment writes to its stdout (its stdout piped on to a program reader),
-    its own stdin included (``cat < f.py | python3``, ``cat - < f.py``)."""
+    its own stdin included (``cat < f.py | python3``, ``cat - < f.py``, ``tee x < f.py``)."""
     for view in _command_segment_views(segment) if segment else []:
         index = _executed_command_index(view)
-        if index is not None and _executable_name(view[index]) == "cat":
+        if index is not None and (name := _executable_name(view[index])) in ("cat", "tee"):
             arguments, stdin = _split_redirections(view[index + 1 :])
-            return [argument for argument in arguments if not argument.startswith("-")] + stdin
+            return [a for a in arguments if name == "cat" and not a.startswith("-")] + stdin
     return []
 
 

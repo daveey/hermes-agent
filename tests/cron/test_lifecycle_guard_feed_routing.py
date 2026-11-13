@@ -54,12 +54,37 @@ def files(tmp_path) -> dict[str, str]:
         "cat {py} > >(python3)",
         "cat {sh} > >(bash)",
         "cat {py} | tee >(python3)",
+        # The `>(…)` body reads the whole command's output, words after it included.
+        "cat > >(python3) {py}",
+        "cat > >(bash) {sh}",
+        "cat >> >(python3) {py}",
+        "cat 1> >(python3) < {py}",
+        "tee >(python3) < {py}",
+        "tee < {py} >(python3)",
+        "{{ tee >(python3); }} < {py}",
+        "{{ cat > >(python3); }} < {py}",
+        "{{ bash <(cat); }} < {sh}",
+        "cat {clean} | tee {out} >(python3) < {py}",
+        "tee {out} < {py} | python3",
+        # `>|` is one redirection operator, not `>` and a pipe.
+        "cat {py} >| >(python3)",
+        "cat >| >(bash) {sh}",
+        "cat {py} &> >(python3)",
+        # A `>(…)` body writes where its command's stdout goes; nested bodies read on.
+        "echo >(cat {py}) | python3",
+        "tee >(python3) >(cat) < {py}",
+        "cat {py} > >(cat | python3)",
+        "cat {py} > >(cat > >(python3))",
+        "cat > >(cat <(cat) > >(python3)) {py}",
+        "{{ cat <(cat) > >(python3); }} < {py}",
         # 3. A `cat`/`tee` with no file operand passes its stdin through.
         "cat {py} | cat | python3",
         "cat {py} | cat - | python3",
         "cat {py} | if true; then cat; fi | python3",
         "cat {py} | {{ cat; }} | python3",
         "cat {py} | tee /dev/null | python3",
+        "cat {py} | tee /dev/null 2<{clean} | python3",
+        "cat {py} | cat 2<{clean} | python3",
         "cat {py} | cat | cat | python3",
         # 4. A pipe continued on the next line.
         "cat {py} |\npython3",
@@ -109,6 +134,8 @@ def test_routed_stdin_feeds_are_scanned(files, template):
         "cat | python3",
         # `tee`'s operands are files it writes, not reads.
         "cat {clean} | tee {py} | python3",
+        "cat {py} | tee /dev/null < {clean} | python3",
+        "cat {py} | true | python3",
         # A closed subshell's output ends at the next operator.
         "(cat {py}); echo hi | python3",
         "(cat {py}) > {out}; echo hi | python3",
@@ -117,6 +144,10 @@ def test_routed_stdin_feeds_are_scanned(files, template):
         "cat {py} &&\npython3",
         "cat {py}\npython3",
         "echo '>&' | python3 {clean}",
+        # `>|f` clobbers f; it pipes nothing on.
+        "cat {py} >|{out}; python3 {clean}",
+        # A `>(…)` body fed by a `cat` reading another file.
+        "cat > >(python3) {clean}",
     ],
 )
 def test_routing_mentions_stay_allowed(files, template):
@@ -141,6 +172,9 @@ def test_redirection_ampersands_survive_tokenizing():
     assert words("echo '2>&1' \"&>\" 'a&'>x") == ["echo", "2>&1", "&>", "a&>x"]
     assert words("echo \\>&1") == ["echo", ">", "&", "1"]
     assert words("echo '>'&1") == ["echo", ">", "&", "1"]
+    # The `|` of `>|` (clobber) stays in its redirection; `> |` is still a pipe.
+    assert words("a >|x 2>| y | b") == ["a", ">|x", "2>|", "y", "|", "b"]
+    assert words("a > | b '>|'") == ["a", ">", "|", "b", ">|"]
 
 
 def test_glued_ampersand_redirection_splits_from_its_word():
