@@ -21,7 +21,10 @@ process ANCESTRY's start-time environments, not from this process's mutable ``os
 
 No input asserts ``human``: no flag, no variable. Human is only a COMPLETE walk to init that found
 no marker; an inconclusive walk (psutil unusable, an ancestor vanishing mid-walk, a same-user
-process whose environment can't be read, the depth cap) records ``agent``. ROOT's unreadable
+process whose environment can't be read, the depth cap) records ``agent``, and so does a walk that
+meets a non-interactive automation runner (:data:`AUTOMATION_RUNNERS`: SSM SendCommand, cron, atd)
+or a comment whose ``--author`` is an agent handle; relays need not forward markers for those.
+ROOT's unreadable
 process is skipped (``login``/``sshd``, launchd, a setuid ``login`` whose effective uid is root, a
 non-dumpable ``sshd-session`` whose environ is root's). Linux also skips a same-uid
 ``systemd --user`` with permitted capabilities beyond ours when environment access is denied:
@@ -34,7 +37,7 @@ terminal app started from an agent, the TUI's ``!`` shell) labels a person's not
 only withholds operator authority; so does Windows, where an unreadable or exited ancestor (the
 parent of ``explorer.exe``) leaves every walk inconclusive. Out of reach: a same-user process that
 deliberately destroys its marked ancestry (``exec env -i`` replacing the tool shell, double-fork
-daemonizing) or hands its command to a process outside its ancestry (``tmux send-keys``, ``at``,
+daemonizing) or hands its command to a process outside its ancestry (``tmux send-keys``,
 ``ssh <host> hermes kanban comment``, whose remote sshd session starts clean) — evasion or a
 handoff, not provenance, which needs real authentication. The dashboard API uses this ancestry
 reader for resolved raw loopback TCP peers (``kanban_http_comment_writer``); remote/unresolvable
@@ -42,7 +45,9 @@ HTTP peers retain the legacy human default, not a claim of authenticated human i
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -64,6 +69,24 @@ AGENT_ENV_MARKERS: tuple[str, ...] = (
 )
 
 MAX_ANCESTRY = 64
+
+# [daveey] Non-interactive automation runners: a command they started is a scheduled job or a
+# remote automation (hub-worker-exec's SSM SendCommand), never a person typing, even when the runner
+# is root's and its environment unreadable. Relays (ssh, the courier, SSM) each had to forward the
+# caller's markers, and each new relay defaulted to ``human``; this rule lives in the writer. Keyed
+# by the 15-char ``comm`` prefix too: Linux truncates it when psutil can't widen it from cmdline.
+AUTOMATION_RUNNERS: tuple[str, ...] = ("amazon-ssm-agent", "ssm-document-worker", "cron", "crond", "atd")
+RUNNER_FOR_NAME: dict[str, str] = {**{r[:15]: r for r in AUTOMATION_RUNNERS},
+                                   **{r: r for r in AUTOMATION_RUNNERS}}
+# An interactive SSM session (``aws ssm start-session``) is a person's shell; its ancestors are the
+# same ssm-agent-worker/amazon-ssm-agent that start SendCommand documents, so no runner above it
+# counts and the walk goes on to init exactly as before.
+INTERACTIVE_SSM = "ssm-session-worker"
+
+# Agent comment handles: ``<gateway>/t_<16 hex>`` (a worker run's note) and ``hub-chat-<hex>``.
+_AGENT_HANDLE = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/t_[0-9a-f]{16}|hub-chat-[0-9a-f]{6,})")
+
+logger = logging.getLogger(__name__)
 
 
 class Inconclusive(Exception):
@@ -157,13 +180,33 @@ def _foreign(proc, pid: int) -> bool:
         return False
 
 
+def _proc_name(pid: int) -> Optional[str]:
+    """The process name (psutil widens Linux's 15-char ``comm`` from cmdline), None if unreadable:
+    an unknown name only means the runner rule doesn't apply, never a less conclusive walk."""
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        return str(psutil.Process(pid).name() or "") or None
+    except (psutil.Error, OSError, AttributeError):
+        return None
+
+
+_REAL_READ = _read_proc
+
+
 def agent_ancestor(pid: Optional[int] = None, *, read: Optional[ProcReader] = None) -> Optional[str]:
     """``"<pid>:<MARKER>"`` for the nearest process from ``pid`` (default: this one) up to init
-    whose start-time environment carries an agent marker; None after a complete clean walk.
-    Raises :class:`Inconclusive` when the walk can't be completed."""
+    whose start-time environment carries an agent marker, or ``"<pid>:runner:<name>"`` for a
+    non-interactive automation runner (:data:`AUTOMATION_RUNNERS`); None after a complete clean
+    walk. Raises :class:`Inconclusive` when the walk can't be completed. Process names are read only
+    with the real reader: a substituted reader models its own pids, which real names don't match."""
     read = read or _read_proc
+    name_of = _proc_name if read is _REAL_READ else None
     current = os.getpid() if pid is None else int(pid)
     seen: set[int] = set()
+    interactive = False
     for _ in range(MAX_ANCESTRY):
         if current in seen:
             raise Inconclusive(f"ancestry loop at pid {current}")
@@ -172,24 +215,75 @@ def agent_ancestor(pid: Optional[int] = None, *, read: Optional[ProcReader] = No
         marker = env_agent_marker(environ)
         if marker:
             return f"{current}:{marker}"
+        name = name_of(current) if name_of else None
+        if name == INTERACTIVE_SSM:
+            interactive = True
+        runner = RUNNER_FOR_NAME.get(name or "")
+        if runner and not interactive:
+            return f"{current}:runner:{runner}"
         if current == 1 or ppid <= 0:
             return None  # reached init (or a root with no parent): complete
         current = ppid
     raise Inconclusive(f"ancestry deeper than {MAX_ANCESTRY}")
 
 
-def cli_comment_writer(*, read: Optional[ProcReader] = None,
-                       env: Optional[Mapping[str, str]] = None) -> tuple[str, Optional[str], str]:
+def is_agent_handle(author: Optional[str]) -> bool:
+    """True for an agent comment handle: ``<gateway>/t_<16 hex>`` or ``hub-chat-<6+ hex>``."""
+    return _AGENT_HANDLE.fullmatch(author or "") is not None
+
+
+# [daveey] A systemd service (a timer's job, the gateway and its plugins) is started by the service
+# manager, never typed by a person inside it; a login/ssh shell lives in ``session-N.scope`` and a
+# terminal app in its own ``.scope``, which keep the walk. Linux cgroup v2 only.
+_SYSTEMD_SERVICE = re.compile(r"/(?:system\.slice|user\.slice/(?:[^/]+/)*user@\d+\.service)/(?:[^/]+/)*"
+                              r"(?P<unit>[^/]+\.service)")
+
+
+def cgroup_v2_path(text: str) -> Optional[str]:
+    """The unified (``0::``) hierarchy path from ``/proc/<pid>/cgroup`` text, else None."""
+    for line in text.splitlines():
+        if line.startswith("0::"):
+            return line[3:].strip() or None
+    return None
+
+
+def _self_cgroup() -> Optional[str]:
+    try:
+        return cgroup_v2_path(Path("/proc/self/cgroup").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+
+
+def systemd_service_unit(path: Optional[str]) -> Optional[str]:
+    """The ``.service`` unit whose cgroup leaf ``path`` is (under system.slice or a user manager)."""
+    match = _SYSTEMD_SERVICE.fullmatch(path or "")
+    return match.group("unit") if match else None
+
+
+def cli_comment_writer(*, read: Optional[ProcReader] = None, env: Optional[Mapping[str, str]] = None,
+                       author: Optional[str] = None,
+                       cgroup: Optional[Callable[[], Optional[str]]] = None) -> tuple[str, Optional[str], str]:
     """``(writer_kind, writer_session, evidence)`` for a comment written by this CLI process.
 
-    ``agent`` when this process or any ancestor started with an agent marker, or when that can't
-    be ruled out; ``human`` only after a complete walk found none. ``writer_session`` is the agent's
-    inherited ``HERMES_SESSION_ID`` when it has one."""
+    ``agent`` when this process or any ancestor started with an agent marker or under an
+    automation runner, when this process runs in a systemd ``.service`` (``cgroup``: its cgroup v2
+    path; the real one only with the real reader), or when that can't be ruled out, or when
+    ``author`` is an agent handle (:func:`is_agent_handle`); each only ever lowers authority.
+    ``human`` only after a complete walk found none. ``writer_session`` is the agent's inherited
+    ``HERMES_SESSION_ID`` when it has one."""
     env = os.environ if env is None else env
+    if cgroup is None and (read or _read_proc) is _REAL_READ:
+        cgroup = _self_cgroup
     try:
         found = agent_ancestor(read=read)
     except Inconclusive as exc:
         found = f"inconclusive:{exc}"
+    unit = systemd_service_unit(cgroup()) if found is None and cgroup else None
+    if unit:
+        found = f"runner:systemd:{unit}"
+    if found is None and is_agent_handle(author):
+        logger.info("comment_writer: author handle overrides human walk")
+        found = "author_handle"
     if found is None:
         return "human", None, "clean-ancestry"
     session = str(env.get("HERMES_SESSION_ID") or "").strip()[:200] or None

@@ -400,3 +400,282 @@ def test_real_cli_subprocess_in_terminal_tool_shell_records_agent(worker_home):
                           capture_output=True, text=True, timeout=180, check=False, cwd=root)
     assert "Comment added" in proc.stdout, proc.stdout + proc.stderr
     assert _payload(tid, _last_comment(tid))["writer_kind"] == "agent"
+
+
+# --- automation runners and agent handles (third relay: hub-worker-exec over SSM) ---------------
+# hub-worker-exec runs `runuser -u ubuntu -- bash -c ...` from ssm-document-worker, whose environment
+# is amazon-ssm-agent's: no relay forwarded the caller's markers, and the root-owned runners were
+# skipped as foreign, so the walk reached init clean and recorded `human`. A command started by a
+# non-interactive automation runner is never a person typing; an interactive SSM session still is.
+
+class _FakeProc:
+    """psutil.Process for a modelled tree: (ppid, uids, environ or None=unreadable, name)."""
+    table: dict = {}
+
+    def __init__(self, pid):
+        self.pid = pid
+        self._ppid, self._uids, self._env, self._name = self.table[pid]
+
+    def ppid(self):
+        return self._ppid
+
+    def uids(self):
+        return self._uids
+
+    def name(self):
+        return self._name
+
+    def environ(self):
+        import psutil
+        if self._env is None:
+            raise psutil.AccessDenied(self.pid)
+        return self._env
+
+
+def _fake_psutil_tree(monkeypatch, rows: dict):
+    """Model a process tree for the REAL reader (``_read_proc`` + names): root rows are unreadable."""
+    import psutil
+    uid = os.getuid()  # windows-footgun: ok (POSIX-only tests, skipped elsewhere)
+    if uid == 0:
+        pytest.skip("root reads every environ")
+    table = {}
+    for pid, (ppid, owner, env, name) in rows.items():
+        uids = (0, 0, 0) if owner == "root" else (uid, uid, uid)
+        table[pid] = (ppid, uids, None if owner == "root" else env, name)
+    real_process, real_stat = psutil.Process, os.stat
+    monkeypatch.setattr(_FakeProc, "table", table)
+    # Only modelled pids are fake (the CLI's own DB code may consult psutil/os.stat for others).
+    monkeypatch.setattr(psutil, "Process", lambda pid=None: _FakeProc(pid) if pid in table else real_process(pid))
+    monkeypatch.setattr(kcw.os, "stat", lambda path, *a, **k: SimpleNamespace(st_uid=uid)
+                        if str(path).startswith("/proc/") else real_stat(path, *a, **k))
+
+
+CLEAN = {"HOME": "/home/ubuntu", "PATH": "/usr/bin"}
+INIT = {1: (0, "root", None, "systemd")}
+# The hub-worker-exec tree observed on worker-5 (comment 16922).
+SSM_SEND_COMMAND = {
+    900: (901, "ubuntu", CLEAN, "python3"), 901: (902, "ubuntu", CLEAN, "bash"),
+    902: (903, "root", None, "runuser"), 903: (904, "root", None, "ssm-document-worker"),
+    904: (905, "root", None, "ssm-agent-worker"), 905: (1, "root", None, "amazon-ssm-agent"), **INIT}
+
+
+posix_only = pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX uids")
+
+
+@posix_only
+def test_ssm_send_command_tree_is_an_agent_at_ssm_document_worker(monkeypatch):
+    _fake_psutil_tree(monkeypatch, SSM_SEND_COMMAND)
+    assert kcw.agent_ancestor(900) == "903:runner:ssm-document-worker"
+
+
+@posix_only
+@pytest.mark.parametrize("runner", ["amazon-ssm-agent", "amazon-ssm-agen", "ssm-document-worker",
+                                    "cron", "crond", "atd"],
+                         ids=["ssm-agent", "ssm-agent-comm-truncated", "ssm-document-worker", "cron",
+                              "crond", "atd"])
+def test_tree_rooted_at_an_automation_runner_is_an_agent(monkeypatch, runner):
+    _fake_psutil_tree(monkeypatch, {900: (901, "ubuntu", CLEAN, "python3"),
+                                    901: (910, "ubuntu", CLEAN, "sh"),
+                                    910: (1, "root", None, runner), **INIT})
+    assert kcw.agent_ancestor(900) == f"910:runner:{kcw.RUNNER_FOR_NAME[runner[:15]]}"
+
+
+@posix_only
+def test_interactive_ssm_session_stays_human(monkeypatch):
+    """``aws ssm start-session``: a person's shell under ssm-session-worker, whose own ancestors are
+    the same ssm-agent-worker/amazon-ssm-agent that start SendCommand documents."""
+    _fake_psutil_tree(monkeypatch, {900: (901, "ubuntu", CLEAN, "python3"),
+                                    901: (920, "ubuntu", CLEAN, "bash"),
+                                    920: (904, "root", None, "ssm-session-worker"),
+                                    904: (905, "root", None, "ssm-agent-worker"),
+                                    905: (1, "root", None, "amazon-ssm-agent"), **INIT})
+    assert kcw.agent_ancestor(900) is None
+
+
+@posix_only
+def test_human_login_shell_under_real_reader_stays_human(monkeypatch):
+    _fake_psutil_tree(monkeypatch, {900: (901, "ubuntu", CLEAN, "python3"),
+                                    901: (930, "ubuntu", CLEAN, "bash"),
+                                    930: (931, "root", None, "sshd-session"),
+                                    931: (1, "root", None, "sshd"), **INIT})
+    assert kcw.agent_ancestor(900) is None
+
+
+@posix_only
+def test_cli_writer_records_runner_evidence(monkeypatch):
+    me = os.getpid()
+    _fake_psutil_tree(monkeypatch, {me: (901, "ubuntu", CLEAN, "python3"),
+                                    **{k: v for k, v in SSM_SEND_COMMAND.items() if k != 900}})
+    assert kcw.cli_comment_writer(env={}) == ("agent", None, "903:runner:ssm-document-worker")
+
+
+@posix_only
+def test_cli_comment_over_ssm_send_command_records_agent(worker_home, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    me = os.getpid()
+    tid = _task()
+    _fake_psutil_tree(monkeypatch, {me: (901, "ubuntu", CLEAN, "python3"),
+                                    **{k: v for k, v in SSM_SEND_COMMAND.items() if k != 900}})
+    p = _payload(tid, _cli_comment(tid, "relayed agent note"))
+    assert p["writer_kind"] == "agent"
+
+
+AGENT_HANDLES = ["worker-5/t_01a1d55f5bbdae39", "hermes-hub/t_0123456789abcdef", "David-MBP/t_01a1d4faf1ecda4b",
+                 "hub-chat-a1b2c3", "hub-chat-0123456789abcdef"]
+NOT_HANDLES = ["default", "david", "worker-5/t_01a1d55f", "worker-5/t_01A1D55F5BBDAE39", "hub-chat-a1b2c",
+               "hub-chat-zzzzzz", "x/t_01a1d55f5bbdae39/extra", "/t_01a1d55f5bbdae39", "t_01a1d55f5bbdae39",
+               "hub-chat-a1b2c3 ", "my hub-chat-a1b2c3"]
+
+
+@pytest.mark.parametrize("author", AGENT_HANDLES)
+def test_agent_handle_author_records_agent_over_a_clean_walk(author, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger=kcw.__name__):
+        assert kcw.cli_comment_writer(read=_me({}, 500, HUMAN_SHELL), env={}, author=author) == (
+            "agent", None, "author_handle")
+    assert [r.getMessage() for r in caplog.records if "author handle" in r.getMessage()] == [
+        "comment_writer: author handle overrides human walk"]
+
+
+@pytest.mark.parametrize("author", NOT_HANDLES)
+def test_other_authors_with_a_clean_walk_stay_human(author, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger=kcw.__name__):
+        assert kcw.cli_comment_writer(read=_me({}, 500, HUMAN_SHELL), env={}, author=author) == (
+            "human", None, "clean-ancestry")
+    assert not [r for r in caplog.records if "author handle" in r.getMessage()]
+
+
+def test_handle_author_does_not_relabel_an_agent_walk(caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger=kcw.__name__):
+        kind, _s, evidence = kcw.cli_comment_writer(read=_me({}, 600, AGENT_TERMINAL), env={},
+                                                    author="hub-chat-a1b2c3")
+    assert (kind, evidence) == ("agent", "600:HERMES_SESSION_ID")
+    assert not [r for r in caplog.records if "author handle" in r.getMessage()]
+
+
+def test_cli_comment_with_handle_author_from_clean_shell_records_agent(worker_home, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(kcw, "_read_proc", _me({"HOME": "/h"}, 500, HUMAN_SHELL))
+    tid = _task()
+    parser = argparse.ArgumentParser(prog="hermes")
+    kanban.build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["kanban", "comment", tid, "relayed", "--author", "worker-5/t_01a1d55f5bbdae39"])
+    assert kanban.kanban_command(args) == 0
+    p = _payload(tid, _last_comment(tid))
+    assert p["writer_kind"] == "agent"
+
+
+@posix_only
+def test_unreadable_process_name_only_skips_the_runner_rule(monkeypatch):
+    """A name psutil can't read is no runner, and no reason to call the walk inconclusive."""
+    import psutil
+    _fake_psutil_tree(monkeypatch, {900: (901, "ubuntu", CLEAN, "python3"),
+                                    901: (1, "ubuntu", CLEAN, "bash"), **INIT})
+
+    def denied(self):
+        raise psutil.AccessDenied(self.pid)
+    monkeypatch.setattr(_FakeProc, "name", denied)
+    assert kcw.agent_ancestor(900) is None
+
+
+def test_none_author_is_not_a_handle():
+    assert kcw.is_agent_handle(None) is False
+
+
+def test_monkeypatched_reader_reads_no_real_names(monkeypatch):
+    """A fake ``_read_proc`` (fixed pids) must not be paired with REAL process names: pid 400 on a
+    CI host may well be cron."""
+    monkeypatch.setattr(kcw, "_read_proc", _me({"HOME": "/h"}, 500, HUMAN_SHELL))
+    monkeypatch.setattr(kcw, "_proc_name", lambda pid: pytest.fail(f"real name read for fake pid {pid}"))
+    assert kcw.agent_ancestor() is None
+
+
+# --- systemd units (hub timers, gateway plugins): the comment process's own cgroup v2 leaf -------
+# 14 hub automation comments from systemd timers and the gateway's own services recorded human: a
+# `.service` unit is started by the service manager, never typed by a person in it; a login/ssh
+# session lives in a `session-N.scope`, and other `.scope`s (terminal apps) keep the walk.
+
+SYSTEM_SERVICE = "/system.slice/hermes-hub-sync.service"
+USER_SERVICE = "/user.slice/user-1000.slice/user@1000.service/app.slice/hermes-gateway.service"
+SSH_SESSION = "/user.slice/user-1000.slice/session-3.scope"
+APP_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal-1234.scope"
+
+
+@pytest.mark.parametrize("path,unit", [(SYSTEM_SERVICE, "hermes-hub-sync.service"),
+                                       (USER_SERVICE, "hermes-gateway.service"),
+                                       ("/user.slice/user-1000.slice/user@1000.service/hermes-hub-watch.service",
+                                        "hermes-hub-watch.service")],
+                         ids=["system-slice", "user-app-slice", "user-manager-direct"])
+def test_systemd_service_cgroup_records_agent_over_a_clean_walk(path, unit):
+    assert kcw.cli_comment_writer(read=_me({}, 500, HUMAN_SHELL), env={}, cgroup=lambda: path) == (
+        "agent", None, f"runner:systemd:{unit}")
+
+
+@pytest.mark.parametrize("path", [SSH_SESSION, APP_SCOPE, None, "/", "",
+                                  "/system.slice/session-9.scope",          # a scope, even under system.slice
+                                  "/machine.slice/libvirtd-x.service",       # neither system.slice nor user@
+                                  "/user.slice/user-1000.slice/user@1000.service",  # the manager's own node
+                                  "/user.slice/user-1000.slice/user@1000.service/app.slice",
+                                  "/system.slice/docker.service/sub"],     # inside a delegated subtree
+                         ids=["session-scope", "app-scope", "no-v2-line", "root", "empty", "system-scope",
+                              "machine-slice", "user-manager-node", "app-slice-node", "delegated-subtree"])
+def test_other_cgroups_keep_the_human_walk(path):
+    assert kcw.cli_comment_writer(read=_me({}, 500, HUMAN_SHELL), env={}, cgroup=lambda: path) == (
+        "human", None, "clean-ancestry")
+
+
+def test_app_scope_keeps_an_agent_walk_unchanged():
+    assert kcw.cli_comment_writer(read=_me({}, 600, AGENT_TERMINAL), env={}, cgroup=lambda: APP_SCOPE) == (
+        "agent", None, "600:HERMES_SESSION_ID")
+
+
+def test_service_cgroup_does_not_relabel_an_agent_walk():
+    kind, _s, evidence = kcw.cli_comment_writer(read=_me({}, 600, AGENT_TERMINAL), env={},
+                                                cgroup=lambda: SYSTEM_SERVICE)
+    assert (kind, evidence) == ("agent", "600:HERMES_SESSION_ID")
+
+
+@pytest.mark.parametrize("text,path", [
+    ("0::/system.slice/cron.service\n", "/system.slice/cron.service"),
+    ("12:pids:/user.slice\n1:name=systemd:/x.service\n0::" + USER_SERVICE + "\n", USER_SERVICE),
+    ("12:pids:/system.slice/x.service\n", None),   # cgroup v1 only: no unified line
+    ("", None)], ids=["v2", "hybrid", "v1-only", "empty"])
+def test_cgroup_v2_path_parses_the_unified_line(text, path):
+    assert kcw.cgroup_v2_path(text) == path
+
+
+def test_monkeypatched_reader_reads_no_real_cgroup(monkeypatch):
+    """With a substituted reader the real process's cgroup (a test run inside a systemd service) is
+    not consulted, like process names."""
+    monkeypatch.setattr(kcw, "_read_proc", _me({"HOME": "/h"}, 500, HUMAN_SHELL))
+    monkeypatch.setattr(kcw, "_self_cgroup", lambda: pytest.fail("real cgroup read"))
+    assert kcw.cli_comment_writer(env={}) == ("human", None, "clean-ancestry")
+
+
+def test_real_reader_consults_the_real_cgroup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(kcw, "agent_ancestor", lambda **kw: None)
+    monkeypatch.setattr(kcw, "_self_cgroup", lambda: calls.append(1) or SYSTEM_SERVICE)
+    assert kcw.cli_comment_writer(env={}) == ("agent", None, "runner:systemd:hermes-hub-sync.service")
+    assert calls == [1]
+
+
+def test_cli_comment_from_a_systemd_service_records_agent(worker_home, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(kcw, "agent_ancestor", lambda **kw: None)
+    monkeypatch.setattr(kcw, "_self_cgroup", lambda: USER_SERVICE)
+    tid = _task()
+    assert _payload(tid, _cli_comment(tid, "timer note"))["writer_kind"] == "agent"
+
+
+def test_typed_slash_command_inside_a_service_stays_human(worker_home, monkeypatch):
+    """The gateway is a systemd service; ``/kanban comment`` a person typed into it is still theirs."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(kcw, "agent_ancestor", lambda **kw: None)
+    monkeypatch.setattr(kcw, "_self_cgroup", lambda: USER_SERVICE)
+    tid = _task()
+    assert "Comment added" in kanban.run_slash(f"comment {tid} typed by me", human_typed=True)
+    assert _payload(tid, _last_comment(tid))["writer_kind"] == "human"

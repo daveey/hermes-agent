@@ -1050,7 +1050,7 @@ def _cmd_comment(args: argparse.Namespace) -> int:
         writer_kind, writer_session = "human", None
     else:
         from hermes_cli.kanban_comment_writer import cli_comment_writer
-        writer_kind, writer_session, _evidence = cli_comment_writer()
+        writer_kind, writer_session, _evidence = cli_comment_writer(author=author)
     with kbc.connect_closing() as conn:
         try:
             kb.add_comment(conn, args.task_id, author, body,
