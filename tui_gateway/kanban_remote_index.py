@@ -420,19 +420,26 @@ def _hold(lease, hub: Path, ledger: Path, stop: threading.Event, poll: float = R
     """Change-driven refresher: one ``PRAGMA data_version`` per ``poll`` while held, a rebuild per replica change.
 
     A refresh that does not leave the copy current (publishing fails, the replica has no key) is retried after a
-    backoff that doubles up to :data:`BACKOFF_MAX_S`, whatever the stamp, not on every poll: readers compute
-    locally on a miss meanwhile. A success resets it and remembers the stamp, so that state is not rebuilt."""
+    backoff that doubles up to :data:`BACKOFF_MAX_S`, not on every poll: readers compute locally on a miss
+    meanwhile. A success resets it and remembers the stamp, so that state is not rebuilt. The backoff belongs to
+    one holding and one replica state: re-acquiring the lease or a new stamp starts it over (an immediate
+    rebuild), so a failing streak never delays the next state's copy by up to :data:`BACKOFF_MAX_S`."""
     from tui_gateway.kanban_replica_observer import fingerprint
 
-    last, retry_at, delay = None, 0.0, poll
+    last, tried, holding, retry_at, delay = None, None, False, 0.0, poll
     try:
         while not stop.wait(poll):
             if not lease.held():
-                last = None
+                last, holding = None, False
                 continue
+            if not holding:  # (re-)acquired: the last holding's failing streak says nothing about this one
+                holding, retry_at, delay = True, 0.0, poll
             try:
                 stamp = fingerprint(hub) if hub.is_file() else None
+                if stamp is not None and stamp != tried:  # a replica state not tried yet: no inherited wait
+                    retry_at, delay = 0.0, poll
                 if stamp is not None and stamp != last and _clock() >= retry_at:
+                    tried = stamp
                     if refresh(hub, ledger):
                         last, retry_at, delay = stamp, 0.0, poll
                     else:

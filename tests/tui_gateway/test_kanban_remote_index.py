@@ -364,3 +364,89 @@ def test_gateway_claim_upgrades_a_serve_holder(monkeypatch):
     kri.ensure_holder("serve")
     kri.ensure_holder("gateway")
     assert len(spawned) == 2
+
+
+def _failing_holder(monkeypatch, replica, ledger):
+    """A held ``_hold`` whose every refresh fails, on a frozen clock (the backoff never expires by itself)."""
+    clock, calls = [1000.0], []
+    monkeypatch.setattr(kri, "_clock", lambda: clock[0])
+    monkeypatch.setattr(kri, "refresh", lambda hub, led: calls.append(1) and False)
+    lease, stop = _Lease(True), threading.Event()
+    thread = threading.Thread(target=kri._hold, args=(lease, replica, ledger, stop, 0.01), daemon=True)
+    thread.start()
+    wait_until(lambda: lease.beats > 20, what="failing passes")
+    assert len(calls) == 1  # backing off
+    return lease, stop, thread, calls
+
+
+def test_holder_backoff_restarts_when_the_lease_is_re_acquired(tmp_path, monkeypatch):
+    """A lost lease ends the holding's failing streak: the next holding rebuilds at once, not after it."""
+    replica, ledger = _home(tmp_path, _cards())
+    lease, stop, thread, calls = _failing_holder(monkeypatch, replica, ledger)
+    try:
+        asked = lease.asked
+        lease.value = False
+        wait_until(lambda: lease.asked > asked + 3, what="standby passes")
+        lease.value = True
+        wait_until(lambda: len(calls) == 2, what="rebuild on re-acquire, clock still frozen")
+    finally:
+        stop.set()
+        thread.join(5)
+
+
+def test_holder_backoff_restarts_on_a_new_replica_stamp(tmp_path, monkeypatch):
+    """The backoff is per replica state: a new stamp is tried at once, whatever the last state's streak."""
+    replica, ledger = _home(tmp_path, _cards())
+    lease, stop, thread, calls = _failing_holder(monkeypatch, replica, ledger)
+    try:
+        _add(replica, _linked("t_new", CHAT), 50)
+        wait_until(lambda: len(calls) == 2, what="rebuild of the new stamp, clock still frozen")
+        beats = lease.beats
+        wait_until(lambda: lease.beats > beats + 20, what="passes on the same failing stamp")
+        assert len(calls) == 2  # that stamp backs off again
+    finally:
+        stop.set()
+        thread.join(5)
+
+
+def test_serve_holder_hands_the_lease_to_a_gateway_claim_in_the_same_process(tmp_path, monkeypatch):
+    """Two real ``HostLoopLease`` objects in one process: the serve refresher holds, a gateway claim stops it, its
+    ``release()`` unlocks, and the gateway lease's blocked ``LOCK_EX`` waiter becomes the holder and publishes."""
+    import agent.memory_provider as mp
+    from hermes_cli import host_loop_lease as hll
+
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path))
+    replica, _ = _home(tmp_path, _cards())
+    ledger = krn.ledger_path()
+    assert krn.hub_db_path() == replica
+    real, spawned = mp.spawn_context_thread, []
+
+    def spawn(target, name, args):
+        thread = real(target, name=name, args=args)
+        spawned.append((thread, args[0]))
+        return thread
+    monkeypatch.setattr(mp, "spawn_context_thread", spawn)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    try:
+        kri.ensure_holder("serve")
+        (serve_thread, serve), = spawned
+        assert isinstance(serve, hll.HostLoopLease) and serve.role == "serve"
+        wait_until(lambda: serve._held, timeout=15, what="the serve refresher holds the lease")
+        wait_until(lambda: kri.published_key(ledger) == kri.replica_key(replica), timeout=15, what="serve publish")
+        kri.ensure_holder("gateway")
+        gateway_thread, gateway = spawned[1]
+        assert gateway is not serve and gateway.role == "gateway" and gateway.path == serve.path
+        serve_thread.join(15)
+        assert not serve_thread.is_alive() and not serve._held  # the serve refresher stopped and released
+        wait_until(lambda: gateway._held, timeout=15, what="the gateway lease takes over the released lock")
+        meta = json.loads(gateway.path.read_text())
+        assert meta["held"] is True and meta["role"] == "gateway" and meta["pid"] == os.getpid()
+        assert not gateway._waiting
+        _add(replica, _linked("t_new", CHAT), 50)  # the gateway refresher publishes the next state
+        wait_until(lambda: kri.published_key(ledger) == kri.replica_key(replica), timeout=15,
+                   what="gateway publish")
+    finally:
+        kri.reset()
+        for thread, _lease in spawned:
+            thread.join(15)
+    assert not gateway_thread.is_alive() and not any(lease._held for _thread, lease in spawned)
