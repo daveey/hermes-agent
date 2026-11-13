@@ -13,7 +13,8 @@ Such a run is booked ``owner_unavailable`` and requeued WITHOUT counting a failu
   have run and its loss is a real failure), unless the run's bound interpreter proved it died
   constructing its agent on the host's routing registry (empty, or unreadable/invalid:
   ``kanban_host_refusal.proven``: no turn ran, and no card's pin could have passed), or its final
-  bound-worker receipt proves an owner storage refusal (``kanban_owner_storage_refusal``), or
+  bound-worker receipt proves an owner fault mid-turn: a storage refusal or an owner it could not
+  reach (``kanban_owner_storage_refusal``), or
 - the card's last ``NEUTRAL_STREAK_LIMIT`` closed runs were all ``owner_unavailable`` (an owner that
   never comes back must still reach the breaker instead of respawning forever).
 
