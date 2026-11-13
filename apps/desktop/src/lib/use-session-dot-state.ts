@@ -13,10 +13,10 @@ import {
 } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 
-/** [daveey] Every store a dot's row verdict reads: the observation tick (time-only expiry), the listed rows a missing
- *  caller row falls back to, and `rowExecution`'s own inputs. Subscribing to fewer left the dot up to one 15 s tick
- *  behind a roster or event change. */
-const DOT_ROW_STORES = [$kanbanObservationTick, $messagingSessions, ...ROW_EXECUTION_STORES] as const
+/** [daveey] Every store a dot's row verdict reads: the observation tick (time-only expiry) and `rowExecution`'s own
+ *  inputs, which include the owner route and the listed `$sessions` / `$messagingSessions` rows a missing caller row
+ *  falls back to. Subscribing to fewer left the dot up to one 15 s tick behind a roster, event or owner change. */
+const DOT_ROW_STORES = [$kanbanObservationTick, ...ROW_EXECUTION_STORES] as const
 
 const NO_ROW: Partial<SessionInfo> = {}
 

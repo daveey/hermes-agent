@@ -6,6 +6,7 @@ import { activeGatewayProfileKey, gatewayRouteState, isActivePrimary } from '@/s
 import { $kanbanObservationTick } from '@/store/kanban-observation'
 import { $liveWorkRoster, setLiveWorkRosterSource } from '@/store/live-work-roster'
 import { $sessions } from '@/store/session'
+import { $sessionTiles } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
 import fixture from '../../../../../schemas/fixtures/execution-observations-v1.json'
@@ -68,6 +69,7 @@ afterEach(() => {
   vi.useRealTimers()
   $liveWorkRoster.set({})
   $sessions.set([])
+  $sessionTiles.set([])
 })
 
 // [daveey] PR #2154 review follow-ups: the dot evaluates every store its row verdict reads, falls back to the
@@ -90,6 +92,36 @@ describe('SessionStatusDot live inputs (no tick lag)', () => {
     act(() => rosterRunningCard('lag-label'))
 
     expect(rowExecution({ id: 'lag-label' } as SessionInfo)?.live).toBe(1)
+    expect($kanbanObservationTick.get()).toBe(tick)
+    expect(c.querySelector(RUNNING)).not.toBeNull()
+    expect(c.querySelector(UNKNOWN)).toBeNull()
+  })
+
+  // [daveey] PR #2234 review: the owner route picks the roster source. A tile that names the owner moves the row to
+  // that source's evidence at once, not on the next 15 s tick.
+  it('relabels as soon as a tile names the owner whose roster reports a running card', () => {
+    const tick = $kanbanObservationTick.get()
+    const otherSource = gatewayRouteState(null, 'owner-elsewhere').key
+
+    expect(otherSource).not.toBe(ownSource())
+    setLiveWorkRosterSource(otherSource, [
+      { background: 0, execution_observations: [fixture.base], session_id: 'owned', subagents: 0 }
+    ])
+
+    const c = dot({
+      execution_observations: [unknownObs],
+      id: 'owned',
+      kanban_active: 1,
+      kanban_observed_at: NOW,
+      kanban_parked: 1,
+      message_count: 4
+    })
+
+    expect(c.querySelector(UNKNOWN)).not.toBeNull()
+
+    act(() => $sessionTiles.set([{ ownerProfile: 'owner-elsewhere', storedSessionId: 'owned' }]))
+
+    expect(rowExecution({ id: 'owned' } as SessionInfo)?.live).toBe(1)
     expect($kanbanObservationTick.get()).toBe(tick)
     expect(c.querySelector(RUNNING)).not.toBeNull()
     expect(c.querySelector(UNKNOWN)).toBeNull()
@@ -147,6 +179,22 @@ describe('SessionStatusDot waiting label', () => {
     $sessions.set([row as SessionInfo])
 
     expect(dot(row).querySelector(WAITING)).not.toBeNull()
+  })
+
+  // [daveey] PR #2234 review: a held card is red on the stripe, so the label must not say waiting.
+  it('keeps running when a held card sits beside the waiting one', () => {
+    const c = dot({
+      execution_observations: [waitingObs],
+      id: 'held',
+      kanban_active: 2,
+      kanban_held: 1,
+      kanban_observed_at: NOW,
+      kanban_parked: 1,
+      message_count: 4
+    })
+
+    expect(c.querySelector(RUNNING)).not.toBeNull()
+    expect(c.querySelector(WAITING)).toBeNull()
   })
 
   it('keeps running when a running card sits beside the waiting one', () => {

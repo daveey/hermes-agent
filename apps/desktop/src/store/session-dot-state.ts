@@ -466,9 +466,9 @@ export type BackgroundDotLabel = 'running' | 'unknown' | 'waiting'
  *    the row (a renderer-polled process, async subagents).
  *  - `unknown` when nothing runs and the claim rests on unknown or unfresh evidence: a failed or stale kanban read, an
  *    expired/absent observation, or work whose execution evidence is unknown.
- *  - `waiting` when the only open work is known waiting on a fresh read: parked or held cards, or current waiting
- *    observations, with no unparked card, blocked card, needs-you entry or outstanding ask.
- *  Anything else (blocked or needs-you work) keeps the existing `running` label. */
+ *  - `waiting` when the only open work is known waiting on a fresh read: parked cards or current waiting
+ *    observations, with no unparked card, blocked or held card, needs-you entry or outstanding ask.
+ *  Anything else (blocked, held or needs-you work) keeps the existing `running` label. */
 export const backgroundDotLabel = (
   row: RowActivity,
   liveElsewhere = false,
@@ -499,15 +499,17 @@ const rowEvidenceUnknown = (row: RowActivity, exec: ReturnType<typeof rowExecuti
   !hasFreshKanbanObservation(row) ||
   (exec?.unknown ?? 0) > 0
 
-/** [daveey] The only open work is known waiting: parked/held cards or current waiting observations, and no unparked
- *  card, blocked card, needs-you entry or outstanding ask. */
+/** [daveey] The only open work is known waiting: parked cards or current waiting observations, and no unparked card,
+ *  blocked card, held card, needs-you entry or outstanding ask. A held card (todo behind a human ask) is red in
+ *  `kanbanStripeCounts`, so it keeps the `running` label like a blocked one instead of reading "waiting". */
 const rowOnlyWaiting = (row: RowActivity, exec: ReturnType<typeof rowExecution>): boolean => {
-  const parked = row.kanban_parked === undefined ? 0 : row.kanban_parked + (row.kanban_held ?? 0)
+  const parked = row.kanban_parked ?? 0
 
   return (
     parked + (exec?.waiting ?? 0) > 0 &&
     liveKanbanCount(row) === 0 &&
     (row.kanban_blocked ?? 0) === 0 &&
+    (row.kanban_held ?? 0) === 0 &&
     (exec?.needsUser ?? 0) === 0 &&
     (exec?.outstanding ?? 0) === 0
   )

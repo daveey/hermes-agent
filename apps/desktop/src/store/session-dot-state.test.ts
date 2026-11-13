@@ -751,8 +751,7 @@ describe('backgroundDotLabel', () => {
   it('says waiting when the only open work is known waiting (fresh, all parked)', () => {
     const rows = [
       { ...fresh(), execution_observations: [waitingObs()], kanban_active: 1, kanban_parked: 1 },
-      { ...fresh(), execution_observations: [], kanban_active: 2, kanban_parked: 2 },
-      { ...fresh(), execution_observations: [], kanban_active: 2, kanban_held: 1, kanban_parked: 1 }
+      { ...fresh(), execution_observations: [], kanban_active: 2, kanban_parked: 2 }
     ]
 
     for (const row of rows) {
@@ -768,6 +767,21 @@ describe('backgroundDotLabel', () => {
     expect(
       backgroundDotLabel({ ...fresh(), execution_observations: [waitingObs()], kanban_active: 2, kanban_parked: 1 } as never)
     ).toBe('running')
+  })
+
+  // [daveey] PR #2234 review: a held card (todo behind a human ask) is red in `kanbanStripeCounts`, so the label
+  // must not call the row "waiting" while the stripe says blocked.
+  it('keeps the running label while a held card paints the stripe red', () => {
+    const rows = [
+      { ...fresh(), execution_observations: [], kanban_active: 2, kanban_held: 1, kanban_parked: 1 },
+      { ...fresh(), execution_observations: [], kanban_active: 1, kanban_held: 1, kanban_parked: 0 },
+      { ...fresh(), execution_observations: [waitingObs()], kanban_active: 2, kanban_held: 1, kanban_parked: 1 }
+    ]
+
+    for (const row of rows) {
+      expect(kanbanStripeCounts(row as never).blocked).toBeGreaterThan(0)
+      expect(backgroundDotLabel(row as never)).toBe('running')
+    }
   })
 })
 

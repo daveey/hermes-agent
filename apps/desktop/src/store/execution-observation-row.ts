@@ -4,11 +4,13 @@ import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import type { SessionInfo } from '@/types/hermes'
 
 import { $backgroundStatusBySession } from './composer-status'
-import { activeGatewayProfileKey, gatewayRouteState, isActivePrimary } from './gateway'
+import { $activeGatewayRoute, activeGatewayProfileKey, gatewayRouteState, isActivePrimary } from './gateway'
+import { $gatewayActivationEpoch } from './gateway-activation-epoch'
 import { $liveWorkRoster, rosterRowEvidence, selectWorkObservations } from './live-work-roster'
-import { $sessions, lineageAliases } from './session'
+import { $projectTree } from './project-tree'
+import { $cronSessions, $messagingSessions, $sessions, $unlistedSessionOwnerRows, lineageAliases } from './session'
 import { isSessionOwnerRoute } from './session-request-router'
-import { $sessionStates, knownOwnerForSession } from './session-states'
+import { $sessionStates, $sessionTiles, knownOwnerForSession } from './session-states'
 import { $subagentsBySession } from './subagents'
 
 /**
@@ -118,14 +120,33 @@ const $runtimeBindings = computed($sessionStates, states =>
   Object.entries(states).map(([runtime, state]) => `${runtime}=${state?.storedSessionId ?? ''}`).join('\n')
 )
 
-/** [daveey] Every store `rowExecution` reads. A hook that evaluates it for a render must subscribe to all of them
- *  (`useStoresSelector`), or its verdict lags until some unrelated store happens to notify. */
+/** [daveey] What owner resolution (`knownOwnerForSession`) reads off the tiles: each tile's stored id, bound runtime
+ *  and owner route/profile. Layout-only tile edits (dock, anchor, error) leave the key unchanged. */
+const $tileOwnerBindings = computed($sessionTiles, tiles =>
+  tiles
+    .map(tile => JSON.stringify([tile.storedSessionId, tile.runtimeId ?? '', tile.ownerProfile ?? '', tile.ownerRoute ?? null]))
+    .join('\n')
+)
+
+/** [daveey] Every store `rowExecution` reads, including the owner route that picks its roster source: the tiles'
+ *  owner bindings, the active profile and route selection (`$activeGatewayRoute`, `$gatewayActivationEpoch`), and
+ *  the owner-lookup rows a runtime's owner falls back to. A hook that evaluates it for a render must subscribe to all
+ *  of them (`useStoresSelector`), or its verdict lags until some unrelated store happens to notify.
+ *  Not covered (module state, no store): the per-runtime event owner map (session-states.ts), remembered owner hints
+ *  (session.ts) and the gateway registry's primary/secondary sockets; those changes repaint on the next 15 s tick. */
 export const ROW_EXECUTION_STORES = [
   $liveWorkRoster,
   $backgroundStatusBySession,
   $subagentsBySession,
   $runtimeBindings,
-  $sessions
+  $sessions,
+  $tileOwnerBindings,
+  $activeGatewayRoute,
+  $gatewayActivationEpoch,
+  $cronSessions,
+  $messagingSessions,
+  $projectTree,
+  $unlistedSessionOwnerRows
 ] as const
 
 /** Evidence that keeps a row off done: live/waiting/needs-you work, an outstanding ask, or unresolved uncertainty. */
