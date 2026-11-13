@@ -992,7 +992,6 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         if not db_path:
             return {"submitted": [], "in_flight": 0}
         ts = int(time.time()) if now is None else int(now)
-        stale_interval = episode.stale_seconds()  # resolve before crossing into unscoped pool threads
         try:
             stale = conn.execute(
                 "SELECT w.task_id FROM task_wake_checks w LEFT JOIN tasks t ON t.id = w.task_id "
@@ -1010,10 +1009,17 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         kar.reconcile(conn, now=ts)  # [daveey] an ask's probe row follows its stored ask; a lost one is restored
         from hermes_cli.kanban_awaited_card_wake import report_lag
         report_lag(conn, now=ts)  # [daveey] a park still asleep 2 min after its awaited card finished: one WARNING
-        due = conn.execute(
-            "SELECT w.task_id, w.cmd, w.every, w.generation, w.purpose FROM task_wake_checks w "
-            f"JOIN tasks t ON t.id = w.task_id WHERE {_LIVE_ROW} AND w.next_at <= ? ORDER BY w.next_at",
-            (ts,)).fetchall()
+        # next_at is indexed and changes outside the task content revision. Read it live;
+        # never skip the recovery passes above or pool/CI housekeeping below on this clock.
+        next_at = conn.execute("SELECT MIN(next_at) FROM task_wake_checks").fetchone()[0]
+        due = []
+        if next_at is not None and next_at <= ts:
+            due = conn.execute(
+                "SELECT w.task_id, w.cmd, w.every, w.generation, w.purpose FROM task_wake_checks w "
+                f"JOIN tasks t ON t.id = w.task_id WHERE {_LIVE_ROW} AND w.next_at <= ? ORDER BY w.next_at",
+                (ts,)).fetchall()
+        # Resolve policy only for a real probe batch, still on the scoped dispatcher thread.
+        stale_interval = episode.stale_seconds() if due else None
         for task_id, cmd, every, generation, purpose in due:
             key = (db_path, task_id)
             sweeping = kanban_ci_progress.running_sweeps()  # [daveey] a CI sweep holds a pool worker too
