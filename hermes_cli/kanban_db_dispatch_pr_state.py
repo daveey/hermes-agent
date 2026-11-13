@@ -501,8 +501,9 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
     PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
     its PR, and the wake resumes it from that checkpoint, not a context-free respawn.
-    The parking run's own note written just after that park, restating PRs this card
-    already named, belongs to the park and does not post-date it
+    The parking run's own note written just after that park, naming only PRs this card
+    already named or the park itself names (its awaiting ref, reason or ship CI probe),
+    belongs to the park and does not post-date it
     (:mod:`hermes_cli.kanban_pr_park_note`); any other run's note, a new PR or unreadable
     provenance keeps the hold.
     So does a supported operator reopen of the done card (``reopened``, strictly after): the

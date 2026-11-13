@@ -14,18 +14,49 @@ Such a note is part of the park, not new evidence, but only when every fact is p
   (the portable ``writer_run_uid`` on a synced schema; the database-local integer only on
   an unsynced one), with one event per comment row;
 * it was written at or after the park and before any later claim of the card;
-* every PR it names was already named in this card's own PR comments before the park.
+* every PR it names was already known when it parked: named in this card's own PR comments
+  before the park, or named by that park event itself (:func:`park_named_prs`: its
+  ``awaiting.ref`` PR URL, PR URLs in its ``reason``, a ``--repo O/R --number N`` probe in
+  its ``wake_check``).
 
-A note naming a new PR, any other run's note, or unreadable provenance keeps today's rules.
+The second source is ship's request-review order: open the PR, park on its CI with
+``awaiting.ref`` = that PR, then post the summary note that first names it (2026-11-13
+MacBook t_01a1cff0541bf30c: park 04:26:18 awaiting PR #2208, own note 04:26:25, wake held
+``active_pr`` until an operator ``kanban resume``).
+
+A note naming a PR neither source names, any other run's note, or unreadable provenance
+keeps today's rules.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Optional
 
 from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
 
 _PARK_KINDS = ("scheduled", "continued")
+_PULL_RE = re.compile(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+", re.IGNORECASE)
+# ``hermes-core-wt-land --review-ci-probe --repo O/R --number N`` (ship's printed wake_check).
+_PROBE_RE = re.compile(r"--repo[= ]+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+--number[= ]+(\d+)\b")
+
+
+def park_named_prs(data: object) -> set[str]:
+    """``norm_pr`` keys of the PRs an orderly park event's own payload names. [daveey]"""
+    if not isinstance(data, dict):
+        return set()
+    urls: list[str] = []
+    awaiting = data.get("awaiting")
+    ref = awaiting.get("ref") if isinstance(awaiting, dict) else None
+    if isinstance(ref, str) and _PULL_RE.fullmatch(ref.strip().rstrip("/")):
+        urls.append(ref)
+    reason = data.get("reason")
+    if isinstance(reason, str):
+        urls.extend(_PULL_RE.findall(reason))
+    probe = data.get("wake_check")
+    if isinstance(probe, str):
+        urls.extend(f"https://github.com/{repo}/pull/{n}" for repo, n in _PROBE_RE.findall(probe))
+    return {norm_pr(u) for u in urls}
 
 
 def _writer_matches(conn: sqlite3.Connection, data: dict, run_id: int) -> bool:
@@ -51,7 +82,7 @@ def restated_after_park(
     from hermes_cli.kanban_db_dispatch_pr_state import _comment_events
 
     park = conn.execute(
-        "SELECT id, run_id, created_at FROM task_events WHERE task_id = ? AND kind IN (?, ?) "
+        "SELECT id, run_id, created_at, payload FROM task_events WHERE task_id = ? AND kind IN (?, ?) "
         "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id, *_PARK_KINDS),
     ).fetchone()
     if park is None:
@@ -75,6 +106,7 @@ def restated_after_park(
     for data, _at, cid in _comment_events(conn, task_id) or []:
         by_row.setdefault(cid, []).append(data)
     known = {norm_pr(u) for t, _cid, urls in candidates if t < parked_at for u in urls}
+    known |= park_named_prs(kb._json_dict(park["payload"]))
     restated: set[int] = set()
     for t, cid, urls in candidates:
         if t < parked_at or (bound is not None and t >= bound):
