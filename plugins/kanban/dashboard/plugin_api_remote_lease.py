@@ -22,12 +22,13 @@ _STATUS_VERBS = {"done": "complete", "blocked": "block", "scheduled": "schedule"
 
 
 def patch_verb(payload: Any) -> Optional[str]:
-    """The fenced verb a PATCH /tasks/{id} or bulk body asks for, else None (archive, rejected or no status)."""
-    if payload.status is not None and not getattr(payload, "archive", False):
-        return _STATUS_VERBS.get(payload.status)
-    if getattr(payload, "reclaim_first", False) and payload.assignee is not None:
-        return "reassign"
-    return None
+    """The fenced verb a PATCH /tasks/{id} or bulk body asks for, else None (archive alone, rejected or no status).
+
+    Any assignee write is fenced as ``reassign``, with or without ``reclaim_first``: the Board accepts an assignee
+    change from a non-holder, which would change who owns the live run."""
+    if payload.status is not None and not getattr(payload, "archive", False) and payload.status in _STATUS_VERBS:
+        return _STATUS_VERBS[payload.status]
+    return "reassign" if payload.assignee is not None else None
 
 
 def lease_refusal(conn: sqlite3.Connection, task_id: str, verb: Optional[str]) -> Optional[dict]:
