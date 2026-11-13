@@ -1478,7 +1478,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     note_start()
     ahead = _schema_ahead_boards(board_paths())
     if ahead:
-        on_give_up(runstate, ident.gateway, "not starting: ", "; ".join(f"board {s}: {r}" for s, r in ahead))
+        on_give_up(runstate, ident.gateway, "not starting: ", ahead)
         return  # give the host sync role up: a current core's gateway can take it [daveey]
     hub = Hub(ident)
     sync.set_lease_client(HubLeaseClient(hub))
@@ -1520,8 +1520,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
             if ahead:
                 _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
-                on_give_up(runstate, ident.gateway, "gave up the sync role: ",
-                           "; ".join(f"board {r.board}: {r.error}" for r in ahead))
+                on_give_up(runstate, ident.gateway, "gave up the sync role: ", [(r.board, r.error) for r in ahead])
                 return
             runstate.clear()  # a completed round: the loop runs
             for r in results:
@@ -1546,8 +1545,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
 
 
 def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[tuple[str, str]]:
-    """``(slug, refusal)`` per board a newer core migrated (logged at ERROR). An unreadable board is left to the
-    round's own errors."""
+    """``(slug, refusal)`` per board a newer core migrated (logged at ERROR); an unreadable one is the round's error."""
     ahead = []
     for slug, path in boards:
         try:

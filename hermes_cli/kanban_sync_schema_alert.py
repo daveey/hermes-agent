@@ -216,14 +216,15 @@ def _report(host, why, since, runner, hub_cli, info, now) -> Optional[str]:
     return rid
 
 
-def on_give_up(state: Any, gateway: str, prefix: str, why: str) -> None:
-    """``run_forever``'s give-up: record the stop (``prefix + why``) in ``state``, then report it; the incident is
-    that record's ``since``.
+def on_give_up(state: Any, gateway: str, prefix: str, ahead: list[tuple[str, Any]]) -> None:
+    """``run_forever``'s give-up over ``ahead`` (``(board, refusal)`` pairs): record the stop (``prefix + why``) in
+    ``state``, then report it; the incident is that record's ``since``.
 
     A give-up while this host's own core update is under way (the installed checkout moved past the commit this
     process started on, and this process runs that checkout) is the update's transition, not an incident: the
     update restarts this gateway on the new core."""
     from hermes_cli import kanban_sync_runstate as runstate
+    why = "; ".join(f"board {board}: {refusal}" for board, refusal in ahead)
     state.record_down(prefix + why)
     if _updating():
         log.warning("kanban sync: gave up the sync role while this host's core update is under way (%s -> %s); "
