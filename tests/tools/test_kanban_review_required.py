@@ -71,8 +71,9 @@ def test_reviewer_completion_allowed(board, monkeypatch, surface):
 def test_operator_can_approve_review_but_implementer_cannot(board, monkeypatch):
     tid, run = claimed(board, monkeypatch)
     assert kb.request_review(board, tid, summary="implemented", expected_run_id=run)
-    with pytest.raises(ValueError, match="kanban_request_review"):
+    with pytest.raises(ValueError, match="is pending review"):  # already in review: not "use kanban_request_review"
         kb.complete_task(board, tid, summary="skip", expected_run_id=run)
+    assert kb.get_task(board, tid).status == "review"
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
     assert kb.complete_task(board, tid, summary="operator approved")

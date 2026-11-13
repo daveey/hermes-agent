@@ -902,9 +902,9 @@ def _handle_complete(args: dict, **kw) -> str:
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
         from hermes_cli import kanban_review_contract as _krc  # [daveey] a review ship would refuse: refuse it now
-        if refused := _krc.completion_refusal(getattr(task, "body", None), metadata, _worker_run_id(tid)):
-            raise _Reject(*refused)
         run_id = _worker_run_id(tid)
+        if refused := _krc.completion_refusal(getattr(task, "body", None), metadata, run_id):
+            raise _Reject(*refused)
         if run_id is not None and _kc.parked_by_own_run(conn, tid, run_id):
             # This worker parked its card with kanban_block, then edited its own edges (kanban_unlink):
             # its run is over but nothing has claimed the card since, so it may still close its own card.

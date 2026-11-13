@@ -39,10 +39,12 @@ def require_review(conn, task_id: str, expected_run_id: int | None, *, placement
             and (expected_run_id is None or expected_run_id == task.current_run_id)
             and kb._retry_status_for_run(conn, task_id, task.current_run_id) == "review"):
         return
-    if task.status == "review" and expected_run_id is None:
+    if task.status == "review":  # never tell any lane an in-review card "is not in review"
+        stale = ("" if expected_run_id is None else
+                 f" Run {expected_run_id} is not its current run: a card pending review has none.")
         raise ReviewRequiredError(
             f"{task_id} is pending review: a reviewer approves it by claiming the review run; only "
-            f"{OPERATOR} may approve it without claiming it."
+            f"{OPERATOR} may approve it without claiming it.{stale}"
         )
     if not worker:
         raise ReviewRequiredError(
@@ -52,5 +54,5 @@ def require_review(conn, task_id: str, expected_run_id: int | None, *, placement
         )
     raise ReviewRequiredError(
         f"{task_id} requires review: use kanban_request_review, then a reviewer may complete it. "
-        "The implementer cannot complete this card, even with --force."
+        "A kanban worker run cannot complete this card outside review, even with --force."
     )
