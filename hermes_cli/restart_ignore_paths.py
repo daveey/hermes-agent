@@ -72,15 +72,30 @@ def _git(root: str, *args: str) -> Optional[subprocess.CompletedProcess]:
         return None
 
 
+def _names_no_commit(root: str, *shas: str) -> bool:
+    """True when git, reading the repo fine, says one of ``shas`` is no commit there (exit 1 of
+    ``rev-parse --verify --quiet``). An unreadable repo (exit 128), a timeout or no git is not that statement."""
+    for sha in shas:
+        found = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{sha}^{{commit}}")
+        if found is None or found.returncode not in (0, 1):
+            return False
+        if found.returncode == 1:
+            return True
+    return False
+
+
 def range_restart_verdict(root: str, base: str, head: str,
                           globs: Iterable[str] = RESTART_IGNORE_GLOBS) -> Optional[bool]:
     """``range_restart_free`` with the transient case kept apart: True/False are final for the pair (a commit
     range never changes), None means git did not answer (not found, timeout, OSError, an unexpected exit) and
-    the same question may get a definite answer later, so callers must not cache it."""
+    the same question may get a definite answer later, so callers must not cache it. A sha that names no commit
+    in the repo (a boot commit gc'd after a force-push) is a definite False: it never comes back."""
     if not (_is_sha(base) and _is_sha(head)) or base == head:
         return False
     globs = tuple(globs)
     ancestor = _git(root, "merge-base", "--is-ancestor", base, head)
+    if ancestor is not None and ancestor.returncode == 128 and _names_no_commit(root, base, head):
+        return False
     if ancestor is None or ancestor.returncode not in (0, 1):
         return None
     if ancestor.returncode == 1:

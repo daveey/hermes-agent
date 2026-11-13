@@ -114,7 +114,8 @@ def detect_code_skew() -> tuple[str, str] | None:
 # (boot sha, disk sha) -> range_restart_verdict. A commit range never changes, so a definite verdict is final; the
 # watchdogs poll every few seconds and would otherwise run two git commands per poll for the same pair. A transient
 # git failure (None: timeout, OSError, git not found) is not cached: it reads as skew now and is asked again on the
-# next poll, so it never pins the pair as skewed for the life of the process (t_01a1d49d2f2a8ae2).
+# next poll, so it never pins the pair as skewed for the life of the process (t_01a1d49d2f2a8ae2). A sha git says
+# is no commit (boot commit gc'd after a force-push) is a definite False and is cached (PR #2151 review).
 _restart_free_verdicts: dict[tuple[str, str], bool] = {}
 
 
@@ -143,7 +144,9 @@ def note_import_error(exc: BaseException, where: str) -> bool:
     One ``code-skew import mix`` WARNING per (boot, disk) pair, so the error signal shows the cause
     (a process running two revisions; restart it) instead of a bare ``cannot import name``
     (agent-529f2244ac). Returns True when the error happened under skew. Never raises: the
-    fingerprint readers swallow their own failures and the rest is string work."""
+    fingerprint readers and ``range_restart_verdict`` swallow their own failures. Not free: the first
+    ImportError for an uncached (boot, disk) pair runs a few git subprocesses (``_drift_restart_free``,
+    15 s timeout each); later ones hit the verdict cache unless git failed transiently."""
     if not isinstance(exc, ImportError):
         return False
     boot = _boot_fingerprint or _process_boot_fingerprint()

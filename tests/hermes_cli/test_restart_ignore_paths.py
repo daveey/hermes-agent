@@ -183,12 +183,12 @@ def test_git_is_resolved_through_locate_command(repo, monkeypatch, tmp_path_fact
         asked.append(name)
         return Resolution("known_path", (Candidate(str(shim), "known_dir:x", True),))
 
-    monkeypatch.setattr(rip, "locate_command", resolve, raising=False)
+    monkeypatch.setattr(rip, "locate_command", resolve)
     assert rip.range_restart_free(str(root), base, head)
     assert asked and set(asked) == {"git"}
     assert log.read_text().count("call") == 2  # merge-base + log, both through the resolved binary
 
-    monkeypatch.setattr(rip, "locate_command", lambda name: Resolution("missing"), raising=False)
+    monkeypatch.setattr(rip, "locate_command", lambda name: Resolution("missing"))
     assert not rip.range_restart_free(str(root), base, head)  # no git: unprovable, fail closed
     assert rip.range_restart_verdict(str(root), base, head) is None
 
@@ -208,6 +208,55 @@ def test_a_transient_git_failure_is_not_cached_as_skew(repo, monkeypatch):
     monkeypatch.setattr(rip, "_git", real_git)
     assert code_skew.detect_code_skew() is None
     assert code_skew._restart_free_verdicts == {(base, tests_only): True}
+
+
+def _counting_git(monkeypatch):
+    calls = []
+    real_git = rip._git
+
+    def counted(root, *args):
+        calls.append(args[0])
+        return real_git(root, *args)
+
+    monkeypatch.setattr(rip, "_git", counted)
+    return calls
+
+
+@pytest.mark.parametrize("missing", ["boot", "disk"])
+def test_a_missing_commit_is_a_definite_verdict_cached_as_skew(repo, monkeypatch, missing):
+    """A boot sha gc'd after a force-push (or an absent disk sha) never comes back: merge-base exits 128 for it,
+    which is a definite False, cached so the watchdog polls stop running git for that pair (PR #2151 review)."""
+    root, base = repo
+    head = _commit(root, {"tests/test_a.py": "x\n"}, "t1")
+    gone = "f" * 40
+    boot, disk = (gone, head) if missing == "boot" else (base, gone)
+    assert rip.range_restart_verdict(str(root), boot, disk) is False
+
+    monkeypatch.setattr(code_skew, "_PROJECT_ROOT", root)
+    monkeypatch.setattr(code_skew, "_restart_free_verdicts", {})
+    monkeypatch.setattr(code_skew, "_boot_fingerprint", f"git:refs/heads/main:{boot}")
+    monkeypatch.setattr(code_skew, "_fingerprint", lambda: f"git:refs/heads/main:{disk}")
+    calls = _counting_git(monkeypatch)
+    assert code_skew.detect_code_skew() == (boot[:10], disk[:10])
+    first = len(calls)
+    assert first >= 1
+    assert code_skew._restart_free_verdicts == {(boot, disk): False}
+    assert code_skew.detect_code_skew() == (boot[:10], disk[:10])
+    assert len(calls) == first  # cached: the next poll runs no git
+
+
+def test_a_non_commit_object_is_a_definite_verdict(repo):
+    root, _base = repo
+    head = _commit(root, {"tests/test_a.py": "x\n"}, "t1")
+    tree = _git(root, "rev-parse", "HEAD^{tree}")
+    assert rip.range_restart_verdict(str(root), tree, head) is False
+
+
+def test_a_git_that_cannot_read_the_repo_stays_uncached(repo, tmp_path):
+    """Exit 128 because the checkout is unreadable (not a repo) is no statement about the commits: None."""
+    root, base = repo
+    head = _commit(root, {"tests/test_a.py": "x\n"}, "t1")
+    assert rip.range_restart_verdict(str(tmp_path / "nope"), base, head) is None
 
 
 def test_import_error_after_a_restart_free_drift_is_no_skew_mix(repo, monkeypatch, caplog):
