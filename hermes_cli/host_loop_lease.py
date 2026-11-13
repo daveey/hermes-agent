@@ -232,10 +232,13 @@ class HostLoopLease:
 
     def held(self) -> bool:
         """True when this process should run the host pass now. One ``flock`` syscall when not holder.
-        A True answer opens this thread's ``lease.<name>`` accounting pass, which :meth:`beat` closes."""
+        A True answer opens this thread's ``lease.<name>`` accounting pass, which :meth:`beat` closes. A pass
+        still open here never reached its ``beat()`` (the host pass raised): it is closed as an error first, so
+        one run never spans two passes and the sleep between them."""
         if self._held_inner():
-            if self._pass is None:
-                self._pass = _span_open(f"lease.{self.name}")
+            if self._pass is not None:
+                self._account_pass(error=True)
+            self._pass = _span_open(f"lease.{self.name}")
             return True
         return False
 
@@ -314,13 +317,13 @@ class HostLoopLease:
 
     # -- internals -----------------------------------------------------------------------------
 
-    def _account_pass(self) -> None:
+    def _account_pass(self, *, error: bool = False) -> None:
         opened, self._pass = self._pass, None
         if opened is None:
             return
         try:
             from hermes_cli import loop_accounting
-            loop_accounting.span_close(opened)  # a beat() on another thread records nothing
+            loop_accounting.span_close(opened, error=error)  # a beat() on another thread records nothing
         except Exception:  # health: allow BLE001 -- accounting never touches the lease
             logger.debug("host loop %s: pass accounting failed", self.name, exc_info=True)
 

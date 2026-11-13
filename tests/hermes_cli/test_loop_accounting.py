@@ -135,6 +135,90 @@ def test_host_loop_lease_accounts_held_to_beat(monkeypatch, tmp_path):
     assert c["runs"] == 1 and c["cpu_s"] >= 0.01
 
 
+def test_host_loop_lease_pass_that_raised_before_beat_is_closed_as_an_error(monkeypatch):
+    """A host pass that raises skips beat() (kanban_annotation_host.loop): the next true held() must close the
+    stale span as one errored run, not let the next beat() record one run spanning both passes."""
+    from hermes_cli import host_loop_lease as hll
+
+    monkeypatch.setenv("HERMES_HOST_LOOP_LEASE", "1")
+    lease = hll.HostLoopLease("acct-raise", "gateway", interval=1.0)
+    try:
+        if not lease.held():
+            pytest.skip("lease not acquirable in this sandbox")
+        _burn(0.01)  # this pass "raises": no beat()
+        assert lease.held()
+        lease.beat()
+    finally:
+        lease.release()
+    c = la.counters()["lease.acct-raise"]
+    assert (c["runs"], c["errors"]) == (2, 1)
+
+
+def test_fork_with_a_nested_pass_open_keeps_counting_outermost_passes():
+    """The at-fork hook clears the child's thread-local depth while two passes are open: their exits must not
+    drive depth below 0, or the thread never counts another outermost pass."""
+    with la.pass_("outer"):
+        with la.pass_("inner"):
+            la._after_fork_child()  # what os.fork runs in the child, here on this thread
+    assert la._local.depth == 0
+    with la.pass_("after"):
+        _burn(0.01)
+    me = threading.get_native_id()
+    acc = {t["tid"]: t["accounted_cpu_s"] for t in la.thread_cpu()}
+    assert acc.get(me, 0.0) >= 0.01
+
+
+def test_reused_thread_id_does_not_inherit_the_exited_threads_cpu(monkeypatch):
+    """A Linux tid reused before the next snapshot must start at 0, or unaccounted_live_cpu_s under-reports."""
+    monkeypatch.setattr(la, "_native_id", lambda: 424242)  # both threads get the same native id
+    seen: list = []
+
+    def first():
+        with la.pass_("first"):
+            _burn(0.03)
+
+    def second():
+        with la.pass_("second"):
+            pass
+        with la._lock:
+            seen.append(la._thread_accounted.get(424242, 0.0))
+
+    for target in (first, second):
+        t = threading.Thread(target=target)
+        t.start()
+        t.join()
+    assert seen and seen[0] < 0.03, seen  # only the live thread's own CPU, not the exited one's
+    assert la.snapshot()["process"]["accounted_cpu_s"] >= 0.03  # the exited thread's CPU is kept, as exited
+
+
+def test_setting_survives_config_backend_unavailable(monkeypatch):
+    """ConfigBackendUnavailable is a SystemExit: it must not escape start() / begin_process at boot."""
+    from hermes_cli import config as config_mod
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    def unavailable():
+        raise ConfigBackendUnavailable("backend missing")
+
+    monkeypatch.setattr(config_mod, "load_config", unavailable)
+    assert la._setting("interval_s", 7.0) == 7.0
+    assert la.start("gateway") is True
+
+
+def test_start_reads_the_interval_outside_the_lock(monkeypatch):
+    """Every pass exit takes _lock: the config read for the interval must not run while start() holds it."""
+    held_during_read: list = []
+
+    def setting(key, default):
+        if key == "interval_s":
+            held_during_read.append(la._lock.locked())
+            return 0.05
+        return default
+
+    monkeypatch.setattr(la, "_setting", setting)
+    assert la.start("serve") is True
+    assert held_during_read == [False]
+
+
 def test_name_overflow_is_bounded(monkeypatch):
     monkeypatch.setattr(la, "MAX_NAMES", 3)
     for i in range(10):

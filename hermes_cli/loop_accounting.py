@@ -14,7 +14,8 @@ measured CPU unattributed). Per pass name it counts:
 
 Per process it also records every live thread's CPU (``/proc/self/task/<tid>/stat`` on Linux) next to the
 CPU the outermost passes on that thread accounted for, so the remainder is attributable to a thread
-(``unaccounted_cpu_s``) rather than lost.
+(``process.unaccounted_live_cpu_s``; None without procfs, where thread CPU is not readable) rather than lost.
+A thread's accounted CPU folds into the exited total when the thread ends, so a reused native id starts at 0.
 
 Use::
 
@@ -37,7 +38,8 @@ Use::
 Nested passes count in their own names; only the outermost pass on a thread adds to that thread's
 ``accounted_cpu_s``, so totals never double count. Mods (chat-closeout, user-steps, throughput, runners) call
 the same API; ``host_loop_lease.HostLoopLease`` records ``lease.<name>`` for every host pass between a true
-``held()`` and its ``beat()`` without any change in the caller.
+``held()`` and its ``beat()`` without any change in the caller (a pass that raised before its ``beat()`` is
+closed as an error by the next true ``held()``).
 
 **Snapshot.** A long-lived process calls :func:`start` once (``shared_metrics_process.begin_process`` does it
 for the gateway, ``serve`` and the ``tui`` backend); a daemon thread then writes
@@ -52,6 +54,7 @@ uncontended lock: a few microseconds (``tests/hermes_cli/test_loop_accounting_be
 from __future__ import annotations
 
 import atexit
+import collections
 import functools
 import json
 import logging
@@ -104,8 +107,53 @@ _lock = threading.Lock()
 _stats: dict[str, _Stat] = {}
 _thread_accounted: dict[int, float] = {}  # native thread id -> CPU of its outermost passes
 _local = threading.local()
+_exited_tids: collections.deque = collections.deque()  # tids whose thread ended; folded under _lock
 _started_at = time.time()
 _state: dict[str, Any] = {"role": None, "thread": None, "stop": None, "pid": os.getpid()}
+
+
+class _ThreadExit:
+    """Held in ``_local`` by each thread that accounted CPU. CPython drops a thread's ``threading.local``
+    values when the thread ends, before its native id can be reused, so this queues the tid to fold then:
+    a later thread given the same id never inherits the exited thread's accounted CPU. Lock-free (a
+    ``deque.append``), so it is safe wherever teardown runs it."""
+
+    __slots__ = ("tid",)
+    _queue = _exited_tids  # bound here, so __del__ still reaches it while module globals are torn down
+
+    def __init__(self, tid: int) -> None:
+        self.tid = tid
+
+    def __del__(self) -> None:
+        self._queue.append(self.tid)
+
+
+def _own_tid() -> int:
+    """This thread's native id, registering its exit fold on first use."""
+    tid = _native_id()
+    mark = getattr(_local, "exit_mark", None)
+    if mark is None or mark.tid != tid:
+        _local.exit_mark = _ThreadExit(tid)
+    return tid
+
+
+def _fold_exited() -> None:
+    """Move the accounted CPU of ended threads into ``exited_accounted`` (caller holds ``_lock``)."""
+    while _exited_tids:
+        try:
+            tid = _exited_tids.popleft()
+        except IndexError:
+            return
+        gone = _thread_accounted.pop(tid, None)
+        if gone:
+            _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + gone
+
+
+def _add_accounted(tid: int, cpu: float) -> None:
+    """Add ``cpu`` to ``tid``'s outermost-pass CPU (caller holds ``_lock``)."""
+    if _exited_tids:
+        _fold_exited()
+    _thread_accounted[tid] = _thread_accounted.get(tid, 0.0) + cpu
 
 
 def _stat(name: str) -> _Stat:
@@ -156,7 +204,10 @@ class Pass:
     def __exit__(self, exc_type, exc, tb) -> None:
         cpu = _thread_time() - self._c0
         wall = _perf() - self._w0
-        _local.depth = getattr(_local, "depth", 1) - 1
+        # Clamped: a fork while a nested pass is open clears the child's depth, so its exits would go negative
+        # and the thread would never count another outermost pass.
+        _local.depth = max(0, getattr(_local, "depth", 1) - 1)
+        tid = _own_tid() if self._outer else 0
         with _lock:
             st = _stat(self.name)
             st.runs += 1
@@ -174,8 +225,7 @@ class Pass:
             st.wall_s += wall
             st.last_at = time.time()
             if self._outer:
-                tid = _native_id()
-                _thread_accounted[tid] = _thread_accounted.get(tid, 0.0) + cpu
+                _add_accounted(tid, cpu)
 
 
 def pass_(name: str, *, skipped: bool = False, changed: Optional[bool] = None, fallback: bool = False,
@@ -188,6 +238,8 @@ def record(name: str, *, cpu_s: float = 0.0, wall_s: float = 0.0, skipped: bool 
            changed: Optional[bool] = None, fallback: bool = False, rows: int = 0, error: bool = False,
            outer: bool = True) -> None:
     """Account a pass measured elsewhere (``cpu_s`` from the caller's own ``thread_time`` delta, on this thread)."""
+    outer = outer and getattr(_local, "depth", 0) <= 0
+    tid = _own_tid() if outer else 0
     with _lock:
         st = _stat(name)
         st.runs += 1
@@ -200,17 +252,17 @@ def record(name: str, *, cpu_s: float = 0.0, wall_s: float = 0.0, skipped: bool 
         st.cpu_max_s = max(st.cpu_max_s, cpu_s)
         st.wall_s += wall_s
         st.last_at = time.time()
-        if outer and getattr(_local, "depth", 0) == 0:
-            tid = _native_id()
-            _thread_accounted[tid] = _thread_accounted.get(tid, 0.0) + cpu_s
+        if outer:
+            _add_accounted(tid, cpu_s)
 
 
 def span_open(name: str) -> tuple:
     """Open a pass whose end is in another call (``host_loop_lease``: a true ``held()`` to its ``beat()``).
     Close it with :func:`span_close` on the same thread. Passes run inside it keep their own names; the
     thread's ``accounted_cpu_s`` gets only the span's CPU those passes did not already account."""
-    tid = _native_id()
+    tid = _own_tid()
     with _lock:
+        _fold_exited()
         acc0 = _thread_accounted.get(tid, 0.0)
     return name, tid, _thread_time(), _perf(), acc0
 
@@ -230,9 +282,9 @@ def span_close(token: tuple, *, error: bool = False) -> bool:
         st.cpu_max_s = max(st.cpu_max_s, cpu)
         st.wall_s += wall
         st.last_at = time.time()
-        if getattr(_local, "depth", 0) == 0:
+        if getattr(_local, "depth", 0) <= 0:
             inner = _thread_accounted.get(tid, 0.0) - acc0
-            _thread_accounted[tid] = _thread_accounted.get(tid, 0.0) + max(0.0, cpu - inner)
+            _add_accounted(tid, max(0.0, cpu - inner))
     return True
 
 
@@ -306,6 +358,7 @@ def thread_cpu() -> list[dict[str, Any]]:
     listed (their ``cpu_s`` is None)."""
     names = {t.native_id: t.name for t in threading.enumerate() if t.native_id is not None}
     with _lock:
+        _fold_exited()
         accounted_by = dict(_thread_accounted)
     out: list[dict[str, Any]] = []
     hz = _clk_tck()
@@ -343,13 +396,15 @@ def snapshot() -> dict[str, Any]:
     threads = thread_cpu()
     procfs = bool(threads) and threads[0]["cpu_s"] is not None
     live = sum(t["cpu_s"] for t in threads if t["cpu_s"] is not None)
-    # Fold exited threads, so pool churn cannot grow the map. Without procfs (macOS, whose native thread
+    # Fold exited threads, so pool churn cannot grow the map (a thread that accounted CPU already queued its
+    # fold at exit via _ThreadExit; this catches the rest). Without procfs (macOS, whose native thread
     # ids are never reused) the live set comes from threading.enumerate().
     if procfs:
         live_tids = {t["tid"] for t in threads}
     else:
         live_tids = {t.native_id for t in threading.enumerate() if t.native_id is not None}
     with _lock:
+        _fold_exited()
         if live_tids:
             for tid in [tid for tid in _thread_accounted if tid not in live_tids]:
                 _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + _thread_accounted.pop(tid)
@@ -441,9 +496,15 @@ def _setting(key: str, default: Any) -> Any:
     """``loop_accounting.<key>`` from config.yaml (read once per :func:`start`), else ``default``."""
     try:
         from hermes_cli.config import load_config
+        from hermes_cli.config_backend import ConfigBackendUnavailable
+    except Exception:  # health: allow BLE001 -- no config module: the defaults
+        logger.debug("loop accounting: config unavailable; using defaults", exc_info=True)
+        return default
+    try:
         section = load_config().get("loop_accounting") or {}
         return section.get(key, default) if isinstance(section, dict) else default
-    except Exception:  # health: allow BLE001 -- an unreadable config keeps the defaults
+    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- an unreadable config keeps the defaults
+        # ConfigBackendUnavailable is a SystemExit, caught by name: accounting must never be what ends a boot.
         logger.debug("loop accounting: config unreadable; using defaults", exc_info=True)
         return default
 
@@ -482,12 +543,13 @@ def start(role: str) -> bool:
     _state["enabled"] = None  # re-read config.yaml
     if not enabled():
         return False
+    period = interval_s()  # a config read: never under _lock, which every pass exit on every thread takes
     with _lock:
         thread = _state.get("thread")
         if thread is not None and thread.is_alive() and _state.get("pid") == os.getpid():
             return True
         stop = threading.Event()
-        thread = threading.Thread(target=_writer, args=(stop, interval_s()), name="hermes-loop-accounting",
+        thread = threading.Thread(target=_writer, args=(stop, period), name="hermes-loop-accounting",
                                   daemon=True)
         _state.update(thread=thread, stop=stop, pid=os.getpid())
     thread.start()
@@ -524,6 +586,7 @@ def reset() -> None:
     with _lock:
         _stats.clear()
         _thread_accounted.clear()
+        _exited_tids.clear()
         _state.pop("exited_accounted", None)
 
 
@@ -535,7 +598,8 @@ def _after_fork_child() -> None:
     _started_at = time.time()
     _state.pop("exited_accounted", None)
     _state.update(thread=None, stop=None, pid=os.getpid(), role=None)
-    _local.__dict__.clear()
+    _local.__dict__.clear()  # drops this thread's _ThreadExit, queueing the parent's tid: cleared next
+    _exited_tids.clear()
 
 
 if hasattr(os, "register_at_fork"):
