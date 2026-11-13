@@ -68,10 +68,13 @@ def record_human_input(session_id: str = "", home: Path | None = None) -> None:
         logger.debug("could not record the last human input", exc_info=True)
 
 
+_PLUMBING_ROW_SQL = "SELECT model_config, hidden, title FROM sessions WHERE id = ?"
+
+
 def _row_is_room_plumbing(row) -> bool:
     """A stored Bot Mode room member row: ``model_config.room_plumbing``, or a legacy hidden ``Group:`` row (the
     rule ``agent_factory._stored_session_runtime_overrides`` applies on resume; kept here to leave that upstream
-    function untouched)."""
+    function untouched, with test_human_input's parity test running both over one row matrix so they can't drift)."""
     if not isinstance(row, dict):
         return False
     config = row.get("model_config")
@@ -86,14 +89,20 @@ def _row_is_room_plumbing(row) -> bool:
 
 def _stored_room_plumbing(session: dict) -> bool:
     """True when the session's persisted row is Bot Mode room plumbing (:func:`_row_is_room_plumbing`). A resumed
-    session carries no in-memory ``room_plumbing`` flag, so only the row answers for it. Unreadable row: False."""
+    session carries no in-memory ``room_plumbing`` flag, so only the row answers for it. Unreadable row: False.
+
+    Runs on every would-be human submit, so it reads only the three columns the rule needs: not ``get_session``
+    (flush_for_read plus the prompt/tool JOINs, on the request thread)."""
     if not session.get("session_key"):
         return False
     try:
         from tui_gateway import server  # session_workdir's helpers are bound into the server namespace
 
         with server._session_db(session) as db:
-            return db is not None and _row_is_room_plumbing(db.get_session(session["session_key"]))
+            if db is None:
+                return False
+            row = db._read_one(_PLUMBING_ROW_SQL, (session["session_key"],))
+            return row is not None and _row_is_room_plumbing(dict(row))
     except Exception:  # health: allow BLE001 -- a classification must never fail a prompt
         logger.debug("input-origin row read failed", exc_info=True)
         return False

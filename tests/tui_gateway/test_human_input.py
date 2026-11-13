@@ -100,6 +100,62 @@ def test_row_is_room_plumbing(row, expected):
     assert human_input._row_is_room_plumbing(row) is expected
 
 
+_PARITY_CONFIGS = [None, {}, {"room_plumbing": True}, {"room_plumbing": False}, {"room_plumbing": 1}, {"room_plumbing": ""},
+                   '{"room_plumbing": true}', '{"room_plumbing": 0}', "not json", "[1]", "null", "  "]
+_PARITY_TITLES = [None, "", "Group: standup", "  Group: a", "group: lower", "Groups", "renamed"]
+_PARITY_HIDDEN = [None, 0, 1, True, False]
+
+
+def test_row_is_room_plumbing_matches_the_resume_rule():
+    """One plumbing rule: ``_row_is_room_plumbing`` mirrors ``agent_factory._stored_session_runtime_overrides`` (which
+    drops a plumbing row's stored runtime on resume; upstream code, left untouched), so the two must not drift. A row
+    carrying a stored model restores a non-empty override unless the resume rule calls it plumbing (agent_factory
+    binds into the server namespace, so call it there)."""
+    rows = [{"id": "s", "model": "parity-model", "model_config": config, "title": title, "hidden": hidden}
+            for config in _PARITY_CONFIGS for title in _PARITY_TITLES for hidden in _PARITY_HIDDEN]
+    resume_plumbing = [server._stored_session_runtime_overrides(row) == {} for row in rows]
+    assert any(resume_plumbing) and not all(resume_plumbing), "the matrix must hold both kinds of row"
+    mismatched = [(row, resume) for row, resume in zip(rows, resume_plumbing)
+                  if human_input._row_is_room_plumbing(row) is not resume]
+    assert mismatched == []
+
+
+def test_input_origin_reads_only_the_plumbing_columns(tmp_path, monkeypatch, caplog):
+    """A would-be human submit reads ``model_config, hidden, title`` for the key: never ``get_session`` (its
+    flush_for_read plus prompt/tool JOINs on the request thread) or any other full-row read."""
+    import logging
+
+    from hermes_state import SessionDB
+
+    plumbing = _stored(tmp_path, "plumb", title="Group: x", hidden=True)
+    chat = _stored(tmp_path, "dm", title="Bot Chat", hidden=True, model_config={"room_plumbing": False})
+    reads, sql = [], []
+
+    def spy(name):
+        def call(self, *args, **kwargs):
+            reads.append(name)
+            raise AssertionError(f"{name} on a submit")
+        return call
+
+    real_read_one = SessionDB._read_one
+
+    def read_one(self, query, params=()):
+        sql.append(" ".join(query.split()))
+        return real_read_one(self, query, params)
+
+    for name in ("get_session", "flush_for_read", "get_session_list_row"):
+        monkeypatch.setattr(SessionDB, name, spy(name))
+    monkeypatch.setattr(SessionDB, "_read_one", read_one)
+    caplog.set_level(logging.DEBUG, logger=human_input.logger.name)
+    assert human_input.input_origin("r", {}, "hi", session=plumbing) == "agent"
+    assert human_input.input_origin("r", {}, "hi", session=chat) == "human"
+    assert human_input.input_origin("r", {}, "hi", session={"session_key": "missing", "profile_home": str(tmp_path)}) \
+        == "human", "no row: not plumbing"
+    assert reads == []
+    assert "row read failed" not in caplog.text, "a missing row is a plain miss, not an error"
+    assert sql == ["SELECT model_config, hidden, title FROM sessions WHERE id = ?"] * 3
+
+
 @pytest.mark.parametrize("session", [{"pending_hidden": True}, {"pending_hidden": False}])
 def test_hidden_alone_is_no_authorship_signal(session):
     """Bot Mode's canonical Bot Chat is born hidden and David types into it, so hidden != agent (first submit
