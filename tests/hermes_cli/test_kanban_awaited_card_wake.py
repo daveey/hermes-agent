@@ -380,6 +380,42 @@ def test_lag_warning_reads_the_replica_for_a_status_no_expedite_was_handed(
     assert len(lags()) == 1
 
 
+@pytest.mark.parametrize("other_card", [False, True])
+def test_a_warned_park_that_re_parks_within_one_scan_window_on_a_finished_card_is_warned_again(
+        live, svc, kanban_home, probes, caplog, other_card):
+    """Review 5895271396 nit 1 on #2432: the warned mark was keyed by park only, and a scan that still found the park
+    on a finished card kept it, so a re-park inside one ``_SCAN_SECONDS`` window was never warned again."""
+    caplog.set_level("WARNING", logger=acw.__name__)
+    owner, t0 = _setup(live, svc, kanban_home, probes, f"hermes kanban wait-check task {REVIEW} --until review")
+    _other(svc, REVIEW, {"status": "done"})
+    _other(svc, UNRELATED, {"status": "done"})
+    ksc._pull_replica(BOARD, svc.hub(ME), ME, kanban_home / "kanban.db", diagnostic=True)
+
+    def lags():
+        return [r.getMessage() for r in caplog.records if "awaited_card_done_park_lag" in r.getMessage()]
+
+    scanned = t0 + acw._SCAN_SECONDS
+    acw.report_lag(live, now=scanned)
+    warned_at = scanned + acw.LAG_WARN_SECONDS + 1
+    assert acw.report_lag(live, now=warned_at) == [owner]
+    acw.report_lag(live, now=warned_at + 30)  # same episode, no scan due: still once
+    assert len(lags()) == 1
+    # The park wakes, runs and re-parks inside the scan window, still on a finished card (the same one or another).
+    with kb.write_txn(live):
+        live.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (owner,))
+    assert kb.claim_task(live, owner, claimer="worker") is not None
+    ref = UNRELATED if other_card else REVIEW
+    assert kb.schedule_task(live, owner, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z still waiting",
+                            wake_check=f"hermes kanban wait-check task {ref} --until review", check_every=EVERY)
+    rescanned = warned_at + acw._SCAN_SECONDS
+    assert acw.report_lag(live, now=rescanned) == []  # the scan re-arms the new episode
+    assert acw.report_lag(live, now=rescanned + acw.LAG_WARN_SECONDS + 1) == [owner]  # before the fix: []
+    assert len(lags()) == 2 and f"task={owner} awaited={ref} lag_s=" in lags()[-1]
+    for later in range(2, 12):  # the new episode across later scans: warned once
+        acw.report_lag(live, now=rescanned + acw.LAG_WARN_SECONDS + 60 * later)
+    assert len(lags()) == 2
+
+
 def test_the_replica_read_is_throttled_and_skipped_without_a_replica(live, monkeypatch):
     calls = []
     monkeypatch.setattr(acw, "_replica_finished", lambda conn: calls.append(1) or None)

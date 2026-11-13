@@ -19,7 +19,8 @@ rebuilt replica, with the pages a pull applied before its Resync, :func:`changes
 reconcile``'s standalone pull (``kanban_sync_backlog.replica_at_head``).
 
 Detection: when an awaited card reached done/archived and its park is still ``scheduled`` more than
-``LAG_WARN_SECONDS`` later, the wake-check tick logs one ``awaited_card_done_park_lag`` WARNING (``report_lag``).
+``LAG_WARN_SECONDS`` later, the wake-check tick logs one ``awaited_card_done_park_lag`` WARNING (``report_lag``)
+per park episode and awaited card: a park that re-parks still naming a finished card is warned again.
 It reads the awaited cards' status from the replica itself (at most once per ``_SCAN_SECONDS`` per board), so a
 status that arrived by any path is seen, not only one ``expedite`` was handed.
 """
@@ -42,7 +43,10 @@ _FINISHED = ("done", "archived")
 _LOCK = threading.Lock()
 # (board db path, waiting card) -> (awaited card, its status, when this gateway applied it)
 _WATCH: dict[tuple[str, str], tuple[str, str, float]] = {}
-_WARNED: dict[tuple[str, str], str] = {}  # parks already warned for (-> awaited card), until they leave scheduled
+# (board db path, waiting card) -> (awaited card, park episode) it was warned for: one warning per park episode and
+# awaited card. A later replica scan re-arms it when the park re-parked (new episode) or names another finished
+# card, and drops it once the park no longer waits on a finished card.
+_WARNED: dict[tuple[str, str], tuple[str, Optional[int]]] = {}
 _SCANNED: dict[str, float] = {}  # board db path -> when report_lag last read the replica
 
 
@@ -117,17 +121,39 @@ def _expedite(live: sqlite3.Connection, changed: Mapping[str, str], now: float) 
                 moved.append(task_id)
                 logger.info("kanban awaited-card wake: %s re-probes now: awaited card %s is %s", task_id, ref,
                             changed[ref])
-    _remember(key, hits, changed, now)
+    _remember(live, key, hits, changed, now)
     if moved:
         sync.wake_dispatcher()
     return moved
 
 
-def _remember(key: str, hits: list, changed: Mapping[str, str], now: float) -> None:
+def _episode(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """The park episode: the id of the card's latest park event (the park ``named_cards`` reads its ref from)."""
+    try:
+        row = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued')",
+                           (task_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def _rearm(conn: sqlite3.Connection, key: str, task_id: str, ref: str) -> bool:
+    """Whether the park may be watched for ``ref``: never warned, or warned for another awaited card or an earlier
+    park episode (that mark is dropped). Call under ``_LOCK``."""
+    mark = _WARNED.get((key, task_id))
+    if mark is None:
+        return True
+    if mark == (ref, _episode(conn, task_id)):
+        return False
+    del _WARNED[(key, task_id)]
+    return True
+
+
+def _remember(live: sqlite3.Connection, key: str, hits: list, changed: Mapping[str, str], now: float) -> None:
     with _LOCK:
         for task_id, _cmd, ref in hits:
             if changed[ref] in _FINISHED:
-                if (key, task_id) not in _WARNED:
+                if _rearm(live, key, task_id, ref):
                     _WATCH.setdefault((key, task_id), (ref, changed[ref], now))
             else:
                 _WATCH.pop((key, task_id), None)
@@ -165,8 +191,9 @@ def _replica_finished(conn: sqlite3.Connection) -> Optional[dict[str, tuple[str,
 
 
 def _scan(conn: sqlite3.Connection, key: str, now: float) -> None:
-    """Record the parks whose awaited card the replica shows finished, whatever path applied it, and forget the
-    warned mark of a park that no longer waits on a finished card. At most once per ``_SCAN_SECONDS`` per board."""
+    """Record the parks whose awaited card the replica shows finished, whatever path applied it (re-arming a warned
+    park that re-parked or now names another finished card), and forget the warned mark of a park that no longer
+    waits on a finished card. At most once per ``_SCAN_SECONDS`` per board."""
     with _LOCK:
         last = _SCANNED.get(key)
         if last is not None and 0 <= now - last < _SCAN_SECONDS:
@@ -181,7 +208,7 @@ def _scan(conn: sqlite3.Connection, key: str, now: float) -> None:
         return
     with _LOCK:
         for task_id, (ref, status) in found.items():
-            if (key, task_id) not in _WARNED:
+            if _rearm(conn, key, task_id, ref):
                 _WATCH.setdefault((key, task_id), (ref, status, now))
         for k in [k for k in _WARNED if k[0] == key and k[1] not in found]:
             del _WARNED[k]
@@ -190,9 +217,11 @@ def _scan(conn: sqlite3.Connection, key: str, now: float) -> None:
 
 def report_lag(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list[str]:
     """Log one WARNING per park still ``scheduled`` ``LAG_WARN_SECONDS`` after its awaited card finished (seen by
-    ``expedite`` when it applied, or by the replica scan at most ``_SCAN_SECONDS`` later), then mark it warned
-    until it leaves ``scheduled``; a park that left ``scheduled`` is forgotten silently. Returns the warned cards.
-    Beyond the throttled replica read it reads only the recorded parks."""
+    ``expedite`` when it applied, or by the replica scan at most ``_SCAN_SECONDS`` later), then mark it warned for
+    that awaited card and park episode: a later scan warns again only after the park re-parks (a new episode) or
+    names another finished card, and drops the mark once it no longer waits on a finished card. A recorded park that
+    left ``scheduled`` before its warning is forgotten silently. Returns the warned cards. Beyond the throttled
+    replica read it reads only the recorded parks (and a warned park's latest park event)."""
     key = _db_key(conn)
     now = time.time() if now is None else float(now)
     _scan(conn, key, now)
@@ -209,7 +238,7 @@ def report_lag(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list
         with _LOCK:
             _WATCH.pop((key, task_id), None)
             if row is not None and row[0] == "scheduled":
-                _WARNED[(key, task_id)] = ref
+                _WARNED[(key, task_id)] = (ref, _episode(conn, task_id))
                 _bound()
         if row is not None and row[0] == "scheduled":
             warned.append(task_id)
