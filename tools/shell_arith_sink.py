@@ -24,7 +24,7 @@ DATE_PRODUCER_BODY = r"""[ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\)"""
 _DATE_PRODUCER_RE = re.compile(DATE_PRODUCER_BODY)
 
 _TOKENS = (r"\\.|'|\"|`|\$\(\(|\$\(|\$\[|\$\{|\(\(|\(|\)|\[\[|\]\]|\[|\]|\}|#"
-           r"|(?<![\w.$/-])let[ \t]+")
+           r"|\$'|<<<|<<|\n|(?<![\w.$/-])let[ \t]+")
 _TOKEN_RE = re.compile(_TOKENS, re.DOTALL)
 # Inside `let` the list operators end the arithmetic too; elsewhere skipping them keeps the scan
 # of a long script fast.
@@ -43,12 +43,12 @@ _CMD, _ARITH, _PARAM = "cmd", "arith", "param"
 def substitution_in_arithmetic(command: str, *, date_exempt: bool) -> bool:
     """Whether *command* holds a ``$(`` (not the exempt ``$(date +%s)`` when *date_exempt*)
     whose nearest enclosing context is arithmetic."""
-    if "$(" not in command:
-        return False
-    if _INTEGER_DECLARATION_RE.search(command):
+    if "$(" in command and _INTEGER_DECLARATION_RE.search(command):
         return True
     closes = [m.start() for m in re.finditer(r"\]\]", command)]
     operators = [m.start() for m in _INT_OPERATOR_RE.finditer(command)]
+    pending = []
+    backtick_open = False
     stack: list[list] = [[_CMD, None, 0, False]]
     pos, end = 0, len(command)
     while pos < end:
@@ -60,15 +60,19 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool) -> bool:
         pos = match.end()
         top = stack[-1]
         kind, quoted = top[0], top[3]
-        if token[0] == "\\" or token == "`":
+        if token == "`":
+            backtick_open = not backtick_open
+            continue
+        if token[0] == "\\":
             continue
         if token == '"':
             top[3] = not quoted
             continue
-        if token == "'":
-            if not quoted:
-                close = command.find("'", pos)
-                pos = end if close == -1 else close + 1
+        skipped = _skip_data(command, token, start, pos, quoted, kind, pending)
+        if skipped is not None:
+            if skipped < 0:
+                return True
+            pos = skipped
             continue
         if token == "$((":
             stack.append([_ARITH, "))", 0, False])
@@ -98,7 +102,50 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool) -> bool:
         elif token in (")", "]", "]]") and len(stack) > 1:
             stack.pop()  # a parameter frame never closes on these: recover outward
             pos = start
-    return False
+    # Callers also pass opener-only command units; queued bodies are not quote errors.
+    return backtick_open or any(frame[3] for frame in stack)
+
+
+def _skip_data(command, token, start, pos, quoted, kind, pending) -> int | None:
+    """Skip literal spans; None means a normal token, -1 means fail closed."""
+    if token in ("'", "$'"):
+        return pos if quoted else _quote_close(command, pos, ansi=token == "$'") or -1
+    if quoted:
+        return None
+    # Lazy import: shell_heredoc calls this scanner, but owns delimiter parsing.
+    from tools.shell_heredoc import _find_heredoc_close, _parse_heredoc_operator
+
+    if kind == _CMD and token == "<<":
+        parsed = _parse_heredoc_operator(command, start)
+        if parsed is None:
+            return -1
+        pos, delimiter, strip_tabs, literal = parsed
+        pending.append((delimiter, strip_tabs, literal))
+        return pos
+    if token != "\n" or not pending:
+        return None
+    for delimiter, strip_tabs, literal in pending:
+        close = _find_heredoc_close(command, pos, delimiter, strip_tabs)
+        if close is None:
+            # Masked inert bodies have no terminators. Scan the remainder rather
+            # than hiding later sinks or unmatched quotes behind an unknown body.
+            break
+        body_end, after = close
+        # Unquoted bodies expand, but their apostrophes are plain data.
+        if not literal and ("$(" in command[pos:body_end] or "`" in command[pos:body_end]):
+            return -1
+        pos = after
+    pending.clear()
+    return pos
+
+
+def _quote_close(command: str, pos: int, *, ansi: bool) -> int | None:
+    """Return past a single quote, honouring escapes only in ANSI-C strings."""
+    while pos < len(command):
+        if command[pos] == "'":
+            return pos + 1
+        pos += 2 if ansi and command[pos] == "\\" else 1
+    return None
 
 
 def _open_parameter(command: str, pos: int, stack: list[list]) -> int:
