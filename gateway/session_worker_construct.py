@@ -184,11 +184,15 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
             # [daveey] A router-picked pin walled for hours is rerouted within its class by the agent
             # build (``resolve_managed_runtime``); this lookup has no standing allocation to do it, so
             # it defers to the build instead of refusing the turn. David's own pins still refuse here.
-            from agent.model_routing_walls import gateway_deferral
-            if key or json.loads(policy.request_json).get('base_url'):
+            # A Desktop chat freezes its provider's OWN endpoint into the creation request: that URL
+            # overrides nothing, so only a launch key or a foreign endpoint keeps the refusal here.
+            from agent.model_routing_managed import overrides_endpoint
+            from agent.model_routing_walls import gateway_deferral, log_not_deferred
+            provider = (frozen.get('model') or {}).get('provider')
+            if key or overrides_endpoint(provider, json.loads(policy.request_json).get('base_url'), frozen):
+                log_not_deferred(wall, 'key' if key else 'endpoint')
                 raise
-            deferred = gateway_deferral(wall, model or (frozen.get('model') or {}).get('default'),
-                                        (frozen.get('model') or {}).get('provider'), None)
+            deferred = gateway_deferral(wall, model or (frozen.get('model') or {}).get('default'), provider, None)
             if deferred is None:
                 raise
             return deferred, None

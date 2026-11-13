@@ -110,6 +110,25 @@ def log_reroute(wall, metadata):
                    metadata["selected_provider"], metadata["selected_model"], reset_pt(wall.resets_at))
 
 
+_NOT_DEFERRED_SEEN: set = set()
+
+
+def log_not_deferred(wall, reason):
+    """One WARNING per wall episode and reason when the pre-build lookup keeps a far wall's refusal.
+
+    A wall under ``WALL_REROUTE_MIN_SECONDS`` is meant to hold, so it stays quiet; a far one that
+    refuses every turn names why (``key``, ``endpoint``, ``explicit``, ``no-target``, ``no-session``)."""
+    reset = getattr(wall, "resets_at", None)
+    if not isinstance(reset, (int, float)) or reset - time.time() < WALL_REROUTE_MIN_SECONDS:
+        return
+    episode = (getattr(wall, "provider", None), getattr(wall, "model", None), int(reset), reason)
+    if episode in _NOT_DEFERRED_SEEN:
+        return
+    _NOT_DEFERRED_SEEN.add(episode)
+    logger.warning("routing: walled pin not deferred (reason=%s) %s/%s until %s", reason, wall.provider,
+                   wall.model, reset_pt(reset))
+
+
 def predicted_target(config, level, wall):
     """Other ``(provider, model)`` routes that can serve *level* now (the allocator picks among them)."""
     from agent.credential_pool import load_pool
@@ -136,6 +155,7 @@ def gateway_deferral(wall, model, provider, config):
     from agent.model_routing_runtime import current_routing_session
     session_id = current_routing_session()
     if not session_id:
+        log_not_deferred(wall, "no-session")
         return None
     managed = managed_config(config)
     if managed is None:
@@ -147,10 +167,12 @@ def gateway_deferral(wall, model, provider, config):
     row = peek_route(session_id, level)
     followed = follows_reroute(row, model)
     if followed is None and not may_reroute(wall, row, request_pin_source(model, provider, managed)):
+        log_not_deferred(wall, "explicit")
         return None
     if followed is None:
         targets = predicted_target(managed, level, wall)
         if not targets:
+            log_not_deferred(wall, "no-target")
             return None  # nothing else in the class can serve: the refusal stands
         notice = reroute_notice(wall, targets[0][1] if len({p for p, _ in targets}) == 1 else None)
     else:

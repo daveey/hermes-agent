@@ -201,14 +201,10 @@ def test_gateway_local_turn_with_legacy_astra_pin_builds_on_opus(home, monkeypat
     """The pre-build lookup (``route_runtime``) and the agent build both take the reroute."""
     from agent.model_routing_runtime import routing_session
     from gateway.run_turn_prepare import _resolve_policy_agent_runtime
-    from hermes_cli.config import load_config
     from run_agent import AIAgent
     _legacy_row(home, LEGACY_ECHO)
     _wall(home, 'openai-codex', ASTRA, 33)
-    frozen = dict(load_config())
-    frozen['model'] = dict(frozen['model'], default=ASTRA, provider='openai-codex')
-    policy = SimpleNamespace(request_json='{}', model=ASTRA,
-                             effective=lambda authority=None, secrets=True: (frozen, ASTRA))
+    policy = _cli_policy(home)
     runner = SimpleNamespace(_pre_agent_fallback_notice=None)
     monkeypatch.setattr('gateway.session_authorities.active_authority', lambda runner: None)
     monkeypatch.setattr('gateway.session_policy.route_launch_key', lambda *a: None)
@@ -233,13 +229,9 @@ def test_gateway_local_turn_with_explicit_switch_pin_still_refuses(home, monkeyp
     from agent.model_routing_runtime import routing_session
     from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     from gateway.run_turn_prepare import _resolve_policy_agent_runtime
-    from hermes_cli.config import load_config
     _legacy_row(home, dict(LEGACY_ECHO, reason='explicit-switch'))
     _wall(home, 'openai-codex', ASTRA, 33)
-    frozen = dict(load_config())
-    frozen['model'] = dict(frozen['model'], default=ASTRA, provider='openai-codex')
-    policy = SimpleNamespace(request_json='{}', model=ASTRA,
-                             effective=lambda authority=None, secrets=True: (frozen, ASTRA))
+    policy = _cli_policy(home)
     runner = SimpleNamespace(_pre_agent_fallback_notice=None)
     monkeypatch.setattr('gateway.session_authorities.active_authority', lambda runner: None)
     monkeypatch.setattr('gateway.session_policy.route_launch_key', lambda *a: None)
@@ -256,3 +248,123 @@ def test_gateway_explicit_pin_reply_names_the_reset_and_model_command(home):
     text, _, _ = _resolution_failure_reply(SubscriptionQuotaUnavailable('openai-codex', ASTRA, reset),
                                            Platform.LOCAL)
     assert 'PT' in text and '/model' in text and ASTRA in text, text
+
+
+# Every Desktop GUI chat freezes its provider's own endpoint into the creation request (MacBook chat
+# 20261025_104956_99e2e1, 11-13): the policy is built by the real creation code, never faked as '{}'.
+GUI_CODEX_REQUEST = {'base_url': 'https://chatgpt.com/backend-api/codex', 'provider': 'openai-codex',
+                     'model': ASTRA, 'source': 'gui'}
+
+
+def _cli_policy(home):
+    """A CLI session's policy (no endpoint in its request), built by the real creation code."""
+    from gateway.session_policy import build_policy
+    from hermes_cli.config import load_config
+    return build_policy({'model': ASTRA, 'provider': 'openai-codex', 'source': 'cli', 'cwd': str(home)},
+                        load_config(), private_secrets={})
+
+
+def _gui_policy(home, **overrides):
+    from gateway.session_policy import build_policy
+    from hermes_cli.config import load_config
+    return build_policy(dict(GUI_CODEX_REQUEST, cwd=str(home), **overrides), load_config(), private_secrets={})
+
+
+def _gateway_turn(monkeypatch, policy):
+    from agent.model_routing_runtime import routing_session
+    from gateway.run_turn_prepare import _resolve_policy_agent_runtime
+    runner = SimpleNamespace(_pre_agent_fallback_notice=None)
+    monkeypatch.setattr('gateway.session_authorities.active_authority', lambda runner: None)
+    with routing_session(SID):
+        return runner, _resolve_policy_agent_runtime(runner, policy)
+
+
+def _not_deferred(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith('routing: walled pin not deferred')]
+
+
+def test_gateway_gui_chat_on_its_own_codex_url_builds_on_opus(home, monkeypatch, caplog):
+    """The chat's saved native Codex URL overrides nothing: the walled default pin still reroutes."""
+    from run_agent import AIAgent
+    _legacy_row(home, LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 110)
+    policy = _gui_policy(home)
+    assert json.loads(policy.request_json)['base_url'] == GUI_CODEX_REQUEST['base_url']
+    with caplog.at_level(logging.WARNING):
+        runner, (model, kwargs) = _gateway_turn(monkeypatch, policy)
+    assert model == ASTRA and kwargs['provider'] == 'auto' and not kwargs['api_key'], kwargs
+    notice = runner._pre_agent_fallback_notice
+    assert notice and 'quota is out until' in notice and OPUS in notice, notice
+    assert not _not_deferred(caplog)
+    agent = AIAgent(model=model, session_id=SID, quiet_mode=True, skip_memory=True, skip_context_files=True,
+                    **{k: v for k, v in kwargs.items() if k in ('provider', 'api_key', 'base_url', 'api_mode')})
+    assert (agent.model, agent.provider) == (OPUS, 'anthropic')
+
+
+def test_gateway_gui_chat_explicit_switch_pin_still_refuses_and_says_why(home, monkeypatch, caplog):
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    _legacy_row(home, dict(LEGACY_ECHO, reason='explicit-switch'))
+    _wall(home, 'openai-codex', ASTRA, 110)
+    policy = _gui_policy(home)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            with pytest.raises(SubscriptionQuotaUnavailable):
+                _gateway_turn(monkeypatch, policy)
+    skipped = _not_deferred(caplog)
+    assert len(skipped) == 1 and 'reason=explicit' in skipped[0], skipped  # once per episode
+
+
+def test_gateway_gui_chat_on_a_foreign_endpoint_still_refuses(home, monkeypatch):
+    from agent.model_routing import ModelRoutingError
+    _legacy_row(home, LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 110)
+    policy = _gui_policy(home, base_url='https://example.com/v1')
+    with pytest.raises(ModelRoutingError):
+        _gateway_turn(monkeypatch, policy)
+
+
+def _injected_wall_refusal(home, monkeypatch, caplog, *, key=None, hours=110, session=True, **policy_overrides):
+    """route_runtime with the inner resolver raising the wall directly: the refusal and its log line."""
+    import contextlib
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from gateway.session_worker_construct import route_runtime
+    from agent.model_routing_runtime import routing_session
+    _legacy_row(home, LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 110)
+    policy = _gui_policy(home, **policy_overrides)
+    frozen, model = policy.effective(None)
+    reset = None if hours is None else time.time() + hours * HOUR
+    monkeypatch.setattr('gateway.session_worker_construct._route_runtime',
+                        lambda *a, **k: (_ for _ in ()).throw(SubscriptionQuotaUnavailable('openai-codex', ASTRA,
+                                                                                           reset)))
+    scope = routing_session(SID) if session else contextlib.nullcontext()
+    with caplog.at_level(logging.WARNING), scope, pytest.raises(SubscriptionQuotaUnavailable):
+        route_runtime(policy, frozen, model, key)
+    return _not_deferred(caplog)
+
+
+def test_walled_pin_with_a_launch_key_logs_why_it_was_not_deferred(home, monkeypatch, caplog):
+    skipped = _injected_wall_refusal(home, monkeypatch, caplog, key='***')
+    assert len(skipped) == 1 and 'reason=key' in skipped[0], skipped
+
+
+def test_walled_pin_on_a_foreign_endpoint_refuses_before_deferral_and_says_why(home, monkeypatch, caplog):
+    """The managed resolver normally refuses a foreign URL first; route_runtime keeps that refusal too."""
+    skipped = _injected_wall_refusal(home, monkeypatch, caplog, base_url='https://example.com/v1')
+    assert len(skipped) == 1 and 'reason=endpoint' in skipped[0], skipped
+
+
+def test_walled_pin_outside_a_routing_session_logs_no_session(home, monkeypatch, caplog):
+    skipped = _injected_wall_refusal(home, monkeypatch, caplog, session=False)
+    assert len(skipped) == 1 and 'reason=no-session' in skipped[0], skipped
+
+
+def test_walled_pin_with_nothing_else_in_its_class_logs_no_target(home, monkeypatch, caplog):
+    monkeypatch.setattr('agent.model_routing_walls.predicted_target', lambda *a, **k: [])
+    skipped = _injected_wall_refusal(home, monkeypatch, caplog)
+    assert len(skipped) == 1 and 'reason=no-target' in skipped[0], skipped
+
+
+@pytest.mark.parametrize('hours', [1, None], ids=['short-wall', 'unknown-reset'])
+def test_a_short_or_unknown_wall_refuses_quietly(home, monkeypatch, caplog, hours):
+    assert _injected_wall_refusal(home, monkeypatch, caplog, key='***', hours=hours) == []
