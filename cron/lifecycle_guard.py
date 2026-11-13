@@ -986,9 +986,10 @@ def contains_launchctl_submit_command(command: str) -> bool:
 
 
 # Reserved words that may precede a simple command in the same segment (`if hermes-sync`,
-# `then x`, `! x`, `time -p x`, `{ x; }`, `coproc x`); `fi`/`done`/`}` close a list and run nothing.
+# `then x`, `! x`, `time -p x`, `{ x; }`, `coproc x`, `function f { x; }`); `fi`/`done`/`}` close
+# a list and run nothing.
 _COMMAND_PREFIX_KEYWORDS = frozenset({
-    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{", "coproc",
+    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{", "coproc", "function",
 })
 _MAX_EXECUTES_NAMED_DEPTH = 4
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -996,7 +997,7 @@ _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 def _peel_command_keywords(segment: list[str]) -> list[str]:
     """*segment* without its leading reserved words (and ``time``'s ``-p``/``--``, and the NAME of
-    ``coproc NAME { … }``)."""
+    ``coproc NAME { … }`` and ``function NAME { … }``)."""
     index = 0
     while index < len(segment) and segment[index] in _COMMAND_PREFIX_KEYWORDS:
         word = segment[index]
@@ -1006,6 +1007,10 @@ def _peel_command_keywords(segment: list[str]) -> list[str]:
                 index += 1
         elif (word == "coproc" and index + 1 < len(segment) and segment[index + 1] == "{"
               and _SHELL_NAME.fullmatch(segment[index])):
+            index += 1
+        elif word == "function" and index < len(segment):
+            # The NAME after `function` is never a command, and bash accepts names `_SHELL_NAME`
+            # rejects (`function f-x.y { … }`), so skip any word. `function f() {` splits at `(`.
             index += 1
     return segment[index:]
 

@@ -68,6 +68,13 @@ _KEYWORD_TEMPLATES = [
     "coproc {p}",
     "coproc {{ {p}; }}",
     "coproc NAME {{ {p}; }}",
+    # `function NAME [()] { … }` defines a function the next segment may call.
+    "function f {{ {p}; }}; f",
+    "function f() {{ {p}; }}; f",
+    "function f () {{ {p}; }}; f",
+    "function f-x.y {{ {p}; }}; f-x.y",
+    "if true; then function f {{ {p}; }}; f; fi",
+    "function f {{ time {p}; }}; f",
     # The external time(1), also reached through `command`.
     "/usr/bin/time {p}",
     "/usr/bin/time -f %e -o /dev/null {p}",
@@ -87,6 +94,7 @@ def test_script_behind_a_reserved_word_is_scanned(script, template):
     "while false; do timeout 5 python3 {p}; done",
     "{{ python3 {p}; }}",
     "/usr/bin/time python3 {p}",
+    "function f {{ python3 {p}; }}; f",
 ])
 def test_interpreter_run_behind_a_reserved_word_is_scanned(runner, template):
     assert scan_gateway_lifecycle(template.format(p=runner)) == (True, None)
@@ -99,6 +107,9 @@ def test_interpreter_run_behind_a_reserved_word_is_scanned(runner, template):
     "time env -S {q}",
     "then su -c {q}",
     "/usr/bin/time bash -c {q}",
+    "function f {{ bash -c {q}; }}; f",
+    "function f {{ env -S {q}; }}; f",
+    "function f {{ su -c {q}; }}; f",
 ])
 def test_shell_payload_behind_a_reserved_word_is_scanned(script, template):
     assert scan_gateway_lifecycle(template.format(q=shlex.quote(script))) == (True, None)
@@ -110,6 +121,7 @@ def test_shell_payload_behind_a_reserved_word_is_scanned(script, template):
     "! launchctl bootstrap gui/501 /tmp/x.plist",
     "{ launchctl submit -l x -- /bin/true; }",
     "/usr/bin/time launchctl submit -l x -- /bin/true",
+    "function f { launchctl submit -l x -- /bin/true; }; f",
 ])
 def test_launchctl_submit_behind_a_reserved_word_is_detected(command):
     assert contains_launchctl_submit_command(command)
@@ -122,6 +134,7 @@ def test_launchctl_submit_behind_a_reserved_word_is_detected(command):
     "if true; then {p}; fi",
     "{{ {p}; }}",
     "while false; do {p}; done",
+    "function f {{ {p}; }}; f",
 ])
 def test_unscannable_script_behind_a_reserved_word_fails_closed(tmp_path, monkeypatch, template):
     monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 50)
@@ -142,6 +155,8 @@ def test_unscannable_script_behind_a_reserved_word_fails_closed(tmp_path, monkey
     "time echo {p}",
     "if true; then echo {p}; fi",
     "{{ cat {p}; }}",
+    "echo function f {p}",
+    "function f {{ echo {p}; }}; f",
 ])
 def test_reserved_word_does_not_turn_a_mention_into_a_run(script, template):
     assert scan_gateway_lifecycle(template.format(p=script)) == (False, None)
