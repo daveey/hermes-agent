@@ -25,7 +25,10 @@ by a dispatched reviewer run with its own session. A landing chat that completed
 subagent's verdict, from the CLI, or from the dashboard) left a record ship refuses hours later at land time
 ("its latest run did not complete; no completed review record"). Such a completion is now refused when it is
 recorded: on a core-pull card, a verdict-bearing review result from a caller that is not the card's own dispatched
-worker run. No override: ship refuses the record regardless, so an override would only bring the defect back.
+worker run. A card whose body names no core-fork pull still counts as one when the completion's own
+``reviewed_pr`` names a core-fork pull (``reviewed_core_pull``, defect agent-8a7de4b89f: a card that named the
+PR only in prose escaped the check). No override: ship refuses the record regardless, so an override would only
+bring the defect back.
 The card's own worker calling the CLI from its terminal shell (the fallback when a kanban tool hits a DB error)
 is not outside: ``kanban_worker_shell.run_for`` proves its claimed run, whose completion ship accepts.
 """
