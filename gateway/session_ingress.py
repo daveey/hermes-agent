@@ -322,6 +322,8 @@ async def execute_admission(authority, ref, row):
         # by get_or_create_session. Strict lookup refuses a route moved since claim.
         event.metadata.update(gateway_session_key=live.route, gateway_session_strict=True,
                               gateway_session_id=row['update_resume']['physical_session_id'])
+    from gateway.session_fold_pending import fold_pending
+    await fold_pending(authority, ref, live, row, event)  # [daveey] pending notices ride this turn
     # The claim's admission gate ran inside its commit, so no drain had begun when this row was
     # claimed: it is in-flight work the restart drain waits for, not new work its gate refuses.
     # Without this a drain that flips between the claim and the turn settles it 'completed' unrun.

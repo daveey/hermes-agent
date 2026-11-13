@@ -190,7 +190,8 @@ def commit_and_publish(authority, live, ref, row, response, outcome, captured, s
     # already have dropped it from ``authority.sessions``.
     with live.event_stream.lock:
         live.settling[admission_id] = row
-    transfers = _transfers(authority, live, row)
+    from gateway.session_fold_pending import settle_outcome
+    transfers = settle_outcome(authority, row, _transfers(authority, live, row), prepared[0])
     try:
         settlement['settled'], settlement['response'] = finish_result(
             authority.db, epoch=authority.epoch, row=row, response=response, outcome=outcome,

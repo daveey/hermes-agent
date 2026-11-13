@@ -132,6 +132,8 @@ async def park_or_interrupt(authority, live, ref, row):
             if requeued is not None:
                 return requeued
         try:
+            from gateway.session_fold_pending import unfold_for_checkpoint
+            await unfold_for_checkpoint(authority, live, ref, row)
             receipt = await tracked_write(authority, partial(checkpoint_session_input, authority.db,
                 epoch=authority.epoch, admission_id=row['admission_id'], generation=row['generation'],
                 physical_session_id=authority.physical_target(ref), transcript_mark=row['transcript_mark']))
