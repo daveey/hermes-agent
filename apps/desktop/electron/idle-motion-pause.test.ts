@@ -37,6 +37,12 @@ class FakeContents implements IdleMotionTarget {
     return Promise.resolve()
   }
 
+  /** A reload into a new renderer process: its sheets are gone and Blink's per-process key counter starts over. */
+  restartRenderer() {
+    this.inserted.clear()
+    this.#next = 0
+  }
+
   on(event: string, listener: () => void) {
     ;(this.listeners[event] ??= []).push(listener)
 
@@ -164,6 +170,50 @@ describe('IdleMotionPause', () => {
 
     h.setIdle(0)
     h.pause.check()
+    await flush()
+    expect(win.live).toEqual([])
+  })
+
+  it('a reload into a new renderer process while paused keeps the fresh sheet when its key repeats the stale one', async () => {
+    // insertCSS keys come from a per-renderer-process counter, so after a crash reload the new sheet's key can equal
+    // the old one; removing the stale key after re-inserting would delete the fresh sheet.
+    const win = new FakeContents(1)
+    const h = harness([win])
+
+    h.setIdle(IDLE_MOTION_PAUSE_AFTER_SECONDS)
+    h.pause.check()
+    await flush()
+    expect([...win.inserted.keys()]).toEqual(['k1-1'])
+
+    win.restartRenderer()
+    h.pause.noteLoaded(win)
+    await flush()
+    expect([...win.inserted.keys()]).toEqual(['k1-1'])
+    expect(win.live).toEqual([IDLE_MOTION_PAUSE_CSS])
+
+    // The 1 s paused tick does not stack a second copy while the re-apply is in flight or after it.
+    h.pause.check()
+    await flush()
+    expect(win.live).toEqual([IDLE_MOTION_PAUSE_CSS])
+
+    h.setIdle(0)
+    h.pause.check()
+    await flush()
+    expect(win.live).toEqual([])
+  })
+
+  it('a resume while a reload re-apply waits on the stale removal still leaves the window unfrozen', async () => {
+    const win = new FakeContents(1)
+    const h = harness([win])
+
+    h.setIdle(IDLE_MOTION_PAUSE_AFTER_SECONDS)
+    h.pause.check()
+    await flush()
+
+    win.restartRenderer()
+    h.pause.noteLoaded(win)
+    h.setIdle(0)
+    h.pause.check() // input arrives before the stale removal and the re-insert settle
     await flush()
     expect(win.live).toEqual([])
   })

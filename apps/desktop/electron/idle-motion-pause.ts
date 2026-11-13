@@ -98,16 +98,23 @@ export class IdleMotionPause {
     // The old sheet is usually gone with the old page, but the 1 s paused tick can insert into a new window after its
     // document commits and before did-finish-load; that sheet survives the load. Remove the old key (a no-op when the
     // page already dropped it) before re-applying, or resume removes only the second copy and the window stays frozen.
+    // Re-insert only once that removal has finished: insertCSS keys come from a per-renderer-process counter, so after
+    // a reload into a new renderer process (a crash reload) the fresh sheet's key can equal the stale one, and a stale
+    // removal landing after the re-insert would delete the fresh sheet.
     const previous = this.#keys.get(target.id)
     this.#keys.delete(target.id)
+    const removed = previous ? this.#remove(previous) : undefined
 
-    if (previous) {
-      this.#remove(previous)
+    if (!this.#paused) {
+      return
     }
 
-    if (this.#paused) {
-      this.#applyMissing()
+    if (removed && !target.isDestroyed()) {
+      // Claim the slot now so the 1 s paused tick does not insert a second copy meanwhile.
+      this.#keys.set(target.id, { target, key: removed.then(() => this.#insert(target)) })
     }
+
+    this.#applyMissing()
   }
 
   #applyMissing(): void {
@@ -116,15 +123,19 @@ export class IdleMotionPause {
         continue
       }
 
-      let key: Promise<string | null>
+      this.#keys.set(target.id, { target, key: this.#insert(target) })
+    }
+  }
 
-      try {
-        key = Promise.resolve(target.insertCSS(IDLE_MOTION_PAUSE_CSS)).catch(() => null)
-      } catch {
-        key = Promise.resolve(null)
-      }
+  #insert(target: IdleMotionTarget): Promise<string | null> {
+    if (target.isDestroyed()) {
+      return Promise.resolve(null)
+    }
 
-      this.#keys.set(target.id, { target, key })
+    try {
+      return Promise.resolve(target.insertCSS(IDLE_MOTION_PAUSE_CSS)).catch(() => null)
+    } catch {
+      return Promise.resolve(null)
     }
   }
 
@@ -133,12 +144,13 @@ export class IdleMotionPause {
     this.#keys.clear()
 
     for (const entry of entries) {
-      this.#remove(entry)
+      void this.#remove(entry)
     }
   }
 
-  #remove({ target, key }: { target: IdleMotionTarget; key: Promise<string | null> }): void {
-    void key.then(value => {
+  /** Remove a sheet once its insertCSS settles; the promise settles (never rejects) when the removal is done. */
+  #remove({ target, key }: { target: IdleMotionTarget; key: Promise<string | null> }): Promise<void> {
+    return key.then(value => {
       if (value === null || target.isDestroyed()) {
         return
       }
