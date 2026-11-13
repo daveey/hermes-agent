@@ -43,12 +43,33 @@ def _worker_shepherd(session: Any, kind: str, gateway=None, profile=None) -> boo
     return is_headless_session(session, gateway=gateway, profile=profile)
 
 
+def _worker_shepherds(sessions: Iterable[Any], gateway=None, profile=None) -> set[str]:
+    """:func:`_worker_shepherd` for many sessions: the ``str(session or "")`` refs it is true for, from one
+    ``scoped_sources`` read instead of one per row (t_01a1d2cc49634a78). [daveey]"""
+    from hermes_cli.kanban_db_notify import headless_sessions
+    return headless_sessions(sessions, gateway=gateway, profile=profile)
+
+
+def _machine_by_profile(gateway: str, rows: Iterable[tuple[Any, Any]]) -> dict[tuple, set[str]]:
+    """``machine_sessions`` once per exact chat profile for ``(profile, session)`` rows, keyed ``(type, value)``
+    like :func:`_ledger_links`, so ``None`` and ``""`` stay distinct. A row is a machine session iff
+    ``str(session or "") in out[(type(profile), profile)]``: the per-row ``is_machine_session`` verdict. [daveey]"""
+    from hermes_cli.kanban_db_notify import machine_sessions, prefetch_sources
+    groups: dict[tuple, tuple[Any, list[Any]]] = {}
+    for profile, session in rows:
+        groups.setdefault((type(profile), profile), (profile, []))[1].append(session)
+    if len(groups) > 1:  # each home read once for every profile's refs, not once per profile
+        prefetch_sources(s for _p, refs in groups.values() for s in refs)
+    return {key: machine_sessions(gateway, refs, local_gateway=gateway, profile=profile)
+            for key, (profile, refs) in groups.items()}
+
+
 def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, Any]]:
     """Links from this board file's own data: creating chats and ``tui`` shepherd subscriptions.
 
     A machine session of this gateway (``is_machine_session``: a worker/cron/one-shot/subagent transcript) is no
     chat, so it is never wanted: :func:`reconcile` releases a link to it and never writes one back. [daveey]"""
-    from hermes_cli.kanban_db_notify import is_machine_session, machine_sessions
+    from hermes_cli.kanban_db_notify import machine_sessions, prefetch_sources
     from hermes_cli.kanban_session_activity import _counted_sub_clause
     now = int(time.time())
     out: dict[str, dict[str, Any]] = {}
@@ -69,19 +90,25 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
             f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)}")]
     except sqlite3.Error:  # board predates notify subscriptions
         shepherds = []
-    machine = machine_sessions(gateway, [r[1] for r in sessions]
-                               + [r[1] for r in shepherds], local_gateway=gateway)
+    candidates = [r[1] for r in sessions] + [r[1] for r in shepherds]
+    # [daveey] Each verdict below is classified in one batch, not per row: a per-row lookup reopened every home's
+    # state.db once the 300 s source cache expired, so a pass on a 3k-card hub board ran for 15-28 min and held up
+    # the replica pull and outbox push behind it (t_01a1d2cc49634a78). One prefetch reads each home once.
+    prefetch_sources(candidates + [r["chat_session"] for r in created])
+    machine = machine_sessions(gateway, candidates, local_gateway=gateway)
+    headless = _worker_shepherds(candidates)
+    created_machine = _machine_by_profile(gateway, ((r["chat_profile"], r["chat_session"]) for r in created))
 
     def add(task_id: str, session: str, kind: str, created_at: Any) -> None:
         from hermes_cli.kanban_placement import is_placeholder_session
-        if is_placeholder_session(session) or _worker_shepherd(session, kind) or session in machine:
+        if is_placeholder_session(session) or str(session or "") in headless or session in machine:
             return
         uid = link_uid(task_id, gateway, None, session, kind)
         out[uid] = {"uid": uid, "task_id": task_id, "chat_gateway": gateway, "chat_profile": None,
                     "chat_session": session, "kind": kind, "released": 0, "created_at": int(created_at or now)}
 
     for row in created:
-        if not is_machine_session(gateway, row["chat_session"], profile=row["chat_profile"], local_gateway=gateway):
+        if str(row["chat_session"] or "") not in created_machine[(type(row["chat_profile"]), row["chat_profile"])]:
             # [daveey] Wanted unreleased, like a ``tasks.session_id`` creator link: creator-chat ownership has no
             # release on this gateway but the machine/placeholder rules above. Keeping the stored flag let one
             # foreign reconcile (a named-profile gateway on an older core holding the host sync lock) release it
@@ -148,7 +175,6 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     no human reads that session, so it owns nothing even on an open card (hub t_01a19864fc42f5b2 was owned by
     MacBook worker transcript 20261029_180356_84db5f, 2026-11-01)."""
     from hermes_cli import kanban_sync_client as ksc
-    from hermes_cli.kanban_db_notify import is_machine_session
     from hermes_cli.kanban_lockguard import connect
     from hermes_cli.kanban_placement import is_placeholder_session
     path = ksc.shadow_path(board)
@@ -170,14 +196,17 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
         _log.info("kanban chat links: replica %s unreadable for owner-link releases (%s)", path, exc)
         return {}
     out: dict[str, dict[str, Any]] = {}
+    rows = [r for r in rows if r["uid"] not in want and not is_placeholder_session(r["chat_session"])]
+    # One machine classification per chat profile for the open cards' rows, not one per row: this per-row
+    # lookup was 60% of a 60 s profile of the hub's sync thread (t_01a1d2cc49634a78). [daveey]
+    machine = _machine_by_profile(gateway, ((r["chat_profile"], r["chat_session"]) for r in rows
+                                            if r["status"] not in TERMINAL_STATUSES))
     for r in rows:
         # [daveey] A worker's ``local-<sha256>`` is released like any machine session, not skipped as a shepherd:
         # another gateway proves a foreign hash chat by an unreleased ``created`` link (``proven_foreign_chats``),
         # and only this gateway can say the hash is a worker (review t_01a1cf9aab0349a9).
-        if r["uid"] in want or is_placeholder_session(r["chat_session"]):
-            continue
-        if r.pop("status") not in TERMINAL_STATUSES and not is_machine_session(
-                gateway, r["chat_session"], local_gateway=gateway, profile=r["chat_profile"]):
+        if r.pop("status") not in TERMINAL_STATUSES and str(r["chat_session"] or "") not in machine[
+                (type(r["chat_profile"]), r["chat_profile"])]:
             continue
         out[r["uid"]] = {**r, "released": 1, "created_at": int(r["created_at"] or time.time())}
     return out
@@ -203,14 +232,16 @@ def _plan(conn: sqlite3.Connection, board: str, gateway: str, ledger: bool) -> t
 def _machine_releases(want: dict, rows: list, gateway: str) -> list[dict[str, Any]]:
     """The links a reconcile pass releases because their chat is a machine session of this gateway: an unreleased
     row nothing wants any more, or an owner-written row it writes back released (``_owner_written_releases``)."""
-    from hermes_cli.kanban_db_notify import is_headless_session, machine_sessions
+    from hermes_cli.kanban_db_notify import machine_sessions
     from hermes_cli.kanban_placement import is_placeholder_session
     have = {r[0]: r for r in rows}
     out = [{"uid": r[0], "task_id": r[4], "chat_session": r[2], "kind": r[3]} for r in rows
            if not r[1] and r[0] not in want]
     out += [{"uid": uid, "task_id": l["task_id"], "chat_session": l["chat_session"], "kind": l["kind"]}
             for uid, l in want.items() if l["released"] and (uid not in have or not have[uid][1])]
-    out = [o for o in out if not is_placeholder_session(o["chat_session"]) and not is_headless_session(o["chat_session"])]
+    headless = _worker_shepherds(o["chat_session"] for o in out)
+    out = [o for o in out if not is_placeholder_session(o["chat_session"])
+           and str(o["chat_session"] or "") not in headless]
     machine = machine_sessions(gateway, [o["chat_session"] for o in out], local_gateway=gateway)
     return sorted((o for o in out if o["chat_session"] in machine), key=lambda o: o["uid"])
 
@@ -252,8 +283,12 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     # shepherd link is no chat either (its wakes are refused). [daveey]
     # A released ``created`` row to a worker hash is the release record of an owner-written link
     # (``_owner_written_releases``): deleting it would hand the owner's unreleased copy back. [daveey]
+    shepherd_rows: dict[tuple, tuple[Any, list[Any]]] = {}  # exact chat profile -> (profile, sessions)
+    for r in rows:
+        shepherd_rows.setdefault((type(r[5]), r[5]), (r[5], []))[1].append(r[2])
+    headless = {key: _worker_shepherds(sessions, gateway, profile) for key, (profile, sessions) in shepherd_rows.items()}
     placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or (
-        _worker_shepherd(r[2], r[3], gateway, r[5]) and not (r[1] and r[3] == "created"))}
+        str(r[2] or "") in headless[(type(r[5]), r[5])] and not (r[1] and r[3] == "created"))}
     added = changed = released = retired = 0
     with write_txn(conn):
         for uid in placeholders - set(want):
