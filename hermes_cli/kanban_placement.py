@@ -277,7 +277,13 @@ def route_labels(dest: str) -> list[str]:
 def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) -> list[str]:
     """Active, unheld, fresh registry machines that carry ``label`` (or every label of a list/set) and pick up
     other gateways' cards (sorted). Fresh is coordination attestation's window (``last_seen`` within
-    ``FRESH_S``): a stale entry holding the whole set leases nothing, so it must not make a queue look live."""
+    ``FRESH_S``, up to ``SKEW_S`` ahead of this clock): a stale entry holding the whole set leases nothing, so it
+    must not make a queue look live.
+
+    Board outage: ``wn.registry()`` keeps the last good snapshot, so ``FRESH_S`` after the last successful fetch
+    every entry is stale and this returns []. Callers then fail closed: hub-admission deny-route cards go
+    worker-first (:func:`kanban_hub_admission_placement.pool_route`) and portable cards keep their local placement
+    (:func:`kanban_worker_placement.queue_decision`) instead of queueing on a pool label nobody may lease."""
     from hermes_cli import kanban_worker_node as wn
     from hermes_cli.kanban_placement_coordination import _fresh
     if machines is None:
@@ -668,19 +674,19 @@ def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
 
 
 def _machine_picks_up(name: str | Iterable[str]) -> bool:
-    """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
+    """``name`` is an active, fresh machine in the Board registry that is not held (draining) and has not turned
     pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
     and worker-1 included, though both claim ``runs_on`` cards), so a missing field counts as on:
     ``heavy_route`` naming the worker is the operator saying it picks up. A pool label (:func:`is_pool_label`) is
     live when some fresh such machine carries it; a label collection (queue label + coordination labels) when one
-    carries all (:func:`label_machines`)."""
+    carries all (:func:`label_machines`). A named machine uses the same window: one silent past ``FRESH_S`` leases
+    nothing (the Board's selection skips it), so a ``machine:<name>`` pin to it would strand the card."""
     from hermes_cli import kanban_worker_node as wn
     if not isinstance(name, str) or is_pool_label(name):
         return bool(label_machines(name))
     entry = ((wn.registry() or {}).get("machines") or {}).get(name)
-    if not entry or entry.get("state", "active") != "active" or entry.get("hold"):
-        return False
-    return "pickup" not in entry or wn.advertises_pickup(entry)
+    # The empty label set: every other rule (active, unheld, pickup, fresh) is label_machines'.
+    return bool(label_machines((), {name: entry}))
 
 
 def target_live(target: str, *, now: float, live_seconds: int,

@@ -1430,7 +1430,8 @@ def test_configured_heavy_markers_replace_the_builtin_list():
 ])
 def test_heavy_route_machine_check_reads_the_board_registry(monkeypatch, entry, ok):
     from hermes_cli import kanban_worker_node as wn
-    machines = {"worker-1": entry} if entry else {}
+    # Seen just now: a named machine is held to the same FRESH_S window (test_kanban_placement_freshness).
+    machines = {"worker-1": {**entry, "last_seen": time.time() * 1000}} if entry else {}
     monkeypatch.setattr(wn, "registry", lambda: {"me": "macbook", "machines": machines})
     assert kp._machine_picks_up("worker-1") is ok
 

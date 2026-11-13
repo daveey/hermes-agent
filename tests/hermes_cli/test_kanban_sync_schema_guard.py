@@ -23,6 +23,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as ksc
 from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli._placement_helpers import seen_now
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 
 ME, BOARD = "hub", "default"
@@ -340,8 +341,8 @@ def machine_pin_create(kanban_home, pre_rename_live, monkeypatch):
     from hermes_cli import kanban_capability_registry as reg
     from hermes_cli import kanban_worker_node as wn
     monkeypatch.setattr(reg, "self_gateway", lambda: ME)
-    wn.set_registry_fetch(lambda: {"me": ME, "machines": [
-        {"name": "worker-1", "state": "active", "labels": ["linux"], "pickup": "all"}]})
+    wn.set_registry_fetch(lambda: {"me": ME, "machines": seen_now([
+        {"name": "worker-1", "state": "active", "labels": ["linux"], "pickup": "all"}])})
     monkeypatch.setenv("HERMES_KANBAN_DB", str(kanban_home / "kanban.db"))
     monkeypatch.setenv("HERMES_KANBAN_BOARD", BOARD)
     monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)

@@ -110,7 +110,9 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). On a pool worker a built-in local-marker
     hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`). Either way the card queues only
     when one active, unheld machine holds the whole label set (queue, group and coordination labels), judged by
-    ``machine_ok`` (given the label tuple) or the registry; else the local keep stands. [daveey]
+    ``machine_ok`` (given the label tuple) or the registry; else the local keep stands. The registry counts only
+    machines seen within ``FRESH_S`` (:func:`kanban_placement.label_machines`), so during a Board outage the card
+    stays local once the last good snapshot ages out, instead of queueing on ``pool:worker``. [daveey]
     """
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination

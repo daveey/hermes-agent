@@ -531,6 +531,10 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
 
     Never a ``machine:worker-N`` pin. The queue's coordination labels include ``requires``'
     (``hub:write`` -> ``capability:hub-write``), so only a hub-write worker claims it.
+
+    Live means fresh in the Board registry (:func:`kanban_placement.label_machines`). During a Board outage the
+    last good registry snapshot goes stale after ``FRESH_S``, so a denied card goes worker-first (or a denied
+    mandatory pin is refused) rather than queueing on a label no machine is known to lease: fails closed.
     """
     from hermes_cli import kanban_placement as kp
     from hermes_cli import kanban_placement_coordination as coordination

@@ -18,6 +18,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as ksc
 from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli._placement_helpers import seen_now
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 
 HUB, WORKER, BOARD = "hub", "worker-1", "default"
@@ -48,7 +49,7 @@ class Gateway:
     def enter(self):
         self.mp.setenv("HERMES_HOME", str(self.home))
         sync.set_lease_client(ksc.HubLeaseClient(self.svc.hub(self.name)))
-        wn.set_registry_fetch(lambda: {"me": self.name, "machines": list(MACHINES.values())})
+        wn.set_registry_fetch(lambda: {"me": self.name, "machines": seen_now(MACHINES.values())})
         return self.conn if hasattr(self, "conn") else None
 
     def round(self):
@@ -415,8 +416,8 @@ def test_tool_create_heavy_route_works_when_the_registry_has_no_pickup_field(gws
     hub, _ = gws
     hub.enter()
     from hermes_cli import kanban_placement as kp
-    wn.set_registry_fetch(lambda: {"me": HUB, "machines": [
-        {k: v for k, v in MACHINES[m].items() if k != "pickup"} for m in (HUB, WORKER, "macbook")]})
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now([
+        {k: v for k, v in MACHINES[m].items() if k != "pickup"} for m in (HUB, WORKER, "macbook")])})
     monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
     monkeypatch.setattr(kp, "config", lambda: {"route": {HUB: "elsewhere"}, "heavy_route": {HUB: WORKER}})
     monkeypatch.setattr(kp, "target_live", lambda *a, **k: None)
