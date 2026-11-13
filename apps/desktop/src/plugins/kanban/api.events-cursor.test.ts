@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // The socket must start at the snapshot's tail, and a late snapshot must not
 // reopen a board the user already left. The cursor is per connection.
 
-const { $boardSlug, bindApi, boardKey } = await import('./api')
+const { $boardSlug, bindApi, boardKey, EVENTS_BOARD_REFRESH_MIN_MS } = await import('./api')
 const { setConnection } = await import('@/store/session')
 
 const BOARD = (latest_event_id: number) => ({
@@ -148,5 +148,83 @@ describe('kanban event cursor', () => {
     })
 
     dispose()
+  })
+
+  // [daveey] 2026-11-13: the hub's own /board read timed out, mergeBoards stamped the cached board
+  // latest_event_id 0, and the socket opened at since=0: a full history replay, 200 events a frame.
+  it('never opens at since=0 from a snapshot whose routed gateway did not answer', async () => {
+    queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(0))
+
+    const socket = vi.fn(() => vi.fn())
+
+    const dispose = bindApi(
+      async () => {
+        throw new Error('hub /board timed out again')
+      },
+      storage('ops'),
+      socket
+    )
+
+    await vi.waitFor(() => {
+      expect(socket).toHaveBeenCalledWith('/events?board=ops', expect.any(Function))
+    })
+    expect(socket.mock.calls.flat().some(arg => String(arg).includes('since=0'))).toBe(false)
+    dispose()
+  })
+
+  it('opens at the server tail when the fetched snapshot carries no positive cursor', async () => {
+    const socket = vi.fn(() => vi.fn())
+    const dispose = bindApi(async <T>() => BOARD(0) as T, storage('ops'), socket)
+
+    await vi.waitFor(() => {
+      expect(socket).toHaveBeenCalledWith('/events?board=ops', expect.any(Function))
+    })
+
+    dispose()
+  })
+
+  it('coalesces a burst of frames into one immediate and one trailing board re-read', async () => {
+    vi.useFakeTimers()
+
+    try {
+      queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(10))
+      const frames: Array<(data: unknown) => void> = []
+
+      const dispose = bindApi(
+        async () => {
+          throw new Error('cached snapshot must not refetch')
+        },
+        storage('ops'),
+        vi.fn((_path: string, onMessage: (data: unknown) => void) => {
+          frames.push(onMessage)
+
+          return vi.fn()
+        })
+      )
+
+      const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+      const boardReads = () => invalidate.mock.calls.filter(([filters]) => filters?.queryKey?.[1] === 'board').length
+
+      for (let id = 11; id <= 60; id++) {
+        frames.at(-1)!({ cursor: id, events: [{ id, kind: 'heartbeat', task_id: `t_${id}` }] })
+      }
+
+      expect(boardReads()).toBe(1)
+      // A read in flight answers the next frame too: no orphaned duplicate request.
+      expect(invalidate.mock.calls.find(([filters]) => filters?.queryKey?.[1] === 'board')?.[1]).toEqual({
+        cancelRefetch: false
+      })
+
+      vi.advanceTimersByTime(EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(boardReads()).toBe(2)
+
+      vi.advanceTimersByTime(10 * EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(boardReads()).toBe(2)
+
+      invalidate.mockRestore()
+      dispose()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

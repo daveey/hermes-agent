@@ -124,12 +124,25 @@ function cursorKey(scope: string, slug: string): string {
   return `${scope}\0${slug}`
 }
 
+/** [daveey] A snapshot's tail is a usable `since` only when positive. A merged
+ *  board whose routed gateway did not answer carries `latest_event_id: 0`
+ *  (mergeBoards), and `since=0` makes the server replay that board's whole
+ *  task_events history, 200 rows per frame. On 2026-11-13 the hub's own /board
+ *  read timed out, the cached merge said 0, and the reopened socket replayed
+ *  ~360k hub events: every frame invalidated the board, which re-read three
+ *  gateways ~4x/s and timed out ~1.5k reads per 30 min. Unknown opens at the
+ *  server's tail instead (an empty board's tail is 0 anyway). */
+function knownCursor(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
 function snapshotCursor(scope: string, slug: string): number | undefined {
   for (const archived of [false, true]) {
     const board = queryClient.getQueryData<KanbanBoard>(boardKey(scope, slug, archived))
+    const cursor = knownCursor(board?.latest_event_id)
 
-    if (typeof board?.latest_event_id === 'number') {
-      return board.latest_event_id
+    if (cursor !== undefined) {
+      return cursor
     }
   }
 
@@ -196,9 +209,64 @@ const routedScope = (): string => host.activeConnectionId() ?? LOCAL_SCOPE
  *  `bindApi`; sites with their own `enabled` compose it. */
 export const routedToScope = (query: { queryKey: readonly unknown[] }): boolean => query.queryKey[2] === routedScope()
 
-/** One live `task_events` frame → precise cache invalidation: the board, plus
- *  each touched task's detail. The polls (8s board / 4s drawer) stay as the
- *  fallback — the socket just makes the board feel instant. */
+/** [daveey] Board-wide reads (merged board, switcher counts, Blocked section)
+ *  fan out to every gateway and can take seconds over an SSH tunnel, so event
+ *  frames refresh them at most once per this interval per connection: the first
+ *  frame immediately, any later ones as one trailing refresh. A busy or
+ *  catching-up stream (200 events per 300 ms frame) used to invalidate them on
+ *  every frame; the reads' queryFns ignore the abort signal, so each superseded
+ *  read kept its HTTP request running and they queued past the request
+ *  deadline (2026-11-13: ~4 board re-reads/s, ~1.5k timeouts per 30 min). */
+export const EVENTS_BOARD_REFRESH_MIN_MS = 2000
+
+const boardRefreshAt = new Map<string, number>()
+const boardRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function refreshBoardReads(scope: string): void {
+  boardRefreshAt.set(scope, Date.now())
+  // cancelRefetch: false — a read already in flight answers this frame too
+  // instead of being orphaned (still on the wire) by a duplicate.
+  const keep = { cancelRefetch: false }
+
+  void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) }, keep)
+  // Any event can change a board's card count — keep the switcher badge honest.
+  void queryClient.invalidateQueries({ queryKey: boardsKey(scope) }, keep)
+  // [daveey] The sidebar's Blocked section spans every board.
+  void queryClient.invalidateQueries({ queryKey: blockedKey(scope) }, keep)
+}
+
+function scheduleBoardRefresh(scope: string): void {
+  if (boardRefreshTimers.has(scope)) {
+    return
+  }
+
+  const waitMs = (boardRefreshAt.get(scope) ?? -Infinity) + EVENTS_BOARD_REFRESH_MIN_MS - Date.now()
+
+  if (waitMs <= 0) {
+    refreshBoardReads(scope)
+
+    return
+  }
+
+  boardRefreshTimers.set(
+    scope,
+    setTimeout(() => {
+      boardRefreshTimers.delete(scope)
+      refreshBoardReads(scope)
+    }, waitMs)
+  )
+}
+
+function resetBoardRefresh(): void {
+  boardRefreshTimers.forEach(timer => clearTimeout(timer))
+  boardRefreshTimers.clear()
+  boardRefreshAt.clear()
+}
+
+/** One live `task_events` frame → precise cache invalidation: the board
+ *  (coalesced, see EVENTS_BOARD_REFRESH_MIN_MS), plus each touched task's
+ *  detail. The polls (8s board / 4s drawer) stay as the fallback — the socket
+ *  just makes the board feel instant. */
 function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug = slug): void {
   const frame = data as { cursor?: unknown; events?: CompletionEvent[] }
 
@@ -212,11 +280,7 @@ function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug 
     return
   }
 
-  void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
-  // Any event can change a board's card count — keep the switcher badge honest.
-  void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
-  // [daveey] The sidebar's Blocked section spans every board.
-  void queryClient.invalidateQueries({ queryKey: blockedKey(scope) })
+  scheduleBoardRefresh(scope)
 
   for (const taskId of new Set(events.map(event => event.task_id).filter(Boolean))) {
     void queryClient.invalidateQueries({ queryKey: taskKey(scope, slug, taskId!) })
@@ -269,6 +333,7 @@ export function bindApi(
   persist($gatewayFilter, GATEWAY_FILTER_KEY, '')
 
   eventCursorByBoard.clear()
+  resetBoardRefresh()
 
   let close: (() => void) | null = null
   let socketGeneration = 0
@@ -321,7 +386,7 @@ export function bindApi(
             return
           }
 
-          const tail = typeof board?.latest_event_id === 'number' ? board.latest_event_id : undefined
+          const tail = knownCursor(board?.latest_event_id)
 
           close = dial(scope, slug, tail)
         })
@@ -398,6 +463,7 @@ export function bindApi(
   return () => {
     socketGeneration += 1
     eventCursorByBoard.clear()
+    resetBoardRefresh()
     unsubs.forEach(unsub => unsub())
     close?.()
     rest = null
@@ -435,17 +501,19 @@ export const boardKeyPrefix = (scope: string) => ['kanban', 'board', scope] as c
 export const boardKey = (scope: string, slug: string, archived: boolean) =>
   [...boardKeyPrefix(scope), slug, archived] as const
 export const taskKey = (scope: string, slug: string, id: string, owner?: TaskOwner) =>
-  owner ? ['kanban', 'task', owner.gateway, owner.board, id, owner.profile] as const
-    : ['kanban', 'task', scope, slug, id] as const
+  owner
+    ? (['kanban', 'task', owner.gateway, owner.board, id, owner.profile] as const)
+    : (['kanban', 'task', scope, slug, id] as const)
 export const logKey = (scope: string, slug: string, id: string, owner?: TaskOwner) =>
-  owner ? ['kanban', 'log', owner.gateway, owner.board, id, owner.profile] as const
-    : ['kanban', 'log', scope, slug, id] as const
+  owner
+    ? (['kanban', 'log', owner.gateway, owner.board, id, owner.profile] as const)
+    : (['kanban', 'log', scope, slug, id] as const)
 export const boardsKey = (scope: string) => ['kanban', 'boards', scope] as const
 /** [daveey] The routed gateway's server-current board slug (the '' alias), see resolvedSlug. */
 const currentBoardKey = (scope: string) => ['kanban', 'current-board', scope] as const
 const CURRENT_BOARD_STALE_MS = 30_000
 export const profilesKey = (scope: string, owner?: TaskOwner) =>
-  owner ? ['kanban', 'profiles', owner.gateway, owner.profile] as const : ['kanban', 'profiles', scope] as const
+  owner ? (['kanban', 'profiles', owner.gateway, owner.profile] as const) : (['kanban', 'profiles', scope] as const)
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
 export const orchestrationKey = (scope: string) => ['kanban', 'orchestration', scope] as const
 /** [daveey] Blocked cards across every board and gateway (sidebar section). */
@@ -594,7 +662,12 @@ function withSlug(path: string, slug: string, params: Record<string, string> = {
 }
 
 /** `withBoard` for a task: its own board slug on its own gateway. */
-function forTask(id: string, path: string, params: Record<string, string> = {}, explicitOwner?: TaskOwner): [string, PluginRestOptions] {
+function forTask(
+  id: string,
+  path: string,
+  params: Record<string, string> = {},
+  explicitOwner?: TaskOwner
+): [string, PluginRestOptions] {
   const owner = explicitOwner ?? rememberedOwner(id)
 
   return owner
@@ -659,7 +732,8 @@ const TERMINAL_ORDER = new Set(['done', 'archived'])
  *  tagged with its `gateway`, queue lanes re-sorted by the backend's dispatch
  *  key (priority DESC, created_at ASC) and history lanes newest-first. The
  *  FIRST part is the routed gateway: its `latest_event_id`/`now` drive the
- *  events socket. A gateway that lacks the board contributes nothing; any
+ *  events socket; when it did not answer, `latest_event_id` is 0 = unknown
+ *  (never a cursor: see knownCursor). A gateway that lacks the board contributes nothing; any
  *  other failure is reported in `gateway_errors`. Throws only when no
  *  gateway answered. */
 export function mergeBoards(parts: GatewayBoardPart[]): KanbanBoard {
@@ -741,7 +815,10 @@ function rememberOwners(board: KanbanBoard, slug: string): KanbanBoard {
         const hubGateway = hubGatewayForConnection(task.gateway)
 
         if (hubGateway) {
-          hubTaskRefs.set(ownerKey(task.id, { board: slug, gateway: task.gateway }), { board: slug || 'default', hubGateway })
+          hubTaskRefs.set(ownerKey(task.id, { board: slug, gateway: task.gateway }), {
+            board: slug || 'default',
+            hubGateway
+          })
         }
       } else {
         hubTaskRefs.delete(ownerKey(task.id, { board: slug, gateway: task.gateway ?? routedScope() }))
@@ -931,7 +1008,9 @@ export const retryingFetch = ({ client, queryKey }: ReadFetchContext) =>
   (client.getQueryState(queryKey)?.fetchFailureCount ?? 0) > 0
 
 export const fetchTask = async (id: string, owner?: TaskOwner, read: PluginRestOptions = {}) => {
-  const downloadAttachment = captureGatewayFileDownload(owner ? { connectionId: owner.gateway, profile: owner.profile } : undefined)
+  const downloadAttachment = captureGatewayFileDownload(
+    owner ? { connectionId: owner.gateway, profile: owner.profile } : undefined
+  )
   const [path, opts] = forTask(id, `/tasks/${id}`, {}, owner)
   const detail = await call<KanbanTaskDetail>(path, { ...opts, ...read })
 
@@ -1128,9 +1207,15 @@ function autoNudge(gateway: string | TaskOwner = routedScope()): void {
     setTimeout(() => {
       nudgeTimers.delete(key)
 
-      const request = typeof gateway === 'string'
-        ? nudgeDispatcher(gateway)
-        : call(withSlug('/dispatch', gateway.board), { connectionId: gateway.gateway, profile: gateway.profile, method: 'POST', body: {} })
+      const request =
+        typeof gateway === 'string'
+          ? nudgeDispatcher(gateway)
+          : call(withSlug('/dispatch', gateway.board), {
+              connectionId: gateway.gateway,
+              profile: gateway.profile,
+              method: 'POST',
+              body: {}
+            })
 
       request.catch(() => undefined)
     }, 400)
@@ -1256,7 +1341,10 @@ export const addComment = (id: string, body: string, owner?: TaskOwner) => {
 export const reassignTask = (id: string, profile: string, owner?: TaskOwner) => {
   const [path, opts] = forTask(id, `/tasks/${id}/reassign`, {}, owner)
 
-  return nudged(call(path, { ...opts, method: 'POST', body: { profile, reclaim_first: true } }), owner ?? taskGateway(id))
+  return nudged(
+    call(path, { ...opts, method: 'POST', body: { profile, reclaim_first: true } }),
+    owner ?? taskGateway(id)
+  )
 }
 
 export const reclaimTask = (id: string, owner?: TaskOwner) => {
