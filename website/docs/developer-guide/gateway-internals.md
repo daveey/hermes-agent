@@ -575,6 +575,17 @@ same-user lock left at mode 0644 by an older Hermes is narrowed to 0600, as
 `hermes gateway attach` does. None of this protects against code already running as your user,
 or root.
 
+**Home check and its cache.** Before it mints a ticket on POSIX, `_posix_peer_subject` requires
+the gateway's home to be a real directory owned by its uid with a safe mode and no symlinked path
+component. The home itself is `lstat`ed on every connection, so the home turning into a symlink
+or changing owner or mode is refused at once. The "no symlinked component" verdict (a `realpath`,
+one `lstat` per ancestor) is reused for `_HOME_REALPATH_TTL_SECS` (30 s), and only a pass is
+reused: **an ancestor of the home swapped for a symlink is still admitted for up to 30 s**, until
+the cached pass expires. A refusal is never cached, so a repaired home is admitted on the next
+connection. The cache exists because a per-connection `realpath` on the event loop held
+session-ticket bootstraps for 25-45 s under filesystem pressure; changing the TTL or caching
+refusals changes this window.
+
 The contract is pinned by `apps/shared/src/node/control-socket.vectors.json`: request and reply
 pairs a client in any language can replay, run against the gateway by
 `tests/gateway/test_control_socket_vectors.py`.

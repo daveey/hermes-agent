@@ -252,8 +252,32 @@ def hermes_home_key(path: str | Path | None = None) -> str:
 
 
 def reset_hermes_home_key_cache() -> None:
-    """Forget every remembered home key (for tests that move a home dir on disk)."""
+    """Forget every remembered home key (for tests that move a home dir on disk).
+
+    Clears :func:`resolved_home_str`'s memo too, so one reset covers every home-path memo."""
     _HOME_KEY_CACHE.clear()
+    _RESOLVED_HOME_CACHE.clear()
+
+
+_RESOLVED_HOME_CACHE: dict[str, str] = {}
+
+
+def resolved_home_str(path: str | os.PathLike) -> str:
+    """``str(Path(path).resolve())`` memoized per input for a path that exists.
+
+    Unlike :func:`hermes_home_key` it neither expands ``~`` nor normcases: ``env_loader`` keys its
+    per-home secret maps this way. A missing path is resolved again each call (it may yet appear
+    as a symlink). Shares :func:`reset_hermes_home_key_cache` with ``hermes_home_key``."""
+    raw = os.fspath(path)
+    cached = _RESOLVED_HOME_CACHE.get(raw)
+    if cached is not None:
+        return cached
+    try:
+        key = str(Path(raw).resolve(strict=True))
+    except OSError:
+        return str(Path(raw).resolve())
+    _RESOLVED_HOME_CACHE[raw] = key
+    return key
 
 
 def get_process_hermes_home() -> Path:

@@ -87,6 +87,10 @@ replaced by #92091's `pause-for-update`. Do NOT "fix" gateway-dies-with-app by r
 gateway under the backend, and do NOT "fix" update locks by widening the tree-kill. Gateways stamp
 `code_sha`/`code_version` into `gateway_state.json` (`status.py`) so the updater can verify a fleet.
 
+**Control socket peer check:** the home's "no symlinked ancestor" verdict is cached 30 s (passes
+only), so an ancestor swapped for a symlink is admitted for up to 30 s. Details: developer-guide
+`gateway-internals.md`, "Home check and its cache".
+
 ## Profile scope (adapters, turns, and everything between turns)
 
 - **One identity per inbound event, canonicalized FIRST.** `gateway/session_identity.py::resolve_identity`

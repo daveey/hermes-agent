@@ -118,9 +118,10 @@ def test_secret_source_values_reuse_the_resolved_home(tmp_path, monkeypatch):
 
 def test_missing_home_key_is_not_memoized(tmp_path):
     from hermes_cli import env_loader
+    import hermes_constants
     home = tmp_path / "later"
     assert env_loader._home_key(home) == str(home.resolve())
-    assert str(home) not in env_loader._HOME_KEYS
+    assert str(home) not in hermes_constants._RESOLVED_HOME_CACHE
     real = tmp_path / "real"
     real.mkdir()
     home.symlink_to(real)

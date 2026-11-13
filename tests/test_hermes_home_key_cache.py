@@ -114,6 +114,33 @@ class TestSymlinks:
         assert hc.hermes_home_key(str(link)) == hc.hermes_home_key(str(target))
 
 
+class TestOneResetForEveryHomeMemo:
+    def test_reset_also_forgets_the_env_loader_home_key(self, tmp_path):
+        # env_loader keys its per-home secret maps by a memoized resolve too; a test that moves a
+        # home on disk resets once and must see the new answer from both (PR #1982 review).
+        from hermes_cli import env_loader
+
+        home, real = tmp_path / "home", tmp_path / "real"
+        home.mkdir()
+        real.mkdir()
+        assert env_loader._home_key(home) == str(home.resolve())
+        home.rmdir()
+        try:
+            home.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("this platform or account cannot create symlinks")
+        hc.reset_hermes_home_key_cache()
+        assert env_loader._home_key(home) == str(real.resolve())
+
+    def test_env_loader_key_keeps_its_no_expanduser_semantics(self, tmp_path):
+        from hermes_cli import env_loader
+
+        (tmp_path / "real").mkdir()
+        target = str(tmp_path / "real" / ".." / "real")
+        assert env_loader._home_key(target) == str(Path(target).resolve())
+        assert env_loader._home_key("~nobody-such-user/x") == str(Path("~nobody-such-user/x").resolve())
+
+
 class TestRegistryLookupsDoNotHitTheDisk:
     def test_scope_key_resolves_the_path_once(self, monkeypatch):
         # The reason this cache exists. ToolRegistry.current_scope_key() runs

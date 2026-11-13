@@ -60,15 +60,15 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
     # every rmtree run outside it (they took 11 min for 29 trees on a loaded Mac, holding BEGIN
     # IMMEDIATE on the board throughout); each removal re-checks its owner in a short write txn
     # and detaches the tree by rename there, so a card resumed mid-GC never sees it half-deleted.
-    with kb.write_txn(conn):
-        rows = conn.execute(
-            "SELECT t.id, t.workspace_path, t.workspace_kind, t.completed_at, t.created_at, "
-            "(SELECT MAX(created_at) FROM task_events e WHERE e.task_id=t.id "
-            " AND e.kind NOT LIKE 'workspace%') AS last_event "
-            "FROM tasks t WHERE t.workspace_kind='scratch' "
-            f"AND t.status IN {ws._TERMINAL_STATUSES_SQL}"
-        ).fetchall()
     try:
+        with kb.write_txn(conn):
+            rows = conn.execute(
+                "SELECT t.id, t.workspace_path, t.workspace_kind, t.completed_at, t.created_at, "
+                "(SELECT MAX(created_at) FROM task_events e WHERE e.task_id=t.id "
+                " AND e.kind NOT LIKE 'workspace%') AS last_event "
+                "FROM tasks t WHERE t.workspace_kind='scratch' "
+                f"AND t.status IN {ws._TERMINAL_STATUSES_SQL}"
+            ).fetchall()
         known_paths = _scratch_owner_paths(conn)
         for board in ws._sibling_board_db_files(conn):
             with _read_board(board) as other:
@@ -76,6 +76,7 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
     except (OSError, sqlite3.Error):
         log.warning("Scratch GC aborted: cannot read all boards; preserving workspaces", exc_info=True)
         return 0
+    _sweep_detached_trash(kb.workspaces_root(), rows)
     try:
         _report_unowned_scratch(kb.workspaces_root(), known_paths)
     except OSError:
@@ -103,7 +104,7 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
                 aged.append((row["id"], path, row["completed_at"]))
                 continue
             ws.release_lsp_clients(str(path))
-            trash = path.with_name(f".{path.name}.gc-rm-{uuid.uuid4().hex}")
+            trash = path.with_name(f".{path.name}{_TRASH_INFIX}{uuid.uuid4().hex}")
             try:
                 os.rename(path, trash)
             except OSError:
@@ -120,6 +121,42 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
     from hermes_cli.kanban_scratch_custody import gc_custody
     removed += gc_custody(conn, days)
     return removed
+
+
+# A tree detached for removal: ``.<workspace name>.gc-rm-<uuid4 hex>``, a sibling of the workspace.
+# Only this GC creates the name, after the owner check passed and the removal was logged.
+_TRASH_INFIX = ".gc-rm-"
+_TRASH_NAME = re.compile(r"\..+\.gc-rm-[0-9a-f]{32}")
+
+
+def _is_detached_trash(path: Path) -> bool:
+    return _TRASH_NAME.fullmatch(path.name) is not None
+
+
+def _sweep_detached_trash(root: Path, rows) -> None:
+    """Finish removals an earlier run detached but could not rmtree (no board lock is held here).
+
+    Looks in the workspaces root and beside each candidate's workspace, never follows a symlink,
+    and only touches names this GC mints."""
+    import shutil
+
+    parents = {root}
+    for row in rows:
+        if row["workspace_path"]:
+            path = Path(row["workspace_path"]).expanduser()
+            if ws._is_managed_scratch_path(path):
+                parents.add(path.parent)
+    for parent in parents:
+        try:
+            entries = [p for p in parent.iterdir() if _is_detached_trash(p)]
+        except OSError:
+            continue
+        for trash in entries:
+            if trash.is_symlink() or not trash.is_dir():
+                continue
+            shutil.rmtree(trash, ignore_errors=True)
+            if os.path.lexists(trash):
+                log.warning("Scratch GC left detached tree %s; retried next run", trash)
 
 
 def _scratch_owner_unchanged(conn: sqlite3.Connection, row: sqlite3.Row, path: Path) -> bool:
@@ -161,8 +198,8 @@ def _report_unowned_scratch(root: Path, known_paths: set[Path]) -> None:
     represented = {root_key / known.relative_to(root_key).parts[0]
                    for known in known_paths if known.is_relative_to(root_key) and known != root_key}
     for path in root.iterdir():
-        if path.is_symlink() or not path.is_dir():
-            continue
+        if path.is_symlink() or not path.is_dir() or _is_detached_trash(path):
+            continue  # detached trash is swept by gc_task_scratch, not an unknown owner
         if path.resolve() not in represented:
             log.warning("Scratch preserved: reason=owner_unverified path=%s; "
                         "no local task workspace record; moved or unknown ownership; "

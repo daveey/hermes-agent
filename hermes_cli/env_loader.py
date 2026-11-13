@@ -189,20 +189,11 @@ def _home_key(hermes_home: str | os.PathLike) -> str:
     """``str(Path(hermes_home).resolve())``, the key of the per-home source maps, memoized per input
     for a home that exists (a missing one is resolved again: it may yet appear as a symlink). The
     dashboard and control paths build a secret scope on the event loop for every request, and a
-    per-request realpath stalled that loop for seconds under FS pressure."""
-    raw = os.fspath(hermes_home)
-    cached = _HOME_KEYS.get(raw)
-    if cached is not None:
-        return cached
-    try:
-        key = str(Path(raw).resolve(strict=True))
-    except OSError:
-        return str(Path(raw).resolve())
-    _HOME_KEYS[raw] = key
-    return key
+    per-request realpath stalled that loop for seconds under FS pressure. The memo lives in
+    ``hermes_constants`` so ``reset_hermes_home_key_cache()`` clears it with ``hermes_home_key``'s."""
+    from hermes_constants import resolved_home_str
 
-
-_HOME_KEYS: dict[str, str] = {}
+    return resolved_home_str(hermes_home)
 
 
 def get_secret_source_values(hermes_home: str | os.PathLike) -> dict[str, str]:
