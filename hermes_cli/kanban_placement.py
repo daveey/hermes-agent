@@ -90,8 +90,10 @@ DEFAULT_HUB_LIVE_SECONDS = 600
 DEFAULT_CREATOR_SESSION = "kanban-placement"
 
 # "macOS" as a word, not a CI runner label or file/skill name (macos-latest, macos-release,
-# hermes-state-macos.yml): a GitHub-hosted macOS job runs on GitHub, not on this Mac.
-MACOS_MARKER = r"(?<![\w/.-])mac ?os(?![\w/-]|\.\w)"
+# hermes-state-macos.yml): a GitHub-hosted macOS job runs on GitHub, not on this Mac. Nor the required-check
+# name "macOS state required (v1)": ship's review body quotes it ("CI at filing: ..."), which kept every
+# ship-filed review card on its filing worker. APPLE_CONTEXT_MARKERS reuses this on purpose.
+MACOS_MARKER = r"(?<![\w/.-])mac ?os(?![\w/-]|\.\w)(?! state required\b)"
 # Baby Bear the product, named in the TITLE (see TITLE_ONLY_LOCAL_MARKERS) and not as part of a skill,
 # repo or path name (babybear-ship-and-ops, daveey/babybear, ~/code/babybear-h4): the BB repo is
 # checked out on the hub and its devices are reached over ssh:mini, so a body that loads a BB skill

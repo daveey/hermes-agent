@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -382,6 +383,57 @@ def test_macos_ci_runner_labels_do_not_pin_the_card():
     assert d["where"] == "local" and "macos" in d["why"], d
     d = decide({"title": "Teardown fails", "body": "Only on macOS, never on Linux."})
     assert d["where"] == "local" and "macos" in d["why"], d
+
+
+# --- tool-generated card text: a required-check name is not device context ----------------------
+# 11-12/13: every review card `hermes-core-wt ship --request-review` filed on a pool worker stayed on that
+# worker (t_01a1d1c2ca18df39, t_01a1d2434cf3676c, t_01a1d1fe567955ba): its body quotes the required checks
+# ("CI at filing: green: macOS state required (v1): success; ..."), and MACOS_MARKER read the check name
+# as Mac work. On the hub the same text sent the card to the admission judge. [daveey]
+
+SHIP_REVIEW = json.loads((Path(__file__).parent / "fixtures" /
+                          "ship_review_card_t_01a1d2434cf3676c.json").read_text())
+SHIP_REVIEW_ARGS = {"title": SHIP_REVIEW["title"], "body": SHIP_REVIEW["body"], "assignee": "default",
+                    "priority": 60000, "requires": ["terminal", "git"]}
+POOL = "pool:worker"
+
+
+def test_ship_review_fixture_quotes_the_required_check_name():
+    assert "CI at filing: green: macOS state required (v1): success" in SHIP_REVIEW["body"]
+
+
+def test_ship_review_card_on_a_pool_worker_joins_the_pool_queue():
+    d = kp.decide(dict(SHIP_REVIEW_ARGS), cfg={"worker_queue": {"worker-2": POOL}}, self_gw="worker-2",
+                  live=ALIVE, locate=NOWHERE, info=SILENT, carries=True, machine_ok=lambda name: True)
+    assert POOL in (d.get("runs_on") or []), d
+    assert "local marker" not in d["why"] and not any(v.startswith("machine:") for v in d["runs_on"]), d
+    assert kp.portable_reason(dict(SHIP_REVIEW_ARGS), {"worker_queue": {"worker-2": POOL}}) is None
+
+
+def test_ship_review_card_on_the_hub_is_no_marker_hit_and_never_consults_admission(monkeypatch):
+    from hermes_cli import kanban_hub_admission as judge
+    asked = []
+    monkeypatch.setattr(judge, "admit", lambda fields, **kw: asked.append(fields) or judge.Verdict())
+    cfg = {"worker_queue": {"hub": POOL}}
+    d = kp.decide(dict(SHIP_REVIEW_ARGS), cfg=cfg, self_gw="hub", live=ALIVE, locate=NOWHERE, info=SILENT,
+                  carries=True, machine_ok=lambda name: True)
+    assert asked == [] and POOL in (d.get("runs_on") or []), d
+    assert "marker" not in d["why"], d
+
+
+@pytest.mark.parametrize("text", [
+    "macOS state required (v1)", "MACOS STATE REQUIRED (v2)", "mac os state required", "macOS state required",
+])
+def test_the_required_check_name_is_not_a_macos_marker(text):
+    assert not re.search(kp.MACOS_MARKER, text, re.IGNORECASE)
+
+
+@pytest.mark.parametrize("text", [
+    "macOS state is broken after the update", "macOS required for this repro", "Only on macOS state",
+    "macOS stateful tests fail", "macOS",
+])
+def test_macos_followed_by_other_words_still_matches(text):
+    assert re.search(kp.MACOS_MARKER, text, re.IGNORECASE)
 
 
 # --- liveness -----------------------------------------------------------------------------------
