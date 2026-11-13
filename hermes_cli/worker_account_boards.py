@@ -6,6 +6,18 @@ jobs vanished. Missing registered DBs are unknown, never silently free capacity,
 except a board whose whole directory was removed from an ephemeral root (system
 temp, the account scratch dir): that workspace was garbage-collected, so its
 record retires instead of holding every claim on the host forever.
+
+Reads (``paths()``, called by ``refusal()`` and the never-mutating
+``occupied_count_for_host`` census) only skip a collected record. Its file is
+unlinked by ``register()``, which runs under the account admission fence: an
+unfenced unlink could delete the record a concurrent ``register()`` of the same
+recreated scratch path had just found and kept, losing that board until its next
+claim.
+
+Accepted trade-off: if the pruner deletes a scratch board's directory while its
+process still has the DB open, the record retires and that board's running rows
+stop counting toward host capacity. Its detached jobs still count through their
+cgroups; only the rows of a board whose workspace is already gone are dropped.
 """
 from __future__ import annotations
 
@@ -28,8 +40,13 @@ def _refuse_test_registration() -> None:
     account. Once pytest deleted the board, every worker claim on the host was
     deferred ``worker_resources_unknown``. Compare paths without I/O: the
     test-only real-home guard refuses any stat under the real root.
+
+    The test signal is env OR ancestry (``hermes_state_guard``): a child that
+    rebuilt its environment loses ``PYTEST_*`` but keeps our inherited
+    ``HERMES_TEST_ISOLATION`` marker and its pytest ancestor.
     """
-    if not os.environ.get('PYTEST_CURRENT_TEST'):
+    import hermes_state_guard
+    if not hermes_state_guard._in_test_context():
         return
     from hermes_constants import _account_home
     real = os.path.normpath(str(_account_home() / '.hermes'))
@@ -57,7 +74,27 @@ def _collected(path: Path) -> bool:
     return any(path.is_relative_to(root) for root in _ephemeral_roots())
 
 
+def _retire_collected(directory: Path) -> None:
+    """Unlink records of garbage-collected boards. Caller holds the account fence.
+
+    Malformed records are left for ``paths()`` to refuse loudly.
+    """
+    for record in directory.iterdir():
+        if record.suffix != '.json':
+            continue
+        try:
+            raw = json.loads(record.read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(raw, str) or not Path(raw).is_absolute()
+                or record.stem != hashlib.sha256(raw.encode()).hexdigest()):
+            continue
+        if not Path(raw).exists() and _collected(Path(raw)):
+            record.unlink(missing_ok=True)
+
+
 def register(conn) -> None:
+    """Record *conn*'s board. Caller holds the account admission fence."""
     _refuse_test_registration()
     from hermes_cli.kanban_db_connect import _main_db_file
     raw = _main_db_file(conn)
@@ -71,6 +108,7 @@ def register(conn) -> None:
     discard(intent)
     directory = capacity.policy_root() / 'worker-resources' / 'boards'
     directory.mkdir(parents=True, exist_ok=True)
+    _retire_collected(directory)
     destination = directory / (hashlib.sha256(str(path).encode()).hexdigest() + '.json')
     if destination.exists():
         if json.loads(destination.read_text(encoding='utf-8-sig')) != str(path):
@@ -178,7 +216,6 @@ def paths() -> list[Path]:
             except FileNotFoundError:
                 if not _collected(Path(raw)):
                     raise
-                record.unlink(missing_ok=True)
-                continue
+                continue  # read-only: register() retires it under the fence
             found.append(Path(raw))
     return found
