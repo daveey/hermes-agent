@@ -107,6 +107,12 @@ def test_short_output_is_marked_complete():
     assert r["truncated"] is False
 
 
+def test_pending_approval_result_keeps_its_shape():
+    pending = {"output": "", "exit_code": -1, "error": "", "status": "pending_approval",
+               "approval_pending": True, "command": "rm -rf x"}
+    assert _rpc(pending) == pending
+
+
 def test_write_file_warns_on_truncation_marker(tmp_path):
     marked = tmp_path / "SHA256SUMS"
     content = ("abc  a.txt\n\n... [OUTPUT TRUNCATED - 13,635 chars omitted out of 63,562 total] ...\n\n"

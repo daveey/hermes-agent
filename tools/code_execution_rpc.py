@@ -154,6 +154,8 @@ def _complete_terminal_output(result):
         return result
     if not isinstance(body, dict) or not isinstance(body.get("output"), str):
         return result
+    if body.get("approval_pending") or body.get("status") == "pending_approval":
+        return result  # the command never ran: keep the approval contract's exact shape
     spill_path = body.get("full_output_path")
     full = _read_full_output(spill_path) if spill_path else None
     if full is not None:
