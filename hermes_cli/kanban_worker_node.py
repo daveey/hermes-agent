@@ -321,6 +321,15 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     keep = (" AND NOT EXISTS (SELECT 1 FROM task_wake_checks w WHERE w.task_id = tasks.id AND "
             "((tasks.status = 'scheduled' AND w.purpose IS NOT 'ask_resolved') "
             "OR (tasks.status = 'blocked' AND w.purpose = 'ask_resolved')))" if probes else "")
+    # [daveey] A copy adopted here as an origin owner (``kanban_origin_adopt``) holds an ``origin_creation_intents``
+    # row: machine-local, never synced, and the only copy of the binding secret. The collector publishes a card's
+    # ``origin_bindings`` only from that table, and the origin ledger advances (or releases, once terminal) its
+    # obligation only from an owner record that still carries the marker and the card's completion events/runs.
+    # So the copy stays, terminal ones included: evicting it would strand the origin chat's obligation, and its
+    # FK row made the DELETE raise and roll back every eviction and the whole pickup (worker-4, 11-13,
+    # t_01a1d4f144e2f2a0).
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone():
+        keep += " AND NOT EXISTS (SELECT 1 FROM origin_creation_intents i WHERE i.task_id = tasks.id)"
     rows = conn.execute(
         "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ? AND claim_lock IS NULL "
         "AND status != 'running'" + keep, (own,)).fetchall()
@@ -350,21 +359,32 @@ def evict(conn: sqlite3.Connection) -> list[str]:
                     "SELECT 1 FROM task_attachments WHERE task_id=? AND stored_path!='' "
                     "AND coalesce(blob_key,'')='' LIMIT 1", (tid,)).fetchone():
                 continue  # retain the only byte custodian until private storage acknowledges it
-            from hermes_cli.kanban_run_tombstones import retain_ended_runs
-            from hermes_cli.kanban_scratch_custody import retain
-            retain(conn, tid)
-            retain_ended_runs(conn, tid)
-            for table in present:
-                conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))
-            # The copy's own edges go with it; an edge from it to a card still in this file belongs to that child
-            # (own_partition keeps it, the Board still holds it). Dropping it un-gated a hub child of a copy evicted
-            # between review hand-off and re-pickup: 51 promoted / 97 claim_rejected parents_not_done (2026-10-29).
-            conn.execute("DELETE FROM task_links WHERE child_id = ? OR (parent_id = ? AND child_id NOT IN "
-                         "(SELECT id FROM tasks WHERE id != ?))", (tid, tid, tid))
-            conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
+            # [daveey] Each copy in its own savepoint: one row that cannot go (an FK child this list does not know)
+            # is kept and logged, and never rolls back the other evictions or stops the pickup after it.
+            try:
+                with write_txn(conn, allow_nested=True):
+                    _evict_one(conn, tid, present)
+            except sqlite3.Error:
+                _log.warning("kanban worker node: could not evict copy %s; kept", tid, exc_info=True)
+                continue
             gone.append(tid)
         conn.execute("UPDATE kanban_sync_state SET applying = 0")
     return gone
+
+
+def _evict_one(conn: sqlite3.Connection, tid: str, present: set[str]) -> None:
+    from hermes_cli.kanban_run_tombstones import retain_ended_runs
+    from hermes_cli.kanban_scratch_custody import retain
+    retain(conn, tid)
+    retain_ended_runs(conn, tid)
+    for table in present:
+        conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))
+    # The copy's own edges go with it; an edge from it to a card still in this file belongs to that child
+    # (own_partition keeps it, the Board still holds it). Dropping it un-gated a hub child of a copy evicted
+    # between review hand-off and re-pickup: 51 promoted / 97 claim_rejected parents_not_done (2026-10-29).
+    conn.execute("DELETE FROM task_links WHERE child_id = ? OR (parent_id = ? AND child_id NOT IN "
+                 "(SELECT id FROM tasks WHERE id != ?))", (tid, tid, tid))
+    conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
 
 
 def _guard_held(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
@@ -640,7 +660,10 @@ def pickup(conn: sqlite3.Connection, *, budget: Any,
     mode = pickup_mode()
     if sync.board_mode(conn) != "primary" or mode is None:
         return []
-    evict(conn)
+    try:
+        evict(conn)
+    except Exception:  # health: allow BLE001 -- [daveey] a failed eviction must never stop the pickup that follows
+        _log.warning("kanban worker node: evicting finished copies failed; picking up anyway", exc_info=True)
     _refill_copies(conn)
     limit = DEFAULT_PICKUP_BATCH if budget is None else budget
     if getattr(limit, "total", limit) <= 0:

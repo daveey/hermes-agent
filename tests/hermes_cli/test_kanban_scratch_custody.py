@@ -138,8 +138,8 @@ def test_eviction_receipt_and_rollback_are_local_only(env):
     tid, path, run = task(env)
     env.conn.execute("CREATE TEMP TRIGGER refuse_eviction BEFORE DELETE ON tasks "
                      "BEGIN SELECT RAISE(ABORT, 'rollback'); END")
-    with pytest.raises(sqlite3.IntegrityError, match="rollback"):
-        worker.evict(env.conn)
+    # The refused copy is kept (its own savepoint rolls back, receipt included); evict never raises.
+    assert worker.evict(env.conn) == []
     assert kb.get_task(env.conn, tid) is not None
     assert custody.receipts(env.conn) == []
     env.conn.execute("DROP TRIGGER refuse_eviction")
