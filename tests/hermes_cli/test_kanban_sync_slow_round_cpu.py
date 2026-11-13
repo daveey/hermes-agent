@@ -72,7 +72,7 @@ def test_slow_sync_rounds_keep_the_hub_cpu_advisory_fresh(tmp_path, monkeypatch)
     monkeypatch.setattr(client, "FeedWatcher", lambda *a, **kw: SimpleNamespace(run=lambda: None))
     monkeypatch.setattr(client, "wait_for_work", lambda wake, paths, remaining, keep_running:
                         waits.append(remaining) or "period")
-    state = SimpleNamespace(clear=lambda: None, record_down=lambda msg: None)
+    state = SimpleNamespace(clear=lambda: None, record_down=lambda msg: None, started=lambda: None, STOPPED="stopped")
 
     client._run_forever(lambda: len(rounds) < ROUNDS, 30.0, state)
     # The loop owns the sampler's lifetime: once it returns, the advisory is no longer refreshed (fail-closed).

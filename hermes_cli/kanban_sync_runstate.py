@@ -18,11 +18,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 __all__ = [
-    "SyncNotRunning", "clear", "describe", "down", "explicit_runs_on", "path", "placement_runs_on", "record_down",
-    "stranded_create",
+    "STOPPED", "SyncNotRunning", "clear", "describe", "down", "explicit_runs_on", "path", "placement_runs_on",
+    "record_down", "started", "stranded_create",
 ]
 
 _FILE = ".sync-state.json"
+# A graceful stop's record (gateway stopping, or the host sync lease went to another gateway): see :func:`started`.
+STOPPED = "stopped (gateway stopping, or the host sync lease went to another gateway)"
 
 
 class SyncNotRunning(ValueError):
@@ -62,6 +64,20 @@ def clear() -> None:
             target.unlink()
     except OSError:
         pass
+
+
+def started() -> None:
+    """A new loop passed its start checks: drop an earlier loop's graceful-stop record.
+
+    Every gateway restart writes :data:`STOPPED` on the way down, and the next loop's first completed round (which
+    clears it) took 20 min on the hub after a restart (a full repair pass). Meanwhile :func:`down` called the running
+    loop stopped, so ``kanban_create`` read the worker queue as unreachable and enrolled hub-admission-denied cards
+    worker-first with ``runs_on`` NULL (t_01a1d2a8ea3dfbdb sat ready 36 min, 11-13). A refusal to start or a crash
+    keeps its record until a round completes, as before. [daveey]
+    """
+    record = _read(path())
+    if record and record.get("running") is False and record.get("reason") == STOPPED:
+        clear()
 
 
 def _read(target: Path) -> Optional[dict[str, Any]]:

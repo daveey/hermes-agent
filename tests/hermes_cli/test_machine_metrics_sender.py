@@ -550,7 +550,7 @@ def test_a_long_blocked_round_still_yields_reports_from_the_sender(tmp_path, mon
     monkeypatch.setattr(client, "sync_all_once", blocked_round)
     monkeypatch.setattr(client, "FeedWatcher", lambda *a, **kw: SimpleNamespace(run=lambda: None))
     monkeypatch.setattr(client, "wait_for_work", lambda *a: "period")
-    state = SimpleNamespace(clear=lambda: None, record_down=lambda msg: None)
+    state = SimpleNamespace(clear=lambda: None, record_down=lambda msg: None, started=lambda: None, STOPPED="stopped")
 
     client._run_forever(lambda: len(rounds) < 1, 30.0, state)
     assert not [t for t in threading.enumerate() if t.name == ms.THREAD_NAME]  # closed with the loop

@@ -26,7 +26,7 @@ def run_loop(loop, keep_running: Callable[[], bool], interval) -> None:
         with stop_scope(keep_running):
             loop(keep_running, interval, runstate)
     except SyncStopped:
-        runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
+        runstate.record_down(runstate.STOPPED)
     except BaseException as exc:
         runstate.record_down(f"kanban sync loop crashed: {type(exc).__name__}: {exc}")
         raise

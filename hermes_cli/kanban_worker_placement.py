@@ -364,7 +364,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             if len(_refused) > 1024:  # cards that left the query never come back to clear their entry
                 for stale in [k for k, (_, until) in _refused.items() if until <= now]:
                     del _refused[stale]
-            labels = None if mode else requested_move(conn, row["id"])
+            labels, why = (None, None) if mode else _move_target(conn, row, gateway, cfg)
             stage = "recover" if mode else ("reserve" if labels is None else "repin")
             held = _queued.get(key)
             identity = _local_identity(conn, row["id"]) if labels is None else None
@@ -381,7 +381,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     reply = hub.repin(board, task_id=row["id"], expected_revision=row["sync_version"], runs_on=labels)
                     queue.clear_streak(gateway, row["id"])
                     try:
-                        _record_repin(conn, row["id"], gateway, labels, reply)
+                        _record_repin(conn, row["id"], gateway, labels, reply, reason=why)
                     except sqlite3.Error:
                         logger.warning("repinned %s on the Board but could not record it locally", row["id"],
                                        exc_info=True)
@@ -496,15 +496,29 @@ def requested_move(conn, task_id):
     return labels or None
 
 
-def _record_repin(conn, task_id, gateway, labels, reply):
+def _move_target(conn, row, gateway, cfg):
+    """``(labels, self-check reason)``: the run's unapplied ``kanban_move`` (reason None), else the worker-first
+    self-check's pool target for a card stranded with no ``runs_on``, else ``(None, None)`` (reserve)."""
+    labels = requested_move(conn, row["id"])
+    if labels is not None:
+        return labels, None
+    from hermes_cli.kanban_worker_first_selfcheck import pool_target
+    return pool_target(conn, row, gateway, cfg) or (None, None)
+
+
+def _record_repin(conn, task_id, gateway, labels, reply, *, reason=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_move as km
     from hermes_cli.kanban_worker_repin import REPINNED_EVENT_FLAG
 
     version = reply.get("version") if isinstance(reply, dict) else None
+    if reason:  # the worker-first self-check's repin (the Board has committed it)
+        from hermes_cli.kanban_worker_first_selfcheck import log_repin
+        log_repin(task_id, labels, reason)
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, km.MOVED_EVENT, {
-            "from_machine": gateway, "runs_on": labels, "reason": "applied the run's kanban_move as the creator repin",
+            "from_machine": gateway, "runs_on": labels,
+            "reason": reason or "applied the run's kanban_move as the creator repin",
             "queued": True, REPINNED_EVENT_FLAG: True, "board_version": version})
 
 

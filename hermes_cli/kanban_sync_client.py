@@ -1461,6 +1461,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     sync.set_lease_client(HubLeaseClient(hub))
     period = float(interval or sync.sync_config().get("interval_seconds") or DEFAULT_INTERVAL_S)
     _log.info("kanban sync: running as gateway %s against %s (feed sockets; poll every %.1fs)", ident.gateway, ident.url, period)
+    runstate.started()  # an earlier loop's graceful stop no longer describes this host
     wake = threading.Event()
     from hermes_cli.kanban_sync_work import SyncWork
     work = SyncWork(period)
@@ -1513,7 +1514,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     finally:
         sender.close()
         sampler.close()
-    runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
+    runstate.record_down(runstate.STOPPED)
 
 
 def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[tuple[str, str]]:
