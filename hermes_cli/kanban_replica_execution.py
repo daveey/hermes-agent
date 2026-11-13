@@ -93,8 +93,18 @@ def raw(row: dict) -> dict | None:
 
 
 def collect(card: dict, evidence: dict) -> None:
-    """Add a replica card's running evidence to the counts' per-session evidence sink, keyed like its count key, so
-    the sidebar counts and ``session_tasks`` project the same record. Never mutates ``card`` (shared, read-only)."""
+    """Add a remote card's record to the counts' per-session evidence sink, keyed like its count key, so the
+    sidebar counts and ``session_tasks`` project the same record. Never mutates ``card`` (shared, read-only).
+
+    Running evidence is ``raw``. Any other remote row (parked, or running with no current-run beat) gets the
+    ``kanban.card`` record ``session_tasks`` builds from the same row (``card_raw``): still unknown with no clock,
+    but with the row's last-known state and ask, which the count key alone cannot carry. No query, no clock."""
     value = raw(card)
+    if value is None and card.get("remote"):
+        from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_raw
+        try:
+            value = card_raw(card)
+        except ADAPTER_ERRORS:  # what add_cards turns into failed_card: keep the key-only unknown here
+            value = None
     if value is not None:
         evidence.setdefault(card["session"], {})[str(card.get("key"))] = value

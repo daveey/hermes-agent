@@ -136,12 +136,19 @@ def card(row, *, gateway=None, profile=None, now=None):
         if row.get("stale"):
             value.update(state="unknown", unknown_reason="source_unavailable")
         return project(value, now=now, source_class="sidebar")
-    remote = bool(row.get("remote"))
-    if remote and isinstance(row.get("_replica_run"), dict):
+    if row.get("remote") and isinstance(row.get("_replica_run"), dict):
         from hermes_cli.kanban_replica_execution import raw as replica_raw
         value = replica_raw(row)
         if value is not None:
             return project(value, now=now, source_class="sidebar")
+    return project(card_raw(row, gateway=gateway, profile=profile), now=now, source_class="sidebar")
+
+
+def card_raw(row, *, gateway=None, profile=None):
+    """The unprojected ``kanban.card`` record ``card`` projects for a row with no execution source, receipt or
+    running replica evidence. The sidebar counts store it for a parked replica card (``kanban_replica_execution
+    .collect``), so they project exactly what ``session_tasks`` does for the same row."""
+    remote = bool(row.get("remote"))
     gateway = row.get("gateway") if remote else gateway
     profile = row.get("owner_profile", row.get("profile")) if remote else profile
     identity = {"kind": "card", "work_id": row.get("id")}
@@ -179,7 +186,7 @@ def card(row, *, gateway=None, profile=None, now=None):
         raw["human_request"] = request
     if row.get("stale"):
         raw.update(state="unknown", last_known_state=state, unknown_reason="source_unavailable")
-    return project(raw, now=now, source_class="sidebar")
+    return raw
 
 
 def _merge(row, observations, *, keep_empty=False):

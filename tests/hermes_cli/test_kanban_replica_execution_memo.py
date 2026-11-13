@@ -170,6 +170,32 @@ def test_last_good_preserves_run_evidence_when_replica_read_fails(shadow, monkey
         assert after[field] == before[field]
 
 
+@pytest.mark.parametrize("status, request_json, last_known", [
+    ("scheduled", None, "waiting"), ("review", None, "waiting"), ("blocked", None, "waiting"),
+    ("blocked", '{"action": "reply A or B"}', "needs_user")])
+def test_parked_remote_card_projects_one_record_in_list_counts_and_checker(shadow, monkeypatch, status,
+                                                                         request_json, last_known):
+    """A parked replica card has no executor clock: every consumer is unknown, and all of them keep the SAME
+    last-known state. The counts used to rebuild the row from its count key alone (no status), so the sidebar and
+    session-idle-check (``annotate_kanban_activity``) showed ``last_known_state`` null while
+    ``/api/session-kanban-tasks`` showed the row's status (t_01a1d495b43909e8)."""
+    _path, conn, now = shadow
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = ?, human_request = ? WHERE id = 't_hub'", (status, request_json))
+        conn.execute("UPDATE task_runs SET status = 'released', ended_at = ? WHERE id = 7", (int(now - 60),))
+    sync.mark_pulled(conn, at=now)
+    monkeypatch.setattr(time, "time", lambda: now)
+    counted = _counted_observation()  # the sidebar counts row, which session-idle-check reads too
+    (listed,) = ksa.session_tasks(["s1"])
+    (obs,) = listed["execution_observations"]
+    assert obs == counted
+    assert obs["state"] == "unknown" and obs["unknown_reason"] == "missing_qualified_identity"
+    assert obs["last_known_state"] == last_known
+    assert obs["observed_at"] is None and obs["evidence_refs"] == []  # the pull clock never dates it
+    assert obs["identity"] == {"gateway": OWNER, "profile": "work", "board": "default", "kind": "card",
+                               "work_id": "t_hub"}
+
+
 def test_warm_counts_reproject_expired_run_without_recompute(shadow, monkeypatch):
     _path, _conn, now = shadow
     beat = int(now - 170)
