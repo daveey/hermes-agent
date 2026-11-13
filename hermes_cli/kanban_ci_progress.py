@@ -11,8 +11,12 @@ longer than ``QUEUED_LIMIT_SECONDS`` with no runner assigned.
 
 A job nobody picked up can also mean the runners are online but saturated. When the repo's or org's self-hosted
 runner list is readable (``actions/runners``) and a runner that is ``online`` carries every label the job asks for,
-the run is ``busy`` instead: a park on it is allowed and nothing is woken. When the list is unreadable (the token
-lacks admin scope) the run stays ``not_starting`` and every message says only that no runner picked it up. The org
+the run is ``busy`` instead: a park on it is allowed and nothing is woken. When neither list is readable (the token
+lacks admin scope) a self-hosted job is still ``busy`` when a job asking for the same labels is running or a runner
+took it within ``QUEUED_LIMIT_SECONDS`` (this run's jobs, then recent runs of the repo): 2026-11-13, run
+43423320884 waited 15 min behind ~10 min jobs on the one-runner ``hermes-state`` pool, which was online and busy,
+and the card owning an approved PR was woken behind ``runners-offline.hermes-state``. With no such job the run
+stays ``not_starting`` and every message says only that no runner picked it up. The org
 list can include runners in groups this repo may not use, so such a runner online for the labels reads as ``busy``
 and nothing is woken (a false negative, never a false wake); the repo list is read first and decides alone when it
 has an online match.
@@ -68,6 +72,7 @@ NO_CREDENTIAL_WARN_SECONDS = 60 * 60
 SWEEP_EVERY_SECONDS = 60
 MAX_CARDS_PER_SWEEP = 6
 SWEEP_BUDGET_SECONDS = 90
+RECENT_RUNS_MAX = 4  # runs per status whose jobs the unreadable-runner-list fallback reads
 BLOCKER_PREFIX = "runners-offline"
 AUTHOR = "kanban-dispatcher"
 
@@ -239,7 +244,61 @@ def ci_run_progress(ref: str, *, hint: str = "", fetch: Optional[Fetch] = None,
                         repo, run_id, age, name, ",".join(labels))
             return Progress(BUSY, repo, run_id, labels, age,
                             detail=f"runner {name} is online for those labels; the runners are saturated")
+    elif "self-hosted" in {x.lower() for x in labels}:
+        try:
+            took = _recent_job_on(repo, labels, (data or {}).get("jobs") or [], now, deadline)
+        except OverBudget as exc:
+            return Progress("unknown", repo, run_id, labels, age, detail=str(exc), deferred=True)
+        if took:
+            logger.info("ci run %s/%s queued %ss: runner list unreadable, but %s on %s, so the runners are "
+                        "saturated", repo, run_id, age, took, ",".join(labels))
+            return Progress(BUSY, repo, run_id, labels, age,
+                            detail=f"runner list unreadable, but {took} on those labels; the runners are saturated")
     return Progress(NOT_STARTING, repo, run_id, labels, age, runners_readable=runners is not None)
+
+
+def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadline: Optional[float]) -> str:
+    """With the runner lists unreadable: a job asking for exactly ``labels`` that a runner is running, or took
+    within ``QUEUED_LIMIT_SECONDS``, shows the pool alive. This run's jobs first, then the jobs of up to
+    ``RECENT_RUNS_MAX`` in-progress or recently updated runs of the repo. "" when none or unreadable; raises
+    :class:`OverBudget` when ``deadline`` passed before a read."""
+    want = {x.lower() for x in labels}
+    cutoff = now - QUEUED_LIMIT_SECONDS
+
+    def took(js) -> str:
+        for j in js:
+            if not isinstance(j, dict) or not j.get("runner_name"):
+                continue
+            if {str(x).lower() for x in j.get("labels") or []} != want:
+                continue
+            started = _epoch(j.get("started_at"))
+            if j.get("status") == "in_progress" or (started is not None and started >= cutoff):
+                return f"runner {j.get('runner_name')} took job {j.get('id')}"
+        return ""
+
+    def read(path: str) -> dict:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise OverBudget(f"sweep budget spent before {path.split('?', 1)[0]} was read")
+        return _gh_api(path) or {}
+
+    found = took(jobs)
+    try:
+        runs: list = []
+        for status in ("in_progress", "completed"):
+            if found:
+                break
+            runs = [r for r in read(f"repos/{repo}/actions/runs?status={status}&per_page=10").get("workflow_runs")
+                    or [] if isinstance(r, dict) and r.get("id")
+                    and (status == "in_progress" or (_epoch(r.get("updated_at")) or 0) >= cutoff)]
+            for run in runs[:RECENT_RUNS_MAX]:
+                found = took(read(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100").get("jobs") or [])
+                if found:
+                    break
+    except OverBudget:
+        raise
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+        logger.debug("ci run progress: recent runs of %s unreadable: %s", repo, exc)
+    return found
 
 
 def describe(p: Progress) -> str:

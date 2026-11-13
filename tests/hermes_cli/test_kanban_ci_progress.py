@@ -32,6 +32,10 @@ LABELS = ["self-hosted", "ci-fast"]
 BLOCKER = "runners-offline.ci-fast"
 
 
+def _iso(age: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
+
+
 @pytest.fixture
 def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / ".hermes"
@@ -74,6 +78,13 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "    if not os.path.exists(src):\n"
         "        sys.stderr.write('HTTP 403: Resource not accessible by integration\\n'); sys.exit(1)\n"
         "    sys.stdout.write(open(src).read()); sys.exit(0)\n"
+        "if '/actions/runs?' in path:\n"
+        "    status = path.split('status=', 1)[-1].split('&', 1)[0]\n"
+        f"    src = os.path.join({str(tmp_path)!r}, f'runs-{{status}}.json')\n"
+        "    sys.stdout.write(open(src).read() if os.path.exists(src) else '{\"workflow_runs\": []}'); sys.exit(0)\n"
+        f"other = os.path.join({str(tmp_path)!r}, 'jobs-' + path.split('/runs/', 1)[-1].split('/', 1)[0] + '.json')\n"
+        "if os.path.exists(other):\n"
+        "    sys.stdout.write(open(other).read()); sys.exit(0)\n"
         f"sys.stdout.write(open({str(jobs)!r}).read())\n")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
@@ -90,6 +101,12 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         def runners(self, *runners: dict, org: bool = False) -> None:
             (org_runners if org else repo_runners).write_text(json.dumps({"total_count": len(runners),
                                                                           "runners": list(runners)}))
+
+        def recent(self, status: str, run_id: int, *, updated_age: int, jobs: list[dict]) -> None:
+            """One recent run of the repo with ``status`` (as the run list shows it) and its jobs."""
+            (tmp_path / f"runs-{status}.json").write_text(json.dumps({"total_count": 1, "workflow_runs": [{
+                "id": run_id, "status": status, "updated_at": _iso(updated_age)}]}))
+            (tmp_path / f"jobs-{run_id}.json").write_text(json.dumps({"total_count": len(jobs), "jobs": jobs}))
 
         def calls(self, what: str = "") -> int:
             lines = calls.read_text().splitlines() if calls.exists() else []
@@ -892,3 +909,62 @@ def test_a_running_sweep_counts_against_the_probe_budget(kanban_home, fake_gh, m
             release.set()
         kcp._SWEEPS.clear()
         assert kwc.run_due_wake_checks(conn, wait=True)["submitted"] == [tid]
+
+
+# --- runner list unreadable: a job running on the same labels shows the pool alive (2026-11-13, run 43423320884) --
+# The hermes-state pool is one runner taking ~10 min jobs back to back; a run queued behind two core PRs waits past
+# 15 min. A token without admin scope cannot list runners (the fixture's default: HTTP 403), so the pool's own
+# recent jobs are the evidence that it is taking work.
+
+def _taken(*, run_id: int, started_age: int, status: str = "completed", labels=LABELS) -> dict:
+    return {"id": run_id * 10, "run_id": run_id, "name": "hermes_state (macOS)", "status": status,
+            "conclusion": "success" if status == "completed" else None, "created_at": _iso(started_age + 60),
+            "started_at": _iso(started_age), "labels": list(labels), "runner_name": "ci-fast-1", "runner_id": 7}
+
+
+def test_unreadable_runners_with_a_job_running_on_the_labels_neither_wakes_nor_blocks(kanban_home, fake_gh,
+                                                                                       monkeypatch, caplog) -> None:
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        fake_gh.serve(age=20 * 60)
+        fake_gh.recent("in_progress", 555, updated_age=60, jobs=[_taken(run_id=555, started_age=9 * 60,
+                                                                         status="in_progress")])
+        with caplog.at_level("INFO", logger=kcp.logger.name):
+            assert kcp.sweep(conn) == []
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert "ci_run_unstartable" not in [e.kind for e in kb.list_events(conn, tid)]
+        assert BLOCKER not in ksb.blocker_states(conn)
+    assert any("runner list unreadable, but runner ci-fast-1 took job 5550" in r.getMessage()
+               for r in caplog.records), caplog.text
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.BUSY and "ci-fast-1" in p.detail, p
+
+
+def test_unreadable_runners_with_a_recently_started_job_on_the_labels_parks(kanban_home, fake_gh,
+                                                                            monkeypatch) -> None:
+    fake_gh.serve(age=20 * 60)
+    fake_gh.recent("completed", 556, updated_age=60, jobs=[_taken(run_id=556, started_age=11 * 60)])
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        assert _park_on_run().get("status") == "scheduled"
+
+
+@pytest.mark.parametrize("job", [
+    _taken(run_id=557, started_age=40 * 60),  # the pool's last job started long ago
+    _taken(run_id=557, started_age=5 * 60, labels=("self-hosted", "ci-slow")),  # another pool is alive
+], ids=["stale", "other-labels"])
+def test_unreadable_runners_and_no_recent_job_on_the_labels_is_not_starting(kanban_home, fake_gh, job) -> None:
+    fake_gh.serve(age=20 * 60)
+    fake_gh.recent("completed", 557, updated_age=60, jobs=[job])
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.NOT_STARTING and not p.runners_readable, p
+
+
+def test_github_hosted_labels_read_no_recent_runs(kanban_home, fake_gh) -> None:
+    queued = {"jobs": [{"id": 1, "status": "queued", "created_at": _iso(20 * 60), "labels": ["ubuntu-latest"],
+                        "runner_name": None}]}
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda _repo, _run: queued)
+    assert p.state == kcp.NOT_STARTING, p
+    assert fake_gh.calls("actions/runs?") == 0
