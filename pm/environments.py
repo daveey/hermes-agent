@@ -34,6 +34,44 @@ def installs_root() -> Path:
     return dependency_home_root() / "installs"
 
 
+def account_home_root() -> Path | None:
+    """The account's default home when the active home is another one on its filesystem, else ``None``.
+
+    A test, review or mutation home (``HERMES_HOME=<scratch>``) then reuses the account's
+    immutable, content-checked state (verified tool entries, uv's cache, source snapshots) by
+    hard link instead of fetching and unpacking its own ~2 GiB copy. Another filesystem keeps
+    the home's own state: a link cannot cross it.
+    """
+    from hermes_constants import _get_platform_default_hermes_home
+
+    account = _get_platform_default_hermes_home()
+    active = dependency_home_root()
+    while not active.exists() and active.parent != active:
+        active = active.parent
+    try:
+        if not account.is_dir() or os.path.samefile(account, active):
+            return None
+        if os.stat(account).st_dev != os.stat(active).st_dev:
+            return None
+    except OSError:
+        return None
+    return account
+
+
+def account_environment(project_root: Path) -> Path | None:
+    """The environment the account home has selected for *project_root*, or ``None``. Read-only."""
+    account = account_home_root()
+    if account is None:
+        return None
+    try:
+        data = json.loads((account / "installs" / install_key(project_root) / "facts.json")
+                          .read_text(encoding="utf-8-sig"))
+        value = data["packages"]["venv"]["environment"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return Path(value) if isinstance(value, str) else None
+
+
 def install_state_dir(project_root: Path) -> Path:
     return installs_root() / install_key(project_root)
 

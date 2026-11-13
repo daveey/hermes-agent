@@ -420,6 +420,71 @@ def _copy_verified_source(package, lockfile, copy_from, staged, version, target)
         raise InstallError(package.name, "copied bytes do not match the bundled source")
 
 
+def _link_or_copy(src, dst, *, follow_symlinks=True):
+    """``copytree``'s copy function for a seed: a hard link, or a copy where none can be made
+    (another filesystem, a link-count limit). Windows always copies: a running executable locks
+    every name of its file, so a shared inode would couple the two homes' updates."""
+    if os.name != "nt":
+        try:
+            os.link(src, dst)
+            return dst
+        except OSError:
+            pass
+    return shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+
+
+def _account_seed(package, lockfile, store: Store, version, target) -> tuple[dict, Store] | None:
+    """The account home's tool store, when it already holds this exact pin and *store* is another.
+
+    A fresh ``HERMES_HOME`` (a review clone's home, a mutation-test home) otherwise downloads and
+    unpacks every tool again, about 2 GiB per home. Read-only: the seed is never written."""
+    try:
+        from pm.environments import account_home_root
+    except ImportError:  # the Docker toolchain stage runs pm/ alone, without hermes_constants
+        return None
+    from pm.filesystem import long_root
+
+    account = account_home_root()
+    if account is None:
+        return None
+    seed = Store(long_root(account / "tools"))
+    try:
+        if os.path.samefile(seed.root, store.root):
+            return None
+        facts = Facts(seed.root / "facts.json", strict=True)
+    except (OSError, ValueError):
+        return None
+    fact = facts.get(package.name)
+    if (not facts.installed(package.name, version, seed.root, _identity(lockfile, package.name, target))
+            or not fact or not fact.get("digest")):
+        return None
+    return fact, seed
+
+
+def _seed_from_account(package, lockfile, store, staged, version, target) -> bool:
+    """Stage *package* by linking the account store's entry; False leaves the download to the caller.
+
+    Entries are immutable once published and every name is replaced by rename, so a link shares
+    bytes without sharing a tree. The staged tree must still hash to the digest the account
+    recorded for this exact pin; a seed that changes mid-link fails that check and is dropped."""
+    seed = _account_seed(package, lockfile, store, version, target)
+    if seed is None:
+        return False
+    fact, source_store = seed
+    try:
+        shutil.copytree(source_store.entry(fact["entry"]), staged, symlinks=True, copy_function=_link_or_copy)
+        if digest_matches(staged, fact["digest"]):
+            LOG.info("%s: linked from %s", package.name, native(source_store.root))
+            return True
+        LOG.warning("%s: %s does not match its recorded digest; downloading", package.name,
+                    native(source_store.entry(fact["entry"])))
+    except OSError as exc:
+        LOG.warning("%s: cannot link from %s (%s); downloading", package.name, native(source_store.root), exc)
+    if staged.exists():
+        remove_tree(staged)
+    return False
+
+
 def _log_repair(package, previous, version, artifacts) -> None:
     """Work item 6: replacing an ESTABLISHED fact is a repair — log it,
     no transaction system, no receipt file."""
@@ -489,6 +554,8 @@ def _install(
             try:
                 if copy_from is not None:
                     _copy_verified_source(package, lockfile, copy_from, staged, version, target)
+                elif facts is not None and _seed_from_account(package, lockfile, store, staged, version, target):
+                    pass
                 else:
                     staged = _prepare_artifacts(package, store, scratch, artifacts, version, target,
                                                 progress=progress, pause_event=pause_event,
