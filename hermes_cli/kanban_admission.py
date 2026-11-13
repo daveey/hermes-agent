@@ -24,6 +24,9 @@ ADVISORY_MAX_AGE_MS = 15_000  # the locked gate's freshness limit for the sample
 # The pre-lease advisory wants this much more freshness, so the sample it accepts survives the Board lease round-trip
 # and the txn wait inside ADVISORY_MAX_AGE_MS (the sampler rewrites it every 5 s: a healthy one is <= ~7 s old).
 PRELEASE_HEADROOM_MS = 5_000
+# The pre-lease advisory's freshness limit (10 s): an older sample defers every claim here. Shared with the
+# stale-advisory alert (``kanban_hub_cpu_alert``), which must call a sample stale at the age the advisory defers.
+PRELEASE_MAX_AGE_MS = ADVISORY_MAX_AGE_MS - PRELEASE_HEADROOM_MS
 OVERRUN = "hub_admission_overrun"
 _consumed = threading.local()
 _decision = threading.local()  # the last cap count this thread's final gate read (refusal log / claimed event)
@@ -43,11 +46,11 @@ def _defer(task_id, reason):
 def hub_cpu_advisory(task_id=None, *, conn=None):
     """Lock-free pre-check before a Board lease (review ruling 5). Returns a refusal reason or None.
 
-    Off unless the root limit is set. Uses the advisory sampler's latest complete sample: missing, stale (>15 s),
+    Off unless the root limit is set. Uses the advisory sampler's latest complete sample: missing, stale (>10 s),
     future or malformed reads as unknown and defers; a fresh value at or above the limit defers. Advisory only.
-    Freshness here is ``ADVISORY_MAX_AGE_MS - PRELEASE_HEADROOM_MS`` (10 s): the locked gate re-reads the same
-    file with the looser ``ADVISORY_MAX_AGE_MS``, so a sample accepted before the lease is not stale by the time the
-    gate reads it."""
+    Freshness here is ``PRELEASE_MAX_AGE_MS`` (``ADVISORY_MAX_AGE_MS - PRELEASE_HEADROOM_MS``, 10 s): the locked
+    gate re-reads the same file with the looser ``ADVISORY_MAX_AGE_MS``, so a sample accepted before the lease is not
+    stale by the time the gate reads it."""
     from hermes_cli import machine_cpu_metrics as cpu
 
     from hermes_cli.worker_resource_admission import refusal
@@ -72,7 +75,7 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
             except (OSError, ValueError, TypeError):
                 _defer(task_id, reason)
                 return reason
-        last = sampler_sample(ADVISORY_MAX_AGE_MS - PRELEASE_HEADROOM_MS)
+        last = sampler_sample(PRELEASE_MAX_AGE_MS)
         if last is not None:
             if cpu.below(last["cpu_busy_pct"], limit):
                 return None
@@ -190,7 +193,13 @@ def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=Non
     recounted. ``started`` (monotonic, taken when admission.lock was acquired) enforces the designed hold: a gate that
     overran ``CLAIM_MAX_HOLD_S`` minus the commit reserve (a slow board scan in a GIL-starved process, a stall) refuses
     as ``hub_admission_overrun`` instead of committing, so a waiting turn's BUSY_WAIT_S budget is never outlasted by an
-    admitted claim (final review N1). The overrun is not a CPU reading and is never reported as one."""
+    admitted claim (final review N1). The overrun is not a CPU reading and is never reported as one.
+
+    Back-to-back local claims inside one sampler period (~5 s) read the same pre-claim sample, which cannot show the
+    CPU the first claim's worker is about to use: between them only the ``max_in_progress`` census (it counts the
+    committed run) protects the host. The gate's own independent re-sample was dropped deliberately: in the GIL-busy
+    hub gateway census + ~1 s sample + recount overran the 2.25 s hold on every claim, after the lease was granted,
+    and every claim deferred as ``hub_cpu_unknown`` (2026-11-13, t_01a1d2e5c4899f40)."""
     from hermes_cli import machine_cpu_metrics as cpu
 
     echo = getattr(gate, "echo", None)
@@ -427,7 +436,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 return
             if waiting:
                 # [daveey] A chat/notification/review turn is waiting out this lock: claims retry next tick, turns
-                # cannot, so the claim yields before its ~1 s sample (review F1).
+                # cannot, so the claim yields before the locked gate's census (review F1).
                 logging.getLogger(__name__).info("A turn is waiting for update admission; deferring Kanban claim")
                 yield False
                 return

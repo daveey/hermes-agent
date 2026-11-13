@@ -84,14 +84,25 @@ def test_a_fresh_sample_ends_the_incident_and_resets_the_clock(home):
     assert _cards() == []
 
 
-def test_fresh_within_fifteen_seconds_never_files(home):
+def test_fresh_within_the_prelease_limit_never_files(home):
     w = World(home)
     for _ in range(20):
         w.mono += 10
         w.wall += 10
-        w.sample(age_s=14)
+        w.sample(age_s=9)
         assert w.tick() is None
     assert _cards() == []
+
+
+def test_a_sample_stuck_twelve_seconds_old_trips_the_alert(home):
+    """The pre-lease advisory defers every claim on a sample older than 10 s, so a sampler stuck 10-15 s behind
+    starts nothing here: the alert must use the advisory's limit, not the locked gate's looser 15 s."""
+    w = World(home)
+    w.sample(age_s=12)
+    assert w.tick() is None
+    w.wall -= alert.STALE_FOR_S  # keep the sample 12 s old while the dispatcher observes for 60 s
+    tid = w.tick(alert.STALE_FOR_S)
+    assert tid is not None and "12 s old" in _cards()[0][3]
 
 
 @pytest.mark.parametrize("gate", [(cpu.OFF, None), (cpu.UNKNOWN, None)])

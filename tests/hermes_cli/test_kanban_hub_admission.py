@@ -997,8 +997,8 @@ def _lock_state(home):
 
 def test_real_claim_reads_the_sampler_file_under_the_lock_and_holds_it_briefly(board, monkeypatch):
     """Contract (replaces the 2026-11 independent ~1 s sample): the locked gate reads the sampler's own file while
-    admission.lock is held, takes no /proc/stat sample, records that very triple on ``claimed``, and its hold is short
-    enough that a chat/notification turn reserving the lock with BUSY_WAIT_S (3.0 s) is admitted well inside it."""
+    admission.lock is held, takes no /proc/stat sample, records that very triple on ``claimed``, and the whole claim
+    finishes in under ``BUSY_WAIT_S - WINDOW_S`` (1.75 s), so it no longer holds the lock for a ~1 s sample."""
     from hermes_cli import backend_retirement
 
     conn, home = board

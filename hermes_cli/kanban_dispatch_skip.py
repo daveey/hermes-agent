@@ -294,11 +294,20 @@ _WORDS = {
 }
 
 
+def _local_gate(detail: Any) -> bool:
+    """A ``claim_deferred`` detail set by this host's own admission gate (``kanban_admission``: the hub CPU checks,
+    the hold overrun, the whole-host cap), not by the Board service."""
+    return isinstance(detail, str) and (detail.startswith("hub_cpu_")
+                                        or detail in ("hub_admission_overrun", "hub_capacity_full"))
+
+
 def words(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     """The skip as one clause, e.g. ``held: pinned model claude-opus-5-5 (anthropic) quota-walled until 01:59Z``."""
     reason = str(skip.get("reason") or "unknown")
     detail = skip.get("detail") or "no detail"
     text = _WORDS.get(reason, "skipped: {reason} ({detail})").format(reason=reason, detail=detail)
+    if reason == "claim_deferred" and _local_gate(detail):
+        text = f"skipped: this host's admission gate deferred its claim ({detail})"
     if skip.get("until"):
         text += f" until {_stamp(skip['until'], now)}"
         if _wall_passed(skip, now):

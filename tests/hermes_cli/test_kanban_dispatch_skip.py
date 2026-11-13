@@ -309,9 +309,19 @@ def test_flapping_detail_over_40_ticks_keeps_two_rows_and_latest_tracks_the_curr
             skips.record_tick(conn, _deferred(tid, detail))
             assert skips.latest(conn, tid)["detail"] == detail, i
             place = qp.position(conn, kb.get_task(conn, tid))
-            assert f"the Board deferred its claim ({detail})" in qp.describe(place), i
+            who = "the Board" if detail == "capacity" else "this host's admission gate"
+            assert f"{who} deferred its claim ({detail})" in qp.describe(place), i
             clock[0] += 10
         assert [(p["reason"], p["detail"]) for p in _skips(conn, tid)] == [("claim_deferred", d) for d in FLAP]
+
+
+@pytest.mark.parametrize("detail,who", [
+    ("capacity", "the Board"), ("hub_cpu_unknown", "this host's admission gate"),
+    ("hub_cpu_sample_stale", "this host's admission gate"), ("hub_admission_overrun", "this host's admission gate"),
+    ("hub_capacity_full", "this host's admission gate"),
+])
+def test_claim_deferred_words_name_who_deferred_it(detail, who):
+    assert skips.words({"reason": "claim_deferred", "detail": detail}) == f"skipped: {who} deferred its claim ({detail})"
 
 
 def test_latest_tracks_the_current_skip_after_the_episode_cap(board, monkeypatch):
