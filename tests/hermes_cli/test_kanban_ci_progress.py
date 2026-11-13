@@ -1130,6 +1130,34 @@ def test_unreadable_runners_find_the_pools_running_job_past_the_first_runs(kanba
     assert fake_gh.calls("status=completed") == 0
 
 
+def test_pool_scan_reads_use_the_bound_home_on_its_reader_threads(kanban_home, fake_gh, tmp_path,
+                                                                   monkeypatch) -> None:
+    """PR #2321 review: the parallel job reads ran on fresh pool threads that lost the bound board home, so
+    ``dispatcher_gh_argv`` read the launch home's gh_command_prefix. Every read must see the bound home, and the
+    scan's answer is kept per home."""
+    from agent.runtime_scope import bind_profile_scope
+    from hermes_constants import get_hermes_home
+
+    other = tmp_path / "other-home"
+    other.mkdir()
+    fake_gh.serve(age=20 * 60)
+    fake_gh.runs("in_progress", *[(700 + i, 30, []) for i in range(3)])
+    seen: list[tuple[str, str]] = []
+    real = kcp._gh_api
+
+    def recording(path: str) -> dict:
+        seen.append((path.split("?", 1)[0], str(get_hermes_home())))
+        return real(path)
+
+    monkeypatch.setattr(kcp, "_gh_api", recording)
+    with bind_profile_scope(other, hydrate_secrets=False):
+        p = kcp.ci_run_progress(RUN_URL, fetch_runners=lambda *_a, **_k: None)
+    assert p.state == kcp.NOT_STARTING, p
+    job_reads = [home for path, home in seen if "/runs/70" in path and path.endswith("/jobs")]
+    assert len(job_reads) == 3 and set(job_reads) == {str(other)}, seen
+    assert {key[0] for key in kcp._POOL_SCANS} == {str(other)}, kcp._POOL_SCANS
+
+
 def test_unreadable_runners_with_a_long_running_job_on_the_labels_is_busy(kanban_home, fake_gh) -> None:
     """A job the pool's runner started 40 min ago and is still running: the pool is alive, just slow."""
     fake_gh.serve(age=20 * 60)

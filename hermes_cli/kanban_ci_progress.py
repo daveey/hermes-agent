@@ -54,6 +54,7 @@ on a pool thread with the dispatching home rebound, so each board reads its own 
 from __future__ import annotations
 
 import calendar
+import contextvars
 import json
 import logging
 import re
@@ -332,8 +333,10 @@ def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadlin
         run order; when none matched, the first read's error is raised."""
         if deadline is not None and time.monotonic() >= deadline:
             raise OverBudget(f"sweep budget spent before {paths[0].split('?', 1)[0]} was read")
+        # Each read runs in a copy of this thread's context: a fresh pool thread would lose the bound home, and
+        # ``dispatcher_gh_argv`` would read the launch home's gh_command_prefix (another home's credential).
         with ThreadPoolExecutor(max_workers=len(paths), thread_name_prefix="ci-pool-scan") as ex:
-            futures = [ex.submit(_gh_api, p) for p in paths]
+            futures = [ex.submit(contextvars.copy_context().run, _gh_api, p) for p in paths]
         error: Optional[BaseException] = None
         for fut in futures:
             exc = fut.exception()
@@ -348,7 +351,8 @@ def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadlin
     found = took(jobs)
     if found:
         return found
-    key = (repo.lower(), frozenset(want))
+    from hermes_constants import get_hermes_home
+    key = (str(get_hermes_home()), repo.lower(), frozenset(want))  # by home too: its credential did the reads
     seen = _POOL_SCANS.get(key)
     if seen is not None and time.monotonic() - seen[0] < POOL_SCAN_TTL_SECONDS:
         return seen[1]
@@ -424,8 +428,8 @@ _LOCK = threading.Lock()
 _LAST_CHECK: dict[tuple[str, str], float] = {}   # (db, task id) -> monotonic time of its last read; live waits only
 _LAST_SWEEP: dict[str, float] = {}               # db -> monotonic time its last sweep started
 _SWEEPS: dict[str, Future] = {}
-# (repo, labels) -> (monotonic time, answer) of the last repo-wide scan for a job on those labels
-_POOL_SCANS: dict[tuple[str, frozenset], tuple[float, str]] = {}
+# (home, repo, labels) -> (monotonic time, answer) of the last repo-wide scan for a job on those labels
+_POOL_SCANS: dict[tuple[str, str, frozenset], tuple[float, str]] = {}
 # (home, board db) -> monotonic time of the last disabled-check WARNING. Keyed like ``_LAST_CHECK`` (and by home,
 # whose gh_command_prefix the read used) so one home's warning never hides another's in a multi-home process.
 _WARNED_AT: dict[tuple[str, str], float] = {}
