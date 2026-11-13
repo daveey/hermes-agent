@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SidebarSessionsResponse } from './sessions'
 
-vi.mock('@/lib/gateway-rpc', () => ({ isMissingRestEndpoint: () => false }))
+vi.mock('@/lib/gateway-rpc', () => ({ isMissingRestEndpoint: () => false, isUnroutedRestPath: () => false }))
 vi.mock('@/store/transcript-tail', () => ({ pageHonorsLatestOrder: () => true, recordTranscriptTail: vi.fn() }))
 vi.mock('./client', () => ({
   ambientOwnerConnectionId: vi.fn(() => 'prometheus'),
@@ -194,6 +194,60 @@ describe('setSessionArchived profile scoping', () => {
     expect(patch.body).toMatchObject({ archived: true, pinned: false, expected_revision: 7 })
     expect(typeof patch.body.request_id).toBe('string')
     expect(patch.body.request_id).not.toBe('')
+  })
+
+  it('replays a hub archive that hit a reconnect with the SAME identity, without a user retry', async () => {
+    // Regression (MacBook 2026-11-12, hub chat 20261111_091916_d2d36a): the hub PATCH died with
+    // "socket hang up", then the down gate failed the next tries fast ("reconnect in progress"), and
+    // the user had to click Archive again. The write now waits out the reconnect and replays the
+    // retained request_id/expected_revision, so an owner that already committed it answers from its receipt.
+    vi.useFakeTimers()
+
+    try {
+      vi.mocked(client.capabilityScoped).mockReturnValue({ profile: 'default', connectionId: 'hermes-hub' })
+      let patches = 0
+      hermesApi.mockImplementation((async (request: { method?: string }) => {
+        if (request.method !== 'PATCH') {
+          return { exists: true, runtime_revision: 7, runtime_generation: 3 }
+        }
+
+        patches += 1
+
+        if (patches === 1) {
+          throw new Error("Error invoking remote method 'hermes:api': Error: socket hang up")
+        }
+
+        if (patches === 2) {
+          throw new Error('Remote backend "conn:hermes-hub::default" is down (socket hang up, 3s ago); reconnect in progress. Failing fast instead of waiting for a timeout.')
+        }
+
+        return { ok: true }
+      }) as never)
+
+      const archived = setSessionArchived('sess-reconnect', true, { connectionId: 'hermes-hub', profile: 'default' })
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      await expect(archived).resolves.toEqual({ ok: true })
+      const sent = hermesApi.mock.calls.map(([request]) => request as Record<string, any>).filter(request => request.method === 'PATCH')
+      expect(sent).toHaveLength(3)
+      expect(new Set(sent.map(request => request.body.request_id)).size).toBe(1)
+      expect(sent.every(request => request.connectionId === 'hermes-hub' && request.body.expected_revision === 7)).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not replay a definitive refusal (client_upgrade_required)', async () => {
+    hermesApi.mockImplementation((async (request: { method?: string }) => {
+      if (request.method !== 'PATCH') {
+        return { exists: true, runtime_revision: 7, runtime_generation: 3 }
+      }
+
+      throw new Error('409: {"detail":"client_upgrade_required: this app is out of sync (different versions) with the Hermes backend; update the app to edit sessions"}')
+    }) as never)
+
+    await expect(setSessionArchived('sess-refused', true, 'default')).rejects.toThrow(/client_upgrade_required/)
+    expect(hermesApi.mock.calls.filter(([request]) => request.method === 'PATCH')).toHaveLength(1)
   })
 
   it('omits the profile from the body only when there is no active profile at all', async () => {

@@ -23,6 +23,7 @@ import {
   profileScoped,
   sessionReadOwnerPin
 } from './client'
+import { withSessionWriteReconnect } from './session-write-reconnect'
 
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 
@@ -426,7 +427,10 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
       body: { ...payload, ...identity, ...(scope.profile ? { profile: scope.profile } : {}) } })
   }
 
-  return mutateSessionFenced(key, () => hermesApi<SessionMutationSnapshot>({ ...scope, path: `${path}/mutation-snapshot${suffix}` }), send)
+  // A reconnect (hub restart, tunnel reset) replays the same intent with its retained identity.
+  return withSessionWriteReconnect(() => mutateSessionFenced(key,
+    () => hermesApi<SessionMutationSnapshot>({ ...scope, path: `${path}/mutation-snapshot${suffix}` }), send),
+  { label: `${method} ${id}` })
 }
 
 // Mutations take the owning `profile` so Electron can route them to the correct
