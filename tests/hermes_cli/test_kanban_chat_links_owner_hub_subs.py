@@ -261,3 +261,117 @@ def test_owner_never_reopens_or_doubles_a_link_the_chat_gateway_already_wrote(gw
     rep.write_bytes(b"not a database")
     links.reconcile(conn, BOARD, OWNER)
     assert _owner_links(conn, tid) == []
+
+
+# --- PR #2095 review follow-ups (t_01a1d480e6d8fd12) -------------------------------------------------------------
+
+TIP = "20261027_081500_c0ffee"
+
+
+def _compress(gws: Gateways, old: str, new: str) -> None:
+    """The chat compresses on its own gateway: ``old`` ends ``compression`` and ``new`` continues it."""
+    from hermes_state import SessionDB
+    home = gws.at(ME)
+    state = SessionDB(db_path=home / "state.db")
+    try:
+        if state.get_session(old) is None:
+            state.create_session(old, "cli")
+        state.end_session(old, "compression")
+        state.create_session(new, "cli", parent_session_id=old)
+    finally:
+        state.close()
+
+
+def test_a_chat_compressed_during_the_outage_keeps_one_unreleased_row_and_a_clean_diff(gws):
+    """The hub sub names the session that placed the card (S0); the chat compressed before its gateway accepted the
+    binding, so that gateway's ledger resolves the tip (S1). Before the fix both rows stayed unreleased and
+    links_diff listed S0 only_in_replica until the card closed."""
+    _give_up(gws)
+    tid = _placed(gws)
+    _compress(gws, CHAT, TIP)
+    gws.ledger[0]["session"] = TIP  # the recovered gateway's ledger resolves the chat's tip
+    gws.round(OWNER)  # the owner publishes S0's link from its hub sub
+    gws.pull_replica(ME)
+    runstate.clear()
+    gws.round(ME)  # the chat gateway writes S1's link and releases the owner's S0 row
+    gws.round(OWNER)
+    gws.round(ME)
+    rows = gws.replica_rows(ME, tid)
+    assert [r for r in rows if r[5] == 0] == [
+        (links.link_uid(tid, ME, "default", TIP, "created"), ME, "default", TIP, "created", 0)]
+    assert (links.link_uid(tid, ME, "default", CHAT, "created"), ME, "default", CHAT, "created", 1) in rows
+    gws.at(ME)
+    diff = links.links_diff(ME)
+    assert diff["clean"], diff
+    assert [t["id"] for t in ksa.session_tasks([TIP])] == [tid]
+    # The owner never writes S0's link back: a released row for that card and chat is still a row.
+    gws.at(OWNER)
+    assert links.reconcile(gws.conns[OWNER], BOARD, OWNER)["added"] == 0
+
+
+def test_an_uncompressed_second_chat_on_the_same_card_keeps_its_owner_row(gws):
+    """Only a compression ancestor is released: another chat's (or a sibling branch's) owner-written link stays."""
+    _give_up(gws)
+    tid = _placed(gws)
+    other = "20261027_090000_beef00"
+    from hermes_state import SessionDB
+    state = SessionDB(db_path=gws.at(ME) / "state.db")
+    try:
+        state.create_session(other, "cli")
+    finally:
+        state.close()
+    gws.at(OWNER)
+    _sub(gws.conns[OWNER], tid, f"{ME}/default/{other}", "shepherd")
+    gws.round(OWNER)
+    gws.pull_replica(ME)
+    runstate.clear()
+    gws.round(ME)
+    gws.round(ME)
+    unreleased = sorted(r[3] for r in gws.replica_rows(ME, tid) if r[5] == 0)
+    assert unreleased == sorted([CHAT, other])
+
+
+def test_owner_skips_a_cron_session_the_chat_gateway_would_release(gws):
+    """The owner filtered worker hashes but not ``cron_`` sessions, so a cron chat's hub sub got a row the chat
+    gateway (``machine_sessions``) released on its next pass."""
+    from hermes_cli.kanban_db_notify import machine_sessions
+    cron = "cron_3f2a1b_20261113_101500"
+    assert machine_sessions("mini", [cron], local_gateway="mini") == {cron}  # the chat gateway's own verdict
+    gws.at(OWNER)
+    conn = gws.conns[OWNER]
+    tid = kb.create_task(conn, title="watched by a cron chat", assignee="default")
+    _sub(conn, tid, f"mini/default/{cron}", "shepherd")
+    _sub(conn, tid, "mini/default/chat-human", "shepherd")
+    links.reconcile(conn, BOARD, OWNER)
+    assert _owner_links(conn, tid) == [("mini", "default", "chat-human", "shepherd", 0)]
+
+
+def _plan_detail(conn, sql, args):
+    return " ".join(str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + sql, args))
+
+
+def test_task_chat_links_has_a_task_id_index_in_board_files_and_replicas_and_migrates_old_files(gws, tmp_path):
+    owner_lookup = ("SELECT task_id, chat_gateway, COALESCE(chat_profile, 'default'), chat_session "
+                    "FROM task_chat_links WHERE task_id IN (?, ?)")
+    gws.at(OWNER)
+    board = gws.conns[OWNER]
+    replica = ksc.open_shadow(BOARD, OWNER)
+    try:
+        for conn in (board, replica):
+            assert "USING INDEX idx_task_chat_links_task" in _plan_detail(conn, owner_lookup, ("a", "b"))
+    finally:
+        replica.close()
+    # A board file synced by a core that predates the index gets it on the next process's first open.
+    path = gws.homes[OWNER] / "kanban.db"
+    with kbc.write_txn(board):
+        board.execute("DROP INDEX idx_task_chat_links_task")
+    kbc._INITIALIZED_PATHS.clear()
+    reopened = kbc.connect(path)
+    try:
+        names = {r[0] for r in reopened.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'task_chat_links'")}
+        assert "idx_task_chat_links_task" in names
+        # An index is not a column: the schema guard still finds nothing this core does not declare.
+        assert not ksc.schema_ahead(reopened)
+    finally:
+        reopened.close()

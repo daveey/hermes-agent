@@ -171,7 +171,8 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     stayed an ``unknown`` obligation in ``replica_cards`` forever (4 hub cards on macbook chat
     20261027_134353_5ab65c, 2026-11-01). The chat's gateway releases them by writing the same uid (the same row on
     the Board) with ``released = 1``, as it already does for a ledger ``origin`` row. Open cards and missing card
-    rows are left alone; links ``want`` already carries keep the ledger's answer. A card reopened after the release
+    rows are left alone, except a row whose chat session compressed into one this gateway links to the same card
+    (``_compressed_away``); links ``want`` already carries keep the ledger's answer. A card reopened after the release
     stays released for that chat: the uid is one row, so the owner's original intent is not recoverable here.
 
     A link to a machine session of this gateway (``is_machine_session``) is released whatever the card's status:
@@ -204,14 +205,68 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     # lookup was 60% of a 60 s profile of the hub's sync thread (t_01a1d2cc49634a78). [daveey]
     machine = _machine_by_profile(gateway, ((r["chat_profile"], r["chat_session"]) for r in rows
                                             if r["status"] not in TERMINAL_STATUSES))
+    superseded = _compressed_away(rows, want, gateway)
     for r in rows:
         # [daveey] A worker's ``local-<sha256>`` is released like any machine session, not skipped as a shepherd:
         # another gateway proves a foreign hash chat by an unreleased ``created`` link (``proven_foreign_chats``),
         # and only this gateway can say the hash is a worker (review t_01a1cf9aab0349a9).
         if r.pop("status") not in TERMINAL_STATUSES and str(r["chat_session"] or "") not in machine[
-                (type(r["chat_profile"]), r["chat_profile"])]:
+                (type(r["chat_profile"]), r["chat_profile"])] and r["uid"] not in superseded:
             continue
         out[r["uid"]] = {**r, "released": 1, "created_at": int(r["created_at"] or time.time())}
+    return out
+
+
+def _compressed_away(rows: list[dict[str, Any]], want: dict[str, dict[str, Any]], gateway: str) -> set[str]:
+    """Uids of owner-written rows on OPEN cards whose chat session is a compression ancestor of a session this
+    gateway already links, unreleased, to the same card and chat profile. [daveey]
+
+    The owner writes its link from the card's ``platform='hub'`` subscription (``_owner_hub_links``), which names
+    the session that placed the card. A chat that compressed before its gateway's ``accept_binding`` (its Board
+    sync down) has its ledger resolve the tip instead, so the card had two unreleased rows, the ancestor's from the
+    owner and the tip's from here: ``session_tasks`` deduped them but ``links_diff`` listed the ancestor
+    ``only_in_replica`` until the card closed (review of PR #2095). The descendant's row is the chat's link; the
+    ancestor's is released, as a closed card's is. Only this gateway's ``state.db`` (the chat profile's home) knows
+    the lineage; an unreadable one releases nothing this pass."""
+    from hermes_cli.kanban_origin import _ro
+    from hermes_cli.kanban_session_provenance import _local_homes
+    from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
+    linked: dict[tuple[str, Any], set[str]] = {}
+    for link in want.values():
+        if link.get("task_id") and not link.get("released") and link.get("chat_gateway") == gateway:
+            linked.setdefault((link["task_id"], link.get("chat_profile")), set()).add(str(link.get("chat_session")))
+    candidates: dict[Any, list[dict[str, Any]]] = {}
+    for r in rows:
+        sessions = linked.get((r["task_id"], r["chat_profile"]))
+        if r["status"] not in TERMINAL_STATUSES and sessions and str(r["chat_session"]) not in sessions:
+            candidates.setdefault(r["chat_profile"], []).append(r)
+    out: set[str] = set()
+    for profile, group in candidates.items():
+        for home in _local_homes(profile):
+            path = home / "state.db"
+            if not path.exists():
+                continue
+            try:
+                db = _ro(path)
+            except sqlite3.Error as exc:
+                _log.info("kanban chat links: %s unreadable for compression lineage (%s)", path, exc)
+                continue
+            try:
+                for r in group:
+                    sid, seen = str(r["chat_session"]), {str(r["chat_session"])}
+                    for _ in range(_CHAIN_CAP):
+                        step = db.execute(_CHAIN_STEP_SQL, (sid,)).fetchone()
+                        if step is None or step[0] in seen:
+                            break
+                        sid = str(step[0])
+                        seen.add(sid)
+                        if sid in linked[(r["task_id"], r["chat_profile"])]:
+                            out.add(r["uid"])
+                            break
+            except sqlite3.Error as exc:
+                _log.info("kanban chat links: compression lineage unreadable in %s (%s)", path, exc)
+            finally:
+                db.close()
     return out
 
 
@@ -231,6 +286,7 @@ def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list
     exists in this file or the replica, released included, so a release the chat's gateway already made is never
     reopened; an unreadable replica writes nothing this pass."""
     from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_db_notify import machine_sessions
     from hermes_cli.kanban_lockguard import connect
     from hermes_cli.kanban_origin import OriginError, parse_origin
     from hermes_cli.kanban_origin_intent_carry import EVENT_KIND
@@ -261,8 +317,12 @@ def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list
     groups: dict[tuple[str, str], list[str]] = {}
     for _tid, gw, profile, session in wanted:
         groups.setdefault((gw, profile), []).append(session)
-    headless = {(gw, profile): _worker_shepherds(sessions, gw, profile) for (gw, profile), sessions in groups.items()}
-    wanted = {k: v for k, v in wanted.items() if k[3] not in headless[(k[1], k[2])]}
+    # [daveey] The chat gateway's own verdict (``machine_sessions``, as its ``_owner_written_releases`` releases by):
+    # worker hashes AND ``cron_`` sessions. With only the headless filter a cron chat's sub got a row that gateway
+    # released on its next pass. A foreign ref is never looked up locally, so this reads no state.db.
+    machine = {(gw, profile): machine_sessions(gw, sessions, local_gateway=gateway, profile=profile)
+               for (gw, profile), sessions in groups.items()}
+    wanted = {k: v for k, v in wanted.items() if k[3] not in machine[(k[1], k[2])]}
     task_ids = sorted({k[0] for k in wanted})
     have: set[tuple] = set()
     bound: set[tuple] = set()

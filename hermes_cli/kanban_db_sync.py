@@ -228,6 +228,11 @@ CREATE TABLE IF NOT EXISTS task_chat_links (
     created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_chat_links_chat ON task_chat_links(chat_gateway, chat_session);
+-- [daveey] Per-card lookups (the owner's ``_owner_hub_links``, ``proven_foreign_chats``, the released-sibling
+-- EXISTS of ``_read_replica_links``) scanned every link without it. An index is no column: ``SchemaAhead`` and the
+-- wire format only compare columns, so an older core syncs a file that has it. A process's first open of each board
+-- file and replica runs this script (``install_or_remove``), so it is also the migration of existing files.
+CREATE INDEX IF NOT EXISTS idx_task_chat_links_task ON task_chat_links(task_id);
 CREATE TABLE IF NOT EXISTS kanban_sync_state (
     board_id        TEXT PRIMARY KEY,
     cursor          INTEGER NOT NULL DEFAULT 0,
