@@ -158,3 +158,46 @@ def test_a_store_python_borrower_activates_the_owners_generation(tmp_path, monke
         assert not (home / "installs").exists(), "the borrower built state of its own"
     else:
         assert result.stdout.startswith("refused: no dependency environment is committed"), result.stdout
+
+
+@posix
+def test_a_served_borrowers_relaunch_runs_the_owners_generation_without_rechecking(tmp_path, monkeypatch):
+    """The store interpreter a served borrowing launch relaunches into (same pid, the parent's
+    verdict handed over in the environment) asks no probe at all -- neither currency nor the owner
+    check -- records the root as current for check_runtime, and boots the owner's generation."""
+    root = _checkout(tmp_path, monkeypatch)
+    (root / ".git").mkdir()
+    (root / "install-stamp.json").write_text(json.dumps({"updateMechanism": "self", "commit": "abc"}),
+                                              encoding="utf-8")
+    venv = _owner_generation(tmp_path / "owner", root)
+    home = _borrow(tmp_path, monkeypatch)
+    base_prefix = Path(sys.base_prefix).resolve()
+    repo = Path(__file__).resolve().parents[2]
+    code = (
+        "import importlib.util, os, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1])\n"
+        "import hermes_constants; hermes_constants._get_platform_default_hermes_home = lambda: Path(sys.argv[3])\n"
+        "root = Path(sys.argv[2]).resolve()\n"
+        "from hermes_cli import _launchers, launch_probe, venv_sync\n"
+        "probes = []\n"
+        "launch_probe.probe = lambda root, operation='currency', **kw: probes.append(operation)\n"
+        "venv_sync._launch_currency = lambda root, command: probes.append('currency')\n"
+        "_launchers.resolve_store_python = lambda *a, **kw: Path(sys.executable)\n"
+        "os.environ[venv_sync.LAUNCH_HANDOFF_ENV] = f'current:{os.getpid()}:{root}'\n"
+        "print('relaunch:', venv_sync.prepare_launch(root, ['config', 'path']))\n"
+        "print('probes:', probes)\n"
+        "print('current:', root in venv_sync._current_roots)\n"
+        "from pm.environments import activate_dependencies\n"
+        "activate_dependencies(root)\n"
+        "print('owner importable:', importlib.util.find_spec('owner_only') is not None)\n"
+    )
+    env = {**os.environ, "HERMES_HOME": str(home), "HERMES_RUNTIME_DIR": str(base_prefix.parent)}
+    for name in ("PYTHONPATH", "HERMES_DISABLE_LAZY_INSTALLS", "HERMES_LAUNCH_CURRENT_HANDOFF"):
+        env.pop(name, None)
+    result = subprocess.run([getattr(sys, "_base_executable", sys.executable), "-I", "-c", code, str(repo),
+                             str(root), str(tmp_path / "default")],
+                            env=env, capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["relaunch: None", "probes: []", "current: True",
+                                          "owner importable: True"], result.stdout + result.stderr
+    assert not (home / "installs").exists(), "the borrower built state of its own"
+    assert venv.is_dir()

@@ -525,6 +525,16 @@ def _require_own_dependencies(project_root: Path) -> Path | None:
     removes it under a running borrower. Nothing else of the owner's state is written and its lock
     is not taken: the selection is re-read after leasing, as an unlocked reader does. A lease
     directory this user cannot write leaves the refusal in place.
+
+    The lease does not check the owner's stamp (``pm.install.borrowed_venv_is_current``): that
+    is ``hermes_cli.venv_sync.prepare_launch``'s question, and a borrowing launch that asks it
+    syncs its own environment when the owner's does not serve it. Processes that skip
+    prepare_launch -- the ``_METADATA_FLAGS`` path (``--version``, ``--help``) and
+    ``ui-tui/scripts/gateway_bootstrap.py`` -- therefore boot the owner's last committed
+    generation even when the checkout has moved past it, where they used to refuse. That is
+    accepted: it is the generation the owner's own processes on those paths run too (they skip
+    the same check), and the bootstrap is only a client: a gateway it starts is a ``hermes``
+    entry point, whose boot (``hermes_bootstrap``) runs prepare_launch and judges currency.
     """
     import sys
 

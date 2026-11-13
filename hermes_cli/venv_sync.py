@@ -749,6 +749,14 @@ def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path 
     run, written or published from here, so a borrowing launch cannot rebind the shared
     launchers, rebuild products another root is serving, or race the owner's tail under a lock
     that lives in a different home.
+
+    A launch whose dependencies serve it -- its own current generation, or the owner's that
+    serves it -- hands that verdict to the store interpreter it relaunches into (``_handoff``,
+    as ``prepare_launch`` does), so the exec'd child repeats neither the currency probe nor the
+    owner check; on that interpreter it records the root as current, so ``check_runtime`` skips
+    its own probe as well. A borrower's child reads ``current`` as "served" (its own or the
+    owner's) and takes this path again. A launch that just synced its own hands nothing on: its
+    child checks for itself, as a relaunch after the main path's sync does.
     """
     import os
     import sys
@@ -756,7 +764,9 @@ def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path 
     from hermes_cli._launchers import resolve_store_python
     from hermes_cli.update_lock import UpdateLock
 
-    if not current and not _owner_environment_serves(root):
+    global _handoff
+    served = current or _owner_environment_serves(root)
+    if not served:
         lock = UpdateLock(install_root=root, checkout_first=False)  # R6, as in prepare_launch
         if not lock.acquire():
             raise RuntimeError("an update is still running; wait for it to exit, then relaunch Hermes")
@@ -774,7 +784,13 @@ def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path 
     # The pre-sync flag used to force a re-exec even when this process already is the store
     # interpreter. A script that mints a new HERMES_HOME on each start would then sync and
     # re-exec forever. Activation runs in this process when prepare_launch returns None.
-    return None if same else python
+    if not same:
+        if served:
+            _handoff = ("current", root)
+        return python
+    if served:
+        _current_roots.add(root)
+    return None
 
 
 def _finish_source_update(root: Path, *, current: bool, pending: Path) -> None:
