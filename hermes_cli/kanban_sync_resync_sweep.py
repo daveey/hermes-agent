@@ -12,7 +12,8 @@ local tombstones and picked-up copies of other gateways' cards. So the sweep del
   tombstone;
 - not written after the rebuild began: its creation time, in whole seconds, is before ``since`` (a row of that
   same second is spared for one more rebuild rather than guessed older); ``task_links`` has no creation time, so a
-  link is swept only if it was in the file when the rebuild began.
+  link is swept only if its key was in the file when the rebuild began and its child card has no ``linked`` or
+  ``unlinked`` event since then (a key unlinked and linked again during the rebuild is a new row under an old key).
 
 The deletes go through the feed apply (the same handlers and tombstones as a feed delete, observers fired), children
 before cards, and each candidate is re-checked inside that apply transaction.
@@ -22,7 +23,8 @@ The round's ``board_sync_lock`` does not stop every push: ``reconcile`` (``herme
 row is then missing from the snapshot although the Board holds it, and its op is gone before the sweep. So
 :func:`resync_live` reads every outbox op (any state) before the rebuild starts, and the sweep also spares those
 rows and every row of the cards they name. A link written after that read and acked by such a push before the
-sweep has neither an op nor a creation time, so the links present at that read bound the ``task_links`` sweep.
+sweep has neither an op nor a creation time, so the links present at that read bound the ``task_links`` sweep, and
+the child card's ``linked``/``unlinked`` events since ``since`` spare a key that was unlinked and re-created.
 [daveey] t_01a1d5f9de4020fa t_01a1d62f0a4187d8 t_01a1d6660108bedb
 """
 
@@ -40,6 +42,11 @@ _log = logging.getLogger(__name__)
 
 _OWN = "(t.created_on IS NULL OR t.created_on = :gw)"
 _CARD_FREE = "NOT EXISTS (SELECT 1 FROM kanban_sync_outbox o WHERE o.table_name = 'tasks' AND o.row_uid = t.id)"
+# A link is swept only while its child card's links are unchanged since the rebuild began: a key unlinked and linked
+# again carries no creation time of its own, but link_tasks / unlink_tasks write a linked / unlinked event on the child.
+_LINK_QUIET = ("NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = x.child_id "
+               "AND e.kind IN ('linked', 'unlinked') AND e.created_at >= :since)")
+_CHUNK = 500  # bound variables per IN (...) read
 # Child rows of this gateway's cards: (uid expression, creation-time column or None).
 _CHILDREN: dict[str, tuple[str, Optional[str]]] = {
     "task_links": ("x.parent_id || '>' || x.child_id", None),
@@ -70,7 +77,9 @@ def _candidates_sql(table: str) -> str:
         where.append(f"COALESCE(x.{born}, 0) < :since")
     if table == "task_events":  # the Board drops older events without a delete: their absence is no deletion
         where.append("COALESCE(x.created_at, 0) >= :window")
-    if table != "task_links":
+    if table == "task_links":
+        where.append(_LINK_QUIET)
+    else:
         where.append("x.uid IS NOT NULL")
     return f"SELECT {uid}, t.id FROM {table} x JOIN tasks t ON t.id = {task} WHERE " + " AND ".join(where)
 
@@ -101,19 +110,16 @@ def held_at_start(conn: sqlite3.Connection) -> Held:
     row's table was already paged. The links are read first: a link written between the two reads is then spared
     as new rather than bounded in without its op."""
     links = frozenset(str(uid) for (uid,) in conn.execute(f"SELECT {_CHILDREN['task_links'][0]} FROM task_links x"))
-    rows: set[tuple[str, str]] = set()
-    cards: set[str] = set()
-    for table, uid in conn.execute("SELECT table_name, row_uid FROM kanban_sync_outbox"):
-        table, uid = str(table), str(uid)
-        rows.add((table, uid))
-        if table == "tasks":
-            cards.add(uid)
-        elif table == "task_links":
-            cards.add(uid.partition(">")[2])
-        elif table in _CHILDREN:
-            found = conn.execute(f"SELECT task_id FROM {table} WHERE uid = ?", (uid,)).fetchone()
-            if found and found[0]:
-                cards.add(str(found[0]))
+    rows = {(str(table), str(uid)) for table, uid in conn.execute("SELECT table_name, row_uid FROM kanban_sync_outbox")}
+    cards = {uid for table, uid in rows if table == "tasks"}
+    cards |= {uid.partition(">")[2] for table, uid in rows if table == "task_links"}
+    for table in sorted({t for t, _ in rows} & (set(_CHILDREN) - {"task_links"})):  # grouped reads, not one per op
+        uids = sorted(uid for t, uid in rows if t == table)
+        for i in range(0, len(uids), _CHUNK):
+            part = uids[i:i + _CHUNK]
+            cards |= {str(task) for (task,) in conn.execute(
+                f"SELECT DISTINCT task_id FROM {table} WHERE task_id IS NOT NULL "
+                f"AND uid IN ({', '.join('?' * len(part))})", part)}
     return Held(frozenset(rows), frozenset(cards), links)
 
 

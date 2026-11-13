@@ -315,12 +315,58 @@ def test_a_link_in_the_file_when_the_rebuild_began_is_still_swept(live, svc):
     kb.link_tasks(live, parent, child)
     with kbc.write_txn(live):  # the backdate is a local write too: clear the outbox after it
         live.execute("UPDATE tasks SET created_at = created_at - 60")
+        live.execute("UPDATE task_events SET created_at = created_at - 60")  # the linked event predates the rebuild
         live.execute("DELETE FROM kanban_sync_outbox")
     held = sweep.held_at_start(live)
     assert held.links == {f"{parent}>{child}"}
-    seen = {t: set() for t in ksc.IMPORT_ORDER} | {"tasks": {parent, child}}
+    seen = {"task_links": set(), "tasks": {parent, child}}  # task_events unread: the backdated events stay
     assert sweep.sweep_absent(live, seen, BOARD, ME, since=int(time.time()), held=held) == {"task_links": 1}
     assert not live.execute("SELECT 1 FROM task_links").fetchone()
+
+
+class RelinkMidRebuild(FakeHub):
+    """After ``held_at_start``: before the ``task_links`` snapshot is read, a link is unlinked locally and a concurrent
+    ``reconcile`` acks the delete; after that snapshot was read to its end, the same key is linked again and acked.
+    The key was in the file when the rebuild began, but the row the Board holds is a new one."""
+
+    def __init__(self, svc, gateway, path, parent, child):
+        super().__init__(svc, gateway)
+        self._path, self._link, self._steps = path, (parent, child), set()
+
+    def _push(self, board, act):
+        other = kbc.connect(self._path)
+        try:
+            act(other, *self._link)
+            ksc.push(other, FakeHub(self.svc, ME), board, ME, primary=True)
+        finally:
+            other.close()
+
+    def snapshot_page(self, board, table, after="", limit=1000):
+        if table == "task_links" and "unlink" not in self._steps:
+            self._steps.add("unlink")
+            self._push(board, kb.unlink_tasks)
+        if table == "task_runs" and "relink" not in self._steps:
+            self._steps.add("relink")
+            self._push(board, kb.link_tasks)
+        return super().snapshot_page(board, table, after, limit)
+
+
+def test_a_link_unlinked_and_relinked_mid_rebuild_is_not_swept(live, svc, kanban_home):
+    parent = kb.create_task(live, title="parent")
+    child = kb.create_task(live, title="child")
+    kb.link_tasks(live, parent, child)
+    with kbc.write_txn(live):  # the first link predates the rebuild: only the mid-rebuild relink may spare it
+        live.execute("UPDATE task_events SET created_at = created_at - 60")
+    assert _round(kanban_home, svc.hub(ME)).error is None
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox").fetchone()  # nothing held at the rebuild's start
+
+    swept = sweep.resync_live(live, RelinkMidRebuild(svc, ME, kanban_home / "kanban.db", parent, child), BOARD, ME)
+
+    assert f"{parent}>{child}" in svc.board(BOARD)["rows"]["task_links"]
+    assert "task_links" not in swept
+    # RED before: the key was in Held.links, absent from the links snapshot, no op: deleted and tombstoned
+    assert (parent, child) in {tuple(r) for r in live.execute("SELECT parent_id, child_id FROM task_links")}
+    assert not live.execute("SELECT 1 FROM kanban_sync_tombstones WHERE table_name = 'task_links'").fetchone()
 
 
 def test_a_row_written_in_the_second_the_rebuild_began_is_not_swept(live, svc):
