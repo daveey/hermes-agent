@@ -182,8 +182,9 @@ def test_glued_ampersand_redirection_splits_from_its_word():
 
     assert split("python3 f.py&>x") == "python3 f.py &>x"
     assert split("a 'b'&>>y") == "a 'b' &>>y"
-    # `>&`, `&&>`, `|&>`, a quoted `&` and a lone `&` are left as written; an escaped `&` is
-    # part of the word, so only the `>` after it splits off.
-    assert split("a 2>&1 >&2") == "a 2>&1 >&2"
+    # Main's fd normalizer escapes duplication punctuation for shlex; it stays one token.
+    assert split("a 2>&1 >&2") == r"a 2>\&1 >\&2"
+    # Control operators, quoted ampersands and lone `&` remain unchanged. An escaped `&`
+    # belongs to the word, so only the `>` after it splits off.
     assert split("a&&>x a|&>x a & b") == "a&&>x a|&>x a & b"
     assert split("echo 'a&>x' a\\&>x") == "echo 'a&>x' a\\& >x"
