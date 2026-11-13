@@ -19,6 +19,7 @@ import {
   $stalledSessionIds,
   $workingSessionIds,
   clearAllSessionStates,
+  holdsTurnClaim,
   liveSessionScopes,
   publishSessionState,
   reconcileBusyStatesOnReconnect,
@@ -40,7 +41,7 @@ function tileDelegate(cache: Map<string, ClientSessionState>): SessionTileDelega
     retireBusyClaim: runtimeId => {
       const cached = cache.get(runtimeId)
 
-      if (!cached || (!cached.busy && !cached.awaitingResponse && !cached.turnLive)) {
+      if (!holdsTurnClaim(cached)) {
         return false
       }
 

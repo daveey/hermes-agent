@@ -34,6 +34,7 @@ import {
 } from '@/store/session-request-router'
 import {
   $sessionTiles,
+  holdsTurnClaim,
   publishSessionState,
   sessionTileOwnerRoute,
   setSessionTileDelegate
@@ -355,7 +356,7 @@ export function useSessionTileDelegate({
       retireBusyClaim: runtimeId => {
         const cached = sessionStateByRuntimeIdRef.current.get(runtimeId)
 
-        if (!cached || (!cached.busy && !cached.awaitingResponse && !cached.turnLive)) {
+        if (!holdsTurnClaim(cached)) {
           return false
         }
 

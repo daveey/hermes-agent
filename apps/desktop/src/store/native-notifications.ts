@@ -21,7 +21,9 @@ import {
   $activeSessionId, $cronSessions, $messagingSessions, $sessions,
   ownerLookupSessionRows, sessionMatchesStoredId
 } from './session'
-import { $sessionStates, knownOwnerForSession, runtimeSessionOwner, storedSessionIdForRuntimeId } from './session-states'
+import {
+  $sessionStates, holdsTurnClaim, knownOwnerForSession, runtimeSessionOwner, storedSessionIdForRuntimeId
+} from './session-states'
 
 export type { HermesOpenTarget }
 
@@ -258,7 +260,7 @@ function deferCompletion(input: NativeNotificationInput, storedId: string, owner
     for (const [id, pending] of [...deferredCompletions]) {
       const state = $sessionStates.get()[id]
 
-      if (!state || state.busy || state.awaitingResponse || state.turnLive) {
+      if (!state || holdsTurnClaim(state)) {
         deferredCompletions.delete(id)
 
         continue

@@ -96,6 +96,8 @@ import {
   type SessionProfileRoute
 } from './session-request-router'
 import {
+  holdsTurnClaim,
+  isLiveTurnAwaitingEvents,
   liveTurnLastActiveMs,
   type LiveTurnStatusResponse,
   type LiveTurnVerdict,
@@ -398,11 +400,7 @@ function clearEventSilence(runtimeId: string) {
   }
 }
 
-export function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined): boolean {
-  return Boolean(state && (state.busy || state.awaitingResponse || state.turnLive) && !state.needsInput)
-}
-
-export { liveTurnLastActiveMs, type LiveTurnVerdict, liveTurnVerdict } from './session-states-live-turn'
+export { holdsTurnClaim, isLiveTurnAwaitingEvents, liveTurnLastActiveMs, type LiveTurnVerdict, liveTurnVerdict }
 
 /** [daveey] The backend's activity decides the quiet hint for a running turn.
  *  The renderer watchdog only measures events reaching THIS window, and a turn
@@ -1035,7 +1033,7 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
 
   try {
     for (const [runtimeId, state] of Object.entries(states)) {
-      if (!state || (!state.busy && !state.awaitingResponse && !state.turnLive)) {
+      if (!holdsTurnClaim(state)) {
         continue
       }
 
@@ -1054,7 +1052,7 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
       // Re-read — the write path may have republished (and released) this entry.
       const published = $sessionStates.get()[runtimeId]
 
-      if (published?.busy || published?.awaitingResponse || published?.turnLive) {
+      if (holdsTurnClaim(published)) {
         publishSessionState(runtimeId, {
           ...published,
           awaitingResponse: false,

@@ -1,3 +1,5 @@
+import type { ClientSessionState } from '@/app/types'
+
 export type LiveTurnVerdict = 'ended' | 'running' | 'unknown'
 
 export interface LiveTurnStatusResponse {
@@ -34,4 +36,15 @@ export function liveTurnLastActiveMs(
   const ms = Number(lastActive) * 1000
 
   return lastActive != null && Number.isFinite(ms) && ms > 0 ? ms : null
+}
+
+/** [daveey] Whether `state` holds a turn claim: busy, awaiting a reply, or a
+ *  live turn. The single copy of this predicate — reconnect reconcile and the
+ *  tile delegate's retireBusyClaim must agree on it (PR #1913). */
+export function holdsTurnClaim(state: ClientSessionState | undefined): state is ClientSessionState {
+  return Boolean(state && (state.busy || state.awaitingResponse || state.turnLive))
+}
+
+export function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined): boolean {
+  return holdsTurnClaim(state) && !state.needsInput
 }
