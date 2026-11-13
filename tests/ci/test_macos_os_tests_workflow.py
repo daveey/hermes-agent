@@ -104,6 +104,44 @@ def test_own_run_is_excluded_and_each_run_is_read_once():
     assert not any("/runs/99/jobs" in c for c in calls)
 
 
+def _paged_api(pages: dict[str, list[list[dict]]], jobs: dict[int, list[dict]], calls: list[str]):
+    """Like _api, but each state's runs are split into pages served by &page=N (1 when absent)."""
+    def api(path: str):
+        calls.append(path)
+        if "/jobs" in path:
+            run_id = int(path.split("/runs/")[1].split("/")[0])
+            return {"jobs": jobs.get(run_id, [])}
+        state = path.split("status=")[1].split("&")[0]
+        page = int(path.split("page=")[-1].split("&")[0]) if "&page=" in path else 1
+        listing = pages.get(state, [])
+        return {"workflow_runs": listing[page - 1] if page <= len(listing) else []}
+    return api
+
+
+def test_a_mini_job_waiting_only_in_a_later_page_of_runs_still_skips_the_slot():
+    # 100 in-progress runs fill page 1 with nothing waiting; the waiting mini job sits on page 2.
+    calls: list[str] = []
+    page1 = [{"id": i} for i in range(1, 101)]
+    api = _paged_api({"in_progress": [page1, [{"id": 500}]]}, {500: [_job("queued")]}, calls)
+    run, reason = _gate().decide("schedule", api, REPO, own_run_id=99)
+    assert run is False
+    assert "1 job(s) already waiting" in reason
+    assert any("status=in_progress" in c and "&page=2" in c for c in calls)
+    # A short page ends the listing: no page 3 read.
+    assert not any("status=in_progress" in c and "&page=3" in c for c in calls)
+
+
+def test_a_state_with_more_full_pages_than_the_cap_is_treated_as_busy():
+    gate = _gate()
+    calls: list[str] = []
+    full = [[{"id": p * 1000 + i} for i in range(gate.PAGE_SIZE)] for p in range(gate.MAX_RUN_PAGES)]
+    api = _paged_api({"queued": full}, {}, calls)
+    run, reason = gate.decide("schedule", api, REPO, own_run_id=99)
+    assert run is False
+    assert "queued runs open; skipping this slot" in reason
+    assert not any("/jobs" in c for c in calls)
+
+
 @pytest.mark.parametrize("event", ["workflow_dispatch", "push"])
 def test_manual_and_probe_runs_are_never_gated(event):
     def api(path):
