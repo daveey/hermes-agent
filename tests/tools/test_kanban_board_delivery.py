@@ -349,9 +349,11 @@ def test_create_placed_elsewhere_while_the_sync_role_is_given_up_says_only_this_
     assert "queued locally" not in json.dumps(out)
     assert SHOWS_PROMISE not in out["note"]
     assert "shows in this chat's tasks once this gateway's copy of the Board refreshes" in out["note"]
-    assert "Worker-4 writes this chat's link to the Board; this gateway's Board sync has been stopped since " in out[
-        "note"]
-    assert out["board_sync"].startswith("worker-4 writes this chat's link to the Board")
+    # [daveey] PR #2079 re-review 5889570113: the gateway id stays verbatim (it read "Worker-4").
+    assert ("Owner gateway worker-4 writes this chat's link to the Board; this gateway's Board sync has been stopped "
+            "since ") in out["note"]
+    assert "Worker-4" not in out["note"]
+    assert out["board_sync"].startswith("owner gateway worker-4 writes this chat's link to the Board")
     assert "gave up the sync role" in out["board_sync"] and "may not refresh until it recovers" in out["board_sync"]
 
 

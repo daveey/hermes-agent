@@ -58,13 +58,14 @@ def _chat_link_by_owner(payload: dict) -> None:
     """The placed card and its link to this chat are on the Board; only this gateway's replica lags."""
     from hermes_cli import kanban_sync_runstate as runstate
     record = runstate.down() or {}
-    owner = payload.get("runs_where") or "the card's home gateway"
+    owner = f"owner gateway {payload['runs_where']}" if payload.get("runs_where") else "the card's home gateway"
     text = str(payload.get("note") or "")
     text = text.replace(CHAT_TASKS_SHOWS, CHAT_TASKS_SHOWS + _LATER, 1).replace(
         CHAT_TASKS_HEAD + CHAT_TASKS_SEP, CHAT_TASKS_HEAD + _LATER + CHAT_TASKS_SEP, 1)
     sync_note = (f"{owner} writes this chat's link to the Board; this gateway's Board sync has been stopped since "
                  f"{runstate.when(record.get('since'))} ({record.get('reason') or 'unknown reason'}), so its copy "
                  "of the Board may not refresh until it recovers")
+    # [daveey] Capitalize only the fixed lead word: a gateway id stays verbatim ("worker-4", never "Worker-4").
     payload["note"] = f"{text} {sync_note[0].upper()}{sync_note[1:]}."
     payload["chat_link"] = OWNER_WRITTEN
     payload["board_sync"] = sync_note
