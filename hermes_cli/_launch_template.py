@@ -189,6 +189,32 @@ def render(root: str, module: str, func: str) -> str:
     )
 
 
+def relaunch_prefix(root: str, argv: list[str]) -> str:
+    """The single-line source ``venv_sync.relaunch_command`` puts before the re-entry body.
+
+    One stdlib-only definition shared by the producer (``venv_sync``) and the bootstrap-time
+    attestation, which compares a relaunched child's ``-c`` source to it byte for byte.
+    Selects deps before run_path: ``__setitem__`` returns None, so the ``or`` still execs the
+    module; registering it first keeps a later import from re-entering prepare_launch under a
+    HERMES_HOME the script has not set yet. ``_hermes_relaunched`` marks the child this starts
+    (not processes it spawns) for ``venv_sync._relaunch_target``.
+    """
+    return (
+        f"import sys, runpy; sys.path.insert(0, {root!r}); sys.argv = {argv!r}; "
+        "sys._hermes_relaunched = True; "
+        "import importlib.util as _iu, pathlib as _pl; "
+        f"_bp = _pl.Path({root!r}) / 'hermes_bootstrap.py'; "
+        "_spec = _iu.spec_from_file_location('hermes_bootstrap', _bp) if _bp.is_file() else None; "
+        "_mod = _iu.module_from_spec(_spec) if _spec is not None else None; "
+        "(sys.modules.__setitem__('hermes_bootstrap', _mod) or _spec.loader.exec_module(_mod)) "
+        "if _mod is not None else None; "
+    )
+
+
+# The fixed start of every relaunch source (the root literal follows it).
+RELAUNCH_HEAD = "import sys, runpy; sys.path.insert(0, "
+
+
 def split_pin_marker(script: str) -> tuple[str, str] | None:
     """Split at the single pin marker: (head, tail) both excluding the marker, else None."""
     if script.count(PIN_MARKER) != 1:

@@ -138,7 +138,8 @@ def test_launch_lock_acquisition_seeds_the_installed_registry(registry, homes, m
 def test_quiet_control_pending_reads_the_real_registry(registry, homes):
     real, _link = homes
     runner = types.SimpleNamespace(_quiet_registry=registry, _quiet_bootstrap_provenance=True,
-                                   _quiet_attested=True)
+                                   _quiet_attested=True, _quiet_code=types.SimpleNamespace(
+                                       unknowns=tuple, latched_unknowns=tuple))
     control = quiet_control.QuietControl(runner)
     pending = control._pending(registry)
     assert "membership_unsupported" not in pending and "membership_unseeded" in pending

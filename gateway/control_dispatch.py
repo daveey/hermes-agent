@@ -7,7 +7,8 @@ import json
 from typing import Callable
 
 
-QUIET_BOOKKEEPING_VERBS = ('quiet-observe-start', 'quiet-observe-snapshot', 'quiet-observe-end')
+QUIET_BOOKKEEPING_VERBS = ('quiet-observe-start', 'quiet-observe-snapshot', 'quiet-observe-end',
+                           'quiet-observe-check')
 # Read-only identity/status/list polling: passive, never reserved (and never suppressed).
 PASSIVE_VERBS = frozenset({
     'identify', 'status', 'profile', 'resolve-profile', 'session-ticket', 'active-work',

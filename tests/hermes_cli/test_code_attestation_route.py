@@ -153,10 +153,10 @@ def refused(probe, reason):
     assert probe["report"]["route"] is None and probe["report"]["launcher"] is None
 
 
-def assert_supported(probe, core, digest):
+def assert_supported(probe, core, digest, route="managed-stub"):
     from hermes_cli.code_attestation import SEED_COMMON
     report = probe["report"]
-    assert report["route"] == "managed-stub" and report["stub_head_digest"] == digest
+    assert report["route"] == route and report["stub_head_digest"] == digest
     assert report["main_is_seed"] is False
     seeds = {s["module"]: s for s in probe["seed"] if s["kind"] == "trusted_bootstrap_seed"}
     assert set(seeds) == set(SEED_COMMON) and "hermes_cli.main" not in seeds
@@ -265,14 +265,6 @@ def test_run_module_argv_refuses(tmp_path, core, python):
 def test_post_swap_refuses(tmp_path, core, python):
     probe = run_stub(tmp_path, python, current_script(core), args=("update", "--post-swap", str(tmp_path / "x")))
     refused(probe, "unsupported-route:post-swap")
-
-
-def test_relaunch_prefix_script_refuses(tmp_path, core, python):
-    from hermes_cli import venv_sync
-    original = [str(python), "-I", "-c", current_script(core), *ARGS]
-    command = venv_sync.relaunch_command(python, core, ["-c", *ARGS], original, None)
-    probe = run(tmp_path, command)
-    refused(probe, "relaunched-launch")
 
 
 def test_runtime_command_c_form_refuses(tmp_path, core, python):
