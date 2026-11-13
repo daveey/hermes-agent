@@ -46,6 +46,7 @@ from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the document
     BOARD_COLUMNS, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
 from plugins.kanban.dashboard.plugin_api_comment_actor import CommentBody, admitted_relay, comment_relay, comment_writer
+from plugins.kanban.dashboard.plugin_api_remote_lease import archive as _archive, lease_refusal, patch_verb, refuse_live_lease
 from hermes_cli.kanban_db_attachment_names import _collision_free_path, _safe_attachment_name
 
 log = logging.getLogger(__name__)
@@ -738,17 +739,6 @@ _OVERRIDE_OPS = (
 )
 
 
-def _archive(conn, task_id: str) -> tuple[bool, Optional[str]]:
-    """Archive, or send a stop request when another machine runs the card under its live Board lease
-    (``kanban_remote_stop``): ``(ok, holder)``, holder set when the archive is pending there. [daveey]"""
-    from hermes_cli.kanban_remote_stop import RemoteArchiveRefused, archive
-    try:
-        out = archive(conn, task_id)
-    except RemoteArchiveRefused as exc:
-        raise _conflict(str(exc)) from exc
-    return bool(out), (out or {}).get("holder") if (out or {}).get("status") == "archive_pending" else None
-
-
 def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_deferred: bool) -> Optional[str]:
     """PATCH status phase: 400 on a rejected verb, 409 when the transition is refused
     (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast).
@@ -814,6 +804,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
     with _board_conn(board) as (board, conn):
         _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)
+        refuse_live_lease(conn, task_id, patch_verb(payload))  # [daveey] another machine's live Board lease
         if (refusal := ask_filing_refusal(conn, task_id, payload)):
             raise _conflict(refusal)
         if payload.metadata_only:
@@ -961,6 +952,8 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
     if (refusal := ask_filing_refusal(conn, tid, payload)):
         entry.update(ok=False, error=refusal)
         return
+    if (lease := lease_refusal(conn, tid, patch_verb(payload))):  # [daveey] write nothing on this card
+        return entry.update(ok=False, holder=lease["holder"], error=lease["message"])
     if payload.metadata_only:
         if not classify_request(conn, tid, payload, actor):
             entry.update(ok=False, error="classification requires parked card without a current run")
@@ -1142,6 +1135,7 @@ def terminate_run_endpoint(run_id: int, payload: TerminateRunBody, board: Option
         r = _require_run(conn, run_id)
         if r.ended_at is not None:
             raise _conflict(f"run {run_id} already ended")
+        refuse_live_lease(conn, r.task_id, "reclaim")
         if not kanban_db.reclaim_task(conn, r.task_id, reason=payload.reason):
             raise _conflict(f"cannot terminate run {run_id}: task {r.task_id} is no longer in a reclaimable state")
         return {"ok": True, "run_id": run_id, "task_id": r.task_id}
@@ -1158,6 +1152,7 @@ def reclaim_task_endpoint(task_id: str, payload: ReclaimBody, board: Optional[st
     """Release an active worker claim without waiting for the claim TTL
     (``hermes kanban reclaim <task_id> --reason ...``)."""
     with _board_conn(board) as (board, conn):
+        refuse_live_lease(conn, task_id, "reclaim")
         if not kanban_db.reclaim_task(conn, task_id, reason=payload.reason):
             raise _conflict(f"cannot reclaim {task_id}: not in a claimable state (not running, or unknown id)")
         return {"ok": True, "task_id": task_id}
@@ -1189,6 +1184,7 @@ def reassign_task_endpoint(task_id: str, payload: ReassignBody, board: Optional[
     """Reassign to another profile, optionally reclaiming first
     (``hermes kanban reassign <task_id> <profile> [--reclaim]``)."""
     with _board_conn(board) as (board, conn):
+        refuse_live_lease(conn, task_id, "reassign")
         ok = kanban_db.reassign_task(
             conn, task_id, payload.profile or None, reclaim_first=bool(payload.reclaim_first), reason=payload.reason)
         if not ok:
