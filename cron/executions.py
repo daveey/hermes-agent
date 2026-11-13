@@ -804,3 +804,133 @@ def latest_executions(job_ids: list[str]) -> dict[str, dict[str, Any]]:
             clean,
         ).fetchall()
     return {row["job_id"]: dict(row) for row in rows}
+
+
+# --- change-proportional job-list read --------------------------------------------------------------
+# [daveey] The Desktop cron poll lists every profile's jobs about twice a second, and each list read
+# latest_executions + live_executions: two opens of executions.db, each paying connect + WAL pragma +
+# schema initialize (~2.2 ms of a 5 ms list_jobs on the hub, ~0.5% of a core on the busiest serve;
+# t_01a1d6c7f670c9d8, design t_01a1d563324d7e8e §6). The list now reads through one kept read-only
+# connection per ledger file and memoizes the rows on that connection's PRAGMA data_version, which
+# moves on every commit by any other connection (every ledger write opens its own), so a start or a
+# finish is seen by the next poll and an unchanged ledger costs one pragma, no open. Owner liveness is
+# not in the file: it is re-checked on every call. A replaced file (new inode) or WAL index (-shm),
+# any sqlite error, or a fork drops the reader. P1 pass ``cron.executions``: a skip is a memo hit.
+_VIEW_LOCK = threading.Lock()
+_VIEWS: dict[str, dict[str, Any]] = {}
+_VIEWS_MAX = 16
+
+_LIST_LATEST_SQL = """SELECT e.* FROM executions e WHERE e.id IN (
+      SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (
+                 PARTITION BY job_id
+                 ORDER BY julianday(claimed_at) DESC, claimed_at DESC, id DESC
+               ) AS rn
+        FROM executions)
+      WHERE rn=1)"""
+_LIST_LIVE_SQL = """SELECT * FROM executions WHERE status IN ('claimed', 'running')
+   ORDER BY julianday(claimed_at) DESC, claimed_at DESC, id DESC"""
+
+
+def _file_ident(path: str) -> Optional[tuple[int, int]]:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _drop_view(key: str) -> None:
+    view = _VIEWS.pop(key, None)
+    if view is not None:
+        try:
+            view["conn"].close()
+        except sqlite3.Error:
+            pass
+
+
+def _open_view(key: str, ident: tuple[int, int]) -> dict[str, Any]:
+    conn = sqlite3.connect(Path(key).as_uri() + "?mode=ro", uri=True, timeout=5.0, check_same_thread=False)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA data_version").fetchone()  # maps the WAL index (-shm) before it is stat'ed
+    except BaseException:
+        conn.close()
+        raise
+    while len(_VIEWS) >= _VIEWS_MAX:
+        _drop_view(next(iter(_VIEWS)))
+    view = {"conn": conn, "ident": ident, "shm": _file_ident(key + "-shm"), "version": None, "rows": None}
+    _VIEWS[key] = view
+    return view
+
+
+def _ledger_rows() -> Optional[tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]]:
+    """(each job's latest row, every claimed/running row newest first) for the current ledger, from the
+    kept reader; ``None`` when it cannot serve the read (no ledger file yet, Windows, a sqlite error),
+    and the caller then takes the exact per-call path."""
+    from hermes_cli import loop_accounting as la
+
+    if os.name == "nt":  # an open handle would pin the file against deletes and renames
+        return None
+    key = str(EXECUTIONS_FILE or (get_hermes_home().resolve() / "cron" / "executions.db"))
+    with la.pass_("cron.executions") as p, _VIEW_LOCK:
+        ident = _file_ident(key)
+        if ident is None:
+            _drop_view(key)
+            p.fallback()
+            return None
+        view = _VIEWS.get(key)
+        if view is not None and (view["ident"] != ident or view["shm"] != _file_ident(key + "-shm")):
+            _drop_view(key)
+            view = None
+        try:
+            if view is None:
+                view = _open_view(key, ident)
+            conn = view["conn"]
+            version = conn.execute("PRAGMA data_version").fetchone()[0]
+            if view["rows"] is not None and view["version"] == version:
+                p.skip()
+                return view["rows"]
+            p.change()
+            latest = {row["job_id"]: dict(row) for row in conn.execute(_LIST_LATEST_SQL).fetchall()}
+            live = [dict(row) for row in conn.execute(_LIST_LIVE_SQL).fetchall()]
+        except sqlite3.Error:
+            _drop_view(key)
+            p.fallback()
+            return None
+        p.rows(len(latest) + len(live))
+        view["version"], view["rows"] = version, (latest, live)
+        return view["rows"]
+
+
+def listed_executions(job_ids: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """``(latest_executions(job_ids), live_executions(job_ids))`` for the job list, read
+    change-proportionally (see ``_ledger_rows``). Rows are fresh copies: callers may mutate them."""
+    clean = [str(job_id) for job_id in dict.fromkeys(job_ids) if job_id]
+    if not clean:
+        return {}, {}
+    rows = _ledger_rows()
+    if rows is None:
+        return latest_executions(clean), live_executions(clean)
+    wanted = set(clean)
+    latest = {job_id: dict(row) for job_id, row in rows[0].items() if job_id in wanted}
+    live: dict[str, dict[str, Any]] = {}
+    for row in rows[1]:
+        if row["job_id"] in wanted and row["job_id"] not in live and _row_owner_live(row):
+            live[row["job_id"]] = dict(row)
+    return latest, live
+
+
+_FORK_ORPHANS: list[dict[str, Any]] = []
+
+
+def _forget_views_after_fork() -> None:
+    # A child must never use, nor close, the parent's SQLite handles: keep them referenced, unused.
+    global _VIEW_LOCK
+    _VIEW_LOCK = threading.Lock()
+    _FORK_ORPHANS.extend(_VIEWS.values())
+    _VIEWS.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_views_after_fork)
