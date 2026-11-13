@@ -26,6 +26,19 @@ def _events(delegation_id):
     return got
 
 
+def _until_completion(delegation_id):
+    """The queued events of a non-silent unit up to its own completion. Its worker writes the ledger row before it
+    queues that completion, so a finished row does not mean the event is there yet; any early per-task notice is
+    queued before it, while the unit still runs."""
+    got = []
+
+    def completed():
+        got.extend(_events(delegation_id))
+        return any(not e.get("task_failure_notice") for e in got)
+    wait_until(completed, what="the unit's completion to be queued")
+    return got
+
+
 def _ledger(parent, delegation_id):
     import sqlite3
     conn = sqlite3.connect(parent._session_db.db_path)  # health: allow HX015 -- test reads a temp-home store
@@ -199,8 +212,7 @@ def test_a_mixed_batch_reports_each_child_once_and_no_early_failure_for_the_wait
     with patch("run_agent.AIAgent", side_effect=_LimitedWhenSlow()):
         out = json.loads(delegate_task(tasks=[{"goal": "write the parser"}, {"goal": "slow: write the tests"}],
                                        background=True, parent_agent=parent))
-        wait_until(lambda: (_ledger(parent, out["delegation_id"]) or ("running",))[0] != "running", what="the unit")
-    first = _events(out["delegation_id"])
+        first = _until_completion(out["delegation_id"])
     assert [e.get("task_failure_notice") for e in first] == [None], first  # the batch result only, no early notice
     _deadline(1)
     for _ in range(3):
