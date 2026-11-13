@@ -1380,8 +1380,8 @@ def _handle_comment(args: dict, **kw) -> str:
         cid = kb.add_comment(conn, tid, author=author, body=str(body), writer_kind="agent",
                              writer_session=writer_session, relayed_human=relayed)
         subscribed = _maybe_subscribe_on_touch(conn, str(tid))
-        live = kb.live_run_id(conn, str(tid))
-        extra: dict = {"live_run": live is not None, **({"relayed_human": relayed} if relayed else {})}
+        from hermes_cli.kanban_comment_liveness import comment_live_fields
+        live, extra = comment_live_fields(conn, str(tid), kb.live_run_id(conn, str(tid)), relayed)  # [daveey]
         if live is not None and _worker_run_id(str(tid)) != live:
             extra["delivery"] = (
                 "the card has a live worker run: it gets this note at its next model call "

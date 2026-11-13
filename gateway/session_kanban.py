@@ -411,13 +411,17 @@ def _record_worker_result(context, code, last_output, failure=None, extra=None, 
     from hermes_cli.kanban_quota_receipt import quota_fields, route_fields
     observer_error = None
     strict_death_proof = False
-    if code and not (extra or {}).get('continuable'):
-        from hermes_cli.kanban_failed_result import recorded_process_witnesses
+    if not (extra or {}).get('continuable'):
+        from hermes_cli.kanban_failed_result import modern_result_recorded, recorded_process_witnesses
         with connect_closing(Path(context['db'])) as conn:
             if not _bound_worker_matches(conn, context):
                 return
-            strict_death_proof = recorded_process_witnesses(conn, context)
-        if strict_death_proof:
+            # [daveey] A clean exit joins the modern evidence only on a run that already holds it (a turn
+            # continued after its owner's restart booked a modern exit 76). Unmarked, it is never
+            # attributable there, so the crash sweep held the run forever (t_01a1d563324d7e8e run 11569).
+            strict_death_proof = recorded_process_witnesses(conn, context) and bool(
+                code or modern_result_recorded(conn, context['task_id'], context['run_id']))
+        if strict_death_proof and code:
             from hermes_cli.kanban_failed_result_observer import arm
             try:
                 arm(context)

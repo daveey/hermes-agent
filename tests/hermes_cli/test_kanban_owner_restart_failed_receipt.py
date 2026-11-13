@@ -160,6 +160,86 @@ def test_owner_snapshot_survives_replica_event_ids(board):
     assert proof.failed_result_proof(conn, context['task_id'], context['run_id'], context['claim_lock'])
 
 
+_CONTINUED_CHILD = '''
+import json, os, sys
+from pathlib import Path
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli.kanban_db_connect import connect_closing
+from gateway.session_kanban import _record_worker_result
+import hermes_cli.kanban_failed_result_observer as observer
+observer.arm = lambda context: None
+context, code, output = json.loads(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+with connect_closing(Path(context['db'])) as conn, kb.write_txn(conn):
+    kb._append_event(conn, context['task_id'], 'worker_bound',
+        {'pid': os.getpid(), 'started_at': kbd._process_fingerprint(os.getpid()),
+         'claim_lock': context['claim_lock']}, run_id=context['run_id'])
+_record_worker_result(context, code, output)
+'''
+
+
+def _continued_turn(context, code, output):
+    """The next owner's interpreter for the SAME run: binds, ends its continued turn with ``code``, exits."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    from tools.environments.local import build_subprocess_env
+    done = subprocess.run([sys.executable, '-c', _CONTINUED_CHILD, json.dumps(context), str(code), output],
+                          capture_output=True, text=True, timeout=60, env=build_subprocess_env(), check=False,
+                          cwd=str(Path(__file__).resolve().parents[2]))
+    assert done.returncode == 0, (done.stdout, done.stderr)
+
+
+def test_a_continued_run_whose_worker_exits_cleanly_is_a_protocol_violation(board):
+    """t_01a1d563324d7e8e run 11569 (worker-6, 11-13): the owner's continuable restart booking makes the
+    run's evidence modern; the continued interpreter's rc=0 result carried no modern identity, so no
+    result was attributable, ``reclaim_proof`` held, and the card sat ``running`` with every pid dead."""
+    conn, context = board
+    _failed_child(conn, context)          # the first owner's interpreter, stopped by the restart
+    book(context, True)                   # the stopping owner's continuable checkpoint (exit 76)
+    last = "I stopped retrying because I kept running kanban_link 8 times. Tell me how you'd like to proceed"
+    _continued_turn(context, 0, last)     # the next owner continues the turn; it ends without a terminal call
+    dispatch.detect_crashed_workers(conn)  # one pass, every pid of the run already dead
+    task = kb.get_task(conn, context['task_id'])
+    run = conn.execute('SELECT * FROM task_runs WHERE id=?', (context['run_id'],)).fetchone()
+    assert task is not None and task.last_failure_error is not None
+    assert task.status == 'ready', dict(run)
+    assert run['outcome'] == 'crashed' and run['ended_at'] is not None
+    assert json.loads(run['metadata'])['protocol_violation'] is True
+    assert run['error'].startswith(dispatch._PROTOCOL_VIOLATION_ERROR)
+    assert last[:60] in run['error'] and last[:60] in task.last_failure_error
+    assert task.last_failure_error.startswith(dispatch._PROTOCOL_VIOLATION_ERROR)
+    kinds = [r[0] for r in conn.execute('SELECT kind FROM task_events WHERE run_id=?', (context['run_id'],))]
+    assert kinds.count('protocol_violation') == 1
+
+
+def test_a_continued_run_whose_worker_fails_is_still_a_crash(board):
+    """The same continued shape with a failing worker keeps the strict failed-result booking."""
+    conn, context = board
+    _failed_child(conn, context)
+    book(context, True)
+    _continued_turn(context, 1, 'continued turn failed')
+    dispatch.detect_crashed_workers(conn)
+    run = conn.execute('SELECT * FROM task_runs WHERE id=?', (context['run_id'],)).fetchone()
+    assert run['outcome'] == 'crashed' and 'protocol_violation' not in json.loads(run['metadata'])
+    assert 'continued turn failed' in run['error']
+
+
+def test_a_live_continued_interpreter_with_a_clean_result_still_holds(board, monkeypatch):
+    """A clean receipt is not a death proof: a still-live bound interpreter keeps the run."""
+    conn, context = board
+    _failed_child(conn, context)
+    book(context, True)
+    _continued_turn(context, 0, 'done talking')
+    real = proof.process_gone
+    bound = [json.loads(r[0])['pid'] for r in conn.execute(
+        "SELECT payload FROM task_events WHERE kind='worker_bound' ORDER BY id")][-1]
+    monkeypatch.setattr(proof, 'process_gone', lambda pid, birth: pid != bound and real(pid, birth))
+    dispatch.detect_crashed_workers(conn)
+    task = kb.get_task(conn, context['task_id'])
+    assert task is not None and task.status == 'running'
+
+
 def test_child_can_supersede_owner_after_continuation_rebind(board):
     from hermes_cli.kanban_failed_result_identity import result_identity_fields
     conn, context = board

@@ -1059,12 +1059,16 @@ def _cmd_comment(args: argparse.Namespace) -> int:
         except ValueError as exc:
             return _err(f"kanban comment: {exc}", 2)
         live = kb.live_run_id(conn, args.task_id)
+        from hermes_cli.kanban_comment_liveness import EXITED_NOTE, worker_exited
+        exited = live is not None and worker_exited(conn, args.task_id, live)  # [daveey] no reader left
         from hermes_cli.kanban_board_delivery import cli_lines, remote_runner
         queued = cli_lines(conn, args.task_id)  # [daveey] the stopped Board sync keeps it here
         remote = bool(queued) and remote_runner(conn, args.task_id) is not None
     print(f"Comment added to {args.task_id}")
     own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id
-    if live is not None and not own_run and not remote:
+    if exited and not own_run:
+        print(EXITED_NOTE[0].upper() + EXITED_NOTE[1:] + ".")
+    elif live is not None and not own_run and not remote:
         print("The card has a live worker run: it gets this note at its next model call.")
     for line in queued:
         print(line)
