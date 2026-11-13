@@ -68,8 +68,10 @@ def admitted_claim(conn: sqlite3.Connection, task_id: str, assignee: str, lane, 
     claim; it leaves no claim deferral, so the caller's deferral pop finds none."""
     from hermes_cli.kanban_gateway_drain import claim_if_admitting
 
+    from hermes_cli.kanban_source_board import protocol_call
     recheck, refusals = capsule_claim_check(conn, task_id, assignee, spawn_fn)
-    claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_check=recheck)
+    with protocol_call():  # workspace_source R3-a: only the dispatcher's own grant may carry source_protocol
+        claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_check=recheck)
     if claimed is None and refusals:
         record_claim_refusal(conn, task_id, assignee, refusals[-1], result)
     return claimed

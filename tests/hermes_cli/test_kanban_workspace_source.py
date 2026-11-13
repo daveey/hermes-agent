@@ -274,8 +274,10 @@ def test_dispatch_routes_before_kind_branch(conn, monkeypatch, kind):
         kws.stash_grant_snapshot(task_id, snapshot)
         return kb.get_task(conn_, task_id)
     monkeypatch.setattr(admission, "admitted_claim", claim)
-    for name in ("resolve_workspace", "resolve_worktree_for_dispatch", "_ensure_git_worktree", "set_branch_name"):
+    for name in ("resolve_workspace", "resolve_worktree_for_dispatch", "_ensure_git_worktree"):
         monkeypatch.setattr(d._kbw, name, lambda *a, **kw: pytest.fail("legacy kind resolver/writer reached"))
+    branches = []
+    monkeypatch.setattr(d._kbw, "set_branch_name", lambda conn_, task_id, b: branches.append(b))
     seen = []
 
     def source(conn_, task_, snap, **kw):
@@ -293,6 +295,7 @@ def test_dispatch_routes_before_kind_branch(conn, monkeypatch, kind):
     assert seen == [tid] and spawned == [(tid, "/source/exact")]
     assert result.spawned == [(tid, "worker", "/source/exact")]
     assert kb.get_task(conn, tid).workspace_path == "/source/exact"
+    assert branches == ["wt/exact"]  # the branch comes from the manifest (source branch), never the legacy default
 
 
 # --- pickup skip + skip memo ----------------------------------------------------------------------------------------

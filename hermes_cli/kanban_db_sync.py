@@ -790,7 +790,7 @@ class Lease:
 
 class LeaseClient(Protocol):
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
-                lane: str = "ready") -> Lease: ...
+                lane: str = "ready", source_protocol: Optional[int] = None) -> Lease: ...
 
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> Lease: ...
 
@@ -911,8 +911,11 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     ids = (state["board_id"], state["gateway_id"], task_id)
     run_uid = uuid7()
     try:
+        from hermes_cli.kanban_source_board import grant_protocol
+        protocol = grant_protocol()  # workspace_source: only the dispatcher's claim, only when enabled (R3-a)
         lease = _client().acquire(board_id=ids[0], task_uid=task_id, run_uid=run_uid, gateway_id=ids[1],
-                                  ttl_s=max(expires - int(time.time()), 1), lane=lane)
+                                  ttl_s=max(expires - int(time.time()), 1), lane=lane,
+                                  **({"source_protocol": protocol} if protocol else {}))
     except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
         _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
         defer_claim(task_id, "offline", ORIGIN_BOARD)

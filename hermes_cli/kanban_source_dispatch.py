@@ -27,8 +27,19 @@ def _me(conn: sqlite3.Connection) -> Optional[str]:
 def resolve(conn: sqlite3.Connection, claimed: Any, *, board: Optional[str], kbw: Any):
     """``(workspace, branch_name, source)``: a card whose grant snapshot carries custody or a manifest goes to the
     source resolver whatever its ``workspace_kind`` (the legacy HEAD-create, ``default_workdir`` anchor and other-task
-    branch reuse are unreachable for it); every other card takes the legacy path unchanged."""
+    branch reuse are unreachable for it); every other card takes the legacy path unchanged.
+
+    S2 (v4, v4.1 §B): a primary grant made with ``source_protocol`` whose response has no snapshot keys is an old
+    Board. This process then stops sending the protocol, and a card whose REPLICA already carries custody or a
+    manifest is refused here (released, host-scope memo) instead of falling back to the legacy path."""
     snapshot = ws.pop_grant_snapshot(claimed.id)
+    from hermes_cli import kanban_source_launch as launch
+    launch.note_grant(claimed.id, snapshot)
+    if snapshot is None and launch.old_board_grant(conn, claimed):
+        replica = _replica(conn, claimed.id)
+        if replica is not None and replica.has_source:
+            raise WorkspaceSourceRefusal("board_lacks_source", "the Board answered without a source snapshot",
+                                         evidence={"manifest_revision": _replica_revision(replica)})
     if snapshot is not None and snapshot.has_source:
         from hermes_cli.kanban_source_resolver import resolve_source_workspace
         ttl = (claimed.claim_expires - time.time()) if getattr(claimed, "claim_expires", None) else None
@@ -46,7 +57,6 @@ def resolve(conn: sqlite3.Connection, claimed: Any, *, board: Optional[str], kbw
                 revision = snapshot.custody.manifest_revision if snapshot.custody else None
             exc.evidence["manifest_revision"] = revision
             raise
-        _materialized_event(conn, claimed, snapshot, source)
         return Path(source.path), source.branch, source
     if claimed.workspace_kind == "worktree":
         workspace, branch = kbw.resolve_worktree_for_dispatch(conn, claimed, board=board)
@@ -54,8 +64,23 @@ def resolve(conn: sqlite3.Connection, claimed: Any, *, board: Optional[str], kbw
     return kbw.resolve_workspace(claimed, board=board), None, None
 
 
-def _materialized_event(conn: sqlite3.Connection, claimed: Any, snapshot: Any, source: Any) -> None:
-    """``workspace_source_materialized`` (v2 §6 step 5). PR-2 moves it after ``source_attach``."""
+def _replica(conn: sqlite3.Connection, task_id: str) -> Optional[ws.SourceSnapshot]:
+    try:
+        row = conn.execute("SELECT workspace_source, workspace_custody FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return ws.replica_snapshot(row) if row is not None else None
+
+
+def _replica_revision(snapshot: ws.SourceSnapshot) -> Optional[int]:
+    try:
+        return snapshot.manifest().manifest_revision
+    except ws.ManifestInvalid:
+        return snapshot.custody.manifest_revision if snapshot.custody else None
+
+
+def materialized_event(conn: sqlite3.Connection, claimed: Any, snapshot: Any, source: Any) -> None:
+    """``workspace_source_materialized`` (v2 §6 step 5), emitted once the run attached (v3 §6)."""
     from hermes_cli import kanban_db as kb
     run_id = getattr(claimed, "current_run_id", None)
     row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (run_id,)).fetchone() if run_id else None

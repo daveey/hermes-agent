@@ -42,7 +42,7 @@ SOURCE_KINDS = frozenset({"task_worktree", "scratch_external"})
 # v3 §6b: host scope releases the grant and memoizes ``(task, manifest_revision)``; card scope releases and blocks.
 HOST_SCOPE = frozenset({"wrong_repo", "origin_rewritten", "origin_unreachable", "occupied_path", "dirty_destination",
                         "diverged_local_branch", "clone_missing", "materialize_timeout", "custody_not_portable",
-                        "source_disabled"})
+                        "source_disabled", "board_lacks_source"})
 CARD_SCOPE = frozenset({"remote_drift", "remote_branch_missing", "manifest_invalid", "custody_source_missing"})
 FENCED_COLUMNS = frozenset({"workspace_kind", "branch_name"})
 SKIP_MEMO_SECONDS = 6 * 3600
@@ -337,8 +337,13 @@ def pickup_skip(conn: sqlite3.Connection, card: Any, own: str, *, cfg: Optional[
         else:
             cfg = settings()
     snap = replica_snapshot(card)
+    if cfg.enabled and snap is not None and not snap.has_source and _legacy_foreign_worktree(card, own):
+        return "workspace_source: a legacy worktree card is adopted only by its creator"
     if not cfg.enabled or snap is None or not snap.has_source:
         return None
+    from hermes_cli.kanban_source_board import board_lacks_source
+    if board_lacks_source():  # S2: an old Board never gets a source card through the legacy path
+        return "workspace_source: the Board lacks the source protocol"
     if snap.custody is not None and snap.custody.source_holder == own:
         return None
     try:
@@ -365,6 +370,15 @@ def pickup_skip(conn: sqlite3.Connection, card: Any, own: str, *, cfg: Optional[
 
 
 # --- R4c fence -------------------------------------------------------------------------------------------------------
+
+def _legacy_foreign_worktree(card: Any, own: str) -> bool:
+    """v4 S4: a worktree card with no custody and no manifest whose creator is another gateway (only the creator may
+    ``legacy_adopt`` it; its worktree lives there)."""
+    keys = card.keys() if hasattr(card, "keys") else ()
+    if "workspace_kind" not in keys or "created_on" not in keys:
+        return False
+    return card["workspace_kind"] == "worktree" and bool(card["created_on"]) and card["created_on"] != own
+
 
 def fence(conn: sqlite3.Connection, task_id: str, column: str, value: Any) -> None:
     """Refuse a CHANGED ``workspace_kind``/``branch_name`` on a card whose replica carries custody or a manifest

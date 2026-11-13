@@ -1966,9 +1966,9 @@ class HubLeaseClient:
                           version=res.get("version"), source_snapshot=snapshot_from_row(res.get("row")))
 
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
-                lane: str = "ready") -> sync.Lease:
-        return self._lease(board_id, {"action": "grant", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s,
-                                      "lane": lane}, run_uid)
+                lane: str = "ready", source_protocol: Optional[int] = None) -> sync.Lease:
+        return self._lease(board_id, {"action": "grant", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s, "lane": lane,
+                                      **({"source_protocol": source_protocol} if source_protocol else {})}, run_uid)
 
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> sync.Lease:
         return self._lease(board_id, {"action": "renew", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s}, run_uid)

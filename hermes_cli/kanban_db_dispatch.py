@@ -1983,43 +1983,9 @@ def _dispatch_lane_task(
         ):
             result.auto_blocked.append(claimed.id)
         return False
-    _kbw.set_workspace_path(conn, claimed.id, str(workspace))
-    if claimed.workspace_kind == "worktree" and source is None:  # a source card's branch is the manifest's (fenced)
-        _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
-    _kbw._maybe_emit_scratch_tip(conn, claimed.id, "worktree" if source is not None else claimed.workspace_kind)
-    if lane == "review":
-        # Force-load sdlc-review; the kanban lifecycle is already in every
-        # worker's system prompt via KANBAN_GUIDANCE.
-        claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
-    # Apply inside spawn accounting: an unavailable independent reviewer fails closed.
-    from hermes_cli.kanban_model_tier import apply_model_tier
-    try:
-        apply_model_tier(conn, claimed, lane=lane)
-        pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
-        if pid:
-            _set_worker_pid(conn, claimed.id, int(pid), run_id=claimed.current_run_id, claim_lock=claimed.claim_lock)
-        # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
-        _kb._fire_worker_spawned_hook(conn, claimed, str(workspace), pid, board=board)
-        # consecutive_failures is deliberately NOT reset here: resetting on
-        # spawn would let a task that keeps timing out loop forever. Cleared
-        # only on successful completion (complete_task).
-        result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
-        _count_spawn(claimed.assignee)
-        return True
-    except Exception as exc:
-        from hermes_cli.kanban_review_model import admission_refusal
-
-        # Admission failed before any worker ran; preserve its retry budget (a repeated review refusal: visible block).
-        infrastructure, exhausted, extra = admission_refusal(conn, claimed.id, exc)
-        if infrastructure:
-            _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
-        if _record_task_failure(
-            conn, claimed.id, str(exc),
-            outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
-            infrastructure=infrastructure, force_trip=exhausted, event_payload_extra=extra,
-        ):
-            result.auto_blocked.append(claimed.id)
-        return False
+    from hermes_cli.kanban_source_launch import launch  # record, attach (source cards), spawn, pre-spawn abort
+    return launch(conn, claimed, workspace, resolved_branch_name, source, lane=lane, board=board, failure_limit=failure_limit,
+                  spawn_fn=spawn_fn if spawn_fn is not None else _default_spawn, result=result, count_spawn=_count_spawn)
 
 
 def _apply_default_assignee(
@@ -2760,8 +2726,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
     # actually happens.
     if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
         env["TERMINAL_CWD"] = workspace
-    if task.branch_name:
-        env["HERMES_KANBAN_BRANCH"] = task.branch_name
+    env.update({"HERMES_KANBAN_BRANCH": task.branch_name} if task.branch_name else {},
+               **(getattr(task, "source_env", None) or {}))  # workspace_source: HERMES_KANBAN_SOURCE_{COMMIT,PATH,BRANCH}
     if task.current_run_id is not None:
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
