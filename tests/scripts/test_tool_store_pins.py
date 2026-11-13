@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from pm.defaults import default_packages
+from pm.defaults import DECLINED_FILENAME, default_packages
+from pm.environments import install_key
 from pm.lock import Facts, Lockfile
 from pm.package import StatePackage
 from pm.registry import get_package, tool_roots, walk
@@ -131,6 +132,53 @@ def test_the_stores_own_root_never_borrows_it(tmp_path):
     assert not _shares(store, hermes_home=store.parent)
     assert not _shares(store, hermes_home=store.parent / "profiles" / "work")
     assert not _shares(store, home=tmp_path / "account"), "HERMES_HOME unset under the account HOME"
+
+
+def _drop_fact(store: Path, name: str) -> None:
+    data = json.loads((store / "facts.json").read_text())
+    del data["packages"][name]
+    (store / "facts.json").write_text(json.dumps(data))
+
+
+def _snapshot(root: Path) -> list:
+    return sorted((p.relative_to(root), p.is_file() and p.read_bytes(), p.stat().st_mode) for p in root.rglob("*"))
+
+
+@pytest.mark.platforms("posix")
+def test_an_optional_default_the_store_never_installed_is_declined_by_the_borrower(tmp_path):
+    """worker-7: cua-driver fails to install headless (no libXi), so the account store has no
+    fact for it. That used to refuse sharing, and every fake home downloaded the whole toolchain."""
+    store = _account_store(tmp_path)
+    lock = Lockfile(ROOT / "pm" / "lock.json")
+    defaults = default_packages(lock.names(), declined_names=frozenset())
+    if not defaults:
+        pytest.skip("no optional default on this target")
+    for name in defaults:
+        _drop_fact(store, name)
+    before = _snapshot(store)
+    borrower = tmp_path / "card" / "hh"
+    assert _shares(store, hermes_home=borrower)
+    assert _snapshot(store) == before, "the decline must not touch the shared store"
+    record = borrower / "installs" / install_key(ROOT) / DECLINED_FILENAME
+    assert record.is_file(), "the borrower records its own decline, so its pm install skips the default"
+    assert set(json.loads(record.read_text())["declined"]) >= set(defaults)
+    assert _shares(store, hermes_home=borrower), "a rerun still shares"
+    assert not (borrower / "tools").exists()
+
+
+@pytest.mark.platforms("posix")
+def test_an_optional_default_at_another_version_is_still_not_shared(tmp_path):
+    """Only a default absent at every version is declined; one recorded at other pins would be re-staged."""
+    store = _account_store(tmp_path)
+    defaults = default_packages(Lockfile(ROOT / "pm" / "lock.json").names(), declined_names=frozenset())
+    if not defaults:
+        pytest.skip("no optional default on this target")
+    data = json.loads((store / "facts.json").read_text())
+    data["packages"][defaults[0]]["version"] = "0.0.0-other"
+    (store / "facts.json").write_text(json.dumps(data))
+    borrower = tmp_path / "card" / "hh"
+    assert not _shares(store, hermes_home=borrower)
+    assert not borrower.exists(), "a refusal writes nothing, not even the borrower's decline"
 
 
 @pytest.mark.platforms("posix")

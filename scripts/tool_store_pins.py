@@ -21,6 +21,13 @@ and a missing or non-executable binary (setup-hermes.sh's uv copy included)
 sends setup or `pm install` into a re-stage whose unlocked remove + publish
 races other runs on the shared store. Read-only: no lock, no install, no
 bytecode; any unreadable record or error means "do not share".
+
+One exception to "every tool": an optional default (Chromium, cua-driver) the
+store records at no version at all, because the owner declined it or it failed
+to install (cua-driver on a headless Linux worker lacks libXi). The borrower
+declines it too, so its own `pm install` never stages it into the shared store.
+That decline, written only once every check passed, is this script's one write,
+and it lands in the borrower's install state, never in STORE.
 """
 import os
 import sys
@@ -50,7 +57,7 @@ def main(repo: str, store: Path) -> int:
     sys.path.insert(0, repo)
     if not borrows(store):
         return 1
-    from pm.defaults import default_packages
+    from pm.defaults import default_packages, record_declined
     from pm.install import _installed_location
     from pm.lock import Facts, Lockfile
     from pm.package import StatePackage
@@ -60,9 +67,12 @@ def main(repo: str, store: Path) -> int:
 
     lock = Lockfile(Path(repo, "pm", "lock.json"))
     # Strict first: PM's lenient read would quarantine an unparsable file as .corrupt.
-    Facts(store / "facts.json", strict=True)
+    store_facts = Facts(store / "facts.json", strict=True)
     names, target = lock.names(), current_target()
-    for package in walk(tool_roots(names) + developer_tools(names) + default_packages(names) + ["venv"]):
+    defaults = default_packages(names)
+    absent = [name for name in defaults if store_facts.get(name) is None]
+    carried = [name for name in defaults if name not in absent]
+    for package in walk(tool_roots(names) + developer_tools(names) + carried + ["venv"]):
         if isinstance(package, StatePackage):
             continue
         location = _installed_location(package, lock, target, roots=(store,), heal=False)
@@ -75,6 +85,8 @@ def main(repo: str, store: Path) -> int:
     uv = _setup_uv(store, target, lock.version("uv"))
     if not uv.is_file() or not (os.name == "nt" or os.access(uv, os.X_OK)):
         return 1
+    if absent:
+        record_declined(add=absent, project_root=Path(repo))
     # The runner reuses uv's interpreter cache only when it already holds this minor.
     print(".".join(lock.version("python").split("+")[0].split(".")[:2]))
     return 0
