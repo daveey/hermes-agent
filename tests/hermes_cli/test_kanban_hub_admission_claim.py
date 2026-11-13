@@ -331,6 +331,17 @@ def test_screen_reports_deferred_ids(gws, hub_judge):
     assert "deferred=2" in counts.line()
 
 
+def test_the_judge_budget_follows_dispatch_priority_not_creation_order(gws, hub_judge):
+    hub, _worker, _svc = gws
+    low = _hub_card(hub, title="older low-priority card", priority=0)
+    high = _hub_card(hub, title="newer urgent card", priority=900)
+    hub.enter()
+    counts = hac.screen(hub.conn, budget=1)
+    # The claim pass reaches the urgent card first; deferring it would let the older card jump it this tick.
+    assert counts.deferred_ids == frozenset({low})
+    assert _events(hub.conn, high, "hub_admission") and not _events(hub.conn, low, "hub_admission")
+
+
 @pytest.mark.parametrize("kind,payload", [
     ("scheduled", {"wake_check": "test -f ~/.hermes/cache/new-probe"}),
     ("hub_admission", {"admit": True, "entry": "move", "why": "new decision"}),

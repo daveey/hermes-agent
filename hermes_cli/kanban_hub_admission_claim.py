@@ -64,9 +64,13 @@ class Counts:
 
 
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute(
+    """Screenable cards in the claim pass's own dispatch order, so the per-tick judge budget covers the cards the
+    claims reach first and never lets lower-priority work jump a deferred higher-priority card."""
+    from hermes_cli.kanban_db_dispatch_queries import lane_rows
+    rows = {row["id"]: row for row in conn.execute(
         "SELECT * FROM tasks WHERE status = 'ready' AND claim_lock IS NULL "
-        "AND (runs_on IS NULL OR runs_on IN ('', '[]')) AND placement_policy IS NULL ORDER BY id").fetchall()
+        "AND (runs_on IS NULL OR runs_on IN ('', '[]')) AND placement_policy IS NULL").fetchall()}
+    return [rows[row["id"]] for row in lane_rows(conn, "ready") if row["id"] in rows]
 
 
 def _latest_wake_check(conn: sqlite3.Connection, task_id: str) -> str:
