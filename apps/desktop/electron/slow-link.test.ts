@@ -8,11 +8,14 @@ import { isRemoteTimeout } from './remote-down-gate'
 import {
   ensureHealthyPooledRemoteBackendForDispatch,
   POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS,
-  RemoteAnswerLedger
+  RemoteAnswerLedger,
+  remoteAnswerLedger
 } from './remote-liveness'
 import {
   dispatchSlowLink,
   isThinnedPollPath,
+  noteRemoteAnswer,
+  noteRemoteConnect,
   SLOW_LINK_BACKGROUND_GAP_MS,
   SLOW_LINK_EXIT_SAMPLES,
   SLOW_LINK_FAST_MS,
@@ -381,6 +384,25 @@ describe('main.ts wiring helpers', () => {
     tracker.noteTimeoutWhileAlive(mini)
 
     expect(tracker.isConnectionSlow('mac-mini')).toBe(true)
+  })
+})
+
+describe('noteRemoteAnswer', () => {
+  it('feeds the shared answer ledger and logs the first request a new descriptor serves, once', () => {
+    const url = 'http://127.0.0.1:50999'
+    const lines: string[] = []
+    const log = (line: string) => lines.push(line)
+
+    remoteAnswerLedger.forget(url)
+    noteRemoteConnect(url, 'conn:hermes-hub::default', Date.now() - 250)
+    noteRemoteAnswer(url, '/api/status', 40, log)
+    noteRemoteAnswer(url, '/api/profiles', 40, log)
+
+    expect(remoteAnswerLedger.answeredWithin(url, 30_000)).toBe(true)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(/^\[remote-timing\] conn:hermes-hub::default first-request \/api\/status served \+\d+ ms$/)
+
+    remoteAnswerLedger.forget(url)
   })
 })
 

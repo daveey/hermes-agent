@@ -280,6 +280,11 @@ describe('main.ts wiring', () => {
 
   it('pooled dispatch skips the probe from the shared answer ledger unless forced', () => {
     expect(main).toMatch(/answers: remoteAnswerLedger,\n\s+skipWindowMs: opts\.forceProbe \? 0 : DISPATCH_PROBE_SKIP_WINDOW_MS/)
-    expect(main).toMatch(/function noteRemoteAnswer\(baseUrl: string, path: string\) \{\n\s+remoteAnswerLedger\.recordAnswer\(baseUrl\)/)
+    // noteRemoteAnswer moved to slow-link.ts (main.ts is over its line cap); fetchJsonForBackend still calls it on
+    // every answer, and it still feeds the shared ledger first.
+    expect(main.match(/noteRemoteAnswer\(descriptor\.baseUrl, path, Date\.now\(\) - startedAt, rememberLog\)/g)).toHaveLength(2)
+    expect(readFileSync(join(__dirname, 'slow-link.ts'), 'utf8')).toMatch(
+      /export function noteRemoteAnswer\(.*\): void \{\n\s+remoteAnswerLedger\.recordAnswer\(baseUrl\)/
+    )
   })
 })
