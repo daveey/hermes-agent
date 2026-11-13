@@ -363,6 +363,17 @@ def test_desktop_ssh_backend_spawn_shape_is_desktop_owned(monkeypatch):
     assert pi.is_desktop_owned_backend(["serve", "--host", "127.0.0.1", "--port", "0"]) is False
 
 
+def test_desktop_ssh_backend_token_file_equals_form_is_desktop_owned(monkeypatch):
+    """argparse accepts ``--ssh-session-token-file=F`` as the same flag, so it is the same shape."""
+    monkeypatch.setenv("HERMES_DESKTOP", "1")
+    monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+
+    assert pi.is_desktop_owned_backend(
+        ["serve", "--isolated", "--ssh-session-token-file=/home/u/.hermes/desktop-ssh/abc.token"]) is True
+    # A different flag that merely shares the prefix is not the token-file flag.
+    assert pi.is_desktop_owned_backend(["serve", "--ssh-session-token-file-x=/f"]) is False
+
+
 # ---------------------------------------------------------------------------
 # Host-reclaim rung: reap_orphaned_backend_owner (#121964)
 # ---------------------------------------------------------------------------

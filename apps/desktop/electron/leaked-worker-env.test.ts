@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { dropAgentProvenance, scrubLeakedWorkerEnv } from './leaked-worker-env'
+import { AGENT_PROVENANCE_KEYS, dropAgentProvenance, scrubLeakedWorkerEnv } from './leaked-worker-env'
 
 describe('dropAgentProvenance', () => {
+  it('pins the stamp names hermes_cli/proof_home.py PROVENANCE_KEYS stamps', () => {
+    // tests/hermes_cli/test_serve_proof_home.py pins the Python side to this same literal list.
+    expect([...AGENT_PROVENANCE_KEYS]).toEqual(['HERMES_AGENT_TOOL_CALL', 'HERMES_AGENT_ORIGIN', 'HERMES_AGENT_HOME'])
+  })
+
   it('drops tool-child stamps even without a worker marker', () => {
     const env: NodeJS.ProcessEnv = {
       HERMES_AGENT_HOME: '/Users/x/.hermes',

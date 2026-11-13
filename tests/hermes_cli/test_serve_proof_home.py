@@ -124,6 +124,8 @@ def test_wrapped_tool_origin_rejected_without_worker_vars(sentinel, wrapper):
 @pytest.mark.parametrize('extra,args', [
     ({'HERMES_DESKTOP': '1', 'HERMES_DASHBOARD_SESSION_TOKEN': 'fixture-only'}, ['serve']),
     ({'HERMES_DESKTOP': '1'}, ['serve', '--ssh-session-token-file', '/fixture/token']),
+    # argparse's equals form names the same Desktop token-file flag.
+    ({'HERMES_DESKTOP': '1'}, ['serve', '--ssh-session-token-file=/fixture/token']),
 ])
 def test_desktop_backend_shape_without_isolated_still_rejected(sentinel, extra, args):
     before = _snapshot(sentinel)
@@ -355,7 +357,8 @@ def test_backend_launch_keeps_tool_stamps(monkeypatch):
 
 
 def test_desktop_drop_list_is_the_provenance_stamps():
-    """Electron's AGENT_PROVENANCE_KEYS mirrors this list; its own vitest pins the same names."""
+    """Pinned to the literal names. apps/desktop/electron/leaked-worker-env.ts AGENT_PROVENANCE_KEYS
+    mirrors this list and its vitest pins the same literal, so drift on either side fails a test."""
     from hermes_cli.proof_home import PROVENANCE_KEYS
 
-    assert set(PROVENANCE_KEYS) == set(_PROVENANCE)
+    assert PROVENANCE_KEYS == ('HERMES_AGENT_TOOL_CALL', 'HERMES_AGENT_ORIGIN', 'HERMES_AGENT_HOME')

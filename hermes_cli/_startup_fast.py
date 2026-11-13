@@ -111,7 +111,9 @@ def is_desktop_ssh_backend_argv(argv: list[str]) -> bool:
     ``HERMES_DASHBOARD_SESSION_TOKEN`` env var the local pool spawn uses. Every reader of
     "is this process Desktop's backend" needs both shapes; this is the argv half.
     """
-    return "--ssh-session-token-file" in argv
+    # argparse also accepts the equals form (``--ssh-session-token-file=F``): the same shape.
+    flag = "--ssh-session-token-file"
+    return any(arg == flag or arg.startswith(flag + "=") for arg in argv)
 
 
 def is_container_startup_environment() -> bool:

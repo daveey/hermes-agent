@@ -62,8 +62,9 @@ export function scrubLeakedWorkerEnv(env: NodeJS.ProcessEnv = process.env): stri
   return removed
 }
 
-// Agent tool-child provenance stamps (hermes_cli/proof_home.py PROVENANCE_KEYS;
-// tests/hermes_cli/test_serve_proof_home.py fails on drift). A Desktop an agent opened is still the
+// Agent tool-child provenance stamps (mirrors hermes_cli/proof_home.py PROVENANCE_KEYS; no test reads
+// the other side's source, so leaked-worker-env.test.ts and tests/hermes_cli/test_serve_proof_home.py
+// each pin these exact literal names and drift on either side fails). A Desktop an agent opened is still the
 // person's app: its own HERMES_DESKTOP=1 backend must not read as an agent-launched restart proof,
 // which the proof-home guard refuses on the production home (gateway-9aaf151a15). Dropped always,
 // not only with a worker marker: a plain chat's terminal tool carries no worker marker.
