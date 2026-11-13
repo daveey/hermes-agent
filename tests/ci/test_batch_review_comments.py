@@ -774,6 +774,52 @@ def test_a_targeted_run_skipped_by_the_budget_gate_marks_the_comment_failed(monk
     assert d.dispatches == []  # the re-refresh itself (a dispatch) never queues another
 
 
+def test_a_ci_triggered_run_skipped_by_the_budget_gate_queues_one_re_refresh(monkeypatch, tmp_path, capsys):
+    """Review 5888188312 nit 1: the CI-triggered branch (re_refresh=True) of the budget-skip marker queues exactly one
+    re-refresh and records ``requeued=`` in the comment; nit 2: its log line names that, not "the next sweep"."""
+    from datetime import timedelta
+    sha = "a" * 40
+    prs = [_pr(1, sha)]
+    f = Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=_fresh(prs),
+             comments={1: [_running_comment(sha, NOW - timedelta(minutes=20))]})
+    d = Downloads(monkeypatch, tmp_path, fail=0)
+    c = Clock(monkeypatch, d, 1.0)
+    c.t = b.RUN_BUDGET_S - 10
+    assert b.run_batch("t", REPO, NOW, head_sha=sha, trigger_workflow="CI", deadline=float(b.RUN_BUDGET_S)) == 1
+    assert d.calls == 0 and f.collected == []
+    body = f.posted["1"]
+    assert BOT_HEAD.search(body) is None and "refresh failed on [aaaaaaa]" in body and "run budget" in body
+    assert "re-refresh queued" in body and b.requeued_at(body, sha) is not None
+    assert body.count(b.STATE_PREFIX) == 1 and " requeued=" in body
+    assert len(d.dispatches) == 1
+    assert d.dispatches[0][1]["inputs"]["head_sha"] == sha
+    err = capsys.readouterr().err
+    assert "the next sweep takes them" not in err
+    assert "one re-refresh per head is queued" in err
+
+
+def test_budget_skip_log_line_is_worded_per_mode(monkeypatch, tmp_path, capsys):
+    """Review 5888188312 nit 2: the sweep defers to the next sweep; a targeted re-refresh (no trigger) marks the PR
+    failed and points at the hourly sweep, never claiming a re-refresh was queued."""
+    from datetime import timedelta
+    sha = "a" * 40
+    prs = [_pr(1, sha)]
+    f = Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=_fresh(prs),
+             comments={1: [_running_comment(sha, NOW - timedelta(minutes=20))]})
+    d = Downloads(monkeypatch, tmp_path, fail=0)
+    c = Clock(monkeypatch, d, 1.0)
+    c.t = b.RUN_BUDGET_S - 10
+    assert b.run_batch("t", REPO, NOW, deadline=float(b.RUN_BUDGET_S)) == 1
+    err = capsys.readouterr().err
+    assert "the next sweep takes them" in err and "marked refresh failed" not in err
+    f.posted.clear()
+    assert b.run_batch("t", REPO, NOW, head_sha=sha, trigger_workflow="", deadline=float(b.RUN_BUDGET_S)) == 1
+    err = capsys.readouterr().err
+    assert "the next sweep takes them" not in err and "re-refresh" not in err.split("\n")[0]
+    assert "marked refresh failed; the hourly sweep is next" in err
+    assert d.dispatches == []
+
+
 def test_the_sweep_skipped_by_the_budget_gate_writes_no_marker(monkeypatch, tmp_path):
     from datetime import timedelta
     sha = "a" * 40

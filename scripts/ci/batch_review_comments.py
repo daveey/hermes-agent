@@ -454,8 +454,14 @@ def run_batch(token: str, repo: str, now: datetime | None = None, *, head_sha: s
         if deadline is not None and _clock() + lc.DOWNLOAD_ATTEMPT_MAX_S + PR_MIN_BUDGET_S > deadline:
             left = len(targets) - i
             failures += left
+            if not head_sha:
+                then = "the next sweep takes them"
+            elif trigger_workflow:  # mark_refresh_failed queues one re-refresh per head (or notes the queued one)
+                then = "each is marked refresh failed; at most one re-refresh per head is queued, then the hourly sweep"
+            else:  # the re-refresh itself (or a dispatch) queues nothing
+                then = "each is marked refresh failed; the hourly sweep is next"
             print(f"ERROR run budget ({RUN_BUDGET_S}s) spent: {left} PR(s) not refreshed "
-                  f"(#{', #'.join(str(p['number']) for p in targets[i:])}); the next sweep takes them",
+                  f"(#{', #'.join(str(p['number']) for p in targets[i:])}); {then}",
                   file=sys.stderr)
             if head_sha:  # a targeted run must not leave "running on" standing as if live (PR #1907 review)
                 for skipped in targets[i:]:
