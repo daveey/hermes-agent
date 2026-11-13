@@ -56,14 +56,21 @@ def _stray_raw_copy(path: Path) -> None:
             shutil.copy2(src, str(path) + ".copy" + suffix)
 
 
-def _deleted_sidecars() -> list[str]:
+def _deleted_sidecars(path: Path) -> list[str]:
+    """Open fds of this process that point at a deleted ``-wal``/``-shm`` of the board at ``path``.
+
+    Match the board's own sidecar paths exactly, not a ``-wal``/``-shm`` substring: unrelated deleted
+    fds (pytest's O_TMPFILE capture files read back as ``<TMPDIR>/#<inode> (deleted)``) would otherwise
+    count whenever a random temp dir name contains ``-shm`` (CI saw ``r-shmza7pj``)."""
+    base = os.path.realpath(path)
+    wanted = {f"{base}{suffix} (deleted)" for suffix in ("-wal", "-shm")}
     out = []
     for fd in os.listdir("/proc/self/fd"):
         try:
             target = os.readlink(f"/proc/self/fd/{fd}")
         except OSError:
             continue
-        if target.endswith(" (deleted)") and ("-wal" in target or "-shm" in target):
+        if target in wanted:
             out.append(target)
     return out
 
@@ -75,7 +82,7 @@ def _assert_survives(conn: sqlite3.Connection, path: Path) -> None:
     _sibling_write_and_close(path, "t2")
     assert Path(str(path) + "-wal").exists(), "a sibling's close deleted -wal under a live connection"
     assert Path(str(path) + "-shm").exists(), "a sibling's close deleted -shm under a live connection"
-    assert _deleted_sidecars() == [], "this process is stranded on a deleted WAL/SHM generation"
+    assert _deleted_sidecars(path) == [], "this process is stranded on a deleted WAL/SHM generation"
     # The live connection still sees the sibling's committed write (not a stale snapshot / IOERR).
     assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 2
     # And a second sibling write after more stray I/O is still visible.
@@ -100,9 +107,21 @@ def test_control_raw_sqlite_connection_is_stranded(board):
         conn.execute("SELECT count(*) FROM tasks").fetchone()
         _stray_raw_copy(board)
         _sibling_write_and_close(board, "t2")
-        assert not Path(str(board) + "-wal").exists() or _deleted_sidecars()
+        assert not Path(str(board) + "-wal").exists() or _deleted_sidecars(board)
     finally:
         conn.close()
+
+
+def test_deleted_sidecars_ignores_unrelated_deleted_files(tmp_path):
+    """Regression: a deleted file under a directory whose name contains ``-shm``/``-wal`` is not a
+    stranded board sidecar (CI flake: random TMPDIR ``r-shmza7pj`` held pytest's capture files)."""
+    import tempfile
+
+    odd = tmp_path / "r-shmx-walx"
+    odd.mkdir()
+    with tempfile.TemporaryFile(dir=odd), open(odd / "other.db-shm", "w") as stray:
+        os.unlink(stray.name)
+        assert _deleted_sidecars(odd / "kanban.db") == []
 
 
 def test_session_activity_open_ro_survives_stray_close(board):
