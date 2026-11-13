@@ -32,8 +32,9 @@ and it lands in the borrower's install state, never in STORE.
 The decline is sticky, like any opt-out in pm/defaults.py: later runs read it
 back through default_packages(), so the package is neither checked nor staged
 again, even after the owner's store gains it. A long-lived borrower root keeps
-skipping it until a successful `hermes pm install NAME` (the opt-back-in,
-which clears the record) or deleting <root>/installs/<key>/declined-packages.json.
+skipping it until a successful same-target `hermes pm install NAME` (the
+opt-back-in, which clears the record; an install with `--target <other>`
+leaves it) or deleting <root>/installs/<key>/declined-packages.json.
 This script never clears it: it cannot tell its own decline from the user's.
 """
 import os
