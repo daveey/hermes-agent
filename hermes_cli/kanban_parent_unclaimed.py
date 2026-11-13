@@ -50,7 +50,7 @@ def _place(conn, parent_id: str) -> dict[str, Any]:
         return {}
 
 
-def _queue_words(place: dict[str, Any]) -> str:
+def _queue_words(place: dict[str, Any], now: Optional[float] = None) -> str:
     if place.get("lane") == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'})"
     if place.get("lane") in ("machine", "unplaceable"):
@@ -67,16 +67,16 @@ def _queue_words(place: dict[str, Any]) -> str:
     elif place.get("limit") is not None and "running" in place:
         words += f", running count unknown (cap {place['limit']})"
     if place.get("skip"):  # the recorded reason comes first: a bare queue place read as an ordering wait [daveey]
-        words = f"{skips.words(place['skip'])}; {words}"
+        words = f"{skips.words(place['skip'], now=now)}; {words}"
     return words
 
 
-def _pool_sentence(place: dict[str, Any]) -> str:
+def _pool_sentence(place: dict[str, Any], now: Optional[float] = None) -> str:
     """The pool re-place sentence when a pool worker could start the card now, else ``""``. Kept out of
     :func:`_queue_words`: the notices print that clause in parentheses, and their advice already says not to run the
     work outside the dispatcher (PR #1821 review). Dropped from these notices before (kanban-e7a33105a4). [daveey]"""
     from hermes_cli.kanban_dispatch_skip import pool_replace_helps
-    if not place.get("pool_could_run") or not pool_replace_helps(place.get("skip")):  # a quota wall (PR #1835)
+    if not place.get("pool_could_run") or not pool_replace_helps(place.get("skip"), now=now):  # quota wall (#1835)
         return ""
     from hermes_cli.kanban_queue_position import pool_words
     return pool_words(place, advice=False)
@@ -100,11 +100,11 @@ def _observation(payload: dict[str, Any]) -> str:
 
 
 def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None,
-             payload: Optional[dict[str, Any]] = None) -> str:
+             payload: Optional[dict[str, Any]] = None, now: Optional[float] = None) -> str:
     """Capacity advice, or the recorded skip's (or the unrecorded skip's) advice without priority changes."""
     from hermes_cli.kanban_dispatch_skip import notice_advice
     from hermes_cli.kanban_priority import advice
-    return f"{NO_FIX}: " + (notice_advice(payload or {}) or advice(parent_id, evidence))
+    return f"{NO_FIX}: " + (notice_advice(payload or {}, now=now) or advice(parent_id, evidence))
 
 
 def notice_text(payload: Any) -> str:
@@ -136,10 +136,10 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
     if place.get("lane") == "respawn_guard":
         return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}. {checkpoint}".rstrip()
     from hermes_cli.kanban_dispatch_skip import notice_fields
-    pool = _pool_sentence(place)
+    pool = _pool_sentence(place, now)
     fields = {**notice_fields(place, waited), **({"pool_hint": pool} if pool else {})}  # _options defers to it
-    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. " + (f"{pool}. " if pool else "")
-            + checkpoint + _options(task.id, lane_evidence(conn, task.id), fields) + ".")
+    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place, now)}. " + (f"{pool}. " if pool else "")
+            + checkpoint + _options(task.id, lane_evidence(conn, task.id), fields, now) + ".")
 
 
 _CANDIDATES = (
@@ -212,7 +212,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
-    pool_hint = "" if guard else _pool_sentence(place)  # outside the parenthesised queue clause (PR #1821) [daveey]
+    pool_hint = "" if guard else _pool_sentence(place, observed["observed_at"])  # outside the queue clause (#1821)
     checkpoint = last_checkpoint.notice_fields(conn, waiting_on)  # same lookup supplies fields and evidence [daveey]
     with kb.write_txn(conn):
         if _already_posted(conn, task_id, waiting_on, wait_key, kind):
@@ -225,7 +225,8 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
-            "queue": kqp.describe(place) if guard else _queue_words(place), **observed, **checkpoint,
+            "queue": kqp.describe(place) if guard else _queue_words(place, observed["observed_at"]),
+            **observed, **checkpoint,
             **({"pool_hint": pool_hint} if pool_hint else {}),
             **(extra or {}),
             "respawn_guard": guard,

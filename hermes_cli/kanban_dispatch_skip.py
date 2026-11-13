@@ -301,6 +301,8 @@ def words(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     text = _WORDS.get(reason, "skipped: {reason} ({detail})").format(reason=reason, detail=detail)
     if skip.get("until"):
         text += f" until {_stamp(skip['until'], now)}"
+        if _wall_passed(skip, now):
+            text += " (reset passed)"
     return text
 
 
@@ -311,8 +313,13 @@ def is_ordering(skip: Optional[dict[str, Any]]) -> bool:
                            or skip.get("reason") == "per_profile_capped")
 
 
-def advice(skip: dict[str, Any]) -> str:
-    """What to do about a non-ordering skip; never a priority change."""
+def advice(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
+    """What to do about a non-ordering skip; never a priority change. A quota wall whose ``until`` has passed by
+    ``now`` (default ``time.time()``) drops "starts on its own when that wall resets": :func:`pool_replace_helps`
+    offers the pool re-place for it at the same ``now`` (PR #1865 review). [daveey]"""
+    if _wall_passed(skip, now):
+        return ("that wall's reset has passed; the next dispatcher tick re-checks the pin. Priority changes do not "
+                "clear a quota wall. Do not run its work outside the dispatcher")
     if skip.get("reason") == PINNED_QUOTA_WALL:
         return ("it starts on its own when that wall resets. Re-pin it (`hermes kanban set-model <id> ...`) only if it "
                 "cannot wait; priority changes do not clear a quota wall. Do not run its work outside the dispatcher")
@@ -320,10 +327,10 @@ def advice(skip: dict[str, Any]) -> str:
             "Do not run its work outside the dispatcher")
 
 
-def sentence_advice(skip: dict[str, Any]) -> str:
+def sentence_advice(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     """:func:`advice` as a sentence of its own, for a join after a full stop (``kanban show``); the notices keep the
     lowercase clause after their ``NO_FIX: `` prefix. [daveey] PR #1846 review nit."""
-    text = advice(skip)
+    text = advice(skip, now=now)
     return text[:1].upper() + text[1:]
 
 
@@ -335,6 +342,12 @@ def _wall_lasts(skip: dict[str, Any], now: Optional[float]) -> bool:
     except (KeyError, TypeError, ValueError):
         return True
     return until != until or until > (time.time() if now is None else now)  # NaN is unparseable too
+
+
+def _wall_passed(skip: dict[str, Any], now: Optional[float]) -> bool:
+    """A ``pinned_quota_wall`` skip whose readable ``until`` is at or before ``now``: the exact complement of the
+    :func:`pool_replace_helps` suppression, so the wording and the re-place offer agree."""
+    return skip.get("reason") == PINNED_QUOTA_WALL and not _wall_lasts(skip, now)
 
 
 def pool_replace_helps(skip: Optional[dict[str, Any]], *, now: Optional[float] = None) -> bool:
@@ -372,11 +385,16 @@ def notice_fields(place: Optional[dict[str, Any]], ready_seconds: Optional[float
     return {"skip_unrecorded": True} if unrecorded(place, ready_seconds) else {}
 
 
-def notice_advice(payload: dict[str, Any]) -> Optional[str]:
-    """The advice for a notice payload carrying :func:`notice_fields`, or None for the ordinary capacity advice."""
+def notice_advice(payload: dict[str, Any], *, now: Optional[float] = None) -> Optional[str]:
+    """The advice for a notice payload carrying :func:`notice_fields`, or None for the ordinary capacity advice.
+    ``now`` defaults to the payload's ``observed_at`` (when its queue words and pool hint were written), else the
+    current time."""
     skip = payload.get("dispatch_skip")
     if isinstance(skip, dict) and skip and not is_ordering(skip):
-        return advice(skip)
+        seen = payload.get("observed_at")
+        if now is None and isinstance(seen, (int, float)) and not isinstance(seen, bool):
+            now = seen
+        return advice(skip, now=now)
     if not payload.get("skip_unrecorded"):
         return None
     return UNRECORDED_POOL_ADVICE if str(payload.get("pool_hint") or "").strip() else UNRECORDED_ADVICE

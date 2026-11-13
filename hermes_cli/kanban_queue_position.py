@@ -321,11 +321,14 @@ def _describe_lane(place: Optional[dict[str, Any]]) -> Optional[str]:
     return local_words(place)
 
 
-def local_words(place: dict[str, Any]) -> str:
-    """``describe`` for the ``local`` lane: the recorded dispatcher skip first, when there is one."""
+def local_words(place: dict[str, Any], *, now: Optional[float] = None) -> str:
+    """``describe`` for the ``local`` lane: the recorded dispatcher skip first, when there is one. One ``now``
+    (default ``time.time()``) feeds the re-place gate and the skip's words and advice, so an expired quota wall is
+    not offered the re-place while still said to start "when that wall resets" (PR #1865 review). [daveey]"""
     from hermes_cli import kanban_dispatch_skip as skips
+    now = time.time() if now is None else now
     skip = place.get("skip")
-    pooled = bool(place.get("pool_could_run")) and skips.pool_replace_helps(skip)
+    pooled = bool(place.get("pool_could_run")) and skips.pool_replace_helps(skip, now=now)
     ahead = place.get("ahead")
     words = (ahead_words(place, "waiting for a local slot: ~{n} ahead") if ahead is not None
              else "waiting for a local slot")
@@ -348,8 +351,8 @@ def local_words(place: dict[str, Any]) -> str:
             pool_advice = pool_words(place)
         if not skip:
             return f"{words}. {pool_advice}"
-        words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
-        return words + ". " + _skip_advice(place, skip, pool_advice, pooled)
+        words = f"last dispatcher skip of this ready episode: {skips.words(skip, now=now)} ({words})"
+        return words + ". " + _skip_advice(place, skip, pool_advice, pooled, now)
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:
@@ -359,11 +362,12 @@ def local_words(place: dict[str, Any]) -> str:
     pool_advice = pool_words(place) if pooled else _NOT_STUCK
     if not skip:
         return words + ". " + pool_advice
-    words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
-    return words + ". " + _skip_advice(place, skip, pool_advice, pooled)
+    words = f"last dispatcher skip of this ready episode: {skips.words(skip, now=now)} ({words})"
+    return words + ". " + _skip_advice(place, skip, pool_advice, pooled, now)
 
 
-def _skip_advice(place: dict[str, Any], skip: dict[str, Any], ordering_advice: str, pooled: bool) -> str:
+def _skip_advice(place: dict[str, Any], skip: dict[str, Any], ordering_advice: str, pooled: bool,
+                 now: Optional[float] = None) -> str:
     """The advice after a recorded skip, by the rule the chat notices follow (``kanban_parent_unclaimed._options``):
     an ordering skip takes the lane's own advice (the pool re-place when a pool worker could run it); any other skip
     keeps its own advice, after the re-place sentence when one applies. [daveey] PR #1835 review: ``kanban show``
@@ -371,7 +375,7 @@ def _skip_advice(place: dict[str, Any], skip: dict[str, Any], ordering_advice: s
     from hermes_cli import kanban_dispatch_skip as skips
     if skips.is_ordering(skip):
         return ordering_advice
-    return (pool_words(place, advice=False) + ". " if pooled else "") + skips.sentence_advice(skip)
+    return (pool_words(place, advice=False) + ". " if pooled else "") + skips.sentence_advice(skip, now=now)
 
 
 def pool_words(place: dict[str, Any], *, advice: bool = True) -> str:

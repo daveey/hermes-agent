@@ -344,3 +344,56 @@ def test_an_expired_quota_wall_skip_offers_the_pool_re_place_on_every_surface(ho
         hint = pu.ready_hint(conn, kb.get_task(conn, tid))
     assert hint is not None
     _assert_pool_hint(hint, tid)
+
+
+_WALL_RESETS = "starts on its own when that wall resets"
+
+
+@pytest.mark.parametrize("census", [True, False])
+@pytest.mark.parametrize("offset", [-60, 0])  # the gate keeps the wall only while until > now: until == now passed
+def test_kanban_show_marks_an_expired_quota_wall_reset_passed(census, offset):
+    """PR #1865 review nit 2: once a quota wall's ``until`` has passed (no later tick replaced the skip),
+    ``kanban show`` offers the pool re-place, so the same text must not still say the card "starts on its own when
+    that wall resets". Both halves read one ``now``."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    now = 1_800_000_000.0
+    skip = {"reason": skips.PINNED_QUOTA_WALL, "detail": "claude-opus-5-5 (anthropic)", "until": now + offset}
+    place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x", **(_CENSUS if census else {})}
+    shown = kqp.local_words(place, now=now)
+    _assert_pool_hint(shown, "t_x")
+    assert _WALL_RESETS not in shown, shown
+    assert "(reset passed)" in shown, shown
+    assert shown.count("outside the dispatcher") == 1, shown
+
+
+@pytest.mark.parametrize("until", [3600, None, "soon"])
+def test_a_lasting_or_unreadable_quota_wall_keeps_its_wording(until):
+    """A future wall, or one with a missing/unparseable ``until``, keeps "starts on its own" and no marker."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    now = 1_800_000_000.0
+    at = now + until if isinstance(until, int) else until
+    skip = {"reason": skips.PINNED_QUOTA_WALL, "detail": "claude-opus-5-5 (anthropic)", "until": at}
+    place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
+    shown = kqp.local_words(place, now=now)
+    assert _WALL_RESETS in shown and "(reset passed)" not in shown and "--runs-on" not in shown, shown
+    assert _WALL_RESETS in skips.advice(skip, now=now)
+    assert "(reset passed)" not in skips.words(skip, now=now)
+
+
+def test_an_expired_quota_wall_drops_the_reset_clause_on_every_surface(home, pool):
+    """The notices and ``ready_hint`` follow ``kanban show``: with the re-place offered, no "starts on its own"."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = {"reason": skips.PINNED_QUOTA_WALL, "detail": "claude-opus-5-5 (anthropic)", "until": time.time() - 60}
+    shown = kqp.local_words({**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"})
+    assert _WALL_RESETS not in shown and "(reset passed)" in shown, shown
+    with kbc.connect_closing() as conn:
+        tid = _waiting_card(conn)
+        _record_skip(conn, tid, skips.PINNED_QUOTA_WALL, "claude-opus-5-5 (anthropic)", until=time.time() - 60)
+        hint = pu.ready_hint(conn, kb.get_task(conn, tid))
+        assert cw.sweep(conn) == 1
+        notice = cw.notice_text(_notice(conn, tid, cw.NOTICE_KIND))
+    assert hint is not None
+    for text in (hint, notice):
+        _assert_pool_hint(text, tid)
+        assert _WALL_RESETS not in text and "(reset passed)" in text, text
+        assert text.count("outside the dispatcher") == 1, text
