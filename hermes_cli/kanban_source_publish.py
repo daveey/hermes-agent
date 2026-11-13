@@ -162,10 +162,19 @@ def prove_origin(path: str, cfg: Settings, *, lookup: Optional[Callable[[str], d
 
 # --- step 4: secret scan ----------------------------------------------------------------------------------------
 
-def _secret_in(text: str) -> bool:
-    from agent.redact import redact_sensitive_text
+def _secret_in(text: str, *, pii: bool = True) -> bool:
+    """Whether the redactor masks anything in ``text``. ``pii=False`` ignores the PII-style pass (E.164 phone
+    numbers): binary bytes form those by chance, while the high-signal patterns (keys, provider tokens, credential
+    assignments) stay on. The phone pass runs last over the other passes' output, so when the full result equals
+    the phone pass alone applied to the input, no other pattern matched."""
+    from agent.redact import _SIGNAL_PHONE_RE, _redact_phone, redact_sensitive_text
+    if not text.strip():
+        return False
     # force: the publish gate never honours ``security.redact_secrets: false`` (that only governs display).
-    return bool(text.strip()) and redact_sensitive_text(text, force=True) != text
+    masked = redact_sensitive_text(text, force=True)
+    if masked == text:
+        return False
+    return pii or masked != _SIGNAL_PHONE_RE.sub(_redact_phone, text)
 
 
 def _denylisted(rel: str) -> bool:
@@ -254,9 +263,10 @@ def _blob_secret_line(blob: bytes) -> Optional[int]:
     if _KEY_MARKER_BYTES.search(blob):
         return 0
     text = _decode(blob)
-    if text is None:  # binary: the PEM marker above, plus every printable run (like ``strings``)
+    if text is None:  # binary: the PEM marker above, plus the high-signal patterns over every printable run
         runs = [m.group(0).decode("ascii") for m in _PRINTABLE_RUN.finditer(blob)]
-        return 0 if any(_secret_in(r) for r in runs) or _secret_in("\n".join(runs)) else None
+        found = any(_secret_in(r, pii=False) for r in runs) or _secret_in("\n".join(runs), pii=False)
+        return 0 if found else None
     if _KEY_MARKER.search(text):
         return 0
     for no, line in enumerate(text.splitlines(), 1):
@@ -282,8 +292,9 @@ def _name_text(name: bytes) -> str:
 
 def secret_scan(deadline: _Deadline, path: str, base: str, head: str) -> None:
     """Scan exactly the objects a push of ``head`` over ``base`` can send (``rev-list --objects head --not base``
-    with replace refs and grafts off): every new commit's headers and message, every new tree's entry names, every
-    new blob's raw bytes. ``head`` is the sha that is then pushed, never a ref name re-resolved later."""
+    with replace refs and grafts off). Commits, tags and blobs: the entire raw bytes go to the matcher, unparsed.
+    Trees: only the entry names (the fixed ``<mode> <name>\\0<20-byte sha>`` format leaves no other place for data,
+    and raw sha bytes false-match). ``head`` is the sha that is then pushed, never a ref name re-resolved later."""
     listed = _isolated(deadline, path, "rev-list", "--objects", "--no-object-names", head, "--not", base,
                        cap=120.0).decode("ascii").split()
     kinds = _cat_batch(deadline, path, listed, check_only=True)
@@ -300,8 +311,10 @@ def secret_scan(deadline: _Deadline, path: str, base: str, head: str) -> None:
         if name:
             old.add((name, meta.split()[2].decode("ascii")))
     where: dict[str, str] = {}
+    walked: set[str] = set()
 
     def walk(tree: str, prefix: bytes) -> None:
+        walked.add(tree)
         for mode, name, sha in _tree_entries(objects[tree][1]):
             full = prefix + name
             if (full, sha) in old:
@@ -322,9 +335,16 @@ def secret_scan(deadline: _Deadline, path: str, base: str, head: str) -> None:
         tree = objects[sha][1].split(b"\n", 1)[0].removeprefix(b"tree ").decode("ascii")
         if tree in new:
             walk(tree, b"")
-    # No object format is parsed for the credential match: the ENTIRE raw bytes of every new object (a commit with
-    # all its headers, signatures and message; a tag; a tree; a blob) go to the matcher (review 5891362210).
+    # No commit, tag or blob format is parsed for the credential match: their ENTIRE raw bytes (a commit with all
+    # its headers, signatures and message) go to the matcher (review 5891362210). A tree's content is its entry
+    # names, matched in walk() per new entry; its raw bytes interleave binary shas, which false-match (review
+    # 5892051198). A new tree no new commit reaches has every entry name matched here.
     for sha, (kind, data) in objects.items():
+        if kind == "tree":
+            if sha not in walked and any(_secret_in(_name_text(n)) or _KEY_MARKER_BYTES.search(n)
+                                         for _, n, _ in _tree_entries(data)):
+                raise PublishRefused("secret_scan_refused", f"tree {sha[:12]} has a credential in a path name")
+            continue
         if (line := _blob_secret_line(data)) is not None:
             label = where.get(sha, f"blob {sha[:12]}") if kind == "blob" else f"{kind} {sha[:12]}"
             raise PublishRefused("secret_scan_refused", f"{label}{f':{line}' if line else ''} adds a credential")

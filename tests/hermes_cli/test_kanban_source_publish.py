@@ -292,6 +292,66 @@ def test_key_inside_binary_blob_is_scanned(card):
     _refused(card, "secret_scan_refused")
 
 
+def test_provider_token_inside_binary_blob_is_scanned(card):
+    (card.path / "blob.bin").write_bytes(b"\x00\x01\xff\xfe" * 64 + f"token={SECRET}".encode() + b"\x00\x9f" * 32)
+    git(card.path, "add", "blob.bin")
+    git(card.path, "commit", "-q", "-m", "bin")
+    _refused(card, "secret_scan_refused")
+
+
+def _blob_sha_tail_plus_digit(prefix: bytes) -> bytes:
+    """Content whose blob sha ends in ``+<digit>``: in the raw tree the next entry's ``100644`` mode follows those
+    bytes, so ``+<digit>100644`` reads as an E.164 phone number (review 5892051198)."""
+    import hashlib
+    for i in range(1_000_000):
+        body = prefix + f"# {i}\n".encode()
+        tail = hashlib.sha1(b"blob %d\0" % len(body) + body).digest()[-2:]
+        if tail[:1] == b"+" and tail[1:] in b"123456789":
+            return body
+    raise AssertionError("no candidate")
+
+
+def test_tree_sha_bytes_never_false_match(card):
+    """A benign new file whose blob sha forms a phone-shaped run with the next tree entry's mode is published:
+    trees are matched by entry name only, never by their raw (binary sha) bytes."""
+    (card.path / "zz_probe_a.py").write_bytes(_blob_sha_tail_plus_digit(b"print('benign')\n"))
+    (card.path / "zz_probe_b.py").write_text("x = 1\n")
+    git(card.path, "add", "zz_probe_a.py", "zz_probe_b.py")
+    git(card.path, "commit", "-q", "-m", "benign files")
+    tree = subprocess.run(["git", "-C", str(card.path), "cat-file", "tree", "HEAD"], capture_output=True,
+                          check=True).stdout
+    from agent.redact import _SIGNAL_PHONE_RE
+    assert _SIGNAL_PHONE_RE.search(tree.decode("latin-1"))  # the fixture really has the shape
+    head = git(card.path, "rev-parse", "HEAD")
+    assert card.receipt()["state"] == "published" and card.remote() == head
+
+
+def test_secret_in_tree_entry_name_refused(card):
+    commit(card.path, f"conf/{SECRET}.txt", "plain\n")
+    _refused(card, "secret_scan_refused")
+
+
+def test_random_binary_blob_passes(card):
+    import random
+    data = random.Random(7).randbytes(256 * 1024)
+    (card.path / "noise.bin").write_bytes(b"\x00" + data)
+    git(card.path, "add", "noise.bin")
+    git(card.path, "commit", "-q", "-m", "noise")
+    head = git(card.path, "rev-parse", "HEAD")
+    assert card.receipt()["state"] == "published" and card.remote() == head
+
+
+def test_phone_shaped_bytes_in_binary_blob_pass_but_text_phone_refused(card):
+    """PII-style patterns apply to text only; binary blobs get the high-signal patterns."""
+    (card.path / "img.bin").write_bytes(b"\x00\x89PNG\xff" + b"+15551234567 " + b"\x00\xfe" * 16)
+    git(card.path, "add", "img.bin")
+    git(card.path, "commit", "-q", "-m", "image")
+    head = git(card.path, "rev-parse", "HEAD")
+    assert card.receipt()["state"] == "published" and card.remote() == head
+    assert pub._secret_in("call +15551234567 now") and not pub._secret_in("call +15551234567 now", pii=False)
+    assert pub._secret_in(f"a +15551234567 b {SECRET}", pii=False)
+
+
 def test_global_config_cannot_reshape_the_scan_or_push(card, world, monkeypatch):
     """The scan and the push ignore global config (attributes file, hooks path); a global pre-push hook never runs."""
     hooks = world.tmp / "global-hooks"
