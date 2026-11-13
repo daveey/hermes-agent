@@ -96,15 +96,17 @@ def collect(card: dict, evidence: dict) -> None:
     """Add a remote card's record to the counts' per-session evidence sink, keyed like its count key, so the
     sidebar counts and ``session_tasks`` project the same record. Never mutates ``card`` (shared, read-only).
 
-    Running evidence is ``raw``. Any other remote row (parked, or running with no current-run beat) gets the
-    ``kanban.card`` record ``session_tasks`` builds from the same row (``card_raw``): still unknown with no clock,
-    but with the row's last-known state and ask, which the count key alone cannot carry. No query, no clock."""
-    value = raw(card)
-    if value is None and card.get("remote"):
-        from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_raw
-        try:
+    Running evidence is ``raw``. Any other remote row (parked, todo, unknown, or running with no current-run beat)
+    gets the ``kanban.card`` record ``session_tasks`` builds from the same row (``card_raw``): still unknown with no
+    clock, but with the row's last-known state and ask, which the count key alone cannot carry. When either adapter
+    fails, the remote row gets the ``failed_card`` record ``add_cards`` projects for it (``adapter_error``, keeping
+    its ask). No query, no clock."""
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_raw, failed_card_raw
+    try:
+        value = raw(card)
+        if value is None and card.get("remote"):
             value = card_raw(card)
-        except ADAPTER_ERRORS:  # what add_cards turns into failed_card: keep the key-only unknown here
-            value = None
+    except ADAPTER_ERRORS:  # only a remote row reaches either adapter
+        value = failed_card_raw(card)
     if value is not None:
         evidence.setdefault(card["session"], {})[str(card.get("key"))] = value

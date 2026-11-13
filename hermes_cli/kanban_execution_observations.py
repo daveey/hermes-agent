@@ -146,7 +146,8 @@ def card(row, *, gateway=None, profile=None, now=None):
 
 def card_raw(row, *, gateway=None, profile=None):
     """The unprojected ``kanban.card`` record ``card`` projects for a row with no execution source, receipt or
-    running replica evidence. The sidebar counts store it for a parked replica card (``kanban_replica_execution
+    running replica evidence. The sidebar counts store it for every remote row ``kanban_replica_execution.raw``
+    returns None for (parked, todo, unknown, or running with no current-run beat; see ``kanban_replica_execution
     .collect``), so they project exactly what ``session_tasks`` does for the same row."""
     remote = bool(row.get("remote"))
     gateway = row.get("gateway") if remote else gateway
@@ -237,6 +238,13 @@ def _project(value, *, now, **kw):
 
 def failed_card(row, *, gateway=None, profile=None, now=None):
     """Explicit unknown for a card whose adapter failed: never absent, never a state, keeps its own ask."""
+    value = failed_card_raw(row, gateway=gateway, profile=profile)
+    return _project(value, now=time.time() if now is None else now, source_class="sidebar")
+
+
+def failed_card_raw(row, *, gateway=None, profile=None):
+    """The unprojected record ``failed_card`` projects. The sidebar counts store it for a remote card whose adapter
+    failed (``kanban_replica_execution.collect``), so they project what ``add_cards`` does for the same row."""
     from hermes_cli.kanban_execution_source import unknown_raw
     source = row.get("_execution_source")
     source = source if isinstance(source, dict) else {}
@@ -253,8 +261,7 @@ def failed_card(row, *, gateway=None, profile=None, now=None):
         source = {**source, "gateway": source.get("gateway") or gateway,
                   "profile": source.get("profile") if owned else profile,
                   "board": source.get("board") or row.get("board")}
-    value = unknown_raw(row, source)
-    return _project(value, now=time.time() if now is None else now, source_class="sidebar")
+    return unknown_raw(row, source)
 
 
 _HISTORY = ("human_request", "retained_human_requests", "delivery_receipt", "historical_delivery_receipts")
