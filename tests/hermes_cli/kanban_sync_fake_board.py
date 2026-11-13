@@ -274,6 +274,10 @@ class FakeHub:
                                    "created_at": int(time.time())}, gw, op_id, hlc)
                 self.svc._put(b, "tasks", task, {"status": "ready", "current_run_uid": None, "lease_holder": None,
                                                  "lease_run_uid": None, "lease_expires": None}, gw, op_id, hlc)
+            elif self.svc.lease_runs and cur and task in b["rows"].get("tasks", {}):
+                # releaseTask's clearLease drops the card's lease mirror even when the holder already ended its run.
+                self.svc._put(b, "tasks", task, {"lease_holder": None, "lease_run_uid": None, "lease_expires": None},
+                              gw, op_id, hlc)
             return {"status": "applied", "lease": None}
         return {"status": "applied", "lease": b["leases"][task], "version": version}
 

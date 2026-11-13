@@ -271,7 +271,7 @@ def test_live_lease_by_the_run_keeps_release_end_to_end(live, kanban_home):
     """The ``lease_held`` veto through real Board transitions, not a hand-set row: the grant mirrors the lease
     onto the card (setLease), the holder then ends its run row and drops ``current_run_uid`` while keeping the
     lease, so only ``lease_run_uid`` still names the run. Once the holder leaves ``running`` (clearLease), the same
-    release is moot."""
+    release is moot. End-to-end on the Board side only: the rejected local release op is still inserted by hand."""
     svc = FakeService(lease_runs=True)
     hub = svc.hub(ME)
     tid = kb.create_task(live, title="leased", assignee="worker")
@@ -306,6 +306,22 @@ def test_live_lease_by_the_run_keeps_release_end_to_end(live, kanban_home):
     report = next(r for r in resolve_rejections(live, hub, BOARD) if r["op_id"] == "release-op")
     assert (report["classification"], report["action"]) == ("moot", "retired")
     assert client.status(live)["rejected"] == 0
+
+
+def test_fake_lease_release_after_run_end_clears_mirror(live, kanban_home):
+    """As releaseTask's clearLease: releasing a lease whose run row already ended still drops lease_run_uid."""
+    svc = FakeService(lease_runs=True)
+    hub = svc.hub(ME)
+    tid = kb.create_task(live, title="leased", assignee="worker")
+    client.push(live, hub, BOARD, ME, primary=False)
+    assert hub.leases(BOARD, {"action": "grant", "task": tid, "run_uid": RUN, "client_op_id": "g"})["status"] == "applied"
+    res = hub.ops(BOARD, [{"client_op_id": "end", "table": "task_runs", "uid": RUN, "op": "upsert",
+                           "fields": {"ended_at": 1794527437, "status": "crashed", "outcome": "crashed"},
+                           "hlc": f"{9_999_999_999_999:013d}-0001-{ME}"}])["results"][0]
+    assert res["status"] == "applied", res
+    assert hub.leases(BOARD, {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r"})["status"] == "applied"
+    card = svc.board(BOARD)["rows"]["tasks"][tid]
+    assert (card["lease_holder"], card["lease_run_uid"], card["lease_expires"]) == (None, None, None)
 
 
 def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):
