@@ -145,31 +145,37 @@ def _spawn_stepping_review(agent, monkeypatch, *, calls, in_call, finish_call, d
             done.set()
 
     monkeypatch.setattr(background_review, "spawn_background_review_thread", lambda *a, **k: (_target, "prompt"))
+    before = set(threading.enumerate())
     agent._spawn_background_review_now(messages_snapshot=[{"role": "user", "content": "hi"}], review_skills=True,
                                        **spawn_kwargs)
+    (thread,) = [t for t in threading.enumerate() if t not in before and t.name == "bg-review"]
+    return thread
+
+
+def _join(thread):
+    """The review thread's exit is the one point where its whole wind-down has happened (target, reservation
+    release, requeue or drop, and the log line written after the enqueue); polling any single effect races
+    the rest on a starved runner."""
+    thread.join(timeout=30)
+    assert not thread.is_alive(), "background review thread never exited"
 
 
 def test_gateway_review_winds_down_releases_its_reservation_and_is_requeued(root, fence, queue, monkeypatch, caplog):
     """The backend path end to end: a review mid-run when the drain window asks turns to pause."""
     calls, in_call, finish_call, done = [], threading.Event(), threading.Event(), threading.Event()
     agent = _spawning_agent()
-    _spawn_stepping_review(agent, monkeypatch, calls=calls, in_call=in_call, finish_call=finish_call, done=done)
-    assert in_call.wait(5)  # provider call #1 is in flight
+    caplog.set_level(logging.INFO)
+    thread = _spawn_stepping_review(agent, monkeypatch, calls=calls, in_call=in_call, finish_call=finish_call,
+                                    done=done)
+    assert in_call.wait(30)  # provider call #1 is in flight
     assert admission_fence.state(root, details=True)["reservations"] == 1
     _drain_asks_turns_to_pause(root)
     assert admission_fence.state(root)["reservations"] == 1  # never cut mid-call: the claim stands until it returns
-    with caplog.at_level(logging.INFO):
-        finish_call.set()
-        assert done.wait(5)
-        deadline = time.monotonic() + 5
-        while admission_fence.state(root)["reservations"] and time.monotonic() < deadline:
-            threading.Event().wait(0.01)
+    finish_call.set()
+    _join(thread)
     assert len(calls) == 1  # it stopped at the boundary: provider call #2 never started
     assert admission_fence.state(root)["reservations"] == 0  # what the drain's worker reclaim waits for
     assert fence.background_review_count() == 0
-    deadline = time.monotonic() + 5
-    while not queue.pending_count() and time.monotonic() < deadline:
-        threading.Event().wait(0.01)
     pending = queue._pending["20261026_170127_f07c32"]
     assert pending.kwargs["review_skills"] is True and pending.kwargs["_requeue_attempts"] == 1
     assert any("stopped for a Hermes update" in r.getMessage() and "requeued" in r.getMessage()
@@ -192,19 +198,14 @@ def test_requeued_review_waits_for_the_update_hold_then_dispatches(root, queue, 
 def test_review_out_of_requeues_is_dropped_with_a_log_line(root, fence, queue, monkeypatch, caplog):
     calls, in_call, finish_call, done = [], threading.Event(), threading.Event(), threading.Event()
     agent = _spawning_agent()
-    _spawn_stepping_review(agent, monkeypatch, calls=calls, in_call=in_call, finish_call=finish_call, done=done,
-                           _requeue_attempts=agent._REVIEW_REQUEUE_MAX_ATTEMPTS)
-    assert in_call.wait(5)
+    caplog.set_level(logging.INFO)
+    thread = _spawn_stepping_review(agent, monkeypatch, calls=calls, in_call=in_call, finish_call=finish_call,
+                                    done=done, _requeue_attempts=agent._REVIEW_REQUEUE_MAX_ATTEMPTS)
+    assert in_call.wait(30)
     _drain_asks_turns_to_pause(root)
-    with caplog.at_level(logging.INFO):
-        finish_call.set()
-        assert done.wait(5)
-        deadline = time.monotonic() + 5
-        while fence.background_review_count() and time.monotonic() < deadline:
-            threading.Event().wait(0.01)
-        deadline = time.monotonic() + 5
-        while (not any("dropped" in r.getMessage() for r in caplog.records)) and time.monotonic() < deadline:
-            threading.Event().wait(0.01)
+    finish_call.set()
+    _join(thread)
+    assert fence.background_review_count() == 0
     assert queue.pending_count() == 0
     assert any("stopped for a Hermes update" in r.getMessage() and "dropped" in r.getMessage()
                for r in caplog.records)
