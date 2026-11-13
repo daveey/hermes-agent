@@ -976,6 +976,16 @@ class SessionSchemaMixin:
     # ── _init_schema ───────────────────────────────────────────────────────
 
     def _init_schema(self):
+        """Full init once per settled store and schema per process; later opens restore its flags
+        (hermes_state_schema_memo, design t_01a1d45d75851804 §2d)."""
+        import hermes_state_schema_memo as memo  # lazy: the memo module imports this one
+        if memo.try_restore(self):
+            return
+        before = memo.snapshot(self)
+        self._init_schema_full()
+        memo.record(self, before)
+
+    def _init_schema_full(self):
         """Create tables and FTS if missing, reconcile columns, run data migrations. Column
         additions are declarative via _reconcile_columns(), so reordered migrations can
         never skip a column; schema_version remains for data migrations only."""
