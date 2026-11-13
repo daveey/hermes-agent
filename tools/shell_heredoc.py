@@ -486,7 +486,7 @@ _WORD_START, _WORD_END = r"(?<![\w.-])", r"(?![\w.-])"
 # Shapes that hand some command's OUTPUT to a shell as code, so a data consumer's body (or a
 # string its interpreter prints) may be shell text after all: `… | [wrappers] bash`, `| ssh h`,
 # `eval`, `. <(…)`/`source /dev/stdin`, `bash <(…)`/`<<<`, `sh -c "$(…)"`, `$(…)` as a command.
-_SHELL_SINK_RE = re.compile(
+_SHELL_SINK_TEMPLATE = (
     rf"(?<!\|)\|&?(?!\|)[^|;&\n]*?{_WORD_START}(?:{_SINK_SHELLS}|eval){_WORD_END}"
     rf"|{_WORD_START}eval{_WORD_END}"
     r"|(?:^|[\s;&|({])(?:source|\.)\s+(?:<\s*\(|/dev/(?:stdin|fd/)|/proc/self/fd/)"
@@ -494,7 +494,22 @@ _SHELL_SINK_RE = re.compile(
     rf"|{_WORD_START}(?:ba|da|z|k|mk|a)?sh\s+(?:[-+][A-Za-z]+\s+)*-[A-Za-z]*c\s*\"?(?:\$\(|`)"
     # [ \t]* not \s*: newline is already an anchor, and \s* made this alternative quadratic on
     # the all-newline bodies strip_inert_heredoc_bodies leaves (review 5890191993).
-    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b)[ \t]*\"?(?:\$\((?!\()|`)",
+    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b)[ \t]*\"?(?:\$\((?!\()")
+# `$(date +%s)` prints only digits, so a shell running its output can run no command. That is
+# the watcher's `deadline=$(( $(date +%s) + 2700 ))`, whose second `(` reads as a command
+# position (t_01a1d67ff0075752). Only this producer is exempt: inside `$((`/`((` bash still runs
+# code from other substitutions' output (`a[$(cmd)]` subscripts, `((` falling back to nested
+# subshells; review 5897778680).
+_NUMERIC_PRODUCER = r"""(?![ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\))"""
+_SHELL_SINK_RE = re.compile(_SHELL_SINK_TEMPLATE + r"|`)", re.MULTILINE)
+_SHELL_SINK_NUMERIC_RE = re.compile(_SHELL_SINK_TEMPLATE + _NUMERIC_PRODUCER + r"|`)", re.MULTILINE)
+# What could make `date` something other than the date binary: a function or alias of that name,
+# PATH/hash/enable/BASH_ENV changes, exported or sourced definitions. Any of them drops the
+# `$(date +%s)` exemption.
+_DATE_REBIND_RE = re.compile(
+    r"\bdate\s*\(|\bfunction\s+date\b"
+    r"|\b(?:alias|hash|enable|source|declare|typeset|export|command_not_found_handle)\b"
+    r"|\b(?:PATH|BASH_ENV|ENV)\+?=|(?:^|[\s;&|({])\.\s",
     re.MULTILINE)
 
 
@@ -506,7 +521,8 @@ def output_reaches_shell(command: str) -> bool:
     shell, so ``| grep bash`` / ``| grep -c bash`` count as sinks too: telling a wrapper's operand
     from a filter's pattern needs a per-command grammar, and the false sink only fails closed
     (review 5890784121 nit 3; ``| grep bash.sh`` is no sink only because of the word end)."""
-    return _SHELL_SINK_RE.search(command) is not None
+    sink = _SHELL_SINK_RE if _DATE_REBIND_RE.search(command) else _SHELL_SINK_NUMERIC_RE
+    return sink.search(command) is not None
 
 
 def _nonreading_shell_unit(unit: str, functions: set[str]) -> bool:
