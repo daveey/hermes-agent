@@ -70,7 +70,9 @@ class LinksPass:
     @staticmethod
     def _warn_held_elsewhere() -> None:
         # The holder is never this runner: its own pass keeps ``_idle`` clear, so ``request`` returns before here,
-        # and ``_pass`` clears ``_HOLD`` before releasing the lock. ``_HOLD`` is None only in that release window.
+        # and ``_pass`` clears ``_HOLD`` before releasing the lock. While another runner holds the lock, ``_HOLD`` is
+        # None only between acquiring the lock and setting ``_HOLD``, and between clearing it and releasing the lock;
+        # a refusal in either window stays quiet, which is harmless because the next request warns.
         global _WARNED
         hold, warned, now = _HOLD, _WARNED, _clock()
         if hold is None:

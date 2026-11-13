@@ -231,7 +231,7 @@ def test_a_hold_past_the_threshold_warns_again_naming_its_duration(monkeypatch, 
     again, naming how long it has held the lock, then at most once per interval (review nit on PR #2073)."""
     from hermes_cli import kanban_sync_links_pass as lp
     now = {"t": 1000.0}
-    monkeypatch.setattr(lp, "_clock", lambda: now["t"], raising=False)  # base has no seam: the real clock barely moves
+    monkeypatch.setattr(lp, "_clock", lambda: now["t"])  # the real clock barely moves
     held, refused = _HeldPass(monkeypatch), lp.LinksPass("refused")
     boards = [("default", Path("/nonexistent/kanban.db"))]
     try:
