@@ -157,6 +157,7 @@ def interrupt_subagent(subagent_id: str) -> bool:
     agent = record.get("agent") if record else None
     if agent is None:
         return False
+    agent._delegate_stop_requested = True  # read where a run that never started settles its record
     try:
         return bool(request_hard_interrupt(agent, f"Interrupted via TUI ({subagent_id})"))
     except Exception as exc:
@@ -317,6 +318,9 @@ def _list_payload(parent_agent: Any) -> dict[str, Any]:
             "accepting_steer": bool(r.get("accepting_steer", False)),
             "live_transcript": getattr(r.get("agent"), "_live_transcript_path", None),
         })
+    from tools.delegate_tool_auto_resume import waiting_entries
+    live = {e["subagent_id"] for e in entries}
+    entries += [w for w in waiting_entries(parent_agent) if w["subagent_id"] not in live]
     payload: dict[str, Any] = {"action": "list", "count": len(entries), "subagents": entries}
     awaiting = _finished_awaiting_batch(parent_agent, records)
     if awaiting:
@@ -401,6 +405,16 @@ def _handle_control_action(action: str, subagent_id: Optional[str], message: Opt
     with _active_subagents_lock:
         record = _active_subagents.get(sid)
         stub = _recent_subagents.get(sid) if record is None else None
+    if record is None and action == "stop":
+        from tools.delegate_tool_auto_resume import dismiss
+        dismissed = dismiss(parent_agent, sid)
+        if dismissed == "dismissed":  # not running, waiting to resume: it never resumes, its pin is released
+            return json.dumps({"action": "stop", "subagent_id": sid, "status": "dismissed",
+                               "note": "It will not resume automatically; its worktree is no longer kept."})
+        if dismissed == "recorded":  # this conversation's own continue holds it and has not started it yet
+            return json.dumps({"action": "stop", "subagent_id": sid, "status": "stop_recorded",
+                               "note": "Your continue of it is starting: if that continue is refused it ends "
+                                       "stopped and never resumes automatically; if it starts, stop it again."})
     if record is None and stub is not None and _owns_subagent_record(stub, parent_agent):
         return _finished_payload(action, sid, stub, parent_agent)
     if record is None or not _owns_subagent_record(record, parent_agent):

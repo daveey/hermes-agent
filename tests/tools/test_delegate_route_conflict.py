@@ -24,12 +24,13 @@ def route_call():
         children.append(child)
         return child
 
-    def runtime(*, requested, target_model):
+    def runtime(*, requested, target_model, explicit_base_url=None):
+        # Upstream hands delegation.base_url through as explicit_base_url; the resolver keeps it.
         endpoints = {"openai-codex": "https://chatgpt.com/backend-api/codex",
                      "anthropic": "https://api.anthropic.com",
                      "gemini": "https://generativelanguage.googleapis.com"}
         return {"provider": requested, "model": target_model,
-                "base_url": endpoints.get(requested, "https://relay.example.com/v1"),
+                "base_url": explicit_base_url or endpoints.get(requested, "https://relay.example.com/v1"),
                 "api_key": "synthetic-token",
                 "api_mode": "anthropic_messages"}
 

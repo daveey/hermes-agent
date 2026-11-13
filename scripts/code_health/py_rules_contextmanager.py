@@ -1,4 +1,4 @@
-"""HX017: a ``@contextmanager`` that swallows the caller's error at its ``yield`` and can then yield again
+"""HX901: a ``@contextmanager`` that swallows the caller's error at its ``yield`` and can then yield again
 (registered in ``py_rules.CHECKERS``).
 
 An exception raised in the caller's ``with`` block is thrown INTO the generator at the ``yield``. A broad

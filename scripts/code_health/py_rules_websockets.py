@@ -1,4 +1,4 @@
-"""HX018: a websockets connection opened without ``logger=`` (registered in ``py_rules.CHECKERS``).
+"""HX902: a websockets connection opened without ``logger=`` (registered in ``py_rules.CHECKERS``).
 
 websockets logs a peer that stops answering pings as ``ERROR keepalive ping failed`` + traceback from its own
 keepalive thread, even when the caller handles the drop (reconnect, end the stream). Every Hermes call site

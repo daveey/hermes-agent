@@ -1,4 +1,4 @@
-"""HX017: a ``@contextmanager`` whose broad ``except`` around ``yield`` swallows the caller's error.
+"""HX901: a ``@contextmanager`` whose broad ``except`` around ``yield`` swallows the caller's error.
 
 kanban-e5babca565: ``tui_gateway.kanban_unloaded.find_session_db`` caught the ``with`` block's own
 "Session has an active turn lease" at its ``yield``, yielded again, and the sweeper logged "generator didn't
@@ -33,7 +33,7 @@ def find(stores):
 
 
 def _hits(src: str) -> list[int]:
-    return sorted(set(CHECKERS["HX017"](canonical_tree(ast.parse(src)), Ctx())))
+    return sorted(set(CHECKERS["HX901"](canonical_tree(ast.parse(src)), Ctx())))
 
 
 @pytest.mark.parametrize("src, flagged", [
@@ -90,7 +90,7 @@ def test_flagged_shape_really_hides_the_callers_error():
 
 
 def test_rule_covers_product_code_not_tests():
-    rule = RULES_BY_ID["HX017"]
+    rule = RULES_BY_ID["HX901"]
     assert rule_applies(rule, "tui_gateway/kanban_unloaded.py")
     assert rule_applies(rule, "hermes_cli/kanban_db.py")
     assert not rule_applies(rule, "tests/tui_gateway/test_x.py")

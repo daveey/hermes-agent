@@ -392,10 +392,10 @@ def test_homes_on_different_locks_do_not_rerun_each_others_seed(tmp_path, monkey
     merges = []
     real_seed_tree = packages._seed_tree
 
-    def counting_seed_tree(src, dst):
+    def counting_seed_tree(src, dst, *rest):  # upstream added the cache ``root`` argument
         if src.parent.name == "uv-cache":  # one payload bucket merged; nested calls recurse
             merges.append(src)
-        real_seed_tree(src, dst)
+        real_seed_tree(src, dst, *rest)
 
     monkeypatch.setattr(packages, "_seed_tree", counting_seed_tree)
 

@@ -27,7 +27,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 _IS_LINUX = platform.system() == "Linux"
 from tools.process_registry_bg_shell import bg_command_env, bg_login_argv
 from tools.environments.sandbox_scope import hosted_scope, producer_fields
-from tools.environments.local import _append_dropped_path_entries, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env, process_cwd
+from tools.environments.local import _append_dropped_path_entries, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env, process_cwd, routed_terminal_base
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import MISSING, dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
@@ -1141,9 +1141,9 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
 
     @staticmethod
     def _spawn_env(env_vars: dict) -> dict:
-        """Sanitized child env from the session's client toolchain; PYTHONUNBUFFERED so poll sees progress."""
+        """Sanitized child env from the served profile's base, as foreground commands; PYTHONUNBUFFERED."""
         from agent.session_client_env import toolchain_environ
-        env = _terminal_env(_sanitize_subprocess_env(toolchain_environ(), env_vars))
+        env = _terminal_env(_sanitize_subprocess_env(toolchain_environ(routed_terminal_base()), env_vars))
         env["PYTHONUNBUFFERED"] = "1"
         return env
 

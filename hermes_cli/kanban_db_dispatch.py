@@ -1659,19 +1659,19 @@ def _rows_since(conn: sqlite3.Connection, table: str, task_id: str, since: int, 
 
 
 def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
-    """``hermes_cli.profiles.profile_exists``, or ``None`` when it cannot be
-    imported (local import avoids a cycle; callers fall back to trusting the
-    assignee).
+    """``profile_exists`` from ``hermes_cli.profiles``; ``None`` when it cannot be
+    imported and no allowlist is set (callers then trust the assignee).
 
-    When ``kanban.dispatch_profiles`` is set (#110995) the returned predicate
-    additionally requires the assignee to be listed, fail-closed — so a card
-    assigned to ``default`` is only claimable by homes that opted into it.
-    Foreign assignees land in the existing ``skipped_nonspawnable`` bucket.
-    """
+    With ``kanban.dispatch_profiles`` set (#110995) the predicate also requires the
+    assignee to be listed, fail-closed: a ``default`` card is only claimable by homes that
+    opted in, and a set allowlist whose gate cannot be built claims nothing (#147531)."""
     try:
         from hermes_cli.profiles import normalize_profile_name, profile_exists
     except Exception:
-        return None
+        if _dispatch_profile_allowlist(str) is None:
+            return None
+        _kb._log.warning("kanban: hermes_cli.profiles unimportable — claiming no cards", exc_info=True)
+        return lambda _name: False
     allowlist = _dispatch_profile_allowlist(normalize_profile_name)
     if allowlist is None:
         return profile_exists
@@ -1708,7 +1708,7 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
 
     Lets health telemetry tell "stuck" (``0 spawned`` with spawnable work) from
     "correctly idle" (only control-plane lanes waiting on ``claim_task``). Falls
-    back to "any assigned" when ``profile_exists`` is unimportable.
+    back to "any assigned" when profiles cannot import and no allowlist is set.
     """
     return _has_spawnable(conn, "ready")
 
@@ -2153,7 +2153,7 @@ def _any_spawnable_review(
 ) -> bool:
     """Mirror review dispatch gates before reserving ready-lane capacity.
 
-    Unavailable profile metadata retains the historic fail-open behavior. A
+    Unimportable profiles fail open only when no allowlist is set. A
     review row that :func:`_dispatch_lane_task` would refuse this tick — its
     assignee already at the per-profile cap, or respawn-guarded — cannot
     consume the reservation, so it must not withhold capacity from an
@@ -2180,9 +2180,9 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
     """``kanban.default_assignee`` when it names a real profile this home may
     claim (``kanban.dispatch_profiles`` gated, same predicate as the spawn
     gate). Otherwise ``None`` so an unassigned shared-board card is never
-    written to. When the profiles module isn't importable trust the
-    operator's config: the downstream check still buckets a missing profile
-    as nonspawnable."""
+    written to. Profiles unimportable: trust the config if no allowlist is set
+    (the downstream check still buckets a missing profile as nonspawnable),
+    else ``None`` — the fail-closed gate claims nothing (#147531)."""
     name = (default_assignee or "").strip() or None
     if name:
         profile_exists = _profile_exists_fn()

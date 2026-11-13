@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 from hermes_cli._launchers import expose_cli
+from hermes_cli.default_plugins import step_install_default_plugins
 from pm.paths import install_root
 
 logger = logging.getLogger(__name__)
@@ -357,6 +358,7 @@ HOME_STEPS: tuple = (
     ("kanban_board_schema", step_kanban_board_schema),
     ("drop_live_plugin_catalog", step_drop_live_plugin_catalog),
     ("expose_cli", expose_cli),
+    ("install_default_plugins", step_install_default_plugins),
 )
 
 # Startup skill syncing belongs to each entry point. Boot bootstrap must
