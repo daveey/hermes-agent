@@ -49,6 +49,7 @@ def test_unreadable_replica_fallback_preserves_stale_policy(tmp_path, monkeypatc
 
     monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
     monkeypatch.setattr(ksa, '_remote_links', remote_links)
+    links._reset_for_tests()  # no earlier projection: the profile-board read keeps the caller's policy too
     rows = links.replica_cards(['s1'], ME, replicas=[('default', tmp_path / 'absent.db')], stale_ok=stale_ok)
     assert calls and set(calls) == {stale_ok}  # the cold fallback and the profile-board read both keep the policy
     assert [(r['id'], r['stale'], r['source']) for r in rows] == [('t_prior', True, 'ledger-fallback')]
