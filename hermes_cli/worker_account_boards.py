@@ -2,7 +2,10 @@
 
 Registration happens under account admission.lock before the final gate. Records
 survive process exits: a parked dispatcher is not evidence its running rows or
-jobs vanished. Missing registered DBs are unknown, never silently free capacity.
+jobs vanished. Missing registered DBs are unknown, never silently free capacity,
+except a board whose whole directory was removed from an ephemeral root (system
+temp, the account scratch dir): that workspace was garbage-collected, so its
+record retires instead of holding every claim on the host forever.
 """
 from __future__ import annotations
 
@@ -17,7 +20,45 @@ import tempfile
 from hermes_cli import worker_compute_capacity as capacity
 
 
+def _refuse_test_registration() -> None:
+    """A pytest process never writes the real account inventory.
+
+    conftest isolates ``policy_root``; a test's ``monkeypatch.undo()`` also drops
+    that patch, and a later claim then registered its tmp board in the real
+    account. Once pytest deleted the board, every worker claim on the host was
+    deferred ``worker_resources_unknown``. Compare paths without I/O: the
+    test-only real-home guard refuses any stat under the real root.
+    """
+    if not os.environ.get('PYTEST_CURRENT_TEST'):
+        return
+    from hermes_constants import _account_home
+    real = os.path.normpath(str(_account_home() / '.hermes'))
+    if os.path.normpath(str(capacity.policy_root())) == real:
+        raise RuntimeError('pytest must not register boards in the real account worker '
+                           f'inventory ({real}); is worker_compute_capacity.policy_root isolated?')
+
+
+def _ephemeral_roots() -> list[Path]:
+    account = capacity.policy_root().resolve()
+    # no-tmp: ok — matches boards OTHER processes made in system temp (pytest tmp_path), not our own scratch
+    roots = {Path('/tmp'), Path('/var/tmp'), Path(tempfile.gettempdir()), account / 'cache' / 'scratch'}
+    # An odd TMPDIR (a home or /) must never make the account's own boards ephemeral.
+    return [root for root in (r.resolve() for r in roots) if not account.is_relative_to(root)]
+
+
+def _collected(path: Path) -> bool:
+    """The board's directory is gone from a temp/scratch root: GC'd, not unknown.
+
+    A real board (installation root, any non-ephemeral path) or a missing file in
+    a surviving directory stays unknown and keeps refusing claims.
+    """
+    if path.parent.exists():
+        return False
+    return any(path.is_relative_to(root) for root in _ephemeral_roots())
+
+
 def register(conn) -> None:
+    _refuse_test_registration()
     from hermes_cli.kanban_db_connect import _main_db_file
     raw = _main_db_file(conn)
     if not raw:
@@ -132,6 +173,12 @@ def paths() -> list[Path]:
                 raise ValueError('invalid registered board path')
             if record.stem != hashlib.sha256(raw.encode()).hexdigest():
                 raise ValueError('invalid registered board identity')
-            Path(raw).stat()  # disappearance is unknown, including default boards
+            try:
+                Path(raw).stat()  # disappearance is unknown, including default boards
+            except FileNotFoundError:
+                if not _collected(Path(raw)):
+                    raise
+                record.unlink(missing_ok=True)
+                continue
             found.append(Path(raw))
     return found

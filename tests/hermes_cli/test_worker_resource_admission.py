@@ -223,3 +223,19 @@ def test_policy_enabled_after_lock_selection_refuses(worker_rig, monkeypatch):
     with admission.claim_transaction(rig.conn) as accepted:
         assert not accepted
 
+
+
+def test_unknown_names_the_failing_check_once(monkeypatch, tmp_path, caplog):
+    import logging
+    from hermes_cli import worker_resource_admission as resources
+    monkeypatch.setattr(resources, '_unknown_logged', {})
+    monkeypatch.setattr(resources, '_pressure', lambda directory: False)
+    missing = tmp_path / 'gone' / 'kanban.db'
+    def boom(*_args, **_kwargs):
+        raise FileNotFoundError(2, 'No such file or directory', str(missing))
+    monkeypatch.setattr(resources, 'occupied_count_for_host', boom)
+    with caplog.at_level(logging.WARNING, logger=resources.__name__):
+        assert resources.refusal(enabled=True) == 'worker_resources_unknown'
+        assert resources.refusal(enabled=True) == 'worker_resources_unknown'
+    lines = [r.getMessage() for r in caplog.records if 'worker_resources_unknown' in r.getMessage()]
+    assert len(lines) == 1 and str(missing) in lines[0]

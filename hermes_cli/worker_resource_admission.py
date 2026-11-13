@@ -3,6 +3,7 @@ from __future__ import annotations
 
 
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -13,6 +14,21 @@ from hermes_cli import worker_compute_capacity as capacity
 # Short hysteresis writers should not cause prelease/final-gate churn. Keep the
 # wait bounded; final admission also checks its whole-lock budget after sampling.
 PRESSURE_LOCK_TIMEOUT = 0.25
+# One log line per distinct failure per window: refusal() runs per card per tick.
+UNKNOWN_LOG_INTERVAL = 600.0
+_unknown_logged: dict[str, float] = {}
+
+
+def _log_unknown(exc: BaseException) -> None:
+    """Name the failing check (e.g. the missing registered board) in gateway.log."""
+    detail = f'{type(exc).__name__}: {exc}'
+    now = time.monotonic()
+    if detail in _unknown_logged and now - _unknown_logged[detail] < UNKNOWN_LOG_INTERVAL:
+        return
+    _unknown_logged[detail] = now
+    logging.getLogger(__name__).warning(
+        'worker_resources_unknown: %s (board inventory: %s)', detail,
+        capacity.policy_root() / 'worker-resources' / 'boards')
 
 
 def _lock_pressure(lock):
@@ -125,5 +141,6 @@ def refusal(echo=None, *, enabled=None, claimant=None) -> str | None:
         if occupied_count > cap if claimant is not None else occupied_count >= cap:
             return 'worker_capacity_full'
         return None
-    except Exception:  # health: allow BLE001 -- any unreadable policy/controller must refuse claims
+    except Exception as exc:  # health: allow BLE001 -- any unreadable policy/controller must refuse claims
+        _log_unknown(exc)
         return 'worker_resources_unknown'
