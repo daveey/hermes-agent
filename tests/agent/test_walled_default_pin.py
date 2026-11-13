@@ -368,3 +368,80 @@ def test_walled_pin_with_nothing_else_in_its_class_logs_no_target(home, monkeypa
 @pytest.mark.parametrize('hours', [1, None], ids=['short-wall', 'unknown-reset'])
 def test_a_short_or_unknown_wall_refuses_quietly(home, monkeypatch, caplog, hours):
     assert _injected_wall_refusal(home, monkeypatch, caplog, key='***', hours=hours) == []
+
+
+# --- Desktop/TUI gateway (tui_gateway.agent_factory): the same reroute, on its own agent-build path -------------
+# Hub Desktop chats 20261031_222913_405ade and 20261031_064851_d0f106 (11-13): router-picked Astra pins, Codex
+# walled until 11-17, 187 failed builds, because only the messaging gateway's pre-build lookup deferred to the
+# agent build's reroute.
+
+DESKTOP_ROW = {'model': ASTRA, 'provider': 'openai-codex'}  # what a resumed Desktop session row carries
+
+
+def _desktop_agent(model, runtime):
+    from run_agent import AIAgent
+    return AIAgent(model=model, session_id=SID, quiet_mode=True, skip_memory=True, skip_context_files=True,
+                   **{k: runtime.get(k) for k in ('provider', 'api_key', 'base_url', 'api_mode')})
+
+
+def test_desktop_session_with_legacy_astra_pin_builds_on_opus(home):
+    from tui_gateway.server import _resolve_agent_model_runtime  # agent_factory binds into the server namespace
+    _legacy_row(home, LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 33)
+    model, runtime = _resolve_agent_model_runtime(DESKTOP_ROW, None, SID)
+    assert model == ASTRA and runtime['provider'] == 'auto' and not runtime['api_key'], runtime
+    assert 'class_deferred' not in runtime and 'walled_notice' not in runtime, runtime
+    notice = runtime.pop('_fallback_notice')  # what _make_agent pops and shows once
+    assert 'quota is out until' in notice and 'PT' in notice and OPUS in notice, notice
+    agent = _desktop_agent(model, runtime)
+    assert (agent.model, agent.provider) == (OPUS, 'anthropic')
+    assert agent.model_routing['walled_from']['model'] == ASTRA
+    # The next build of this session follows the reroute without announcing it again.
+    model, runtime = _resolve_agent_model_runtime(DESKTOP_ROW, None, SID)
+    assert '_fallback_notice' not in runtime, runtime
+    again = _desktop_agent(model, runtime)
+    assert (again.model, again.provider) == (OPUS, 'anthropic')
+
+
+def test_desktop_session_with_router_picked_astra_builds_on_opus(home):
+    """A row written by the current allocator (``pin_source: default``), not only a legacy one."""
+    from tui_gateway.server import _resolve_agent_model_runtime  # agent_factory binds into the server namespace
+    _router_picks_astra(home)
+    _wall(home, 'openai-codex', ASTRA, 33)
+    model, runtime = _resolve_agent_model_runtime(DESKTOP_ROW, None, SID)
+    runtime.pop('_fallback_notice')
+    agent = _desktop_agent(model, runtime)
+    assert (agent.model, agent.provider) == (OPUS, 'anthropic')
+
+
+@pytest.mark.parametrize('case', ['explicit switch', 'short wall', 'no session id', 'own endpoint'])
+def test_desktop_wall_still_refuses_when_the_pin_must_not_move(home, case):
+    """Controls: David's own switch, a wall under the reroute threshold, a build with no session identity
+    (the readiness probe) and a session that overrides its endpoint all keep the refusal."""
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from tui_gateway.server import _resolve_runtime_or_defer_wall
+    _legacy_row(home, dict(LEGACY_ECHO, reason='explicit-switch') if case == 'explicit switch' else LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 2 if case == 'short wall' else 33)
+    overrides = {'base_url': 'https://proxy.example/v1'} if case == 'own endpoint' else {}
+    session = None if case == 'no session id' else SID
+    with pytest.raises(SubscriptionQuotaUnavailable):
+        _resolve_runtime_or_defer_wall({'requested': 'openai-codex', 'target_model': ASTRA}, ASTRA,
+                                       'openai-codex', overrides, session)
+
+
+def test_desktop_wall_refuses_when_nothing_else_in_the_class_can_serve(home):
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from tui_gateway.server import _resolve_agent_model_runtime  # agent_factory binds into the server namespace
+    _legacy_row(home, LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 33)
+    _wall(home, 'anthropic', OPUS, 33)
+    with pytest.raises(SubscriptionQuotaUnavailable):
+        _resolve_agent_model_runtime(DESKTOP_ROW, None, SID)
+
+
+def test_make_agent_resolves_under_the_session_it_builds():
+    """_make_agent is too heavy to run here; it must hand the resolver the id the route store is keyed by."""
+    import inspect
+    from tui_gateway import server
+    source = inspect.getsource(server._make_agent)
+    assert '_resolve_agent_model_runtime(model_override, provider_override, session_id or key)' in source

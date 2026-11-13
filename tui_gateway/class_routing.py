@@ -12,6 +12,28 @@ def deferred_runtime(model, provider, config):
     return {"provider": requested, "requested_provider": requested}
 
 
+def walled_pin_deferral(wall, model, provider, session_id):
+    """A runtime that leaves the route to the agent build, or None when the quota *wall* must stand.
+
+    The agent build owns the session's durable route and moves a router-picked pin off a far wall within its
+    class (``resolve_managed_runtime``); David's own pins and short walls still refuse
+    (``model_routing_walls.gateway_deferral`` decides, from the session's standing route). The one chat line
+    naming the reroute rides ``_fallback_notice``, which ``_make_agent`` already shows once."""
+    if not session_id:
+        return None
+    from agent.model_routing_runtime import routing_session
+    from agent.model_routing_walls import gateway_deferral
+    with routing_session(session_id):
+        deferred = gateway_deferral(wall, model, provider, None)
+    if deferred is None:
+        return None
+    notice = deferred.pop("walled_notice", None)
+    deferred.pop("class_deferred", None)
+    if notice:
+        deferred["_fallback_notice"] = notice
+    return deferred
+
+
 def child_class_kwargs(agent):
     """Independent side jobs inherit the workload class, not a paid-capable concrete pin."""
     route = getattr(agent, "model_routing", None)
