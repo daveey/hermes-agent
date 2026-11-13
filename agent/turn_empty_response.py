@@ -28,8 +28,10 @@ _INLINE_THINK_RE = re.compile(r'<think>|<thinking>|<reasoning>', re.IGNORECASE)
 # The persisted user-row display kinds the gateway types as machinery: the self-injected
 # internal_notification turn plus the producer-notice cards (background-process completions,
 # async delegation results). Mirrors gateway.response_filters.MACHINERY_DISPLAY_KINDS;
-# agent/ cannot import gateway/.
-_MACHINERY_DISPLAY_KINDS = frozenset({"internal_notification", "process_complete", "async_delegation_complete"})
+# agent/ cannot import gateway/. The fork's kanban_notice and loop_tick producer kinds are
+# machinery too. [daveey]
+_MACHINERY_DISPLAY_KINDS = frozenset({"internal_notification", "process_complete", "async_delegation_complete",
+                                      "kanban_notice", "loop_tick"})
 
 # Loop exit stamped when a machinery turn ends with the model adding nothing.
 NOTIFICATION_NO_REPLY_EXIT = "notification_no_reply"

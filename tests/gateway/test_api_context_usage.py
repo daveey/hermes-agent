@@ -268,7 +268,10 @@ def _canonical_handler(owner, agent):
         turn._ctx = SimpleNamespace(
             session_key="", session_id=event.source.chat_id, message=event.text, source=event.source,
             title_user_message=None, persist_user_display_kind=None, persist_user_display_metadata=None,
-            moa_config=None, inbound_message_id=None, mute_notification_reply=False, reply_expected=None)
+            moa_config=None, inbound_message_id=None, mute_notification_reply=False, reply_expected=None,
+            # approval_transport snapshots the turn's status routing. [daveey]
+            _loop_for_step=None, _status_chat_id=None, _status_thread_metadata=None,
+            _status_adapter_pinned=None, _status_adapter_resolver=None)
         turn._approval_owner = None
         turn._approval_notify_sync = lambda *args, **kwargs: None
         turn._runner = SimpleNamespace(_consume_pending_native_image_paths=lambda key: [])

@@ -67,7 +67,9 @@ def test_cli_creates_through_a_live_gateway_local_and_by_url(tmp_path, monkeypat
         profile_cmd._profile_create(parser.parse_args(["profile", "create", "viaurl"]))
         out = capsys.readouterr().out
         assert (home / "profiles" / "viaurl" / "config.yaml").is_file(), out
-        assert (user / ".local" / "bin" / "viaurl").is_file(), out
+        # tests/conftest.py points the profile wrapper dir at the sandbox. [daveey]
+        from hermes_cli.profiles import _get_wrapper_dir
+        assert (_get_wrapper_dir() / "viaurl").is_file(), out
         monkeypatch.delenv("HERMES_TUI_GATEWAY_URL")
 
         # Named: a different home with no gateway, pointed at this one by URL.
@@ -86,7 +88,7 @@ def test_cli_creates_through_a_live_gateway_local_and_by_url(tmp_path, monkeypat
         profile_cmd._profile_create(parser.parse_args(["profile", "create", "byurl2"]))
         out = capsys.readouterr().out
         assert (home / "profiles" / "byurl2" / "config.yaml").is_file(), out
-        assert not (user / ".local" / "bin" / "byurl2").exists(), out
+        assert not (_get_wrapper_dir() / "byurl2").exists(), out
         (terminal_home / "config.yaml").unlink()
         monkeypatch.delenv("HERMES_TUI_GATEWAY_URL")
 

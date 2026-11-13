@@ -397,6 +397,8 @@ def test_macos_ignores_the_opt_in_and_stays_idle_only(monkeypatch):
     assert asked == [entry]
 
 
-def test_the_opt_in_is_not_inherited_by_a_replayed_gateway():
-    import inspect
-    assert "STOP_BUSY_ENV" in inspect.getsource(pause._relaunch_bare).split("for leaked in", 1)[1].split("\n", 1)[0]
+def test_the_opt_in_is_not_inherited_by_a_replayed_gateway(tmp_path, monkeypatch):
+    home = str(tmp_path / "home")
+    monkeypatch.setitem(pause._REPLAY_ENVS, home, {"HERMES_HOME": home, pause.STOP_BUSY_ENV: "1"})
+    env = pause._bare_replay_env(home)
+    assert pause.STOP_BUSY_ENV not in env and env["HERMES_HOME"] == home

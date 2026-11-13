@@ -45,6 +45,14 @@ def _routing_entry(runner, session_key):
     return entry if isinstance(getattr(entry, "metadata", None), dict) else None
 
 
+def _store_is_this_profiles() -> bool:
+    """[daveey] A multiplexed gateway keeps ONE routing store, in its launch home, for every profile it
+    serves. A served profile's turn must not write its host path into that home (another tenant's
+    files), so its cwd is not saved there and restarts start it in ``terminal.cwd``."""
+    from hermes_constants import get_hermes_home, get_routing_process_hermes_home, hermes_home_key
+    return hermes_home_key(get_hermes_home()) == hermes_home_key(get_routing_process_hermes_home())
+
+
 # Which conversation (routing entry, by its creation stamp) each chat's in-process cwd record
 # belongs to. ``/new`` publishes a fresh entry: the record left by the old conversation is dropped at
 # that conversation's next turn, inside the turn's own profile scope that qualifies the record's key.
@@ -63,7 +71,7 @@ def restore_turn_cwd(runner, session_key: str | None, policy) -> object | None:
     if _record_owner.get(owner, token) != token:
         clear_session_cwd(session_key)
     _record_owner[owner] = token
-    if get_session_cwd(session_key) is None:
+    if get_session_cwd(session_key) is None and _store_is_this_profiles():
         saved = entry.metadata.get(_METADATA_KEY)
         if isinstance(saved, str) and os.path.isabs(saved) and os.path.isdir(saved):
             record_session_cwd(session_key, saved)
@@ -74,7 +82,7 @@ def persist_turn_cwd(runner, session_key: str | None, token: object | None) -> N
     """Write the chat's recorded cwd onto its routing entry when it changed. Only onto the entry the
     turn started on: a ``/new`` during the turn published a fresh one, which starts in ``terminal.cwd``."""
     entry = _routing_entry(runner, session_key) if token is not None else None
-    if entry is None or entry.created_at != token:
+    if entry is None or entry.created_at != token or not _store_is_this_profiles():
         return
     from tools.terminal_tool import get_session_cwd
     cwd = get_session_cwd(session_key)
