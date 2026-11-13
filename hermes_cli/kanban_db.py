@@ -3356,11 +3356,15 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tu
     loop escalated can go back to work without the specifier/decomposer rewriting it. ``comment`` is
     written in the same txn and only when the unblock lands (``kanban_reason_comment``); ``event_extra``
     is merged into the ``unblocked`` event (audit provenance). ``precondition`` runs first inside the
-    write txn; a returned refusal aborts with ``False`` and no change. [daveey]"""
+    write txn; a returned refusal aborts with ``False`` and no change. A card held terminal is refused before both
+    (``kanban_terminal_guard.unblock_held``: ``unblocked`` is a reopen). [daveey]"""
     from hermes_cli.kanban_reason_comment import reason_comment
+    from hermes_cli.kanban_terminal_guard import unblock_held
     now = int(time.time())
-    with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
-        if precondition is not None and precondition(conn):
+    # ``held`` is decided before the comment's savepoint opens: a rollback to it would drop the note.
+    with write_txn(conn), reason_comment(conn, task_id, None if (held := unblock_held(conn, task_id)) else comment) \
+            as noted:
+        if held or precondition is not None and precondition(conn):
             return False
         resume_status = (_resume_status_from_events(conn, task_id)
                          if _task_status(conn, task_id) in ("blocked", "triage") else "ready")
@@ -3392,50 +3396,6 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tu
             payload = {**(payload or {}), **event_extra}
         _append_event(conn, task_id, "unblocked", payload)
         return noted.keep(True)
-
-
-def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``review`` -> ``ready``/``todo`` so the implementer re-runs on the new
-    comments; restores the implementer from the ``review_requested`` event.
-    Preserves ``consecutive_failures`` and the block loop counter (review is
-    not a block; only :func:`complete_task` clears them)."""
-    now = int(time.time())
-    with write_txn(conn):
-        task = get_task(conn, task_id)
-        if task is None or task.status != "review":
-            return False
-        review_event = _latest_event(conn, task_id, "review_requested")
-        handoff = _json_dict(_row_get(review_event, "payload"))
-        implementer = _nonblank_str(handoff.get("implementer"))
-        if implementer:
-            from hermes_cli.kanban_capabilities import validate_assignment
-
-            validate_assignment(implementer, requires=task.requires,
-                                workspace_kind=task.workspace_kind, workspace_path=task.workspace_path, skills=task.skills)
-        _reclaim_dangling_run(
-            conn, task_id, statuses=("review",), now=now,
-            note="invariant recovery on review reopen",
-        )
-        new_status = _landing_status_after_parents(conn, task_id)
-        params: tuple[Any, ...] = (new_status, *((implementer,) if implementer else ()), task_id)
-        cur = conn.execute(
-            # consecutive_failures deliberately PRESERVED: review reopen is not
-            # a success signal; only complete_task resets the breaker (#35072).
-            "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
-            + (", assignee = ?" if implementer else "")
-            + " WHERE id = ? AND status = 'review'",
-            params,
-        )
-        if cur.rowcount != 1:
-            return False
-        payload: dict[str, Any] = {"status": new_status}
-        if implementer:
-            payload["implementer"] = implementer
-        _append_event(
-            conn, task_id, "review_reopened", payload if payload != {"status": "ready"} else None,
-        )
-        return True
 
 
 def invalidate_descendants_for_parent_reopen(
@@ -4007,6 +3967,7 @@ from hermes_cli.kanban_db_comment_ids import (
 from hermes_cli.kanban_db_archive import archive_task
 from hermes_cli.kanban_db_list import list_task_rows, list_tasks
 from hermes_cli.kanban_db_schedule import schedule_task
+from hermes_cli.kanban_db_review_reopen import reopen_review_task
 from hermes_cli.kanban_db_edit import PriorityLowerRefused, edit_task
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer
 from hermes_cli.kanban_db_notify import _inherit_notify_subs, _owning_sub_clause

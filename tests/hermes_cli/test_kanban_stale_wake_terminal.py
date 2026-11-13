@@ -345,3 +345,63 @@ def test_terminal_hold_orders_by_origin_not_by_arrival():
     assert ktg.terminal_hold(conn, "t") is None
     conn.execute("INSERT INTO task_events VALUES (4, NULL, 't', 'completed', '{}', 400)")
     assert ktg.terminal_hold(conn, "t")["id"] == 4
+
+
+# --- unblock_task: ``unblocked`` is a reopen, and its automated callers act on the local row -----------------------
+# PR #1958 review 5889419180 nit 1: a stale copy of a done card, auto-unblocked by the shared-blocker clear/probe,
+# the quota release or a ``resolved_check``, went ``ready`` and wrote ``unblocked``, which both guards (here and
+# hermes-hub#105) accept as an explicit reopen.
+
+@pytest.mark.parametrize("stale", ["scheduled", "blocked"])
+def test_unblock_of_a_stale_copy_of_a_done_card_does_not_reopen_it(board, stale):
+    tid = _parked(board)
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    if stale == "blocked":
+        with kb.write_txn(board):
+            board.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+    for _ in range(2):  # the shared-blocker probe and the quota release retry every tick
+        assert kb.unblock_task(board, tid) is False
+    assert _status(board, tid) == stale
+    assert "unblocked" not in _kinds(board, tid)
+    assert ktg.terminal_hold(board, tid) is not None                    # the push still strips the stale status
+    [note] = _ignored(board, tid)                                     # one note, not one per tick
+    assert (note["terminal_kind"], note["source"], note["wake_kind"]) == ("completed", "producer:unblocked",
+                                                                           "unblocked")
+
+
+def test_a_refused_unblock_runs_no_precondition_and_keeps_no_comment(board):
+    """``kanban_ask_resolved`` passes both: its precondition writes ``ask_resolved`` and drops the wake check, so it
+    must not run for a card the guard refuses; the note survives the comment's savepoint rollback."""
+    tid = _parked(board)
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    ran = []
+    assert kb.unblock_task(board, tid, comment=("dispatcher", "resolved_check exited 0"),
+                           precondition=lambda c: ran.append(1)) is False
+    assert ran == []
+    assert [c for c in kb.list_comments(board, tid) if "resolved_check" in c.body] == []
+    assert len(_ignored(board, tid)) == 1
+
+
+def test_unblock_of_a_live_card_still_lands(board):
+    """A card never completed, and one completed then explicitly reopened, unblock as before and leave no note."""
+    fresh = _parked(board)
+    again = _parked(board)
+    with kb.write_txn(board):
+        kb._append_event(board, again, "completed", {})
+        kb._append_event(board, again, "reopened", {"reason": "more"})
+    for tid in (fresh, again):
+        assert kb.unblock_task(board, tid, comment=("david", "go")) is True
+        assert _status(board, tid) == "ready"
+        assert "unblocked" in _kinds(board, tid)
+        assert _ignored(board, tid) == []
+
+
+def test_unblock_of_a_done_row_is_refused_without_a_note(board):
+    """Not unblockable anyway: the row is already terminal, so there is no stale wake to record."""
+    tid = kb.create_task(board, title="t", assignee="worker")
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (tid,))
+        kb._append_event(board, tid, "completed", {})
+    assert kb.unblock_task(board, tid) is False
+    assert _status(board, tid) == "done"
+    assert _ignored(board, tid) == []

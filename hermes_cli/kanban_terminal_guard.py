@@ -13,7 +13,8 @@ done for days (t_01a1c7b27ca3b496 and five more). The push stamps its HLC at sen
 Board's per-field LWW over the completion, and the Board leased the card again.
 
 Enforced where a status is produced or applied: the wake producers (``kanban_continuation``,
-``kanban_wake_check``) skip a held card; the feed apply (``kanban_db_sync.apply_remote_changes``) keeps a held card
+``kanban_wake_check``) skip a held card; ``kanban_db.unblock_task`` refuses one (``unblocked`` is a reopen, and its
+automated callers act on the local row); the feed apply (``kanban_db_sync.apply_remote_changes``) keeps a held card
 terminal; the push (``kanban_sync_client.push``) strips the stale status; the Board (hermes-hub rows.ts/
 transitions.ts) refuses the lease and puts the card back. Each ignored wake leaves a ``stale_wake_ignored`` event
 naming the terminal event it lost to. [daveey]
@@ -136,6 +137,18 @@ def skip_wake(conn: sqlite3.Connection, task_id: str, wake_kind: str, **extra: A
     return True
 
 
+_UNBLOCKABLE = ("blocked", "scheduled", "triage")
+
+
+def unblock_held(conn: sqlite3.Connection, task_id: str) -> bool:
+    """``kanban_db.unblock_task``, first inside its write txn: True (refuse) when the row reads blocked/scheduled/
+    triage but the card is held terminal. ``unblocked`` is an explicit reopen (``REOPEN_KINDS``, and on the Board),
+    so an automated caller acting on a stale copy (shared-blocker clear/probe, quota release, ``resolved_check``)
+    would otherwise reopen a done card. A card that is not unblockable anyway leaves no note."""
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row is not None and row[0] in _UNBLOCKABLE and skip_wake(conn, task_id, "unblocked")
+
+
 def push_status_is_stale(conn: sqlite3.Connection, task_id: str, status: Any) -> Optional[dict]:
     """The push: the terminal event a task row's live ``status`` must lose to, or None to send it.
 
@@ -182,16 +195,17 @@ def enforce_after_apply(conn: sqlite3.Connection, left_terminal: Iterable[tuple[
     ``reopened``: cards that received a reopen event in this page. A card this guard held while its reopen was
     still in a later page (a page boundary between the row and its event) gets the held status back."""
     changed: dict[str, str] = {}
-    for task_id, was in left_terminal:
+    for task_id, _was in left_terminal:
         row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None or row[0] in TERMINAL_STATUSES or row[0] == "running":
             continue
         hold = terminal_hold(conn, task_id)
         if hold is None:
             continue
-        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (hold["status"] or was, task_id))
+        # The hold's own status, not ``_was``: ``terminal_hold`` only returns an event with a terminal status.
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (hold["status"], task_id))
         _note(conn, task_id, hold, source="apply", held_status=row[0])
-        changed[task_id] = hold["status"] or was
+        changed[task_id] = hold["status"]
     for task_id in reopened:
         if task_id in changed:
             continue
@@ -215,7 +229,9 @@ def _restore_held(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     held = _payload(last[1]).get("held_status")
     if not isinstance(held, str) or held in TERMINAL_STATUSES:
         return None
-    # Only a hold newer than every terminal event: an older one belongs to an earlier completion.
+    # Only a hold newer than every terminal event: an older one belongs to an earlier completion. Local ids
+    # (arrival order) on purpose, unlike ``terminal_hold``'s origin order: the question is whether this apply note
+    # was written after the terminal event reached this file, which only arrival order answers.
     newest_terminal = max((e["id"] for e in _events(conn, task_id) if terminal_status(e)), default=0)
     if last[0] < newest_terminal:
         return None
