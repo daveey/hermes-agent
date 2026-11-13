@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
+from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
 
@@ -279,7 +281,6 @@ _SHELL_LONG_OPTIONS_WITH_VALUES = frozenset({"--rcfile", "--init-file"})
 _SHELL_COMMAND_FLAGS = {"-c", "--command"}
 _MAX_REFERENCED_SCRIPT_BYTES = 1024 * 1024
 _MAX_REFERENCED_SCRIPT_DEPTH = 8
-_CONTROL_CHARS = frozenset(";&|()")
 
 # Directory names directly under `Library` that mark a FileProvider-backed subtree: `Mobile
 # Documents` is iCloud Drive; `CloudStorage` hosts third-party providers (Dropbox, OneDrive, Google
@@ -739,14 +740,15 @@ def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterat
 
 def _iter_command_token_lists(command: str) -> Iterator[list[str]]:
     """Yield the shell tokens of each logical line; a line shlex rejects (unbalanced quotes) falls
-    back to per-physical-line tokenization."""
+    back to per-physical-line tokenization. An unquoted ``<``/``>`` glued to a word starts a word
+    of its own (``python3 -<f.py``), as in the shell."""
     for line in _split_logical_lines(command.replace("\\\n", "")):
         try:
-            tokens = _shlex_tokens(line)
+            tokens = _shlex_tokens(split_glued_redirections(line))
         except ValueError:
             for physical_line in line.splitlines():
                 try:
-                    yield _shlex_tokens(physical_line)
+                    yield _shlex_tokens(split_glued_redirections(physical_line))
                 except ValueError:
                     continue
             continue
@@ -835,47 +837,15 @@ def _session_aliases_shadow_consumers(session_aliases: Optional[frozenset[str]])
                for name in session_aliases)
 
 
-_CONTROL_OPERATOR = re.compile(r"\|\||&&|\|&|;;|[;&|()]")
-
-
 def _iter_segment_contexts(command: str) -> Iterator[tuple[list[str], bool, list[str]]]:
     """``(segment, call_argument, piped_files)``: whether the segment is the argument list of a
     call (the segment right after a ``(`` that follows an ordinary word), and the files a ``cat``
-    pipes into its stdin (``cat f.sh | bash``). A group a pipe feeds (``cat f | (true; bash)``,
-    ``| { …; }``) passes the feed to every command in it, as the shell does."""
+    pipes into its stdin (``cat f.sh | bash``), through groups, compound commands and process
+    substitution too (``{ cat f; } | bash``, ``cat f | if …; fi``, ``bash <(cat f)``)."""
     for tokens in _iter_command_token_lists(command):
-        segment: list[str] = []
-        call_argument = False
-        previous: Optional[list[str]] = None
-        feed: list[str] = []
-        # The feed each open `(`/`{` group inherited: every command in it reads that stdin.
-        groups: list[list[str]] = []
-        for token in tokens:
-            if token and set(token) <= _CONTROL_CHARS:
-                next_is_call = token == "(" and bool(segment) and _opens_call_arguments(segment)
-                if segment:
-                    yield segment, call_argument, feed
-                    if segment[0] == "{":
-                        groups.append(feed)
-                    previous = segment
-                    segment = []
-                for operator in _CONTROL_OPERATOR.findall(token):
-                    if operator in ("|", "|&"):
-                        feed = _cat_operands(previous)
-                    elif operator == "(":
-                        groups.append(feed)
-                    else:
-                        if operator == ")" and groups:
-                            groups.pop()
-                        feed = groups[-1] if groups else []
-                call_argument = next_is_call
-                continue
-            if not segment and token == "}" and groups:
-                groups.pop()
-                feed = groups[-1] if groups else []
-            segment.append(token)
-        if segment:
-            yield segment, call_argument, feed
+        yield from iter_line_segment_contexts(
+            tokens, cat_operands=_cat_operands, opens_call_arguments=_opens_call_arguments,
+            peel_reserved_words=_peel_reserved_words)
 
 
 def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
