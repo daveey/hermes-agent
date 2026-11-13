@@ -419,11 +419,7 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
                 return
             drop_triggers(conn)
         return
-    conn.executescript(SYNC_SCHEMA_SQL)
-    for table, column, ddl in _SYNC_COLUMN_DDL:
-        _add_column_if_missing(conn, table, column, ddl)
-    for table in _UID_TABLES:
-        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
+    apply_sync_schema_steps(conn)
     from hermes_cli.kanban_db_connect import write_txn
     with write_txn(conn):  # one transaction: no other writer can land between dropping and recreating a trigger
         enabled_now = conn.execute(
@@ -458,19 +454,35 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
     _SYNCED_PATHS.add(db_path)
 
 
+def apply_sync_schema_steps(conn: sqlite3.Connection) -> None:
+    """Every sync table/column/index step of :func:`install_or_remove`. ``kanban_schema_owner`` replays it on an
+    in-memory DB to judge a synced board "at par", so a sync column added here is never missed there. [daveey]"""
+    conn.executescript(SYNC_SCHEMA_SQL)
+    for table, column, ddl in _SYNC_COLUMN_DDL:
+        _add_column_if_missing(conn, table, column, ddl)
+    for table in _UID_TABLES:
+        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
+
+
+def live_without_install(conn: sqlite3.Connection, db_path: str) -> bool:
+    """Whether :func:`register_without_install` registers ``db_path`` as synced: sync is on for the board and the
+    installed core attached it (state row not ``off``, capture triggers present). [daveey]"""
+    try:
+        return bool(sync_enabled() and board_selected(db_path)
+                    and conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+                                     "AND name LIKE 'kanban_sync_%' LIMIT 1").fetchone() is not None
+                    and (conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone() or ("off",))[0] != "off")
+    except sqlite3.OperationalError:  # no kanban_sync_state: the installed core never enabled sync here
+        return False
+
+
 def register_without_install(conn: sqlite3.Connection, db_path: str) -> None:
     """:func:`install_or_remove` for a core that may not change this board's schema (``kanban_schema_owner``: a
     non-installed checkout on a board already at its schema). Writes nothing: the installed core owns the sync
-    tables and capture triggers. When it has attached the board (state row not ``off``, capture triggers present),
-    register the path, so :func:`board_mode` reads the real mode and this process mints Board ids and takes Board
-    leases like the installed core. [daveey]"""
-    try:
-        live = (sync_enabled() and board_selected(db_path)
-                and conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
-                                 "AND name LIKE 'kanban_sync_%' LIMIT 1").fetchone() is not None
-                and (conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone() or ("off",))[0] != "off")
-    except sqlite3.OperationalError:  # no kanban_sync_state: the installed core never enabled sync here
-        live = False
+    tables and capture triggers. When it has attached the board (:func:`live_without_install`), register the path,
+    so :func:`board_mode` reads the real mode and this process mints Board ids and takes Board leases like the
+    installed core. [daveey]"""
+    live = live_without_install(conn, db_path)
     (_SYNCED_PATHS.add if live else _SYNCED_PATHS.discard)(db_path)
 
 

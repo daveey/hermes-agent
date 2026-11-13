@@ -924,6 +924,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             raise PermissionError("Kanban descendants require an initialized board; ask its owner to initialize it")
         return conn
     _refuse_dead_board_resurrection(path, board)
+    _schema_owner.refuse_missing_board(path)  # a non-installed core never creates a home's board file [daveey]
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fast path: once THIS process has initialized this path, skip the
@@ -1029,6 +1030,7 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     ensure_kanban_test_isolation(path)
     _refuse_dead_board_resurrection(path, board)
+    _schema_owner.refuse_missing_board(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:

@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "BoardSchemaNotOwned", "Owner", "decide", "home_of_board", "installed_core", "missing_schema",
-    "open_read_only", "refusal_line", "running_core",
+    "open_read_only", "refusal_line", "refuse_missing_board", "running_core",
 ]
 
 
@@ -124,24 +124,30 @@ def decide(db_path: Any, *, running: Optional[Path] = None) -> Owner:
 
 # --- what this core's schema pass would add ---------------------------------------------------------------
 
-_REFERENCE: Optional[dict[str, frozenset[str]]] = None
+# sync live for the board? -> every table and column this core's board init declares (once per process each)
+_REFERENCE: dict[bool, dict[str, frozenset[str]]] = {}
 _REFERENCE_LOCK = threading.Lock()
 
 
-def _reference_schema() -> dict[str, frozenset[str]]:
-    """Every table and column this core's board init declares, from one in-memory init (once per process)."""
-    global _REFERENCE
+def _reference_schema(sync: bool = False) -> dict[str, frozenset[str]]:
+    """Every table and column this core's board init declares, from one in-memory init. ``sync``: the board is
+    synced here (``kanban_db_sync.live_without_install``), so the sync tables/columns ``install_or_remove`` adds
+    belong to it too: a sync column this core declares and the board lacks is not "at par"."""
     with _REFERENCE_LOCK:
-        if _REFERENCE is None:
+        ref = _REFERENCE.get(sync)
+        if ref is None:
             from hermes_cli import kanban_db_connect as kbc
             mem = sqlite3.connect(":memory:", isolation_level=None)  # noqa: kanban-lockguard (in-memory reference schema, not a board)
             try:
                 mem.row_factory = sqlite3.Row
                 kbc.apply_schema_steps(mem)  # the same steps connect()'s schema pass runs
-                _REFERENCE = _tables(mem)
+                if sync:
+                    from hermes_cli import kanban_db_sync
+                    kanban_db_sync.apply_sync_schema_steps(mem)  # the same steps install_or_remove runs
+                ref = _REFERENCE[sync] = _tables(mem)
             finally:
                 mem.close()
-        return _REFERENCE
+        return ref
 
 
 def _tables(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
@@ -150,12 +156,13 @@ def _tables(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
     return {n: frozenset(r[1] for r in conn.execute(f'PRAGMA table_info("{n}")')) for n in names}
 
 
-def missing_schema(conn: sqlite3.Connection) -> dict[str, set[str]]:
+def missing_schema(conn: sqlite3.Connection, *, sync: bool = False) -> dict[str, set[str]]:
     """Per table, what this core's schema pass would add to ``conn``'s board (``{"<table>": {"*"}}`` for a
-    missing table). Empty: the board already holds everything this core declares."""
+    missing table). Empty: the board already holds everything this core declares. ``sync``: include the sync
+    schema (:func:`_reference_schema`)."""
     live = _tables(conn)
     out: dict[str, set[str]] = {}
-    for table, cols in _reference_schema().items():
+    for table, cols in _reference_schema(sync).items():
         have = live.get(table)
         if have is None:
             out[table] = {"*"}
@@ -235,7 +242,18 @@ def check(conn: sqlite3.Connection, path: Path) -> Optional[str]:
     owner = decide(path)
     if owner.allowed:
         return None
-    missing = missing_schema(conn)
+    from hermes_cli import kanban_db_sync
+    missing = missing_schema(conn, sync=kanban_db_sync.live_without_install(conn, str(Path(path).resolve())))
     if not missing:
         return ""
     return refusal_line(path, owner, missing)
+
+
+def refuse_missing_board(path: Path) -> None:
+    """Before ``connect``/``init_db`` creates ``path``: a non-installed core never creates a board file in a home
+    that has an installed core (it would leave an empty ``kanban.db`` behind). Raises :class:`BoardSchemaNotOwned`."""
+    if Path(path).exists():
+        return
+    owner = decide(path)
+    if not owner.allowed:
+        raise BoardSchemaNotOwned(refusal_line(path, owner, {}))

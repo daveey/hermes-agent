@@ -41,6 +41,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_schema_owner import BoardSchemaNotOwned
 from hermes_cli.kanban_notify_identity import _caller_identity_for_target
 from hermes_cli.kanban_cli_metadata import ReceiptEditRefused, parse_metadata_flag as _parse_metadata_flag, receipt_refusal
 from hermes_cli.kanban_cli_park import (
@@ -203,6 +204,8 @@ def kanban_command(args: argparse.Namespace) -> int:
         # "no such table: tasks" on first use from a fresh HERMES_HOME.
         try:
             kb.init_db()
+        except BoardSchemaNotOwned as exc:  # one line, its own "kanban:" prefix
+            return _err(str(exc))
         except Exception as exc:
             return _err(f"kanban: could not initialize database: {exc}")
 
@@ -211,6 +214,8 @@ def kanban_command(args: argparse.Namespace) -> int:
             return _err(f"kanban: unknown action {action!r}", 2)
         try:
             return int(handler(args) or 0)
+        except BoardSchemaNotOwned as exc:  # a write a non-installed core may not make here, not a traceback [daveey]
+            return _err(str(exc))
         except (ValueError, RuntimeError, PermissionError) as exc:
             return _err(f"kanban: {exc}")
 

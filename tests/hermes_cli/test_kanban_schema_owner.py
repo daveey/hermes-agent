@@ -306,6 +306,101 @@ def test_non_installed_checkout_on_a_synced_board_at_par_keeps_its_sync_mode(hom
     assert _triggers(db) == triggers_before
 
 
+# --- follow-ups from review 5889519484 (card t_01a1d47a6e38a25b) -------------------------------------------
+
+def _synced_board(home: Path) -> Path:
+    """A board the installed core created with sync on (capture triggers, ``shadow`` mode)."""
+    support.write_sync_config(home, True)
+    db = home / "kanban.db"
+    kbc.connect(db).close()
+    resolved = str(db.resolve())
+    kbc._INITIALIZED_PATHS.discard(resolved)
+    from hermes_cli import kanban_db_sync as sync
+    sync._SYNCED_PATHS.discard(resolved)
+    return db
+
+
+def test_reference_schema_with_sync_matches_what_a_synced_connect_creates(home, monkeypatch):
+    """With sync live, the at-par reference also holds every sync table/column connect() installs."""
+    from hermes_cli.kanban_activity_revision import REVISION_TABLE
+    monkeypatch.setattr(owner, "_REFERENCE", {})
+    db = _synced_board(home)
+    raw = sqlite3.connect(db)
+    try:
+        created = {t: c for t, c in owner._tables(raw).items() if t != REVISION_TABLE}
+        assert "kanban_sync_state" in created
+        assert created == owner._reference_schema(sync=True)
+    finally:
+        raw.close()
+
+
+def test_synced_board_missing_a_sync_column_this_core_declares_is_not_at_par(home, monkeypatch):
+    """Main adds a sync column the installed core lacks: a non-installed checkout must refuse with
+    BoardSchemaNotOwned, not open read-write with sync live and fail later on a raw "no such column"."""
+    from hermes_cli import kanban_db_sync as sync
+    db = _synced_board(home)
+    before = _triggers(db), _columns(db)
+    monkeypatch.setattr(owner, "_REFERENCE", {})
+    monkeypatch.setattr(sync, "_SYNC_COLUMN_DDL", (*sync._SYNC_COLUMN_DDL, ("tasks", "fake_sync_col", "fake_sync_col TEXT")))
+    _foreign_install(home)
+    conn = kbc.connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0  # reads still work
+        with pytest.raises(owner.BoardSchemaNotOwned) as err:
+            kb.create_task(conn, title="from a worktree", assignee="default")
+    finally:
+        conn.close()
+    assert "fake_sync_col" in str(err.value)
+    assert (_triggers(db), _columns(db)) == before
+
+
+def test_unsynced_board_ignores_sync_ddl(home, monkeypatch):
+    """Sync off for the board: the sync DDL is not part of "at par" (nothing would touch those columns)."""
+    from hermes_cli import kanban_db_sync as sync
+    db = home / "kanban.db"
+    kbc.connect(db).close()
+    kbc._INITIALIZED_PATHS.discard(str(db.resolve()))
+    monkeypatch.setattr(owner, "_REFERENCE", {})
+    monkeypatch.setattr(sync, "_SYNC_COLUMN_DDL", (*sync._SYNC_COLUMN_DDL, ("tasks", "fake_sync_col", "fake_sync_col TEXT")))
+    _foreign_install(home)
+    conn = kbc.connect(db)
+    try:
+        kb.create_task(conn, title="sync off, at par", assignee="default")
+    finally:
+        conn.close()
+
+
+def test_non_installed_checkout_does_not_create_a_missing_board(home):
+    """A board file that does not exist yet stays absent: no 4096-byte empty kanban.db, no sidecars."""
+    db = home / "kanban.db"
+    assert not db.exists()
+    core = _foreign_install(home)
+    with pytest.raises(owner.BoardSchemaNotOwned) as err:
+        kbc.connect(db)
+    assert not db.exists()
+    assert not any(p.name.startswith("kanban.db") for p in home.iterdir()), sorted(p.name for p in home.iterdir())
+    line = str(err.value)
+    assert str(core.resolve()) in line and "a new board" in line and "\n" not in line
+
+
+def test_cli_prints_the_refusal_line_not_a_traceback(home, capsys):
+    import argparse
+    from hermes_cli import kanban as kcli
+    from hermes_cli.kanban_parser import build_parser
+    db = _older_board(home)
+    _foreign_install(home)
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers())
+    rc = kcli.kanban_command(parser.parse_args(["kanban", "create", "from a worktree", "--assignee", "default"]))
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "Traceback" not in err
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert len(lines) == 1 and lines[0].startswith("kanban: ") and "only this home's installed core" in lines[0]
+    assert not lines[0].startswith("kanban: kanban:")
+    assert DROPPED[1] not in _columns(db)
+
+
 def test_run_forever_give_up_opens_the_hub_card(home, monkeypatch):
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_placement as kp
