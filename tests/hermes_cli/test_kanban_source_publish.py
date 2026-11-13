@@ -20,9 +20,14 @@ from hermes_cli import kanban_source_preflight as pre
 from hermes_cli import kanban_source_publish as pub
 from hermes_cli import kanban_workspace_source as kws
 from tests.hermes_cli import kanban_source_support as fake
-from tests.hermes_cli.test_kanban_source_resolver import commit, git, use_home, world  # noqa: F401  (fixture)
+from tests.hermes_cli.test_kanban_source_resolver import commit, git, make_world, use_home
 
 SECRET = "sk-" + "A1b2C3d4E5f6G7h8J9k0"
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    return make_world(tmp_path, monkeypatch)
 
 
 class Card:
@@ -160,7 +165,7 @@ def test_denylisted_rename_refused(card):
 
 def test_secret_scan_ignores_display_redaction_setting(card, monkeypatch):
     """``security.redact_secrets: false`` disables display masking, never the publish gate."""
-    import agent.redact as redact
+    from agent import redact
     real = redact.redact_sensitive_text
     monkeypatch.setattr(redact, "redact_sensitive_text",
                         lambda text, *, force=False, **kw: real(text, force=force, **kw) if force else text)

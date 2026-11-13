@@ -12,7 +12,7 @@ from hermes_cli import kanban_db_sync as sync
 class FakeSourceHub:
     """``hub.leases(board, payload)``: grant/renew/release/source_attach/publish_source/source_release."""
 
-    def __init__(self, board: "FakeSourceBoard") -> None:
+    def __init__(self, board: FakeSourceBoard) -> None:
         self.board = board
 
     def leases(self, board_id: str, payload: dict) -> dict:

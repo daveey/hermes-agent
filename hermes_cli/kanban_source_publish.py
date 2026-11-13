@@ -124,7 +124,7 @@ def check_local(deadline: _Deadline, path: str) -> None:
         raise PublishRefused("source_submodules_unsupported", ".gitmodules present")
     for rel in _git(deadline, path, "ls-files", "--", ".gitattributes", "*/.gitattributes").splitlines():
         try:
-            text = (Path(path) / rel).read_text(encoding="utf-8", errors="replace")
+            text = (Path(path) / rel).read_text(encoding="utf-8-sig", errors="replace")
         except OSError:
             continue
         if "filter=lfs" in text:

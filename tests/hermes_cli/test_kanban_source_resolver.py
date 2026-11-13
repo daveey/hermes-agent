@@ -38,6 +38,11 @@ def commit(cwd, name, text="x") -> str:
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
+    return make_world(tmp_path, monkeypatch)
+
+
+def make_world(tmp_path, monkeypatch):
+    """The git world (shared with the core PR-2 publish tests)."""
     for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
                  "GIT_COMMITTER_EMAIL": "t@x", "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
                  "GIT_CONFIG_NOSYSTEM": "1"}.items():

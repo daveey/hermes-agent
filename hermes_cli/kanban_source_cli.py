@@ -53,7 +53,7 @@ def _admin_hub() -> Any:
     if not key_path.is_file():
         raise PermissionError(f"no admin key at {ADMIN_KEY}: source-release runs on the hub (Board admin key)")
     ident = client.load_identity()
-    key = key_path.read_text(encoding="utf-8").strip()
+    key = key_path.read_text(encoding="utf-8-sig").strip()
     return client.Hub(client.Identity(url=ident.url, key=key, gateway=ident.gateway))
 
 

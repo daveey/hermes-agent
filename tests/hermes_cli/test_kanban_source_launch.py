@@ -122,7 +122,6 @@ def test_source_attach_precedes_spawn_with_no_renew_between(conn, board, dispatc
         marks.append(len(board.calls))
         assert task.source_env == {"HERMES_KANBAN_SOURCE_COMMIT": C1, "HERMES_KANBAN_SOURCE_PATH": str(dispatcher.path),
                                    "HERMES_KANBAN_SOURCE_BRANCH": "wt/exact"}
-        return None
     tid, result, used = dispatcher.run(spawn)
     assert used and result.spawned and marks
     seen = board.actions()[:marks[0]]
@@ -152,7 +151,7 @@ def test_attach_refused_releases_unused_grant_and_never_spawns(conn, board, disp
     dispatcher.snapshot = _source_snapshot()
     board.refuse["source_attach"] = "custody_attached"
     spawned = []
-    tid, result, used = dispatcher.run(lambda task, path: spawned.append(task.id))
+    _, result, used = dispatcher.run(lambda task, path: spawned.append(task.id))
     assert not used and spawned == []
     assert any(code.startswith("workspace_source_attach_refused:custody_attached") for _, code in result.respawn_guarded)
 
@@ -161,14 +160,14 @@ def test_legacy_adopt_by_creator(conn, board, dispatcher):
     """A legacy worktree card (no source on the Board) is adopted by its creator on its first enabled run."""
     dispatcher.snapshot = kws.SourceSnapshot(None, None)
     me = sync._state(conn)["gateway_id"]
-    tid, result, used = dispatcher.run(lambda task, path: None, created_on=me)
+    _, _, used = dispatcher.run(lambda task, path: None, created_on=me)
     assert used
     assert board.body("source_attach")["mode"] == "legacy_adopt"
 
 
 def test_legacy_card_of_another_creator_is_not_adopted(conn, board, dispatcher):
     dispatcher.snapshot = kws.SourceSnapshot(None, None)
-    tid, result, used = dispatcher.run(lambda task, path: None, created_on="someone-else")
+    dispatcher.run(lambda task, path: None, created_on="someone-else")
     assert "source_attach" not in board.actions()
 
 
@@ -176,7 +175,7 @@ def test_legacy_adopt_on_old_board_runs_without_custody(conn, board, dispatcher)
     dispatcher.snapshot = kws.SourceSnapshot(None, None)
     board.old = True
     me = sync._state(conn)["gateway_id"]
-    tid, result, used = dispatcher.run(lambda task, path: None, created_on=me)
+    _, _, used = dispatcher.run(lambda task, path: None, created_on=me)
     assert used and kbs.board_lacks_source()
 
 
@@ -196,7 +195,7 @@ def test_pre_spawn_abort_single_release(conn, board, dispatcher):
     _git(path, "checkout", "-q", "-b", "wt/exact")
     head = _git(path, "rev-parse", "HEAD")
     dispatcher.snapshot = kws.SourceSnapshot(json.dumps(manifest(commit=head)), kws.Custody("hub", "published", 3))
-    tid, result, used = dispatcher.run(spawn)
+    tid, _, used = dispatcher.run(spawn)
     assert not used
     releases = [b for k, b in board.calls if k == "release"]
     assert len(releases) == 1
@@ -234,7 +233,7 @@ def test_post_pid_failure_kills_worker_and_sends_retained(conn, board, dispatche
     def hook(*a, **kw):
         raise RuntimeError("hook exploded after the worker started")
     monkeypatch.setattr(kb, "_fire_worker_spawned_hook", hook)
-    tid, result, used = dispatcher.run(lambda task, path: 4242)
+    _, _, used = dispatcher.run(lambda task, path: 4242)
     assert not used
     assert dispatcher.terminated == [4242]
     receipt = board.body("release")["source_receipt"]
