@@ -43,12 +43,15 @@ _FILED: set[str] = set()
 _NEXT_CHECK: list[float] = [0.0]
 
 
-def oldest_pending_age_s(conn: sqlite3.Connection, *, unanswered: bool = False,
+def oldest_pending_age_s(conn: sqlite3.Connection, *, unanswered: bool = False, held_runs: bool = False,
                          now: Optional[float] = None) -> Optional[float]:
     """Seconds since the oldest pending outbox op was queued (None: no pending op). ``unanswered`` counts only ops
-    the Board never deferred."""
+    the Board never deferred; ``held_runs`` leaves out run rows, which a round behind the feed head holds back on
+    purpose (``push(hold_runs=...)``)."""
     sql = "SELECT MIN(created_at) FROM kanban_sync_outbox WHERE state = 'pending'"
-    row = conn.execute(sql + (" AND retry_after IS NULL" if unanswered else "")).fetchone()
+    sql += " AND retry_after IS NULL" if unanswered else ""
+    sql += " AND table_name != 'task_runs'" if held_runs else ""
+    row = conn.execute(sql).fetchone()
     if not row or row[0] is None:
         return None
     return max(0.0, (time.time() if now is None else now) - float(row[0]) / 1000)  # created_at is in ms
@@ -56,11 +59,12 @@ def oldest_pending_age_s(conn: sqlite3.Connection, *, unanswered: bool = False,
 
 def _age(path: Path) -> Optional[float]:
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_sync_backlog as backlog
     if not Path(path).exists():
         return None  # never create a board file just to read its outbox
     try:
         with kbc.connect_closing(path) as conn:
-            return oldest_pending_age_s(conn, unanswered=True)
+            return oldest_pending_age_s(conn, unanswered=True, held_runs=backlog.behind(path))
     except (sqlite3.Error, OSError):
         return None
 

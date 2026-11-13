@@ -33,6 +33,16 @@ BACKLOG_PAGES = 60
 conn = reserve_fixtures.conn  # a primary board as gateway "hub" (dispatch_tick tests)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_loop_state():
+    """Backlog flags and outbox-age verdicts are process-wide (the sync loop's): no test inherits another's."""
+    backlog.reset()
+    outbox_age.reset()
+    yield
+    backlog.reset()
+    outbox_age.reset()
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     return support.kanban_home(tmp_path, monkeypatch)
@@ -153,6 +163,37 @@ def test_a_pushed_status_survives_older_versions_of_its_row_in_the_backlog(live,
     assert svc.board(BOARD)["rows"]["tasks"][tid]["status"] == "blocked"
 
 
+def test_a_round_left_behind_holds_a_pending_run_start_over_the_boards_end(kanban_home):
+    """Review 5887313221 finding 1: the host slept, the Board reclaimed its lease (the run's end sits in a page the
+    round does not reach) and the run's start is still pending. The send after a budget-ended pull must hold it:
+    sent whole, it overwrote ``reclaimed`` with ``running`` on the Board, and its ack fenced the end off locally."""
+    from tests.hermes_cli import test_kanban_sync_run_rows as run_rows
+    svc = FakeService(lease_runs=True)
+    support.write_sync_config(kanban_home, True)
+    c = kbc.connect(kanban_home / "kanban.db")
+    ksc.ensure_identity(c, BOARD, ME)
+    sync.set_mode(c, "primary")
+    previous = sync.set_lease_client(ksc.HubLeaseClient(svc.hub(ME)))
+    try:
+        tid, uid = run_rows._claimed(c, kanban_home, svc, "asleep")
+        assert c.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name = 'task_runs' AND row_uid = ? "
+                         "AND state = 'pending'", (uid,)).fetchone()  # the start has not reached the Board
+        c.execute("UPDATE tasks SET claim_expires = ?, worker_pid = NULL WHERE id = ?", (int(time.time()) - 5, tid))
+        assert kb.release_stale_claims(c) == 0
+        _other_creates(svc, BACKLOG_PAGES)
+        run_rows._expire_board_lease(svc, tid, uid)
+        hub = PagedHub(svc, ME, [])
+        assert _round(kanban_home, hub).behind
+        assert run_rows._board_run(svc, uid)["status"] == "reclaimed"  # not reopened by the held start
+        while _round(kanban_home, hub).behind:
+            assert run_rows._board_run(svc, uid)["status"] == "reclaimed"
+        _round(kanban_home, hub)
+        run_rows._assert_ended(c, svc, uid, "reclaimed")
+    finally:
+        sync.set_lease_client(previous)
+        c.close()
+
+
 # --- a budget-ended round still finishes ---------------------------------------------------------------------
 
 def test_a_round_ending_its_page_budget_still_pushes_resolves_refreshes_and_reevaluates(live, svc, kanban_home,
@@ -184,9 +225,10 @@ def test_a_round_ending_its_page_budget_still_pushes_resolves_refreshes_and_reev
     assert ["refresh", "push", "resolve", "reevaluate"] == [c for c in after if c != "page"]
 
 
-def test_the_loop_reruns_a_board_left_behind_without_the_poll_wait(monkeypatch, tmp_path):
+def _fake_loop(monkeypatch, tmp_path, boards):
+    """``run_forever`` with every collaborator faked except board selection, ``sync_all_once`` and the wait math.
+    Returns the per-iteration rounds and the waits passed to ``sync_timing.wait``."""
     monkeypatch.chdir(tmp_path)
-    boards = [("one", Path("one")), ("two", Path("two"))]
     rounds: list = [[]]
     waits: list = []
     monkeypatch.setattr(ksc, "load_identity", lambda: ksc.Identity("https://example.com", "test", "gateway"))
@@ -214,6 +256,19 @@ def test_the_loop_reruns_a_board_left_behind_without_the_poll_wait(monkeypatch, 
     import threading
     monkeypatch.setattr(ksc, "threading", SimpleNamespace(Thread=Thread, Event=threading.Event))
     monkeypatch.setattr(ksc, "FeedWatcher", lambda *a, **kw: SimpleNamespace(run=lambda: None))
+
+    def wait(fn, wake, paths, remaining, keep_running):
+        waits.append(remaining)
+        clock[0] += 1  # far less than the 30 s poll period: only a rerun selects a board
+        rounds.append([])
+        return "period"
+    monkeypatch.setattr(ksc.sync_timing, "wait", wait)
+    return rounds, waits
+
+
+def test_the_loop_reruns_a_board_left_behind_without_the_poll_wait(monkeypatch, tmp_path):
+    boards = [("one", Path("one")), ("two", Path("two"))]
+    rounds, waits = _fake_loop(monkeypatch, tmp_path, boards)
     behind_rounds = {"one": 2}  # "one" stops at its page budget twice, then reaches the head
 
     def sync_board(slug, path, *args):
@@ -223,16 +278,41 @@ def test_the_loop_reruns_a_board_left_behind_without_the_poll_wait(monkeypatch, 
         backlog.note(path, left > 0)
         return ksc.RoundResult(board=slug, mode="primary", behind=left > 0)
     monkeypatch.setattr(ksc, "sync_board", sync_board)
-
-    def wait(fn, wake, paths, remaining, keep_running):
-        waits.append(remaining)
-        clock[0] += 1  # far less than the 30 s poll period: only a rerun selects a board
-        rounds.append([])
-        return "period"
-    monkeypatch.setattr(ksc.sync_timing, "wait", wait)
     ksc.run_forever(lambda: len(rounds) < 5, interval=30)
     assert rounds[:4] == [["one", "two"], ["one"], ["one"], []]
     assert waits[:3] == [0.0, 0.0, pytest.approx(28.0)]  # back on the 30 s period once the head is reached
+
+
+def test_a_round_a_tick_holds_off_is_skipped_not_failed_and_retried_shortly(monkeypatch, tmp_path, caplog):
+    """Review 5887313221 finding 2: a SyncRoundBusy round kept the previous round's behind flag, so the loop
+    reran with zero wait and logged a WARNING per iteration while the dispatcher tick held the board; it also
+    marked the board failed and silenced the stalled-outbox alarm (``_LAST_OK``)."""
+    from hermes_cli import kanban_sync_work
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy
+    boards = [("one", Path("one"))]
+    rounds, waits = _fake_loop(monkeypatch, tmp_path, boards)
+    finished: list = []
+    real_finished = kanban_sync_work.SyncWork.finished
+    monkeypatch.setattr(kanban_sync_work.SyncWork, "finished",
+                        lambda self, board, ok: finished.append((board, ok)) or real_finished(self, board, ok))
+
+    def sync_board(slug, path, *args):
+        rounds[-1].append(slug)
+        if len(rounds) == 1:  # the first round stops behind the head; then a tick holds the board
+            backlog.note(path, True)
+            return ksc.RoundResult(board=slug, mode="primary", behind=True)
+        raise SyncRoundBusy("board sync round is busy; retry after it finishes")
+    monkeypatch.setattr(ksc, "sync_board", sync_board)
+    with caplog.at_level(logging.DEBUG, logger="hermes_cli.kanban_sync_client"):
+        ksc.run_forever(lambda: len(rounds) < 6, interval=30)
+    assert waits[0] == 0.0  # behind: rerun at once
+    assert waits[1:5] == [ksc.BUSY_RETRY_S] * 4 and ksc.BUSY_RETRY_S > 0  # busy: a short wait, never a hot loop
+    assert rounds[:5] == [["one"]] * 5  # the skipped board is retried every time
+    assert finished == [("one", True)]  # never marked failed
+    assert outbox_age._LAST_OK == {"one": True}  # the alarm keeps its last verdict
+    busy = [r for r in caplog.records if "one" in r.getMessage() and "busy" in r.getMessage()]
+    assert busy and {r.levelno for r in busy} == {logging.DEBUG}
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 # --- one replica puller per board per host --------------------------------------------------------------------
@@ -265,6 +345,51 @@ def test_sync_diff_compares_the_replica_as_is_while_a_round_holds_the_board(live
     report = json.loads(capsys.readouterr().out)
     assert "refresh_skipped" in report and not report.get("unavailable")
     assert _replica_state()[0] == before
+
+
+def test_a_reconcile_under_a_backlog_lets_a_round_push_between_its_replica_chunks(live, svc, kanban_home,
+                                                                                  monkeypatch):
+    """Review 5887313221 nit 1: reconcile pulled the replica to the head in one locked pull, so under the incident's
+    backlog every sync round (and its push) was refused for the whole catch-up. It now pulls in budgeted chunks and
+    releases the board between them: a local edit made during the reconcile reaches the Board from a round in a
+    gap, before the reconcile's replica reaches the head."""
+    _other_creates(svc, BACKLOG_PAGES)
+    log: list = []
+    hub = PagedHub(svc, ME, log)
+    edit: list = []
+    real_changes = hub.changes
+
+    def changes(board, since, limit=500):
+        if not edit and since >= 2:  # a local edit while the reconcile is reading the backlog
+            edit.append(kb.create_task(live, title="edited mid-reconcile"))
+        return real_changes(board, since, limit)
+    hub.changes = changes
+    real_pull_replica = ksc._pull_replica
+    gaps: list = []
+    at_head: list = []
+
+    def pull_replica(*a, **kw):  # the sync loop takes each gap the reconcile leaves (here: synchronously)
+        pulled = real_pull_replica(*a, **kw)
+        if pulled.more:
+            gaps.append(_round(kanban_home, hub).error)
+        else:
+            at_head.append(len(log))  # the reconcile's replica reached the head
+        return pulled
+    monkeypatch.setattr(ksc, "_pull_replica", pull_replica)
+    ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=hub)
+    assert edit and gaps and set(gaps) == {None}
+    sent = [i for i, (kind, uids) in enumerate(log) if kind == "ops" and edit[0] in uids]
+    assert sent and sent[0] < at_head[0], "the edit waited for the reconcile's whole catch-up"
+
+
+def test_a_reconcile_waits_out_a_round_holding_the_board_then_gives_up(live, svc, kanban_home, monkeypatch):
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy
+    naps: list = []
+    monkeypatch.setattr(backlog, "_sleep", naps.append)
+    monkeypatch.setattr(backlog, "RECONCILE_BUSY_WAIT_S", 2.0)
+    with board_sync_lock(kanban_home / "kanban.db"), pytest.raises(SyncRoundBusy):
+        backlog.replica_at_head(BOARD, svc.hub(ME), ME, kanban_home / "kanban.db")
+    assert naps == [ksc.BUSY_RETRY_S] * 4
 
 
 # --- the dispatcher tick: reservation is not held behind the backlog (scope addition 5/6) ---------------------
@@ -303,6 +428,21 @@ def test_a_worker_first_card_is_reserved_on_the_first_tick_despite_a_backlog(con
     assert len(served) < BACKLOG_PAGES
 
 
+def test_a_raw_read_timeout_in_the_ticks_pull_stays_a_recorded_pull_error(conn, monkeypatch):
+    """Review nit 2: only the shared budget running out keeps the tick going; a socket read timeout (a
+    ``TimeoutError`` on the proxied urlopen path) is a pull failure with its diagnostics, as before."""
+    reserve_fixtures.acknowledged(conn)
+    hub = Mock()
+    hub.changes.side_effect = TimeoutError("The read operation timed out")
+    _tick_setup(monkeypatch, hub)
+    from hermes_cli import kanban_queue_reason as queue
+    recorded: list = []
+    monkeypatch.setattr(queue, "try_record", lambda fn, *a, **kw: recorded.append((fn, kw.get("error"))))
+    wp.dispatch_tick(conn)
+    assert [(fn, type(err)) for fn, err in recorded] == [(queue.record_pull_error, TimeoutError)]
+    assert hub.reserve.call_count == 0
+
+
 def test_the_tick_neither_pulls_nor_reads_the_feed_while_a_round_holds_the_board(conn, monkeypatch):
     reserve_fixtures.acknowledged(conn)
     hub = Mock()
@@ -321,6 +461,20 @@ def _age_rows(c, *, minutes, retry_after=None):
     with kbc.write_txn(c):
         c.execute("UPDATE kanban_sync_outbox SET created_at = ?, retry_after = ?",
                   (int((time.time() - minutes * 60) * 1000), retry_after))
+
+
+def test_run_rows_held_while_behind_the_head_do_not_age_the_alarm(live, kanban_home):
+    """A round behind the head holds run rows on purpose (finding 1), possibly for a long catch-up: that is not a
+    stalled outbox. The same row ages the alarm again once the board reaches the head."""
+    path = kanban_home / "kanban.db"
+    kb.create_task(live, title="claimed while asleep")
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_outbox SET table_name = 'task_runs'")
+    _age_rows(live, minutes=30)
+    backlog.note(path, True)
+    assert outbox_age._age(path) is None
+    backlog.note(path, False)
+    assert outbox_age._age(path) == pytest.approx(30 * 60, abs=5)
 
 
 def test_sync_status_prints_the_age_of_the_oldest_pending_op(live):

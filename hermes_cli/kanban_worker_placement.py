@@ -645,9 +645,10 @@ def dispatch_tick(conn):
             if own:
                 try:
                     client.pull(conn, hub, state["board_id"], observers=True, partition=ident.gateway)
-                except TimeoutError:  # BoardBudgetExhausted or a page slower than the budget
+                except client.BoardBudgetExhausted:  # the 2 s budget ran out between or before pages
                     # A backlog outlasts the budget (a 500-change page took 4.5 s on David-MBP): the pages applied
                     # stay, and reservation still runs on a fresh budget instead of waiting for the full catch-up.
+                    # A raw read timeout is no budget: it stays a recorded pull error below.
                     hub = _tick_hub(client, ident)
                 except (client.HubError, client.SyncUnavailable, client.Resync, OSError) as exc:
                     queue.try_record(queue.record_pull_error, conn, ident.gateway, error=exc)

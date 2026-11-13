@@ -12,10 +12,14 @@ that board at once, without the poll wait: the backlog drains over consecutive r
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 PULL_PAGE_BUDGET = 20  # 20 pages x 500 changes = 10k changes per database per round
+BUSY_RETRY_S = 0.5  # a round skipped because a dispatcher tick held the board (wait_for_work's tick)
+RECONCILE_BUSY_WAIT_S = 600.0  # a reconcile waits this long in all for rounds holding the board between its chunks
+_sleep = time.sleep  # tests
 
 _LOCK = threading.Lock()
 _BEHIND: set[str] = set()  # live board paths whose last round stopped before the feed head
@@ -48,6 +52,31 @@ def due(boards: Iterable[tuple[str, Path]]) -> list[tuple[str, Path]]:
     """The boards to run again now: their last round stopped at the page budget."""
     with _LOCK:
         return [(slug, path) for slug, path in boards if str(path) in _BEHIND]
+
+
+def behind(path: Path) -> bool:
+    """The board's last round stopped before the feed head (its run rows are held back meanwhile)."""
+    with _LOCK:
+        return str(path) in _BEHIND
+
+
+def replica_at_head(slug: str, hub: Any, gateway: str, live_path: Path) -> None:
+    """Pull the replica to the feed head for ``reconcile`` (it reads tombstones from it), :data:`PULL_PAGE_BUDGET`
+    pages at a time with the board lock released between chunks: under a backlog one unbounded locked pull would
+    refuse every sync round, and so every push, for the whole catch-up. A round holding the board pauses the chunks
+    (it pulls the same replica forward); over :data:`RECONCILE_BUSY_WAIT_S` of such waits raises SyncRoundBusy."""
+    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy
+    waited = 0.0
+    while True:
+        pulled = ksc._pull_replica(slug, hub, gateway, live_path)
+        if not pulled.busy and not pulled.more:
+            return
+        if pulled.busy:
+            if waited >= RECONCILE_BUSY_WAIT_S:
+                raise SyncRoundBusy("a kanban sync round keeps holding this board; rerun the reconcile later")
+            _sleep(BUSY_RETRY_S)
+            waited += BUSY_RETRY_S
 
 
 def reset() -> None:
