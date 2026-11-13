@@ -229,3 +229,42 @@ def test_a_swept_card_sweeps_its_children_first_so_each_child_gets_its_own_tombs
     assert card not in _ids(live) and "c-gone" not in _ids(live, "task_comments", "uid")
     stones = {(r[0], r[1]) for r in live.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
     assert {("tasks", card), ("task_comments", "c-gone")} <= stones
+
+
+class AckedMidRebuild(FakeHub):
+    """A concurrent ``reconcile`` (it pushes without the round's lock): once the ``task_links`` snapshot is read to
+    its end, it pushes this gateway's pending outbox from another connection and the Board acks it."""
+
+    def __init__(self, svc, gateway, path):
+        super().__init__(svc, gateway)
+        self._path, self._pushed = path, False
+
+    def snapshot_page(self, board, table, after="", limit=1000):
+        if table == "task_runs" and not self._pushed:
+            self._pushed = True
+            other = kbc.connect(self._path)
+            try:
+                ksc.push(other, FakeHub(self.svc, ME), board, ME, primary=True)
+            finally:
+                other.close()
+        return super().snapshot_page(board, table, after, limit)
+
+
+def test_a_row_whose_outbox_op_is_acked_during_the_rebuild_is_not_swept(live, svc, kanban_home):
+    parent = kb.create_task(live, title="parent on the Board")
+    child = kb.create_task(live, title="child on the Board")
+    assert _round(kanban_home, svc.hub(ME)).error is None
+    new = kb.create_task(live, title="pending when the rebuild starts")
+    kb.link_tasks(live, parent, child)
+    link = f"{parent}>{child}"
+    with kbc.write_txn(live):  # both older than the rebuild: only the outbox op protects them
+        live.execute("UPDATE tasks SET created_at = created_at - 60 WHERE id = ?", (new,))
+    assert {r[0] for r in live.execute("SELECT row_uid FROM kanban_sync_outbox")} >= {new, link}
+
+    sweep.resync_live(live, AckedMidRebuild(svc, ME, kanban_home / "kanban.db"), BOARD, ME)
+
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox").fetchone()  # the concurrent push acked both
+    assert new in svc.board(BOARD)["rows"]["tasks"] and link in svc.board(BOARD)["rows"]["task_links"]
+    assert new in _ids(live)  # RED before: absent from the tasks snapshot, op acked before the sweep: deleted
+    assert (parent, child) in {tuple(r) for r in live.execute("SELECT parent_id, child_id FROM task_links")}
+    assert not live.execute("SELECT 1 FROM kanban_sync_tombstones").fetchone()

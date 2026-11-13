@@ -14,8 +14,13 @@ local tombstones and picked-up copies of other gateways' cards. So the sweep del
   write in that same second has an outbox op).
 
 The deletes go through the feed apply (the same handlers and tombstones as a feed delete, observers fired), children
-before cards, and each candidate is re-checked inside that apply transaction. The caller holds the round's
-``board_sync_lock`` (``sync_board``), so no push of this board runs meanwhile. [daveey] t_01a1d5f9de4020fa
+before cards, and each candidate is re-checked inside that apply transaction.
+
+The round's ``board_sync_lock`` does not stop every push: ``reconcile`` (``hermes kanban sync reconcile``,
+``kanban_db_recover``) pushes without it. Its push can ack an op after that table's snapshot pages were read: the
+row is then missing from the snapshot although the Board holds it, and its op is gone before the sweep. So
+:func:`resync_live` reads every outbox op (any state) before the rebuild starts, and the sweep also spares those
+rows and every row of the cards they name. [daveey] t_01a1d5f9de4020fa t_01a1d62f0a4187d8
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
@@ -49,9 +55,10 @@ def _row_free(table: str, uid: str) -> str:
 
 
 def _candidates_sql(table: str) -> str:
-    """Rows of ``table`` the sweep may delete (before the snapshot comparison); ``:uid`` NULL selects all."""
+    """``(uid, card id)`` of the rows of ``table`` the sweep may delete (before the snapshot comparison); ``:uid``
+    NULL selects all."""
     if table == "tasks":
-        return (f"SELECT t.id FROM tasks t WHERE {_OWN} AND COALESCE(t.created_at, 0) <= :since "
+        return (f"SELECT t.id, t.id FROM tasks t WHERE {_OWN} AND COALESCE(t.created_at, 0) <= :since "
                 f"AND {_row_free('tasks', 't.id')} AND (:uid IS NULL OR t.id = :uid)")
     uid, born = _CHILDREN[table]
     task = "x.child_id" if table == "task_links" else "x.task_id"
@@ -62,7 +69,7 @@ def _candidates_sql(table: str) -> str:
         where.append("COALESCE(x.created_at, 0) >= :window")
     if table != "task_links":
         where.append("x.uid IS NOT NULL")
-    return f"SELECT {uid} FROM {table} x JOIN tasks t ON t.id = {task} WHERE " + " AND ".join(where)
+    return f"SELECT {uid}, t.id FROM {table} x JOIN tasks t ON t.id = {task} WHERE " + " AND ".join(where)
 
 
 def _params(gateway: str, since: int, uid: Optional[str] = None) -> dict[str, Any]:
@@ -70,26 +77,59 @@ def _params(gateway: str, since: int, uid: Optional[str] = None) -> dict[str, An
     return {"gw": gateway, "since": since, "uid": uid, "window": int(time.time()) - EVENT_IMPORT_WINDOW_S}
 
 
+@dataclass(frozen=True)
+class Held:
+    """Outbox ops present when the rebuild began: their rows, and the cards those rows belong to."""
+
+    rows: frozenset[tuple[str, str]] = frozenset()
+    cards: frozenset[str] = frozenset()
+
+    def spares(self, table: str, uid: str, card: str) -> bool:
+        return (table, uid) in self.rows or (table != "tasks" and card in self.cards)
+
+
+def held_at_start(conn: sqlite3.Connection) -> Held:
+    """Every outbox op (any state) and the card each one names, read before the snapshot: a push outside the round's
+    lock (``reconcile``) may ack one while the snapshot is read, after its row's table was already paged."""
+    rows: set[tuple[str, str]] = set()
+    cards: set[str] = set()
+    for table, uid in conn.execute("SELECT table_name, row_uid FROM kanban_sync_outbox"):
+        table, uid = str(table), str(uid)
+        rows.add((table, uid))
+        if table == "tasks":
+            cards.add(uid)
+        elif table == "task_links":
+            cards.add(uid.partition(">")[2])
+        elif table in _CHILDREN:
+            found = conn.execute(f"SELECT task_id FROM {table} WHERE uid = ?", (uid,)).fetchone()
+            if found and found[0]:
+                cards.add(str(found[0]))
+    return Held(frozenset(rows), frozenset(cards))
+
+
 def sweep_absent(conn: sqlite3.Connection, seen: Mapping[str, set[str]], board: str, gateway: str, *,
-                 since: int, observers: bool = True) -> dict[str, int]:
+                 since: int, observers: bool = True, held: Held = Held()) -> dict[str, int]:
     """Delete this gateway's rows that the snapshot did not return (``seen``: uids per table read to its last page;
-    a table not in it is not swept). Returns the count deleted per table."""
+    a table not in it is not swept), sparing what ``held`` names. Returns the count deleted per table."""
     from hermes_cli.kanban_sync_client import IMPORT_ORDER
     deletes: list[sync.RemoteChange] = []
     for table in reversed(IMPORT_ORDER):  # children before cards: a card's delete cascades its own rows
         if table not in seen:
             continue
-        uids = sorted(str(r[0]) for r in conn.execute(_candidates_sql(table), _params(gateway, since)))
+        rows = conn.execute(_candidates_sql(table), _params(gateway, since)).fetchall()
+        uids = sorted(str(uid) for uid, card in rows
+                      if str(uid) not in seen[table] and not held.spares(table, str(uid), str(card)))
         deletes += [sync.RemoteChange(seq=0, table=table, uid=uid, op="delete", fields={}, version=0, hlc="",
                                       origin_gateway="", client_op_id=None)
-                    for uid in uids if uid not in seen[table]]
+                    for uid in uids]
     if not deletes:
         return {}
 
     swept: dict[str, int] = {}
 
     def still_sweepable(c: sqlite3.Connection, ch: sync.RemoteChange) -> bool:  # inside the apply transaction
-        if c.execute(_candidates_sql(ch.table), _params(gateway, since, ch.uid)).fetchone() is None:
+        row = c.execute(_candidates_sql(ch.table), _params(gateway, since, ch.uid)).fetchone()
+        if row is None or held.spares(ch.table, ch.uid, str(row[1])):
             return False
         swept[ch.table] = swept.get(ch.table, 0) + 1
         return True
@@ -124,9 +164,11 @@ def resync_live(conn: sqlite3.Connection, hub: Any, board: str, gateway: str) ->
     from hermes_cli.kanban_sync_client import resync
     _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", board)
     since = int(time.time())
+    held = held_at_start(conn)
     seeing = _SeenHub(hub)
     resync(conn, seeing, board, observers=True, partition=gateway)
-    swept = sweep_absent(conn, {t: seeing.seen.get(t, set()) for t in seeing.complete}, board, gateway, since=since)
+    swept = sweep_absent(conn, {t: seeing.seen.get(t, set()) for t in seeing.complete}, board, gateway, since=since,
+                         held=held)
     if swept:
         _log.warning("kanban sync: %s live rebuild removed rows the Board deleted: %s", board, swept)
     return swept
