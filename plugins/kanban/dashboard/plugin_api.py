@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from hermes_cli import kanban_db
 from hermes_cli import kanban_review_contract as _review_contract  # a dashboard "done" is never a worker run
 from hermes_cli import kanban_workflow
+from hermes_cli import loop_accounting as _la  # [daveey] per-route pass accounting
 from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
@@ -246,6 +247,7 @@ def _link_tasks(conn: sqlite3.Connection, links: dict[str, list[str]]) -> list[d
 
 # --- GET /board -------------------------------------------------------------
 
+@_la.accounted("route/kanban.board")
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),

@@ -1823,13 +1823,12 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
 def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
     """Daemon thread (started by _init_session()) that drains the process-global completion_queue for this session
     (ownership routing: _notif_handle_event), claims the events parked while their owner was not live
-    (``notification_park``), and polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` — the
-    delivery path for platform="tui" rows.
-
-    Also polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` for this session's TUI kanban
-    subscriptions and delivers terminal task events the same way (status.update + agent turn) — the delivery
-    path tools/kanban_tools.py documents for platform="tui" rows (issue #59890).
+    (``notification_park``), and polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` for this session's TUI
+    subscriptions, delivering terminal task events (status.update + agent turn): the delivery path for
+    platform="tui" rows that tools/kanban_tools.py documents (issue #59890). Each sub-poll is a
+    ``notifications.<poll>`` pass (loop_accounting).
     """
+    from hermes_cli import loop_accounting as _la
     from tools import async_delegation
     from tools.process_registry import process_registry
     from tools.process_registry_awaiting import release as release_in_flight, take_ready
@@ -1849,25 +1848,25 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         wake_generation = generation(queue)
         now = time.monotonic()
         # Completions whose owner process died after this one started (#97202); throttled per profile home.
-        async_delegation.maybe_sweep_orphaned_completions(queue)
+        _la.timed("notifications.sweep_orphaned_completions", async_delegation.maybe_sweep_orphaned_completions, queue)
         # /loop and /heartbeat wakeup drivers: fire a due tick for THIS session while idle (same claim-under-lock
         # as kanban dispatch). An active non-parked /goal owns the idle boundary and defers the loop tick.
         if now - last_loop_poll >= _LOOP_POLL_SECONDS:
             last_loop_poll = now
             for what, fire in (("loop wakeup", _maybe_fire_tui_loop_tick), ("heartbeat", _maybe_fire_tui_heartbeat_tick)):
                 try:
-                    fire(sid, session)
+                    _la.timed(f"notifications.{what.replace(' ', '_')}", fire, sid, session)
                 except Exception as tick_exc:
                     _notif_log_failure(f"{what} poll failed", tick_exc)
         if now - last_kanban_poll >= _KANBAN_POLL_SECONDS:
             last_kanban_poll = now
-            _notif_poll_kanban(sid, session)
+            _la.timed("notifications.poll_kanban", _notif_poll_kanban, sid, session)
             # [daveey] Trusted producer completions queued for this unrouted chat (hermes_state_producer_admission).
             from tui_gateway.producer_admission import deliver_pending
-            deliver_pending(sid, session)
+            _la.timed("notifications.producer_deliver_pending", deliver_pending, sid, session)
         if now - last_parked_poll >= _PARKED_POLL_SECONDS:
             last_parked_poll = now
-            _notif_take_parked(sid, session, process_registry, handle)
+            _la.timed("notifications.take_parked", _notif_take_parked, sid, session, process_registry, handle)
         if session.get("_notif_held") and not session.get("running") and not session.get("_turn_cancel_requested"):
             taken = _notif_take_held(session)
             try:

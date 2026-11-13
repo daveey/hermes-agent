@@ -130,7 +130,18 @@ def unchanged_inputs(scope: tuple[str, ...]) -> tuple[float, tuple] | None:
 def refresh_if_unchanged(scope: tuple[str, ...], refresh) -> tuple | None:
     """Caller holds the annotation refresh lock. When nothing the read depends on moved, re-read inline, where every
     heavy part is a cache hit (no refresh thread, no recompute; the waiting sources still run and a new observation
-    is dated): ``refresh(scope, read_at)``'s parts. None when an input moved (or the probe failed)."""
+    is dated): ``refresh(scope, read_at)``'s parts. None when an input moved (or the probe failed). Accounted as
+    ``annotation.revalidate`` (loop_accounting): unchanged inputs are a skip, moved ones a key change."""
+    from hermes_cli import loop_accounting
+    with loop_accounting.pass_("annotation.revalidate") as acct:
+        parts = _refresh_if_unchanged(scope, refresh)
+        acct.change(parts is None)
+        if parts is not None:
+            acct.skip()
+        return parts
+
+
+def _refresh_if_unchanged(scope: tuple[str, ...], refresh) -> tuple | None:
     try:
         unchanged = unchanged_inputs(scope)
     except Exception:  # health: allow BLE001 -- only a shortcut probe; the bounded refresh reports a real read error

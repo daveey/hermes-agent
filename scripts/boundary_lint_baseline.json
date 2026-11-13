@@ -212,6 +212,7 @@
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_wake_check": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_worker_recovery.worker_session_ids": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_workflow": 1,
+    "plugins/kanban/dashboard/plugin_api.py hermes_cli.loop_accounting": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.profile_describer": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.profiles": 4,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.profiles.current_profile_name": 1,

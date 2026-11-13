@@ -18,7 +18,7 @@ from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_annotation_host as _host_copy
-from hermes_cli import kanban_annotation_refresh as _bounded
+from hermes_cli import kanban_annotation_refresh as _bounded, loop_accounting as _la
 from hermes_cli import kanban_activity_revision as _revision
 from hermes_cli import kanban_session_activity_busy as _busy
 from hermes_cli import kanban_session_activity_hub as _hub_signature
@@ -1738,6 +1738,7 @@ _read_annotation_parts = _host_copy.read_annotation_parts
 _frozen_parts = _host_copy.frozen_parts
 
 
+@_la.accounted("annotation.refresh")
 def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = None) -> tuple:
     """Read this scope's parts and publish them. Caller holds ``_annotate_refresh_lock``."""
     global _annotate_flight_scope, _annotate_flight_result
@@ -1757,6 +1758,7 @@ def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = N
     return parts
 
 
+@_la.accounted("annotation.poll")
 def _annotation_snapshot() -> tuple | None:
     """One in-flight annotation read, shared by overlapping polls.
 

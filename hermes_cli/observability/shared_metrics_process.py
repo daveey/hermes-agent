@@ -35,6 +35,7 @@ EXIT_FLUSH_TIMEOUT_S = 3.0
 _DRAIN_MARGIN_S = 0.1
 _STATE: dict[str, Any] = {}
 _STATE_LOCK = threading.Lock()
+LOOP_ACCOUNTING_KINDS = frozenset({"gateway", "serve", "tui"})  # long-lived: hermes_cli.loop_accounting snapshots
 
 
 def crash_class(exc: BaseException | None) -> str:
@@ -127,7 +128,14 @@ def purge_pending_receipts(home: Path) -> None:
 
 
 def begin_process(kind: str) -> None:
-    """Mark this process as a running ``kind`` and report dead predecessors. Once per process."""
+    """Mark this process as a running ``kind`` and report dead predecessors. Once per process.
+    A long-lived ``kind`` (gateway, serve, tui) also starts the loop-accounting snapshot writer. [daveey]"""
+    if kind in LOOP_ACCOUNTING_KINDS and not _STATE:
+        try:
+            from hermes_cli import loop_accounting
+            loop_accounting.start(kind)
+        except Exception:
+            logger.debug("Loop accounting writer not started", exc_info=True)
     try:
         from hermes_constants import get_hermes_home
 

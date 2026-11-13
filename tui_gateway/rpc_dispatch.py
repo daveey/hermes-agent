@@ -46,11 +46,13 @@ def _handle_admitted_request(req: dict) -> dict | None:
         params, problem = _contracts.validate_params(contract, params)
         if problem is not None:
             return _err(rid, 4000, problem)
+    from hermes_cli import loop_accounting  # one ``rpc/<method>`` pass per handled request
     from hermes_cli.config_backend import ConfigBackendUnavailable
 
     token = _current_rpc_method.set(method)
     try:
-        response = fn(rid, params)
+        with loop_accounting.pass_(f"rpc/{method}"):
+            response = fn(rid, params)
     except ProfileUnavailableError as exc:
         return _err(rid, 4064, str(exc))
     except ConfigBackendUnavailable as exc:

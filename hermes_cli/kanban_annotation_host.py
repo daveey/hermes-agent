@@ -341,7 +341,18 @@ def _holder_pass() -> int:
 
 
 def _holder_refresh(scope: tuple[str, ...]) -> bool:
-    """Runs inside ``scope``'s own context: its demand file and copy live under that profile's home."""
+    """Runs inside ``scope``'s own context: its demand file and copy live under that profile's home. One
+    ``annotation.holder_refresh/<profile>`` pass (loop_accounting): a refresh is a key change, no refresh a skip."""
+    from hermes_cli import loop_accounting
+    with loop_accounting.pass_(f"annotation.holder_refresh/{scope[1] if len(scope) > 1 else '?'}") as acct:
+        refreshed = _holder_refresh_scope(scope)
+        acct.change(refreshed)
+        if not refreshed:
+            acct.skip()
+        return refreshed
+
+
+def _holder_refresh_scope(scope: tuple[str, ...]) -> bool:
     from hermes_cli import kanban_session_activity as _ksa
 
     age = _disk.demand_age(scope)

@@ -14,6 +14,7 @@ import contextlib
 import copy
 import functools
 from hermes_cli.web_read_coalescing import coalesced_read
+from hermes_cli import loop_accounting as _la  # [daveey] per-route pass accounting
 from hermes_cli.web_json_response import encoded_in_thread, native_json_response, per_request_response
 import inspect
 import json
@@ -425,6 +426,7 @@ def _read_serial_profile_db(name, home, errors, read, cache_key):
             home, cache_key, lambda: _read_profile_db(name, home, errors, read))
 
 
+@_la.accounted("route/profiles.sessions")
 def get_profiles_sessions(
     # ``le=500`` caps the page size — this endpoint fans out across EVERY profile's state.db.
     # 500 (not 100) because desktop callers use limit=200 and the electron remote-merge
@@ -565,6 +567,7 @@ def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile:
 
 
 @_sidebar_singleflight_cache
+@_la.accounted("route/profiles.sessions.sidebar")
 def get_profiles_sessions_sidebar(
     recents_profile: str = "all", recents_limit: int = 20, recents_exclude: str | None = None,
     cron_limit: int = 50, messaging_limit: int = 100, messaging_exclude: str | None = None):
@@ -789,6 +792,7 @@ def profile_project_trees(
 
 
 @_sidebar_singleflight_cache
+@_la.accounted("route/profiles.projects.tree")
 def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000, profile: Optional[str] = None):
     """Project tree for every profile at once, for the all-profiles sidebar.
 

@@ -558,14 +558,17 @@ _change_broadcast_at: dict[str, float] = {}
 
 def _broadcast_watched_changes(now: float | None = None) -> None:
     """One pass: recompute due signatures, broadcast events whose signature moved.
-    First sighting seeds silently so a gateway boot never fires a refresh storm."""
+    First sighting seeds silently so a gateway boot never fires a refresh storm. Each signature read is a
+    ``change_watcher/<event>`` pass (loop_accounting)."""
+    from hermes_cli import loop_accounting
     now = time.monotonic() if now is None else now
     for event, (interval, sig_fn, payload_fn, *diff_fn) in _CHANGE_WATCHES.items():
         if now - _change_checked_at.get(event, -interval) < interval:
             continue
         _change_checked_at[event] = now
         try:
-            sig = sig_fn()
+            with loop_accounting.pass_(f"change_watcher/{event}"):
+                sig = sig_fn()
         except Exception:
             continue
         if event not in _change_sigs:
@@ -595,10 +598,12 @@ def _ensure_skin_watcher() -> None:
     _note_skin_broadcast()  # seed the baseline so only a real change repaints
 
     def _loop() -> None:
+        from hermes_cli import loop_accounting
         while True:
             time.sleep(0.5)
-            _broadcast_skin_if_changed()
-            _broadcast_watched_changes()
+            with loop_accounting.pass_("change_watcher.pass"):
+                _broadcast_skin_if_changed()
+                _broadcast_watched_changes()
             # A failed wake must never end this thread: every push (skin, sessions, groups...) runs on it.
             with contextlib.suppress(Exception):  # health: allow BLE001 -- the driver's own idle poll still runs
                 _wake_room_drivers()

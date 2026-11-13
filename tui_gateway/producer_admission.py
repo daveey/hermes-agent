@@ -27,6 +27,7 @@ from typing import Optional
 import hermes_state_producer_admission as pa
 from agent.memory_provider import spawn_context_thread
 from agent.local_work_agent import scope as work_scope
+from hermes_cli import loop_accounting as _la
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,7 @@ def _live(server, key: str, profile: Optional[str]):
     return None
 
 
+@_la.accounted("producer_admission.sweep", rows=True)
 def sweep_once() -> list[dict]:
     """One pass over every profile store: wake each cold chat that holds an undelivered completion, then deliver.
     Returns one record per owner it acted on. Never raises."""

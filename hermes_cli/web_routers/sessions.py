@@ -24,6 +24,7 @@ from hermes_cli.session_listing import stamp_automated, subagent_listing_scope
 from hermes_cli.session_list_flight import SESSION_LIST_CACHE, data_stamp
 from hermes_cli.web_deps import late
 from hermes_cli.web_read_coalescing import coalesced_read
+from hermes_cli import loop_accounting as _la  # [daveey] per-route pass accounting
 from hermes_cli.web_json_response import encoded_in_thread, native_json_response, per_request_response
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.cron_session_activity import annotate_cron_activity
@@ -194,6 +195,7 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
 
 
 @list_router.get("/api/session-kanban-tasks")
+@_la.accounted("route/sessions.kanban_tasks")
 def get_session_kanban_tasks(ids: str = Query(..., max_length=4000)):
     """Open, blocked and review kanban cards that any of the comma-separated
     session ``ids`` (one compression lineage) created or shepherds, across every

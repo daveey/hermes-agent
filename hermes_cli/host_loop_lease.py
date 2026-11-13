@@ -80,6 +80,11 @@ _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 _LEASES: weakref.WeakSet = weakref.WeakSet()
 
 
+def _span_open(name: str):
+    from hermes_cli import loop_accounting
+    return loop_accounting.span_open(name)
+
+
 def enabled() -> bool:
     return os.environ.get(KILL_SWITCH_ENV, "").strip() != "0"
 
@@ -220,12 +225,21 @@ class HostLoopLease:
         self._unavailable_logged = False
         self._stale_warned: tuple | None = None
         self._stale_want_warned: tuple | None = None
+        self._pass: tuple | None = None  # the loop_accounting span a true held() opened, closed by beat()
         _LEASES.add(self)
 
     # -- public API ----------------------------------------------------------------------------
 
     def held(self) -> bool:
-        """True when this process should run the host pass now. One ``flock`` syscall when not holder."""
+        """True when this process should run the host pass now. One ``flock`` syscall when not holder.
+        A True answer opens this thread's ``lease.<name>`` accounting pass, which :meth:`beat` closes."""
+        if self._held_inner():
+            if self._pass is None:
+                self._pass = _span_open(f"lease.{self.name}")
+            return True
+        return False
+
+    def _held_inner(self) -> bool:
         if not enabled() or self._held:
             return True
         if self._waiting:
@@ -263,7 +277,10 @@ class HostLoopLease:
         return enabled() and self._held
 
     def beat(self) -> None:
-        """End of a pass: refresh the heartbeat, then hand off to a live higher-priority ``.want``."""
+        """End of a pass: refresh the heartbeat, then hand off to a live higher-priority ``.want``. Also closes the
+        ``lease.<name>`` accounting pass the last true :meth:`held` opened (``hermes_cli.loop_accounting``): this is
+        how every host loop, mods included (chat-closeout), is accounted without calling the API itself."""
+        self._account_pass()
         if not enabled() or not self._held:
             return
         with self._mu:
@@ -279,6 +296,7 @@ class HostLoopLease:
 
     def release(self) -> None:
         """Give the lease up (shutdown). A later ``held()`` competes for it again."""
+        self._pass = None  # a held() with no beat() (shut down mid-pass) records no pass
         with self._mu:
             if self._held:
                 self._drop()
@@ -295,6 +313,16 @@ class HostLoopLease:
                 self._fd = None
 
     # -- internals -----------------------------------------------------------------------------
+
+    def _account_pass(self) -> None:
+        opened, self._pass = self._pass, None
+        if opened is None:
+            return
+        try:
+            from hermes_cli import loop_accounting
+            loop_accounting.span_close(opened)  # a beat() on another thread records nothing
+        except Exception:  # health: allow BLE001 -- accounting never touches the lease
+            logger.debug("host loop %s: pass accounting failed", self.name, exc_info=True)
 
     def _unavailable(self, why: str) -> None:
         self._next_open = time.monotonic() + self.interval
