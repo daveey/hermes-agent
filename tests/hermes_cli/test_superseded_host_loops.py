@@ -344,6 +344,29 @@ def test_a_skewed_but_not_retired_process_still_waits_for_the_reset(monkeypatch)
     assert ng._retry_at("20261031_064851_d0f106", now) == reset + ng.DEFER_SLACK_S
 
 
+@pytest.mark.parametrize("consumer", ["wake", "notice", "scalar", "failure_dict"])
+def test_unreadable_retirement_state_preserves_the_wall_reset(monkeypatch, consumer):
+    from tui_gateway import automation_replay as ar
+    from tui_gateway import notice_guarantee as ng
+    from tui_gateway import server
+
+    def unreadable():
+        raise RuntimeError("retirement state unavailable")
+
+    monkeypatch.setattr(hll, "host_loops_retired", unreadable)
+    now = time.time()
+    reset = now + 4 * 86400
+    if consumer == "wake":
+        assert _replay_due(monkeypatch, reset) == reset
+    elif consumer == "notice":
+        session = {"agent_failure": {"failure_resets_at": reset}}
+        monkeypatch.setattr(server, "_find_live_session_by_key", lambda key: ("sid", session))
+        assert ng._retry_at("20261031_064851_d0f106", now) == reset + ng.DEFER_SLACK_S
+    else:
+        failure = {"failure_resets_at": reset} if consumer == "failure_dict" else reset
+        assert ar.trusted_resets_at(failure) == reset
+
+
 @pytest.mark.parametrize("skewed", [False, True])
 def test_a_wall_failure_in_a_retired_process_replays_after_the_short_delay(monkeypatch, skewed):
     from gateway import code_skew
