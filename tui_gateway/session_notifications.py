@@ -13,6 +13,7 @@ from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait, failure_suffi
 from .kanban_notice_text import parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode
 from .kanban_notice_text import repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out
 from .kanban_notice_text import left_open_suffix as _kb_left_open
+from .completion_obligation import settle_started as _settle_started, settle_suppressed as _settle_suppressed
 
 
 def _notif_locked_sessions(fn, default):
@@ -180,9 +181,8 @@ _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
 
 
-# [daveey] Completion events (process id → event) a claimed notice turn is about to carry. The turn's start
-# (``start_synthesized_turn``) moves them to ``_completion_delivered`` + ``COMPLETION_UNSECURED``; until then
-# they stay in the poller's in-flight custody (backend-exit journal: exit_job_receipts).
+# [daveey] Completion events (pid → event) a claimed notice turn will carry; its start (start_synthesized_turn)
+# moves them to ``_completion_delivered`` + ``COMPLETION_UNSECURED``; until then, poller in-flight custody.
 NOTIF_OFFERED_COMPLETIONS = "_notif_offered_completions"
 # Delivered to a started turn whose crash marker is not written yet: the exit journal still reports these.
 # ``_record_turn_marker`` drops them once the marker (whose prompt carries the notice) is on disk.
@@ -201,14 +201,12 @@ def start_synthesized_turn(session: dict):
     ``_sessions_lock`` (it takes ``history_lock``; lock order is ``history_lock`` -> ``_sessions_lock``, since
     session.resume holds history_lock while it takes _sessions_lock). It yields ``commit(start)``; call that under
     ``_sessions_lock``, under which alone ``fence_exit_notices`` raises the exit fence, so the fence check and the
-    worker start are one step with respect to the exit journal (which fences first): fenced → refused (the events
-    are still in custody and get journaled); started → delivered, and unsecured until the turn's crash marker is
-    on disk. ``commit`` returns ``start()``'s result (None = not started).
-
-    The delivered mark is taken on entry, before the start: a marked completion is also unsecured, and the exit
-    journal reports unsecured ones, so a fence landing between mark and commit still journals it. A commit that did
-    not start (fenced, refused, raised or never called) rolls the mark back on exit, after the caller released
-    ``_sessions_lock``."""
+    worker start are one step for the exit journal (which fences first): fenced → refused (still in custody, so
+    journaled); started → delivered (owed receipts settled), unsecured until the turn's crash marker is on disk.
+    ``commit`` returns ``start()``'s result (None = not started). The delivered mark is taken on entry, before the
+    start: a marked completion is also unsecured and the journal reports those, so a fence landing between mark and
+    commit still journals it. A commit that did not start (fenced, refused, raised or never called) rolls the mark
+    back on exit, after the caller released ``_sessions_lock``."""
     with session["history_lock"]:
         synthesized = bool(session.get("_synthesized_turn"))
         fenced = synthesized and bool(session.get("_exit_notices_pending"))
@@ -229,7 +227,9 @@ def start_synthesized_turn(session: dict):
     try:
         yield commit
     finally:
-        if offered and started is None:
+        if offered and started is not None:  # delivered into the session: settle its owed receipt
+            _settle_started(offered)
+        elif offered:
             with session["history_lock"]:
                 session.get("_completion_delivered", set()).difference_update(offered)
                 unsecured = session.get(COMPLETION_UNSECURED) or {}
@@ -1471,7 +1471,7 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
         return True
     text = fmt(evt)
     if not text:
-        return True
+        return _settle_suppressed(evt, "no notice text")
     # Emit once per dedup key: a re-queued completion would otherwise re-emit every 0.5s while the session is busy,
     # while distinct watch_match events from one process must stay visible.
     dedup_key = _notification_event_dedup_key(evt)
@@ -1487,7 +1487,7 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
     if evt_type != "async_delegation" and _background_notifications_off(session):
         # The user opted out of process-driven agent wakes: the status row above is the whole
         # delivery. Subagent results are not process notifications and still land.
-        return True
+        return _settle_suppressed(evt, "background notifications off")
     if evt_type == "completion" and completions is not None:
         completions.append((evt, text))
         return True

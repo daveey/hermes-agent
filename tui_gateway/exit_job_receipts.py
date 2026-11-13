@@ -197,6 +197,9 @@ def journal_session_jobs(session: dict, reason: str, *, sid: str = "") -> int:
         else:
             logger.warning("backend exit: could not journal pending completions of session %s", key)
     if journaled:
+        # Custody transfer: the marker now carries these notices, so an owed receipt must not deliver them again.
+        from tui_gateway.completion_obligation import settle_journaled
+        settle_journaled(journaled)
         logger.info("backend exit: session %s journaled %d background job(s) (%s)", key, len(journaled), reason)
     return len(journaled)
 
