@@ -254,10 +254,12 @@ class FakeSessionRPC:
             if not current["active"] or current["task_id"] != expected_task_id:
                 self.calls.append(("interrupt_skipped", params))
                 return {"interrupted": False}
+            # Observe on receipt, before the session reads inactive: once it does, the
+            # room thread's next probe may acknowledge the Stop and commit `cancelled`.
+            if self.on_interrupt is not None:
+                self.on_interrupt()
             current["active"] = False
         self.calls.append(("interrupt", params))
-        if self.on_interrupt is not None:
-            self.on_interrupt()
         return {"interrupted": True}
 
 
