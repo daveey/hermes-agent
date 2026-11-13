@@ -25,6 +25,7 @@ pytestmark = pytest.mark.usefixtures("kanban_home")
 URL = "https://github.com/example/project/pull/12"
 OTHER = "https://github.com/example/project/pull/13"
 HEAD = "a" * 40
+_REAL_GH_PR_STATE = prs._gh_pr_state
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def clock(monkeypatch):
     now = [int(time.time())]
     monkeypatch.setattr(time, "time", lambda: now[0])
     monkeypatch.setattr(prs, "pr_state", lambda url: "OPEN")
-    monkeypatch.setattr(kar, "pr_head", lambda url: HEAD)
+    monkeypatch.setattr(kar, "pr_head", lambda url, **_: HEAD)
     return now
 
 
@@ -268,7 +269,7 @@ def test_awaited_review_that_is_not_an_approval_at_head_still_guards(clock, monk
 
 
 def test_awaited_review_with_unknown_head_still_guards(clock, monkeypatch):
-    monkeypatch.setattr(kar, "pr_head", lambda url: None)
+    monkeypatch.setattr(kar, "pr_head", lambda url, **_: None)
     with kbc.connect() as conn:
         tid, _ = _awaiting_owner(conn, clock, monkeypatch, APPROVE)
         assert prs.active_pr_reason(conn, tid, clock[0] + 10) == "active_pr"
@@ -386,6 +387,7 @@ def test_pr_head_reads_only_an_open_full_head(monkeypatch, stdout, code, expecte
         calls.append(argv)
         return subprocess.CompletedProcess(argv, code, stdout=stdout, stderr="")
 
+    monkeypatch.setattr(prs, "_gh_pr_state", _REAL_GH_PR_STATE)
     monkeypatch.setattr(subprocess, "run", run)
     kar.clear_cache()
     assert kar.pr_head(URL) == expected
@@ -400,6 +402,7 @@ def test_pr_head_survives_a_gh_launch_failure(monkeypatch):
     def run(argv, **kwargs):
         raise FileNotFoundError("gh")
 
+    monkeypatch.setattr(prs, "_gh_pr_state", _REAL_GH_PR_STATE)
     monkeypatch.setattr(subprocess, "run", run)
     kar.clear_cache()
     assert kar.pr_head(URL) is None

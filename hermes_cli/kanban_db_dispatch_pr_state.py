@@ -3,7 +3,8 @@
 ``active_pr`` exists to stop a second worker opening a duplicate PR. Once every PR a
 card's comments name is MERGED or CLOSED there is nothing left to duplicate, so the hold
 must lift (2026-10-23: t_d507533c sat held 6 h after Metta-AI/coworld-qwop#1 merged).
-States and queue markers come from ``gh pr view --json state,comments``. A completed
+States and queue markers come from ``gh pr view --json state,comments,headRefOid`` (the head
+serves :func:`pr_head` from the same read). A completed
 rejection releases the worker to repair the existing PR, with a quoted card comment.
 Anything unknown (gh missing, auth, network,
 timeout, unparseable output) is ``None`` and the caller keeps holding (fail closed).
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import time
@@ -35,6 +37,9 @@ GH_TIMEOUT_SECONDS = 20
 # url -> (state or None, monotonic expiry or None for "forever")
 _cache: dict[str, tuple[Optional[str], Optional[float]]] = {}
 _rejections: dict[str, str] = {}
+# url -> (OPEN head sha or None, monotonic time of the gh read that saw it)
+_heads: dict[str, tuple[Optional[str], float]] = {}
+_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def _gh_argv() -> Optional[list[str]]:
@@ -55,10 +60,14 @@ def _gh_argv() -> Optional[list[str]]:
 
 
 def _gh_pr_state(url: str) -> Optional[str]:
-    """GitHub state, ``REJECTED`` for a completed queue rejection, or None on failure."""
+    """GitHub state, ``REJECTED`` for a completed queue rejection, or None on failure.
+
+    The same read records the OPEN head for :func:`pr_head` (``_heads``), so the awaited-review
+    release costs no second ``gh pr view``. [daveey]"""
     gh = _gh_argv() or ["gh"]
     try:
-        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments"], stdin=subprocess.DEVNULL,
+        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments,headRefOid"],
+                              stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GH_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -74,6 +83,9 @@ def _gh_pr_state(url: str) -> Optional[str]:
         return None
     state = state.upper() if isinstance(state, str) and state else None
     key = norm_pr(url)
+    oid = data.get("headRefOid")
+    _heads[key] = (oid.lower() if state == "OPEN" and isinstance(oid, str) and _SHA.fullmatch(oid) else None,
+                   time.monotonic())
     _rejections.pop(key, None)
     if state == "OPEN":
         from hermes_cli.kanban_db_dispatch_pr_rejection import rejection_reason
@@ -85,6 +97,15 @@ def _gh_pr_state(url: str) -> Optional[str]:
     return state
 
 
+def _store(key: str, state: Optional[str], now: float) -> None:
+    if state == "REJECTED":
+        _cache.pop(key, None)  # requeue must invalidate rejection immediately
+    elif state in TERMINAL_STATES:
+        _cache[key] = (state, None)
+    else:
+        _cache[key] = (state, now + (OPEN_TTL_SECONDS if state else ERROR_TTL_SECONDS))
+
+
 def pr_state(url: str) -> Optional[str]:
     """Cached :func:`_gh_pr_state`."""
     key = norm_pr(url)
@@ -93,13 +114,27 @@ def pr_state(url: str) -> Optional[str]:
     if hit is not None and (hit[1] is None or now < hit[1]):
         return hit[0]
     state = _gh_pr_state(url)
-    if state == "REJECTED":
-        _cache.pop(key, None)  # requeue must invalidate rejection immediately
-    elif state in TERMINAL_STATES:
-        _cache[key] = (state, None)
-    else:
-        _cache[key] = (state, now + (OPEN_TTL_SECONDS if state else ERROR_TTL_SECONDS))
+    _store(key, state, now)
     return state
+
+
+def pr_head(url: str, *, max_age: Optional[float] = None) -> Optional[str]:
+    """Full lowercase head sha of an OPEN PR, from :func:`pr_state`'s read; None when unknown.
+
+    Serves the head recorded by the last ``gh pr view`` of this PR while it is younger than
+    ``max_age`` (default: :data:`OPEN_TTL_SECONDS` for a head, :data:`ERROR_TTL_SECONDS` for
+    unknown), else re-reads, refreshing ``pr_state``'s cache entry too. [daveey]"""
+    key = norm_pr(url)
+    now = time.monotonic()
+    hit = _heads.get(key)
+    if hit is not None:
+        limit = max_age if max_age is not None else (OPEN_TTL_SECONDS if hit[0] else ERROR_TTL_SECONDS)
+        if now - hit[1] < limit:
+            return hit[0]
+    _heads.pop(key, None)
+    _store(key, _gh_pr_state(url), now)
+    _heads.setdefault(key, (None, now))  # a failed read is unknown: cached like an error state
+    return _heads[key][0]
 
 
 def all_prs_finished(urls: Iterable[str]) -> bool:
@@ -578,8 +613,6 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
 
 
 def clear_cache() -> None:
-    from hermes_cli import kanban_awaited_review
-
     _cache.clear()
     _rejections.clear()
-    kanban_awaited_review.clear_cache()
+    _heads.clear()

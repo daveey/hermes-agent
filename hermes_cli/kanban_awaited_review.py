@@ -9,76 +9,51 @@ t_01a1d30035fa4777: review t_01a1d3093ee49e78 approved PR #1862 at its head; hel
 
 One continuation is permitted only when all of these hold:
 
-* the card's latest run that executed (no later claim) is the assignee's orderly
-  ``scheduled``/``continued`` park, and that park names the awaited card(s);
+* the card's :func:`kanban_pr_same_run_park.latest_parked_run` (its latest executed run,
+  ended as the assignee's orderly ``scheduled``/``continued`` park) names the awaited card(s);
 * each awaited card is done with a claimed completion that ended at or after the park;
 * none requested changes; together they approve every holding PR by name
-  (``pr``/``reviewed_pr``) at a full ``reviewed_sha`` equal to that PR's current GitHub head.
+  (``pr``/``reviewed_pr``) at a full ``reviewed_sha`` equal to that PR's current GitHub head,
+  read by ``pr_state``'s own ``gh pr view`` and re-read before it releases (a cached head
+  only refuses).
 
 A request-changes verdict, an approval of another head or PR, an unknown head (gh failure),
 or a crash/reclaim after the park keeps the hold. It never authorizes a merge.
 """
 from __future__ import annotations
 
-import json
-import logging
 import re
 import sqlite3
-import subprocess
-import time
 from typing import Iterable, Optional
 
-logger = logging.getLogger(__name__)
-
-_WAIT_CHECK = re.compile(r"\s*hermes\s+kanban\s+wait-check\s+task\s+(t_[0-9A-Za-z_]+)(?:\s|$)")
+# The whole probe must be the card-wait idiom ``kanban_awaiting.card_probe`` writes, with only
+# wait-check's own flags. A wrapper (``bash -lc``, ``timeout``, a path, env) or a shell operator
+# (``&& false``, ``| grep``, a second line) changes what the probe means, so it names no
+# awaited card here (fail closed); the park's recorded ``awaiting`` still can. [daveey]
+_WAIT_CHECK = re.compile(r"\s*hermes\s+kanban\s+wait-check\s+task\s+(t_[0-9A-Za-z_]+)"
+                         r"(?:\s+--(?:gateway|board|until|from)(?:=|\s+)[A-Za-z0-9_.,:@-]+)*\s*\Z")
 _TASK_ID = re.compile(r"t_[0-9A-Za-z_]+\Z")
-_PARKED = {"scheduled": "scheduled", "continued": "continued"}  # run outcome -> park event kind
-
-# url -> (head or None, monotonic expiry)
-_heads: dict[str, tuple[Optional[str], float]] = {}
+# A head read older than this never releases a hold: re-read it (one ``gh`` call per release).
+RELEASE_HEAD_MAX_AGE_SECONDS = 5
 
 
-def _gh_pr_head(url: str) -> Optional[str]:
-    from hermes_cli.kanban_db_dispatch_pr_state import GH_TIMEOUT_SECONDS, _gh_argv
+def pr_head(url: str, *, max_age: Optional[float] = None) -> Optional[str]:
+    """Full head sha of an OPEN PR from :func:`pr_state`'s own read and cache entry; None when unknown."""
+    from hermes_cli.kanban_db_dispatch_pr_state import pr_head as shared_pr_head
 
-    gh = _gh_argv() or ["gh"]
-    try:
-        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,headRefOid"], stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=GH_TIMEOUT_SECONDS, check=False)
-    except (OSError, subprocess.SubprocessError):
-        logger.debug("kanban: gh pr view %s (head) failed", url, exc_info=True)
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        data = json.loads(proc.stdout or "{}")
-    except ValueError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    oid = data.get("headRefOid")
-    if data.get("state") != "OPEN" or not isinstance(oid, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", oid):
-        return None
-    return oid.lower()
+    return shared_pr_head(url, max_age=max_age)
 
 
-def pr_head(url: str) -> Optional[str]:
-    """Full head sha of an OPEN PR, cached like :func:`pr_state`; None when unknown."""
-    from hermes_cli.kanban_db_dispatch_pr_state import ERROR_TTL_SECONDS, OPEN_TTL_SECONDS
-    from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
-
-    key = norm_pr(url)
-    now = time.monotonic()
-    hit = _heads.get(key)
-    if hit is not None and now < hit[1]:
-        return hit[0]
-    head = _gh_pr_head(url)
-    _heads[key] = (head, now + (OPEN_TTL_SECONDS if head else ERROR_TTL_SECONDS))
-    return head
+def _at_head(url: str, sha: str) -> bool:
+    """True when ``sha`` is the PR's head now. A cached head may refuse, never release: a
+    force-push after the approval could still match the approved sha in a head read up to
+    OPEN_TTL_SECONDS old, so a match is confirmed by a read at most seconds old."""
+    return pr_head(url) == sha and pr_head(url, max_age=RELEASE_HEAD_MAX_AGE_SECONDS) == sha
 
 
 def clear_cache() -> None:
+    from hermes_cli.kanban_db_dispatch_pr_state import _heads
+
     _heads.clear()
 
 
@@ -101,16 +76,14 @@ def awaited_cards(payload: dict) -> list[str]:
 def _park(conn: sqlite3.Connection, task_id: str):
     """(run, park payload, parked_at) of the latest run's orderly timed park, or None."""
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
+    from hermes_cli.kanban_pr_same_run_park import latest_parked_run
 
-    run = latest_run_skipping_requeues(conn, task_id)
-    task = kb.get_task(conn, task_id)
-    if (run is None or task is None or run["profile"] != task.assignee
-            or run["outcome"] not in _PARKED or run["ended_at"] is None):
+    run = latest_parked_run(conn, task_id)
+    if run is None:
         return None
     event = conn.execute(
         "SELECT payload, created_at FROM task_events WHERE task_id = ? AND run_id = ? AND kind = ? "
-        "ORDER BY id DESC LIMIT 1", (task_id, run["id"], _PARKED[run["outcome"]])).fetchone()
+        "ORDER BY id DESC LIMIT 1", (task_id, run["id"], run["outcome"])).fetchone()
     parked_at = kb._to_epoch(event["created_at"]) if event is not None else None
     if parked_at is None:
         return None
@@ -134,7 +107,7 @@ def _approved_at_head(conn, card: str, parked_at: int, run_id: int, urls: set[st
             or not isinstance(sha, str)):
         return set()
     named = review._named_prs(data, urls) or set()  # must name the PR: no checkpoint binds scope
-    return {u for u in named if pr_head(u) == sha.lower()}  # pr_head is a full 40-hex sha or None
+    return {u for u in named if _at_head(u, sha.lower())}  # pr_head is a full 40-hex sha or None
 
 
 def resumes_awaited_review(conn: sqlite3.Connection, task_id: str, pr_urls: Iterable[str]) -> bool:
