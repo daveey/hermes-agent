@@ -437,8 +437,11 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str) -> dict:
         lines.append(f"- {pid} ({p.title if p else '?'}): {handoff[:1500]}")
     body = (task.body or "").rstrip()
     if lines:
+        # Spell the tool's read call: "with cross_task @task:..." parses as an unknown explicit invocation in
+        # kanban_placement_coordination._actions (ACTION_REASON), which kept such forwarded cards on the
+        # target's home instead of the pool (t_01a1d49003c65ca4). A read only needs coordination-read.
         body += (f"\n\n---\nParent handoffs (the parents ran on {self_gw}; read them there with "
-                 f"cross_task @task:default@{self_gw}/<id>):\n" + "\n".join(lines))
+                 f"cross_task(action='read', target='@task:default@{self_gw}/<id>')):\n" + "\n".join(lines))
     body += f"\n\nThis card was {self_gw} card {task.id}; it completes there when this one is done."
     return {
         "title": task.title, "body": body, "assignee": task.assignee or "default",
