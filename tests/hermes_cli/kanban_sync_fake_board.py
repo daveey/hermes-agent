@@ -23,8 +23,9 @@ class FakeService:
         self.calls: list[tuple[str, str, Any]] = []
         self.offline = False
         # Like transitions.ts grantLease/releaseTask: a grant writes the card running plus its run row (setLease
-        # mirrors lease_holder/lease_run_uid/lease_expires onto the card), a release ends that run, clears that
-        # mirror (clearLease) and returns the card to ready. Off by default (the older tests count rows).
+        # mirrors lease_holder/lease_run_uid/lease_expires onto the card), a release is fenced on the holder's run
+        # (lease_lost otherwise), ends that run, clears that mirror (clearLease) and returns a running card to its
+        # retryStatusForRun. Off by default (the older tests count rows).
         self.lease_runs = lease_runs
         # Opt-in placement, like transitions.ts checkPlacement's runs_on rule: a grant needs every runs_on label
         # on the claiming machine ({name: {"labels": [...]}}; machine:<name> is implicit). None = no check.
@@ -114,6 +115,15 @@ class FakeService:
         """Advance the retention floor to the head (every older cursor now gets 410)."""
         b = self.board(bid)
         b["floor"] = b["seq"]
+
+    @staticmethod
+    def retry_status_for_run(b: dict, run: Optional[str]) -> str:
+        """As BoardTx.retryStatusForRun: ``review`` when the run's latest ``claimed`` event came out of review."""
+        claims = [e for e in b["rows"].get("task_events", {}).values()
+                  if run and e.get("kind") == "claimed" and e.get("run_uid") == run and not e.get("deleted_at")]
+        latest = max(claims, key=lambda e: e["seq"], default=None)
+        payload = json.loads(latest.get("payload") or "{}") if latest else {}
+        return "review" if payload.get("source_status") == "review" else "ready"
 
     # transitions.ts NEUTRAL_RELEASES: release outcome -> (run outcome, event kind); never charged.
     NEUTRAL = {"rate_limited": ("rate_limited", "rate_limited"), "owner_restart": ("reclaimed", "owner_restart_lost"),
@@ -254,30 +264,34 @@ class FakeHub:
             if not cur or cur["holder"] != self.gateway or cur["run_uid"] != run:
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
         else:
+            if self.svc.lease_runs and (not cur or cur["holder"] != gw or cur["run_uid"] != run):
+                # releaseTask's fence(): a release that does not name this gateway's live lease run is refused and
+                # changes nothing (the card keeps its lease and mirror).
+                return {"status": "rejected", "reason": "lease_lost", "lease": cur}
             b["leases"].pop(task, None)
-            runs = b["rows"].get("task_runs", {})
-            if (self.svc.lease_runs and cur and cur["run_uid"] == run and run in runs
-                    and runs[run].get("ended_at") is None):
-                unused = bool(body.get("unused_grant"))
-                # As the Board's releaseTask with ``unused_grant: true`` (live t_01a1a1dea9c64d6a run 164239): the
-                # run's metadata and the ``released`` event both say the grant never started anything.
-                self.svc._put(b, "task_runs", run, {"status": "released", "outcome": "released", "ended_at": 2,
-                                                    **({"metadata": json.dumps({"unused_grant": True},
-                                                                               separators=(",", ":"))}
-                                                       if unused else {})},
-                              gw, op_id, hlc)
-                if unused:
-                    self.svc._put(b, "task_events", f"ev-rel-{run}",
-                                  {"task_id": task, "run_uid": run, "kind": "released",
-                                   "payload": json.dumps({"error": None, "retry_status": "ready",
-                                                          "unused_grant": True}, separators=(",", ":")),
-                                   "created_at": int(time.time())}, gw, op_id, hlc)
-                self.svc._put(b, "tasks", task, {"status": "ready", "current_run_uid": None, "lease_holder": None,
+            runs, card = b["rows"].get("task_runs", {}), b["rows"].get("tasks", {}).get(task)
+            if self.svc.lease_runs and card is not None:
+                retry = self.svc.retry_status_for_run(b, card.get("current_run_uid"))
+                if run in runs and runs[run].get("ended_at") is None:
+                    unused = bool(body.get("unused_grant"))
+                    # As the Board's releaseTask with ``unused_grant: true`` (live t_01a1a1dea9c64d6a run 164239):
+                    # the run's metadata and the ``released`` event both say the grant never started anything.
+                    self.svc._put(b, "task_runs", run, {"status": "released", "outcome": "released", "ended_at": 2,
+                                                        **({"metadata": json.dumps({"unused_grant": True},
+                                                                                   separators=(",", ":"))}
+                                                           if unused else {})},
+                                  gw, op_id, hlc)
+                    if unused:
+                        self.svc._put(b, "task_events", f"ev-rel-{run}",
+                                      {"task_id": task, "run_uid": run, "kind": "released",
+                                       "payload": json.dumps({"error": None, "retry_status": retry,
+                                                              "unused_grant": True}, separators=(",", ":")),
+                                       "created_at": int(time.time())}, gw, op_id, hlc)
+                # clearLease drops the lease mirror; a still-running card goes back to retryStatusForRun; endRun
+                # clears current_run_uid even when the holder already ended its run row.
+                self.svc._put(b, "tasks", task, {**({"status": retry} if card.get("status") == "running" else {}),
+                                                 "current_run_uid": None, "lease_holder": None,
                                                  "lease_run_uid": None, "lease_expires": None}, gw, op_id, hlc)
-            elif self.svc.lease_runs and cur and task in b["rows"].get("tasks", {}):
-                # releaseTask's clearLease drops the card's lease mirror even when the holder already ended its run.
-                self.svc._put(b, "tasks", task, {"lease_holder": None, "lease_run_uid": None, "lease_expires": None},
-                              gw, op_id, hlc)
             return {"status": "applied", "lease": None}
         return {"status": "applied", "lease": b["leases"][task], "version": version}
 

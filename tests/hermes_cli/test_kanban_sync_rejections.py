@@ -322,6 +322,44 @@ def test_fake_lease_release_after_run_end_clears_mirror(live, kanban_home):
     assert hub.leases(BOARD, {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r"})["status"] == "applied"
     card = svc.board(BOARD)["rows"]["tasks"][tid]
     assert (card["lease_holder"], card["lease_run_uid"], card["lease_expires"]) == (None, None, None)
+    # releaseTask also moves the still-running card to retryStatusForRun and endRun clears current_run_uid.
+    assert (card["status"], card["current_run_uid"]) == ("ready", None)
+    assert svc.board(BOARD)["rows"]["task_runs"][RUN]["outcome"] == "crashed"  # the holder's own end stands
+
+
+def test_fake_lease_release_after_review_run_end_retries_to_review(live, kanban_home):
+    """retryStatusForRun: a run claimed out of review goes back to ``review`` when its ended lease is released."""
+    svc = FakeService(lease_runs=True)
+    hub = svc.hub(ME)
+    tid = kb.create_task(live, title="leased", assignee="worker")
+    client.push(live, hub, BOARD, ME, primary=False)
+    grant = {"action": "grant", "task": tid, "run_uid": RUN, "client_op_id": "g", "lane": "review"}
+    assert hub.leases(BOARD, grant)["status"] == "applied"
+    hub.ops(BOARD, [{"client_op_id": "end", "table": "task_runs", "uid": RUN, "op": "upsert",
+                     "fields": {"ended_at": 1794527437, "status": "crashed", "outcome": "crashed"},
+                     "hlc": f"{9_999_999_999_999:013d}-0001-{ME}"}])
+    assert hub.leases(BOARD, {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r"})["status"] == "applied"
+    card = svc.board(BOARD)["rows"]["tasks"][tid]
+    assert (card["status"], card["current_run_uid"], card["lease_run_uid"]) == ("review", None, None)
+
+
+@pytest.mark.parametrize("gateway,run_uid", [(ME, "run-someone-else"), (OTHER, RUN)])
+def test_fake_lease_release_is_fenced_on_the_holders_run(live, kanban_home, gateway, run_uid):
+    """As releaseTask's fence(): a release naming another run, or from another gateway, is lease_lost and leaves the
+    lease, its card mirror and the run untouched."""
+    svc = FakeService(lease_runs=True)
+    hub = svc.hub(ME)
+    tid = kb.create_task(live, title="leased", assignee="worker")
+    client.push(live, hub, BOARD, ME, primary=False)
+    assert hub.leases(BOARD, {"action": "grant", "task": tid, "run_uid": RUN, "client_op_id": "g"})["status"] == "applied"
+    res = svc.hub(gateway).leases(BOARD, {"action": "release", "task": tid, "run_uid": run_uid, "client_op_id": "r"})
+    assert (res["status"], res["reason"]) == ("rejected", "lease_lost")
+    b = svc.board(BOARD)
+    card = b["rows"]["tasks"][tid]
+    assert b["leases"][tid]["run_uid"] == RUN
+    assert (card["status"], card["current_run_uid"], card["lease_holder"], card["lease_run_uid"]) == (
+        "running", RUN, ME, RUN)
+    assert b["rows"]["task_runs"][RUN]["ended_at"] is None
 
 
 def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):
