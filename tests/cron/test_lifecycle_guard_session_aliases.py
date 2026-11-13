@@ -217,3 +217,91 @@ def test_heredoc_body_reading_an_over_cap_data_file_is_not_refused(tmp_path, in_
     # Control: unknown session aliases still fail closed on the same text.
     unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=None)
     assert unsafe is True and refusal is not None and "scan cap" in refusal
+
+
+# --- PR #2358 review 5894325109 nit 1: a nested login/interactive shell holds its own aliases -----
+# Its startup files (~/.bash_profile, ~/.zshenv, a remote host's) define them, so the outer
+# session's names say nothing about them: inside, every `NAME (` may be a keyword-led subshell.
+_NESTED_FOREIGN_SHELLS = [
+    "bash -l <<'EOF'\nt ( bash {db} )\nEOF",  # the nit's exact shape
+    "bash -i <<'EOF'\nt ( bash {db} )\nEOF",
+    "bash -ls <<'EOF'\nt ( bash {db} )\nEOF",
+    "bash --login <<'EOF'\nt ( bash {db} )\nEOF",
+    "sh -l <<'EOF'\nt ( bash {db} )\nEOF",
+    "zsh <<'EOF'\nt ( bash {db} )\nEOF",  # zsh sources ~/.zshenv even when non-interactive
+    "ssh -o BatchMode=yes ubuntu@h 'bash -ls' <<'EOF'\nt ( bash {db} )\nEOF",
+    "ssh ubuntu@h <<'EOF'\nt ( bash {db} )\nEOF",  # no remote command: a remote login shell
+    "ssh ubuntu@h 'bash -s' <<'EOF'\nt ( bash {db} )\nEOF",  # the remote host's startup files
+    "sudo -i <<'EOF'\nt ( bash {db} )\nEOF",
+    "bash -l -c 't ( bash {db} )'",
+    "bash -lc 't ( bash {db} )'",  # a clustered `-c` (#2494)
+    "bash -ilc 't ( bash {db} )'",
+    "bash -euo pipefail -lc 't ( bash {db} )'",
+    "zsh -lc 't ( bash {db} )'",
+    "bash -c -l 't ( bash {db} )'",
+    "zsh -c 't ( bash {db} )'",
+    "zsh -ec 't ( bash {db} )'",
+    "bash -l <<'EOF'\npython3 - <<'PY'\nprint(1)\nPY\nt ( bash {db} )\nEOF",
+    "bash -l {script}",
+]
+
+
+@pytest.mark.parametrize("shape", _NESTED_FOREIGN_SHELLS)
+def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_db, shape):
+    """Base refused these under any session alias; #2358 allowed them when the outer names
+    (`zz`) missed `t`. The inner shell's own startup files decide whether `t` is an alias."""
+    assert "alias" not in str(tmp_path).lower()
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(db=live_kanban_db, script=script)
+    for names in (frozenset({"zz"}), frozenset()):
+        unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
+        assert unsafe is True and refusal is not None and "SQLite" in refusal, (shape, names)
+
+
+@pytest.mark.parametrize("shape", [
+    "bash <<'EOF'\nt ( bash {db} )\nEOF",  # a non-login, non-interactive child inherits no aliases
+    "bash -s <<'EOF'\nt ( bash {db} )\nEOF",
+    "t2 ( bash {db} )",
+])
+def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
+    """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
+    assert "alias" not in str(tmp_path).lower()
+    text = shape.format(db=live_kanban_db)
+    assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
+        False, None)
+
+
+@pytest.mark.parametrize("names", [frozenset(), frozenset({"zz"}), _STOCK_ALIASES])
+def test_card_repro_python_body_in_login_shell_stays_allowed(tmp_path, live_kanban_db, names):
+    """The ssh `bash -ls` repro: its only `(` openers sit in a quoted `python3 -` body, which the
+    nested shell hands to Python, so they stay call arguments (mentions) under unknown names too.
+    Same for that body run by a local login shell."""
+    assert scan_gateway_lifecycle(_CARD_REPRO, cwd=str(tmp_path), session_aliases=names) == (
+        False, None)
+    body = _CARD_REPRO.split("<<'EOF'\n", 1)[1].rsplit("EOF", 1)[0]
+    local = "bash -l <<'OUT'\n" + body + "OUT"
+    assert scan_gateway_lifecycle(local, cwd=str(tmp_path), session_aliases=names) == (False, None)
+    # Control: the same body with a shell `NAME (` call next to it in the login shell refuses.
+    mixed = "bash -l <<'OUT'\n" + body + f"t ( bash {live_kanban_db} )\nOUT"
+    unsafe, refusal = scan_gateway_lifecycle(mixed, cwd=str(tmp_path), session_aliases=names)
+    assert unsafe is True and refusal is not None and "SQLite" in refusal
+
+
+def test_nested_shell_input_shapes():
+    """Which nested shells hold aliases of their own, and what of theirs is shell code."""
+    from cron.lifecycle_guard_nested_shells import _feeds_nested_shell, _iter_nested_shell_inputs
+
+    for owner in ("bash -l <<'E'", "sh -i <<'E'", "zsh <<'E'", "ssh h <<'E'",
+                  "ssh -p 22 -o X=1 h 'bash -s' <<'E'", "ssh h 'cd /x; bash' <<'E'",
+                  "sudo -i <<'E'", "sudo -u root -s <<'E'", "su - bob <<'E'",
+                  "timeout 9 bash --login <<'E'", "exec -l bash <<'E'", None):
+        assert _feeds_nested_shell(owner), owner
+    for owner in ("bash <<'E'", "bash -s <<'E'", "sh -e <<'E'", "python3 - <<'E'",
+                  "ssh h python3 - <<'E'", "ssh h 'cat > f' <<'E'", "bash -l x.sh <<'E'",
+                  "sudo -u bob python3 - <<'E'", "cat <<'E'"):
+        assert not _feeds_nested_shell(owner), owner
+    found = list(_iter_nested_shell_inputs("bash -l -c 'x ( y )'; zsh s.sh; bash -c 'z'", "", cwd="/"))
+    assert found == []  # *walk_command* holds the segments; *command* only its heredocs
+    text = "bash -l -c 'x ( y )'; bash -c 'z'"
+    assert list(_iter_nested_shell_inputs(text, text, cwd="/")) == [("x ( y )", None)]

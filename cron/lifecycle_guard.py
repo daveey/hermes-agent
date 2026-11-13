@@ -502,6 +502,7 @@ class _LifecycleScanBudget:
 
     __slots__ = (
         "alias_names",
+        "aliases_defined",
         "bytes_remaining",
         "lines_remaining",
         "mask_heredocs",
@@ -536,13 +537,16 @@ class _LifecycleScanBudget:
         self.alias_names: Optional[frozenset[str]] = (
             session_aliases if isinstance(session_aliases, frozenset)
             and all(isinstance(name, str) for name in session_aliases) else None)
+        # Sticky: some walked text may define or enable an alias (see `note_aliases`).
+        self.aliases_defined = False
         # False when a session alias may shadow a heredoc consumer, wrapper or shell name
         # (`alias python3=bash`): then no heredoc body is provably inert, so none is masked.
         self.mask_heredocs = not _session_aliases_shadow_consumers(session_aliases)
 
     def note_aliases(self, text: str) -> None:
         """Record (sticky) that walked *text* may define or enable an alias."""
-        if self.alias_names is not None and _may_define_alias(text):
+        if not self.aliases_defined and _may_define_alias(text):
+            self.aliases_defined = True
             self.alias_names = None
 
     def charge_text(self, text: str) -> bool:
@@ -1777,13 +1781,15 @@ def _contains_unsafe_gateway_action(
 
     def recurse(
         text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,
+        nested: bool = False,
     ) -> bool:
         if python_source:
             return _python_source_is_unsafe(text, budget)
-        return _contains_unsafe_gateway_action(
-            text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
-            read_remote_script=read_remote_script, executed=executed, source=source,
-        )
+        with shell_scope(budget, nested):
+            return _contains_unsafe_gateway_action(
+                text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
+                read_remote_script=read_remote_script, executed=executed, source=source,
+            )
 
     # The walks below must see the same masked view `_direct_lifecycle_scan` sees (#110422): a
     # path or `sh -c` payload inside a provably-inert heredoc body is never shell-executed, and an
@@ -1793,11 +1799,18 @@ def _contains_unsafe_gateway_action(
     walk_command = (strip_inert_heredoc_bodies(command, nested=True) if budget.mask_heredocs
                     else command)
 
-    for payload in itertools.chain(_iter_shell_command_payloads(walk_command),
-                                   _iter_printed_shell_payloads(walk_command)):
+    # A nested startup-file shell's input is walked first, with unknown alias names (nit 1).
+    from cron.lifecycle_guard_nested_shells import collect_nested_shell_inputs, shell_scope
+
+    nested_texts, nested_scripts = collect_nested_shell_inputs(
+        command, walk_command, cwd=cwd, budget=budget)
+    for payload, nested in itertools.chain(
+            zip(nested_texts, itertools.repeat(True)),
+            zip(itertools.chain(_iter_shell_command_payloads(walk_command),
+                                _iter_printed_shell_payloads(walk_command)), itertools.repeat(False))):
         # An `sh -c` payload is text of the same file (or command) it appears in; so is a string
         # an interpreter prints when its output is fed to a shell.
-        if recurse(payload, cwd, executed, source):
+        if recurse(payload, cwd, executed, source, nested=nested):
             return True
 
     for script_path, candidate_executed, python_source in _walk_candidates(
@@ -1849,7 +1862,7 @@ def _contains_unsafe_gateway_action(
         # Relative references inside a script resolve against that script's directory, not the cwd.
         if recurse(
             script_text, _resolve_script_directory(str(resolved)) or cwd, candidate_executed,
-            f"`{script_path}`", python_source,
+            f"`{script_path}`", python_source, nested=resolved in nested_scripts,
         ):
             return True
     return False

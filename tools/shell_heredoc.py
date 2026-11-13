@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Iterator
 
 from tools.shell_arith_sink import DATE_PRODUCER_BODY, substitution_in_arithmetic
 
@@ -701,6 +702,45 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
         result = _apply_replacements(
             command, [item for item in replacements if item[3] != "function"])
     return result
+
+
+def iter_heredoc_bodies(command: str, *, _depth: int = 0) -> Iterator[tuple[str | None, str]]:
+    """``(owner, body)`` for every heredoc in *command*, bodies nested in bodies included.
+
+    *owner* is the text of the command reading the body: its simple command on the opener line,
+    or the whole opener line when several heredocs or a list operator share it. ``None`` means
+    the owner is unknown (nested past ``_MAX_NESTED_HEREDOC_DEPTH``). An opener whose operator
+    does not parse or whose body has no terminator yields the rest of *command* as its body, so a
+    caller that treats some owners' bodies as shell code fails closed."""
+    if "<<" not in command:
+        return
+    if _depth > _MAX_NESTED_HEREDOC_DEPTH:
+        yield None, command
+        return
+    last_opener_index = command.rfind("<<")
+    cursor = 0
+    while cursor <= last_opener_index:
+        end, specs, unknown_operator, post_list, owner_start = _scan_heredoc_command_unit(
+            command, cursor)
+        line = command[cursor:end]
+        if unknown_operator:
+            yield line, command[end + 1:]
+            return
+        if not specs:
+            if end >= len(command):
+                return
+            cursor = end + 1
+            continue
+        owner = line if len(specs) > 1 or post_list else command[owner_start:end]
+        bodies = _heredoc_bodies(command, end + 1, specs) if end < len(command) else None
+        if bodies is None:
+            yield owner, command[end + 1:]
+            return
+        for start, terminator, _after in bodies:
+            body = command[start:terminator]
+            yield owner, body
+            yield from iter_heredoc_bodies(body, _depth=_depth + 1)
+        cursor = bodies[-1][2]
 
 
 def _apply_replacements(command: str, replacements: list[tuple[int, int, str, str]]) -> str:
