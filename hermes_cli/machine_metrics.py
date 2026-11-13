@@ -248,7 +248,7 @@ def _hub_cpu_path(root: Optional[Path] = None) -> Path:
 
 def record_hub_cpu_sample(sample: dict, root: Optional[Path] = None) -> None:
     """Keep the reporter's latest complete CPU triple for the lock-free advisory pre-check
-    (``kanban_admission.hub_cpu_advisory``). Advisory only: the final gate always measures again under the lock."""
+    (``kanban_admission.hub_cpu_advisory``) and the locked final gate (``kanban_admission.sampler_sample``)."""
     import json
     path = _hub_cpu_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -71,6 +71,16 @@ def fake_sample(pct, calls=None, check=None):
     return sample
 
 
+def locked(monkeypatch, read):
+    """Feed the final gate's locked read of the sampler sample from ``read()`` (a ``fake_sample`` or a ``pytest.fail``
+    stand-in). The pre-lease advisory (stricter age) still reads the real file written with :func:`advisory`."""
+    real = ka.sampler_sample
+
+    def sampler_sample(max_age_ms=None):
+        return read() if max_age_ms is None else real(max_age_ms)
+    monkeypatch.setattr(ka, "sampler_sample", sampler_sample)
+
+
 tool_worker_env = tool_helpers.worker_env
 
 
@@ -144,7 +154,7 @@ def test_concurrent_cross_board_claims_obey_origin_and_pool_caps(board, monkeypa
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: 3\n")
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
     candidates = []
     for index in range(4):
         folder = kb.boards_root() / f"pool-{index}"
@@ -184,7 +194,7 @@ def test_queue_note_reports_pools_and_marked_lane_order(board, monkeypatch):
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: 3\n")
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
     active = task(conn, title="marked running")
     kb.edit_task(conn, active, admission_class="urgent")
     assert kb.claim_task(conn, active)
@@ -244,7 +254,7 @@ def test_unsupported_fence_resets_prior_priority_receipt(board, monkeypatch):
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: 3\n")
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
     marked = task(conn)
     kb.edit_task(conn, marked, admission_class="urgent")
     assert kb.claim_task(conn, marked)
@@ -281,7 +291,7 @@ def test_capacity_origin_cap_survives_task_class_edits(board, monkeypatch):
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: 3\n")
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
     for index in range(2):
         tid = task(conn, title=f"capacity {index}")
         kb.edit_task(conn, tid, admission_class="capacity", admission_frees="frees: worker slots")
@@ -362,7 +372,7 @@ def test_urgent_claim_uses_extra_pool_with_regular_pool_full(board, monkeypatch,
     candidate = task(conn, review=review, title="Incident recovery")
     kb.edit_task(conn, candidate, admission_class="urgent")
     advisory(home, pct=70)
-    monkeypatch.setattr(cm, "sample", fake_sample(70))
+    locked(monkeypatch, fake_sample(70))
     assert claim(conn, candidate, review) is not None
     receipt = conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (candidate,)).fetchone()
     assert receipt[0] == "priority"
@@ -412,7 +422,7 @@ def test_dispatch_marked_candidate_precedes_normal_in_same_lane(
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: 3\n")
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
     monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
     normal = task(conn, review=review, title="higher numeric priority")
@@ -442,7 +452,7 @@ def test_replica_waiter_ranking_cannot_undo_marked_lane_order(board, monkeypatch
         with (home / "config.yaml").open("a") as config:
             config.write("    priority_slots: 3\n")
         advisory(home)
-        monkeypatch.setattr(cm, "sample", fake_sample(10))
+        locked(monkeypatch, fake_sample(10))
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
     marked = task(conn, title="restore capacity")
     kb.edit_task(conn, marked, admission_class="urgent")
@@ -499,7 +509,7 @@ def test_dispatch_full_regular_pool_claims_marked_with_shared_memory_budget(
     for tid in marked:
         kb.edit_task(conn, tid, admission_class="urgent")
     advisory(home, pct=70)
-    monkeypatch.setattr(cm, "sample", fake_sample(70))
+    locked(monkeypatch, fake_sample(70))
     monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: pressure)
     spawned = []
@@ -528,7 +538,7 @@ def _saturate(conn, home, monkeypatch, regular_active):
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: 3\n")
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
     monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
     attempts, spawned = [], []
@@ -816,7 +826,7 @@ def refused(conn, t, review, reason):
 @pytest.mark.parametrize("review", [False, True])
 def test_gate_absent_admits_without_sampling(board, monkeypatch, review):
     conn, _home = board
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("no root limit: must not sample"))
+    locked(monkeypatch, lambda *a, **k: pytest.fail("no root limit: must not sample"))
     t = task(conn, review)
     assert claim(conn, t, review) is not None
 
@@ -826,7 +836,7 @@ def test_below_limit_admits_and_claimed_event_carries_consumed_sample(board, mon
     conn, home = board
     configure(home)
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(49.999))
+    locked(monkeypatch, fake_sample(49.999))
     t = task(conn, review)
     assert claim(conn, t, review) is not None
     payload = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='claimed'",
@@ -843,7 +853,7 @@ def test_at_or_above_limit_or_unknown_refuses_with_no_local_run(board, monkeypat
     conn, home = board
     configure(home)
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(pct))
+    locked(monkeypatch, fake_sample(pct))
     t = task(conn, review)
     assert claim(conn, t, review) is None
     refused(conn, t, review, reason)
@@ -853,7 +863,7 @@ def test_at_or_above_limit_or_unknown_refuses_with_no_local_run(board, monkeypat
 def test_invalid_root_limit_refuses_without_sampling(board, monkeypatch, review):
     conn, home = board
     configure(home, limit='"fifty"')  # type: ignore[arg-type]
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("invalid limit: refuse before sampling"))
+    locked(monkeypatch, lambda *a, **k: pytest.fail("invalid limit: refuse before sampling"))
     t = task(conn, review)
     assert claim(conn, t, review) is None
     refused(conn, t, review, "hub_cpu_unknown")
@@ -869,7 +879,7 @@ def test_profile_override_cannot_disable_root_gate(board, monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(profile))
     import hermes_constants
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda *a, **k: home)
-    monkeypatch.setattr(cm, "sample", fake_sample(80.0))
+    locked(monkeypatch, fake_sample(80.0))
     t = task(conn)
     assert kb.claim_task(conn, t) is None
     refused(conn, t, False, "hub_cpu_at_or_above_limit")
@@ -888,7 +898,7 @@ def test_sample_is_taken_while_admission_lock_is_held(board, monkeypatch, review
                 seen.append("free")
         except af.AdmissionBusy:
             seen.append("held")
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=check))
+    locked(monkeypatch, fake_sample(10.0, check=check))
     t = task(conn, review)
     assert claim(conn, t, review) is not None
     assert seen == ["held"]
@@ -907,19 +917,22 @@ def test_advisory_precheck_defers_before_any_lease_or_sample(board, monkeypatch,
     elif advice != "missing":
         advisory(home, pct=advice)
     monkeypatch.setattr(sync, "claim_gate", lambda *a, **k: pytest.fail("advisory refusal must not ask for a lease"))
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("advisory refusal must not sample"))
+    locked(monkeypatch, lambda *a, **k: pytest.fail("advisory refusal must not sample"))
     t = task(conn, review)
     assert claim(conn, t, review) is None
     refused(conn, t, review, reason)
 
 
-def test_advisory_age_boundary_15000_ms_is_fresh(board, monkeypatch):
+def test_advisory_age_boundary_10000_ms_is_fresh_and_the_locked_read_keeps_15000(board, monkeypatch):
+    """Pre-lease: 10 s (15 s minus the lease headroom). The locked gate reads the same file and accepts up to 15 s."""
     conn, home = board
     configure(home)
-    advisory(home, age_ms=14_900)
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0))
+    advisory(home, age_ms=9_900)
     t = task(conn)
     assert kb.claim_task(conn, t) is not None
+    assert ka.ADVISORY_MAX_AGE_MS - ka.PRELEASE_HEADROOM_MS == 10_000
+    advisory(home, age_ms=14_000)  # too old to take a lease, still fresh for the locked read
+    assert ka.sampler_sample() is not None and ka.sampler_sample(10_000) is None
 
 
 @pytest.mark.parametrize("review", [False, True])
@@ -927,7 +940,7 @@ def test_whole_host_cap_is_rechecked_under_lock(board, monkeypatch, review):
     conn, home = board
     configure(home, cap=2)
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0))
+    locked(monkeypatch, fake_sample(10.0))
     monkeypatch.setattr(mm, "active_card_runs", lambda: 2)
     t = task(conn, review)
     assert claim(conn, t, review) is None
@@ -944,7 +957,7 @@ def test_lease_expiring_during_sample_cannot_start(board, monkeypatch):
     configure(home)
     advisory(home)
     real_time = time.time
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: monkeypatch.setattr(
+    locked(monkeypatch, fake_sample(10.0, check=lambda: monkeypatch.setattr(
         ka, "_now", lambda: real_time() + 10 ** 7)))
     t = task(conn)
     assert kb.claim_task(conn, t) is None
@@ -962,7 +975,7 @@ def test_simultaneous_claimers_at_6_of_7_start_at_most_one(board, monkeypatch):
         with closing(sqlite3.connect(f"file:{home / 'kanban.db'}?mode=ro", uri=True, timeout=5)) as db:
             return 6 + db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
     monkeypatch.setattr(mm, "active_card_runs", active)
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.2)))  # health: allow HX013 -- stands in for the ~1 s sample held under the lock
+    locked(monkeypatch, fake_sample(10.0, check=lambda: time.sleep(0.2)))  # health: allow HX013 -- stands in for the ~1 s sample held under the lock
     tasks = [task(conn, title=f"t{i}") for i in range(4)]
 
     def go(t):
@@ -982,72 +995,35 @@ def _lock_state(home):
         return "held"
 
 
-@pytest.mark.skipif(not cm.sys.platform.startswith("linux"), reason="real /proc/stat sample")
-def test_real_sample_is_entirely_under_lock_bounded_and_measures_chat_turn_cost(board):
-    """Frozen contract: an independent FULL real ~1 s /proc/stat sample is taken entirely while admission.lock is held
-    (held at its first and last read), the hold stays <= ~2 s, and a chat/notification turn reserving the lock with
-    BUSY_WAIT_S (3.0 s) during the sample is measured (its outcome must match the measured hold interval)."""
+def test_real_claim_reads_the_sampler_file_under_the_lock_and_holds_it_briefly(board, monkeypatch):
+    """Contract (replaces the 2026-11 independent ~1 s sample): the locked gate reads the sampler's own file while
+    admission.lock is held, takes no /proc/stat sample, records that very triple on ``claimed``, and its hold is short
+    enough that a chat/notification turn reserving the lock with BUSY_WAIT_S (3.0 s) is admitted well inside it."""
     from hermes_cli import backend_retirement
 
     conn, home = board
-    configure(home, limit=100)  # the real measured value admits unless the host is 100% busy
-    advisory(home)
+    configure(home)
+    advisory(home, pct=23.0, age_ms=500)
     t = task(conn)
+    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("no /proc/stat sample under the lock"))
     m = {}
-    started = threading.Event()
+    real = ka.sampler_sample
 
-    def chat_turn():
-        started.wait(5)
-        time.sleep(0.2)  # health: allow HX013 -- positions the chat turn inside the claim's real ~1 s sample
-        m["chat_try"] = time.monotonic()
-        try:
-            with af.admission_lock(home, timeout=backend_retirement.BUSY_WAIT_S):
-                m["chat"] = "acquired"
-        except af.AdmissionBusy:
-            m["chat"] = "busy"
-        m["chat_done"] = time.monotonic()
-    real_sample = cm.sample
-
-    def sample(*a, **k):
-        m["lock_at_sample_start"] = _lock_state(home)
-        m["sample_start"] = time.monotonic()
-        started.set()
-        out = real_sample(*a, **k)
-        m["sample_end"] = time.monotonic()
-        m["lock_at_sample_end"] = _lock_state(home)
-        m["sample"] = out
-        return out
-    cm_sample, cm.sample = cm.sample, sample
-    try:
-        th = threading.Thread(target=chat_turn)
-        th.start()
-        t0 = time.monotonic()
-        got = kb.claim_task(conn, t)
-        m["claim_end"] = time.monotonic()
-        th.join(5)
-    finally:
-        cm.sample = cm_sample
-    claim_s = m["claim_end"] - t0
-    sample_s = m["sample_end"] - m["sample_start"]
-    record = {"claim_s": round(claim_s, 4), "sample_s": round(sample_s, 4),
-              "lock_at_sample_start": m["lock_at_sample_start"], "lock_at_sample_end": m["lock_at_sample_end"],
-              "sample": m["sample"], "chat": m["chat"], "chat_wait_s": round(m["chat_done"] - m["chat_try"], 4),
-              "chat_try_offset_s": round(m["chat_try"] - m["sample_start"], 4),
-              "busy_wait_s": backend_retirement.BUSY_WAIT_S}
-    print("HUB_ADMISSION_LOCK_MEASURE " + json.dumps(record))
+    def read(max_age_ms=None):
+        if max_age_ms is None:
+            m["lock_at_read"] = _lock_state(home)
+        return real(max_age_ms)
+    monkeypatch.setattr(ka, "sampler_sample", read)
+    t0 = time.monotonic()
+    got = kb.claim_task(conn, t)
+    claim_s = time.monotonic() - t0
+    print("HUB_ADMISSION_LOCK_MEASURE " + json.dumps({"claim_s": round(claim_s, 4)}))
     assert got is not None
-    # The whole independent sample ran with admission.lock held (first and last /proc/stat read inside the hold).
-    assert m["lock_at_sample_start"] == "held" and m["lock_at_sample_end"] == "held"
-    assert m["sample"] is not None and cm.MIN_WINDOW_MS <= m["sample"]["cpu_busy_window_ms"] <= cm.MAX_WINDOW_MS
-    assert sample_s >= 1.0
-    assert claim_s <= 2.5  # frozen bound: one ~1 s sample (window <= 2 s) plus the commit
-    # The chat turn's outcome follows from the measured hold: lock held over [sample_start, claim_end].
-    wait_end = m["chat_try"] + backend_retirement.BUSY_WAIT_S
-    if m["sample_start"] <= m["chat_try"] and wait_end <= m["sample_end"]:
-        assert m["chat"] == "busy" and m["chat_done"] - m["chat_try"] >= backend_retirement.BUSY_WAIT_S
-    elif m["chat"] == "acquired":
-        assert m["chat_done"] >= m["sample_end"]  # only once the claim's hold had ended
-    assert m["chat_done"] - m["chat_try"] <= 2.5
+    assert m["lock_at_read"] == "held"
+    payload = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='claimed'",
+                                      (t,)).fetchone()[0])
+    assert {k: payload["hub_cpu"][k] for k in cm.FIELDS} == mm.read_hub_cpu_sample(home)
+    assert claim_s < backend_retirement.BUSY_WAIT_S - cm.WINDOW_S  # no ~1 s sample inside the hold any more
 
 
 def test_queue_reason_codes_cover_the_eight_overflow_reasons():
@@ -1062,7 +1038,7 @@ def test_full_cap_refuses_before_the_sample_so_the_lock_is_not_held_for_it(board
     configure(home, cap=2)
     advisory(home)
     monkeypatch.setattr(mm, "active_card_runs", lambda: 2)
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("at the cap: refuse before sampling"))
+    locked(monkeypatch, lambda *a, **k: pytest.fail("at the cap: refuse before sampling"))
     t = task(conn, review)
     assert claim(conn, t, review) is None
     refused(conn, t, review, "hub_capacity_full")
@@ -1075,7 +1051,7 @@ def test_deadline_already_passed_refuses_before_the_sample(board, monkeypatch):
     real_time = time.time
     monkeypatch.setattr(sync, "claim_gate", lambda conn, task_id, expires, lane="ready": sync.ClaimGate(expires))
     monkeypatch.setattr(ka, "_now", lambda: real_time() + 10 ** 7)
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("deadline passed: refuse before sampling"))
+    locked(monkeypatch, lambda *a, **k: pytest.fail("deadline passed: refuse before sampling"))
     t = task(conn)
     assert kb.claim_task(conn, t) is None
     refused(conn, t, False, "hub_cpu_unknown")
@@ -1088,43 +1064,42 @@ def _shrink_hold_budget(monkeypatch, budget_s):
 
 @pytest.mark.parametrize("review", [False, True])
 def test_hold_that_overruns_its_budget_refuses_instead_of_committing(board, monkeypatch, review):
-    """Final review N1: a sample + recount that outlast the designed hold must not commit (turn budget would lose)."""
+    """Final review N1: a gate that outlasts the designed hold must not commit (turn budget would lose). It is named
+    ``hub_admission_overrun``: an overrun is not a CPU reading (hub 2026-11-13 reported it as hub_cpu_unknown)."""
     conn, home = board
     configure(home)
     advisory(home)
     _shrink_hold_budget(monkeypatch, 0.2)
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.3)))  # health: allow HX013 -- a sample that overruns the shrunken hold
+    locked(monkeypatch, fake_sample(10.0, check=lambda: time.sleep(0.3)))  # health: allow HX013 -- a read that overruns the shrunken hold
     t = task(conn, review)
     assert claim(conn, t, review) is None
-    refused(conn, t, review, "hub_cpu_unknown")
+    refused(conn, t, review, ka.OVERRUN)
 
 
 @pytest.mark.parametrize("review", [False, True])
-def test_slow_pre_sample_checks_leave_no_room_so_it_refuses_before_sampling(board, monkeypatch, review):
-    """Final review N1: when the cheap checks already ate the room a nominal 1 s sample needs, never start sampling."""
+def test_slow_census_overrun_refuses_as_overrun(board, monkeypatch, review):
     conn, home = board
     configure(home)
     advisory(home)
-    _shrink_hold_budget(monkeypatch, cm.WINDOW_S + 0.2)
+    _shrink_hold_budget(monkeypatch, 0.2)
 
     def slow_count():
-        time.sleep(0.3)  # health: allow HX013 -- a slow board scan before the sample
+        time.sleep(0.3)  # health: allow HX013 -- a slow board scan under the lock
         return 0
     monkeypatch.setattr(mm, "active_card_runs", slow_count)
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("no room for the sample: refuse before sampling"))
     t = task(conn, review)
     assert claim(conn, t, review) is None
-    refused(conn, t, review, "hub_cpu_unknown")
+    refused(conn, t, review, ka.OVERRUN)
 
 
 def test_claim_inside_the_hold_budget_still_admits(board, monkeypatch):
-    """Control for the N1 bound: the default budget admits a normal sample (the bound is not a blanket refusal)."""
+    """Control for the N1 bound: the default budget admits a normal gate (the bound is not a blanket refusal)."""
     conn, home = board
     configure(home)
     advisory(home)
     assert ka._hold_budget_s() == pytest.approx(af.CLAIM_MAX_HOLD_S - ka.COMMIT_RESERVE_S)
     assert ka._hold_budget_s() >= cm.WINDOW_S + 1.0
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.1)))  # health: allow HX013 -- a short stand-in sample
+    locked(monkeypatch, fake_sample(10.0, check=lambda: time.sleep(0.1)))  # health: allow HX013 -- a short stand-in read
     t = task(conn)
     assert kb.claim_task(conn, t) is not None
 
@@ -1344,7 +1319,7 @@ def _explain_board(conn, home, monkeypatch):
     assert kb.claim_task(conn, task(conn, title="regular running"))
     _enable(home)
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
     fresh = ready(conn, "fresh", priority=900, created_at=now)
     starved = ready(conn, "starved", priority=0, created_at=now - 11 * 3600)
     marked = ready(conn, "marked", priority=0, created_at=now - 25 * 60, admission_class="capacity")

@@ -18,6 +18,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
 from tests.waiting import wait_until
+from tests.hermes_cli.test_kanban_hub_admission import locked
 
 pytestmark = pytest.mark.platforms("posix")
 
@@ -66,7 +67,7 @@ def test_turn_reserving_during_a_hub_claim_sample_is_admitted_after_the_hold(boa
     claim's held sample is admitted once the claim commits: no 5035, and the claim still sampled under the lock."""
     conn, home = board
     started, ended = threading.Event(), []
-    monkeypatch.setattr(cm, "sample", slow_sample(started, ended=ended))
+    locked(monkeypatch, slow_sample(started, ended=ended))
     t = ready(conn)
     m = {}
 
@@ -89,7 +90,7 @@ def test_turn_reserving_during_a_hub_claim_sample_is_admitted_after_the_hold(boa
 
 def test_a_waiting_turn_makes_the_next_claim_defer_without_sampling(board, monkeypatch):
     conn, home = board
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("a waiting turn: defer before sampling"))
+    locked(monkeypatch, lambda *a, **k: pytest.fail("a waiting turn: defer before sampling"))
     t = ready(conn)
     with af.turn_waiting(home):
         assert af.turns_waiting(home / "core-update")
@@ -98,7 +99,7 @@ def test_a_waiting_turn_makes_the_next_claim_defer_without_sampling(board, monke
         assert conn.execute("SELECT count(*) FROM task_runs").fetchone()[0] == 0
         assert sync.pop_claim_deferral(t) is None  # an ordinary busy-lock defer, not a gate refusal
     assert not af.turns_waiting(home / "core-update")
-    monkeypatch.setattr(cm, "sample", slow_sample(threading.Event(), hold_s=0))
+    locked(monkeypatch, slow_sample(threading.Event(), hold_s=0))
     assert kb.claim_task(conn, t) is not None
 
 

@@ -14,7 +14,8 @@ from tests.hermes_cli import test_kanban_hub_admission as helpers
 pytestmark = pytest.mark.platforms("posix")
 
 board = helpers.board
-configure, advisory, task, fake_sample = helpers.configure, helpers.advisory, helpers.task, helpers.fake_sample
+configure, advisory, task, fake_sample, locked = (helpers.configure, helpers.advisory, helpers.task, helpers.fake_sample,
+                                              helpers.locked)
 
 
 def enable(home, extra=""):
@@ -25,7 +26,7 @@ def enable(home, extra=""):
 
 def no_lease_or_sample(monkeypatch):
     monkeypatch.setattr(sync, "claim_gate", lambda *a, **k: pytest.fail("advisory refusal must not ask for a lease"))
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("advisory refusal must not sample"))
+    locked(monkeypatch, lambda *a, **k: pytest.fail("advisory refusal must not sample"))
 
 
 @pytest.mark.parametrize("key,value,reason", [
@@ -113,7 +114,7 @@ def test_pool_census_error_at_final_gate_refuses_instead_of_scalar_admit(board, 
     conn, home = board
     enable(home)
     advisory(home)
-    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    locked(monkeypatch, fake_sample(10))
 
     def broken(*a, **k):
         raise ValueError("unknown admission pool receipt")
@@ -133,7 +134,7 @@ def test_candidate_pool_unknown_census_selects_no_pool(board, monkeypatch):
     assert (pool, ceiling) == (None, 85)
 
 
-def test_pool_change_during_sample_rechecks_cpu_against_new_pool(board, monkeypatch):
+def test_pool_change_during_the_lease_checks_cpu_against_the_locked_census_pool(board, monkeypatch):
     conn, home = board
     configure(home, limit=None)
     for index in range(6):
@@ -153,11 +154,17 @@ def test_pool_change_during_sample_rechecks_cpu_against_new_pool(board, monkeypa
     calls = []
 
     def fill_priority_pool():
-        # Another board's three priority runs become live while this claim samples: the recount moves the
-        # candidate from the priority pool (85%) to the last regular slot (50%), where 70% must refuse.
+        # Another board's three priority runs become live while this claim waits for its lease: the locked census
+        # moves the candidate from the priority pool (85%) to the last regular slot (50%), where 70% must refuse.
         with closing(kbc.connect(late)) as other, kb.write_txn(other):
             other.execute("UPDATE tasks SET status='running'")
-    monkeypatch.setattr(cm, "sample", fake_sample(70, calls=calls, check=fill_priority_pool))
+    real_gate = sync.claim_gate
+
+    def lease(*a, **k):
+        fill_priority_pool()
+        return real_gate(*a, **k)
+    monkeypatch.setattr(sync, "claim_gate", lease)
+    locked(monkeypatch, fake_sample(70, calls=calls))
     candidate = task(conn, title="incident")
     kb.edit_task(conn, candidate, admission_class="urgent")
     assert kb.claim_task(conn, candidate) is None

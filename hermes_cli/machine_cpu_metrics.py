@@ -8,12 +8,12 @@ included in user/nice and are never added again; ``steal`` counts as busy (time 
 error, malformed line, counter decrease (reboot/reset), non-positive total, or an elapsed window outside
 [1000, 2000] ms yields ``None`` (unknown), which every caller treats as "refuse", never as idle.
 
-Two callers sample:
-- the sync loop's advisory sampler thread (``machine_cpu_sampler``), one rolling snapshot per second and only while
-  the installation-root config sets ``kanban.admission.cpu_busy_below_pct``; it feeds the lock-free advisory file
-  and the metrics report (the Board uses the reported triple for hub overflow), and
-- the final claim gate in ``kanban_admission.claim_transaction``, with an independent full sample taken while
-  ``admission.lock`` is held.
+One caller samples: the sync loop's advisory sampler thread (``machine_cpu_sampler``), one rolling snapshot per
+second and only while the installation-root config sets ``kanban.admission.cpu_busy_below_pct``. It feeds the
+advisory file, which both the lock-free pre-lease advisory and the final claim gate under ``admission.lock`` read
+(``kanban_admission.sampler_sample``), and the metrics report (the Board uses the reported triple for hub overflow).
+The final gate no longer takes its own ~1 s sample under the lock: in the GIL-busy hub gateway that sample plus the
+census overran the hold on every claim (2026-11-13).
 
 Normalized load average is NOT a substitute for this measurement anywhere in the gate.
 """

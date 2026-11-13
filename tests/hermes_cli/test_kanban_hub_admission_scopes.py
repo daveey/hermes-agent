@@ -20,6 +20,7 @@ from hermes_cli import kanban_worker_node as wn
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
 from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli.test_kanban_hub_admission import locked
 
 pytestmark = pytest.mark.platforms("posix")
 
@@ -84,7 +85,7 @@ class Install:
             calls.append(pct)
             return {"cpu_busy_pct": pct, "cpu_busy_window_ms": 1000,
                     "cpu_busy_sample_end_ms": int(time.time() * 1000)}
-        self.mp.setattr(cm, "sample", sample)
+        locked(self.mp, sample)
         return calls
 
 

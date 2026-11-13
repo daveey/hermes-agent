@@ -14,7 +14,8 @@ CODES = {"reserved", "draining", "admission_limits", "no_live_candidate", "capab
          "observation_unavailable", "mixed", "board_error", "board_refused", "no_pool_worker",
          # worker-first overflow (docs/worker-first-v1.md): Board reserve observations and the core final gate
          "workers_unknown", "no_eligible_worker", "workers_saturated", "hub_cpu_at_or_above_limit",
-         "hub_cpu_unknown", "hub_capacity_full", "hub_sample_already_used", "hub_overflow_reserved"}
+         "hub_cpu_unknown", "hub_capacity_full", "hub_sample_already_used", "hub_overflow_reserved",
+         "hub_admission_overrun"}
 _REJECTIONS = {"invalid_policy", "not_creator", "not_claimable", "worker_pool_disabled",
                "unauthorized_candidate", "explicit_pin", "revision_conflict", "not_found"}
 _TOKEN = re.compile(r"^[A-Za-z0-9_.:/+-]{1,120}$")

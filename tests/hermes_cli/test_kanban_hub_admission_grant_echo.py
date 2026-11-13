@@ -32,6 +32,7 @@ from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
 from tests.hermes_cli import kanban_sync_support as support
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
+from tests.hermes_cli.test_kanban_hub_admission import locked
 
 pytestmark = pytest.mark.platforms("posix")
 
@@ -59,7 +60,7 @@ class Rig:
                                   "cpu_busy_sample_end_ms": int(time.time() * 1000)}, root=self.home)
         self.mp = monkeypatch
         monkeypatch.setattr(ka, "ADVISORY_MAX_AGE_MS", 10**9)
-        monkeypatch.setattr(cm, "sample", self._sample)
+        locked(monkeypatch, self._sample)
 
     def _sample(self, *a, **k):
         self.samples.append(time.monotonic())

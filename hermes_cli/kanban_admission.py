@@ -2,10 +2,17 @@
 
 Hub CPU gate (worker-first overflow, docs/worker-first-v1.md): on a host whose installation-root config sets
 ``kanban.admission.cpu_busy_below_pct`` every new ready/review claim (legacy, host-bound and policy cards alike) must
-pass, while ``admission.lock`` is held and before the claim commits: an independent full ~1 s CPU busy sample strictly
-below the limit, a whole-host running count below the root ``kanban.max_in_progress`` cap, and a lease deadline that
-is still ahead after sampling. Any unknown refuses. No network happens under the lock. A lock-free advisory read of the
-reporter's latest sample runs earlier, before any Board lease, so a busy hub causes no grant/release churn.
+pass, while ``admission.lock`` is held and before the claim commits: the advisory sampler's latest complete sample
+(``cache/hub-cpu-sample.json``, at most ``ADVISORY_MAX_AGE_MS`` old) strictly below the limit, a whole-host running
+count below the root ``kanban.max_in_progress`` cap, a lease deadline that is still ahead, and a hold inside its
+budget. Any unknown refuses. No network and no sleep happen under the lock. A lock-free advisory read of the same
+sample runs earlier, before any Board lease, and demands ``PRELEASE_HEADROOM_MS`` of extra freshness, so the sample it
+accepts is still fresh when the locked gate reads it and a busy or stale hub causes no grant/release churn.
+
+[daveey] The locked gate used to take its own ~1 s ``/proc/stat`` sample and count the host twice around it. In the
+hub gateway (a process holding the GIL ~100 % of a core) the census alone ran ~1.3 s, so census + sample + recount
+overran the 2.25 s hold on every claim, after the lease was granted, and was reported as ``hub_cpu_unknown`` while the
+advisory was fresh (2026-11-13, t_01a1d2e5c4899f40). An overrun is now ``hub_admission_overrun``.
 """
 import contextlib
 import logging
@@ -13,7 +20,11 @@ import threading
 import time
 from pathlib import Path
 
-ADVISORY_MAX_AGE_MS = 15_000
+ADVISORY_MAX_AGE_MS = 15_000  # the locked gate's freshness limit for the sampler's sample
+# The pre-lease advisory wants this much more freshness, so the sample it accepts survives the Board lease round-trip
+# and the txn wait inside ADVISORY_MAX_AGE_MS (the sampler rewrites it every 5 s: a healthy one is <= ~7 s old).
+PRELEASE_HEADROOM_MS = 5_000
+OVERRUN = "hub_admission_overrun"
 _consumed = threading.local()
 _decision = threading.local()  # the last cap count this thread's final gate read (refusal log / claimed event)
 
@@ -33,9 +44,11 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
     """Lock-free pre-check before a Board lease (review ruling 5). Returns a refusal reason or None.
 
     Off unless the root limit is set. Uses the advisory sampler's latest complete sample: missing, stale (>15 s),
-    future or malformed reads as unknown and defers; a fresh value at or above the limit defers. Advisory only."""
+    future or malformed reads as unknown and defers; a fresh value at or above the limit defers. Advisory only.
+    Freshness here is ``ADVISORY_MAX_AGE_MS - PRELEASE_HEADROOM_MS`` (10 s): the locked gate re-reads the same
+    file with the looser ``ADVISORY_MAX_AGE_MS``, so a sample accepted before the lease is not stale by the time the
+    gate reads it."""
     from hermes_cli import machine_cpu_metrics as cpu
-    from hermes_cli import machine_metrics
 
     from hermes_cli.worker_resource_admission import refusal
     from hermes_cli.worker_compute_capacity import worker_enabled, owner_for_connection
@@ -59,17 +72,32 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
             except (OSError, ValueError, TypeError):
                 _defer(task_id, reason)
                 return reason
-        last = machine_metrics.read_hub_cpu_sample() or {}
-        end = last.get("cpu_busy_sample_end_ms")
-        age = _now() * 1000 - end if type(end) in (int, float) else None
-        if age is not None and 0 <= age <= ADVISORY_MAX_AGE_MS:
-            pct = last.get("cpu_busy_pct")
-            if cpu.below(pct, limit):
+        last = sampler_sample(ADVISORY_MAX_AGE_MS - PRELEASE_HEADROOM_MS)
+        if last is not None:
+            if cpu.below(last["cpu_busy_pct"], limit):
                 return None
-            if type(pct) in (int, float) and 0 <= pct <= 100:
-                reason = "hub_cpu_at_or_above_limit"
+            reason = "hub_cpu_at_or_above_limit"
     _defer(task_id, reason)
     return reason
+
+
+def sampler_sample(max_age_ms=None):
+    """The advisory sampler's latest complete sample when usable, else None (unknown).
+
+    One reader for the pre-lease advisory and the locked gate: the triple ``machine_cpu_sampler`` writes, with every
+    field a number, a 1-2 s window, a busy percentage in [0, 100] and an end stamp 0..``max_age_ms`` ago (a future
+    stamp is unknown). ``max_age_ms`` None is the locked gate's ``ADVISORY_MAX_AGE_MS``."""
+    from hermes_cli import machine_cpu_metrics as cpu
+    from hermes_cli import machine_metrics
+
+    last = machine_metrics.read_hub_cpu_sample() or {}
+    pct, window, end = (last.get(k) for k in cpu.FIELDS)
+    if not (type(pct) in (int, float) and type(window) in (int, float) and type(end) in (int, float)):
+        return None
+    if not 0 <= pct <= 100 or not cpu.MIN_WINDOW_MS <= window <= cpu.MAX_WINDOW_MS:
+        return None
+    max_age_ms = ADVISORY_MAX_AGE_MS if max_age_ms is None else max_age_ms
+    return dict(zip(cpu.FIELDS, (pct, window, end))) if 0 <= _now() * 1000 - end <= max_age_ms else None
 
 
 def _root_max_in_progress(*, root=None):
@@ -143,14 +171,15 @@ def _unknown(stage, started, **extra):
 
 
 def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=None):
-    """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network.
+    """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network or sleeps.
 
-    Cheap checks (whole-host cap, lease deadline) run BEFORE the ~1 s sample so a claim that must be refused anyway
-    never holds the lock for a sample (review F6); the deadline and the whole-host count are checked again after
-    sampling, immediately before the commit. ``started`` (monotonic, taken when admission.lock was acquired) enforces
-    the designed hold: a gate that cannot fit its sample inside ``CLAIM_MAX_HOLD_S`` minus the commit
-    reserve refuses before sampling when not even a nominal 1 s sample fits, and one that overran it (slow board scan, stall) refuses instead of committing, so
-    a waiting turn's BUSY_WAIT_S budget is never outlasted by an admitted claim (final review N1)."""
+    One whole-host census (it picks the pool and its CPU ceiling), then the advisory sampler's sample re-read through
+    :func:`sampler_sample` (at most ``ADVISORY_MAX_AGE_MS`` old, the same triple the pre-lease advisory accepted or a
+    newer one), then the lease deadline and the hold. Nothing between the census and the commit waits, so it is not
+    recounted. ``started`` (monotonic, taken when admission.lock was acquired) enforces the designed hold: a gate that
+    overran ``CLAIM_MAX_HOLD_S`` minus the commit reserve (a slow board scan in a GIL-starved process, a stall) refuses
+    as ``hub_admission_overrun`` instead of committing, so a waiting turn's BUSY_WAIT_S budget is never outlasted by an
+    admitted claim (final review N1). The overrun is not a CPU reading and is never reported as one."""
     from hermes_cli import machine_cpu_metrics as cpu
 
     echo = getattr(gate, "echo", None)
@@ -171,29 +200,20 @@ def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=Non
         return None, None
     if state != cpu.ON:
         return _unknown("limit_unknown", started)
+    if _expired(gate):
+        return _unknown("lease_expired_before_census", started)  # the claim/lease deadline already passed
     if _cap_full(echo, conn=conn, task_id=task_id):
         return "hub_capacity_full", None
-    selected_limit = getattr(_decision, "pool_limit", None) or limit
-    if _expired(gate):
-        return _unknown("lease_expired_before_sample", started)
-    if _over_budget(started, cpu.WINDOW_S):
-        return _unknown("hold_before_sample", started)  # no room left for even a nominal sample inside the hold
-    measured = cpu.sample()
-    if not measured or not all(k in measured for k in cpu.FIELDS):
-        return _unknown("sample_invalid", started)
-    if not cpu.MIN_WINDOW_MS <= measured["cpu_busy_window_ms"] <= cpu.MAX_WINDOW_MS:
-        return _unknown("sample_window", started, window_ms=measured["cpu_busy_window_ms"])
-    if not cpu.below(measured["cpu_busy_pct"], selected_limit):
-        return "hub_cpu_at_or_above_limit", None
-    if _expired(gate):
-        return _unknown("lease_expired_after_sample", started)  # the claim/lease deadline passed while sampling
-    if _cap_full(echo, conn=conn, task_id=task_id):  # recount immediately before commit
-        return "hub_capacity_full", None
     limit = getattr(_decision, "pool_limit", None) or limit
+    measured = sampler_sample()
+    if measured is None:
+        return _unknown("sample_stale_or_missing", started)
     if not cpu.below(measured["cpu_busy_pct"], limit):
         return "hub_cpu_at_or_above_limit", None
+    if _expired(gate):
+        return _unknown("lease_expired_after_census", started)  # the deadline passed while counting: never start
     if _over_budget(started):
-        return _unknown("hold_after_sample", started)  # the hold overran its budget: refuse, never outlast turns
+        return OVERRUN, None  # the hold overran its budget: refuse rather than outlast waiting turns
     counts = getattr(_decision, "counts", None) or {}
     admission = {k: counts[k] for k in ("active_before", "active_after", "excluded_run_uid")} \
         if counts.get("excluded_run_uid") else None
@@ -398,8 +418,8 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 logging.getLogger(__name__).info("A turn is waiting for update admission; deferring Kanban claim")
                 yield False
                 return
-            # Frozen contract: an independent full CPU sample is taken HERE, with admission.lock held, and the
-            # claim commits before the lock is released, so a concurrent claimer sees this run in its recount.
+            # The CPU/cap gate runs HERE, with admission.lock held, and the claim commits before the lock is released,
+            # so a concurrent claimer sees this run in its census. It re-reads the sampler's sample; it never sleeps.
             _bind_echo(conn, task_id, gate)
             _decision.counts = None
             _decision.pool = "regular"
