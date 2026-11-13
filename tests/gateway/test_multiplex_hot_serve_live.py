@@ -130,6 +130,22 @@ def served_homes(desc):
     return {Path(entry['home']).resolve() for entry in desc.get('served_profiles', [])}
 
 
+def serve_verdicts(mux, desc):
+    """Why a boot-time secondary is missing from the served set: the ``identify`` answer's served and
+    parked maps, the recorded state, and every ``[MULTIPLEX]``/ERROR line of the root's and each
+    secondary's log (a park after per-profile log routing lands in that profile's own ``logs/``)."""
+    logs = [mux['log'], *sorted(mux['root'].glob('logs/*.log')), *sorted(mux['root'].glob('profiles/*/logs/*.log'))]
+    lines = [f'{p.name}: {line}' for p in logs if p.exists()
+             for line in p.read_text(encoding='utf-8', errors='replace').splitlines()
+             if '[MULTIPLEX]' in line or ' ERROR ' in line]
+    state = mux['root'] / 'gateway_state.json'
+    recorded = json.loads(state.read_text(encoding='utf-8')) if state.exists() else {}
+    return {'identify_served': sorted(str(h) for h in served_homes(desc)),
+            'identify_parked': desc.get('parked_profiles'),
+            'recorded_served': recorded.get('served_profiles'), 'recorded_parked': recorded.get('parked_profiles'),
+            'log': lines[-40:]}
+
+
 def recorded_served(root):
     return json.loads((root / 'gateway_state.json').read_text(encoding='utf-8')).get('served_profiles')
 
@@ -221,8 +237,12 @@ def test_named_profile_ensure_during_multiplexer_downtime_starts_the_multiplexer
     block the multiplexer's next all-or-nothing reserve with ``Cannot reserve gateway profiles``)."""
     root, env, boot = mux['root'], mux['env'], mux['boot']
     proc, desc = start_daemon(mux)
+    # Precondition, checked at READY where the multiplexer's own verdict is still live: boot is served
+    # by it. A boot-time park (unusable store, failed startup recovery) leaves the recorded set at
+    # ['default'] and is logged; name it instead of failing later on the bare recorded list.
+    assert served_homes(desc) == {root.resolve(), boot.resolve()}, serve_verdicts(mux, desc)
     stop(proc)
-    assert recorded_served(root) == ['default', 'boot']
+    assert recorded_served(root) == ['default', 'boot'], serve_verdicts(mux, desc)
     try:
         ensured = subprocess.run([sys.executable, '-m', 'hermes_cli.main', '-p', 'boot', 'gateway', 'ensure',
                                   '--json', '--timeout', '90'], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False)
