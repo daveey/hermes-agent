@@ -27,12 +27,19 @@ import {
 import type { SessionInfo, UsageStats } from '@/types/hermes'
 
 import { $projectTree } from './project-tree'
+import { idsShareLineage, lineageAliases, sessionMatchesStoredId } from './session-lineage'
 import { $removedSessionIds, isSessionRemovalPending, tombstoneRowIds } from './session-removal'
 import type { SessionOwnerRoute, SessionOwnerScope } from './session-request-router'
 import { clearUnreadOnOpen } from './session-unread-remote'
 
 type Updater<T> = T | ((current: T) => T)
 export type ComposerModelSource = '' | 'default' | 'manual'
+
+export interface ComposerModelSelection {
+  model: string
+  provider: string
+  source: ComposerModelSource
+}
 
 const WORKSPACE_CWD_KEY = 'hermes.desktop.workspace-cwd'
 
@@ -458,100 +465,10 @@ function updateAtom<T>(store: AppAtom<T>, next: Updater<T>) {
 export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id'>): string =>
   session._lineage_root_id ?? session.id
 
-/** True when a stored/lineage id resolves to this session — it matches either
- *  the live id or the stable lineage root (see sessionPinId). The one place the
- *  "same conversation across compression" test lives. */
-export const sessionMatchesStoredId = (
-  session: Pick<SessionInfo, '_lineage_ids' | '_lineage_root_id' | 'id'>,
-  storedSessionId: string
-): boolean =>
-  session.id === storedSessionId ||
-  session._lineage_root_id === storedSessionId ||
-  Boolean(session._lineage_ids?.includes(storedSessionId))
-
-// Alias lookup, memoized per sessions-list reference. `lineageAliases` runs
-// per cached session state per status projection per message delta — an
-// O(sessions) scan there multiplies out to states × sessions × ~30Hz per busy
-// session, which is what made a populated recents list drag every stream. The
-// list is replaced wholesale (never mutated), so its reference is the cache key.
-type LineageRow = Pick<SessionInfo, '_lineage_ids' | '_lineage_root_id' | 'id'>
-const lineageIndexBySessions = new WeakMap<readonly LineageRow[], Map<string, string[]>>()
-
-function lineageIndex(sessions: readonly LineageRow[]): Map<string, string[]> {
-  const cached = lineageIndexBySessions.get(sessions)
-
-  if (cached) {
-    return cached
-  }
-
-  const index = new Map<string, string[]>()
-
-  const add = (key: string, value: string) => {
-    const bucket = index.get(key)
-
-    if (!bucket) {
-      index.set(key, [value])
-    } else if (!bucket.includes(value)) {
-      bucket.push(value)
-    }
-  }
-
-  for (const session of sessions) {
-    add(session.id, session.id)
-
-    if (session._lineage_root_id) {
-      add(session.id, session._lineage_root_id)
-      add(session._lineage_root_id, session.id)
-      add(session._lineage_root_id, session._lineage_root_id)
-    }
-
-    // Chains three+ segments deep: the projected row carries every id the
-    // conversation has answered to, so a surface keyed to a MIDDLE segment
-    // (it was the tip when the surface opened) still aliases to the rest.
-    // Without this, only tip↔root connect and such a surface reads as a
-    // different conversation — one chat open twice after a compaction.
-    const ids = session._lineage_ids
-
-    if (ids && ids.length > 1) {
-      for (const a of ids) {
-        for (const b of ids) {
-          add(a, b)
-        }
-      }
-    }
-  }
-
-  lineageIndexBySessions.set(sessions, index)
-
-  return index
-}
-
-/** Every id one conversation answers to: the id we were handed, plus the live
- *  id and lineage root of each session it resolves to.
- *
- *  Status sets are published under a session's CURRENT stored id, but a sidebar
- *  row, a persisted tile, and the route can each hold a different tip of the
- *  same lineage after a compression. Publishing every alias lets those surfaces
- *  keep using a plain membership test instead of each re-deriving lineage —
- *  and getting it wrong, which reads as a running session going idle mid-turn. */
-export function lineageAliases(storedId: string, sessions: readonly LineageRow[]): string[] {
-  // Every key is in its own bucket by construction, so the bucket IS the
-  // alias set. Copied so no caller can mutate the shared index.
-  return lineageIndex(sessions).get(storedId)?.slice() ?? [storedId]
-}
-
-/** True when two ids name the same conversation across compression tip rotation. */
-export function idsShareLineage(
-  a: string,
-  b: string,
-  sessions: readonly Pick<SessionInfo, '_lineage_root_id' | 'id'>[]
-): boolean {
-  if (a === b) {
-    return true
-  }
-
-  return sessions.some(session => sessionMatchesStoredId(session, a) && sessionMatchesStoredId(session, b))
-}
+// The fresh-draft identity lives in store/composer.ts with the draft stash it
+// keys; re-exported here because session.ts is where new-chat lifecycles rotate
+// it (startFreshSessionDraft) and where most call sites already import from.
+export { $freshDraftKey, rotateFreshDraftKey } from './composer'
 
 /**
  * Whether a composer draft/queue key should move from `fromKey` onto `toKey`.
@@ -1529,10 +1446,12 @@ function rescopeComposerSelection(nextScope: string | null): void {
 /** Publish an exact registry route before active-profile effects can persist a
  * forced default. A registry id is authority even while its descriptive
  * HermesConnection lookup is unavailable. */
+/** The composer storage scope of the (connection, profile) owner. */
+export const composerScopeForOwner = (connectionId: string, profile: string): string =>
+  `.registry.${encodeURIComponent(connectionId)}.${encodeURIComponent(profile.trim() || 'default')}`
+
 export function setComposerSelectionOwner(connectionId: string, profile: string): void {
-  rescopeComposerSelection(
-    `.registry.${encodeURIComponent(connectionId)}.${encodeURIComponent(profile.trim() || 'default')}`
-  )
+  rescopeComposerSelection(composerScopeForOwner(connectionId, profile))
 }
 
 /** Fail closed while a successful legacy profile activation has no descriptor. */
@@ -1688,10 +1607,7 @@ export const markSessionRead = (storedSessionId: string | null | undefined) => {
 export const setMessages = (next: Updater<ChatMessage[]>) => updateAtom($messages, next)
 export const setFreshDraftReady = (next: Updater<boolean>) => updateAtom($freshDraftReady, next)
 
-// The fresh-draft identity lives in store/composer.ts with the draft stash it
-// keys; re-exported here because session.ts is where new-chat lifecycles rotate
-// it (startFreshSessionDraft) and where most call sites already import from.
-export { $freshDraftKey, rotateFreshDraftKey } from './composer'
+export { idsShareLineage, lineageAliases, sessionMatchesStoredId } from './session-lineage'
 
 export const setResumeFailedSessionId = (next: Updater<string | null>) => updateAtom($resumeFailedSessionId, next)
 export const setResumeReattachSessionId = (next: Updater<string | null>) => updateAtom($resumeReattachSessionId, next)
@@ -1784,6 +1700,48 @@ export const getCurrentModelSource = (): ComposerModelSource => {
   const source = storedComposerString(COMPOSER_MODEL_SOURCE_KEY)
 
   return source === 'default' || source === 'manual' ? source : ''
+}
+
+/** The owner's sticky choice, not the runtime/fallback currently painted in the pill. */
+export const getComposerModelSelection = (): ComposerModelSelection => ({
+  model: storedComposerString(COMPOSER_MODEL_KEY) ?? '',
+  provider: storedComposerString(COMPOSER_PROVIDER_KEY) ?? '',
+  source: getCurrentModelSource()
+})
+
+/** Which owner's saved pick the composer reads now; fences a write that outlives an await. */
+export const getComposerSelectionScope = (): null | string => composerSelectionScope
+
+export const restoreComposerModelSelection = (): void => {
+  const selection = getComposerModelSelection()
+
+  if (selection.model !== $currentModel.get() || selection.provider !== $currentProvider.get()) {
+    // The wire level described the outgoing chat's route.
+    $currentReasoningEffortWire.set('')
+  }
+
+  setCurrentModelTransient(selection.model)
+  setCurrentProviderTransient(selection.provider)
+}
+
+/** A saved pick that turned out not to apply hands new chats back to the Settings default, rather than
+ *  guess which earlier pick to restore. In the storage of the owner `scope` that saved it, which the answer
+ *  can outlive, and only while that exact route is still its saved pick. */
+export const releaseComposerModelSelection = (route: { model: string; provider: string }, scope: null | string) => {
+  if (
+    scope === null ||
+    storedString(`${COMPOSER_MODEL_SOURCE_KEY}${scope}`) !== 'manual' ||
+    storedString(`${COMPOSER_MODEL_KEY}${scope}`) !== route.model ||
+    (storedString(`${COMPOSER_PROVIDER_KEY}${scope}`) ?? '') !== route.provider
+  ) {
+    return
+  }
+
+  if (scope === composerSelectionScope) {
+    setCurrentModelSource('default')
+  } else {
+    persistString(`${COMPOSER_MODEL_SOURCE_KEY}${scope}`, 'default')
+  }
 }
 
 // Reactive mirror of the persisted source so UI (the composer pill's

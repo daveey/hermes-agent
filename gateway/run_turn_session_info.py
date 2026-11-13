@@ -23,7 +23,7 @@ class GatewayTurnSessionInfoMixin:
         With ``source``, the chat's ``channel_overrides`` route is reported (what its turn runs)."""
         from gateway.run import _resolve_gateway_model_context
         from gateway.session_info_route import channel_override_route
-        model, route, force_provider = channel_override_route(getattr(self, "config", None), source)
+        model, route, force_provider = channel_override_route(source and self._serving_channel_config(source), source)
         resolved = _resolve_gateway_model_context(model=model, route=route)
         if force_provider:
             resolved = dataclasses.replace(resolved, provider=force_provider)

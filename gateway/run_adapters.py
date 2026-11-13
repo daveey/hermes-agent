@@ -31,6 +31,7 @@ from gateway.run_adapter_status import GatewayAdapterStatusMixin
 from gateway.run_adapters_recovery import (
     GatewaySecondaryReconnectMixin,
     _adapter_unavailable_message,
+    discount_suspended_wait,
 )
 from gateway.run_shutdown import _log_suppressed
 from gateway.session import SessionSource
@@ -734,16 +735,23 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
         """Periodically retry failed platforms: backoff 30s → 300s cap, retryable failures retry
         forever (self-heal), non-retryable drop out. Pausing is manual only (``/platform pause``)."""
         async def _idle(seconds: int, until_queued: bool = False) -> bool:
-            """Sleep in 1s steps; False once the runner stops (or, if asked, once work is queued)."""
+            """Sleep in 1s steps; False once the runner stops (or, if asked, once work is queued). The
+            empty-queue wait measures each step: a fatal queued during it just before the host sleeps
+            must not age by the suspend either. The post-pass wait is measured once by its caller."""
             for _ in range(seconds):
                 if not self._running:
                     return False
                 if until_queued and self._failed_platforms:
                     break
+                step_from = time.monotonic()
                 await asyncio.sleep(1)
+                if until_queued:
+                    discount_suspended_wait(self._failed_platforms.values(), step_from, 1)
             return True
 
+        started = time.monotonic()
         await asyncio.sleep(10)  # initial delay — let startup finish
+        discount_suspended_wait(self._failed_platforms.values(), started, 10)  # startup-queued entries
         while self._running:
             if not self._failed_platforms:
                 if not await _idle(30, until_queued=True):
@@ -754,8 +762,10 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
                 if not self._running:
                     return
                 await self._reconnect_failed_platform(platform, now)
+            idle_from = time.monotonic()
             if not await _idle(10):  # re-check every 10 seconds
                 return
+            discount_suspended_wait(self._failed_platforms.values(), idle_from, 10)
 
 
     def _bump_reconnect_backoff(
