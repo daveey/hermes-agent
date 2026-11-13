@@ -197,3 +197,34 @@ def test_quiet_with_any_hold_field_keeps_stuck_accounting():
     for name in sorted(stuck.QUIET_COMPATIBLE_FIELDS - {"skipped_locked", "skipped_owned"}):
         row = dataclasses.replace(quiet, **{name: _truthy(by_name[name])})
         assert kbd.all_quiet_deferred([row]), name
+
+
+# Hard-coded on purpose: the loop above takes its expectations from the module's own sets, so moving a hold
+# (e.g. clock_held) into QUIET_COMPATIBLE_FIELDS would pass it while quiet then masks that hold (#2570 M1e).
+LITERAL_HOLD_FIELDS = (
+    "clock_held", "rate_limited", "no_progress_held", "core_update_drain_hold", "at_capacity",
+    "spawned", "skipped_unassigned", "skipped_nonspawnable", "skipped_per_profile_capped", "owner_down",
+    "skipped_ineligible", "claim_deferred", "admission_deferred", "capsule_refused", "pinned_quota_held",
+    "auto_blocked", "respawn_guarded", "crashed", "timed_out", "stale", "reclaimed", "reconciled_orphans",
+    "released_leftover_claims", "ownership_error", "memory_pressure",
+)
+
+
+@pytest.mark.parametrize("name", LITERAL_HOLD_FIELDS)
+def test_quiet_with_literal_hold_field_keeps_stuck_accounting(name):
+    from hermes_cli import kanban_db_dispatch_stuck as stuck
+    assert name in stuck.QUIET_HOLD_FIELDS and name not in stuck.QUIET_COMPATIBLE_FIELDS
+    ep = "episode-1"
+    quiet = kbd.DispatchResult(quiet_deferred=[("t_a", ep)], quiet_deadlines={ep: 5.0})
+    field = {f.name: f for f in dataclasses.fields(kbd.DispatchResult)}[name]
+    assert kbd.all_quiet_deferred([dataclasses.replace(quiet, **{name: _truthy(field)})]) is False
+    assert kbd.all_quiet_deferred([quiet, kbd.DispatchResult(**{name: _truthy(field)})]) is False
+
+
+def test_non_dataclass_row_fails_closed():
+    """A row that is not a DispatchResult dataclass never reads as all-quiet, and never raises (#2570 M1d)."""
+    row = SimpleNamespace(quiet_deferred=[("t_a", "episode-1")], quiet_deadlines={"episode-1": 5.0},
+                          skipped_locked=False, skipped_owned=False)
+    assert kbd.all_quiet_deferred([row]) is False
+    quiet = kbd.DispatchResult(quiet_deferred=[("t_a", "episode-1")])
+    assert kbd.all_quiet_deferred([quiet, row]) is False
