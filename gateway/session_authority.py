@@ -521,7 +521,14 @@ class SessionAuthority:
         will not run. The ingress turns that refusal into one user-facing notice per episode.
         ``session_busy`` is transient (a registered worker finishes and wakes the FIFO), so only
         the messaging delivery waiters are released for it; an API/webhook/Bot observer keeps
-        waiting for the answer instead of reporting accepted work as a conflict."""
+        waiting for the answer instead of reporting accepted work as a conflict.
+
+        [daveey] t_01a1d6f94ac774a2: every pause is logged, WARNING unless transient: a silent
+        pause stalled a chat for 1 h 45 min with only INFO refusals to show for it."""
+        import logging
+        transient = reason in ('session_busy', 'runtime_draining')
+        logging.getLogger(__name__).log(logging.INFO if transient else logging.WARNING,
+                                        'Session %s paused: %s', ref.session_id, reason)
         for row in list_session_admissions(self.db, session_id=ref.session_id):
             admission_id = row['admission_id']
             if reason == 'session_busy' and admission_id not in self.native_waiters:
@@ -1302,6 +1309,11 @@ class SessionAuthority:
                         from gateway.session_update_pause import refuse_checkpoint
                         fenced = await refuse_checkpoint(self, ref, live, attempted)
                         if fenced is not False:
+                            # [daveey] t_01a1d6f94ac774a2: a fenced automation head settles (GW-10) and the drain
+                            # runs its follower; pausing here stalled the chat until the next owner boot.
+                            from gateway.session_unattended_unknown import settle_unattended_unknown
+                            if fenced and await settle_unattended_unknown(self, ref):
+                                continue
                             self._pause(ref, 'unknown_execution' if fenced else exc.reason)
                             return None
                         # It changed while preflight awaited: retry, never refuse its successor.
@@ -1334,8 +1346,6 @@ class SessionAuthority:
                             refusing = None
                             if refused:
                                 continue
-                    import logging
-                    logging.getLogger(__name__).warning('Session %s paused: %s', ref.session_id, exc.reason)
                     self._pause(ref, exc.reason)
                     return None
             except (OSError, sqlite3.OperationalError) as exc:

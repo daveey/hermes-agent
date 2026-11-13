@@ -111,6 +111,46 @@ def _valid_checkpoint(conn, row):
         return None
 
 
+def parked_update_turn(conn, session_ids):
+    """[daveey] t_01a1d6f94ac774a2: the admission id of a started turn parked by an update checkpoint
+    whose conversation covers any of ``session_ids``, else None.
+
+    A receipt proves its turn by "no row after the tool suffix", so a row a passive writer (a Kanban or
+    completion notice) appends while the turn is parked voids it and the turn is dropped on resume. A
+    parked turn holds no turn lease, so passive writers ask this instead. Receipt validity is not judged
+    here: an unreadable receipt still fences its logical target until resume or recovery settles it."""
+    wanted = {sid for sid in session_ids if sid}
+    end = CHECKPOINT_PREFIX[:-1] + chr(ord(CHECKPOINT_PREFIX[-1]) + 1)
+    for key, value in conn.execute('SELECT key,value FROM state_meta WHERE key>=? AND key<?',
+                                   (CHECKPOINT_PREFIX, end)).fetchall():
+        admission_id = key[len(CHECKPOINT_PREFIX):]
+        row = conn.execute("SELECT target_session_id FROM session_admissions WHERE admission_id=? "
+                           "AND status='started'", (admission_id,)).fetchone()
+        if row is None:
+            continue
+        bound = {row[0]}
+        try:
+            receipt = json.loads(value) if isinstance(value, str) and len(value) <= MAX_RECEIPT_BYTES else None
+        except (ValueError, RecursionError):
+            receipt = None
+        if isinstance(receipt, dict):
+            chain = receipt.get('physical_chain')
+            bound.update(s for s in [receipt.get('physical_session_id'), *(chain if isinstance(chain, list) else ())]
+                         if isinstance(s, str))
+        if wanted & bound:
+            return admission_id
+    return None
+
+
+def refuse_parked_write(conn, session_id, conversation_id):
+    """A passive (lease-less) transcript write's in-transaction guard: the same retryable "busy" refusal a
+    live turn lease gives, so callers rewind and retry after the parked turn resumes or is settled."""
+    from hermes_state_errors import SessionTurnLeaseLostError
+    if parked_update_turn(conn, (session_id, conversation_id)) is not None:
+        raise SessionTurnLeaseLostError(
+            f'Session has a turn parked for an update; refusing transcript mutation for {session_id!r}')
+
+
 def delete_session_checkpoint(conn, admission_id):
     """Same-transaction cleanup; never deletes unrelated state_meta receipts."""
     conn.execute('DELETE FROM state_meta WHERE key=?', (CHECKPOINT_PREFIX + admission_id,))

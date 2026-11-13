@@ -222,11 +222,9 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         summaries). Destructive user mutations opt in via ``reject_active_*`` so a compressor that captured
         its watermark cannot resurrect the removed turn.
 
-        Shared by :meth:`append_message` and :meth:`append_messages_batch` so the two writers can never
-        diverge on these correctness invariants (this guard has already needed targeted fixes — see the
-        #74478 patience note below). User-initiated transcript mutations may opt in to rejecting an active
-        unowned turn lease in that same transaction.
-        """
+        Shared by every writer so they never diverge on these invariants (#74478 patience note below). A
+        lease-less caller opting in via ``reject_active_turn_lease`` is refused while a turn holds the lease
+        or one is parked for an update (its checkpoint forbids any later row) [daveey t_01a1d6f94ac774a2]."""
         from hermes_state import SessionCompressionInProgressError
         from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
         # NOTE (#75316 redesign): appends do NOT check compression_locks. The lock's job is to stop two
@@ -251,8 +249,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
             now = time.time()
             if turn_lease_holder:
                 if lease is None or lease["holder"] != turn_lease_holder:
-                    raise SessionTurnLeaseLostError(
-                        f"Session turn lease lost; refusing transcript write for {session_id!r}")
+                    raise SessionTurnLeaseLostError(f"Session turn lease lost; refusing transcript write for {session_id!r}")
                 if float(lease["expires_at"]) <= now:
                     # Expiry makes the row reclaimable, not taken over; BEGIN IMMEDIATE serializes this
                     # renewal with acquisition, so a still-matching owner recovers from a starved refresher.
@@ -266,6 +263,9 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
                 # Same reclaim rule as acquisition; deleting also fences a stale late flush after the mutation.
                 conn.execute("DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                     (conversation_id, lease["holder"]))
+            if not turn_lease_holder:
+                from hermes_state_update_pause import refuse_parked_write
+                refuse_parked_write(conn, session_id, conversation_id)
         if _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()) and not allow_closed_compression_parent:
             raise CompressionSessionClosedError(session_id)
 
