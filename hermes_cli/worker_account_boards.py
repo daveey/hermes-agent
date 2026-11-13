@@ -8,7 +8,8 @@ temp, the account scratch dir): that workspace was garbage-collected, so its
 record retires instead of holding every claim on the host forever.
 
 Reads (``paths()``, called by ``refusal()`` and the never-mutating
-``occupied_count_for_host`` census) only skip a collected record. Its file is
+``occupied_count_for_host`` census) only skip a collected record, or a record a
+fenced writer unlinked after the listing. Its file is
 unlinked by ``register()``, which runs under the account admission fence: an
 unfenced unlink could delete the record a concurrent ``register()`` of the same
 recreated scratch path had just found and kept, losing that board until its next
@@ -69,9 +70,23 @@ def _collected(path: Path) -> bool:
     A real board (installation root, any non-ephemeral path) or a missing file in
     a surviving directory stays unknown and keeps refusing claims.
     """
-    if path.parent.exists():
+    if not _missing(path.parent):
         return False
     return any(path.is_relative_to(root) for root in _ephemeral_roots())
+
+
+def _missing(path: Path) -> bool:
+    """Only FileNotFoundError is absence, as in ``paths()``.
+
+    ``Path.exists()`` returns False on any OSError, so a board behind a
+    permission error would look collected and be retired silently instead of
+    refused loudly by ``paths()``. Other errors propagate to the caller.
+    """
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    return False
 
 
 def _retire_collected(directory: Path) -> None:
@@ -89,7 +104,11 @@ def _retire_collected(directory: Path) -> None:
         if (not isinstance(raw, str) or not Path(raw).is_absolute()
                 or record.stem != hashlib.sha256(raw.encode()).hexdigest()):
             continue
-        if not Path(raw).exists() and _collected(Path(raw)):
+        try:
+            gone = _missing(Path(raw)) and _collected(Path(raw))
+        except OSError:
+            continue  # unreadable is not missing: paths() refuses it loudly
+        if gone:
             record.unlink(missing_ok=True)
 
 
@@ -206,7 +225,12 @@ def paths() -> list[Path]:
         for record in directory.iterdir():
             if record.suffix != '.json':
                 continue
-            raw = json.loads(record.read_text(encoding='utf-8-sig'))
+            try:
+                raw = json.loads(record.read_text(encoding='utf-8-sig'))
+            except FileNotFoundError:
+                # A fenced register()/removing() unlinked it after iterdir():
+                # the record is gone, not its board. A vanished board is below.
+                continue
             if not isinstance(raw, str) or not Path(raw).is_absolute():
                 raise ValueError('invalid registered board path')
             if record.stem != hashlib.sha256(raw.encode()).hexdigest():

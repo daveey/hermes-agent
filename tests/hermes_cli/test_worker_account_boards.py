@@ -148,6 +148,64 @@ def test_missing_board_stays_unknown_unless_its_scratch_dir_is_gone(monkeypatch,
         inventory.paths()
 
 
+def test_record_unlinked_between_listing_and_read_is_skipped(monkeypatch, tmp_path):
+    """paths() runs unfenced: a fenced register()/removing() may unlink a record
+    after iterdir() listed it. That record is gone, not a reason to fail the census."""
+    from pathlib import Path
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
+    kept = tmp_path / 'kept' / 'kanban.db'
+    gone = tmp_path / 'gone' / 'kanban.db'
+    for board in (kept, gone):
+        board.parent.mkdir()
+        _registered(board)
+    directory = tmp_path / 'worker-resources' / 'boards'
+    import hashlib
+    victim = directory / (hashlib.sha256(str(gone.resolve()).encode()).hexdigest() + '.json')
+    assert victim.exists()
+    real_read_text = Path.read_text
+
+    def unlink_then_read(self, *args, **kwargs):
+        if self == victim:
+            self.unlink()  # the concurrent fenced writer wins the race
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', unlink_then_read)
+    assert inventory.paths() == [kept.resolve()]
+    # A vanished *board* (not its record) still fails closed as before.
+    monkeypatch.setattr(Path, 'read_text', real_read_text)
+    kept.unlink()
+    with pytest.raises(FileNotFoundError):
+        inventory.paths()
+
+
+def test_unreadable_collected_looking_board_is_not_retired(monkeypatch, tmp_path):
+    """_retire_collected and paths() agree: only FileNotFoundError means missing.
+    A PermissionError on the board's stat keeps the record and refuses loudly."""
+    import shutil
+    from pathlib import Path
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
+    board = tmp_path / 'cache' / 'scratch' / 'run' / 'kanban.db'
+    board.parent.mkdir(parents=True)
+    _registered(board)
+    record, = (tmp_path / 'worker-resources' / 'boards').glob('*.json')
+    shutil.rmtree(board.parent)
+    denied = {board.resolve(), board.resolve().parent}
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self in denied:
+            raise PermissionError(13, 'Permission denied', str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'stat', stat)
+    other = tmp_path / 'cache' / 'scratch' / 'other' / 'kanban.db'
+    other.parent.mkdir(parents=True)
+    _registered(other)  # runs _retire_collected under the fence
+    assert record.exists(), 'a permission error is not proof the board was collected'
+    with pytest.raises(PermissionError):
+        inventory.paths()
+
+
 def test_ephemeral_roots_never_cover_the_account(monkeypatch, tmp_path):
     import tempfile
     account = tmp_path / 'home' / '.hermes'
