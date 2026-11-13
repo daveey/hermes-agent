@@ -310,6 +310,17 @@ def test_links_diff_agrees_on_a_done_unverified_card_whose_owner_written_sibling
     assert [(c["id"], c["status"]) for c in links.replica_cards(["s1"], ME)] == [("t_done", "unknown")]
 
 
+def test_links_diff_leaves_out_placement_placeholder_chats(env):
+    """[daveey] A ``kanban-placement*`` placeholder is no chat: the link writer never links it, and
+    ``machine_sessions`` does not classify it machine, so only the placeholder filter keeps its ledger row out of
+    the comparison. It is counted, not compared; a human chat beside it still differs."""
+    replica(env, [("t_ph", "done", HUB), ("t_human", "done", HUB)], [("t_human", "s_human", "shepherd", 1)])
+    env["ledger"].extend([_unknown_row("t_ph", "kanban-placement-abc"), _unknown_row("t_human", "s_human", "shepherd")])
+    report = links.links_diff(ME)
+    assert report["machine_links"] == 1, report
+    assert report["only_in_ledger"] == {"s_human": [(HUB, "default", "t_human")]}
+
+
 def test_links_diff_leaves_out_chats_the_link_writer_never_links(env):
     """[daveey] 250 of the 270 only-in-ledger links on David-MBP (2026-11-13) were kanban worker transcripts:
     ``_ledger_links`` never writes a machine session's link and ``reconcile`` releases one, so the ledger's rows for
