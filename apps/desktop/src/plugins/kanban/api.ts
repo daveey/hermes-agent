@@ -536,6 +536,19 @@ function withBoard(path: string, params: Record<string, string> = {}): string {
 export const boardKeyPrefix = (scope: string) => ['kanban', 'board', scope] as const
 export const boardKey = (scope: string, slug: string, archived: boolean) =>
   [...boardKeyPrefix(scope), slug, archived] as const
+
+/** [daveey] Board poll interval: the socketless heartbeat, faster when the board spans gateways (no socket there). */
+export const boardPollMs = (spansGateways: boolean) => (spansGateways ? 15_000 : 60_000)
+
+/** [daveey] The board poll every board view runs (page, count pill), minus its queryFn (`() => fetchBoard(archived)`,
+ *  added at the call site so test doubles of fetchBoard apply): one key, so one cache and one poll. Single-flight: an
+ *  interval tick (and a new view mounting) while a read is in flight joins it rather than starting another, because
+ *  neither passes cancelRefetch; socket refreshes wait for the read in flight (invalidateAfterInFlight).
+ *  api.board-poll.test.ts pins that a board read slower than the interval does not stack polls. */
+export const boardPoll = (scope: string, slug: string, archived: boolean, refetchInterval: number) => ({
+  queryKey: boardKey(scope, slug, archived),
+  refetchInterval
+})
 export const taskKey = (scope: string, slug: string, id: string, owner?: TaskOwner) =>
   owner
     ? (['kanban', 'task', owner.gateway, owner.board, id, owner.profile] as const)
@@ -1047,6 +1060,7 @@ export const fetchTask = async (id: string, owner?: TaskOwner, read: PluginRestO
   const downloadAttachment = captureGatewayFileDownload(
     owner ? { connectionId: owner.gateway, profile: owner.profile } : undefined
   )
+
   const [path, opts] = forTask(id, `/tasks/${id}`, {}, owner)
   const detail = await call<KanbanTaskDetail>(path, { ...opts, ...read })
 

@@ -3,7 +3,13 @@ import type { AddressInfo } from 'node:net'
 
 import { afterAll, describe, expect, it } from 'vitest'
 
-import { destroyKeepaliveAgents, PROBE_POOL_MAX_SOCKETS, requestDeadlineBudgetMs } from './api-transport'
+import {
+  destroyKeepaliveAgents,
+  PLUGIN_POOL_MAX_SOCKETS,
+  pluginOfPath,
+  PROBE_POOL_MAX_SOCKETS,
+  requestDeadlineBudgetMs
+} from './api-transport'
 import { fetchJsonWith, fetchPublicJsonWith, type JsonFetchDeps } from './json-fetch'
 
 /**
@@ -143,6 +149,97 @@ describe('fetchJson request pools', () => {
     } finally {
       await srv.close()
     }
+  })
+})
+
+describe('fetchJson plugin pools', () => {
+  // [daveey] 2026-11-13: the runners plugin kept ~11 slow /v1/fleet reads in flight per 15 s poll, each answered after
+  // ~30 s; overlapping polls and their retries filled the 50-socket JSON pool, and kanban/board queued past its total
+  // deadline. 60 such reads is more than the JSON pool holds, so on a shared pool the board read below can't get a
+  // socket at all.
+  const SLOW_PLUGIN_CALLS = 60
+  const SLOW_RESPONSE_MS = 30_000
+  const BOARD_DEADLINE_MS = 3_000
+
+  /** /api/plugins/runners/* answers after SLOW_RESPONSE_MS (or at `release()`); every other path answers at once. */
+  function slowPluginServer() {
+    const slow: Array<{ res: http.ServerResponse; timer: ReturnType<typeof setTimeout> }> = []
+
+    const answer = (res: http.ServerResponse) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end('{"ok":true}')
+    }
+
+    const server = loopbackServer((req, res) => {
+      if (req.url?.startsWith('/api/plugins/runners/')) {
+        const entry = { res, timer: setTimeout(() => answer(res), SLOW_RESPONSE_MS) }
+        slow.push(entry)
+
+        return
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ path: req.url }))
+    })
+
+    return {
+      slow,
+      ...server,
+      release() {
+        for (const { res, timer } of slow.splice(0)) {
+          clearTimeout(timer)
+          answer(res)
+        }
+      }
+    }
+  }
+
+  it('one plugin with 30 s responses cannot starve a concurrent kanban/board read', async () => {
+    const srv = slowPluginServer()
+    const base = await srv.listen()
+
+    const flood = Array.from({ length: SLOW_PLUGIN_CALLS }, () =>
+      fetchJsonWith(deps, `${base}/api/plugins/runners/fleet`, 'token', { timeoutMs: SLOW_RESPONSE_MS * 2 })
+    )
+
+    try {
+      // The flood holds every socket its pool will give it before the board read goes out.
+      const until = Date.now() + 2_000
+
+      while (srv.slow.length < Math.min(SLOW_PLUGIN_CALLS, 50) && Date.now() < until) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+
+      const startedAt = Date.now()
+
+      await expect(
+        fetchJsonWith(deps, `${base}/api/plugins/kanban/board?board=default`, 'token', { timeoutMs: BOARD_DEADLINE_MS })
+      ).resolves.toEqual({ path: '/api/plugins/kanban/board?board=default' })
+      expect(Date.now() - startedAt).toBeLessThan(BOARD_DEADLINE_MS)
+      // A core route is not held behind the flood either.
+      await expect(
+        fetchJsonWith(deps, `${base}/api/status`, 'token', { timeoutMs: BOARD_DEADLINE_MS })
+      ).resolves.toEqual({
+        path: '/api/status'
+      })
+      // The flooding plugin holds at most its own share of sockets on this connection.
+      expect(srv.slow.length).toBe(PLUGIN_POOL_MAX_SOCKETS)
+    } finally {
+      // Answer the held reads, then each queued one as it reaches the server, so the flood settles before close.
+      const drain = setInterval(() => srv.release(), 5)
+      await Promise.allSettled(flood)
+      clearInterval(drain)
+      await srv.close()
+    }
+  }, 20_000)
+
+  it('names the plugin a path is addressed to, and only plugin paths', () => {
+    expect(pluginOfPath('/api/plugins/kanban/board')).toBe('kanban')
+    expect(pluginOfPath('/api/plugins/Hub-Sync/status')).toBe('hub-sync')
+    expect(pluginOfPath('/api/plugins/runners')).toBe('runners')
+    expect(pluginOfPath('/api/status')).toBeNull()
+    expect(pluginOfPath('/api/pluginsx/kanban')).toBeNull()
+    expect(pluginOfPath('')).toBeNull()
   })
 })
 

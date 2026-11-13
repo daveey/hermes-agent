@@ -76,9 +76,48 @@ const HTTPS_PROBE_AGENT = keepAliveAgent(https, PROBE_POOL_MAX_SOCKETS)
 
 export type JsonRequestPool = 'json' | 'probe'
 
-function jsonAgentFor(protocol: string, pool: JsonRequestPool = 'json') {
+// [daveey] Plugin pools: every `/api/plugins/<id>/...` JSON call rides a pool of its own plugin, at most
+// PLUGIN_POOL_MAX_SOCKETS sockets per connection (a Node agent caps sockets per origin, and each connection is its
+// own origin). On 2026-11-13 the runners plugin kept 11 slow (30 s) /v1/fleet reads in flight per 15 s poll; they
+// filled the shared 50-socket JSON pool and every other call (kanban/board, hub-sync/status) queued past its total
+// deadline: 2803 timeouts in 30 min. Now a plugin that floods only queues behind itself: core calls keep the JSON
+// pool and each other plugin, kanban included, keeps its own sockets.
+export const PLUGIN_POOL_MAX_SOCKETS = 8
+const PLUGIN_PATH = /^\/api\/plugins\/([^/?#]+)/
+const PLUGIN_AGENTS = new Map<string, http.Agent>()
+
+/** The plugin id a request path is addressed to (`/api/plugins/<id>/...`), or null for a core route. */
+export function pluginOfPath(pathname: string): null | string {
+  const match = PLUGIN_PATH.exec(pathname || '')
+
+  return match ? match[1].toLowerCase() : null
+}
+
+function pluginAgentFor(protocol: string, plugin: string): http.Agent {
+  const key = `${protocol === 'https:' ? 'https' : 'http'}:${plugin}`
+  let agent = PLUGIN_AGENTS.get(key)
+
+  if (!agent) {
+    agent = keepAliveAgent(protocol === 'https:' ? https : http, PLUGIN_POOL_MAX_SOCKETS)
+    PLUGIN_AGENTS.set(key, agent)
+  }
+
+  return agent
+}
+
+/**
+ * The agent for one JSON request. `pathname` (the request URL's path) routes a plugin route to that plugin's own
+ * pool; the probe pool and core routes are unchanged.
+ */
+function jsonAgentFor(protocol: string, pool: JsonRequestPool = 'json', pathname = '') {
   if (pool === 'probe') {
     return protocol === 'https:' ? HTTPS_PROBE_AGENT : HTTP_PROBE_AGENT
+  }
+
+  const plugin = pluginOfPath(pathname)
+
+  if (plugin) {
+    return pluginAgentFor(protocol, plugin)
   }
 
   return protocol === 'https:' ? HTTPS_JSON_AGENT : HTTP_JSON_AGENT
@@ -97,10 +136,13 @@ function destroyKeepaliveAgents() {
     HTTP_PROBE_AGENT,
     HTTPS_PROBE_AGENT,
     HTTP_DOWNLOAD_AGENT,
-    HTTPS_DOWNLOAD_AGENT
+    HTTPS_DOWNLOAD_AGENT,
+    ...PLUGIN_AGENTS.values()
   ]) {
     agent.destroy()
   }
+
+  PLUGIN_AGENTS.clear()
 }
 
 function requestTimeoutError(timeoutMs: number): Error {

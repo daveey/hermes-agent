@@ -71,6 +71,8 @@ import {
   $lanesByProfile,
   boardKey,
   boardKeyPrefix,
+  boardPoll,
+  boardPollMs,
   boardsKey,
   bulkTasks,
   createTask,
@@ -1215,9 +1217,8 @@ export function KanbanBoardPage() {
   const spansGateways = gateways.length > 1
 
   const { data: board, error } = useQuery({
-    queryFn: () => fetchBoard(archived),
-    queryKey: boardKey(scope, slug, archived),
-    refetchInterval: spansGateways ? 15_000 : 60_000
+    ...boardPoll(scope, slug, archived, boardPollMs(spansGateways)),
+    queryFn: () => fetchBoard(archived)
   })
 
   // A filter naming a gateway that left the registry shows everything.

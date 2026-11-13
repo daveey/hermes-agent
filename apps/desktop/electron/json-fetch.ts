@@ -58,8 +58,9 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
 
         const parsed = new URL(url)
         const client = parsed.protocol === 'https:' ? https : http
-        // The dispatch health probe rides its own small pool (pool: 'probe') so a saturated JSON pool can't fail it.
-        const agent = jsonAgentFor(parsed.protocol, options.pool === 'probe' ? 'probe' : 'json')
+        // The dispatch health probe rides its own small pool (pool: 'probe') so a saturated JSON pool can't fail it;
+        // a plugin route rides its plugin's own pool (api-transport PLUGIN_POOL_MAX_SOCKETS) so one plugin can't.
+        const agent = jsonAgentFor(parsed.protocol, options.pool === 'probe' ? 'probe' : 'json', parsed.pathname)
 
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
@@ -182,7 +183,7 @@ export function fetchPublicJsonWith(deps: JsonFetchDeps, url: string, options: a
         }
 
         const client = parsed.protocol === 'https:' ? https : http
-        const agent = jsonAgentFor(parsed.protocol)
+        const agent = jsonAgentFor(parsed.protocol, 'json', parsed.pathname)
 
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))

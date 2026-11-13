@@ -225,9 +225,17 @@ export async function hubGet<T extends object>(
 }
 
 const statusChecked = new Map<string, number>()
+/** [daveey] A /status read in flight per connection: concurrent askers (every board poll's answering gateways,
+ *  project routing) share it instead of each opening one. */
+const statusInFlight = new Map<string, Promise<boolean>>()
+/** [daveey] When a connection's /status last failed or said "no hub-sync": not asked again for STATUS_RETRY_MS.
+ *  Board polls ask every answering gateway each 15 s, so a gateway without hub-sync (or a slow one) was asked on
+ *  every poll: 501 hub-sync/status timeouts in 30 min on 2026-11-13. */
+const statusFailedAt = new Map<string, number>()
+const STATUS_RETRY_MS = 60_000
 
-/** Ask `connectionId` which hub gateway it is (cached STATUS_TTL_MS). True
- *  when it answered — which also proves the gateway is reachable now. */
+/** Ask `connectionId` which hub gateway it is (cached STATUS_TTL_MS; a miss is not re-asked for STATUS_RETRY_MS;
+ *  single-flight per connection). True when it answered — which also proves the gateway is reachable now. */
 export async function learnHubGatewayName(connectionId: string): Promise<boolean> {
   const at = statusChecked.get(connectionId)
 
@@ -235,15 +243,33 @@ export async function learnHubGatewayName(connectionId: string): Promise<boolean
     return true
   }
 
-  const status = await hubGet<{ gateway?: string }>('/status', connectionId)
+  const failedAt = statusFailedAt.get(connectionId)
 
-  if (status?.gateway) {
-    statusChecked.set(connectionId, Date.now())
-
-    return true
+  if (failedAt !== undefined && Date.now() - failedAt < STATUS_RETRY_MS) {
+    return false
   }
 
-  return false
+  let pending = statusInFlight.get(connectionId)
+
+  if (!pending) {
+    pending = hubGet<{ gateway?: string }>('/status', connectionId)
+      .then(status => {
+        if (status?.gateway) {
+          statusChecked.set(connectionId, Date.now())
+          statusFailedAt.delete(connectionId)
+
+          return true
+        }
+
+        statusFailedAt.set(connectionId, Date.now())
+
+        return false
+      })
+      .finally(() => statusInFlight.delete(connectionId))
+    statusInFlight.set(connectionId, pending)
+  }
+
+  return pending
 }
 
 /** Queue an owner request on the primary gateway (works with the hub down). */
@@ -370,6 +396,8 @@ export function _resetHubSyncForTests(): void {
   }
 
   statusChecked.clear()
+  statusInFlight.clear()
+  statusFailedAt.clear()
   whereCache.clear()
   whereInFlight.clear()
 }

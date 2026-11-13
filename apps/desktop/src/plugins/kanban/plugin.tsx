@@ -31,7 +31,7 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 
-import { $boardSlug, bindApi, boardKey, fetchBoard, rememberTaskOwner, useKanbanScope } from './api'
+import { $boardSlug, bindApi, boardPoll, boardPollMs, fetchBoard, rememberTaskOwner, useKanbanScope } from './api'
 import { $blockedSectionOpen, BlockedTasksSection } from './blocked-section'
 import { KanbanBoardPage } from './board'
 import { KANBAN_LOCALES } from './i18n'
@@ -49,9 +49,8 @@ function KanbanCount() {
 
   // Socket-invalidated like the page (same cache); slow socketless heartbeat.
   const { data: board } = useQuery({
-    queryFn: () => fetchBoard(false),
-    queryKey: boardKey(scope, slug, false),
-    refetchInterval: 60_000
+    ...boardPoll(scope, slug, false, boardPollMs(false)),
+    queryFn: () => fetchBoard(false)
   })
 
   if (!board) {

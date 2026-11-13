@@ -58,16 +58,25 @@ describe('gateway names', () => {
     $connectionsRegistry.set(null)
     rest.handler = () => new Error('backend not running')
     expect(await learnHubGatewayName('local')).toBe(false)
-    expect(pluginRest).toHaveBeenLastCalledWith('hub-sync', '/status', expect.objectContaining({connectionId: 'local', passive: true}))
-    registry({id:'local'}, {id:'remote'})
-    rest.handler = () => ({gateway:'remote',available:true})
+    expect(pluginRest).toHaveBeenLastCalledWith(
+      'hub-sync',
+      '/status',
+      expect.objectContaining({ connectionId: 'local', passive: true })
+    )
+    registry({ id: 'local' }, { id: 'remote' })
+    rest.handler = () => ({ gateway: 'remote', available: true })
     expect(await learnHubGatewayName('remote')).toBe(true)
-    expect(pluginRest).toHaveBeenLastCalledWith('hub-sync', '/status', expect.objectContaining({connectionId: 'remote', passive: true}))
+    expect(pluginRest).toHaveBeenLastCalledWith(
+      'hub-sync',
+      '/status',
+      expect.objectContaining({ connectionId: 'remote', passive: true })
+    )
   })
 
-  it('learns a connection\'s hub name from its own /status and persists it', async () => {
+  it("learns a connection's hub name from its own /status and persists it", async () => {
     registry({ id: 'local' }, { id: 'conn-7', label: 'Studio' })
-    rest.handler = (path, opts) => (path === '/status' && opts.connectionId === 'conn-7' ? { available: true, gateway: 'mini' } : new Error('x'))
+    rest.handler = (path, opts) =>
+      path === '/status' && opts.connectionId === 'conn-7' ? { available: true, gateway: 'mini' } : new Error('x')
 
     expect(await learnHubGatewayName('conn-7')).toBe(true)
     expect(hubGatewayForConnection('conn-7')).toBe('mini')
@@ -102,6 +111,40 @@ describe('gateway names', () => {
     rememberHubGatewayName('new', 'mini')
     expect(connectionForHubGateway('mini')).toBe('new')
     expect(hubGatewayForConnection('old')).toBeUndefined()
+  })
+
+  it('a slow /status is single-flight: overlapping askers share one read', async () => {
+    registry({ id: 'local' }, { id: 'slow' })
+    let answer!: (value: unknown) => void
+    rest.handler = () => new Promise(resolve => (answer = resolve))
+
+    const asks = [learnHubGatewayName('slow'), learnHubGatewayName('slow'), learnHubGatewayName('slow')]
+
+    await Promise.resolve()
+    expect(pluginRest).toHaveBeenCalledTimes(1)
+    answer({ available: true, gateway: 'mini' })
+    expect(await Promise.all(asks)).toEqual([true, true, true])
+    expect(pluginRest).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed or hub-less /status is not re-asked on every board poll', async () => {
+    vi.useFakeTimers()
+
+    try {
+      registry({ id: 'local' }, { id: 'cloud' })
+      rest.handler = () => ({ available: false, gateway: null })
+
+      expect(await learnHubGatewayName('cloud')).toBe(false)
+      vi.advanceTimersByTime(15_000)
+      expect(await learnHubGatewayName('cloud')).toBe(false)
+      expect(pluginRest).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(60_000)
+      rest.handler = () => ({ available: true, gateway: 'cloud-gw' })
+      expect(await learnHubGatewayName('cloud')).toBe(true)
+      expect(pluginRest).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -155,7 +198,7 @@ describe('hubSessionOwner', () => {
 })
 
 describe('hubRequest', () => {
-  it('posts to the primary gateway\'s hub-sync', async () => {
+  it("posts to the primary gateway's hub-sync", async () => {
     registry({ id: 'local' }, { id: 'mini' })
     rest.handler = (path, opts) => ({ id: 'hr-1', path, opts, queued_locally: true, state: 'local' })
 
