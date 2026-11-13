@@ -1042,8 +1042,14 @@ def test_payload_uses_fast_gzip_level_and_old_level_9_archives_still_verify(boar
 FAKE_URL = "https://example.invalid/hermes-fixture.git"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_probe_map(monkeypatch):
+    from hermes_cli import kanban_scratch_archive_omit as om
+    monkeypatch.setattr(om, "_PROBE_URL_MAP", {})
+
+
 def _network_clone_task(tmp_path):
-    """A done card whose clone's origin is a network URL (served at restore from the local bare repo)."""
+    """A done card whose clone's origin is a network URL (served from the local bare repo to the probe and restore)."""
     src = tmp_path / "netseed"
     src.mkdir()
     _run("init", "-q", cwd=src)
@@ -1061,6 +1067,8 @@ def _network_clone_task(tmp_path):
     tid, path = _task(remote=bare)
     repo = path / "repo"
     _run("remote", "set-url", "origin", FAKE_URL, cwd=repo)
+    from hermes_cli import kanban_scratch_archive_omit as om
+    om._PROBE_URL_MAP[FAKE_URL] = str(bare)
     return tid, path, repo, bare
 
 
@@ -1276,3 +1284,96 @@ def test_boundary_blobs_cover_unpushed_head(board, tmp_path):
     from hermes_cli import kanban_scratch_archive as sa
     manifest = sa.verify_complete_archive(_archive(tid))
     assert set(manifest["omitted"]) == {"repo/big.txt", "repo/bin/run.sh"}
+
+
+def test_tip_the_remote_deleted_and_gcd_is_archived_not_omitted(board, tmp_path):
+    # Review repro: a remote-tracking ref whose branch the remote dropped (and gc'd) proves nothing.
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_scratch_archive_omit as om
+    tid, _path, repo, bare = _network_clone_task(tmp_path)
+    _run("checkout", "-q", "-b", "feature", cwd=repo)
+    (repo / "feature.txt").write_text("only on the deleted branch\n")
+    _run("add", "feature.txt", cwd=repo)
+    _run("commit", "-q", "-m", "feature", cwd=repo)
+    feature = _run("rev-parse", "HEAD", cwd=repo)
+    _run("push", "-q", str(bare), "feature:feature", cwd=repo)
+    _run("update-ref", "refs/remotes/origin/feature", feature, cwd=repo)
+    _run("checkout", "-q", "main" if _run("branch", "--list", "main", cwd=repo) else "master", cwd=repo)
+    _run("branch", "-q", "-D", "feature", cwd=repo)
+    _run("branch", "-q", "-D", "feature", cwd=bare)
+    _run("gc", "-q", "--prune=now", cwd=bare)
+    assert _gc() == 0
+    archive = _archive(tid)
+    manifest = sa.verify_complete_archive(archive)
+    [record] = manifest["omitted_repos"]
+    assert "refs/remotes/origin/feature" not in record["remote_refs"]
+    assert record["object_count"] >= 3  # the feature commit, its tree and feature.txt's blob
+    target = tmp_path / "restored"
+    om.restore(archive, target, url_map={FAKE_URL: str(bare)})
+    assert _run("cat-file", "-p", f"{feature}:feature.txt", cwd=target / "repo") == "only on the deleted branch"
+
+
+def test_tip_behind_a_moved_remote_branch_still_counts_as_held(board, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_scratch_archive_omit as om
+    tid, _path, repo, bare = _network_clone_task(tmp_path)
+    branch = _run("symbolic-ref", "--short", "HEAD", cwd=bare)
+    stale = _run("rev-parse", f"refs/remotes/origin/{branch}", cwd=repo)
+    other = tmp_path / "other"
+    _run("clone", "-q", str(bare), str(other))
+    (other / "tracked.txt").write_text("moved on\n")
+    _run("commit", "-q", "-am", "remote moves on", cwd=other)
+    _run("push", "-q", "origin", branch, cwd=other)
+    assert _gc() == 0
+    manifest = sa.verify_complete_archive(_archive(tid))
+    [record] = manifest["omitted_repos"]
+    assert record["remote_refs"][f"refs/remotes/origin/{branch}"] == stale
+    assert record["object_count"] == 0 and "repo/big.txt" in manifest["omitted"]
+    target = tmp_path / "restored"
+    om.restore(_archive(tid), target, url_map={FAKE_URL: str(bare)})
+    assert _run("rev-parse", "HEAD", cwd=target / "repo") == stale
+
+
+def test_unreachable_remote_keeps_every_object(board, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_scratch_archive_omit as om
+    tid, _path, _repo, _bare = _network_clone_task(tmp_path)
+    om._PROBE_URL_MAP[FAKE_URL] = str(tmp_path / "no-such-remote.git")
+    assert _gc() == 0
+    manifest = sa.verify_complete_archive(_archive(tid))
+    assert manifest["version"] == 1 and "omitted" not in manifest
+
+
+def test_restore_writes_omitted_files_into_read_only_directories(board, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_scratch_archive_omit as om
+    tid, path, repo, bare = _network_clone_task(tmp_path)
+    (repo / "bin").chmod(0o555)
+    try:
+        before = _tree_state(path)
+        bin_mtime = (repo / "bin").stat().st_mtime_ns
+        assert _gc() == 0
+    finally:
+        if (repo / "bin").exists():
+            (repo / "bin").chmod(0o755)
+    manifest = sa.verify_complete_archive(_archive(tid))
+    assert "repo/bin/run.sh" in manifest["omitted"]
+    target = tmp_path / "restored"
+    om.restore(_archive(tid), target, url_map={FAKE_URL: str(bare)})
+    try:
+        assert _tree_state(target) == before
+        assert (target / "repo" / "bin").stat().st_mtime_ns // 10**9 == bin_mtime // 10**9
+    finally:
+        (target / "repo" / "bin").chmod(0o755)
+
+
+def test_remote_probe_ignores_the_scratch_repos_own_config(board, tmp_path):
+    # The probe may use the user's credential helpers, but never a helper or URL rewrite the scratch repo planted.
+    from hermes_cli import kanban_scratch_archive as sa
+    tid, _path, repo, _bare = _network_clone_task(tmp_path)
+    marker = tmp_path / "helper-ran"
+    _run("config", f"url.{tmp_path / 'nowhere.git'}.insteadOf", FAKE_URL, cwd=repo)
+    _run("config", "credential.helper", f"!touch {marker}; false", cwd=repo)
+    assert _gc() == 0
+    manifest = sa.verify_complete_archive(_archive(tid))
+    assert manifest["version"] == 2 and not marker.exists()
