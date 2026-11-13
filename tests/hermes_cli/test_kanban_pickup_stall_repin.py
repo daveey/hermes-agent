@@ -248,6 +248,24 @@ def test_declared_ssh_access_refuses_the_pool_queue_with_the_board_reason(board,
     assert why is not None and coord.BOARD_REASON in why, why
 
 
+@pytest.mark.parametrize("stored", ['{"a":1}', '"ssh:mbp"', '["terminal", 3]', "null", "not json"])
+def test_a_requires_the_board_cannot_read_refuses_the_pool_queue_only(board, stored):
+    """t_01a1d2d611cfe71d: ``_requires`` maps a stored requires that is not a JSON list of strings to ``[]``, so the
+    pool move looked eligible with only ``profile:<assignee>``; the Board's ``stringList`` answers
+    ``task_metadata_invalid`` for that row and never pool-places it. A move to one machine is unchanged."""
+    board.set(board.target, requires=stored)
+    why = board.why(runs_on=[POOL], machines=_pooled())
+    assert why is not None and "task_metadata_invalid" in why and "not a JSON list of strings" in why, why
+    assert board.why(machines=_pooled()) is None  # machine:<X> still moves
+
+
+@pytest.mark.parametrize("stored", [None, "[]", '["terminal"]'])
+def test_a_requires_the_board_reads_still_takes_the_pool_queue(board, stored):
+    board.set(board.target, requires=stored)
+    machines = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, "capability:terminal"]})
+    assert board.why(runs_on=[POOL], machines=machines) is None
+
+
 @pytest.mark.parametrize("name, label", [("hub:write", "capability:hub-write"), ("hub:read", "capability:hub-read"),
                                          ("ssh:mbp", "capability:ssh-mbp"), ("ssh:mini", "capability:ssh-mini"),
                                          ("terminal", "capability:terminal")])

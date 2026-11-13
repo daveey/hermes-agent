@@ -99,6 +99,26 @@ def _requires(target: Any) -> list:
     return [r for r in requires if isinstance(r, str)] if isinstance(requires, list) else []
 
 
+def malformed_requires(target: Any) -> Optional[str]:
+    """Why the Board cannot read ``target``'s stored ``requires``, else None.
+
+    Mirrors the Board's ``stringList`` (worker_placement.ts): NULL is ``[]``; anything else must parse as a JSON list
+    of strings, or the Board answers ``task_metadata_invalid`` and never pool-places the card. :func:`_requires` maps
+    such a row to ``[]`` for the need, so this check is what keeps a pool move from looking eligible."""
+    import json
+    raw = target["requires"]
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    except (TypeError, ValueError):
+        value = None
+    if isinstance(value, list) and all(isinstance(r, str) for r in value):
+        return None
+    return (f"its stored requires {str(raw)[:80]!r} is not a JSON list of strings, so the Board's pool selection "
+            "answers task_metadata_invalid; fix the card's requires or move it to one machine:<X>")
+
+
 def _need(target: Any) -> set:
     from hermes_cli.kanban_placement_coordination import requirement_label
     return {requirement_label(r) for r in _requires(target)} | {f"profile:{target['assignee']}"}
@@ -139,10 +159,11 @@ def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: An
     except ValueError as exc:
         return str(exc)
     if labels == [pool_label()]:
-        # A worker may attest ssh access, but the Board's pool selection cannot place it: the card would sit in
-        # task_requirement_unsupported instead of leaving the stalled machine.
+        # A worker may attest ssh access, but the Board's pool selection cannot place it, nor a requires it cannot
+        # read (not a JSON list of strings): the card would sit in task_requirement_unsupported or
+        # task_metadata_invalid instead of leaving the stalled machine.
         from hermes_cli.kanban_placement_coordination import board_refusal
-        if why := board_refusal(_requires(target)):
+        if why := malformed_requires(target) or board_refusal(_requires(target)):
             return f"{target['id']} cannot go to {pool_label()}: {why}"
         return pool_refusal(own, machines, _need(target), now_ms)
     if len(labels) != 1 or not labels[0].startswith("machine:"):
