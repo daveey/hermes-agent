@@ -31,6 +31,9 @@ LIVE_RUN_PROMISE = "gets this note at its next model call"
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
+    from hermes_cli import kanban_sync_claims
+    # Each fixture is a fresh gateway; a previous test's stopped loop must not gate its claims.
+    monkeypatch.setattr(kanban_sync_claims, "_STATE", kanban_sync_claims._State())
     for var in ("HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK", "HERMES_KANBAN_RUN_ID",
                 "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_HOME"):
         monkeypatch.delenv(var, raising=False)
