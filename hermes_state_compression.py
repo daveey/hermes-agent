@@ -159,8 +159,9 @@ _UNSET_ANCESTOR_SQL = """
 """
 
 
-def stamp_compression_ancestors(conn, session_id: str) -> None:
-    """Copy *session_id*'s ``created_source`` onto compression ancestors that have none.
+def stamp_compression_ancestors(conn, session_id: str) -> int:
+    """Copy *session_id*'s ``created_source`` onto compression ancestors that have none; returns the
+    rows stamped (statement counts, so trigger writes such as the session change cursor's are not counted).
 
     A list page shows a compressed conversation as its root, painted as the tip, and filters on
     the root's ``created_source``. Automatic compression publishes the child before any writer
@@ -174,20 +175,23 @@ def stamp_compression_ancestors(conn, session_id: str) -> None:
     row = conn.execute(_CREATED_ROW_SQL, (session_id,)).fetchone()
     surface = row["created_source"] if row else None
     if surface in _UNSET_CREATED_SOURCES:
-        return
+        return 0
     if conn.execute(_UNSET_ANCESTOR_SQL, (session_id, surface, _CHAIN_CAP)).fetchone() is None:
-        return
+        return 0
+    stamped = 0
     current, parent_id = session_id, row["parent_session_id"]
     for _ in range(_CHAIN_CAP):
         parent = parent_id and conn.execute(_CREATED_ROW_SQL, (parent_id,)).fetchone()
         if not parent or parent["created_source"] not in (*_UNSET_CREATED_SOURCES, surface):
-            return
+            return stamped
         step = conn.execute(_CHAIN_STEP_SQL, (parent_id,)).fetchone()
         if step is None or step["id"] != current:
-            return
+            return stamped
         if parent["created_source"] != surface:
-            conn.execute("UPDATE sessions SET created_source = ? WHERE id = ?", (surface, parent_id))
+            stamped += conn.execute("UPDATE sessions SET created_source = ? WHERE id = ?",
+                                    (surface, parent_id)).rowcount
         current, parent_id = parent_id, parent["parent_session_id"]
+    return stamped
 
 
 # Compression edges whose parent is unset and whose continuation child carries a real surface: what
@@ -258,10 +262,9 @@ class SessionCompressionMixin:
         a one-hop walk per stamped child of an unset compression parent that the walk does not
         follow (a non-preferred sibling). Returns the rows stamped."""
         def _do(conn):
-            before = conn.total_changes
-            for row in conn.execute(_UNSTAMPED_EDGE_CHILD_SQL).fetchall():
-                stamp_compression_ancestors(conn, row["id"])
-            return conn.total_changes - before
+            # Statement row counts, not ``total_changes``: trigger writes (the session change cursor) count there.
+            return sum(stamp_compression_ancestors(conn, row["id"])
+                       for row in conn.execute(_UNSTAMPED_EDGE_CHILD_SQL).fetchall())
         return self._execute_write(_do)
 
     def find_live_compression_child(self, parent_session_id: str) -> Optional[dict[str, Any]]:

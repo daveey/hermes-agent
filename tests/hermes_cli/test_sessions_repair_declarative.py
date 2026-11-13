@@ -27,6 +27,7 @@ def _legacy_store(tmp_path, monkeypatch):
         db.create_session('retained', source='cli')
         db.append_message('retained', role='user', content='history survives')
     with closing(sqlite3.connect(path)) as conn:
+        conn.execute('DROP TRIGGER IF EXISTS session_change_on_sessions_update')  # names every column
         conn.execute('ALTER TABLE sessions DROP COLUMN runtime_generation')
         conn.execute('ALTER TABLE sessions DROP COLUMN runtime_revision')
         conn.execute('ALTER TABLE async_delegations DROP COLUMN owner_execution_id')

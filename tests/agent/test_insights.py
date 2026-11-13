@@ -616,6 +616,7 @@ def test_source_filter_on_a_db_without_created_source(db):
     _label(db, "legacy-cli", "cli", "cli")
     # SQLite refuses DROP COLUMN while an index references the column.
     db._conn.execute("DROP INDEX IF EXISTS idx_sessions_local_created_started")
+    db._conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")  # names every column
     db._conn.execute("ALTER TABLE sessions DROP COLUMN created_source")
     db._conn.commit()
     assert InsightsEngine(db).generate(days=30, source="cli")["overview"]["total_sessions"] == 1

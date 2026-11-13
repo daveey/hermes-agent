@@ -2141,7 +2141,7 @@ class TestReconcileColumnsErrorHandling:
         SessionDB(db_path=db_path).close()
         conn = sqlite3.connect(str(db_path))
         try:
-            conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
+            conn.executescript("DROP TRIGGER IF EXISTS sessions_projection_update; DROP TRIGGER IF EXISTS session_change_on_sessions_update;")
             conn.execute("ALTER TABLE sessions DROP COLUMN last_read_at")
             conn.commit()
         finally:

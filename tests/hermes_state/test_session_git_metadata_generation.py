@@ -219,6 +219,7 @@ def test_legacy_sessions_table_reconciles_generation_column(tmp_path):
     SessionDB(db_path=path).close()
     conn = sqlite3.connect(path)
     try:
+        conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")  # names every column
         conn.execute("ALTER TABLE sessions DROP COLUMN git_metadata_generation")
         conn.execute("UPDATE schema_version SET version = 25")
         conn.commit()

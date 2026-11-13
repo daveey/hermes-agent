@@ -32,6 +32,7 @@ def _pre_merge_store(path, *, version=31):
         db.append_message("kept", role="user", content="history survives")
     with closing(sqlite3.connect(path)) as conn:
         conn.execute("DROP TRIGGER IF EXISTS sessions_runtime_ledger_delete_guard")
+        conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")  # names every column
         for table in reversed(_ADDED_TABLES):
             conn.execute(f"DROP TABLE {table}")
         conn.execute("DROP INDEX IF EXISTS idx_sessions_local_created_started")
@@ -202,6 +203,7 @@ def _drop_session_column(path, column):
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
         conn.execute("DROP INDEX IF EXISTS idx_sessions_pinned")
         conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
+        conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")
         conn.execute(f"ALTER TABLE sessions DROP COLUMN {column}")
         conn.commit()
 
@@ -276,6 +278,7 @@ def _lagging_store_with_history(home, rows=400):
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
         conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
+        conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")
         conn.execute("ALTER TABLE sessions DROP COLUMN last_read_at")
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

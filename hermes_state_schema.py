@@ -32,6 +32,7 @@ from hermes_state_fts import (_drop_orphan_fts_shadow_tables, base_index_recogni
                               drop_retired_cjk_index, fts_layout_current)
 from hermes_state_holders import _read_proc_argv
 from hermes_state_search import _delete_meta, _meta_row
+from hermes_state_session_change import install_fail_open as install_session_change
 from hermes_state_errors import is_sqlite_lock_error
 from hermes_state_titles import next_title_in_lineage
 
@@ -1071,6 +1072,7 @@ class SessionSchemaMixin:
             logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
         self._execute_ddl_skipping_settled_triggers(cursor, DEFERRED_INDEX_SQL)  # same ordering constraint (``active``)
         self._ensure_session_projection(cursor)
+        install_session_change(cursor.connection)
 
         # After DEFERRED_INDEX_SQL: its partial index on ``active IS NULL`` serves the probe.
         healed = self._heal_null_active_rows(cursor) and healed

@@ -103,9 +103,14 @@ def test_heartbeat_and_equal_updates_do_not_write_counter(store):
         before = writer.execute("SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone()
         assert before is not None
         changes = writer.total_changes
+        stamps = writer.execute("SELECT revision FROM session_change_revision").fetchone()[0]
         writer.execute("UPDATE sessions SET last_activity_at=123, last_activity_description='busy'")
         writer.execute("UPDATE sessions SET title=title, archived=archived")
-        assert writer.total_changes - changes == 2
+        # The session change cursor (hermes_state_session_change) does watch a heartbeat: each stamp is two
+        # trigger writes (its revision row and the session's row). Nothing else is written.
+        stamped = writer.execute("SELECT revision FROM session_change_revision").fetchone()[0] - stamps
+        assert stamped >= 1
+        assert writer.total_changes - changes - 2 * stamped == 2
         assert writer.execute("SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone() == before
 
 

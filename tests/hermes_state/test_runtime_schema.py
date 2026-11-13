@@ -15,6 +15,7 @@ def test_schema_reconciles_existing_sessions_without_losing_history(tmp_path):
     db.append_message('existing', role='user', content='retained')
     db.close()
     with sqlite3.connect(path) as legacy:
+        legacy.execute('DROP TRIGGER IF EXISTS session_change_on_sessions_update')  # names every column
         legacy.execute('ALTER TABLE sessions DROP COLUMN runtime_generation')
         legacy.execute('ALTER TABLE sessions DROP COLUMN runtime_revision')
         for table in ('worker_receipts', 'worker_executions', 'session_admissions', 'runtime_epoch'):

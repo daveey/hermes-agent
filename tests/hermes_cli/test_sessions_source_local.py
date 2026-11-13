@@ -55,6 +55,7 @@ def test_reader_on_a_read_only_store_from_before_the_column_and_the_runtime_tabl
     with writer._lock:
         writer._conn.execute("UPDATE sessions SET started_at = started_at + 60 WHERE id = 'legacy-stub'")
         writer._conn.execute("DROP INDEX IF EXISTS idx_sessions_local_created_started")
+        writer._conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")  # names every column
         writer._conn.execute("ALTER TABLE sessions DROP COLUMN created_source")
         writer._conn.execute("DROP TABLE session_admissions")
         writer._conn.commit()

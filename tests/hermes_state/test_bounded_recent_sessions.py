@@ -32,6 +32,7 @@ def test_writable_startup_reconciles_legacy_activity_column_before_index(tmp_pat
     conn = sqlite3.connect(path)
     try:
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
+        conn.execute("DROP TRIGGER IF EXISTS session_change_on_sessions_update")  # names every column
         conn.execute("ALTER TABLE sessions DROP COLUMN last_activity_at")
         conn.commit()
     finally:
