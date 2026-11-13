@@ -273,6 +273,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     until_tool = bool(session.pop("_marker_until_tool", False))
     # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
     session.pop("_update_pause_marker_key", None)
+    session.pop("_carried_pause_stamped", None)  # a carried turn that raised before pause_stands left it
     if not synthesized:  # the continuation (or a typed message) started: automatic turns may run again
         session.pop("_update_pause_due_until", None)
     if synthesized and not marker_attempt and _carry_paused_marker(session, marker_home, marker_key):

@@ -277,7 +277,7 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
                 declined.append(why)
                 logger.info("core-update pause: session %s keeps running (%s)", marker_key, why)
             return None
-        from tui_gateway.turn_marker import mark_turn_paused, read_turn_marker
+        from tui_gateway.turn_marker import clear_carried_turn_paused, mark_turn_paused, read_turn_marker
         home = _home(session)
         marker = read_turn_marker(home, marker_key)
         if marker is None:
@@ -290,6 +290,13 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
         # Counted already: a synthesized turn over the paused marker pays it, and a turn retrying its own pause
         # after a failed attempt left the write-ahead mark. Only the former is ``carried`` (the caller's call).
         increment = marker.get("reason") != PAUSE_REASON
+        # Only a stamp this turn adds is its to take back: an earlier carried pause that stood keeps its own.
+        stamps = carried and not marker.get("carried_turn_paused")
+
+        def take_back() -> None:
+            if stamps:  # the carried pause did not stand: the notification turn goes on, so do not name it
+                clear_carried_turn_paused(home, marker_key)
+
         if not mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=increment,
                                 carried=carried):
             return None
@@ -298,18 +305,25 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
                                     carried=carried)
         try:
             if not stop_owned_jobs_for_update_pause(killed, save):
+                take_back()
                 return None
         except Exception:
             logger.warning("core-update pause: background cleanup failed; refusing pause for %s", marker_key, exc_info=True)
+            take_back()
             return None
         drainer_lock = _drainer_lock(session)  # request disappears when the window ends
         with session["history_lock"]:
-            if user_stop_pending(session):  # under the lock user_stop_wins takes: one of the two sees the other
-                logger.info("core-update pause: session %s was stopped by the user; not pausing it", marker_key)
-                return None
-            session["_update_pause_marker_key"] = marker_key
-            session["_update_pause_drainer_lock"] = drainer_lock
-            session.pop("_update_pause_parked_stamp", None)  # a new pause starts unparked
+            stopped = user_stop_pending(session)  # under the lock user_stop_wins takes: one sees the other
+            if not stopped:
+                session["_update_pause_marker_key"] = marker_key
+                session["_update_pause_drainer_lock"] = drainer_lock
+                session.pop("_update_pause_parked_stamp", None)  # a new pause starts unparked
+                if stamps:  # pause_stands takes it back if the turn does not end paused (a later Stop won)
+                    session["_carried_pause_stamped"] = marker_key
+        if stopped:
+            logger.info("core-update pause: session %s was stopped by the user; not pausing it", marker_key)
+            take_back()
+            return None
         logger.info("core-update pause: session %s paused at a step boundary for a Hermes update", marker_key)
         return PAUSE_REASON
 
@@ -372,12 +386,17 @@ def effective_pause_key(session: dict, marker_key: str) -> str:
 def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
     """The turn's end: it ended paused for the update AND the session still keeps this turn's marker (a Stop
     that won dropped it). A turn whose hook paused it but which did not end paused (the Stop won in the agent
-    loop) drops the session's keep here, before its marker is retired."""
+    loop) drops the session's keep here, before its marker is retired, and a carried turn takes back the
+    write-ahead ``carried_turn_paused`` stamp its hook added, so the continuation does not name a stopped turn."""
     with session["history_lock"]:
         mine = bool(marker_key) and session.get("_update_pause_marker_key") == marker_key
         stands = mine and isinstance(result, dict) and bool(result.get("paused_for_update"))
         if mine and not stands and not session.get("_exit_keeps_turn_marker"):
             _drop_pause(session)
+        stamped = session.pop("_carried_pause_stamped", None) == marker_key
+    if stamped and not stands:  # a carried turn's hook paid the pause but the turn did not end paused
+        from tui_gateway.turn_marker import clear_carried_turn_paused
+        clear_carried_turn_paused(_home(session), marker_key)
     return stands
 
 

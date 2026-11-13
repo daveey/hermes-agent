@@ -304,6 +304,19 @@ def mark_turn_paused(home: Path | str, session_key: str, reason: str,
     return False
 
 
+def clear_carried_turn_paused(home: Path | str, session_key: str) -> bool:
+    """[daveey] Take back a write-ahead ``carried_turn_paused`` stamp whose carried pause did not stand (the job
+    stop failed, or a user Stop won), so the continuation does not name a notification turn that ran to completion
+    or was stopped. Everything else untouched. True when a stamp was removed."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict) or not entry.pop("carried_turn_paused", None):
+            return None
+        return entries
+
+    return bool(session_key) and _update(home, session_key, mutate, "unstamp carried pause")
+
+
 def mark_turn_parked(home: Path | str, session_key: str) -> bool:
     """[daveey] Restamp ``parked_at`` on a core-update pause its live writer keeps idle between drain
     windows (``update_pause.drain_retry_pending``). Reason, prompt and counters untouched."""
