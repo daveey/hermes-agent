@@ -123,12 +123,16 @@ def _launch_env() -> dict[str, str]:
 
 
 def launch_terminal_env() -> dict[str, str]:
-    """The frozen launch ``TERMINAL_*`` overlay for a launch-profile turn's terminal scope.
+    """The launch ``TERMINAL_*`` overlay for a launch-profile turn's terminal scope: frozen once
+    multiplexing is active, the live process env before (``_launch_env``).
 
-    Production always captured at activation; a first capture here only happens when the
-    multiplexer flag was set by another owner (the messaging gateway) or a harness.
+    [daveey] A single-profile process that binds or validates its own profile before any
+    activation (``_bind_whole_profile``, the kanban ``requires`` check) must not freeze the
+    process-wide snapshot here: it would miss what the launch process still bridges at startup.
+    Once multiplexing is active, production captured at activation; a first capture here only
+    happens when the flag was set by another owner (the messaging gateway) or a harness.
     """
-    return {k: v for k, v in capture_launch_env().items() if k.startswith("TERMINAL_")}
+    return {k: v for k, v in _launch_env().items() if k.startswith("TERMINAL_")}
 
 
 def launch_secret_scope(launch_home: str | Path) -> dict[str, str]:

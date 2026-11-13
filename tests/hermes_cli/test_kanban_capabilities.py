@@ -231,6 +231,29 @@ def test_own_profile_policy_counts_launch_only_terminal_backend(profiles, monkey
         assert validate_assignment("default", requires=["terminal", "git"]) == ["terminal", "git"]
         # Another profile reads its own files only: the default backend (local) still grants host_repo.
         assert validate_assignment("coder", requires=["host_repo"]) == ["host_repo"]
+        # Single-profile: read from the live launch env, the snapshot stays unfrozen (t_01a1d42d00bdbb33).
+        assert (launch_profile_policy._snapshot is None) is not multiplex
+    finally:
+        secret_scope.reset_multiplex_context(token)
+
+
+def test_own_profile_check_does_not_freeze_the_launch_env(profiles, monkeypatch):
+    """A single-profile process (multiplexing inactive) that checks its OWN profile, bare or inside
+    its own bound worker scope (``_bind_whole_profile``), reads the live launch env and leaves the
+    process-wide launch snapshot unfrozen: freezing it before activation would miss values the
+    launch process still bridges at startup (t_01a1d42d00bdbb33). [daveey]"""
+    from agent import secret_scope
+    from agent.runtime_scope import bind_profile_scope
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)
+    home = profiles("default", LOCAL)
+    token = secret_scope.set_multiplex_context(False)
+    try:
+        assert validate_assignment("default", requires=["host_repo"]) == ["host_repo"]
+        with bind_profile_scope(home, hydrate_secrets=False):
+            assert validate_assignment("default", requires=["terminal", "git"]) == ["terminal", "git"]
+        assert launch_profile_policy._snapshot is None
     finally:
         secret_scope.reset_multiplex_context(token)
 

@@ -92,10 +92,32 @@ def test_the_launch_home_inside_a_bound_scope_binds_the_launch_scope(homes, boun
         assert current_scope() == outer
         assert get_hermes_home() == (launch if bound == "launch" else work)
     assert (get_hermes_home_override(), current_secret_scope(), get_terminal_scope()) == (None, None, None)
-    # Only for bound=="work": bind_profile_scope(launch) on a single-profile host already freezes
-    # ``_snapshot`` itself (``_bind_whole_profile`` -> ``launch_terminal_env()``), before this body runs.
-    if bound == "work" and not multiplex:
-        assert policy._snapshot is frozen_before is None  # a single-profile host's launch env is not frozen early
+    # Neither bind_profile_scope(launch) (``_bind_whole_profile`` -> ``launch_terminal_env()``) nor the
+    # nested launch scope freezes a single-profile host's launch env early.
+    if not multiplex:
+        assert policy._snapshot is frozen_before is None
+
+
+def test_launch_terminal_env_reads_the_live_env_until_multiplexing(homes, monkeypatch):
+    """Single-profile: the live ``TERMINAL_*`` env, nothing frozen (a later startup bridge still
+    counts). Multiplexing: the snapshot frozen at activation, never re-read. [daveey]"""
+    _, _, multiplex = homes
+
+    def overlay() -> dict:
+        env = policy.launch_terminal_env()
+        assert all(k.startswith("TERMINAL_") for k in env)
+        return {k: env.get(k) for k in ("TERMINAL_ENV", "TERMINAL_SSH_HOST")}
+
+    assert overlay()["TERMINAL_ENV"] == "local"
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_SSH_HOST", "bridged-late")
+    if multiplex:
+        assert overlay()["TERMINAL_ENV"] == "local"
+        assert overlay()["TERMINAL_SSH_HOST"] != "bridged-late"
+        assert policy._snapshot is not None
+    else:
+        assert overlay() == {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "bridged-late"}
+        assert policy._snapshot is None
 
 
 def test_the_launch_home_inside_a_bound_launch_turn_keeps_the_turn(homes):
