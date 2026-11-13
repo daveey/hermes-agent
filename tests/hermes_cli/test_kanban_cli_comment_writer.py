@@ -589,14 +589,18 @@ def test_tree_rooted_at_an_automation_runner_is_an_agent(monkeypatch, runner):
 
 
 @posix_only
-def test_interactive_ssm_session_stays_human(monkeypatch):
+@pytest.mark.parametrize("session, agent", [("ssm-session-worker", "amazon-ssm-agent"),
+                                            ("ssm-session-wor", "amazon-ssm-agen")],
+                         ids=["full-names", "comm-truncated"])
+def test_interactive_ssm_session_stays_human(monkeypatch, session, agent):
     """``aws ssm start-session``: a person's shell under ssm-session-worker, whose own ancestors are
-    the same ssm-agent-worker/amazon-ssm-agent that start SendCommand documents."""
+    the same ssm-agent-worker/amazon-ssm-agent that start SendCommand documents. Names psutil can't
+    widen (argv rewritten) are Linux's 15-char ``comm``, matched like the runners."""
     _fake_psutil_tree(monkeypatch, {900: (901, "ubuntu", CLEAN, "python3"),
                                     901: (920, "ubuntu", CLEAN, "bash"),
-                                    920: (904, "root", None, "ssm-session-worker"),
+                                    920: (904, "root", None, session),
                                     904: (905, "root", None, "ssm-agent-worker"),
-                                    905: (1, "root", None, "amazon-ssm-agent"), **INIT})
+                                    905: (1, "root", None, agent), **INIT})
     assert kcw.agent_ancestor(900) is None
 
 

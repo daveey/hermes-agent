@@ -115,7 +115,7 @@ RUNNER_FOR_NAME: dict[str, str] = {**{r[:15]: r for r in AUTOMATION_RUNNERS},
                                    **{r: r for r in AUTOMATION_RUNNERS}}
 # An interactive SSM session (``aws ssm start-session``) is a person's shell; its ancestors are the
 # same ssm-agent-worker/amazon-ssm-agent that start SendCommand documents, so no runner above it
-# counts and the walk goes on to init exactly as before.
+# counts and the walk goes on to init exactly as before. Matched on the 15-char prefix like runners.
 INTERACTIVE_SSM = "ssm-session-worker"
 
 # Agent comment handles: ``<gateway>/t_<16 hex>`` (a worker run's note) and ``hub-chat-<hex>``.
@@ -251,7 +251,7 @@ def agent_ancestor(pid: Optional[int] = None, *, read: Optional[ProcReader] = No
         if marker:
             return f"{current}:{marker}"
         name = name_of(current) if name_of else None
-        if name == INTERACTIVE_SSM:
+        if name and name[:15] == INTERACTIVE_SSM[:15]:  # comm prefix, as RUNNER_FOR_NAME
             interactive = True
         runner = RUNNER_FOR_NAME.get(name or "")
         if runner and not interactive:
