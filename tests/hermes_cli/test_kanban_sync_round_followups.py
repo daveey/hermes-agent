@@ -83,6 +83,22 @@ def test_an_ops_outage_still_pulls_every_remote_row_and_the_round_reports_the_pu
     assert results[0].error and "HubError" in results[0].error
 
 
+def test_a_behind_round_whose_send_after_the_pulls_fails_still_reruns_at_once(live, svc, kanban_home):
+    """The pulls landed before the send after them raised: a board still behind is noted for an immediate rerun
+    (``backlog.due``) before the error is re-raised, so an /ops outage never slows the catch-up to the idle
+    interval."""
+    path = kanban_home / "kanban.db"
+    assert _round(kanban_home, svc.hub(ME)).error is None
+    _other_creates(svc, BACKLOG_PAGES)
+    kb.create_task(live, title="local edit")
+    log: list = []
+    with pytest.raises(ksc.HubError):
+        _round(kanban_home, OpsDown(svc, ME, log))
+    assert [kind for kind, _ in log if kind == "ops-503"] == ["ops-503", "ops-503"]  # both sends were tried
+    assert backlog.behind(path)  # RED with the note dropped: the round's opening note(False) stands
+    assert backlog.due([(BOARD, path)]) == [(BOARD, path)]
+
+
 def test_a_push_that_fails_once_before_the_pulls_is_sent_by_the_push_after_them(live, svc, kanban_home):
     tid = kb.create_task(live, title="local edit")
     _other_creates(svc, 3)
@@ -204,6 +220,25 @@ def test_a_sendable_op_still_alarms_while_behind(live, kanban_home):
     _age_pending(live, minutes=30)
     backlog.note(path, True)
     assert outbox_age._age(path) == pytest.approx(30 * 60, abs=5)
+
+
+def test_a_board_deferred_op_never_ages_the_alarm_while_behind(live, kanban_home):
+    """An op the Board deferred (``retry_after`` set, now in the past, so the push before the head selects it) is a
+    Board-side wait: only unanswered ops (``retry_after IS NULL``) age the alarm while behind."""
+    path = kanban_home / "kanban.db"
+    kb.create_task(live, title="deferred by the Board")
+    _age_pending(live, minutes=30)
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_outbox SET retry_after = ? WHERE state = 'pending'", (int(time.time()) - 60,))
+    backlog.note(path, True)
+    with kbc.connect_closing(path) as conn:
+        assert outbox_age.sendable_age_s(conn, path) is None  # RED with every sendable row aged: 1800 s
+    assert outbox_age._age(path) is None
+    kb.create_task(live, title="unanswered")
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_outbox SET created_at = ? WHERE state = 'pending' AND retry_after IS NULL",
+                     (int((time.time() - 120) * 1000),))
+    assert outbox_age._age(path) == pytest.approx(120, abs=5)  # the unanswered op's age, not the deferred one's
 
 
 # --- 5. one Board read per card per round ---------------------------------------------------------------------------
