@@ -947,3 +947,11 @@ def test_repeat_detector_still_fires_for_a_genuine_external_premise_after_resour
         _bb_gate_parks(conn, tid, ["bb-gate: governor: Claude pool at 88%"] * 3, GOV, "pool 88%")
         kinds = _bb_gate_parks(conn, tid, ["waiting on the vendor quota raise"] * 3, ext, "case open, ETA 2d")
         assert kinds[-1] == kaw.ESCALATED_EVENT and kinds.count(kaw.ESCALATED_EVENT) == 1, kinds
+
+
+def test_ci_premise_ignores_head_order() -> None:
+    """A park naming the same heads in another order is the same premise (run_heads sorts)."""
+    a, b = CI_HEADS[0], CI_HEADS[1]
+    for kind in ("ci", "deploy"):
+        aw = {"kind": kind, "ref": CI_PR}
+        assert kaw.premise_hash(aw, "r", f"wait {a} {b}") == kaw.premise_hash(aw, "r", f"wait {b} {a}")
