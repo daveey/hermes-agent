@@ -72,6 +72,7 @@ _SINK_SHAPES = {
     "printf-format-repeats": "printf '%s%s ' ba sh {big} | bash\n",
     # Review 5893864308 (PR #2341): a `*` width or precision takes an argument, a precision
     # truncates and `%b` decodes its argument, so the whole-argument walk read the wrong words.
+    "printf-unknown-format-escape": "printf '\\%s\\n%.4s %s\\n' junk bashrc {big} | bash\n",
     "printf-star-width": "printf '%*s %s' 5 bash {big} | bash\n",
     "printf-star-precision": "printf '%.*s %s' 4 bashrc {big} | bash\n",
     "printf-precision": "printf '%.4s %s' bashrc {big} | bash\n",
@@ -277,6 +278,9 @@ def test_printf_output_applies_the_format(format_text, arguments, printed):
 
 # Formats whose output the model must reproduce byte for byte; compared against real bash.
 _BASH_PRINTF_CASES = [
+    (r"\%s\n%.4s %s\n", ["junk", "bashrc", "/x/a.sh"]),
+    (r"\%*s|\%.*s|", ["5", "bash", "4", "bashrc"]),
+    (r"%b|%s", [r"\%s", "unchanged"]),
     ("%*s %s", ["5", "bash", "/x/a.sh"]),
     ("%.4s %s", ["bashrc", "/x/a.sh"]),
     ("%.*s %s", ["4", "bashrc", "/x/a.sh"]),

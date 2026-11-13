@@ -19,7 +19,9 @@ The model follows bash 5's ``printf.def``: flags ``#'-+ 0``, a width and a preci
 or ``%%``. An invalid conversion stops the output there, as in bash. Output past the guard's scan
 budget is cut short (the guard refuses it as oversized anyway). Callers also walk the arguments
 without the format and the earlier whole-argument substitution, so the model is one variant
-among several and never the only text scanned.
+among several and never the only text scanned. Unicode escapes assume UTF-8; in a C locale bash
+may retain non-ASCII Unicode escapes verbatim. Empty ``%c`` is modelled without bash's NUL,
+which bash drops again when reading script input.
 """
 
 import re
@@ -82,6 +84,10 @@ def _decode_escape(text: str, index: int, *, echo_style: bool) -> tuple[str, int
         value = int(text[start:end], 16) if end > start else None
         if value is not None and (char == "x" or value < 0x110000):
             return chr(value), end, False
+    # In a format an unknown escape consumes only the backslash: the next `%`
+    # still starts a conversion. Consuming it would shift every subsequent argument.
+    if not echo_style:
+        return "\\", index + 1, False
     return "\\" + char, index + 2, False
 
 
