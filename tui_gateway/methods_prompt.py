@@ -707,6 +707,7 @@ def _run_after_agent_ready(
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
     # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
     # expires. See #63078.
+    input_origin = session.pop("_submit_input_origin", "")  # [daveey] set by prompt.submit for this turn
     err = _wait_agent_for_prompt(session, rid, sid)
     from tui_gateway.turn_admission import owns
     with session["history_lock"]:
@@ -751,7 +752,7 @@ def _run_after_agent_ready(
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
         image_paths=hosted_images, terminal_callback=hosted_terminal_callback, turn_author=turn_author,
-        auto_continue=auto_continue)
+        auto_continue=auto_continue, input_origin=input_origin)
 
 
 _TRUNCATION_PARAMS = (
@@ -897,7 +898,7 @@ def _(rid, params: dict) -> dict:
     # [daveey] Stamp the last human-typed prompt (local and desktop-ssh clients) before any refusal: hermes-sync
     # opens core-update drain windows only while the user is away (tui_gateway/human_input.py).
     from tui_gateway.human_input import note_submit
-    note_submit(rid, params, raw_text, session=_sessions.get(sid) if isinstance(sid, str) else None)
+    input_origin = note_submit(rid, params, raw_text, session=_sessions.get(sid) if isinstance(sid, str) else None)
     if (stopped := _typed_stop_phrase_response(rid, text, sid)) is not None:
         return stopped
     if params.get("interrupted"):
@@ -994,6 +995,8 @@ def _(rid, params: dict) -> dict:
         if busy_response is not None:
             return busy_response
     from tui_gateway.turn_admission import stage
+    # [daveey] The claimed turn's pre_llm_call input_origin; _run_after_agent_ready consumes it.
+    session["_submit_input_origin"] = input_origin
     with stage(session):
         return _dispatch_admitted_prompt(rid, sid, session, text, turn_isolation, turn_author,
             display_kind, display_metadata, survivor_fields, hosted_terminal_callback, hosted_images)

@@ -67,21 +67,38 @@ def record_human_input(session_id: str = "", home: Path | None = None) -> None:
         logger.debug("could not record the last human input", exc_info=True)
 
 
-def note_submit(rid, params: dict, text, *, transport=None, session: dict | None = None) -> None:
-    """Record ``prompt.submit`` when a human typed it. Never raises.
+def input_origin(rid, params, text, *, transport=None, session: dict | None = None) -> str:
+    """Who wrote this client ``prompt.submit``: ``"agent"``, ``"human"`` or ``""`` (unknown). Never raises.
+
+    ``"agent"``: a websocket opened with ``/api/ws?client=agent`` (*transport*, default the bound one), a session
+    such a connection created or a hidden (bot plumbing) one (*session*), a relayed/hosted turn, a hidden widget
+    intent, or a cross-session send. ``"human"``: :func:`is_human_typed_submit`. ``pre_llm_call`` plugins read it
+    as ``input_origin`` (agent/turn_context.py); injected turns never reach here and stay ``""``."""
+    try:
+        from tui_gateway.transport import current_transport, is_agent_transport
+
+        if is_agent_transport(current_transport() if transport is None else transport):
+            return "agent"
+        if isinstance(session, dict) and (session.get("agent_created") or session.get("pending_hidden")):
+            return "agent"
+        if rid is None or not isinstance(params, dict):
+            return ""
+        if any(params.get(k) is not None for k in _INTERNAL_PARAMS) or params.get("display_kind") == "hidden":
+            return "agent"
+        if isinstance(text, str) and text.lstrip().startswith(CROSS_SESSION_HEADER):
+            return "agent"
+        return "human" if is_human_typed_submit(rid, params, text) else ""
+    except Exception:  # health: allow BLE001 -- a classification must never fail a prompt
+        logger.debug("input-origin check failed", exc_info=True)
+        return ""
+
+
+def note_submit(rid, params: dict, text, *, transport=None, session: dict | None = None) -> str:
+    """Record ``prompt.submit`` when a human typed it; return its :func:`input_origin`. Never raises.
 
     Agent traffic never stamps: a submit over a websocket opened with ``/api/ws?client=agent`` (*transport*,
     default the bound one), or into a session such a connection created (*session* ``agent_created``)."""
-    try:
-        if transport is None:
-            from tui_gateway.transport import current_transport
-
-            transport = current_transport()
-        from tui_gateway.transport import is_agent_transport
-
-        if is_agent_transport(transport) or (isinstance(session, dict) and session.get("agent_created")):
-            return
-        if is_human_typed_submit(rid, params, text):
-            record_human_input(str(params.get("session_id") or ""))
-    except Exception:  # health: allow BLE001 -- a stamp must never fail a prompt
-        logger.debug("human-input check failed", exc_info=True)
+    origin = input_origin(rid, params, text, transport=transport, session=session)
+    if origin == "human":
+        record_human_input(str(params.get("session_id") or ""))
+    return origin

@@ -970,6 +970,8 @@ def _collect_pre_llm_call_context(
             platform=getattr(agent, "platform", None) or "",
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
+            # [daveey] "agent" / "human" / "" (unknown) from tui_gateway/human_input.py
+            input_origin=getattr(agent, "_input_origin", "") or "",
         )
         try:
             # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent

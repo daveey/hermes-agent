@@ -1357,7 +1357,7 @@ def _run_admitted_prompt(
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
     turn_author: dict | None = None, auto_continue: bool = True,
-    report_ownership_refusal: bool = True) -> bool:
+    report_ownership_refusal: bool = True, input_origin: str = "") -> bool:
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -1375,6 +1375,9 @@ def _run_admitted_prompt(
             settle(session)
         return False
     images, agent = admitted
+    # [daveey] pre_llm_call's input_origin (tui_gateway/human_input.py): set every turn, so an injected turn
+    # (Kanban notice, auto-continue, queued drain) reads "" instead of the last client submit's origin.
+    agent._input_origin = input_origin
     from gateway.warning_notifications import diagnostic_turn_muted
     from agent.notification_presentation import notification_config_snapshot
     with _session_profile_runtime_scope(session):

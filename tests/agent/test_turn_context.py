@@ -772,3 +772,22 @@ def test_prologue_forwards_the_submit_title_preview_to_the_titler():
               "display_metadata": {"title_preview": "Pasted 5000 chars"}}],
         )
     assert titler.call_args.kwargs["title_preview"] == "Pasted 5000 chars"
+
+
+@pytest.mark.parametrize("origin,expected", [("agent", "agent"), ("human", "human"), (None, ""), ("<unset>", "")])
+def test_pre_llm_call_receives_the_turn_input_origin(monkeypatch, tmp_path, origin, expected):
+    """``prompt.submit`` stamps ``agent._input_origin``; ``pre_llm_call`` plugins read it as ``input_origin``
+    ("" when unknown: injected turns, CLI and gateway platforms). [daveey]"""
+    from types import SimpleNamespace
+    from agent.turn_context import _collect_pre_llm_call_context
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    calls = []
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", lambda name, **kw: calls.append((name, kw)) or [])
+    agent = SimpleNamespace(session_id="s", model="m", _current_turn_id="t")
+    if origin != "<unset>":
+        agent._input_origin = origin
+    rows = [{"role": "user", "content": "hi"}]
+    _collect_pre_llm_call_context(agent, effective_task_id="task", turn_id="turn", original_user_message="hi",
+                                  messages=rows, conversation_history=[], current_turn_user_idx=0)
+    assert [(name, kw["input_origin"]) for name, kw in calls] == [("pre_llm_call", expected)]
