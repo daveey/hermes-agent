@@ -228,9 +228,11 @@ def test_cli_budget_flag_and_default(monkeypatch):
         kanban_ops._cmd_gc(argparse.Namespace(event_retention_days=0, log_retention_days=0,
                                               worktree_retention_days=7, scratch_budget_seconds=value))
     default, unlimited, short = seen
-    assert default.deadline - default.started == bo.DEFAULT_BUDGET_S
+    # Compare against the sum the Budget computes: (s + n) - s is not exactly n for
+    # every monotonic() float s (e.g. s=486.992705996, n=30).
+    assert default.deadline == default.started + bo.DEFAULT_BUDGET_S
     assert unlimited.deadline is None and not unlimited.exhausted()
-    assert short.deadline - short.started == 30
+    assert short.deadline == short.started + 30
 
 
 def test_default_budget_leaves_headroom_below_the_wrapper_kill():
