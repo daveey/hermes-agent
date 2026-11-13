@@ -19,6 +19,25 @@ if TYPE_CHECKING:
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.session")
 
+
+def _ended_reasons(db, session_ids):
+    """Lookup ``session_id -> {"id", "end_reason"}`` (None for a missing or live row) for a startup
+    prune. A real SessionDB answers in chunked id/end_reason reads: ``get_session`` joins the
+    ~45 KB resolved system prompt per row, and one call per routing entry (16k on the hub) held the
+    gateway loop 3-7 s at every boot. Handles without ``_read_all`` (test doubles) keep the per-row
+    ``get_session`` contract."""
+    if not callable(getattr(type(db), "_read_all", None)):
+        return db.get_session
+    from hermes_state_common import _id_chunks, _placeholders
+    ended = {}
+    for chunk in _id_chunks(dict.fromkeys(session_ids)):
+        for row in db._read_all(
+                f"SELECT id, end_reason FROM sessions WHERE end_reason IS NOT NULL AND id IN ({_placeholders(chunk)})",
+                chunk):
+            ended[row["id"]] = {"id": row["id"], "end_reason": row["end_reason"]}
+    return ended.get
+
+
 # "No SessionDB pinned" sentinel: lets ``_db`` distinguish "resolve from the active scope" from a
 # deliberate ``store._db = None`` (JSONL fallback).
 _DB_UNPINNED = object()
@@ -462,21 +481,25 @@ class SessionPersistenceMixin:
         stale_keys: list = []
         recovered_keys = 0
         try:
+            by_db: dict = {}
             for key, entry in self._entries.items():
                 # Ask the store that owns the key, not the ambient handle, or a live
                 # secondary-profile session gets pruned on the root copy.
                 db = self._db_for_key(key)
-                if db is None:
-                    continue
-                row = db.get_session(entry.session_id)
-                if row is None or row.get("end_reason") is None:
-                    continue
-                verdict = self._stale_entry_verdict(key, entry, row)
-                if verdict == "prune":
-                    stale_keys.append(key)
-                elif verdict is not None:
-                    self._entries[key] = verdict
-                    recovered_keys += 1
+                if db is not None:
+                    by_db.setdefault(id(db), (db, []))[1].append((key, entry))
+            for db, items in by_db.values():
+                ended = _ended_reasons(db, [entry.session_id for _key, entry in items])
+                for key, entry in items:
+                    row = ended(entry.session_id)
+                    if row is None or row.get("end_reason") is None:
+                        continue
+                    verdict = self._stale_entry_verdict(key, entry, row)
+                    if verdict == "prune":
+                        stale_keys.append(key)
+                    elif verdict is not None:
+                        self._entries[key] = verdict
+                        recovered_keys += 1
         except Exception as exc:
             logger.warning("gateway.session: stale-entry pruning skipped due to DB error: %s", exc)
             return

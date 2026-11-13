@@ -681,22 +681,33 @@ async def recover_gateway_native_sessions(runner):
     return results
 
 
+def _pending_native_routes(runner, authority):
+    """``(checkpoints, pending, [(owner, origin)])`` for boot recovery; blocking state.db reads,
+    so callers run it in a worker thread. Routes are resolved only when some FIFO is pending."""
+    from hermes_state_update_pause import get_session_checkpoint
+    rows = authority.db._read_all(
+        "SELECT DISTINCT target_session_id,status FROM session_admissions "
+        "WHERE status IN ('queued','unknown','started')")
+    # Old executions recover unknown; only a validated update receipt makes a
+    # still-started admission safe to wake (never replay an ordinary live turn).
+    checkpoints = {row['target_session_id'] for row in rows if row['status'] == 'started'
+                   and get_session_checkpoint(authority.db, session_id=row['target_session_id']) is not None}
+    pending = {row['target_session_id'] for row in rows if row['status'] != 'started'} | checkpoints
+    if not pending:
+        return checkpoints, pending, []
+    routes = [(owner, entry.origin) for entry in runner.session_store.list_sessions() if entry.origin is not None
+              for owner in [authority.logical_owner(entry.session_id)] if owner in pending]
+    return checkpoints, pending, routes
+
+
 async def recover_profile_native_sessions(runner, authority):
     """Bind one authority's queued native rows to the adapters connected now."""
     from gateway.session_authorities import owner_scope
     with owner_scope(authority):
-        from hermes_state_update_pause import get_session_checkpoint
-        rows = authority.db._read_all(
-            "SELECT DISTINCT target_session_id,status FROM session_admissions "
-            "WHERE status IN ('queued','unknown','started')")
-        # Old executions recover unknown; only a validated update receipt makes a
-        # still-started admission safe to wake (never replay an ordinary live turn).
-        checkpoints = {row['target_session_id'] for row in rows if row['status'] == 'started'
-                       and get_session_checkpoint(authority.db, session_id=row['target_session_id']) is not None}
-        pending = {row['target_session_id'] for row in rows if row['status'] != 'started'} | checkpoints
-        bindings = [(owner, entry.origin, runner._adapter_for_source(entry.origin))
-                    for entry in runner.session_store.list_sessions() if entry.origin is not None
-                    for owner in [authority.logical_owner(entry.session_id)] if owner in pending]
+        # state.db reads run off the loop: resolving owners costs one full session-row read per
+        # routing entry (thousands on a long-lived host), which stalled the loop 3-7 s per boot.
+        checkpoints, pending, routes = await asyncio.to_thread(_pending_native_routes, runner, authority)
+        bindings = [(owner, origin, runner._adapter_for_source(origin)) for owner, origin in routes]
         outcome = await authority.recover_native_sessions(bindings)
         from gateway.session_detached import recover_detached_sessions
         outcome.update(dict.fromkeys(recover_detached_sessions(authority, pending - set(outcome)), 'detached'))
