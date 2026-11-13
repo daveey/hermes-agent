@@ -12,7 +12,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from typing import Any, Iterable
+import time
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -72,3 +73,60 @@ def gateway_holds(db: Any, ids: Iterable[str], event_key: str) -> bool:
     its key. Only then: a dropped admission hands the notice back to this sweep (t_01a1cff0541bf30c
     amendment), and a busy chat's claim here is released within the same pass."""
     return bool(event_key) and event_key in pending_keys(db, ids)
+
+
+def canonical_gateway_pid(profile: Optional[str]) -> Optional[int]:
+    """The verified live gateway that runs ``profile``'s chats: the gateway of that profile's own home, else
+    the default root's (a multiplexed gateway serves the profile from there). Identity is the start-time and
+    command-line proven pid of ``gateway.status.live_gateway_pid_for_home``, never the control socket's identify
+    call (``discover_owner`` drops the pid and times out under exactly the load this guards). None when unproven."""
+    try:
+        from gateway.status import live_gateway_pid_for_home
+        from hermes_cli.profiles import get_profile_dir
+        pid = live_gateway_pid_for_home(get_profile_dir(profile or "default"))
+        if pid is None:
+            from hermes_cli.gateway_multiplex_served import live_default_gateway_pid
+            pid = live_default_gateway_pid()
+        return int(pid) if pid is not None else None
+    except Exception:  # health: allow BLE001 -- an unproven gateway keeps the sweep's own path
+        logger.debug("remote kanban fifo: gateway pid lookup failed", exc_info=True)
+        return None
+
+
+def gateway_lease_pid(db: Any, ids: Iterable[str], profile: Optional[str], now: Optional[float] = None,
+                      gateway_pid=None) -> Optional[int]:
+    """The canonical gateway's pid when it holds an UNEXPIRED turn lease on the chat (``ids``: its lineage), else
+    None. The Desktop backend's sweep then leaves the notice alone: no claim, no wake, no passive row.
+
+    Why standing aside gives up nothing (t_01a1cff0541bf30c G3, review t_01a1d4c44f637fff): while another live
+    process holds an unexpired lease, the sweep can deliver nothing. Its passive row is refused
+    (``record_kanban_notice``'s ``reject_active_turn_lease`` guard raises ``SessionTurnLeaseLostError``) and its
+    wake is refused (``refuses_held_lease_at_once`` for a desktop/tui turn). Claiming anyway only logged
+    "deferred: a turn is running" every pass and held the claim the gateway's own pass needs. Once the lease is
+    released, expires (the passive-row guard reclaims an expired lease even from a live pid, so this answers None
+    then) or its holder dies, the sweep runs as before; the gateway's owner pass meanwhile admits the notice to
+    the chat's FIFO. Lease-only on purpose: a ledger arm (``queued``/``started`` admissions) would also hold the
+    notice between turns, when the passive row could land and the owner pass may not run (notify_in_gateway off,
+    a non-launch profile, the restore gap)."""
+    owner_of = getattr(db, "session_turn_lease_owner", None)
+    if owner_of is None:
+        return None
+    now = time.time() if now is None else now
+    holders = []
+    try:
+        for sid in sorted({str(i) for i in ids if i}):
+            row = owner_of(sid) or {}
+            holder = str(row.get("holder") or "")
+            if holder and float(row.get("expires_at") or 0) > now:
+                holders.append(holder)
+    except (sqlite3.Error, TypeError, ValueError):
+        logger.debug("remote kanban fifo: lease read failed", exc_info=True)
+        return None
+    if not holders:
+        return None  # the common case: no running turn, no gateway probe
+    from tui_gateway.kanban_leg_custody import gateway_owner
+    pid = canonical_gateway_pid(profile) if gateway_pid is None else gateway_pid
+    if pid is None:
+        return None
+    owner = gateway_owner(tuple(ids), None, tuple(dict.fromkeys(holders)), gateway_pid=pid, launch_profile="")
+    return owner.pid if owner is not None else None

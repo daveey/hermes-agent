@@ -1247,11 +1247,17 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
             if settled((sid, tip), ref, state):
                 _remember_delivered(memo_key)
                 return
-            from tui_gateway.kanban_remote_fifo import gateway_holds, lineage_ids
-            if gateway_holds(db, lineage_ids(db, sid, tip), event_key):
+            from tui_gateway.kanban_remote_fifo import gateway_holds, gateway_lease_pid, lineage_ids
+            ids = lineage_ids(db, sid, tip)
+            if gateway_holds(db, ids, event_key):
                 # [daveey] The gateway runs this chat's turns and admits the notice to its FIFO
                 # (gateway.kanban_remote_owner); a claim here would only race it (t_01a1cff0541bf30c).
                 _note_wait(sid, ref, state, "left to the gateway's FIFO (the gateway runs this chat's turns)")
+                return
+            if (gw_pid := gateway_lease_pid(db, ids, profile)) is not None:
+                # [daveey] A gateway turn holds the chat: no row or wake can land here until it ends, and the
+                # gateway's owner pass admits the notice meanwhile. No claim, so nothing races it (G3).
+                _note_wait(sid, ref, state, f"left to gateway pid {gw_pid}: its turn holds the chat's lease")
                 return
             if waker is None:
                 row_id = db.append_kanban_notice(tip, text, metadata)
