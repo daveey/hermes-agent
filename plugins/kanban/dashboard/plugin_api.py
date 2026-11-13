@@ -31,7 +31,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from hermes_cli import kanban_db, kanban_terminal_guard as ktg
+from hermes_cli import kanban_db
 from hermes_cli import kanban_review_contract as _review_contract  # a dashboard "done" is never a worker run
 from hermes_cli import kanban_workflow
 from hermes_cli.web_read_coalescing import coalesced_read
@@ -763,9 +763,9 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
 
 def _refusal_detail(conn, task_id: str, s: str) -> Optional[str]:
     """Why a move was refused, past the generic text: a drag to ``ready`` ``unblock_task`` refused for a stale copy of
-    a done/archived card (``kanban_terminal_guard``), or a ``done``/``review`` with open parents (bare False too)."""
+    a done/archived card (``kanban_db.unblock_refusal``), or a ``done``/``review`` with open parents (bare False too)."""
     if s == "ready":
-        return ktg.unblock_refusal(conn, task_id)
+        return kanban_db.unblock_refusal(conn, task_id)
     blockers = kanban_db.unsatisfied_parents(conn, task_id) if s in ("done", "review") else []
     if not blockers:
         return None

@@ -149,7 +149,8 @@ def reopen_done_task(
         cur = conn.execute(
             "UPDATE tasks SET status = ?, completed_at = NULL, current_run_id = NULL, "
             "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-            "consecutive_failures = 0, human_request = NULL WHERE id = ? AND status = ?",
+            "consecutive_failures = 0, human_request = NULL "
+            "WHERE id = ? AND status IN ('done', 'blocked', 'scheduled', 'triage') AND status = ?",
             (new_status, task_id, previous),
         )
         if cur.rowcount != 1:

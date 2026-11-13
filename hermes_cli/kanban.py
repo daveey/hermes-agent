@@ -1498,10 +1498,8 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         if rc:
             return rc
         op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
-        from hermes_cli.kanban_terminal_guard import unblock_refusal
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: (unblock_refusal(conn, tid)
-                                        or f"cannot unblock {tid} (not blocked/scheduled?)"), conn=conn)
+                           lambda tid: kb.unblock_refusal(conn, tid) or f"cannot unblock {tid} (not blocked/scheduled?)", conn=conn)
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
