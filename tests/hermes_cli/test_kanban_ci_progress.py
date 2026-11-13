@@ -50,6 +50,10 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "#!/usr/bin/env python3\n"
         "import os, sys\n"
         f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ.get('FAKE_GH_NEEDS_TOKEN') and not os.environ.get('FAKE_BROKER_TOKEN'):\n"
+        "    sys.stderr.write('To get started with GitHub CLI, please run:  gh auth login\\n'); sys.exit(4)\n"
+        "if os.environ.get('FAKE_GH_401'):\n"
+        "    sys.stderr.write('HTTP 401: Bad credentials (https://api.github.com/)\\n'); sys.exit(1)\n"
         "if os.environ.get('FAKE_GH_FAIL'):\n"
         "    sys.stderr.write('HTTP 502: Bad Gateway (https://api.github.com/)\\n'); sys.exit(1)\n"
         f"sys.stdout.write(open({str(jobs)!r}).read())\n")
@@ -177,3 +181,93 @@ def test_ci_sweep_reads_github_at_most_every_5_min_per_card(kanban_home, fake_gh
             kwc.run_due_wake_checks(conn, wait=True)
         assert fake_gh.calls() == parked + 1
         assert kb.get_task(conn, tid).status == "scheduled", [(e.kind, e.payload) for e in kb.list_events(conn, tid)][-3:]
+
+# --- credentials: the hub's gh has no login; its GitHub reads go through the broker prefix (agent-c2b8fc1abf) ---
+
+@pytest.fixture
+def no_login(fake_gh, monkeypatch):
+    """The hub's ``gh``: exit 4 (auth required) unless the broker put a token in its env."""
+    from hermes_cli import kanban_ci_progress as kcp
+    monkeypatch.setenv("FAKE_GH_NEEDS_TOKEN", "1")
+    monkeypatch.delenv("FAKE_BROKER_TOKEN", raising=False)
+    monkeypatch.setattr(kcp, "_WARNED_AT", None, raising=False)
+    return fake_gh
+
+
+def _configure_prefix(home: Path, prefix: list[str]) -> None:
+    # JSON is YAML; the test env has ruamel, not PyYAML.
+    (home / "config.yaml").write_text(json.dumps({"kanban": {"pr_acceptance": {"gh_command_prefix": prefix}}}))
+
+
+@pytest.fixture
+def broker(kanban_home: Path, tmp_path: Path) -> Path:
+    """``kanban.pr_acceptance.gh_command_prefix`` = a wrapper that hands gh a token, like ``token-broker exec``."""
+    wrapper = tmp_path / "broker" / "token-broker-exec"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n[ \"$1\" = -- ] && shift\nFAKE_BROKER_TOKEN=granted exec \"$@\"\n")
+    wrapper.chmod(0o755)
+    _configure_prefix(kanban_home, [str(wrapper), "--"])
+    return wrapper
+
+
+def test_run_read_goes_through_the_configured_broker_prefix(kanban_home, no_login, broker) -> None:
+    from hermes_cli.kanban_ci_progress import ci_run_progress
+    no_login.serve(age=20 * 60)
+    p = ci_run_progress(RUN_URL)
+    assert p.state == "not_starting", p
+    assert p.labels == LABELS
+
+
+def _sweep_warnings(caplog, conn) -> list[str]:
+    from hermes_cli import kanban_ci_progress as kcp
+    kcp._LAST_CHECK.clear()
+    caplog.clear()
+    with caplog.at_level("WARNING", logger=kcp.logger.name):
+        kcp.sweep(conn)
+    return [r.getMessage() for r in caplog.records if "progress check disabled" in r.getMessage()]
+
+
+def test_no_credential_warns_once_an_hour(kanban_home, no_login, monkeypatch, caplog) -> None:
+    from hermes_cli import kanban_ci_progress as kcp
+    no_login.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        assert _park_on_run().get("status") == "scheduled"  # fails open
+        monkeypatch.delenv("HERMES_KANBAN_TASK")
+        first = _sweep_warnings(caplog, conn)
+        assert len(first) == 1, caplog.text
+        assert "gh api exit 4" in first[0] and "no credential: CI-run progress check disabled" in first[0], first
+        assert _sweep_warnings(caplog, conn) == [], caplog.text
+        monkeypatch.setattr(kcp, "_WARNED_AT", time.monotonic() - kcp.NO_CREDENTIAL_WARN_SECONDS - 1)
+        assert len(_sweep_warnings(caplog, conn)) == 1, caplog.text
+
+
+def test_unreadable_broker_config_fails_open_without_its_text(kanban_home, no_login) -> None:
+    from hermes_cli.kanban_ci_progress import ci_run_progress
+    no_login.serve(age=20 * 60)
+    _configure_prefix(kanban_home, ["relative-broker", "--token=s3cr3t-value"])
+    p = ci_run_progress(RUN_URL)
+    assert p.state == "unknown" and p.no_credential, p
+    assert "s3cr3t" not in p.detail and "relative-broker" not in p.detail, p.detail
+
+
+def test_other_github_errors_are_not_credential_errors(kanban_home, fake_gh, monkeypatch) -> None:
+    from hermes_cli.kanban_ci_progress import ci_run_progress
+    fake_gh.serve(age=20 * 60)
+    monkeypatch.setenv("FAKE_GH_FAIL", "1")
+    p = ci_run_progress(RUN_URL)
+    assert p.state == "unknown" and not p.no_credential, p
+
+
+def test_refused_token_and_missing_gh_are_credential_errors(kanban_home, fake_gh, monkeypatch) -> None:
+    import types
+    from hermes_cli.kanban_ci_progress import ci_run_progress
+    from hermes_platform.resolver import github as ghres
+    fake_gh.serve(age=20 * 60)
+    monkeypatch.setenv("FAKE_GH_401", "1")
+    p = ci_run_progress(RUN_URL)
+    assert p.state == "unknown" and p.no_credential and "HTTP 401" in p.detail, p
+    monkeypatch.setattr(ghres, "resolve_gh", lambda path=None: types.SimpleNamespace(found=False, command=[]))
+    p = ci_run_progress(RUN_URL)
+    assert p.state == "unknown" and p.no_credential and "gh not found" in p.detail, p

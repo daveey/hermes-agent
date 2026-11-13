@@ -44,14 +44,11 @@ def _gh_argv() -> Optional[list[str]]:
     broker wrapper such as ``token-broker exec --scope user/github --``) and resolves ``gh``
     from ~/bin / ~/.local/bin as the PR-acceptance gate does: a service process has a minimal
     PATH and often no ambient ``gh`` login, and without either every lookup failed closed, so
-    merged PRs held their cards for the full 6 h hold cap. [daveey]"""
+    merged PRs held their cards for the full 6 h hold cap. Built by the shared
+    :func:`hermes_cli.kanban_gh_argv.dispatcher_gh_argv`. [daveey]"""
     try:
-        from hermes_cli.kanban_pr_acceptance import _gh_command_prefix
-        from hermes_platform.resolver.github import resolve_gh
-        resolved = resolve_gh()
-        if not resolved.found:
-            return None
-        return [*_gh_command_prefix(None), *resolved.command]
+        from hermes_cli.kanban_gh_argv import dispatcher_gh_argv
+        return dispatcher_gh_argv()
     except Exception:  # config/setup errors may carry credentials: log no text
         logger.debug("kanban: gh argv for PR state unavailable")
         return None
