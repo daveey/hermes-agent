@@ -30,8 +30,9 @@ OPERATOR_DELIVERY_TEXT_MAX = 128
 # character classes and \x/\u escapes only, valid in Python re, ECMA-262 and llama.cpp's grammar converter.
 # Cost: the schema repeats it on 15 fields (~2.3 KB of KANBAN_COMPLETE_SCHEMA, sent on every worker request), so
 # keep it short: the nonblank class folds _CONTROL, tab, newline and space into one \x00-\x20 range. A shared
-# `$defs` + `$ref` would send it once, but Gemini's legacy `parameters` translator drops `$ref` (the field loses
-# its type) and Google rejects reference indirection, so every field carries the pattern inline.
+# `$defs` + `$ref` would send it once, but only the `parametersJsonSchema` path keeps it (agent/gemini_schema's
+# prepare_gemini_tool_parameters inlines same-document `$ref` there); the legacy `parameters` translator
+# (sanitize_gemini_schema) drops `$ref`, so the field loses its type. Every field carries the pattern inline.
 _CONTROL = "\\x00-\\x08\\x0b-\\x1f"
 _SPACE = "\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"  # isspace() above \x20
 TEXT_PATTERN = f"^[^{_CONTROL}]*[^\\x00-\\x20{_SPACE}][^{_CONTROL}]*$"

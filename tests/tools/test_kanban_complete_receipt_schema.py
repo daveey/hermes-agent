@@ -164,14 +164,21 @@ def test_text_fields_advertise_the_writers_nonblank_no_control_rule():
             "^[0-9a-f]{64}$" if path == "operator_delivery.content_sha256" else hcr.TEXT_PATTERN), path
 
 
+def test_kanban_complete_schema_stays_within_its_byte_budget():
+    # KANBAN_COMPLETE_SCHEMA goes out on every worker request, and completion_receipt repeats TEXT_PATTERN on 15
+    # fields (the cost note at TEXT_PATTERN). Budget the whole serialized schema, not the pattern's length, so
+    # growth anywhere is a decision: 10878 bytes at PR #2055, small headroom on top.
+    size = len(json.dumps(KANBAN_COMPLETE_SCHEMA).encode())
+    assert size <= 11000, (
+        f"KANBAN_COMPLETE_SCHEMA is {size} bytes, over its 11000-byte budget: every worker request carries it. "
+        "Trim it, or raise the budget deliberately and say why.")
+
+
 def test_text_pattern_is_exactly_the_writers_text_rule():
     # _text reads the same constant; prove it still means "no C0 control but tab/newline, not all str.isspace()"
     # for every BMP character, alone and padded, so the advertised pattern is the writer's real rule.
     import re
 
-    # PR #2031 review nit: the schema repeats the pattern on 15 fields of every worker request (the cost note at
-    # TEXT_PATTERN); the nonblank class folds control, tab, newline and space into one range. Don't regrow it.
-    assert len(hcr.TEXT_PATTERN) <= 115, len(hcr.TEXT_PATTERN)
     rule = re.compile(hcr.TEXT_PATTERN)
     for code in range(0x10000):
         c = chr(code)
