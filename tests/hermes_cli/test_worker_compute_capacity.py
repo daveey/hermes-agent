@@ -109,6 +109,21 @@ def test_an_odd_tmpdir_never_admits_a_durable_policy_root(tmp_path, monkeypatch,
     assert got == (Path(os.path.realpath(raw)) if honoured else None)
 
 
+def test_a_relative_policy_root_is_refused_even_when_the_cwd_is_a_temp_root(tmp_path, monkeypatch):
+    """#2454 post-merge mutant C2 (t_01a1d62f12ab6265): realpath resolves a relative value against the cwd, so
+    without the isabs check a process whose cwd sits under a temp root would honour ``relative/.hermes``."""
+    import os
+    from pathlib import Path
+    from hermes_cli import worker_compute_capacity as capacity
+    cwd = tmp_path / 'cwd'
+    cwd.mkdir()
+    monkeypatch.setattr(capacity, 'SYSTEM_TEMP_ROOTS', (str(tmp_path),))
+    monkeypatch.chdir(cwd)
+    resolved = Path(os.path.realpath('relative/.hermes'))
+    assert capacity._test_policy_override({'HERMES_TEST_POLICY_ROOT': str(resolved)}) == resolved  # cwd: a temp root
+    assert capacity._test_policy_override({'HERMES_TEST_POLICY_ROOT': 'relative/.hermes'}) is None
+
+
 def test_policy_root_follows_the_override_in_a_child(tmp_path):
     """The unpatched policy_root (a fresh interpreter, no conftest) answers the shard dir, not the account."""
     import os

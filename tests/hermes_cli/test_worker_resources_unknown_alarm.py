@@ -12,6 +12,8 @@ import json
 import sqlite3
 import time
 
+import pytest
+
 from hermes_cli import worker_account_boards as inventory
 from hermes_cli import worker_compute_capacity as capacity
 from hermes_cli import worker_resource_admission as admission
@@ -102,6 +104,20 @@ def test_a_streak_past_ten_minutes_files_one_card_off_this_host(gws):
     assert f"machine:{WORKER}" not in (card["runs_on"] or "")  # the stalled host must not own its alarm
     worker.tick()
     assert len(_alarms(worker.conn)) == 1  # same incident: the open card is reused
+
+
+@pytest.mark.parametrize("mode", ["shadow", "off"])
+def test_a_non_primary_board_never_sweeps(gws, mode):
+    """#2454 post-merge mutant C4 (t_01a1d62f12ab6265): only the primary board files the host's repair card; a shadow
+    or unsynced board opening its own would break one card per host per incident."""
+    from hermes_cli import kanban_db_sync as sync
+    _hub, worker = gws
+    _streak(alarm.STALL_SECONDS + 60)
+    assert sync.board_mode(worker.conn) == "primary"
+    sync.set_mode(worker.conn, mode)
+    assert sync.board_mode(worker.conn) == mode
+    assert alarm.sweep(worker.conn) is None
+    assert not _alarms(worker.conn)
 
 
 def test_a_stale_streak_files_nothing(gws):
