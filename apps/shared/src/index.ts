@@ -100,6 +100,8 @@ export {
 export {
   APPROVAL_RESPOND_TIMEOUT_MS,
   type ConnectionState,
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  GATEWAY_CONNECT_TIMEOUT_CODE,
   type GatewayClientOptions,
   GatewayEventHub,
   isGatewayWebSocketUrl,

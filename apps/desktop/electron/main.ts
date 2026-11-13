@@ -586,7 +586,7 @@ import {
 import { ensureLoginShellPath } from './shell-path'
 import { installSidebarBootSnapshot } from './sidebar-boot-snapshot'
 import { removeStaleSingletonLock } from './singleton-lock'
-import { dispatchSlowLink, noteRemoteAnswer, noteRemoteConnect, slowLinkTracker, thinnedPoll } from './slow-link'
+import { dispatchSlowLink, noteRemoteAnswer, noteRemoteConnect, registerGatewayConnectIpc, slowLinkTracker, thinnedPoll } from './slow-link'
 import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
 import { resolveSourcePython } from './source-python'
 import { registerSpellcheckDictionaryIpc } from './spellcheck-dictionary-ipc'
@@ -9408,7 +9408,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
     `[remote-timing] ${scope} ${result.alwaysOn ? 'reuse always-on' : result.reused ? 'reuse owned' : 'spawn'} ` +
       `pid=${result.pid} ssh=${created ? 'dialed' : 'master reused'} +${Date.now() - timingStartedAt} ms`
   )
-  noteRemoteConnect(result.baseUrl, scope, timingStartedAt)
+  noteRemoteConnect(result.baseUrl, scope, timingStartedAt, () => sshConnections.get(scope)?.ssh?.isAlive())
   sshRememberLog(
     `[ssh] connection ${result.reused ? 'REUSED' : 'spawned'} dashboard: ` +
       `${result.hermesVersion || 'hermes (version unknown)'} at ${result.hermesPath || '?'}`
@@ -13825,9 +13825,8 @@ function revalidateSuspectPoolAfterResume() {
   )
 }
 
-ipcMain.handle('hermes:gateway:ws-url', async (_event, profile) => {
-  return gatewayWsUrlIpcResult(() => freshGatewayWsUrl(profile, _event.sender.id))
-})
+ipcMain.handle('hermes:gateway:ws-url', (e, p) => gatewayWsUrlIpcResult(() => freshGatewayWsUrl(p, e.sender.id)))
+registerGatewayConnectIpc(ipcMain, rememberLog) // [daveey] the chat WebSocket's connect limit follows slow-link mode
 ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
   if (typeof sessionId !== 'string' || !sessionId.trim()) {
     return { ok: false, error: 'invalid-session-id' }

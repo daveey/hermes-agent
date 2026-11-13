@@ -57,7 +57,9 @@ const REPLAY_REQUEST_TIMEOUT_MS = 10_000
 // A reconnect after sleep/wake must not hang forever in 'connecting' (which
 // keeps the composer disabled and stuck on "Starting Hermes..."). If the open
 // handshake doesn't land in this window, fail to 'error' so callers can retry.
-const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
+export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
+/** `code` of the error a dial rejects with when no WebSocket opened within its connect limit. */
+export const GATEWAY_CONNECT_TIMEOUT_CODE = 'GATEWAY_CONNECT_TIMEOUT'
 
 /** True for a `ws://` / `wss://` URL string — the only thing `JsonRpcGatewayClient.connect()` will dial. */
 export function isGatewayWebSocketUrl(value: unknown): value is string {
@@ -223,7 +225,13 @@ export class JsonRpcGatewayClient {
     return this.channel.clarifyBatch
   }
 
-  async connect(wsUrl: string): Promise<void> {
+  /**
+   * `connectTimeoutMs` overrides the constructor's limit for this one dial (Desktop stretches it while a remote
+   * backend's link is slow). A dial that hits the limit rejects with `GATEWAY_CONNECT_TIMEOUT_CODE` as `code`.
+   */
+  async connect(wsUrl: string, dial: { connectTimeoutMs?: number } = {}): Promise<void> {
+    const connectTimeoutMs = dial.connectTimeoutMs ?? this.options.connectTimeoutMs
+
     // Refuse garbage; WebSocket coerces non-strings into
     // `ws://<origin>/[object%20Object]` (#68250 stale-emit boot loop).
     const invalidUrl = () => {
@@ -356,7 +364,7 @@ export class JsonRpcGatewayClient {
       socket.addEventListener('error', onError, { once: true })
       socket.addEventListener('close', onClose, { once: true })
 
-      if (this.options.connectTimeoutMs > 0) {
+      if (connectTimeoutMs > 0) {
         timer = setTimeout(() => {
           if (settled) {
             return
@@ -378,8 +386,12 @@ export class JsonRpcGatewayClient {
             this.setState('error')
           }
 
-          reject(this.connectFailure(`no WebSocket open within ${this.options.connectTimeoutMs} ms`))
-        }, this.options.connectTimeoutMs)
+          reject(
+            Object.assign(this.connectFailure(`no WebSocket open within ${connectTimeoutMs} ms`), {
+              code: GATEWAY_CONNECT_TIMEOUT_CODE
+            })
+          )
+        }, connectTimeoutMs)
       }
     })
   }

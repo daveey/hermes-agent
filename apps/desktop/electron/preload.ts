@@ -82,6 +82,9 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   // Registry-scoped fresh WS URL: { connectionId, profile } → result shape of
   // getGatewayWsUrl, minted against that connection's backend.
   getGatewayWsUrlFor: payload => ipcRenderer.invoke('hermes:gateway:ws-url-for', payload),
+  // [daveey] The chat WebSocket's connect limit for one ws URL (slow-link mode, electron/slow-link.ts) and its outcome.
+  gatewayConnectLimit: wsUrl => ipcRenderer.sendSync('hermes:gateway:connect-limit', wsUrl),
+  noteGatewayConnect: (wsUrl, outcome) => ipcRenderer.send('hermes:gateway:connect-outcome', wsUrl, outcome),
   // { connectionId, profile, pluginId, path } → one-use local plugin socket URL, null, or { refused: 'permission' }.
   getPluginWsUrl: payload => ipcRenderer.invoke('hermes:plugin:ws-url', payload),
   // Union agent roster across every registered connection.
