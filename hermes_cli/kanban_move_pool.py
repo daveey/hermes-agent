@@ -234,12 +234,32 @@ def _clock() -> float:
     return time.monotonic()
 
 
+def _commit_less(tree: str, budget: Callable[[float], float]) -> bool:
+    """Whether a clean ``tree`` has no commits at all: HEAD is unborn and the repo has no ref. A scratch fixture
+    (``git init``, nothing committed) then holds nothing another worker would miss, though the unpushed check's
+    fail-safe reads its unborn HEAD as unpushed (11-13: it pinned t_01a1d5e41b24e463 to worker-6). Any other
+    answer, a git error included, is False: the unpushed check and its fail-safe decide. Timeouts come from
+    ``budget``, whose end raises ``GitUnchecked``."""
+    from hermes_cli.git_budget import timeout_for
+    from hermes_cli.worktree_ops import _git
+    try:
+        head = _git(["rev-parse", "--verify", "-q", "HEAD"], tree, timeout=timeout_for(budget, 10),
+                    stdin=subprocess.DEVNULL)
+        if head.returncode != 1:
+            return False
+        refs = _git(["for-each-ref", "--count=1"], tree, timeout=timeout_for(budget, 10), stdin=subprocess.DEVNULL)
+        return refs.returncode == 0 and not refs.stdout.strip()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S,
                refresh: bool = True) -> Optional[str]:
     """``dirty worktree <p>`` / ``unpushed commits in <p>`` for the first tree with state, else None. Git runs at
     most ``budget`` seconds in all (per-call timeouts shrink to the time left); a tree it could not check (budget
     spent, git timed out) reads ``unchecked worktree <p> (<cause>)``, which callers treat as state (fail safe).
-    ``refresh`` goes to :func:`pushed_on_remote` (a create probes with ``refresh=False`` and a short ``budget``)."""
+    ``refresh`` goes to :func:`pushed_on_remote` (a create probes with ``refresh=False`` and a short ``budget``).
+    A clean tree with no commits at all (:func:`_commit_less`) has no state."""
     from hermes_cli.git_budget import BUDGET_SPENT, GitUnchecked, deadline_budget
     from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     timeouts = deadline_budget(budget, clock=lambda: _clock())
@@ -249,6 +269,8 @@ def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S,
         try:
             if _worktree_is_dirty(tree, tree, timeout=10, budget=timeouts):
                 return f"{_DIRTY}{tree}"
+            if _commit_less(tree, timeouts):
+                continue
             if (_worktree_has_unpushed_commits(tree, timeout=10, budget=timeouts)
                     and not pushed_on_remote(tree, budget=timeouts, refresh=refresh)):
                 return f"{_UNPUSHED}{tree}"
