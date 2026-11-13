@@ -24,6 +24,7 @@ import types
 
 import pytest
 
+from hermes_cli import process_identity
 from tests.tui_gateway import test_shutdown_job_receipts as sjr
 from tools import process_registry as pr_mod
 from tools import process_registry_obligations as obligations
@@ -31,9 +32,10 @@ from tools.process_registry import ProcessRegistry, ProcessSession
 from tools.process_registry_obligations import OBLIGATION_KEY
 from tools.process_registry_readopt import recover_tui_orphaned_processes
 from tui_gateway import server
-from tui_gateway.turn_marker import read_turn_marker
+from tui_gateway.turn_marker import read_turn_marker, record_turn_start
 
 STARTED = 1_794_505_311.25
+_REAL_IS_DESKTOP_OWNED = process_identity.is_desktop_owned_backend
 OUTPUT = "build ok\nCI passed: release verified (RESULT_proc_desk0001)\n"
 _LiveProc, _resume_text, _session = sjr._LiveProc, sjr._resume_text, sjr._session
 _slow_notice_turn = sjr._slow_notice_turn
@@ -303,3 +305,147 @@ def test_orderly_exit_journal_takes_custody_and_delivers_once(home, registry, ba
     assert text.count("proc_desk0001") >= 1
     if when == "finished":
         assert text.count("CI passed: release verified") == 1
+
+
+def test_managed_worker_of_a_desktop_chat_owes_its_finished_notice_to_the_desktop_keeper(home, registry, backend,
+                                                                                          monkeypatch):
+    """Intended: a single-profile managed worker inherits the Desktop backend's env byte-for-byte (``_worker_env``
+    returns None), so ``is_desktop_owned_backend()`` holds inside it too. The worker is a per-turn interpreter
+    whose completion queue nobody reads after its turn, so a Desktop chat's notify job that finishes there leaves
+    an owner:"tui" obligation stamped with the WORKER's pid. The Desktop keeper leaves it while the worker lives
+    and re-arms it once the worker is gone: the chat gets the notice exactly once."""
+    from agent import runtime_session_store
+    from gateway.session_managed_worker import _worker_env
+    from tools.process_registry_readopt import _checkpoint_keeper_tick
+
+    # The worker's real identity check, not the fixture's stub: inherited Desktop flag + per-spawn token.
+    monkeypatch.setattr(process_identity, "is_desktop_owned_backend", _REAL_IS_DESKTOP_OWNED)
+    monkeypatch.setenv("HERMES_DESKTOP", "1")
+    monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "desktop-spawn-token")
+    monkeypatch.setattr(runtime_session_store, "_worker_process", True)
+    assert _worker_env(types.SimpleNamespace(profile_id=str(home))) is None, "single-profile workers inherit env"
+    assert process_identity.is_desktop_owned_backend() is True
+
+    worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        stamp = {"writer_pid": worker.pid, "writer_start_time": ProcessRegistry._safe_host_start_time(worker.pid)}
+        monkeypatch.setattr(obligations, "_writer", lambda: dict(stamp))
+        _finish(registry, _job(registry), 3)  # a bare (Desktop) session key: owner tui
+        owed = _receipt(home)[OBLIGATION_KEY]
+        assert (owed["owner"], owed["writer_pid"]) == ("tui", worker.pid)
+
+        # The Desktop backend's keeper ticks while the worker still runs: the worker holds it, nothing re-arms.
+        monkeypatch.setattr(runtime_session_store, "_worker_process", False)
+        desktop, armed, wakes = _next_backend(monkeypatch)
+        _checkpoint_keeper_tick(desktop)
+        assert (armed, wakes, desktop.has_parked_events()) == (0, [], False)
+        assert _receipt(home)[OBLIGATION_KEY]["writer_pid"] == worker.pid
+    finally:
+        worker.kill()
+        worker.wait()
+
+    # The worker exited (its in-memory completion went with it): the keeper's next tick re-arms it, once.
+    threads, wakes = [], []
+    desktop.on_unknown_exit = lambda evt: threads.append(server._readopted_exit_deliver(evt, registry=desktop))
+    monkeypatch.setattr(server, "_wake_chat_for_readopted_exit", wakes.append)
+    _checkpoint_keeper_tick(desktop)
+    _checkpoint_keeper_tick(desktop)  # this backend now holds it: a second tick does not re-arm it again
+    for thread in threads:
+        if thread is not None:
+            thread.join(5)
+    assert wakes == ["session-key"] and desktop.has_parked_events()
+
+    session = backend.sessions["sid"] = _session(home, _notif_held=[])
+    turn = _slow_notice_turn(monkeypatch, block_in=None)
+    assert _open_chat_and_poll(desktop, session) == 1
+    (text,) = turn.texts
+    assert text.count("CI passed: release verified (RESULT_proc_desk0001)") == 1
+    assert OBLIGATION_KEY not in _receipt(home)
+
+
+@pytest.mark.parametrize("exit_kind", ["orderly", "unclean"])
+def test_update_pause_kill_is_reported_once_from_the_marker(home, registry, backend, monkeypatch, exit_kind):
+    """A core-update pause kills the chat's notify job with ``consume_output=False`` and journals the kill into
+    the marker's ``killed_jobs``. Whether the backend then exits in order (exit journal) or dies (no journal),
+    the next backend reports the kill once, from the marker, and never re-arms the receipt's obligation as a
+    second notice beside it."""
+    from hermes_cli import admission_fence as af
+    from tui_gateway import update_pause as up
+    from tui_gateway.exit_job_receipts import journal_background_jobs_before_exit
+
+    _as_dead_writer(monkeypatch)
+    job = _job(registry)
+    session = _pause(home, backend)
+    assert job.exited and job.termination_source == up.PAUSE_REASON
+    assert [j["session_id"] for j in read_turn_marker(home, "session-key")["killed_jobs"]] == ["proc_desk0001"]
+
+    if exit_kind == "orderly":
+        journal_background_jobs_before_exit()
+        server._shutdown_sessions()
+    registry.completion_queue.queue.clear()  # the next backend has no in-memory queue
+    af.clear_pause_request(home)
+    af.clear_hold(home)
+    assert session.get("_update_pause_marker_key") == "session-key"
+
+    reg, armed, wakes = _next_backend(monkeypatch)
+    assert (armed, wakes, reg.has_parked_events()) == (0, [], False), "the killed job's notice was re-armed"
+    assert OBLIGATION_KEY not in _receipt(home), "the marker carries the notice: the receipt must not owe it too"
+    text = _paused_resume_text(monkeypatch, home)
+    assert text.count("Background process proc_desk0001") == 1 and up.UPDATE_KILL_REASON in text
+    reg, armed, wakes = _next_backend(monkeypatch)
+    assert (armed, wakes, reg.has_parked_events()) == (0, [], False)
+
+
+def _pause(home, backend, stands=True):
+    """A chat's turn reaches a step boundary while a core update asks for the pause."""
+    import time
+
+    from hermes_cli import admission_fence as af
+    from tui_gateway import update_pause as up
+    record_turn_start(home, "session-key", "ship the release")
+    af.set_hold(home)
+    af.request_pause(home, expires_at=time.time() + 120)
+    session = backend.sessions["sid"] = _session(home, _notif_held=[])
+    assert up.boundary_pause_hook(session, "session-key")() == (up.PAUSE_REASON if stands else None)
+    return session
+
+
+@pytest.mark.parametrize("race", ["exited_before_kill", "user_stop_won"])
+def test_update_pause_keeps_the_obligation_the_marker_does_not_carry(home, registry, backend, monkeypatch, race):
+    """Controls. A job that finished on its own just before the pause's kill (``already_exited``) is in the marker
+    only as an uncertain outcome, without its real output. A pause a user Stop beat after the kills does not
+    stand: the turn goes on and its queued completion is delivered the normal way. Both keep the owed notice."""
+    from tui_gateway import update_pause as up
+    _as_dead_writer(monkeypatch)
+    job = _job(registry)
+    if race == "exited_before_kill":
+        real_kill = registry.kill_process
+
+        def exits_first(sid, **kw):
+            _finish(registry, job, 0)
+            return real_kill(sid, **kw)
+
+        monkeypatch.setattr(registry, "kill_process", exits_first)
+        _pause(home, backend)
+        (receipt,) = read_turn_marker(home, "session-key")["killed_jobs"]
+        assert receipt["kill_state"] == "already_exited"
+    else:
+        checks = iter([False, True])  # no Stop before the kills; the Stop is seen under the lock after them
+        monkeypatch.setattr(up, "user_stop_pending", lambda session: next(checks))
+        _pause(home, backend, stands=False)
+        assert job.exited and job.termination_source == up.PAUSE_REASON
+    assert _receipt(home)[OBLIGATION_KEY]["owner"] == "tui", "the marker does not carry this notice"
+
+
+def _paused_resume_text(monkeypatch, home) -> str:
+    """The next backend's auto-continue of the paused turn (``_resume_text`` with the paused-turn slot call)."""
+    submitted = []
+    monkeypatch.setattr(server.threading, "Thread", sjr._InlineThread)
+    monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, session: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda session, rid, timeout=30.0: None)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda sid, session, **kw: None)
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda rid, sid, session, text, **kw: submitted.append(text))
+    assert server._maybe_schedule_auto_continue("sid", _session(home), "session-key") is not None
+    (text,) = submitted
+    return text

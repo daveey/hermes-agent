@@ -107,8 +107,10 @@ def owes_gateway_delivery(session) -> bool:
 
 
 def owes_tui_delivery(session) -> bool:
-    """Whether a finished session's completion is owed to a Desktop chat this Desktop backend hosts (a CLI or
-    worker process delivers in-process and never leaves one behind)."""
+    """Whether a finished session's completion is owed to a Desktop chat this Desktop backend hosts. A CLI
+    delivers in-process and never leaves one behind. A managed worker of the Desktop backend does, on purpose
+    (it inherits the Desktop identity, and its per-turn completion queue dies with it): the Desktop keeper
+    re-arms that obligation once the worker is gone."""
     from tools.process_registry_readopt import OWNER_TUI, checkpoint_entry_owner
     if not session.notify_on_complete or checkpoint_entry_owner(
             {"session_key": session.session_key, "watcher_platform": session.watcher_platform}) != OWNER_TUI:

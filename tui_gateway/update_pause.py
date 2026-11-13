@@ -324,6 +324,10 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
             logger.info("core-update pause: session %s was stopped by the user; not pausing it", marker_key)
             take_back()
             return None
+        # Custody transfer, as at backend exit: the marker now reports each kill, so the killed receipt's owed
+        # notice must not be re-armed beside it after an unclean death of this backend.
+        from tui_gateway.completion_obligation import settle_journaled
+        settle_journaled(job["session_id"] for job in killed if job.get("kill_state") == "killed")
         logger.info("core-update pause: session %s paused at a step boundary for a Hermes update", marker_key)
         return PAUSE_REASON
 

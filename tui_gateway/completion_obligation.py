@@ -10,7 +10,13 @@ This backend removes the block once the notice no longer needs it:
 - intended suppression: the agent consumed the output (wait/log/kill; the registry settles those itself),
   background notifications are ``off`` for the chat, or the event formats to no text;
 - custody transfer: the orderly-exit journal wrote it into the session's turn marker
-  (``exit_job_receipts.journal_session_jobs``), so the next backend reports it from there, not twice.
+  (``exit_job_receipts.journal_session_jobs``), or a core-update pause that stood killed the job and journaled
+  the kill there (``update_pause.boundary_pause_hook``), so the next backend reports it from there, not twice.
+
+A managed worker serving a Desktop chat's turn counts as a Desktop-owned backend too (a single-profile worker
+inherits the backend's env, ``session_managed_worker._worker_env``). That is intended: the worker is a per-turn
+interpreter whose completion queue nobody reads once its turn ends, so the obligation it stamps (its own pid)
+is the notice's only custody; the Desktop keeper re-arms it once that worker is gone.
 
 A tui obligation whose chat is never reopened (deleted or archived) is re-armed and wakes that chat on each
 Desktop start until ``OBLIGATION_MAX_RECOVERIES`` / ``OBLIGATION_MAX_AGE_SECONDS`` drops it (bounded by design).
@@ -51,5 +57,5 @@ def settle_suppressed(evt: dict, how: str) -> bool:
 
 
 def settle_journaled(pids: Iterable) -> None:
-    """The orderly-exit journal wrote these jobs into the turn marker: the marker now holds the notice."""
-    _settle(pids, "journaled into the turn marker at backend exit")
+    """The exit journal or an update pause wrote these jobs into the turn marker: the marker holds the notice."""
+    _settle(pids, "journaled into the turn marker")
