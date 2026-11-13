@@ -458,6 +458,8 @@ def pause_note(prompt: str, killed_jobs: list | None = None) -> str:
     from tui_gateway.session_history import _AUTO_CONTINUE_NOTE_PREFIX
     note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — it was paused at a step boundary for a Hermes update. Every "
             "tool result above is complete; continue with the next step and don't redo finished steps. "
+            "Tool output above may be stale: re-read any PR, CI or card state before reporting it; the update "
+            "may itself be one of those changes. "
             f"The paused request was:]\n\n{prompt}")
     report = killed_jobs_report(killed_jobs, "Background jobs stopped for this Hermes update:")
     return f"{note}\n\n{report}" if report else note

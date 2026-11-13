@@ -370,3 +370,10 @@ def test_marker_writer_is_this_process(home):
     import json
     entry = json.loads((home / "desktop" / "interrupted_turns.json").read_text())["session-key"]
     assert entry["writer_pid"] == os.getpid() and entry["paused_at"] > 0
+
+
+def test_pause_note_warns_tool_output_may_be_stale():
+    # A PR can merge (or CI finish, or a card move) during the pause; a pre-pause read must not be reported as current.
+    text = up.pause_note("x")
+    assert "may be stale" in text
+    assert "re-read any PR, CI or card state" in text
