@@ -103,6 +103,43 @@ def test_a_pre_uid_completion_replayed_from_a_worker_binds_its_runs_receipt(boar
     assert verified(hub, tid) == (False, False)
 
 
+def test_a_pre_uid_replayed_id_naming_another_runs_receipt_still_binds_its_own_run(boards):
+    """The worker's integer can, by chance, name a receipt of this card and gateway written in another run."""
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    event_id, _payload = payload_of(hub, tid)
+    # An earlier replayed event of this card (same origin gateway), relabelled as a receipt of another run.
+    other = hub.execute("SELECT id FROM task_events WHERE task_id=? AND kind='created'", (tid,)).fetchone()["id"]
+    other_run = hub.execute("SELECT id FROM task_runs WHERE task_id != ? ORDER BY id LIMIT 1", (tid,)).fetchone()["id"]
+    assert other_run != hub.execute("SELECT run_id FROM task_events WHERE id=?", (event_id,)).fetchone()["run_id"]
+    with kb.write_txn(hub):
+        hub.execute("UPDATE task_events SET kind='pr_acceptance', run_id=?, payload=? WHERE id=?",
+                    (other_run, json.dumps({"ok": False}), other))
+    assert hub.execute("SELECT origin_gateway FROM task_events WHERE id=?", (other,)).fetchone()[0] == "worker-3"
+    rewrite(hub, event_id, lambda p: (p.pop("pr_acceptance_event_uid", None), p.update(pr_acceptance_event_id=other)))
+    assert verified(hub, tid) == (True, True)
+
+
+def test_a_goal_mode_completion_replayed_from_a_worker_is_verified_there(boards):
+    """The ``goal_verified`` receipt binds across the replay like ``pr_acceptance``, by uid and pre-uid alike."""
+    from hermes_cli.kanban_goal_receipt import GoalVerification
+    worker, hub = boards
+    tid = kb.create_task(worker, title="Build", assignee="dev", goal_mode=True, completion_contract="local-only")
+    run = kb.claim_task(worker, tid).current_run_id
+    proof = GoalVerification.for_handoff(kb.get_task(worker, tid), "Tested")
+    assert kb.complete_task(worker, tid, summary="Tested", expected_run_id=run, goal_verification=proof)
+    assert verified(worker, tid) == (True, True)
+    replay(worker, hub)
+    event_id, payload = payload_of(hub, tid)
+    receipt = hub.execute("SELECT id, uid FROM task_events WHERE task_id=? AND kind='goal_verified'", (tid,)).fetchone()
+    assert payload["goal_verified_event_id"] != receipt["id"]
+    assert payload["goal_verified_event_uid"] == receipt["uid"]
+    assert verified(hub, tid) == (True, True)
+    rewrite(hub, event_id, lambda p: p.pop("goal_verified_event_uid"))
+    assert verified(hub, tid) == (True, True)
+
+
 def test_a_completion_that_names_no_receipt_never_borrows_one(boards):
     worker, hub = boards
     tid = completed_on_worker(worker)

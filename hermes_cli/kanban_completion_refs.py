@@ -10,7 +10,8 @@ chat listed the done card as ``unknown`` for hours (hub t_01a1d41478234144 et al
 
 The completion now also records each receipt's stable ``uid`` (``*_event_uid``), which the feed carries
 unchanged; when present it decides, with no integer fallback. A completion written before that, replayed from
-another gateway (``origin_gateway`` set), whose integer does not name the same card's receipt here, binds the
+another gateway (``origin_gateway`` set), whose integer does not name the same card's receipt here from the same
+gateway and run (on the hub that integer is the worker's, so it can name another run's receipt), binds the
 latest receipt of that kind the same gateway wrote in the same run before the completion: on its own board that
 run's latest receipt is the one ``complete_task`` bound (it writes the receipt and the completion in one
 transaction). A completion that names no receipt never borrows one.
@@ -131,7 +132,8 @@ def pick(rows: Iterable[dict[str, Any]], *, task_id: str, kind: str, event_id: A
         return None
     origin = None if legacy else imported_from
     hit = next((r for r in mine if r["id"] == event_id), None)
-    if hit is not None and (imported_from is None or hit["origin_gateway"] == origin):
+    if hit is not None and (imported_from is None or (hit["origin_gateway"] == origin
+                                                      and (run_id is None or hit["run_id"] == run_id))):
         return hit["payload"], hit["run_id"]
     if imported_from is None or run_id is None:
         return None
