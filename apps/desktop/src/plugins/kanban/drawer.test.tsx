@@ -345,6 +345,38 @@ describe('task modal dialog', () => {
     await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground', undefined, undefined]))
   })
 
+  it('makes the reads of a fetch that replaced a failed one during its retry delay polls', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 300 } } })
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    const taskQuery = () => client.getQueryCache().find({ exact: false, queryKey: ['kanban', 'task'] })
+
+    // A first open caches the task, so the re-open's query has data.
+    const first = openDrawer()
+    await screen.findByText('Keep this description readable.')
+    first.unmount()
+
+    failAlways = new Set(['/tasks/t_example'])
+    openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground']))
+    // Its read failed: the fetch waits out its retry delay.
+    await waitFor(() => expect(taskQuery()?.state.fetchFailureCount).toBe(1))
+
+    // A socket invalidation in the retry delay cancels that fetch and starts a new one (cancelRefetch). The new fetch's
+    // reads (first and retry) are polls: its first read must not pass for a retry of the cancelled fetch.
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['kanban'] })
+    })
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground', undefined, undefined]), {
+      timeout: 3_000
+    })
+  })
+
   it('sends a foreground read when a task is re-opened while its cache is still fresh', async () => {
     detail = { ...legacyDetail, attachments: [] }
     // The shared client's staleTime (60 s): without a mount refetch a warm re-open sends nothing, and its first

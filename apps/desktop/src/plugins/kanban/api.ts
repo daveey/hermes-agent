@@ -901,7 +901,13 @@ export function userOpenReads(): <T>(
 export type ReadFetchContext = { client: typeof queryClient; queryKey: readonly unknown[] }
 
 /** [daveey] Whether React Query is calling a query function to retry a failed read of the same fetch: it counts the
- *  fetch's failures before each retry and resets the count when a new fetch starts. */
+ *  fetch's failures before each retry and resets the count when a new fetch starts. That leans on query-core reducer
+ *  details it does not document ('failed' sets `fetchFailureCount`, 'fetch' and 'success' reset it), including a fetch
+ *  that `cancelRefetch` (a socket invalidation) starts in a failed fetch's retry delay: query-core 5.104 still
+ *  dispatches 'fetch' there, because the restart's undefined meta differs from the running fetch's `fetchMeta` (null).
+ *  drawer.test.tsx pins both; after a React Query bump, check "makes the refetches of a kind whose reads all fail polls
+ *  once its first fetch spent its retries" and "makes the reads of a fetch that replaced a failed one during its retry
+ *  delay polls". */
 export const retryingFetch = ({ client, queryKey }: ReadFetchContext) =>
   (client.getQueryState(queryKey)?.fetchFailureCount ?? 0) > 0
 
