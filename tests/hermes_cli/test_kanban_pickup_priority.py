@@ -189,3 +189,40 @@ def test_malformed_replica_priority_preserves_local_order(graph):
     remote.execute("UPDATE tasks SET priority='invalid' WHERE id='waiter'")
     remote.commit()
     assert _order(local) == ["local", "foreign"]
+
+
+def test_candidate_finished_between_reads_keeps_its_own_priority(graph, caplog):
+    """A pickup candidate read from one replica snapshot can be done in the next.
+
+    The pickup path lists candidates on its own replica connection, then the
+    ranker opens a fresh one; a card finished in between must still rank by
+    the row it was listed with instead of aborting the whole ordering.
+    """
+    _, remote = graph
+    remote.executemany("INSERT INTO tasks VALUES (?, ?, 'ready', ?)", [("t_a", 5, 10), ("t_b", 0, 11)])
+    remote.commit()
+    rows = remote.execute("SELECT * FROM tasks WHERE id IN ('t_a', 't_b') ORDER BY priority ASC").fetchall()
+    remote.execute("UPDATE tasks SET status='done' WHERE id='t_a'")
+    remote.commit()
+    local = sqlite3.connect(":memory:")
+    local.row_factory = sqlite3.Row
+    local.executescript("CREATE TABLE tasks (id TEXT PRIMARY KEY, priority INTEGER, status TEXT, created_at INTEGER);"
+                        "CREATE TABLE task_links (parent_id TEXT, child_id TEXT);")
+    with caplog.at_level("WARNING", logger=priority.__name__):
+        ordered = priority.order_with_remote_waiters(local, rows)
+    assert [r["id"] for r in ordered] == ["t_a", "t_b"]
+    assert "could not read replica priority graph" not in caplog.text
+    local.close()
+
+
+def test_vanished_candidate_without_rank_columns_ranks_as_zero(graph, caplog):
+    """A listed row lacking priority/created_at ranks as 0 rather than aborting the ordering."""
+    local, remote = graph
+    remote.execute("INSERT INTO tasks VALUES ('gone', 7, 'done', 5)")
+    remote.commit()
+    rows = local.execute("SELECT id FROM tasks WHERE id='local'").fetchall()
+    rows += remote.execute("SELECT id FROM tasks WHERE id='gone'").fetchall()
+    with caplog.at_level("WARNING", logger=priority.__name__):
+        ordered = priority.order_with_remote_waiters(local, rows)
+    assert [r["id"] for r in ordered] == ["local", "gone"]
+    assert "could not read replica priority graph" not in caplog.text

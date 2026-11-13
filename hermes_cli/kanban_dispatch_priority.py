@@ -22,6 +22,14 @@ def order_with_remote_waiters(conn: sqlite3.Connection, rows: list[sqlite3.Row])
         return rows
 
 
+def _field(row, key: str):
+    """``row[key] or 0``, and 0 when the row has no such column."""
+    try:
+        return row[key] or 0
+    except (IndexError, KeyError):
+        return 0
+
+
 def _order_with_remote_waiters(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_worker_node as wn
@@ -51,8 +59,12 @@ def _order_with_remote_waiters(conn: sqlite3.Connection, rows: list[sqlite3.Row]
 
     def rank(row):
         tid = row["id"]
-        task = tasks[tid]
-        priority = task["priority"] or 0
+        # A candidate listed from an earlier replica snapshot may be done in
+        # this one (filtered out of ``tasks``): rank it by its own row. Not
+        # seeded into ``tasks``, whose rows must carry ``status`` for the
+        # child-graph filter above. [daveey]
+        task = tasks.get(tid, row)
+        priority = _field(task, "priority")
         pending = list(children[tid])
         seen = {tid}
         while pending:
@@ -62,6 +74,6 @@ def _order_with_remote_waiters(conn: sqlite3.Connection, rows: list[sqlite3.Row]
             seen.add(child)
             priority = max(priority, tasks[child]["priority"] or 0)
             pending.extend(children[child] - seen)
-        return -min(PRIORITY_CAP, priority), -bool(children[tid]), task["created_at"]
+        return -min(PRIORITY_CAP, priority), -bool(children[tid]), _field(task, "created_at")
 
     return sorted(rows, key=rank)
