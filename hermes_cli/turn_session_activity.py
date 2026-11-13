@@ -9,11 +9,15 @@ outcome (red for a decision) or green while the agent was still working in it.
 Session-list endpoints now stamp ``turn_live: true`` on each row whose compression lineage holds a
 live durable turn lease (state.db ``session_turn_leases``, held from admission to flush of every turn
 by any surface, keyed by the lineage root). A lease whose holder pid is provably dead does not count.
+A turn a core update paused at a step boundary (gateway update checkpoint, or a Desktop/TUI
+``core_update_pause`` turn marker) counts too while it can still auto-continue: it holds no lease
+while it waits, and the row painted its stored red decision for the length of every update.
 Cached for a couple of seconds because the sidebar polls.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -84,6 +88,63 @@ def _holder_dead(holder: str) -> bool:
     return False
 
 
+# [daveey] A turn a Hermes core update paused at a step boundary holds no lease while it waits, yet it
+# continues automatically: the row must keep reading as working, not paint its stored outcome (a red
+# decision) for the minute or two the update takes. The freshness bounds match the auto-continue
+# defaults (agent.gateway_auto_continue_freshness 1 h; desktop.auto_continue 15 min, 2 attempts) so a
+# pause nobody will continue stops counting.
+_GATEWAY_CHECKPOINT_PREFIX = "gateway.update_checkpoint.v1."
+_GATEWAY_PAUSE_FRESH_S = 3600.0
+_TUI_PAUSE_REASON = "core_update_pause"
+_TUI_PAUSE_FRESH_S = 15 * 60.0
+_TUI_PAUSE_MAX_ATTEMPTS = 2
+
+
+def _update_paused_gateway_turns(conn: sqlite3.Connection, now: float) -> set[str]:
+    """Sessions whose started gateway admission is parked on an update checkpoint
+    (``hermes_state_update_pause.checkpoint_session_input``), dated by the checkpointed last message."""
+    try:
+        rows = conn.execute(
+            "SELECT a.target_session_id, m.value FROM session_admissions a JOIN state_meta m"
+            " ON m.key = ? || a.admission_id WHERE a.status = 'started'",
+            (_GATEWAY_CHECKPOINT_PREFIX,)).fetchall()
+    except sqlite3.Error:  # no admissions table (older store) or a busy one
+        return set()
+    out: set[str] = set()
+    for sid, value in rows:
+        try:
+            receipt = json.loads(value)
+            stamp = conn.execute("SELECT timestamp FROM messages WHERE id = ?",
+                                 (int(receipt["max_message_id"]),)).fetchone()
+        except (ValueError, TypeError, KeyError, sqlite3.Error):
+            continue
+        if sid and stamp and stamp[0] is not None and now - float(stamp[0]) <= _GATEWAY_PAUSE_FRESH_S:
+            out.add(str(sid))
+    return out
+
+
+def _update_paused_tui_turns(home: Path, now: float) -> set[str]:
+    """Sessions whose Desktop/TUI turn marker (``tui_gateway.turn_marker``) records a core-update pause
+    that may still auto-continue."""
+    try:
+        data = json.loads((home / "desktop" / "interrupted_turns.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return set()
+    out: set[str] = set()
+    for key, entry in (data.items() if isinstance(data, dict) else ()):
+        if not (key and isinstance(entry, dict) and entry.get("reason") == _TUI_PAUSE_REASON
+                and entry.get("auto_continue", True)):
+            continue
+        try:
+            since = max(float(entry.get(k) or 0) for k in ("started_at", "parked_at", "paused_at"))
+            attempts = int(entry.get("attempts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if now - since <= _TUI_PAUSE_FRESH_S and attempts < _TUI_PAUSE_MAX_ATTEMPTS:
+            out.add(str(key))
+    return out
+
+
 def _collect(now: float) -> frozenset[str]:
     global _leases
     live: set[str] = set()
@@ -95,14 +156,17 @@ def _collect(now: float) -> frozenset[str]:
             _log.debug("turn leases unreadable in %s", path, exc_info=True)
             continue
         try:
-            rows = conn.execute(
-                "SELECT conversation_id, holder, acquired_at, expires_at FROM session_turn_leases WHERE expires_at > ?",
-                (now,)
-            ).fetchall()
-        except sqlite3.Error:  # no lease table yet (nothing ever ran a turn there) or a busy/odd store
-            rows = []
+            try:
+                rows = conn.execute(
+                    "SELECT conversation_id, holder, acquired_at, expires_at FROM session_turn_leases"
+                    " WHERE expires_at > ?", (now,)
+                ).fetchall()
+            except sqlite3.Error:  # no lease table yet (nothing ever ran a turn there) or a busy/odd store
+                rows = []
+            live.update(_update_paused_gateway_turns(conn, now))
         finally:
             conn.close()
+        live.update(_update_paused_tui_turns(path.parent, now))
         for cid, holder, acquired_at, expires_at in rows:
             if cid and not _holder_dead(str(holder or "")):
                 live.add(cid)
