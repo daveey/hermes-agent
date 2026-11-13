@@ -398,3 +398,36 @@ def test_refused_scope_bind_does_not_escape_the_wake_check_tick(kanban_home, fak
         assert isinstance(out, dict), out
         assert kb.get_task(conn, tid).status == "scheduled"
         assert any("ci run progress" in r.getMessage() and r.exc_info for r in caplog.records), caplog.text
+
+
+def test_a_raising_pool_callable_does_not_escape_the_wake_check_tick(kanban_home, monkeypatch, caplog) -> None:
+    """PR #2086 review: ``run_due_wake_checks(wait=True)`` caught only timeouts around ``fut.result``, so it
+    relied on every pool callable never raising. Any exception a pool future carries is logged, not raised."""
+    from hermes_cli import kanban_ci_progress as kcp
+
+    def boom() -> list[str]:
+        raise RuntimeError("pool callable blew up")
+
+    monkeypatch.setattr(kcp, "submit_sweep", lambda conn, pool: pool.submit(boom))
+    with kbc.connect_closing() as conn, caplog.at_level("WARNING", logger=kwc.logger.name):
+        out = kwc.run_due_wake_checks(conn, wait=True)
+    assert out == {"submitted": [], "in_flight": 0}, out
+    assert any("pool callable blew up" in str(r.exc_info[1]) for r in caplog.records if r.exc_info), caplog.text
+
+
+def test_close_failure_after_a_sweep_keeps_the_result_and_says_close(kanban_home, monkeypatch, caplog) -> None:
+    """PR #2086 review: ``_sweep_db``'s guard also covered ``conn.close()``, so a close failure after a
+    successful sweep was logged as "sweep ... failed" and dropped the woken ids."""
+    from hermes_cli import kanban_ci_progress as kcp
+
+    class Conn:
+        def close(self) -> None:
+            raise sqlite3.OperationalError("disk I/O error on close")
+
+    monkeypatch.setattr(kbc, "connect", lambda *_a, **_k: Conn())
+    monkeypatch.setattr(kcp, "sweep", lambda conn: ["t_woken"])
+    with caplog.at_level("WARNING", logger=kcp.logger.name):
+        assert kcp._sweep_db(str(kanban_home / "kanban.db"), str(kanban_home)) == ["t_woken"]
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("closing" in m and "after the sweep" in m for m in msgs), msgs
+    assert not any("failed" in m and "sweep of" in m for m in msgs), msgs

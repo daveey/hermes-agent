@@ -292,8 +292,9 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None) -> list[st
 def _sweep_db(db_path: str, home: str) -> list[str]:
     """:func:`sweep` on a pool thread with the dispatching ``home`` bound: a pool thread does not inherit the
     caller's context-local home, so ``dispatcher_gh_argv`` would read the launch home's gh_command_prefix.
-    Never raises: a refused bind (``ScopeSwitchRefused``) or connect error would land in the future, and the
-    wake-check tick's ``fut.result`` loop only catches timeouts, so it would escape the tick."""
+    Never raises: a refused bind (``ScopeSwitchRefused``) or connect error is logged here, with this sweep's
+    wording, rather than as a generic pool failure in the wake-check tick. A close failure after a finished sweep
+    is logged as a close failure and keeps the sweep's result."""
     from pathlib import Path
 
     from agent.runtime_scope import bind_profile_scope
@@ -304,7 +305,11 @@ def _sweep_db(db_path: str, home: str) -> list[str]:
             try:
                 return sweep(conn)
             finally:
-                conn.close()
+                try:
+                    conn.close()
+                except Exception:  # keep the sweep's result: only the close failed
+                    logger.warning("kanban ci run progress: closing %s for home %s failed after the sweep",
+                                   db_path, home, exc_info=True)
     except Exception:
         logger.warning("kanban ci run progress: sweep of %s for home %s failed", db_path, home, exc_info=True)
         return []

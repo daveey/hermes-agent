@@ -1042,6 +1042,8 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                 fut.result(timeout=max(0.0, deadline - time.monotonic()))
             except (FutureTimeout, CancelledError):
                 logger.debug("kanban wake check still running after the wait budget")
+            except Exception:  # [daveey] any pool callable's exception, not only those that never raise
+                logger.warning("kanban wake checks: a pool task raised", exc_info=True)
     return {"submitted": submitted, "in_flight": len(in_flight())}
 
 
