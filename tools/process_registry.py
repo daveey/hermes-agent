@@ -1061,10 +1061,11 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
 
     def _uncollected_gone(self, session: Optional[ProcessSession]) -> bool:
         """True when a detached entry was closed without a collected exit status
-        and the PID is no longer alive. List/poll must not report that as exited."""
+        and the PID is no longer alive. List/poll must not report that as exited. A log-backed
+        adoption's reader settles its own exit (status unknown included), so it stays visible."""
         return bool(
             session is not None and session.exited and session.exit_code is None
-            and session.detached and session.pid_scope == "host"
+            and session.detached and session.pid_scope == "host" and not session.output_log
             and not self._is_host_pid_alive(session.pid))
 
     @staticmethod
@@ -2605,17 +2606,8 @@ def _redact_process_result(result: dict) -> dict:
 
 
 def _list_processes(task_id) -> dict:
-    # Also surface session-scoped background processes (e.g. a forgotten preview
-    # server): they share the gateway session_key and can block session reset.
-    session_key = ""
-    with suppress(Exception):
-        # See #29177.
-        from tools.approval_context import get_current_session_key
-        session_key = get_current_session_key(default="") or ""
-    return {"processes": [
-        _redact_process_result(p)
-        for p in process_registry.list_sessions(
-            task_id=task_id, session_key=session_key or None, include_retained=True)]}
+    from tools.process_registry_listing import list_processes
+    return list_processes(task_id)
 
 
 # action -> (handler(session_id, args) -> dict, redact output?). Output-bearing
@@ -2648,6 +2640,10 @@ def _handle_process(args, **kw):
         handler, redact = _SESSION_ACTIONS[action]
         from tools.process_registry_wait_policy import apply_wait_poll_policy, with_masked_success_hint
         result = with_masked_success_hint(apply_wait_poll_policy(action, session_id, handler(session_id, args)))
+        if result.get("status") == "not_found":
+            # A live job another Hermes process re-adopted after a restart (process_registry_foreign).
+            from tools.process_registry_foreign import foreign_action
+            result = foreign_action(process_registry, action, session_id, args) or result
         return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
     return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff")
 

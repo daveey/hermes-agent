@@ -80,11 +80,18 @@ def _exit_path(log) -> Path:
 
 
 def record_exit_command(log: Path, command: str) -> str:
-    """Prefix ``command`` so the shell writes its exit status beside the log: an interpreter
-    that adopts the process after the spawner exited has no Popen to wait on."""
+    """Wrap ``command`` so a shell writes its exit status beside the log: an interpreter that
+    adopts the process after the spawner exited has no Popen to wait on.
+
+    The command runs in a ``( ... )`` child of the recording shell. An EXIT trap in the command's
+    own shell was removable by the command: ``exec`` replaced that shell and a user ``trap ... EXIT``
+    overwrote it (both then settled as lost, -1), and a SIGTERM to the job ran it with ``$?`` 0
+    (a false success). A shell killed by a signal records nothing, so the adopter reports the
+    status as unknown. [daveey]"""
     import shlex
     target = shlex.quote(_exit_path(log).as_posix())
-    return f"__hermes_exit_file={target}; trap 'printf \"%s\\n\" \"$?\" > \"$__hermes_exit_file\"' EXIT\n{command}"
+    return (f"__hermes_exit_file={target}\n(\n{command}\n)\n__hermes_rc=$?\n"
+            "printf '%s\\n' \"$__hermes_rc\" > \"$__hermes_exit_file\"\nexit \"$__hermes_rc\"")
 
 
 def strip_shell_markers(text: str, markers) -> str:
@@ -166,7 +173,9 @@ class ProcessOutputLogMixin:
             return
         code = recorded_exit_code(session.output_log)
         if code is None:
-            # SIGKILL / exec past the trap: the spawner is gone and no status was recorded.
-            self._finish_exited(session, -1, reason="lost", source="backend_lost")
+            # Killed by a signal (or a job spawned before the recorder ran it as a child): it exited,
+            # and no status was recorded. Not "lost": nothing about its backend disappeared. [daveey]
+            from tools.process_registry_readopt import UNKNOWN_EXIT_REASON
+            self._finish_exited(session, None, reason=UNKNOWN_EXIT_REASON, source="exit_not_recorded")
         else:
             self._finish_exited(session, code)
