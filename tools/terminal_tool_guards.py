@@ -578,6 +578,28 @@ def _session_aliases_for_guard(env: Any) -> Optional[frozenset[str]]:
     return None
 
 
+# hermes-sync can idle-restart the gateway it runs under, so the guard refuses it inside the
+# gateway (by lifecycle content, or because the script is over the scan budget). The generic
+# "separate shell" advice made agents wrap it in systemd-run/nohup; name the sanctioned route.
+_HERMES_SYNC_WORD = re.compile(r"(?:^|[\s/;&|(`'\"])hermes-sync(?=$|[\s;&|)`'\"])")
+
+
+def _refusal_hint(command: str) -> str:
+    if not _HERMES_SYNC_WORD.search(command):
+        return ""
+    from hermes_constants import display_hermes_home
+
+    return (
+        " hermes-sync runs only from its scheduled cron/systemd pass, never from a gateway chat. "
+        "To deploy a pushed hermes-mods commit from here, run "
+        "`git -C ~/code/hermes-mods fetch -q origin && git -C ~/code/hermes-mods merge --ff-only origin/main`, "
+        "then wait for the next scheduled "
+        f"sync pass and read its `mods-reload:` line in {display_hermes_home()}/logs/hermes-sync.log. "
+        "Do not wrap hermes-sync in systemd-run, nohup, setsid or a background shell to get past "
+        "this refusal."
+    )
+
+
 def gateway_lifecycle_block(
     *,
     command: str,
@@ -652,7 +674,8 @@ def gateway_lifecycle_block(
             f"Blocked: the lifecycle guard could not scan this command or referenced script: {refusal}. "
             "Nothing in the command is known to contain a gateway lifecycle command, but a "
             "script the command executes must be scannable (a regular text file "
-            f"{lifecycle_scan_budget_summary()}) before it can run inside the gateway process.",
+            f"{lifecycle_scan_budget_summary()}) before it can run inside the gateway process."
+            + _refusal_hint(command),
             "error",
         )
     if unsafe:
@@ -665,7 +688,7 @@ def gateway_lifecycle_block(
             "uninstall the gateway from inside the gateway process. The gateway would "
             "kill this command before it could complete (SIGTERM propagates "
             "to child processes). Run `hermes gateway restart` from a "
-            "separate shell outside the running gateway.",
+            "separate shell outside the running gateway." + _refusal_hint(command),
             "error",
         )
     return None
