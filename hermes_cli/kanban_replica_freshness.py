@@ -255,7 +255,7 @@ def report_deferred(conn: sqlite3.Connection, deferred: int) -> None:
 
     verdict, board, pulled, mirrored = _replica_state(conn)
     key = str(_main_db_file(conn) or board)
-    stamp = "unreadable" if verdict is None else (pulled, mirrored)
+    stamp = ("unreadable" if verdict is None else (pulled, mirrored), deferred)
     if key in _reported and _reported[key] == stamp:
         return
     _reported[key] = stamp

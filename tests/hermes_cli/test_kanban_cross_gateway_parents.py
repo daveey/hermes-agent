@@ -370,3 +370,26 @@ def test_a_fresh_pull_does_not_vouch_for_a_mirror_not_yet_refreshed_from_it(live
     assert kb.get_task(live, child).status == "blocked"
     kb.recompute_ready(live)
     assert len(_repairs(live, child)) == 1
+
+
+def test_the_deferral_line_is_said_again_when_more_children_wait_on_the_same_stamp(
+        live, svc, kanban_home, caplog, monkeypatch):
+    """Review nit 2 (5888215084) on #1931: keyed on the stamp alone, the line kept the first pass's count."""
+    from hermes_cli import kanban_replica_freshness as fr
+    monkeypatch.setattr(fr, "_reported", {}, raising=False)
+    children = [kb.create_task(live, title=f"child {i}", assignee="worker") for i in range(3)]
+    _round(kanban_home, svc)
+    _link_raw(live, "t_after_offline_0", children[0])
+    _stamp_replica(int(time.time()) - fr.FRESH_SECONDS - 60)
+    caplog.set_level("INFO", logger=fr.__name__)
+
+    def lines():
+        return [r.getMessage() for r in caplog.records if r.name == fr.__name__ and r.levelname == "INFO"]
+
+    kb.recompute_ready(live)
+    for i, child in enumerate(children[1:], start=1):  # same stale stamp, two more children start waiting
+        _link_raw(live, f"t_after_offline_{i}", child)
+    kb.recompute_ready(live)
+    kb.recompute_ready(live)  # same stamp, same count: no third line
+    assert len(lines()) == 2
+    assert "1 child(ren)" in lines()[0] and "3 child(ren)" in lines()[1]
