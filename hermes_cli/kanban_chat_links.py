@@ -32,6 +32,8 @@ from typing import Any, Iterable, Optional
 from hermes_cli import kanban_chat_links_released as _released
 from hermes_cli.kanban_replica_execution import read_runs, run_evidence
 from hermes_cli.kanban_run_machine import placement_select, run_machine
+from hermes_cli.kanban_session_activity_release import (DONE_PENDING_RELEASE, TERMINAL_STATUSES, UNKNOWN,
+                                                       unreleased_obligation)
 
 _log = logging.getLogger(__name__)
 
@@ -484,8 +486,6 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     return {"added": added, "changed": changed, "released": released, "retired": retired}
 
 
-TERMINAL_STATUSES = ("done", "archived")
-UNKNOWN = "unknown"
 # Rows last read from each replica, so an unreadable replica keeps its rows (stale) instead of dropping them.
 _last_good: dict[tuple[str, str, str], tuple[list[dict[str, Any]], Optional[float], dict[str, dict]]] = {}
 
@@ -630,7 +630,7 @@ def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str
         if (c.get("board") != board or c.get("origin_gateway") not in (None, gateway)
                 or c.get("origin_profile") not in (None, profile) or not c.get("session") or c.get("released")):
             continue
-        if c.get("status") in statuses or (c.get("status") == UNKNOWN and c.get("unfinished")):
+        if c.get("status") in statuses or unreleased_obligation(c):
             out.append({**c, "session_id": c["session"], "remote": True, "stale": True, "source": "ledger-fallback"})
     return out
 
@@ -730,8 +730,10 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
     on OTHER gateways, from every board's replica, shaped like the origin-ledger rows ``session_tasks`` appends.
 
     The sidebar counts read this too when ``links_reader`` is ``replica``, so both answers are one projection:
-    - an unreleased link to a ``done``/``archived`` card, or to a card row the replica lacks, is an ``unknown``,
-      unfinished obligation (the ledger's done-without-verified-release); only a released link drops it;
+    - an unreleased link to a ``done``/``archived`` card, or to a card row the replica lacks, is an unfinished
+      obligation (the ledger's done-without-verified-release); only a released link drops it. A ``done`` card reads
+      ``done_pending_release`` (the owner releases the link once it has verified the completion), anything else
+      ``unknown``;
     - only this origin profile's links (``chat_profile``) count;
     - ``stale``/``synced_at`` come from the replica's last successful pull;
     - an unreadable replica keeps its last rows, stale; on a cold start the ledger's rows for that board, stale.
@@ -799,7 +801,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             if pair in out:
                 continue
             out[pair] = {
-                "title": r["title"], "status": UNKNOWN if unknown else status, "assignee": r["assignee"],
+                "title": r["title"], "status": (DONE_PENDING_RELEASE if not missing and status == "done" else UNKNOWN)
+                if unknown else status, "assignee": r["assignee"],
                 "created_at": r["created_at"], "started_at": r["started_at"], "priority": r["priority"],
                 "block_kind": r["block_kind"], "human_request": _decoded_request(r["human_request"]), "id": tid,
                 "board": board,
@@ -879,10 +882,10 @@ def _decoded_request(value: Any) -> Any:
 
 
 def _ledger_obligation(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:
-    """An unreleased ledger row the sidebar counts: open, or ``unknown`` and unfinished (done, release unverified)."""
+    """An unreleased ledger row the sidebar counts: open, or closed and unfinished (``unreleased_obligation``)."""
     if card.get("released"):
         return False
-    return card.get("status") in statuses or (card.get("status") == UNKNOWN and bool(card.get("unfinished")))
+    return card.get("status") in statuses or unreleased_obligation(card)
 
 
 def _unlinked_chats(gateway: str, profiles: dict[str, set[Any]]) -> set[str]:

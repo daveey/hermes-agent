@@ -32,7 +32,7 @@ from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
 from hermes_cli import kanban_replica_projection as _replica_projection, kanban_replica_execution as _replica_exec
 from hermes_cli import kanban_replica_rows as _replica_rows
-from hermes_cli.kanban_session_activity_release import TERMINAL_STATUSES
+from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES, TERMINAL_STATUSES
 from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
 from hermes_cli.kanban_db_sync import sync_enabled as _board_sync_enabled
 from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
@@ -516,7 +516,7 @@ def _replica_bucket(task: dict[str, Any]) -> str | None:
     """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards. ``human_request`` may be
     the decoded dict or the stored JSON text (``_stored_needs_human`` reads both). [daveey]"""
     status = task.get("status")
-    if status == "unknown" and task.get("unfinished"):
+    if status in PENDING_RELEASE_STATUSES and task.get("unfinished"):  # closed, release not yet verified
         return "active"
     if status in BLOCKED_STATUSES:
         return "blocked" if _stored_needs_human(task.get("human_request"), task.get("block_kind")) else "active"
@@ -1214,14 +1214,14 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         # replicated todo waits on a parent (parked). Held needs those links, so remote cards are never held.
         # [daveey] An ``unknown`` card (done, release unverified) has no worker either: it waits like a parked one,
         # or a chat whose other cards are all parked painted no stripe at all instead of waiting.
-        is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo", "unknown")
+        is_parked = bucket == "active" and card.get("status") in (*PARKED_STATUSES, "todo", *PENDING_RELEASE_STATUSES)
         if is_parked:
             parked[sid] = parked.get(sid, 0) + 1
         remote_keys.setdefault(sid, set()).add((str(card.get("key")), str(bucket), is_parked))
         _replica_exec.collect(card, execution)
         # Same status test as parked/blocked above: a legacy row whose live status is unknown (reported_status is
         # only its last report) is never counted stalled, so stalled can't exceed what the row shows parked.
-        if card.get("status") != "unknown" and (_remote_wait(card) or {}).get("wait_state") == "stalled":
+        if card.get("status") not in PENDING_RELEASE_STATUSES and (_remote_wait(card) or {}).get("wait_state") == "stalled":
             stalled[sid] = stalled.get(sid, 0) + 1
             remote_keys.setdefault(sid, set()).add((str(card.get("key")), "stalled", False))
         if card.get("stale"):
@@ -1647,7 +1647,7 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
     wanted, seen = set(ids), set()
     for card in _remote_cards(ids, statuses, stale_ok):
         belongs = card['session'] in wanted or card.get('origin_session') in wanted
-        listed = card.get('status') in statuses or (card.get('status') == 'unknown' and card.get('unfinished'))
+        listed = card.get('status') in statuses or (card.get('status') in PENDING_RELEASE_STATUSES and card.get('unfinished'))
         if belongs and listed and card['key'] not in seen:
             seen.add(card["key"])
             row = {**card, "session_id": card["session"]}

@@ -201,10 +201,11 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
     from hermes_cli import kanban_session_activity as activity
     from hermes_state_outcome import refresh_outcomes_quietly
     from tui_gateway import notice_fanout_state as state
+    from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
     current: dict[str, set[tuple[str, str]]] = {}
     for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=True):
         status = card.get("status")
-        if status not in activity.LISTED_STATUSES and not (status == "unknown" and card.get("unfinished")):
+        if status not in activity.LISTED_STATUSES and not (status in PENDING_RELEASE_STATUSES and card.get("unfinished")):
             continue
         for chat in {card.get("session"), card.get("origin_session")} - {None, ""}:
             current.setdefault(chat, set()).add((card["key"], status))

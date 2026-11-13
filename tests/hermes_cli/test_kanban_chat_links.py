@@ -186,10 +186,11 @@ def test_replica_answers_a_chats_open_cards_on_other_gateways(tmp_path):
              [("t_open", ME, "s1", "shepherd", 0), ("t_done", ME, "s1", "shepherd", 0), ("t_mine", ME, "s1", "created", 0),
               ("t_released", ME, "s1", "shepherd", 1), ("t_theirs", "mini", "s1", "shepherd", 0)])
     got = links.replica_cards(["s1", "s0"], ME, replicas=[("default", rep)])
-    # A done card whose link is not released is still the chat's (unknown, unfinished): the sidebar counts it, so the
-    # list must too. Only a released link drops a card (t_released).
+    # A done card whose link is not released is still the chat's (done_pending_release, unfinished): the sidebar counts
+    # it, so the list must too. Only a released link drops a card (t_released).
     assert sorted((c["id"], c["gateway"], c["board"], c["via"], c["session_id"], c["status"]) for c in got) == [
-        ("t_done", OTHER, "default", "shepherd", "s1", "unknown"), ("t_open", OTHER, "default", "shepherd", "s1", "running")]
+        ("t_done", OTHER, "default", "shepherd", "s1", "done_pending_release"),
+        ("t_open", OTHER, "default", "shepherd", "s1", "running")]
     got = {c["id"]: c for c in got}
     assert got["t_open"]["title"] == "open card" and got["t_open"]["source"] == "replica"
     assert got["t_done"]["reported_status"] == "done" and got["t_done"]["unfinished"] is True
@@ -403,7 +404,7 @@ def test_a_released_sibling_link_does_not_settle_a_closed_cards_unreleased_link(
               ("t_settled", ME, "s1", "created", 1), ("t_settled", ME, "s1", "shepherd", 1)])
     got = sorted((c["session"], c["id"], c["status"])
                  for c in links.replica_cards(None, ME, ksa.LISTED_STATUSES, replicas=[("default", rep)]))
-    assert got == [("s1", "t_arch", "unknown"), ("s1", "t_done", "unknown"), ("s1", "t_open", "running")]
+    assert got == [("s1", "t_arch", "unknown"), ("s1", "t_done", "done_pending_release"), ("s1", "t_open", "running")]
     _switch_to_replica(kanban_home, monkeypatch, rep)
     assert ksa.active_task_counts() == {"s1": 3}
     assert sorted(c["id"] for c in ksa.session_tasks(["s1"])) == ["t_arch", "t_done", "t_open"]  # names its count
@@ -444,16 +445,16 @@ def test_a_released_link_to_a_closed_card_stays_listed_as_done_for_a_reader_of_c
     closed = ksa.LISTED_STATUSES + ("done", "archived")
     got = {c["id"]: c for c in links.replica_cards(["s1"], ME, closed, replicas=[("default", rep)])}
     assert sorted((tid, c["status"], c["released"], c.get("release_reason")) for tid, c in got.items()) == [
-        ("t_arch", "archived", True, "link_released"), ("t_hub", "unknown", False, None),
+        ("t_arch", "archived", True, "link_released"), ("t_hub", "done_pending_release", False, None),
         ("t_open", "running", False, None), ("t_worker", "done", True, "link_released")]
     assert got["t_worker"]["unfinished"] is False and got["t_worker"]["via"] == "origin"
     assert got["t_worker"]["session_id"] == "s1" and got["t_worker"]["source"] == "replica"
     # The open-status readers (sidebar counts, handover) still drop released links.
     assert sorted(c["id"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])) == ["t_hub", "t_open"]
     _switch_to_replica(kanban_home, monkeypatch, rep)
-    assert ksa.active_task_counts() == {"s1": 2}  # t_hub (unknown) and t_open
+    assert ksa.active_task_counts() == {"s1": 2}  # t_hub (done_pending_release) and t_open
     rows = {r["id"]: r["status"] for r in ksa.session_tasks(["s1"], closed)}
-    assert rows == {"t_arch": "archived", "t_hub": "unknown", "t_open": "running", "t_worker": "done"}
+    assert rows == {"t_arch": "archived", "t_hub": "done_pending_release", "t_open": "running", "t_worker": "done"}
 
 
 def _profile_board_row(task_id, session, profile="bb-tuner", **kw):

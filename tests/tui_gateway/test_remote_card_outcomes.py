@@ -95,6 +95,20 @@ def test_unknown_unfinished_and_compression_tip(db, remote, monkeypatch):
     assert seen == [(["compressed-tip"], "card_change", {"db": db})]
 
 
+def test_done_pending_release_stays_observed_until_released(db, remote, monkeypatch):
+    """[daveey] A done card whose link the owner has not released yet is still the chat's obligation: its move from
+    running is a change, and the release (the card leaving the projection) is another, so the outcome refreshes then."""
+    remote.append(card())
+    run(db)
+    seen = []
+    monkeypatch.setattr(so, "refresh_outcomes_quietly", lambda ids, trigger, **kw: (seen.append(trigger) or 1))
+    remote[0] = {**card(status="done_pending_release"), "unfinished": True}
+    assert len(run(db)) == 1
+    assert run(db) == []  # unchanged while pending
+    remote.clear()
+    assert len(run(db)) == 1 and seen == ["card_change", "card_change"]
+
+
 @pytest.mark.parametrize("failure", ["read", "write", "missing"])
 def test_failed_chat_retries_unchanged_projection(db, remote, monkeypatch, failure):
     so.refresh_outcome(CHAT, "manual", db=db)
