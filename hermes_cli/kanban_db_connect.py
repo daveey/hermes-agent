@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
+from hermes_cli import kanban_local_status_wake as _local_status_wake
 from hermes_cli import kanban_run_end_lease as _run_end_lease
 from hermes_cli import kanban_schema_owner as _schema_owner
 import contextlib
@@ -1551,6 +1552,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
 
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
+        _local_status_wake.arm(conn)  # [daveey] record this txn's status changes for the awaited-card wake
         yield conn
     except Exception:
         # SQLite may already have auto-rolled-back (EIO, contention, corruption);
@@ -1572,6 +1574,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         _run_end_lease.flush(conn, committed=True)  # [daveey] Board lease of a run this txn ended
         # Post-commit torn-extend check — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)
+        _local_status_wake.flush(conn)  # [daveey] a park awaiting a card this commit moved re-probes now
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
