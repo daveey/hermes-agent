@@ -95,6 +95,19 @@ export function checkDistBuilt(distDir) {
   return { ok: true }
 }
 
+// How long the one-process chunk check may run before it counts as stalled. The budget is for a
+// throttled box, not an idle one: the unattended Desktop prebuild runs at macOS background QoS
+// (taskpolicy -b), where CPU and I/O yield to everything else. A check that takes 8 s idle took
+// 35-40 s on a loaded mini and overran the old fixed 300 s during a contended build (daveey-mini
+// 2026-11-13, 764f1731c5: ETIMEDOUT failed a bundle vite had built cleanly, then a 2 h cooldown).
+// A false failure costs a whole rebuild; a real stall only costs this wait, so err long.
+export const DEFAULT_CHUNK_CHECK_TIMEOUT_MS = 30 * 60_000
+
+export function chunkCheckTimeoutMs(env = process.env) {
+  const raw = Number(env.HERMES_CHUNK_CHECK_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CHUNK_CHECK_TIMEOUT_MS
+}
+
 // Renderer chunks are emitted as ESM (`<script type="module">` in index.html).
 // A silent bundler failure can emit syntactically invalid chunks that parse fine
 // as CJS-ish text but throw on module evaluation in Electron — the app then
@@ -111,16 +124,20 @@ export function checkDistBuilt(distDir) {
 function verifyChunksParse(assetsDir) {
   const nodeBin = process.env.NODE || process.execPath || "node"
   const checker = join(import.meta.dirname, "check-chunks-parse.mjs")
+  const timeoutMs = chunkCheckTimeoutMs()
   const probe = spawnSync(nodeBin, ["--experimental-vm-modules", checker, assetsDir], {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
-    timeout: 300_000,
+    timeout: timeoutMs,
   })
   if (probe.error) {
+    const overran = probe.error.code === "ETIMEDOUT"
+      ? ` (did not finish within ${timeoutMs / 1000} s; HERMES_CHUNK_CHECK_TIMEOUT_MS sets the budget)`
+      : ""
     return {
       ok: false,
       kind: "harness",
-      error: `could not run node to syntax-check the renderer chunks: ${probe.error.message}`,
+      error: `could not run node to syntax-check the renderer chunks: ${probe.error.message}${overran}`,
     }
   }
 
