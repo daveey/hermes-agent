@@ -1002,18 +1002,12 @@ logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def _session_db(profile, sid):
+    """Reads on the kept read-only store; write a notice through ``notice_writer(db)`` (card I). [daveey]"""
     from hermes_cli.profiles import get_profile_dir
-    from hermes_state import SessionDB
+    from tui_gateway.kanban_notice_session_store import session_store
 
-    path = get_profile_dir(profile) / "state.db"
-    if not path.is_file():
-        yield None, None
-        return
-    db = SessionDB(path)
-    try:
-        yield (db, db.get_compression_tip(sid) or sid) if db.get_session(sid) else (None, None)
-    finally:
-        db.close()
+    with session_store(get_profile_dir(profile) / "state.db", sid) as pair:
+        yield pair
 
 
 def _ledger_settled(conn: Optional[sqlite3.Connection], sessions: tuple, ref: str, state: str) -> bool:
@@ -1211,9 +1205,11 @@ def _persist_claimed(session_db, profile: str, sid: str, text: str, metadata: di
             if db is None or chat_skip_reason(db, sid) is not None:
                 release(claim, ledger=ledger)
                 return False
-            db.append_kanban_notice(tip, text, metadata)
-            from hermes_state_outcome import refresh_outcomes_quietly
-            refresh_outcomes_quietly([tip], "notice", db=db)  # [daveey] the passive row is the chat's last word
+            from tui_gateway.kanban_notice_session_store import notice_writer
+            with notice_writer(db) as wdb:
+                wdb.append_kanban_notice(tip, text, metadata)
+                from hermes_state_outcome import refresh_outcomes_quietly
+                refresh_outcomes_quietly([tip], "notice", db=wdb)  # [daveey] the passive row is the chat's last word
     except SessionTurnLeaseLostError:
         release(claim, ledger=ledger)
         logger.info("remote Kanban notice %s for chat %s deferred: a turn is running; retrying next pass",
@@ -1314,9 +1310,11 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                 _note_wait(sid, ref, state, f"left to gateway pid {gw_pid}: its turn holds the chat's lease")
                 return
             if waker is None:
-                row_id = db.append_kanban_notice(tip, text, metadata)
-                from hermes_state_outcome import refresh_outcomes_quietly
-                refresh_outcomes_quietly([tip], "notice", db=db)  # [daveey] unloaded sweeper's remote rows too
+                from tui_gateway.kanban_notice_session_store import notice_writer
+                with notice_writer(db) as wdb:
+                    row_id = wdb.append_kanban_notice(tip, text, metadata)
+                    from hermes_state_outcome import refresh_outcomes_quietly
+                    refresh_outcomes_quietly([tip], "notice", db=wdb)  # [daveey] unloaded sweeper's remote rows too
                 delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
                 swept.append(memo_key)
                 ack(claim, ledger=ledger)
