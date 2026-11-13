@@ -94,6 +94,26 @@ def test_gate_runs_when_the_live_due_time_arrives(home):
         assert len(calls) == 2
 
 
+def test_gate_unreadable_due_time_reruns_a_completed_key(home):
+    calls = []
+    due_reads = []
+
+    def unreadable_due(conn):
+        due_reads.append(1)
+        # A real SQLite read failure, without changing the board or its key.
+        return conn.execute("SELECT next_at FROM missing_due_table").fetchone()[0]
+
+    with kbc.connect_closing() as conn:
+        kb.create_task(conn, title="t", assignee="nobody")
+        sweep = lambda: calls.append(1)
+        gate.gated("test.unreadable_due", conn, sweep, now=900)
+        gate.gated("test.unreadable_due", conn, sweep, now=900)
+        assert len(calls) == 1  # prove a completed key really suppresses work
+        gate.gated("test.unreadable_due", conn, sweep, due=unreadable_due, now=900)
+        assert due_reads == [1]
+        assert len(calls) == 2, "an unreadable due time must rerun even a completed key"
+
+
 def test_gate_keeps_the_runs_own_due_time_with_its_key(home):
     calls = []
     with kbc.connect_closing() as conn:
@@ -135,6 +155,29 @@ def test_gate_failed_run_does_not_vouch(home):
             with pytest.raises(RuntimeError):
                 gate.gated("test.fail", conn, boom)
         assert len(calls) == 2
+
+
+def test_gate_failed_due_rerun_invalidates_prior_completion(home):
+    calls = []
+
+    def sweep():
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("transient sweep failure")
+
+    with kbc.connect_closing() as conn:
+        kb.create_task(conn, title="t", assignee="nobody")
+        gate.gated("test.warm_fail", conn, sweep, now=900)
+        gate.gated("test.warm_fail", conn, sweep, now=900)
+        assert len(calls) == 1  # establish a reusable prior completion
+        with pytest.raises(RuntimeError, match="^transient sweep failure$"):
+            gate.gated("test.warm_fail", conn, sweep, due=lambda c: 900, now=900)
+        assert len(calls) == 2
+        # The transient due signal cleared, but the failed pass still needs retrying.
+        gate.gated("test.warm_fail", conn, sweep, now=900)
+        assert len(calls) == 3, "a failed rerun must invalidate the prior completed key"
+        gate.gated("test.warm_fail", conn, sweep, now=900)
+        assert len(calls) == 3  # a successful retry can vouch for the key again
 
 
 def test_foreign_ids_memo_follows_new_copies(home):
