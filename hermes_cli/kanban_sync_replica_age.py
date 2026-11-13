@@ -95,8 +95,9 @@ def _stamp(slug: str) -> Optional[float]:
     path = ksc.shadow_path(slug)
     if not path.exists():
         return None
+    from hermes_cli import kanban_lockguard
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        conn = kanban_lockguard.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
         try:
             row = conn.execute("SELECT pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
         finally:
