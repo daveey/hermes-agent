@@ -278,6 +278,22 @@ def test_negation_outside_the_claim_verb_still_needs_a_receipt(fleet, summary):
     ("Comment to t_0123456789abcdef: queued.", False),
     ("Comment to t_0123456789abcdef — failed and was not sent.", False),
     ("Comment to t_0123456789abcdef (not posted).", False),
+    # A standalone spaced ASCII hyphen is a dash too; an intra-word hyphen is not.
+    ("No longer pending - posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef - not posted.", False),
+    ("Comment to t_0123456789abcdef - queued.", False),
+    ("Comment to t_0123456789abcdef - failed and was not sent.", False),
+    ("The note to t_0123456789abcdef was not re-posted.", False),
+    ("Re-posted the note to t_0123456789abcdef.", True),
+    # A future/infinitive form ("to be posted", "will be sent") is never a claim, across any boundary.
+    ("Queued to be posted to t_0123456789abcdef.", False),
+    ("Queued (to be posted to t_0123456789abcdef).", False),
+    ("Queued: to be posted to t_0123456789abcdef.", False),
+    ("Queued - to be posted to t_0123456789abcdef.", False),
+    ("Queued: will be sent to t_0123456789abcdef.", False),
+    ("Done (to be delivered to t_0123456789abcdef).", False),
+    ("Has been posted to t_0123456789abcdef.", True),
+    ("Posted to t_0123456789abcdef as it should be.", True),
 ])
 def test_claimed_targets_scopes_negation_to_the_verb(text, claimed):
     from hermes_cli.kanban_operator_delivery import claimed_targets

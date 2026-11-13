@@ -718,51 +718,61 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             with kb.write_txn(conn):
                 ensure_schema(conn)
         last = _scan_start(conn, board, rep)
-        rows = rep.execute("SELECT id, uid, task_id, payload FROM task_events WHERE id > ? AND kind = ? "
-                           "ORDER BY id LIMIT ?", (last, REQUEST_KIND, SCAN_BATCH)).fetchall()
-        hi = rep.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0] if len(rows) < SCAN_BATCH \
-            else rows[-1][0]
+        from hermes_cli.kanban_consent import home_refusal
         handled = 0
-        hold = hi  # below the first call deferred for creation sync lag
-        for eid, euid, etask, raw in rows:
-            try:
-                payload = json.loads(raw or "{}")
-            except ValueError:
-                continue
-            uid, target = payload.get("request_uid"), payload.get("target_task_id")
-            labels = payload.get("action") == LABEL_PUBLISH
-            if labels:
-                # A machine has no home card: the call names its executor, and only that gateway takes it.
-                if not uid or own != kol.HOME or payload.get("home") != own:
+        hold = None  # below the first call deferred for creation sync lag
+        cursor, stop = last, False
+        while True:
+            rows = rep.execute("SELECT id, uid, task_id, payload FROM task_events WHERE id > ? AND kind = ? "
+                               "ORDER BY id LIMIT ?", (cursor, REQUEST_KIND, SCAN_BATCH)).fetchall()
+            full = len(rows) >= SCAN_BATCH
+            hi = rows[-1][0] if full else rep.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
+            for eid, euid, etask, raw in rows:
+                try:
+                    payload = json.loads(raw or "{}")
+                except ValueError:
                     continue
-            elif not uid or not target or not _is_home(conn, own, target):
-                continue
-            if conn.execute("SELECT 1 FROM operator_calls WHERE request_uid = ? AND side = 'execute'",
-                            (uid,)).fetchone():
-                continue
-            if handled >= MAX_PER_TICK:
-                hi = eid - 1
-                break
-            handled += 1
-            event = {"id": eid, "uid": euid, "task_id": etask}
-            refusal, retry = _caller_refusal(rep, board, event, payload)
-            if retry:  # unreachable Board: every later call would retry too
-                hi = eid - 1
-                break
-            if refusal is None:
-                from hermes_cli.kanban_consent import home_refusal
-                refusal, defer = home_refusal(rep, payload, target)  # unsynced created event: retry, then refuse
-                if defer:
+                uid, target = payload.get("request_uid"), payload.get("target_task_id")
+                labels = payload.get("action") == LABEL_PUBLISH
+                if labels:
+                    # A machine has no home card: the call names its executor, and only that gateway takes it.
+                    if not uid or own != kol.HOME or payload.get("home") != own:
+                        continue
+                elif not uid or not target or not _is_home(conn, own, target):
+                    continue
+                if conn.execute("SELECT 1 FROM operator_calls WHERE request_uid = ? AND side = 'execute'",
+                                (uid,)).fetchone():
+                    continue
+                if handled >= MAX_PER_TICK:
+                    hi, stop = eid - 1, True
+                    break
+                home = home_refusal(rep, payload, target)  # unsynced created event: retry, then refuse
+                if home[1]:
                     # Only this caller lags: keep the watermark below it (retried next tick) and go on with the
-                    # rest; calls handled meanwhile are logged, so the rescan skips them.
-                    hold = min(hold, eid - 1)
+                    # rest. A deferral takes no tick slot and no Board read; calls handled meanwhile are logged,
+                    # so the rescan skips them.
+                    hold = eid - 1 if hold is None else min(hold, eid - 1)
                     continue
-            if labels:
-                done.append((uid, kol.handle(conn, own, event, payload, refusal)))
-                continue
-            outcome, _detail = _execute_one(conn, payload, own, refusal)
-            done.append((uid, outcome))
-        hi = min(int(hi), hold)
+                handled += 1
+                event = {"id": eid, "uid": euid, "task_id": etask}
+                refusal, retry = _caller_refusal(rep, board, event, payload)
+                if retry:  # unreachable Board: every later call would retry too
+                    hi, stop = eid - 1, True
+                    break
+                if refusal is None:
+                    refusal = home[0]
+                if labels:
+                    done.append((uid, kol.handle(conn, own, event, payload, refusal)))
+                    continue
+                outcome, _detail = _execute_one(conn, payload, own, refusal)
+                done.append((uid, outcome))
+            # A held watermark rescans from the deferred call each tick: page on past it, or calls more than
+            # SCAN_BATCH request rows later would wait out the deferral's whole grace.
+            if stop or not full or hold is None:
+                break
+            cursor = rows[-1][0]
+        if hold is not None:
+            hi = min(int(hi), hold)
         stored = conn.execute("SELECT last_id, last_uid FROM operator_call_scan WHERE board = ?",
                               (board,)).fetchone()
         new, anchor = _anchor(rep, max(int(hi), last))

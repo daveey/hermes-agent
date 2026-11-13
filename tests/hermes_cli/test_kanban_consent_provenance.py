@@ -293,6 +293,105 @@ def test_unsynced_caller_defers_only_its_own_call(fleet, monkeypatch, tmp_path):
     assert [r[0] for r in f.h.execute("SELECT body FROM task_comments WHERE task_id=?", (f.target,))] == ["second"]
 
 
+def _outcome(f, rid):
+    result = requests.get_request(f.w, rid).get("result")
+    return result[0].get("outcome") if isinstance(result, list) and result else None
+
+
+def test_deferred_calls_take_no_tick_slot(fleet, monkeypatch, tmp_path):
+    """MAX_PER_TICK+1 lagging callers ahead of a synced one: the synced call applies in the same tick."""
+    from hermes_cli import kanban_consent as consent
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    lagging = [_stopped_home_call(f, monkeypatch, tmp_path, f"lag{i}") for i in range(kox.MAX_PER_TICK + 1)]
+    for caller, _rid in lagging:
+        _hide_created(f, monkeypatch, caller)
+    later = helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "synced"})
+    helpers._round(f)
+    assert _outcome(f, later["request_id"]) == "applied", "deferred calls used up the tick's slots"
+    assert all(requests.get_request(f.w, rid)["status"] != "done" for _c, rid in lagging)
+    monkeypatch.setattr(consent, "CREATION_SYNC_GRACE_S", -1)
+    for _ in range(2):  # MAX_PER_TICK refusals per tick
+        helpers._round(f)
+    for _caller, rid in lagging:
+        request = requests.get_request(f.w, rid)
+        assert request["result"][0]["outcome"] == "refused", request
+        assert "consent_unproven" in request["result"][0]["detail"]
+    assert [r[0] for r in f.h.execute("SELECT body FROM task_comments WHERE task_id=?", (f.target,))] == ["synced"]
+
+
+def test_scan_continues_past_a_full_batch_behind_a_deferral(fleet, monkeypatch, tmp_path):
+    """A held watermark must not hide calls more than SCAN_BATCH request rows past it."""
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    monkeypatch.setattr(kox, "SCAN_BATCH", 2)
+    caller, rid = _stopped_home_call(f, monkeypatch, tmp_path, "lagbatch")
+    _hide_created(f, monkeypatch, caller)
+    later = [helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": f"s{i}"})
+             for i in range(3)]
+    for _ in range(2):  # the watermark stays held below the deferred call across ticks
+        helpers._round(f)
+    assert [_outcome(f, r["request_id"]) for r in later] == ["applied"] * 3, "calls past the batch stalled"
+    assert requests.get_request(f.w, rid)["status"] != "done"
+    assert sorted(r[0] for r in f.h.execute("SELECT body FROM task_comments WHERE task_id=?", (f.target,))) == \
+        ["s0", "s1", "s2"]
+
+
+def test_unreachable_board_stops_paging_behind_a_deferral(fleet, monkeypatch, tmp_path):
+    """An unreachable Board ends the tick even while a held watermark pages on: no later call jumps the retry."""
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    monkeypatch.setattr(kox, "SCAN_BATCH", 2)
+    caller, rid = _stopped_home_call(f, monkeypatch, tmp_path, "lagretry")
+    _hide_created(f, monkeypatch, caller)
+    later = [helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": f"s{i}"})
+             for i in range(3)]
+    real, down = kox._caller_refusal, {"on": True}
+
+    def flaky(rep, board, event, payload):
+        if down["on"] and (payload.get("args") or {}).get("text") == "s0":
+            return None, True
+        return real(rep, board, event, payload)
+    monkeypatch.setattr(kox, "_caller_refusal", flaky)
+    helpers._round(f)
+    assert [_outcome(f, r["request_id"]) for r in later] == [None] * 3, "a call after the retry was applied first"
+    down["on"] = False
+    helpers._round(f)
+    assert [_outcome(f, r["request_id"]) for r in later] == ["applied"] * 3
+    assert requests.get_request(f.w, rid)["status"] != "done"
+
+
+def test_caller_refusal_wins_over_a_deferral_refusal(fleet, monkeypatch, tmp_path):
+    """A call refused for its caller keeps that reason even when its created event also never synced."""
+    from hermes_cli import kanban_consent as consent
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    caller, rid = _stopped_home_call(f, monkeypatch, tmp_path, "lagcaller")
+    _hide_created(f, monkeypatch, caller)
+    monkeypatch.setattr(consent, "CREATION_SYNC_GRACE_S", -1)
+    monkeypatch.setattr(kox, "_caller_refusal", lambda *a: ("caller_unproven: isolated probe", False))
+    helpers._round(f)
+    request = requests.get_request(f.w, rid)
+    assert request["result"][0]["outcome"] == "refused", request
+    assert "caller_unproven: isolated probe" in request["result"][0]["detail"]
+    assert "consent_unproven" not in request["result"][0]["detail"]
+
+
+def test_without_a_deferral_one_tick_reads_one_batch(fleet, monkeypatch):
+    """Paging past a full batch is only for a held watermark; otherwise the next tick resumes after it."""
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    monkeypatch.setattr(kox, "SCAN_BATCH", 2)
+    later = [helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": f"s{i}"})
+             for i in range(3)]
+    requests.drain(f.w)
+    f.board()
+    assert len(kox.apply_incoming(f.h)) == 2
+    assert len(kox.apply_incoming(f.h)) == 1
+    helpers._round(f)
+    assert [_outcome(f, r["request_id"]) for r in later] == ["applied"] * 3
+
+
 def test_submitting_session_stop_is_enforced_and_inherited(fleet, monkeypatch, tmp_path):
     """A worker run's own timed-out approval binds its submissions and the cards it creates."""
     from gateway.session_context import scoped_current_session_id
