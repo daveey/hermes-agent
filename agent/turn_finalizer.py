@@ -137,6 +137,18 @@ def _guarded_cleanup(
         logger.error("finalize_turn: _%s failed: %s", label, err, exc_info=True)
 
 
+def _log_iteration_cap_exhausted(agent, api_call_count, logger) -> None:
+    """One greppable line per cap hit so cap exhaustion is countable per source, and whether the
+    run saw a checkpoint notice first (defect 4a4dc075ad: one-shots lost deliverables unwarned)."""
+    from agent.oneshot_footprint import agent_is_oneshot
+    logger.warning(
+        "iteration_cap_exhausted source=%s oneshot=%s warned=%s used=%s/%s",
+        getattr(agent, "platform", None) or "cli", agent_is_oneshot(agent),
+        bool(getattr(agent, "_iteration_budget_warning_injected", False)),
+        api_call_count, agent.max_iterations,
+    )
+
+
 def _resolve_budget_fallback(
     agent, *, final_response, api_call_count, interrupted, failed, messages, _turn_exit_reason,
     _pending_verification_response, _pending_verification_response_previewed, logger,
@@ -152,6 +164,7 @@ def _resolve_budget_fallback(
         and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
     ):
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+        _log_iteration_cap_exhausted(agent, api_call_count, logger)
         from agent.pre_final_gate import eligible_callbacks, needs_buffer, turn_messages
         _gate_budget_output = bool(eligible_callbacks(agent))
         _budget_context = turn_messages(messages)
