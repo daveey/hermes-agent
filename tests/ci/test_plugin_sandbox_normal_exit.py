@@ -84,8 +84,8 @@ def test_normal_exit_quiesces_namespace_before_remove_tree(work):
                 try:
                     if os.readlink(entry) == namespace:
                         observation["namespace_alive"].append(str(entry))
-                except FileNotFoundError:
-                    pass
+                except (FileNotFoundError, ProcessLookupError):
+                    pass  # reaped between glob and readlink: not alive
                 except PermissionError:
                     pass  # unrelated host processes, not this uid's sandbox
             observation["late_file"] = (copy / "after-remove-entry").exists()
