@@ -354,12 +354,13 @@ def local_words(place: dict[str, Any]) -> str:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:
         words += f", running count unknown (cap {place['limit']})"
-    if place.get("pool_could_run"):
-        return words + ". " + pool_words(place)
+    # One shape with the census branch: a recorded skip is framed first, and a pool re-place is its advice. This
+    # branch used to return the pool hint before the skip, dropping the skip reason (PR #1829 review). [daveey]
+    pool_advice = pool_words(place) if place.get("pool_could_run") else None
     if not skip:
-        return words + ". " + _NOT_STUCK
+        return words + ". " + (pool_advice or _NOT_STUCK)
     words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
-    return words + ". " + (_NOT_STUCK if skips.is_ordering(skip) else skips.advice(skip))
+    return words + ". " + (pool_advice or (_NOT_STUCK if skips.is_ordering(skip) else skips.advice(skip)))
 
 
 def pool_words(place: dict[str, Any], *, advice: bool = True) -> str:

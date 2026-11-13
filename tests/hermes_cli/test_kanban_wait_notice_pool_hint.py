@@ -99,6 +99,68 @@ def test_kanban_show_keeps_the_pool_hint_under_the_admission_census():
     assert "--runs-on" not in unpooled and unpooled.endswith("Do not run its work outside the dispatcher")
 
 
+def test_kanban_show_keeps_the_recorded_skip_with_a_pool_hint_without_the_census():
+    """PR #1829 review: without ``admission_pools``, ``local_words`` returned the pool hint before rendering the
+    recorded skip, so the skip reason vanished there while the census branch kept it. One shape for both: the skip
+    framing first, the pool re-place as its advice."""
+    skip = {"reason": "pinned_quota_wall", "detail": "claude-opus-5-5 (anthropic)"}
+    place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
+    from hermes_cli import kanban_dispatch_skip as skips
+    words = kqp.local_words(place)
+    assert words.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), words
+    assert "(waiting for a local slot: ~16 ahead, 7/7 running)" in words, words
+    assert words.endswith(kqp.pool_words(place)), words  # the pool re-place is the advice, said once
+    _assert_pool_hint(words, "t_x")
+    assert skips.advice(skip) not in words
+    pools = {"regular": 7, "regular_cap": 7, "priority": 0, "priority_cap": 2}
+    census = kqp.local_words({**place, "admission_pools": pools, "admission_class": "normal"})
+    assert census.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), census
+    assert census.endswith(kqp.pool_words(place)), census  # same shape on both branches
+    unskipped = kqp.local_words({**place, "skip": None})
+    assert unskipped.startswith("waiting for a local slot") and unskipped.endswith(kqp.pool_words(place))
+    unpooled = kqp.local_words({**place, "pool_could_run": None})
+    assert unpooled.endswith(skips.advice(skip)) and "--runs-on" not in unpooled
+
+
+_UNRECORDED_CLAUSE = "before changing anything"
+
+
+def test_options_defer_to_the_pool_hint_when_the_skip_is_unrecorded():
+    """PR #1829 review: after "Re-place it ...", the unrecorded-skip advice said "Read the live verdict ... before
+    changing anything; priority changes are not the fix". With a pool hint that clause is dropped."""
+    unrecorded = {"skip_unrecorded": True}
+    plain = pu._options("t_x", None, unrecorded)
+    assert _UNRECORDED_CLAUSE in plain and "priority changes are not the fix" in plain
+    pooled = pu._options("t_x", None, {**unrecorded, "pool_hint": "Home-only ... Re-place it"})
+    assert _UNRECORDED_CLAUSE not in pooled and "priority changes are not the fix" not in pooled
+    assert "dispatcher skip reason unrecorded" in pooled and pooled.endswith("outside the dispatcher")
+    assert pu._options("t_x", None, {**unrecorded, "pool_hint": "  "}) == plain  # a blank hint is no hint
+    assert pu._options("t_x", None, {"pool_hint": "Re-place it"}) == pu._options("t_x", None, {})  # no skip fact
+    recorded = {"dispatch_skip": {"reason": "pinned_quota_wall", "detail": "x"}, "pool_hint": "Re-place it"}
+    assert pu._options("t_x", None, recorded) == pu._options("t_x", None, {"dispatch_skip": recorded["dispatch_skip"]})
+
+
+def test_ready_hint_defers_the_unrecorded_advice_to_the_pool_hint(home, pool, monkeypatch):
+    """The ready-wait hint carries the pool hint into ``_options`` (its payload has no ``pool_hint`` otherwise)."""
+    monkeypatch.setattr(kbd, "configured_max_in_progress", lambda: 9)  # free local slots: the skip is unrecorded
+    with kbc.connect_closing() as conn:
+        tid = _waiting_card(conn)
+        hint = pu.ready_hint(conn, kb.get_task(conn, tid))
+    assert hint is not None
+    _assert_pool_hint(hint, tid)
+    assert "dispatcher skip reason unrecorded" in hint, hint
+    assert _UNRECORDED_CLAUSE not in hint, hint
+    assert hint.count("outside the dispatcher") == 1, hint
+
+
+def test_ready_hint_without_pool_keeps_the_unrecorded_advice(home, monkeypatch):
+    monkeypatch.setattr(kbd, "configured_max_in_progress", lambda: 9)
+    with kbc.connect_closing() as conn:
+        tid = _waiting_card(conn)
+        hint = pu.ready_hint(conn, kb.get_task(conn, tid))
+    assert hint is not None and _UNRECORDED_CLAUSE in hint, hint
+
+
 def _assert_pool_sentence_outside_parens(text: str) -> None:
     """The multi-sentence pool hint follows the parenthesised queue clause, and the dispatcher warning is said once
     (by the advice that ends the notice). PR #1821 review nit."""

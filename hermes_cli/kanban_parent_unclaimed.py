@@ -136,8 +136,9 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
         return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}. {checkpoint}".rstrip()
     from hermes_cli.kanban_dispatch_skip import notice_fields
     pool = _pool_sentence(place)
+    fields = {**notice_fields(place, waited), **({"pool_hint": pool} if pool else {})}  # _options defers to it
     return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. " + (f"{pool}. " if pool else "")
-            + checkpoint + _options(task.id, lane_evidence(conn, task.id), notice_fields(place, waited)) + ".")
+            + checkpoint + _options(task.id, lane_evidence(conn, task.id), fields) + ".")
 
 
 _CANDIDATES = (

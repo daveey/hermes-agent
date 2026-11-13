@@ -323,6 +323,10 @@ def advice(skip: dict[str, Any]) -> str:
 UNRECORDED_ADVICE = (f"{UNRECORDED}: slots are free, yet no tick recorded why it passed this card over. Read the live "
                      "verdict (`hermes kanban dispatch --dry-run --json`) before changing anything; priority changes "
                      "are not the fix. Do not run its work outside the dispatcher")
+# After a pool re-place hint ("Re-place it ..."), "read the verdict before changing anything" contradicts the named
+# fix, so a notice carrying ``pool_hint`` keeps only the fact and the dispatcher warning (PR #1829 review). [daveey]
+UNRECORDED_POOL_ADVICE = (f"{UNRECORDED}: slots are free, yet no tick recorded why it passed this card over. "
+                          "Do not run its work outside the dispatcher")
 
 
 def unrecorded(place: Optional[dict[str, Any]], ready_seconds: Optional[float]) -> bool:
@@ -348,4 +352,6 @@ def notice_advice(payload: dict[str, Any]) -> Optional[str]:
     skip = payload.get("dispatch_skip")
     if isinstance(skip, dict) and skip and not is_ordering(skip):
         return advice(skip)
-    return UNRECORDED_ADVICE if payload.get("skip_unrecorded") else None
+    if not payload.get("skip_unrecorded"):
+        return None
+    return UNRECORDED_POOL_ADVICE if str(payload.get("pool_hint") or "").strip() else UNRECORDED_ADVICE
