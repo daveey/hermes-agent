@@ -17,11 +17,13 @@ DISPATCH_NETWORK_BUDGET_S = 2.0
 # Re-asking at the same revision every dispatcher tick only repeats the refusal; wait for a new revision instead.
 NOT_CLAIMABLE_BACKOFF_S = 600.0
 _refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (refused revision, retry after)
-# (board, task) -> revision at which the Board refused the worker-first self-check's repin (any code but
-# not_claimable, which _refused covers). While the card stays at that revision it goes back to the reserve rather
+# (board, task) -> revision at which the Board refused the worker-first self-check's repin: any 4xx but
+# 408/425/429, coded or not, and a 501; except not_claimable, which _refused covers. Other 5xx and 408/425/429 are
+# outages, retried next tick. While the card stays at that revision it goes back to the reserve rather
 # than re-asking a repin the Board already refused; a new revision asks again. Explicit kanban_move repins never
 # fall back: a reserve would hand the run's move straight back to the pool.
 _selfcheck_refused: dict[tuple[str, str], int] = {}
+_RETRYABLE_4XX = frozenset({408, 425, 429})  # request timeout, too early, rate limited: not the Board's answer
 # No assigned keepalive exists here. Sixty seconds bounds queue probes while still discovering
 # registry-only capacity changes without waiting for a task revision. Assigned renewals are unchanged.
 RESERVE_KEEPALIVE_S = 60.0
@@ -530,10 +532,11 @@ def _selfcheck_unrefused(key, row, labels, why):
 def _remember_selfcheck_refusal(key, revision, why, exc):
     """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead).
 
-    Only a coded 4xx is the Board's answer: a 5xx/429 (an outage) or an uncoded body is retried on the next tick."""
-    status, code = getattr(exc, "status", None), rejection_code(exc)
-    transient = type(status) is not int or not 400 <= status <= 499 or status == 429
-    if why is None or transient or code in (None, "not_claimable"):
+    Any 4xx but 408/425/429, coded or not (a Board or proxy without the repin route answers an uncoded 404/405 HTML
+    body every tick), and a 501 are persistent. Other 5xx and 408/425/429 are outages, retried on the next tick."""
+    status = getattr(exc, "status", None)
+    persistent = type(status) is int and (400 <= status <= 499 or status == 501) and status not in _RETRYABLE_4XX
+    if why is None or not persistent or rejection_code(exc) == "not_claimable":
         return
     _selfcheck_refused[key] = revision  # popped by _selfcheck_unrefused first, so this is the newest entry
     if len(_selfcheck_refused) > 1024:  # cards that left the query never come back to clear theirs

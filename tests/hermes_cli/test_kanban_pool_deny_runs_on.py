@@ -260,6 +260,33 @@ def test_a_transient_board_error_on_a_self_check_repin_is_retried_next_tick(hub,
     assert board.reserves == [] and not wp._selfcheck_refused
 
 
+@pytest.mark.parametrize("status,body", [(404, "<html><body>404 Not Found</body></html>"),
+                                         (405, "Method Not Allowed"), (501, "<html>Not Implemented</html>"),
+                                         (400, "Bad Request")])
+def test_an_uncoded_persistent_refusal_of_a_self_check_repin_reserves(hub, no_pull, status, body):
+    """A Board or proxy without the repin route answers an uncoded 404/405/501 every tick: that is a persistent
+    refusal, so the card goes back to the reserve at that revision instead of re-asking the repin forever."""
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    board = RecordingHub(refuse_repin="missing", refuse_status=status, refuse_detail=body)
+    for _ in range(2):
+        wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert len(board.repins) == 1, "the refused self-check repin was re-asked at the same revision"
+    assert [(r["task_id"], r["expected_revision"]) for r in board.reserves] == [(tid, 4)]
+    assert wp._selfcheck_refused == {(BOARD, tid): 4}
+
+
+@pytest.mark.parametrize("status", [408, 425])
+def test_an_uncoded_retryable_4xx_on_a_self_check_repin_is_retried(hub, no_pull, status):
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    board = RecordingHub(refuse_repin="transient", refuse_status=status, refuse_detail="try again")
+    for _ in range(2):
+        wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert [(r["task_id"], r["expected_revision"]) for r in board.repins] == [(tid, 4)] * 2
+    assert board.reserves == [] and not wp._selfcheck_refused
+
+
 def test_a_forbidden_self_check_repin_still_reserves_at_the_refused_revision(hub, no_pull):
     _home, conn = hub
     tid = _stranded(conn, age=36 * 60)
