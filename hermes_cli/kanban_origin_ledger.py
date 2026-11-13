@@ -241,7 +241,7 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
         # [daveey] By uid, else id; a replayed legacy completion binds its run's receipt (kanban_completion_refs).
         bound_event=lambda kind, event_id, before, uid=None: _refs.pick(
             _refs.read_candidates(conn, [task['id']])[task['id']], task_id=task['id'], kind=kind, event_id=event_id,
-            uid=uid, before=before, run_id=event[1], imported_from=_refs.origin_of(conn, event[0])),
+            uid=uid, before=before, run_id=event[1], **_refs.import_kwargs(conn, event[0], task['id'], event[1])),
         current_task=lambda: conn.execute('SELECT title,body FROM tasks WHERE id=?', (task['id'],)).fetchone(),
         receipt_epoch=lambda: _receipt_epoch(conn))
     payload = {k: v for k, v in task.items()

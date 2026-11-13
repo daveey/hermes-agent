@@ -129,3 +129,103 @@ def test_a_local_completion_with_a_wrong_id_stays_unverified(boards):
     rewrite(worker, event_id, lambda p: (p.pop("pr_acceptance_event_uid", None),
                                          p.update(pr_acceptance_event_id=p["pr_acceptance_event_id"] + 1000)))
     assert verified(worker, tid) == (False, False)
+
+
+# Hub t_01a1ca1975471ed4, t_01a1cda0087499e3, t_01a1ce14309bff2c, t_01a1cf477dece56b, t_01a1cf6b6dd5feb4,
+# t_01a1cf7adf592a71, t_01a1d0622df6ea87, t_01a1d087f0697ede (2026-11-12): run on worker-2..6 and replayed before
+# the hub recorded ``origin_gateway`` (from event 1180961), so the completion AND its receipts carry NULL there.
+# Each payload id named another card's event or none. The run's Board lease (``claimed`` with ``holder`` and the
+# run's ``run_uid``) is what proves the completion was written elsewhere.
+
+def own_gateway(conn):
+    return conn.execute("SELECT gateway_id FROM kanban_sync_state").fetchone()[0]
+
+
+def as_pre_origin_replay(hub, tid, holder="worker-3", run_uid=None, claim_run_id=None):
+    """The hub before origins were recorded: no origin on the card's events, no uid in the completion, plus the
+    Board's lease of the completing run (or ``claim_run_id``) to ``holder``."""
+    event_id, _ = payload_of(hub, tid)
+    rewrite(hub, event_id, lambda p: (p.pop("pr_acceptance_event_uid", None),
+                                      p.update(pr_acceptance_event_id=p["pr_acceptance_event_id"] + 100000)))
+    run_id, uid = hub.execute("SELECT r.id, r.uid FROM task_runs r WHERE r.id = ?",
+                              (claim_run_id or hub.execute("SELECT run_id FROM task_events WHERE id = ?",
+                                                           (event_id,)).fetchone()[0],)).fetchone()
+    with kb.write_txn(hub):
+        hub.execute("UPDATE task_events SET origin_gateway = NULL WHERE task_id = ?", (tid,))
+        if holder is not None:
+            hub.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                        "VALUES (?, ?, 'claimed', ?, 1)",
+                        (tid, run_id, json.dumps({"holder": holder, "run_uid": run_uid or uid, "expires": 1})))
+    assert all(r[0] is None for r in hub.execute("SELECT origin_gateway FROM task_events WHERE task_id = ?", (tid,)))
+
+
+def test_a_completion_replayed_before_origins_were_recorded_binds_its_leased_runs_receipt(boards):
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    assert own_gateway(hub) != "worker-3"
+    as_pre_origin_replay(hub, tid)
+    assert verified(hub, tid) == (True, True)
+
+
+def test_a_waived_completion_replayed_before_origins_were_recorded_is_verified(boards, monkeypatch):
+    """t_01a1ca1975471ed4's shape: a refused try, then a contract_waiver, both no_required_checks, one run."""
+    worker, hub = boards
+    monkeypatch.setattr(kpa, "collect_acceptance", lambda contract, published, assignee=None: {
+        "ok": False, "classification": "no_required_checks", "head_sha": "b" * 40, "pr_url": PR,
+        "pr_state": "MERGED", "checks": [], "recovery": "", "required": [], "detail": "use contract_waiver"})
+    tid = kb.create_task(worker, title="Ship it", assignee="dev", completion_contract="acme/repo")
+    run = kb.claim_task(worker, tid).current_run_id
+    assert not kb.complete_task(worker, tid, summary="landed", expected_run_id=run, metadata={"published_pr": PR})
+    assert kb.complete_task(worker, tid, summary="landed", expected_run_id=run,
+                            metadata={"published_pr": PR, "contract_waiver": {"reason": "no required checks"}})
+    replay(worker, hub)
+    as_pre_origin_replay(hub, tid)
+    assert verified(hub, tid) == (True, True)
+
+
+@pytest.mark.parametrize("lease", ["own", "none", "other_run_uid", "another_run", "non_str_holder", "unknown_own"])
+def test_a_null_origin_completion_without_a_foreign_lease_of_its_run_stays_exact(boards, lease):
+    """A run this gateway held, no Board lease, a lease naming another run, a lease of another run, a malformed
+    holder, or a board that cannot name itself: the wrong id stays wrong."""
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    holder = {"own": own_gateway(hub), "none": None, "non_str_holder": 7}.get(lease, "worker-3")
+    other = hub.execute("SELECT id FROM task_runs WHERE task_id != ? ORDER BY id LIMIT 1", (tid,)).fetchone()[0]
+    as_pre_origin_replay(hub, tid, holder=holder,
+                         run_uid="01a1d000-0000-7000-8000-000000000001" if lease == "other_run_uid" else None,
+                         claim_run_id=other if lease == "another_run" else None)
+    if lease == "unknown_own":
+        with kb.write_txn(hub):
+            hub.execute("UPDATE kanban_sync_state SET gateway_id = ''")
+    assert verified(hub, tid) == (False, False)
+
+
+def test_a_lease_naming_no_run_uid_of_a_run_without_one_stays_exact(boards):
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    as_pre_origin_replay(hub, tid, holder=None)
+    event_id, _ = payload_of(hub, tid)
+    run_id = hub.execute("SELECT run_id FROM task_events WHERE id = ?", (event_id,)).fetchone()[0]
+    with kb.write_txn(hub):
+        hub.execute("UPDATE task_runs SET uid = NULL WHERE id = ?", (run_id,))
+        hub.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'claimed', ?, 1)",
+                    (tid, run_id, json.dumps({"holder": "worker-3"})))
+    assert hub.execute("SELECT uid FROM task_runs WHERE id = ?", (run_id,)).fetchone()[0] is None
+    assert verified(hub, tid) == (False, False)
+
+
+def test_two_gateways_leasing_one_run_is_ambiguous(boards):
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    as_pre_origin_replay(hub, tid)
+    event_id, _ = payload_of(hub, tid)
+    run_id, uid = hub.execute("SELECT r.id, r.uid FROM task_events e JOIN task_runs r ON r.id = e.run_id "
+                              "WHERE e.id = ?", (event_id,)).fetchone()
+    with kb.write_txn(hub):
+        hub.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'claimed', ?, 1)",
+                    (tid, run_id, json.dumps({"holder": "worker-4", "run_uid": uid})))
+    assert verified(hub, tid) == (False, False)

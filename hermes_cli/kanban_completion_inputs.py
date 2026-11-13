@@ -1,9 +1,10 @@
 """Batched, read-only inputs of the owner's completion verdict.
 
 ``kanban_origin_ledger.completion_verdict`` is the single verdict. This module only reads the rows it
-needs for many cards at once inside the caller's transaction: at most five SELECTs per 500 cards (tasks,
-latest completion, latest run, id-bound judge/acceptance events, and archive events only when an
-archived card is present), plus the board's cached receipt epoch. It adds no store and never writes.
+needs for many cards at once inside the caller's transaction: at most six SELECTs per 500 cards (tasks,
+latest completion, latest run, id-bound judge/acceptance events, the Board leases of runs whose completion
+records no origin, and archive events only when an archived card is present), plus the board's cached
+receipt epoch. It adds no store and never writes.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import logging
 import sqlite3
 from typing import NamedTuple
 
-from hermes_cli.kanban_completion_refs import pick, read_candidates
+from hermes_cli.kanban_completion_refs import leased_elsewhere, pick, read_candidates
 from hermes_cli.kanban_origin_ledger import _receipt_epoch, completion_verdict
 
 logger = logging.getLogger(__name__)
@@ -83,9 +84,12 @@ def read_completions(conn, ids) -> dict[str, Completion]:
         refs = read_candidates(conn, list(completed))
         imported = {tid: row["origin_gateway"] if isinstance(row["origin_gateway"], str) and row["origin_gateway"]
                     else None for tid, row in completed.items()}
+        # [daveey] Replayed before origins were recorded: the run's Board lease names the gateway.
+        legacy = leased_elsewhere(conn, {t: completed[t]["run_id"] for t, src in imported.items() if src is None})
+        imported.update(legacy)
         for tid, task in tasks.items():
             out[tid] = _completion(conn, tid, task, completed.get(tid), runs.get(tid), archived.get(tid),
-                                   refs.get(tid, []), imported.get(tid), epoch)
+                                   refs.get(tid, []), imported.get(tid), tid in legacy, epoch)
     return out
 
 
@@ -101,7 +105,7 @@ def _payload(raw):
     return value
 
 
-def _completion(conn, tid, task, event, run, archived, receipts, imported_from, epoch):
+def _completion(conn, tid, task, event, run, archived, receipts, imported_from, legacy_import, epoch):
     row = (task["status"], task["completed_at"], task["current_run_id"], task["goal_mode"],
            task["completion_contract"])
     event_t = None if event is None else (event["id"], event["run_id"], event["created_at"], event["payload"])
@@ -110,7 +114,8 @@ def _completion(conn, tid, task, event, run, archived, receipts, imported_from, 
 
     def bound_event(kind, event_id, before, uid=None):
         return pick(receipts, task_id=tid, kind=kind, event_id=event_id, uid=uid, before=before,
-                    run_id=None if event is None else event["run_id"], imported_from=imported_from)
+                    run_id=None if event is None else event["run_id"], imported_from=imported_from,
+                    legacy=legacy_import)
 
     def receipt_epoch():
         if not epoch:

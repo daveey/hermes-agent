@@ -14,9 +14,17 @@ another gateway (``origin_gateway`` set), whose integer does not name the same c
 latest receipt of that kind the same gateway wrote in the same run before the completion: on its own board that
 run's latest receipt is the one ``complete_task`` bound (it writes the receipt and the completion in one
 transaction). A completion that names no receipt never borrows one.
+
+The hub recorded ``origin_gateway`` only from event 1180961 (2026-11-13); every event replayed before that,
+completions and receipts alike, has NULL there, so eight worker-run hub cards (t_01a1ca1975471ed4 et al.) stayed
+unverified and their origin chat listed them ``unknown``. A NULL-origin completion counts as replayed (``legacy``)
+only when its own run carries the Board's lease (``claimed`` with ``holder`` and that run's ``run_uid``) to a
+gateway other than this board's own; it then binds a NULL-origin receipt of the same run. A run this gateway
+held, or one with no Board lease (an unsynced board), stays exact.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, Iterable
 
@@ -67,9 +75,53 @@ def origin_of(conn: sqlite3.Connection, event_id: int) -> str | None:
     return row[0] if row is not None and isinstance(row[0], str) and row[0] else None
 
 
+def leased_elsewhere(conn: sqlite3.Connection, runs: dict[str, Any]) -> dict[str, str]:
+    """``{task_id: holder}`` for each ``{task_id: run_id}`` whose run the Board leased to exactly one gateway
+    other than this board's own (``claimed`` with ``holder`` and that run's ``run_uid``). One SELECT."""
+    runs = {t: r for t, r in runs.items() if type(r) is int}
+    if not runs or "uid" not in {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}:
+        return {}
+    try:
+        own = conn.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.OperationalError:  # an unsynced board: no Board lease, nothing was replayed
+        return {}
+    own = own[0] if own is not None and isinstance(own[0], str) and own[0] else None
+    if own is None:
+        return {}
+    holders: dict[str, set[Any]] = {}
+    marks = ",".join("?" for _ in runs)
+    for tid, run_id, uid, raw in conn.execute(
+            f"SELECT e.task_id, e.run_id, r.uid, e.payload FROM task_events e JOIN task_runs r ON r.id = e.run_id "
+            f"WHERE e.task_id IN ({marks}) AND e.kind = 'claimed'", list(runs)):
+        try:
+            claim = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        if (run_id == runs.get(tid) and isinstance(uid, str) and uid and isinstance(claim, dict)
+                and claim.get("run_uid") == uid and isinstance(claim.get("holder"), str) and claim["holder"]):
+            holders.setdefault(tid, set()).add(claim["holder"])
+    out: dict[str, str] = {}
+    for tid, found in holders.items():
+        holder = next(iter(found)) if len(found) == 1 else None  # two holders for one run: ambiguous, exact
+        if holder is not None and holder != own:
+            out[tid] = holder
+    return out
+
+
+def import_kwargs(conn: sqlite3.Connection, event_id: int, task_id: str, run_id: Any) -> dict[str, Any]:
+    """``pick``'s ``imported_from``/``legacy`` for a completion event: its ``origin_gateway``, else its run's
+    foreign Board lease."""
+    origin = origin_of(conn, event_id)
+    if origin is not None:
+        return {"imported_from": origin, "legacy": False}
+    holder = leased_elsewhere(conn, {task_id: run_id}).get(task_id)
+    return {"imported_from": holder, "legacy": holder is not None}
+
+
 def pick(rows: Iterable[dict[str, Any]], *, task_id: str, kind: str, event_id: Any, uid: Any, before: int,
-         run_id: Any, imported_from: str | None) -> tuple[Any, Any] | None:
-    """``(payload, run_id)`` of the receipt a completion names, or None. See the module docstring."""
+         run_id: Any, imported_from: str | None, legacy: bool = False) -> tuple[Any, Any] | None:
+    """``(payload, run_id)`` of the receipt a completion names, or None. See the module docstring.
+    ``legacy``: replayed from ``imported_from`` before origins were recorded, so its receipts carry none."""
     mine = [r for r in rows if r["task_id"] == task_id and r["kind"] == kind and type(r["id"]) is int
             and r["id"] < before]
     if isinstance(uid, str) and uid:
@@ -77,12 +129,13 @@ def pick(rows: Iterable[dict[str, Any]], *, task_id: str, kind: str, event_id: A
         return None if hit is None else (hit["payload"], hit["run_id"])
     if type(event_id) is not int:
         return None
+    origin = None if legacy else imported_from
     hit = next((r for r in mine if r["id"] == event_id), None)
-    if hit is not None and (imported_from is None or hit["origin_gateway"] == imported_from):
+    if hit is not None and (imported_from is None or hit["origin_gateway"] == origin):
         return hit["payload"], hit["run_id"]
     if imported_from is None or run_id is None:
         return None
-    same_run = [r for r in mine if r["run_id"] == run_id and r["origin_gateway"] == imported_from]
+    same_run = [r for r in mine if r["run_id"] == run_id and r["origin_gateway"] == origin]
     if not same_run:
         return None
     best = max(same_run, key=lambda r: r["id"])
