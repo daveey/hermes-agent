@@ -169,6 +169,73 @@ def test_review_done_on_another_gateway_wakes_the_owner_within_a_minute(live, sv
     assert met and f"{REVIEW} done" in met[-1].payload["output"]
 
 
+@pytest.fixture
+def lagging_registry(tmp_path, monkeypatch):
+    """worker-1 is unreachable over ssh from here (rc 255, as from every pool worker: name not resolved or
+    permission denied), so ``--gateway`` probes fall back to the hermes-hub registry replica. That replica is
+    collector-refreshed: fresh (observed 30 s ago) but it still holds the review as ``running`` after the Board
+    sync replica already applied ``done`` (t_01a1d5ead059278d: sources disagreed for minutes)."""
+    import json
+    import sqlite3
+    import subprocess
+    from hermes_cli import kanban_wait_check as kwait
+
+    state = tmp_path / "hub-state"
+    state.mkdir()
+    monkeypatch.setenv("HERMES_HUB_STATE", str(state))
+    db = sqlite3.connect(state / "hub.db")
+    db.execute("CREATE TABLE replica(gw TEXT, coll TEXT, key TEXT, data TEXT, updated_at INTEGER)")
+    scope = {"task_scopes": [{"board": BOARD, "profile": "default", "state": "ok", "observed_at": time.time() - 30}]}
+    db.execute("INSERT INTO replica VALUES(?,?,?,?,?)", (OTHER, "gateway", OTHER, json.dumps(scope), 1))
+    row = dict(id=REVIEW, board=BOARD, status="running", gateway=OTHER, profile="default", owner_profile="default",
+               wait_observation={"parked_agent": False, "orphan_reason": None})
+    db.execute("INSERT INTO replica VALUES(?,?,?,?,?)", (OTHER, "tasks", f"default/{BOARD}/{REVIEW}",
+                                                         json.dumps(row), 1))
+    db.commit()
+    db.close()
+    ssh = []
+
+    def unreachable(argv, **kwargs):
+        ssh.append(argv)
+        return subprocess.CompletedProcess(argv, 255, "", f"ssh: Could not resolve hostname {OTHER}")
+
+    monkeypatch.setattr(kwait.subprocess, "run", unreachable)
+    return ssh
+
+
+def test_gateway_probe_wakes_on_the_board_change_while_ssh_fails_and_the_registry_lags(
+        live, svc, kanban_home, probes, lagging_registry, monkeypatch):
+    """The live #2370 gap: both production parks used ``--gateway`` and slept the full ``check_every``."""
+    from hermes_cli import kanban_awaiting as ka
+    monkeypatch.setitem(ka._REMOTE_CONFIRMED, (OTHER, REVIEW), (time.monotonic(), f"{REVIEW} running"))
+    owner, t0 = _setup(live, svc, kanban_home, probes, f"hermes kanban wait-check task {REVIEW} --gateway {OTHER}")
+    assert lagging_registry  # the probe tried the owner first
+    _other(svc, REVIEW, {"status": "done"})
+    _round(kanban_home, svc)  # this gateway's Board replica applies done; the registry replica still says running
+    assert sync.consume_dispatcher_wake()
+    assert _next_at(live, owner) <= t0 + 60
+    kwc.run_due_wake_checks(live, now=t0 + 60, wait=True)
+    assert _status(live, owner) == "ready"  # before the fix: scheduled until t0 + 900
+    met = [e for e in kb.list_events(live, owner) if e.kind == "condition_met"]
+    assert met and f"{REVIEW} done" in met[-1].payload["output"]
+
+
+def test_gateway_probe_keeps_the_registry_answer_when_the_board_replica_is_not_fresh(
+        live, svc, kanban_home, probes, lagging_registry, monkeypatch):
+    """A Board replica whose last pull is old vouches for nothing: the registry's (newer) not-yet stands."""
+    from hermes_cli import kanban_awaiting as ka
+    monkeypatch.setitem(ka._REMOTE_CONFIRMED, (OTHER, REVIEW), (time.monotonic(), f"{REVIEW} running"))
+    owner, t0 = _setup(live, svc, kanban_home, probes, f"hermes kanban wait-check task {REVIEW} --gateway {OTHER}")
+    _other(svc, REVIEW, {"status": "done"})
+    _round(kanban_home, svc)
+    import sqlite3
+    with sqlite3.connect(ksc.shadow_path(BOARD)) as shadow:
+        shadow.execute("UPDATE kanban_sync_state SET pulled_at = ?", (time.time() - 3600,))
+    kwc.run_due_wake_checks(live, now=t0 + 60, wait=True)
+    assert _status(live, owner) == "scheduled"
+    assert _next_at(live, owner) == t0 + 60 + EVERY
+
+
 def test_awaiting_card_ref_alone_names_the_card(live, kanban_home):
     """A park whose own probe does not name the card still counts its ``awaiting`` card ref."""
     owner = kb.create_task(live, title="owner", assignee="worker")

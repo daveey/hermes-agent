@@ -88,21 +88,64 @@ def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DE
             source, rows = _task_source(board, target)
             if not rows:
                 return 2, f"error: {target} not found"
-            status = rows[0][0]
-            if status in set(since or ()):
-                return 1, f"{target} {status} (unchanged since park)"
-            suffix = _producer_suffix(board, target, source=source) if status in ("scheduled", "blocked") else ""
-            if status in set(until):
-                return 0, f"{target} {status}{suffix}"
-            if PARKED_AGENT in set(until) and status in ("scheduled", "blocked") and _agent_owned_park(board, target, source=source):
-                return 0, f"{target} {status} (agent-owned park: nothing else will produce what it waits for)"
-            return 1, f"{target} {status}{suffix}"
+            return _verdict(board, target, rows[0][0], source=source, until=until, since=since)
         if kind == "board-empty":
             n = _query(_db(target), "select count(*) from tasks where status not in ('done','archived')")[0][0]
             return (0 if n == 0 else 1), f"{target} open={n}"
     except Exception as exc:  # any failure is "cannot tell", never "not yet"
         return 2, f"error: {exc}"
     return 2, f"error: unknown check {kind!r}"
+
+
+def _verdict(board, target, status, *, source, until, since, note="") -> tuple[int, str]:
+    """``check_local``'s judgement of one observed ``status`` (``note``: a source tag after the status)."""
+    if status in set(since or ()):
+        return 1, f"{target} {status} (unchanged since park){note}"
+    suffix = _producer_suffix(board, target, source=source) if status in ("scheduled", "blocked") else ""
+    if status in set(until):
+        return 0, f"{target} {status}{suffix}{note}"
+    if PARKED_AGENT in set(until) and status in ("scheduled", "blocked") and _agent_owned_park(board, target, source=source):
+        return 0, f"{target} {status} (agent-owned park: nothing else will produce what it waits for){note}"
+    return 1, f"{target} {status}{suffix}{note}"
+
+
+def _board_replica_task(board, target, *, until, since):
+    """``(rc, message)`` for ``target`` as this gateway's Board sync replica (``sync-shadow``) holds it,
+    or None when that replica cannot vouch for it: no replica or row, unreadable, or not pulled to the feed head
+    within ``kanban_replica_freshness.FRESH_SECONDS`` (sync stopped or detached). Never raises."""
+    from hermes_cli.kanban_replica_freshness import FRESH_SECONDS
+    from hermes_cli.kanban_sync_client import shadow_path
+    try:
+        path = shadow_path(board or "default")
+        if not path.exists():
+            return None
+        state = _query(path, "select pulled_at from kanban_sync_state limit 1")
+        rows = _query(path, "select status from tasks where id=?", (target,))
+        pulled = state[0][0] if state else None
+        if not rows or not isinstance(pulled, (int, float)) or not 0 <= time.time() - pulled <= FRESH_SECONDS:
+            return None
+        return _verdict(board, target, rows[0][0], source=path, until=until, since=since, note=" (board replica)")
+    except Exception:  # health: allow BLE001 -- an unreadable Board replica is no evidence; the registry answer stands
+        return None
+
+
+def _unreachable_task(gateway, target, *, board, until, since, live_timeout) -> tuple[int, str]:
+    """The owner gateway cannot be asked (no route, or a forced-command key). Two local copies may answer: the
+    hermes-hub registry replica (collector-refreshed, owner-qualified) and this gateway's Board sync replica (the
+    same Board row the owner's own ``wait-check`` falls back to, applied each sync round). The Board replica runs
+    minutes ahead, and it is the one whose apply expedites the park (``kanban_awaited_card_wake``): reading only
+    the registry, the expedited probe saw the old status and slept a full ``check_every`` (t_01a1d5ead059278d,
+    0 of 2 live parks woke). So a fresh Board replica may only move the answer to met (rc 0): it never downgrades
+    the registry's met, nor replaces its rc 3 (stale or unknown scope: the owner may be offline, and its frozen
+    Board row would hide the gateway_offline escalation) with a not-yet. Its ``pulled_at`` is this gateway's pull
+    time, not when the owner wrote the row, so it is not weighed against the registry's ``observed_at``. A live
+    owner read stands; a Board replica that is not fresh adds nothing."""
+    from hermes_cli.kanban_wait_replica import check
+    rc, msg = check(gateway, target, board=board, until=until, since=since, live_timeout=live_timeout)
+    if rc == 0 or "(live owner" in msg:
+        return rc, msg
+    board_view = _board_replica_task(board, target, until=until, since=since)
+    return board_view if board_view is not None and board_view[0] == 0 else (rc, msg)
 
 
 def _producer_suffix(board, target, *, source=None):
@@ -142,9 +185,8 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
                            timeout=15 if kind == "task" else SSH_TIMEOUT + 15, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         if kind == "task":
-            from hermes_cli.kanban_wait_replica import check
-            return check(gateway, target, board=board, until=until, since=since,
-                         live_timeout=25 - (time.monotonic() - started))
+            return _unreachable_task(gateway, target, board=board, until=until, since=since,
+                                     live_timeout=25 - (time.monotonic() - started))
         return 2, f"error: ssh {host}: {exc}"
     # A forced-command key can reach SSH but cannot execute the owner CLI.
     # Treat only its explicit refusal as unavailable transport, not arbitrary
@@ -153,9 +195,8 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     # never upgrades a cached observation to a live authoritative read.
     restricted = p.returncode == 2 and p.stderr.strip().startswith("hub-read: refused:")
     if (p.returncode == 255 or restricted) and kind == "task":
-        from hermes_cli.kanban_wait_replica import check
-        return check(gateway, target, board=board, until=until, since=since,
-                         live_timeout=25 - (time.monotonic() - started))
+        return _unreachable_task(gateway, target, board=board, until=until, since=since,
+                                 live_timeout=25 - (time.monotonic() - started))
     out = (p.stdout + p.stderr).strip()
     if p.returncode == 0 and since and kind == "task":
         words = (p.stdout or "").split()
