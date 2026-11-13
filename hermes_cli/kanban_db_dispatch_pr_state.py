@@ -325,7 +325,9 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     not insertion order: synced history can append older events after promotion.
     A park in the same second as the newest PR comment counts only when the park's
     server-stamped comment watermark covers that comment (the owner reported, then
-    parked); without it the tie stays guarded.
+    parked); without it the tie stays guarded. Only awaited parents' results can
+    refuse it: a review parent that finished before the park, unchanged since, was
+    already in the owner's context.
     """
     from hermes_cli import kanban_db as kb
 
@@ -393,12 +395,17 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
             or kb.unsatisfied_parents(conn, task_id)):
         return False
     from hermes_cli.kanban_dependency_review import _awaited_parents, is_review_result
-    if not _awaited_parents(conn, parents, evidence, parked_at):
+    awaited_now = _awaited_parents(conn, parents, evidence, parked_at)
+    if not awaited_now:
         return False
     awaited = evidence.get("awaited")
     # Results is_review_result calls reviews (incomplete or invalid verdicts included)
-    # belong to resumes_review: this handoff must not bypass its exact-head checks. [daveey]
-    for parent in parents:
+    # belong to resumes_review: this handoff must not bypass its exact-head checks. A
+    # parent proven finished and unchanged before the park is not awaited: its verdict
+    # predates the park, so it neither authorizes nor refuses (2026-11-13
+    # t_01a1d09d3547337b: an approval of PR #1760 that preceded the owner's rollout park
+    # held the owner 30 min after the rollout finished). [daveey]
+    for parent in awaited_now:
         result = conn.execute(
             "SELECT metadata, summary FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,),
         ).fetchone()
@@ -420,12 +427,16 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
 
 
 def _handed_off_after(conn: sqlite3.Connection, task_id: str, since: int, latest_pr_comment_id: int,
-                      pr_urls: list[str]) -> bool:
-    """Any supported handoff strictly after the newest PR comment (see :func:`active_pr_reason`)."""
+                      pr_urls: list[str], tie_comment_ids: tuple[int, ...] = ()) -> bool:
+    """Any supported handoff strictly after the newest PR comment (see :func:`active_pr_reason`).
+
+    ``tie_comment_ids`` are the PR comments at ``since``: the run that wrote them and then
+    parked in that same second handed them off (:mod:`kanban_pr_same_run_park`)."""
     from hermes_cli import kanban_db_dispatch as _kbd
     from hermes_cli.kanban_db_dispatch_rerun import is_handoff_event, reopened_after
     from hermes_cli.kanban_hold_release import released_after
     from hermes_cli.kanban_operator_resume import resumed_after
+    from hermes_cli.kanban_pr_same_run_park import reported_then_parked
 
     if released_after(conn, task_id, since, pr_urls):
         return True
@@ -433,12 +444,15 @@ def _handed_off_after(conn: sqlite3.Connection, task_id: str, since: int, latest
         return True  # operator `kanban resume`: one continuation of the latest run
     if _immediate_checkpoint_after(conn, task_id, since, latest_pr_comment_id):
         return True
-    # Strictly after: a same-second handoff tie stays guarded (fail closed).
+    # Strictly after: a same-second handoff tie stays guarded (fail closed), except the
+    # publishing run's own orderly park ordered after its comments.
     if any(is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
             conn, "task_events", task_id, since,
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
             "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
+        return True
+    if reported_then_parked(conn, task_id, since, tie_comment_ids):
         return True
     if reopened_after(conn, task_id, since):
         return True  # operator reopen of the PR owner: it resumes THAT PR (its comments are in context)
@@ -542,13 +556,18 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             if pr_state(url) == "REJECTED":
                 comment_rejection(conn, task_id, url, _rejections[norm_pr(url)])
         return None
-    if _handed_off_after(conn, task_id, max(pr_times), latest_pr_comment_id, pr_urls):
+    since = max(pr_times)
+    ties = tuple(cid for t, cid in published if t == since)
+    if _handed_off_after(conn, task_id, since, latest_pr_comment_id, pr_urls, ties):
         return None
     from hermes_cli import kanban_requeued_publisher
     if kanban_requeued_publisher.continues(conn, task_id, published, latest_pr_comment_id):
         return None  # its own publisher was paused by a core-update requeue: one continuation
     from hermes_cli.kanban_review_release import released
     if released(conn, task_id, pr_urls) or resumes_review(conn, task_id, pr_urls):
+        return None
+    from hermes_cli.kanban_awaited_review import resumes_awaited_review
+    if resumes_awaited_review(conn, task_id, pr_urls):
         return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
     discharged = {u for u, s in states.items() if s in TERMINAL_STATES or s == "REJECTED"}
@@ -562,5 +581,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
 
 
 def clear_cache() -> None:
+    from hermes_cli import kanban_awaited_review
+
     _cache.clear()
     _rejections.clear()
+    kanban_awaited_review.clear_cache()

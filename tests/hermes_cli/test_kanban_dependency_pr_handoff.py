@@ -298,3 +298,50 @@ def test_prose_review_without_head_still_requires_review_evidence(board, monkeyp
     kb.complete_task(board, parent, summary="VERDICT: REQUEST_CHANGES", metadata={})
     kb.recompute_ready(board)
     assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+
+
+@pytest.mark.parametrize("approved_before_park", [True, False], ids=["approved_before_park", "approved_after_park"])
+def test_review_parent_finished_before_the_park_does_not_hold_the_ordering_continuation(
+        board, monkeypatch, approved_before_park):
+    """2026-11-13 t_01a1d09d3547337b (state PR #1760): its exact-head approval finished,
+    then the owner parked on a fleet-rollout parent; when the rollout finished the
+    finished approval parent still refused the ordering handoff (held 30 min). A review
+    parent that finishes after the park is awaited and stays on resumes_review's rules."""
+    now = int(time.time())
+    clock = [now]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    task = kb.create_task(board, title="finish existing PR", assignee="dev")
+    kb.claim_task(board, task)
+    run = kb.get_task(board, task).current_run_id
+    worker_comment(board, task, "dev", PR)
+    review = kb.create_task(board, title="exact-head review", assignee="reviewer")
+    kb.link_tasks(board, review, task, expected_child_run_id=run)
+
+    def approve():
+        kb.claim_task(board, review)
+        assert kb.complete_task(board, review, summary="Approved", metadata={
+            "verdict": "approve", "reviewed_sha": "a" * 40, "pr": PR})
+
+    if approved_before_park:
+        clock[0] += 5
+        approve()
+    rollout = kb.create_task(board, title="fleet rollout", assignee="dev")
+    kb.link_tasks(board, rollout, task, expected_child_run_id=run)
+    clock[0] += 10
+    assert kb.block_task(board, task, kind="dependency", reason="rollout", expected_run_id=run)
+    clock[0] += 10
+    if not approved_before_park:
+        approve()
+        clock[0] += 5
+    kb.claim_task(board, rollout)
+    assert kb.complete_task(board, rollout, summary="rollout finished")
+    kb.recompute_ready(board)
+    assert kb.get_task(board, task).status == "ready"
+    if approved_before_park:
+        assert prs.active_pr_reason(board, task, int(time.time())) is None
+        kb.claim_task(board, task)
+        assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+    else:
+        # A review result awaited at the park belongs to resumes_review (parent approval
+        # names the PR at a full head: it resumes there, not via the ordering handoff).
+        assert prs._dependency_handoff_after(board, task, now, 0) is False
