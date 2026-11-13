@@ -1927,6 +1927,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     from hermes_cli.kanban_block_routing import recovery_held
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_review_release
+    from hermes_cli import kanban_db_graph as _graph
     promoted = 0
     remote = _sync.has_remote_parents(conn)
     releases = kanban_review_release.prepare(conn, failure_limit)
@@ -1951,7 +1952,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             if recovery_held(conn, row, failure_limit):
                 continue
             states = parent_states(conn, task_id, remote=remote)
-            if cur_status == "todo" and _note_missing_parents(conn, task_id, states, remote=remote, fresh=fresh):
+            # Inside this txn, for a ``todo`` child: start/close a missing-parent streak (``parent_missing`` /
+            # ``parent_found``) and block after PARENT_MISSING_BLOCK_SECONDS (synced: replica at the feed head only).
+            if cur_status == "todo" and _graph.note_missing_parents(conn, task_id, states, remote=remote, fresh=fresh):
                 continue
             if all(st in ("done", "archived") for _pid, st in states):
                 resume_status = _resume_status_from_events(conn, task_id)
@@ -1971,6 +1974,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                     promotion_payload,
                 )
                 promoted += 1
+    _graph.report_deferred_pass(conn, fresh)  # one INFO line per board per stale replica stamp
     return promoted
 
 
@@ -2002,16 +2006,6 @@ def parent_states(
         sql = ("SELECT l.parent_id AS id, p.status AS status FROM task_links l "
                "LEFT JOIN tasks p ON p.id = l.parent_id WHERE l.child_id = ? ORDER BY l.parent_id")
     return [(row["id"], row["status"]) for row in conn.execute(sql, (task_id,)).fetchall()]
-
-
-def _note_missing_parents(
-    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]], *, remote=False, fresh=None,
-) -> bool:
-    """Inside :func:`recompute_ready`'s txn, for a ``todo`` child: record when a parent goes missing
-    (``parent_missing`` event, once per streak), clear the streak when it comes back (``parent_found``), and block
-    the child after :data:`PARENT_MISSING_BLOCK_SECONDS` (synced: fresh mirror only). True when blocked here."""
-    from hermes_cli.kanban_db_graph import note_missing_parents
-    return note_missing_parents(conn, task_id, states, remote=remote, fresh=fresh)
 
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:

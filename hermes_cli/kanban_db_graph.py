@@ -2,12 +2,9 @@
 from __future__ import annotations
 
 import json
-import logging
 import sqlite3
 import time
 from typing import Any, Optional
-
-_log = logging.getLogger(__name__)
 
 
 def note_missing_parents(
@@ -19,6 +16,10 @@ def note_missing_parents(
     On a synced board (``remote``) a parent with no status is unknown, not missing, unless the mirror's replica is
     at the feed head (``kanban_replica_freshness.replica_at_head``, read once per readiness pass into ``fresh``):
     otherwise no streak event is recorded and nothing is blocked. The child still waits: an unknown parent gates.
+    Each deferral is counted in ``fresh["deferred"]`` and the pass logs one INFO line per board per stale replica
+    stamp (``kanban_replica_freshness.report_deferred``). A replica that never catches up is alarmed in awake time
+    by the sync-freshness check of t_01a1d3df5e5d0757, not by a wall-clock bound here: a laptop's stamp is hours
+    old on wake from sleep, so such a bound would fire at once and bring back the false blocks.
     A streak is scoped (``_streak_open``): a parent missing after an unblock or a link, or one the open streak does
     not name, starts a fresh ``parent_missing`` and waits its own :data:`PARENT_MISSING_BLOCK_SECONDS`."""
     from hermes_cli import kanban_db as kb
@@ -31,9 +32,8 @@ def note_missing_parents(
         cache = {} if fresh is None else fresh
         if "fresh" not in cache:  # a detached board (sync off) keeps its mirror table but is its own authority
             cache["fresh"] = replica_at_head(conn) if synced(conn) else True
-            if not cache["fresh"]:
-                _log.debug("parent status unknown: replica not at head")
         if not cache["fresh"]:
+            cache["deferred"] = cache.get("deferred", 0) + 1
             return False
     last = conn.execute(
         "SELECT id, kind, created_at, payload FROM task_events WHERE task_id = ? "
@@ -62,6 +62,14 @@ def note_missing_parents(
         "repair_task_id": repair_id,
     })
     return True
+
+
+def report_deferred_pass(conn: sqlite3.Connection, fresh: dict) -> None:
+    """After a readiness pass: the children :func:`note_missing_parents` deferred because the replica is not at the
+    feed head get one INFO line per board per stale replica stamp (``kanban_replica_freshness.report_deferred``)."""
+    if fresh.get("deferred"):
+        from hermes_cli.kanban_replica_freshness import report_deferred
+        report_deferred(conn, fresh["deferred"])
 
 
 def _streak_open(conn: sqlite3.Connection, task_id: str, last, missing: list[str]) -> bool:

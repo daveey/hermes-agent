@@ -166,23 +166,31 @@ def replica_at_head(conn: sqlite3.Connection) -> bool:
 
 def _replica_at_head(conn: sqlite3.Connection):
     """True/False as :func:`replica_at_head`; None when there is no readable replica to judge by."""
+    return _replica_state(conn)[0]
+
+
+def _replica_state(conn: sqlite3.Connection) -> tuple:
+    """``(verdict, board_id, pulled_at)``: the :func:`_replica_at_head` verdict, the live board's id (None when
+    unsynced or unreadable) and the replica's numeric ``pulled_at`` stamp (None when it has none)."""
     from hermes_cli.kanban_db_connect import _main_db_file
     from hermes_cli.kanban_foreign_card import open_replica
 
     try:
         local = conn.execute("SELECT board_id FROM kanban_sync_state LIMIT 1").fetchone()
         if local is None:
-            return None
+            return None, None, None
         with open_replica(_main_db_file(conn)) as replica:
             if replica is None:
-                return None
+                return None, local["board_id"], None
             state = replica.execute("SELECT board_id, pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
     except (sqlite3.Error, OSError, ValueError):
-        return None
+        return None, None, None
     if state is None or state["board_id"] != local["board_id"]:
-        return False
+        return False, local["board_id"], None
     pulled = state["pulled_at"]
-    return type(pulled) in (int, float) and 0 <= time.time() - pulled <= FRESH_SECONDS
+    if type(pulled) not in (int, float):
+        return False, local["board_id"], None
+    return 0 <= time.time() - pulled <= FRESH_SECONDS, local["board_id"], pulled
 
 
 def synced(conn: sqlite3.Connection) -> bool:
@@ -202,3 +210,34 @@ def local_copy_stale(conn: sqlite3.Connection, what: str) -> bool:
         return False
     _log.debug("%s: local copy not at the feed head; deferring to the next tick", what)
     return True
+
+
+# Live board file -> the replica stamp its last deferral line named: one INFO line per board per stale stamp.
+_reported: dict[str, object] = {}
+
+
+def report_deferred(conn: sqlite3.Connection, deferred: int) -> None:
+    """One INFO line when a readiness pass deferred ``deferred`` missing-parent judgements because the replica is
+    not at the feed head, repeated only when the replica's ``pulled_at`` changes. It names the board, the replica's
+    last time at the head (or "no readable replica") and the count. There is deliberately no wall-clock escalation
+    here: after a laptop sleeps for hours its stamp is hours old on wake, so a bound would fire at once and bring
+    back the false blocks this gate removes. A replica that never catches up is alarmed in awake time by the
+    sync-freshness check of t_01a1d3df5e5d0757, which files one card per incident."""
+    from datetime import UTC, datetime
+    from hermes_cli.kanban_db_connect import _main_db_file
+
+    verdict, board, pulled = _replica_state(conn)
+    key = str(_main_db_file(conn) or board)
+    stamp = "unreadable" if verdict is None else pulled
+    if key in _reported and _reported[key] == stamp:
+        return
+    _reported[key] = stamp
+    if verdict is None:
+        last = "no readable replica"
+    elif pulled is None:
+        last = "replica not stamped at the feed head"
+    else:
+        last = "replica last at the feed head " + datetime.fromtimestamp(pulled, UTC).isoformat(
+            timespec="seconds")
+    _log.info("missing-parent check deferred on board %s (%s): %s; %d child(ren) wait with parent status unknown",
+              board or "?", key, last, deferred)

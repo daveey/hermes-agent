@@ -301,3 +301,35 @@ def test_a_detached_board_keeps_its_mirror_table_but_still_blocks_a_missing_pare
     assert kb.get_task(live, child).status == "blocked"
     kb.recompute_ready(live)
     assert len(_repairs(live, child)) == 1
+
+
+def test_a_stalled_replica_is_reported_once_per_stale_stamp_at_info(live, svc, kanban_home, caplog, monkeypatch):
+    """Review nit on #1931: a stalled sync must not leave the deferral silent (DEBUG only), nor repeat it every
+    tick. One INFO line per board per replica stamp names the board, the last time at the head and the count."""
+    from hermes_cli import kanban_replica_freshness as fr
+    monkeypatch.setattr(fr, "_reported", {}, raising=False)
+    children = [kb.create_task(live, title=f"child {i}", assignee="worker") for i in range(2)]
+    _round(kanban_home, svc)
+    for i, child in enumerate(children):
+        _link_raw(live, f"t_after_offline_{i}", child)
+    stale = int(time.time()) - fr.FRESH_SECONDS - 60
+    _stamp_replica(stale)
+    caplog.set_level("INFO", logger=fr.__name__)
+
+    def lines():
+        return [r.getMessage() for r in caplog.records if r.name == fr.__name__ and r.levelname == "INFO"]
+
+    kb.recompute_ready(live)
+    kb.recompute_ready(live)  # same stale stamp: no second line
+    [first] = lines()
+    assert f"board {BOARD}" in first and "2 child(ren)" in first
+    assert time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(stale)) in first
+    _stamp_replica(stale + 1)  # the replica moved but is still behind: said once more
+    kb.recompute_ready(live)
+    assert len(lines()) == 2
+    for path in ksc.shadow_path(BOARD).parent.glob(f"{BOARD}.db*"):  # no replica at all: said once, as such
+        path.unlink()
+    kb.recompute_ready(live)
+    kb.recompute_ready(live)
+    assert len(lines()) == 3 and "no readable replica" in lines()[-1]
+    assert all(kb.get_task(live, c).status == "todo" and not _events(live, c, "parent_missing") for c in children)
