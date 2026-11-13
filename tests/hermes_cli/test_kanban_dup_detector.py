@@ -207,3 +207,13 @@ def test_every_joining_word_stops_the_negator_reaching_the_keyword(summary):
 def test_every_judging_verb_after_a_negator_denies_the_keyword(verb, template):
     """Post-merge check of PR #2535: each ``_JUDGED`` verb keeps the denial across "as"."""
     assert dd.sibling_named(template.format(verb)) == []
+
+
+@pytest.mark.parametrize("summary", [
+    "Not even marked a duplicate of t_0123456789abcdef.",
+    "Never formally flagged the duplicate of t_0123456789abcdef.",
+])
+def test_negator_without_as_still_denies_the_duplicate(summary):
+    """Post-merge check of PR #2577: "as" after the judging verb is optional. With a hedge word before the verb,
+    the denial reaches the keyword only through that branch, since the plain two-word window is too short."""
+    assert dd.sibling_named(summary) == []

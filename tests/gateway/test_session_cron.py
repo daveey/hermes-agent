@@ -439,3 +439,17 @@ async def test_requested_cron_stop_is_not_an_admitted_turn_failure(tmp_path, mon
     assert len(records) <= 1, records
     assert all(r.levelno <= logging.WARNING and not r.exc_info for r in records), records
     assert all('failed' not in r.getMessage() for r in records), records
+
+
+@pytest.mark.parametrize('error, expected', [
+    ('CronRunCancelled: Cron job \'probe\' was stopped: job removed while running', True),
+    ('CronShutdownInterrupted: gateway shutting down', True),
+    ('RuntimeError: lost fire ownership after retry of CronRunCancelled: stale marker', False),
+    ('RuntimeError: worker died during CronShutdownInterrupted: drain', False),
+])
+def test_a_failure_that_mentions_a_stop_class_is_still_a_failure(error, expected):
+    """Post-merge check of PR #2612: only an error text that starts with a stop class's ``<type>: `` is an
+    expected stop. A real failure whose message merely mentions one stays a failure, so it is still logged as an
+    ERROR with its traceback rather than hidden at INFO."""
+    from gateway import session_cron
+    assert session_cron._expected_stop(error) is expected

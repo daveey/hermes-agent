@@ -168,6 +168,13 @@ def test_pr_target(ref, hint, want) -> None:
     assert kcp.pr_target(ref, hint) == want
 
 
+def test_pr_target_ref_with_two_shas_ignores_the_hint() -> None:
+    """Post-merge check of PR #2616: a ref that itself names two shas reads the PR's current head. It never falls
+    through to the hint's one sha, which may be an old head the ref's own text already disagrees with."""
+    ref = f"https://github.com/{REPO}/pull/{PR} {OTHER} {BASE}"
+    assert kcp.pr_target(ref, f"head is {HEAD}") == (REPO, PR, None)
+
+
 # --- a. park time -------------------------------------------------------------------------------------------------
 
 @CONFLICTS
