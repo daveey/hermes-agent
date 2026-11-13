@@ -210,6 +210,31 @@ def test_own_profile_policy_resolves_launch_injected_refs(profiles, monkeypatch)
         secret_scope.reset_multiplex_context(token)
 
 
+@pytest.mark.parametrize("multiplex", [False, True])
+def test_own_profile_policy_counts_launch_only_terminal_backend(profiles, monkeypatch, multiplex):
+    """A backend that only the launch environment sets (``TERMINAL_ENV`` from systemd, ``op run``,
+    a launcher bridge) is the backend the process's own profile runs with, as ``_bind_whole_profile``
+    binds it; another profile never inherits it (t_01a1d4138fd1167a). [daveey]"""
+    from agent import secret_scope
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)  # this test's launch env
+    policy = "platform_toolsets: {cli: [terminal, file]}\n"  # no backend in config.yaml or .env
+    profiles("default", policy)
+    profiles("coder", policy)
+    token = secret_scope.set_multiplex_context(multiplex)
+    try:
+        with pytest.raises(CapabilityMismatchError) as caught:
+            validate_assignment("default", requires=["host_repo"])
+        assert caught.value.missing == ["host_repo"]
+        assert validate_assignment("default", requires=["terminal", "git"]) == ["terminal", "git"]
+        # Another profile reads its own files only: the default backend (local) still grants host_repo.
+        assert validate_assignment("coder", requires=["host_repo"]) == ["host_repo"]
+    finally:
+        secret_scope.reset_multiplex_context(token)
+
+
 def test_skill_names_are_not_guessed_as_capabilities(profiles):
     # Skill capability metadata has no established convention; do not infer from names/prose.
     assert validate_assignment("legacy", skills=["git", "terminal"]) == []

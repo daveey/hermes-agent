@@ -300,7 +300,7 @@ def _profile_policy(assignee: str):
     from hermes_cli.config_effective import load_profile_config_effective
     from hermes_cli.profiles import resolve_profile_env
     from tools.terminal_scope import build_profile_terminal_scope
-    from tui_gateway.launch_profile_policy import owner_secret_scope
+    from tui_gateway.launch_profile_policy import launch_terminal_env, owner_secret_scope
 
     home = Path(resolve_profile_env(assignee))
     config_path = home / "config.yaml"
@@ -308,18 +308,20 @@ def _profile_policy(assignee: str):
     # shared loader. That is fine for startup, but cannot establish assignment authority.
     _check_policy_shape(read_config_doc_readonly(config_path))
     scope = scope_for_profile(home)
-    # The process's own profile reads its launch scope, as ``_bind_whole_profile`` binds it: a
-    # managed ``${VAR}`` that only systemd / ``op run`` injects has no file to rebuild from. Any
-    # other profile gets its own files only (t_01a1d3f89c1e13c6).
+    # The process's own profile reads its launch secret scope and the frozen launch ``TERMINAL_*``
+    # overlay, as ``_bind_whole_profile`` binds it: a managed ``${VAR}`` or a ``TERMINAL_ENV`` that only
+    # systemd / ``op run`` injects has no file to rebuild from. Any other profile gets its own files
+    # only (t_01a1d3f89c1e13c6, t_01a1d4138fd1167a).
     secrets = owner_secret_scope(home)
     # Unstamped marks the process's own profile, as the legacy setter left it; any other home is routed.
     stamp = not _is_process_home(home)
+    overlay = None if stamp else launch_terminal_env()
     with ExitStack() as stack:
         # Home and secrets first: the effective config resolves managed values against them.
         stack.enter_context(bind_state(scope, secrets=secrets, stamp_home=stamp, terminal=False))
         config = load_profile_config_effective(config_path, fail_closed=True)
         _check_policy_shape(config)
-        terminal = build_profile_terminal_scope(home)
+        terminal = build_profile_terminal_scope(home, env_overlay=overlay)
         # Effective config includes managed overlays and expanded values; the terminal
         # scope helper also preserves a legacy profile-local .env backend when YAML omits it.
         if "backend" in config.get("terminal", {}):
