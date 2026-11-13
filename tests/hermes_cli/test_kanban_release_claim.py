@@ -139,17 +139,25 @@ def test_foreign_host_claim_keeps_the_claim(live, monkeypatch):
     assert _claim(live, tid)[2] == DEAD_PID
 
 
-def test_claim_taken_since_the_read_is_untouched(live, monkeypatch):
+@pytest.mark.parametrize(("change_lock", "change_pid"), [
+    pytest.param(True, True, id="both-changed"),
+    pytest.param(False, True, id="worker-pid-only"),
+    pytest.param(True, False, id="claim-lock-only"),
+])
+def test_claim_taken_since_the_read_is_untouched(live, monkeypatch, change_lock, change_pid):
     """The CAS matches the claim values read: a newer claim between the read and the update survives."""
     from hermes_cli.kanban_release_claim import release_on_feed
     tid, _ = _crash_rc0(live, monkeypatch)
     old = live.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-    newer = kb._host_prefix() + "777"
+    # A respawn by the same dispatcher changes only worker_pid, not claim_lock.
+    newer_lock = kb._host_prefix() + "777" if change_lock else old["claim_lock"]
+    newer_pid = DEAD_PID - 1 if change_pid else old["worker_pid"]
     with kbc.write_txn(live):
         live.execute("UPDATE tasks SET status='ready', claim_lock=?, worker_pid=?, claim_expires=? WHERE id=?",
-                     (newer, DEAD_PID - 1, 4102444800, tid))
+                     (newer_lock, newer_pid, 4102444800, tid))
+        expected = _claim(live, tid)
         assert release_on_feed(live, tid, old, "ready") is False
-    assert _claim(live, tid)[:3] == (newer, 4102444800, DEAD_PID - 1)
+    assert _claim(live, tid) == expected
 
 
 @pytest.mark.parametrize(("local", "fed"), [("blocked", "ready"), ("ready", "triage")])
