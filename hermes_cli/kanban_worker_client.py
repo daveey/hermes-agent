@@ -359,23 +359,27 @@ def main():
     return rc
 
 
-def _book_refusal(params, board_db, rc, line, proof=None):
+def _book_refusal(params, board_db, rc, line, proof=None, *, owner_restart=False):
     """Book this submitter's refusal as its run's receipt (``record_submitter_result``): a bound
     run's crash diagnosis never trusts the shared task log, so the line printed below would
     otherwise be lost to the owner-death classifier. *proof*: a pre-admission host refusal
     (``kanban_host_refusal.preadmission_proof``), stored on the receipt. Never raises: the exit must
-    not depend on it. [daveey]"""
+    not depend on it. *owner_restart*: the exit is this submitter's own 76, booked as a witnessed
+    owner-restart result (``record_submitter_owner_restart``). [daveey]"""
     if params is None or not board_db:
         return
     try:
         from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_worker_log
         from hermes_cli.kanban_db_connect import connect_closing
         from hermes_cli.kanban_host_refusal import PROOF_KEY
-        from hermes_cli.kanban_worker_log import record_submitter_result
         # The proof only when there is one: the plain refusal keeps its call shape.
         extra = {'extra': {PROOF_KEY: proof}} if proof else {}
         with connect_closing(Path(board_db)) as conn, kb.write_txn(conn):
-            record_submitter_result(conn, params, os.getpid(), rc, line, **extra)
+            if owner_restart:
+                kanban_worker_log.record_submitter_owner_restart(conn, params, os.getpid(), line)
+            else:
+                kanban_worker_log.record_submitter_result(conn, params, os.getpid(), rc, line, **extra)
     except Exception as exc:  # health: allow BLE001 -- preserve the original refusal exit on receipt-store failure
         print(f'Kanban refusal receipt could not be recorded: {type(exc).__name__}', file=sys.stderr)
 
@@ -399,7 +403,10 @@ def _submit():
     except OwnerRestartLost as exc:
         # The owner's restart, not the card: the sweep requeues this exit without a failure. [daveey]
         from hermes_cli.kanban_db_dispatch_exit_code import KANBAN_OWNER_RESTART_EXIT_CODE
-        print(f'Kanban owner restarted: {exc}', file=sys.stderr)
+        line = f'Kanban owner restarted: {exc}'
+        print(line, file=sys.stderr)
+        # A wedged or dead owner books nothing; without this the bound interpreter's receipt wins. [daveey]
+        _book_refusal(params, board_db, KANBAN_OWNER_RESTART_EXIT_CODE, line, owner_restart=True)
         return KANBAN_OWNER_RESTART_EXIT_CODE
     except (KeyError, ValueError, OSError) as exc:
         line = f'Kanban owner refused: {exc}'

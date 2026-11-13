@@ -192,6 +192,41 @@ def record_submitter_result(conn, params, pid, exit_code, last_output, extra=Non
     return True
 
 
+def record_submitter_owner_restart(conn, params, pid, last_output) -> bool:
+    """Book the submitter's own exit 76 (``OwnerRestartLost``) as its run's witnessed owner-restart result.
+
+    The owner books a restart itself only when it stops cleanly (``record_restart_interruption``). An owner
+    that wedged or died never does, and the submitter's exit line is in the shared task log only, which a
+    bound run's diagnosis never reads, so the sweep booked the bound interpreter's receipt instead and
+    charged the card (paintbot-tools run 207, 2026-11-13). Unlike ``record_submitter_result`` an existing
+    receipt does not stop it: 76 is the submitter's own observation (the owner never settled the turn), not
+    an echo of the interpreter's exit. Same fence: this run, this claim, *pid* is the task's worker. Written
+    only with the full owner-restart witness (spawn identity + every prior result/binding), the shape the
+    classifier accepts (``kanban_failed_result_identity``); an unwitnessed later result would veto reclaim.
+    Caller holds ``write_txn``; returns whether it wrote. [daveey]
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_dispatch_exit_code import KANBAN_OWNER_RESTART_EXIT_CODE
+    from hermes_cli.kanban_failed_result_identity import owner_restart_identity_fields
+
+    task_id, run_id, claim_lock = params['task_id'], int(params['run_id']), params['claim_lock']
+    task = kb.get_task(conn, task_id)
+    if task is None or (task.status, task.current_run_id, task.claim_lock, task.worker_pid) != (
+            'running', run_id, claim_lock, pid):
+        return False
+    run = conn.execute("SELECT status, claim_lock, task_id FROM task_runs WHERE id=?", (run_id,)).fetchone()
+    if run is None or tuple(run) != ('running', claim_lock, task_id):
+        return False
+    witness = owner_restart_identity_fields(conn, {'task_id': task_id, 'run_id': run_id}, task)
+    if not witness:
+        return False
+    kb._append_event(conn, task_id, 'worker_result', {
+        'pid': pid, 'claim_lock': claim_lock, 'exit_code': KANBAN_OWNER_RESTART_EXIT_CODE,
+        'last_output': str(last_output)[-500:], 'owner_restart': True, 'submitter': True, **witness},
+        run_id=run_id)
+    return True
+
+
 def _worker_final_output(task_id: str, board: Optional[str] = None, *, run_id=None) -> str:
     """Best-effort read of a dead worker's last printed text, for the board diagnostic.
 
