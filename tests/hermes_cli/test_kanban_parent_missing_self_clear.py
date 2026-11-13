@@ -124,3 +124,55 @@ def test_a_parent_missing_block_with_one_parent_still_missing_stays_blocked(loca
         local.execute("INSERT INTO tasks (id, title, status, created_at) VALUES ('t_a', 'a', 'done', 0)")
     kb.recompute_ready(local)
     assert kb.get_task(local, child).status == "blocked"  # t_b is still missing
+
+
+def test_every_parent_unlinked_returns_the_detector_blocked_child_to_ready(local):
+    """PR #2104 review: with no parent left ``parent_states`` is ``[]``; the child must not stay blocked on nothing."""
+    child = _blocked_on_missing(local, "t_late")
+    assert kb.unlink_tasks(local, "t_late", child)
+    assert kb.parent_states(local, child) == []
+    kb.recompute_ready(local)
+    assert kb.get_task(local, child).status == "ready"  # before the fix: blocked with nothing to wait on
+    payload = json.loads(support._events(local, child, "unblocked")[-1]["payload"])
+    assert payload["cleared_block"] == "parent_missing" and payload["parents"] == ["t_late"]
+
+
+def test_a_hand_block_with_no_parents_stays_blocked(local):
+    child = kb.create_task(local, title="dependent", assignee="worker")
+    with kbc.write_txn(local):
+        local.execute("UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ?", (child,))
+        kb._append_event(local, child, "blocked", {"kind": "transient", "source": "breaker", "reason": "x"})
+    kb.recompute_ready(local)
+    assert kb.get_task(local, child).status == "blocked"
+
+
+def _repair_comments(conn, repair):
+    return [c.body for c in kb.list_comments(conn, repair)]
+
+
+def test_clearing_the_block_comments_on_the_open_repair_card(local):
+    """PR #2104 review: the repair card is told the block cleared, so its worker does not chase a present parent."""
+    child = _blocked_on_missing(local, "t_late")
+    repair = _repair(local, child)
+    [(blocked_id,)] = local.execute(
+        "SELECT id FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+        "AND json_extract(payload, '$.source') = 'parent_missing'", (child,)).fetchall()
+    with kbc.write_txn(local):
+        local.execute("INSERT INTO tasks (id, title, status, created_at) VALUES ('t_late', 'late', 'done', 0)")
+    kb.recompute_ready(local)
+    assert kb.get_task(local, child).status == "ready"
+    [body] = _repair_comments(local, repair)  # before the fix: no comment, the repair card reads as live work
+    assert child in body and "parent_found" in body and str(blocked_id) in body
+    kb.recompute_ready(local)
+    assert len(_repair_comments(local, repair)) == 1  # once per cleared block
+
+
+def test_a_finished_repair_card_gets_no_comment(local):
+    child = _blocked_on_missing(local, "t_late")
+    repair = _repair(local, child)
+    with kbc.write_txn(local):
+        local.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (repair,))
+        local.execute("INSERT INTO tasks (id, title, status, created_at) VALUES ('t_late', 'late', 'done', 0)")
+    kb.recompute_ready(local)
+    assert kb.get_task(local, child).status == "ready"
+    assert _repair_comments(local, repair) == []
