@@ -16,7 +16,11 @@ class _Client:
         self.calls.append((method, params))
         if method == "reload.mcp":
             return {"status": "reloaded", "message": "MCP servers reconciled (no server changes)"}
-        return {"revision": 2, "execution_generation": 1, "messages": [], "info": {"tool_count": 20}}
+        if method == "session.info":
+            return {"tool_count": 20, "tools": {"mcp-docs": ["docs_search"]}}
+        # A loaded gateway's resume reply: the pending shape (gateway/session_local_inventory.reply_info).
+        return {"revision": 2, "execution_generation": 1, "messages": [],
+                "info": {"tool_count": 0, "tools": {}, "inventory_pending": True}}
 
 
 def test_reload_mcp_runs_on_the_gateway(capsys):
@@ -32,8 +36,12 @@ def test_reload_mcp_runs_on_the_gateway(capsys):
     cli._command_running = False
     try:
         cli._reload_gateway_mcp(conn)
+        state = conn.state("local-mcp").info
     finally:
         conn.close()
     assert client.calls[0] == ("reload.mcp", {"session_id": "local-mcp", "confirm": True})
+    # The count comes from the full session.info, never a resume reply that can be the pending shape.
+    assert [method for method, _ in client.calls[1:]] == ["session.info"]
     out = capsys.readouterr().out
     assert "20 tool(s) available" in out and "MCP reload failed" not in out, out
+    assert state["tools"] == {"mcp-docs": ["docs_search"]}

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 from types import SimpleNamespace
 
@@ -227,11 +228,42 @@ REPLY_INVENTORY_BUDGET_S = 2.0
 # tool``): their reply skips the inventory outright, so a loaded gateway spends nothing on it.
 NO_BANNER_SOURCES = frozenset({'oneshot', 'tool'})
 _pending: dict = {}  # (authority id, session id) -> in-flight inventory task, shared by concurrent opens
+# The RPC reply being built on this task (:func:`reply_scoped`): the pending inventories it promised.
+_REPLY_HOLDS: contextvars.ContextVar = contextvars.ContextVar('session_inventory_reply_holds', default=None)
+
+
+def _empty_inventory():
+    return {'tools': {}, 'skills': {}, 'mcp_servers': []}
 
 
 def _pending_shape(info):
     """The reply before the inventory is known: main's lazy create shape (``tools: {}``)."""
-    return {'tools': {}, 'skills': {}, 'mcp_servers': [], **info, 'inventory_pending': True}
+    return {**_empty_inventory(), **info, 'inventory_pending': True}
+
+
+def _failed_shape(info):
+    """A build that failed: the empty sections, settled (``inventory_pending: false``), so no viewer
+    waits on a ``session.info`` that will never come (the banner shows main's empty inventory)."""
+    return {**_compose(info, _empty_inventory(), None), 'inventory_pending': False}
+
+
+async def reply_scoped(call):
+    """Await one RPC handler (*call*); a late inventory its reply promised (``inventory_pending``)
+    publishes only after that reply. The release runs on a later loop pass than the handler's
+    return, and the transport queues the reply in the same pass it gets it (``WSTransport.write_async``
+    takes its send lock at once or waits in its FIFO), so the ``session.info`` can never reach the
+    client first: on create it would name a session the client does not know yet, and on resume the
+    reply's pending shape would overwrite the merged inventory (the banner stuck at "…")."""
+    holds: list = []
+    token = _REPLY_HOLDS.set(holds)
+    try:
+        return await call
+    finally:
+        _REPLY_HOLDS.reset(token)
+        if holds:
+            loop = asyncio.get_running_loop()
+            for hold in holds:
+                loop.call_soon(_release, *hold)
 
 
 async def reply_info(authority, ref, *, budget=None):
@@ -239,9 +271,10 @@ async def reply_info(authority, ref, *, budget=None):
 
     A no-banner source gets the pending shape at once and nothing is computed. Otherwise, when the
     inventory is not ready within the budget, the reply gets the pending shape and the inventory
-    keeps building; when it finishes, the session publishes the full info as ``session.info``
-    (fresh ``local_session_info`` merged at publish time, so a turn started meanwhile is not
-    reported idle). Concurrent opens of one session share one build."""
+    keeps building; when it finishes (and the pending reply is out, :func:`reply_scoped`), the
+    session publishes the full info as ``session.info`` (fresh ``local_session_info`` merged at
+    publish time, so a turn started meanwhile is not reported idle), or the empty settled shape when
+    the build failed. Concurrent opens of one session share one build."""
     from gateway.session_local import local_session_info
     from gateway.session_policy import policy_for_source
     info = local_session_info(authority, ref)
@@ -252,38 +285,62 @@ async def reply_info(authority, ref, *, budget=None):
     entry = _pending.get(key)
     if entry is None:
         entry = _pending[key] = SimpleNamespace(
-            task=asyncio.ensure_future(_inventory_parts(authority, ref, info.get("cwd"))), deferred=False)
+            task=asyncio.ensure_future(_inventory_parts(authority, ref, info.get("cwd"))), deferred=False,
+            holds=0, published=False)
         entry.task.add_done_callback(lambda task: _settle(authority, ref, key, entry))
-    task, carried = entry.task, False
+    task, answered = entry.task, False
     try:
         await asyncio.wait({task}, timeout=REPLY_INVENTORY_BUDGET_S if budget is None else budget)
         # ``done()``, not the wait's done set: a build that finished in the timeout's own loop pass
         # has not run ``_settle`` yet (done callbacks run on a later pass), so this reply carries it.
-        if task.done() and not task.cancelled() and task.exception() is None:
-            carried = True
-            return _compose(info, *task.result())
+        if task.done():
+            answered = True
+            if not task.cancelled() and task.exception() is None:
+                return _compose(info, *task.result())
+            logger.warning("session inventory failed for %s", ref.session_id,
+                           exc_info=None if task.cancelled() else task.exception())
+            return _failed_shape(info)
+        if (holds := _REPLY_HOLDS.get()) is not None:
+            entry.holds += 1
+            holds.append((authority, ref, key, entry))
     finally:
-        if not carried and not task.done():
+        if not answered:
             entry.deferred = True  # some viewer got the pending shape: publish when it finishes
-    if task.done() and not task.cancelled():
-        logger.warning("session inventory failed for %s", ref.session_id, exc_info=task.exception())
     return _pending_shape(info)
 
 
 def _settle(authority, ref, key, entry):
-    """Publish a late inventory to the session's viewers when some reply went out without it."""
+    """The build finished: publish it now unless a pending reply is still on its way out."""
+    if not entry.holds:
+        _publish(authority, ref, key, entry)
+
+
+def _release(authority, ref, key, entry):
+    """A pending reply is out (:func:`reply_scoped`): publish a build that finished meanwhile."""
+    entry.holds -= 1
+    if not entry.holds and entry.task.done():
+        _publish(authority, ref, key, entry)
+
+
+def _publish(authority, ref, key, entry):
+    """Publish a late inventory to the session's viewers when some reply went out without it; a
+    failed build publishes the settled empty shape, so no viewer stays pending."""
+    if entry.published:
+        return
+    entry.published = True
     if _pending.get(key) is entry:
         del _pending[key]
     task = entry.task
-    if task.cancelled() or not entry.deferred:
+    if not entry.deferred:
         return
-    if (error := task.exception()) is not None:
-        logger.warning("session inventory failed for %s", ref.session_id, exc_info=error)
-        return
+    failed = task.cancelled() or task.exception() is not None
+    if failed and not task.cancelled():
+        logger.warning("session inventory failed for %s", ref.session_id, exc_info=task.exception())
     try:
         from gateway.session_local import local_session_info
         live = authority.sessions[ref.session_id]
-        payload = {**_compose(local_session_info(authority, ref), *task.result()), 'inventory_pending': False}
+        info = local_session_info(authority, ref)
+        payload = _failed_shape(info) if failed else {**_compose(info, *task.result()), 'inventory_pending': False}
         live.event_stream.publish(ref.session_id, payload, event_type='session.info')
     except Exception:  # health: allow BLE001 -- a closed session or a failed publish leaves the lazy banner
         logger.debug("late session inventory publish failed for %s", ref.session_id, exc_info=True)

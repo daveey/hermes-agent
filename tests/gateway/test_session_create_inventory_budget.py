@@ -140,3 +140,82 @@ async def test_concurrent_opens_of_one_session_share_one_build(tmp_path, monkeyp
     await async_wait_until(lambda: frames, what='late session.info published')
     assert len(frames) == 1 and frames[0]['tools'] == {'terminal': ['terminal']}
     assert session_local_inventory._pending == {}
+
+
+def _failing_inventory(monkeypatch):
+    """``session_inventory`` that raises once released (a builder bug, a closed profile)."""
+    from gateway import session_local_inventory
+    release = threading.Event()
+
+    def failing(authority, policy, agent, cwd):
+        release.wait(60)
+        raise RuntimeError('inventory builder crashed')
+
+    monkeypatch.setattr(session_local_inventory, 'session_inventory', failing)
+    return release
+
+
+@pytest.mark.asyncio
+async def test_late_inventory_reaches_the_viewer_only_after_the_reply(tmp_path, monkeypatch):
+    """The build can finish while the pending reply is still being assembled (a long chat's
+    transcript read): its ``session.info`` must follow the reply, never precede it. Before it, Ink
+    drops it on create (the session id is not known yet) and a resume reply's pending shape
+    overwrites the merged inventory, so the banner stays at "…"."""
+    gateway = await _gateway(tmp_path, monkeypatch)
+    from gateway import session_controls, session_local_inventory
+    release, calls = _slow_inventory(monkeypatch, hold_s=60)
+    monkeypatch.setattr(session_local_inventory, 'REPLY_INVENTORY_BUDGET_S', 0.05)
+    order, real_transcript = [], session_controls._resume_transcript
+
+    async def transcript_after_the_build(authority, ref, *rest):
+        authority.sessions[ref.session_id].event_stream.observers.add(
+            lambda frame: order.append(frame['params']['payload']) if frame['params']['type'] == 'session.info' else None)
+        release.set()
+        await async_wait_until(lambda: calls and all(entry.task.done() for entry in session_local_inventory._pending.values()),
+                               what='inventory built')
+        for _ in range(5):
+            await asyncio.sleep(0)  # the build's done callbacks run before the reply is returned
+        return await real_transcript(authority, ref, *rest)
+
+    monkeypatch.setattr(session_controls, '_resume_transcript', transcript_after_the_build)
+    created = await gateway.call('session.create', request_id='race', source='tui', cwd=gateway.cwd)
+    order.append('reply')
+    assert created['info']['inventory_pending'] is True
+    await async_wait_until(lambda: len(order) == 2, what='late session.info published')
+    assert order[0] == 'reply', order
+    assert order[1]['inventory_pending'] is False and order[1]['tools'] == {'terminal': ['terminal']}
+    assert session_local_inventory._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_a_build_failing_after_the_budget_publishes_a_settled_empty_inventory(tmp_path, monkeypatch):
+    gateway = await _gateway(tmp_path, monkeypatch)
+    from gateway import session_local_inventory
+    monkeypatch.setattr(session_local_inventory, 'REPLY_INVENTORY_BUDGET_S', 0.05)
+    release = _failing_inventory(monkeypatch)
+    try:
+        created = await gateway.call('session.create', request_id='fails-late', source='tui', cwd=gateway.cwd)
+        assert created['info']['inventory_pending'] is True
+        frames = _info_frames(gateway.authority, created['session_id'])
+    finally:
+        release.set()
+    await async_wait_until(lambda: frames, what='terminal session.info published')
+    assert len(frames) == 1, frames
+    assert frames[0]['inventory_pending'] is False, frames[0]
+    assert frames[0]['tools'] == {} and frames[0]['skills'] == {} and frames[0]['mcp_servers'] == []
+    assert frames[0]['tool_count'] == 0 and frames[0]['source'] == 'tui'
+    assert session_local_inventory._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_a_build_failing_inside_the_budget_answers_settled_not_pending(tmp_path, monkeypatch):
+    gateway = await _gateway(tmp_path, monkeypatch)
+    from gateway import session_local_inventory
+    _failing_inventory(monkeypatch).set()  # fails at once
+    created = await gateway.call('session.create', request_id='fails-fast', source='tui', cwd=gateway.cwd)
+    info = created['info']
+    assert info['inventory_pending'] is False and info['tools'] == {} and info['skills'] == {}, info
+    frames = _info_frames(gateway.authority, created['session_id'])
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert frames == [] and session_local_inventory._pending == {}

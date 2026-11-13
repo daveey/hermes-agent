@@ -369,6 +369,7 @@ class AuthorityConnection:
             from gateway.session_authorities import async_owner_scope
             from gateway.session_connections import METHODS as CONNECTION_METHODS, session_owned
             from gateway.session_plugin_rpc import call_plugin_rpc, resolve_plugin_rpc
+            from gateway.session_local_inventory import reply_scoped
             async with async_owner_scope(self.authority):
                 if method in GROUP_METHODS or method == 'profiles.list':
                     with _method_work_scope(method):
@@ -385,8 +386,9 @@ class AuthorityConnection:
                         'code': -32601, 'message': unknown_method_message(method),
                         'data': {'reason': 'unknown_method'}}}
                 else:
+                    # A late banner inventory this reply promised publishes after it (``reply_scoped``).
                     with _method_work_scope(method):
-                        result = await handlers[method](ref, params)
+                        result = await reply_scoped(handlers[method](ref, params))
                     if isinstance(result, DeferredReply):  # answered off the serial dispatch
                         check_params_accepted(contract, original_params)
                         return result.start(self, rid, partial(check_result, contract))
