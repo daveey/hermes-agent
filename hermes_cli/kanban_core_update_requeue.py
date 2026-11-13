@@ -9,8 +9,12 @@ t_01a1ce8aff1f09c1 on worker-5). A requeued run is skipped as if it never ran.
 
 Only an exact manual reclaim with that reason, whose run ended ``reclaimed`` and carries no
 crash or timeout evidence, qualifies. Any other reclaim, crash or timeout still consumes the
-handoff (fail closed). A PR the requeued run reported is a newer PR comment and re-arms the
-guard on its own. Keep the reason in sync with hermes-sync.
+handoff (fail closed). A PR the requeued run reported is a newer PR comment that post-dates every
+handoff; when that run itself wrote every such comment, ran as the card's assignee and no real
+run was claimed since, the pause grants its lineage one continuation
+(:mod:`kanban_requeued_publisher`). Unknown writer provenance, a second writer or a later real
+run keeps the hold, and the next real claim consumes the grant (its crash holds again).
+Keep the reason in sync with hermes-sync.
 
 Residual: "restart-safe" is a host property, not per-worker quiescence, so a requeued run may
 have opened a PR it had not yet reported. The next run sees the requeued run's transcript tail

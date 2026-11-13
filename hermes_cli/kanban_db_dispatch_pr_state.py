@@ -461,6 +461,9 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     provenance keeps the hold.
     So does a supported operator reopen of the done card (``reopened``, strictly after): the
     rerun resumes THAT PR; its ``REOPENED:`` note carries chat provenance, so it is FYI here.
+    So does a core-update requeue of the very run that wrote every holding PR comment since its
+    claim (:mod:`hermes_cli.kanban_requeued_publisher`): one continuation, consumed by the next
+    real claim.
     An ordering ``dependency_wait`` strictly after the newest PR comment also permits
     one continuation after parent completion/promotion: it must belong to the latest
     claimed run of this card and assignee, ended orderly as blocked, with no subsequent
@@ -516,6 +519,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     restated, parked_at = restated_after_park(conn, task_id, kept_by_comment)
     pr_times: list[int] = []
     pr_urls: list[str] = []
+    published: list[tuple[int, int]] = []
     latest_pr_comment_id = 0
     for t, comment_id, kept in kept_by_comment:
         pr_urls.extend(kept)
@@ -524,6 +528,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             continue
         latest_pr_comment_id = max(latest_pr_comment_id, comment_id)
         pr_times.append(t)
+        published.append((t, comment_id))
     if not pr_times:
         # Foreign handoffs may still carry queue-rejection repair instructions,
         # but cannot create a duplicate-publication hold.
@@ -539,6 +544,9 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
         return None
     if _handed_off_after(conn, task_id, max(pr_times), latest_pr_comment_id, pr_urls):
         return None
+    from hermes_cli import kanban_requeued_publisher
+    if kanban_requeued_publisher.continues(conn, task_id, published, latest_pr_comment_id):
+        return None  # its own publisher was paused by a core-update requeue: one continuation
     if resumes_review(conn, task_id, pr_urls):
         return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
