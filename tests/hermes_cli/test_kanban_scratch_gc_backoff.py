@@ -144,7 +144,7 @@ def test_malformed_memo_entry_is_dropped_and_the_aged_pass_completes(remote, arc
 @pytest.mark.parametrize("bad", [
     {"retry_at": "x"}, {"count": None}, {"count": "2"}, {"count": True}, {"count": 0},
     {"last_at": "y"}, {"retry_at": float("inf")}, {"retry_at": 1e300}, {"retry_at": None},
-    {"fingerprint": "p"}, {"reason": 5},
+    {"fingerprint": "p"}, {"reason": 5}, {"count": 10**10},
 ])
 def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     tree = tmp_path / "tree"
@@ -159,6 +159,20 @@ def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     assert set(refusals.entries) == {"ok"}
     assert bo.skip_logged(refusals, "bad", tree, 5, "t") is False
     assert bo.skip_logged(refusals, "ok", tree, 5, "t") is True
+
+
+def test_record_saturates_count_so_the_backoff_exponent_stays_small(tmp_path):
+    """A tree refused forever stops growing ``count`` at MAX_COUNT (else 2 ** count stalls)."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    now = 1_000_000.0
+    refusals = bo.Refusals("default", now=lambda: now)
+    refusals.entries["t"] = {"fingerprint": bo.fingerprint(tree, 5), "count": bo.MAX_COUNT,
+                             "last_at": now, "retry_at": now, "reason": "r"}
+    refusals.record("t", tree, 5, "again")
+    assert refusals.entries["t"]["count"] == bo.MAX_COUNT
+    assert refusals.entries["t"]["retry_at"] == now + bo.CAP_S
+    assert set(bo.Refusals("default", now=lambda: now).entries) == {"t"}, "the writer's max loads back"
 
 
 def test_budget_defers_the_rest_oldest_first_and_pass_completes(remote, archives, caplog, capsys):

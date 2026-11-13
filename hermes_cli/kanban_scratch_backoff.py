@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 BASE_S = 2 * 3600
 CAP_S = 24 * 3600
 FORGET_S = 14 * 86400
+MAX_COUNT = 64  # count saturates here: CAP_S is reached at 4, and 2 ** count must stay cheap
 DEFAULT_BUDGET_S = 1200  # the worker/Mac GC wrappers kill a board's pass at 1800 s
 
 
@@ -84,7 +85,7 @@ def _well_formed(entry) -> bool:
     return (isinstance(entry, dict)
             and _finite(entry.get("last_at")) and _finite(entry.get("retry_at"))
             and isinstance(entry.get("count"), int) and not isinstance(entry["count"], bool)
-            and entry["count"] >= 1
+            and 1 <= entry["count"] <= MAX_COUNT
             and (entry.get("fingerprint") is None or isinstance(entry["fingerprint"], list))
             and (entry.get("reason") is None or isinstance(entry["reason"], str)))
 
@@ -126,7 +127,8 @@ class Refusals:
     def record(self, key: str, path: Path, completed_at, reason: str) -> None:
         prior = self.entries.get(key) or {}
         fp = fingerprint(path, completed_at)
-        count = int(prior.get("count") or 0) + 1 if prior.get("fingerprint") == fp else 1
+        count = (min(MAX_COUNT, int(prior.get("count") or 0) + 1)
+                 if prior.get("fingerprint") == fp else 1)
         now = self._now()
         self.entries[key] = {"fingerprint": fp, "count": count, "last_at": now,
                              "retry_at": now + min(CAP_S, BASE_S * 2 ** (count - 1)),
