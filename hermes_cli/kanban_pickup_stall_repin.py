@@ -96,7 +96,8 @@ def _need(target: Any) -> set:
         requires = json.loads(target["requires"]) if target["requires"] else []
     except (TypeError, ValueError):
         requires = []
-    return {f"capability:{r}" for r in requires if isinstance(r, str)} | {f"profile:{target['assignee']}"}
+    from hermes_cli.kanban_placement_coordination import requirement_label
+    return {requirement_label(r) for r in requires if isinstance(r, str)} | {f"profile:{target['assignee']}"}
 
 
 def eligible_now(name: str, own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], need: set,

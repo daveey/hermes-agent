@@ -108,6 +108,13 @@ def requirements(text):
     return labels, None
 
 
+def requirement_label(name):
+    """The attested label a declared ``requires`` entry needs: access names map through :data:`ACCESS_LABELS`
+    (``hub:write`` -> ``capability:hub-write``; no machine carries ``capability:hub:write``), others to
+    ``capability:<name>``."""
+    return ACCESS_LABELS.get(name, f"capability:{name}")
+
+
 def access_requirements(requires):
     """Labels for declared access; unknown names remain gateway-scoped."""
     return {ACCESS_LABELS[r] for r in requires or [] if r in ACCESS_LABELS}

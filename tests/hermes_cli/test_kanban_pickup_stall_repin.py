@@ -223,6 +223,30 @@ def test_the_new_machine_needs_the_cards_required_capabilities(board):
     assert board.why(machines=_machines(**{X: {"labels": [*_worker(X)["labels"], "capability:gpu"]}})) is None
 
 
+def test_declared_hub_write_needs_the_hyphenated_label_a_worker_attests(board):
+    """t_01a1d28d2ff68689: ``requires=["hub:write"]`` built ``capability:hub:write``, which no worker carries, so
+    the pool move refused every worker that attests ``capability:hub-write``."""
+    board.set(board.target, requires=json.dumps(["terminal", "hub:write"]))
+    pooled = {"labels": ["linux", "capability:terminal", "capability:hub-write", "profile:default", POOL]}
+    assert board.why(runs_on=[POOL], machines=_machines(**{X: pooled})) is None
+    assert board.why(machines=_machines(**{X: pooled})) is None
+    lacking = {"labels": ["linux", "capability:terminal", "profile:default", POOL]}
+    assert "capability:hub-write" in board.why(runs_on=[POOL], machines=_machines(**{X: lacking}))
+
+
+@pytest.mark.parametrize("name, label", [("hub:write", "capability:hub-write"), ("hub:read", "capability:hub-read"),
+                                         ("ssh:mbp", "capability:ssh-mbp"), ("ssh:mini", "capability:ssh-mini"),
+                                         ("terminal", "capability:terminal")])
+def test_every_need_site_maps_access_names_to_their_attested_labels(name, label):
+    from hermes_cli import kanban_placement_coordination as coord
+    from hermes_cli import kanban_repin_notice as rn
+    assert coord.requirement_label(name) == label
+    assert label in rp._need({"requires": json.dumps([name]), "assignee": "default"})
+    assert label in rn.required_labels({"requires": json.dumps([name]), "assignee": "default"})
+    machines = {X: {**_worker(X), "labels": ["linux", label, "profile:default"]}}
+    assert kps.alarm_placement(M, machines, assignee="default", requires=(name,), now_ms=NOW)[0] == [f"machine:{X}"]
+
+
 def test_the_hub_lane_without_hub_write_is_a_valid_target(board):
     assert board.why(runs_on=["machine:hub"]) is None  # hub-write is the alarm's need, not the card's
 
