@@ -88,6 +88,7 @@ _SCHEMA = (
         requester_woken INTEGER NOT NULL DEFAULT 0)""",
     "CREATE INDEX IF NOT EXISTS idx_supervisor_requests_status ON supervisor_requests(status, id)",
     "CREATE INDEX IF NOT EXISTS idx_supervisor_requests_requester ON supervisor_requests(requester_task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_supervisor_requests_unwoken ON supervisor_requests(id) WHERE requester_woken=0",
     """CREATE TABLE IF NOT EXISTS supervisor_executors (
         executor_id TEXT PRIMARY KEY,
         role TEXT,
@@ -664,7 +665,7 @@ def _execute(conn: sqlite3.Connection, req: dict, executor: str, board: Optional
 
 def drain(conn: sqlite3.Connection, *, board: Optional[str] = None, role: str = "dispatcher",
           limit: int = 10, now: Optional[int] = None,
-          on_accept: Optional[Callable[[dict], None]] = None) -> dict:
+          on_accept: Optional[Callable[[dict], None]] = None, incoming: bool = True) -> dict:
     """Execute queued requests from a non-worker process. Returns ``{executor, processed: [(id, status)]}``.
 
     Refuses (without touching anything) inside a worker or delegated child."""
@@ -709,7 +710,8 @@ def drain(conn: sqlite3.Connection, *, board: Optional[str] = None, role: str = 
     from hermes_cli import kanban_operator_call as kox
     processed += kox.poll(conn, executor, now=now)
     try:  # home side: calls other gateways' workers made on this gateway's cards
-        kox.apply_incoming(conn)
+        if incoming:
+            kox.apply_incoming(conn)
     except Exception:  # health: allow BLE001 -- the requests stay in the replica and are retried next drain
         _log.warning("kanban: applying incoming operator calls failed", exc_info=True)
     return {"executor": executor, "processed": processed}
@@ -753,10 +755,7 @@ def dispatcher_drain(conn: sqlite3.Connection, *, board: Optional[str] = None) -
     """Dispatcher-tick entry: never raises. Config ``kanban.supervisor_requests.enabled: false``
     (default on, not in config_defaults) leaves requests pending for ``supervisor-requests --drain``."""
     try:
-        from hermes_cli.config import load_config_readonly
-        cfg = ((load_config_readonly() or {}).get("kanban") or {}).get("supervisor_requests") or {}
-        if cfg.get("enabled", True) is False:
-            return []
+        from hermes_cli import kanban_supervisor_gate
         refusal = _non_worker_refusal()
         if refusal:
             global _skip_logged
@@ -764,7 +763,7 @@ def dispatcher_drain(conn: sqlite3.Connection, *, board: Optional[str] = None) -
                 _skip_logged = True
                 _log.warning("kanban: not draining supervisor requests in this process: %s", refusal)
             return []
-        return drain(conn, board=board, role="dispatcher")["processed"]
+        return kanban_supervisor_gate.dispatch(conn, board)
     except Exception:  # health: allow BLE001 -- the tick must go on; the rows stay queued
         _log.warning("kanban: draining supervisor requests failed", exc_info=True)
         return []
