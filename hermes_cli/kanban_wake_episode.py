@@ -242,10 +242,10 @@ def repark(conn: sqlite3.Connection, task_id: str, cmd: str | None) -> None:
 
 def stale_seconds() -> float:
     from hermes_cli.config_backend import ConfigBackendUnavailable
-    from hermes_cli.config import load_config
+    from hermes_cli.config import load_config_readonly
 
     try:
-        section = load_config().get("kanban")
+        section = load_config_readonly().get("kanban")  # read-only: no per-tick deepcopy (G2)
     except (ConfigBackendUnavailable, OSError, ValueError):
         section = None
     value = section.get("wake_check_stale_hours") if isinstance(section, dict) else None

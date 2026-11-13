@@ -246,8 +246,13 @@ function isStaleRuntimeRefusal(error: unknown): boolean {
  *  refusal. Resending it cannot run a second copy.
  *  Timeouts, disconnects and malformed ACKs are not answers and never match. */
 function isDefiniteSubmitRefusal(error: unknown): boolean {
+  // Self-guarded: only a JsonRpcGatewayError can be the stale-runtime frame.
+  if (isStaleRuntimeRefusal(error)) {
+    return true
+  }
+
   if (error instanceof JsonRpcGatewayError) {
-    if (error.code === 4009 || isStaleRuntimeRefusal(error)) {
+    if (error.code === 4009) {
       return true
     }
 

@@ -124,13 +124,14 @@ def test_non_installed_checkout_opens_a_current_board_normally(home):
 
 def test_reference_schema_matches_what_connect_creates(home):
     """The "at par" reference is every table/column connect()'s schema pass creates: no step is left out.
-    Only ``kanban_activity_revision`` is outside it: display-only, its absence leaves readers on a stat fallback."""
-    from hermes_cli.kanban_activity_revision import REVISION_TABLE
+    Only ``kanban_activity_revision`` and its ``kanban_task_change`` are outside it: display-only, their absence
+    leaves readers on a stat fallback or a full read."""
+    from hermes_cli.kanban_activity_revision import CHANGE_TABLE, REVISION_TABLE
     db = home / "kanban.db"
     kbc.connect(db).close()
     raw = sqlite3.connect(db)
     try:
-        created = {t: c for t, c in owner._tables(raw).items() if t != REVISION_TABLE}
+        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE)}
         assert created == owner._reference_schema()
     finally:
         raw.close()
@@ -322,12 +323,12 @@ def _synced_board(home: Path) -> Path:
 
 def test_reference_schema_with_sync_matches_what_a_synced_connect_creates(home, monkeypatch):
     """With sync live, the at-par reference also holds every sync table/column connect() installs."""
-    from hermes_cli.kanban_activity_revision import REVISION_TABLE
+    from hermes_cli.kanban_activity_revision import CHANGE_TABLE, REVISION_TABLE
     monkeypatch.setattr(owner, "_REFERENCE", {})
     db = _synced_board(home)
     raw = sqlite3.connect(db)
     try:
-        created = {t: c for t, c in owner._tables(raw).items() if t != REVISION_TABLE}
+        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE)}
         assert "kanban_sync_state" in created
         assert created == owner._reference_schema(sync=True)
     finally:

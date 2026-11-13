@@ -172,3 +172,66 @@ def test_executed_file_over_the_cap_still_fails_closed(tmp_path, command):
     unsafe, refusal = scan_gateway_lifecycle(command.replace("{big}", str(big)), cwd=str(tmp_path))
     assert unsafe
     assert refusal and "larger than the scan cap" in refusal
+
+
+# t_01a1d6ae05c19594: inside arithmetic bash runs code from a substitution's output wherever the
+# substitution sits, not only right after `((`. Real bash 5.2 prints RAN for each shape with
+# P='a[$(echo RAN >&2)]' standing in for the payload (the `let` shape unquoted only word-splits
+# it; quoted, it runs). The date-prefixed shapes are from review 5898137039: the `$(date +%s)`
+# exemption removed the accidental first anchor main matched on.
+_OPERATOR_PRECEDED = [
+    "x=$(( 1 + $(echo 'a[$(bash {big})]') ))",
+    "x=$(( $(date +%s) + $(echo 'a[$(bash {big})]') ))",
+    "(( $(date +%s) > $(echo 'a[$(bash {big})]') ))",
+    "(( 1 > $(echo 'a[$(bash {big})]') ))",
+    "x=$((1+$(echo 'a[$(bash {big})]')))",
+    "echo \"$(( 1 + $(echo 'a[$(bash {big})]') ))\"",
+    "let x=$(echo 'a[$(bash {big})]')",
+    "let \"x=$(echo 'a[$(bash {big})]')\"",
+    "true; let x=1+$(echo 'a[$(bash {big})]')",
+    "a=(1); b[$(echo 'a[$(bash {big})]')]=1",
+    "echo ${a[$(echo 'a[$(bash {big})]')]}",
+    "echo \"${a[1 + $(echo 'a[$(bash {big})]')]}\"",
+    "s=abc; echo ${s:$(echo 'a[$(bash {big})]')}",
+    "s=abc; echo ${s:1:$(echo 'a[$(bash {big})]')}",
+    "[[ $(echo 'a[$(bash {big})]') -eq 1 ]]",
+    "[[ 1 -lt \"$(echo 'a[$(bash {big})]')\" ]]",
+    "echo $[ 1 + $(echo 'a[$(bash {big})]') ]",
+    "for (( i=$(echo 'a[$(bash {big})]'); i<1; i++ )); do :; done",
+    "declare -i x; x=$(echo 'a[$(bash {big})]')",
+    "f() { local -i y=$(echo 'a[$(bash {big})]'); }; f",
+    "x=$(( a[$(echo 'a[$(bash {big})]')] ))",
+    "x=$(( 1 + (2 * $(echo 'a[$(bash {big})]')) ))",
+]
+
+
+@pytest.mark.parametrize("shape", _OPERATOR_PRECEDED)
+def test_substitution_anywhere_in_arithmetic_is_a_sink(tmp_path, shape):
+    command = shape.replace("{big}", str(_big_log(tmp_path)))
+    assert output_reaches_shell(command)
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe
+    assert refusal and "larger than the scan cap" in refusal
+
+
+# Not arithmetic, or only the exempt producer in it: no sink, so reads of an over-cap log pass.
+@pytest.mark.parametrize("text", [
+    "n=$(( 1 + 2 ))", "x=$(( $(date +%s) + 2700 ))", "(( $(date +%s) > 1 ))",
+    "while [ \"$(date +%s)\" -lt \"$d\" ]; do :; done", "test \"$(y)\" -eq 1",
+    "[[ $(y) == z ]]", "x=${y:-$(z)}", "x=${y:=$(z)}", "echo \"a[$(y)]\"",
+    "echo '$(( 1 + $(y) ))'", "# (( 1 + $(y) ))\necho ok", "echo \"$(git -C x rev-parse HEAD)\"",
+    "echo $(( 1 + 2 )) \"$(y)\"", "a=(1 2); echo \"${a[1]}\" \"$(y)\"", "let x=1; echo \"$(y)\"",
+    "(( n += 1 )); echo \"$(y)\"",
+])
+def test_substitution_outside_arithmetic_is_no_sink(text):
+    assert not output_reaches_shell(text)
+
+
+def test_operator_preceded_shape_reading_a_big_log_fails_closed(tmp_path):
+    """The read-only big-log pass above must not hide a real arithmetic sink in the same text."""
+    log = _big_log(tmp_path)
+    command = ("x=$(( $(date +%s) + 1 ))\n" + _READERS["grep"].replace("{log}", str(log))
+               + f"y=$(( 1 + $(echo 'a[$(bash {log})]') ))\n")
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe
+    assert refusal and "larger than the scan cap" in refusal

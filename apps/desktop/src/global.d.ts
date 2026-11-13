@@ -345,6 +345,8 @@ declare global {
         set: (name: string | null) => Promise<DesktopActiveProfile>
       }
       api: <T>(request: HermesApiRequest) => Promise<T>
+      /** A WS-RPC session write is starting or has settled: main's REST read sharing starts a new generation. */
+      noteBackendWrite?: () => void
       notify: (payload: HermesNotification) => Promise<boolean>
       /** Launch -> ready ms for the first caller per app launch, null afterwards. Absent on older shells. */
       claimStartupLatency?: () => Promise<null | number>

@@ -22,4 +22,8 @@ resolution or fork edit in a merge, or a `[daveey]` fixup commit) is code the
 fork wrote: the gate parks it as NOT YET until an independent exact-head review
 approves it, through the same review card and `review_gate` that
 `hermes-core-wt ship` uses. `upstream_sync.py --classify <sha>` prints which
-kind a head is.
+kind a head is. Only commits of `upstream/main` re-fetched from
+`github.com/NousResearch/hermes-agent` count as upstream's own: an `upstream`
+remote configured with any other URL is REFUSED, never classified. The card
+that authored a fork-authored sync is passed as `--impl-task <card>` (its
+sessions cannot be its reviewer); there is no environment variable for it.

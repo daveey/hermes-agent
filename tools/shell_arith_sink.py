@@ -1,0 +1,190 @@
+"""Find a ``$(…)`` substitution that sits inside a bash arithmetic context.
+
+Bash evaluates arithmetic text recursively, and an array subscript in it runs command
+substitutions, so a substitution's OUTPUT inside arithmetic is shell code wherever the
+substitution sits: ``x=$(( 1 + $(echo 'a[$(bash F)]') ))`` runs ``bash F``
+(t_01a1d6ae05c19594). Arithmetic contexts covered: ``$(( ))``, ``(( ))`` (``for ((``
+too), ``$[ ]``, ``let``, ``[[ … -eq … ]]`` (any of the six integer operators), an array
+subscript (``a[…]=``, ``${a[…]}``), a ``${x:offset:length}`` substring, and any
+``declare/local/typeset/readonly/export -i`` integer assignment (coarse: any substitution
+then counts). ``[ … -eq … ]``/``test`` are not arithmetic and stay out.
+
+The scan is a small linear tokenizer, not a parser: quotes and comments are honoured, and
+whatever it cannot match (an unclosed frame, a stray paren) only widens the arithmetic
+region, so a mistake fails closed (a false sink only makes the lifecycle walk scan more).
+"""
+
+from __future__ import annotations
+
+import bisect
+import re
+
+# `$(date +%s)` prints only digits: the one producer whose output arithmetic may hold.
+DATE_PRODUCER_BODY = r"""[ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\)"""
+_DATE_PRODUCER_RE = re.compile(DATE_PRODUCER_BODY)
+
+_TOKENS = (r"\\.|'|\"|`|\$\(\(|\$\(|\$\[|\$\{|\(\(|\(|\)|\[\[|\]\]|\[|\]|\}|#"
+           r"|(?<![\w.$/-])let[ \t]+")
+_TOKEN_RE = re.compile(_TOKENS, re.DOTALL)
+# Inside `let` the list operators end the arithmetic too; elsewhere skipping them keeps the scan
+# of a long script fast.
+_LET_TOKEN_RE = re.compile(_TOKENS + r"|[;&|\n]", re.DOTALL)
+_INT_OPERATOR_RE = re.compile(r"(?<![\w-])-(?:eq|ne|lt|le|gt|ge)(?![\w-])")
+_INTEGER_DECLARATION_RE = re.compile(
+    r"(?<![\w.-])(?:declare|typeset|local|readonly|export)(?:[ \t]+[-+][A-Za-z]+)*"
+    r"[ \t]+-[A-Za-z]*i")
+_PARAM_NAME_RE = re.compile(r"[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])")
+_COMMENT_PRECEDERS = frozenset(" \t\n;&|(")
+
+# Frame kinds. A frame is [kind, closer, depth, in_double_quotes].
+_CMD, _ARITH, _PARAM = "cmd", "arith", "param"
+
+
+def substitution_in_arithmetic(command: str, *, date_exempt: bool) -> bool:
+    """Whether *command* holds a ``$(`` (not the exempt ``$(date +%s)`` when *date_exempt*)
+    whose nearest enclosing context is arithmetic."""
+    if "$(" not in command:
+        return False
+    if _INTEGER_DECLARATION_RE.search(command):
+        return True
+    closes = [m.start() for m in re.finditer(r"\]\]", command)]
+    operators = [m.start() for m in _INT_OPERATOR_RE.finditer(command)]
+    stack: list[list] = [[_CMD, None, 0, False]]
+    pos, end = 0, len(command)
+    while pos < end:
+        tokens = _LET_TOKEN_RE if stack[-1][1] == "let" else _TOKEN_RE
+        match = tokens.search(command, pos)
+        if match is None:
+            break
+        token, start = match.group(), match.start()
+        pos = match.end()
+        top = stack[-1]
+        kind, quoted = top[0], top[3]
+        if token[0] == "\\" or token == "`":
+            continue
+        if token == '"':
+            top[3] = not quoted
+            continue
+        if token == "'":
+            if not quoted:
+                close = command.find("'", pos)
+                pos = end if close == -1 else close + 1
+            continue
+        if token == "$((":
+            stack.append([_ARITH, "))", 0, False])
+            continue
+        if token == "$(":
+            if kind == _ARITH and not (
+                    date_exempt and _DATE_PRODUCER_RE.match(command, pos)):
+                return True
+            stack.append([_CMD, ")", 0, False])
+            continue
+        if token == "$[":
+            stack.append([_ARITH, "]", 0, False])
+            continue
+        if token == "${":
+            pos = _open_parameter(command, pos, stack)
+            continue
+        if quoted:
+            continue  # inside "…" only expansions (handled above) matter
+        if kind == _CMD:
+            pos = _cmd_token(command, token, start, pos, stack, closes, operators)
+        elif kind == _ARITH:
+            pos = _arith_token(command, token, pos, stack)
+        elif token == "}":  # _PARAM
+            stack.pop()
+        elif token == "#" or token.startswith("let"):
+            continue
+        elif token in (")", "]", "]]") and len(stack) > 1:
+            stack.pop()  # a parameter frame never closes on these: recover outward
+            pos = start
+    return False
+
+
+def _open_parameter(command: str, pos: int, stack: list[list]) -> int:
+    """Push the frame for a ``${`` opened before *pos*; return where scanning resumes."""
+    name = _PARAM_NAME_RE.match(command, pos)
+    after = name.end() if name else pos
+    stack.append([_PARAM, "}", 0, False])
+    return _after_parameter_name(command, after, stack)
+
+
+def _after_parameter_name(command: str, pos: int, stack: list[list]) -> int:
+    """At the end of a ``${name`` (or of its ``[subscript]``): a subscript or a substring
+    offset is arithmetic."""
+    following = command[pos:pos + 2]
+    if following[:1] == "[":
+        stack.append([_ARITH, "]", 0, False])
+        return pos + 1
+    if following[:1] == ":" and following[1:2] not in ("-", "=", "+", "?"):
+        stack[-1] = [_ARITH, "}", 0, False]
+        return pos + 1
+    return pos
+
+
+def _cmd_token(command, token, start, pos, stack, closes, operators) -> int:
+    if token == "#":
+        if start == 0 or command[start - 1] in _COMMENT_PRECEDERS:
+            newline = command.find("\n", pos)
+            return len(command) if newline == -1 else newline
+        return pos
+    if token.startswith("let"):
+        stack.append([_ARITH, "let", 0, False])
+        return pos
+    if token == "((":
+        stack.append([_ARITH, "))", 0, False])
+        return pos
+    if token == "(":
+        stack.append([_CMD, ")", 0, False])
+        return pos
+    if token == ")":
+        if len(stack) > 1:
+            stack.pop()
+        return pos
+    if token == "[[":
+        index = bisect.bisect_left(closes, pos)
+        close = closes[index] if index < len(closes) else len(command)
+        operator = bisect.bisect_left(operators, pos)
+        if operator < len(operators) and operators[operator] < close:
+            stack.append([_ARITH, "]]", 0, False])
+        return pos
+    if token == "[" and start > 0 and (command[start - 1].isalnum() or command[start - 1] == "_"):
+        stack.append([_ARITH, "]", 0, False])  # `a[…]=` subscript
+    return pos
+
+
+def _arith_token(command, token, pos, stack) -> int:
+    top = stack[-1]
+    closer = top[1]
+    if closer == "let" and (token in (";", "&", "|", "\n") or (token == ")" and not top[2])):
+        stack.pop()
+        return pos - len(token)  # the list operator / paren belongs to the outer frame
+    if token in ("(", "(("):
+        top[2] += len(token)
+        return pos
+    if token == ")":
+        if top[2]:
+            top[2] -= 1
+        elif closer in ("))", ")"):
+            stack.pop()
+            if closer == "))" and command.startswith(")", pos):
+                pos += 1
+        return pos
+    if token in ("[", "[["):
+        for _ in token:
+            stack.append([_ARITH, "]", 0, False])
+        return pos
+    if token in ("]", "]]"):
+        if token == "]]" and closer == "]]":
+            stack.pop()
+            return pos
+        for _ in token:
+            if stack[-1][0] != _ARITH or stack[-1][1] != "]":
+                break
+            stack.pop()
+            if stack[-1][0] == _PARAM:
+                pos = _after_parameter_name(command, pos, stack)
+        return pos
+    if token == "}" and closer == "}":
+        stack.pop()
+    return pos

@@ -16,6 +16,8 @@ import pytest
 
 from scripts.ci import upstream_sync as sync
 
+UPSTREAM_URL = "https://github.com/NousResearch/hermes-agent.git"
+
 
 def git(cwd, *args, env=None):
     return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True,
@@ -50,7 +52,10 @@ def make_world(tmp_path):
     subprocess.run(["git", "clone", "-q", str(tmp_path / "origin.git"), str(checkout)], check=True)
     for k, v in (("user.email", "t@example.com"), ("user.name", "T")):
         git(checkout, "config", k, v)
-    git(checkout, "remote", "add", "upstream", str(tmp_path / "upstream.git"))
+    # The gate trusts only an upstream remote configured as the real upstream (upstream_sync_review.
+    # verified_upstream); insteadOf points that URL at the local bare remote.
+    git(checkout, "remote", "add", "upstream", UPSTREAM_URL)
+    git(checkout, "config", f"url.{tmp_path / 'upstream.git'}.insteadOf", UPSTREAM_URL)
     return tmp_path, checkout
 
 

@@ -187,7 +187,12 @@ def test_empty_blocker_sweeps_skip_and_new_candidates_run(board, monkeypatch):
         board.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (task,))
     for _ in range(3):
         tick()
-    assert release.call_count == probe.call_count == 3
+    # [daveey] G2: a candidate runs its lane, then the lane skips until the content revision moves or a due
+    # time it returned arrives (``kanban_sweep_gate``); the mocks return no due time.
+    assert release.call_count == probe.call_count == 1
+    kb.add_comment(board, task, 'someone', 'a content write')
+    tick()
+    assert release.call_count == probe.call_count == 2
 
 
 def test_owner_archive_candidate_scan_is_not_repeated(board, monkeypatch):

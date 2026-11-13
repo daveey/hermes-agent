@@ -2029,10 +2029,9 @@ def list_jobs(include_disabled: bool = False) -> list[dict[str, Any]]:
     if not include_disabled:
         jobs = [j for j in jobs if j.get("enabled", True)]
     try:
-        from cron.executions import latest_executions, live_executions
+        from cron.executions import listed_executions
 
-        ids = [job.get("id", "") for job in jobs]
-        latest, live = latest_executions(ids), live_executions(ids)
+        latest, live = listed_executions([job.get("id", "") for job in jobs])
     except Exception:
         latest, live = {}, {}
     for job in jobs:

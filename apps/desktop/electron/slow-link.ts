@@ -356,19 +356,17 @@ export function thinnedPoll(
 // new descriptor serves, per scope, as `[remote-timing]` lines in desktop.log.
 const remoteFirstRequestPending = new Map<string, { scope: string; startedAt: number }>()
 
+// masterAlive is required: without it the chat WebSocket of this tunnel can never count a strike while the SSH master
+// lives, so a slow link would never stretch its connect limit.
 export function noteRemoteConnect(
   baseUrl: string,
   scope: string,
   startedAt: number,
-  masterAlive?: () => Promise<boolean> | undefined
+  masterAlive: () => Promise<boolean> | undefined
 ): void {
   remoteFirstRequestPending.set(baseUrl, { scope, startedAt })
   slowLinkTracker.bind(scope, baseUrl)
-
-  if (masterAlive) {
-    remoteTransports.remember(baseUrl, scope, masterAlive)
-  }
-
+  remoteTransports.remember(baseUrl, scope, masterAlive)
   deltaBodyStore.bindRemote(baseUrl, scope) // delta-reads.ts: this tunnel's reads may come back as deltas
 }
 

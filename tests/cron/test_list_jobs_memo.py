@@ -68,12 +68,12 @@ def test_a_caller_mutating_the_list_does_not_change_the_next_answer(store):
 
 
 def test_executions_stay_live_on_a_memo_hit(store, monkeypatch):
-    """The memo covers jobs.json only: latest/live executions are read on every call."""
+    """The memo covers jobs.json only: latest/live executions are read on every call (through their own
+    data_version-keyed reader, tests/cron/test_list_jobs_executions_memo.py)."""
     job = cj.create_job(prompt="first", schedule="every 1h", name="one")
     cj.list_jobs(include_disabled=True)
     import cron.executions as ce
-    monkeypatch.setattr(ce, "latest_executions", lambda ids: {job["id"]: {"id": "x1", "status": "completed"}})
-    monkeypatch.setattr(ce, "live_executions", lambda ids: {})
+    monkeypatch.setattr(ce, "listed_executions", lambda ids: ({job["id"]: {"id": "x1", "status": "completed"}}, {}))
     listed = cj.list_jobs(include_disabled=True)
     assert listed[0]["latest_execution"] == {"id": "x1", "status": "completed"}
 

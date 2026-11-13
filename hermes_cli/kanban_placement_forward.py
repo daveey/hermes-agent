@@ -319,10 +319,10 @@ def sweep_unresolved_archives(conn: sqlite3.Connection, *, now: Optional[float] 
     (:func:`_archive_request_id`), so a replay racing the original forward is applied once. Returns the ids whose
     archive request was sent."""
     now = time.time() if now is None else now
-    rows = conn.execute(
-        "SELECT t.id FROM tasks t WHERE t.status IN ('archived', 'done') AND EXISTS "
-        "(SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind IN (?, ?))",
-        (ARCHIVE_FORWARDED, CANCEL_INTENT)).fetchall()
+    # [daveey] G2: the candidate set is structural (status + event kinds), memoized on the task/event revision; the
+    # per-card retry, grace and give-up clocks below still run every tick.
+    from hermes_cli.kanban_idle_candidates import candidate_task_ids
+    rows = [(tid,) for tid in candidate_task_ids(conn, ("archived", "done"), (ARCHIVE_FORWARDED, CANCEL_INTENT))]
     sent: list[str] = []
     for (task_id,) in rows:
         intent = _last_event(conn, task_id, CANCEL_INTENT)

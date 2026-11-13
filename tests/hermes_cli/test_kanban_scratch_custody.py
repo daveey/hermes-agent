@@ -111,10 +111,10 @@ def test_refused_receipt_does_not_starve_later_workspace(env, monkeypatch, caplo
     first, first_path, _ = evicted(env)
     _second, second_path, _ = evicted(env)
 
-    def terminal(_hub, _board, tid):
+    def terminal(_hub, _board, tid, runs=()):
         if tid == first:
             raise archive.ArchiveRefused("preserve this receipt")
-        return dict(env.owner, uid=tid)
+        return dict(env.owner, uid=tid, retention_at=env.owner["completed_at"])
 
     monkeypatch.setattr(custody, "_terminal", terminal)
     assert gc.gc_task_scratch(env.conn, older_than_days=7) == 1
@@ -151,8 +151,7 @@ def test_eviction_receipt_and_rollback_are_local_only(env):
     assert not env.conn.execute("SELECT 1 FROM task_events WHERE task_id=?", (tid,)).fetchone()
 
 
-@pytest.mark.parametrize("kwargs", [{"kind": "dir"}, {"path_mode": "missing"},
-                                    {"path_mode": "root"}, {"path_mode": "outside"}])
+@pytest.mark.parametrize("kwargs", [{"kind": "dir"}, {"path_mode": "root"}, {"path_mode": "outside"}])
 def test_eviction_requires_explicit_managed_scratch(env, kwargs):
     _, path, _ = evicted(env, **kwargs)
     assert custody.receipts(env.conn) == []
@@ -826,9 +825,9 @@ def test_commit_failure_after_rename_restores_tree_and_stops(env, monkeypatch, c
     second, second_path, _ = evicted(env)
     fired, asked = [], []
 
-    def terminal(_hub, _board, tid):
+    def terminal(_hub, _board, tid, runs=()):
         asked.append(tid)
-        return dict(env.owner, uid=tid)
+        return dict(env.owner, uid=tid, retention_at=env.owner["completed_at"])
 
     monkeypatch.setattr(custody, "_terminal", terminal)
 

@@ -35,7 +35,14 @@ MINI_LABEL = "hermes-state"
 WAITING = frozenset({"queued", "waiting", "pending", "requested"})
 OPEN_RUN_STATES = ("queued", "in_progress", "waiting", "pending", "requested")
 
+PAGE_SIZE = 100
+MAX_RUN_PAGES = 10
+
 Api = Callable[[str], dict[str, Any]]
+
+
+class QueueSaturated(Exception):
+    """More open runs in one state than the gate reads: the mini is busy."""
 
 
 def waiting_mini_jobs(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -49,16 +56,25 @@ def waiting_mini_jobs(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 def find_waiting(api: Api, repo: str, own_run_id: int) -> list[dict[str, Any]]:
     """Every waiting mini job across this repository's open runs, ours excluded.
 
-    Busy hours have 100+ open runs; their job lists are read 8 at a time
-    (read serially, one probe took ~3 min).
+    Busy hours have 100+ open runs, so each state's listing is read page by
+    page until a short page; a waiting job on page 2 counts like one on page 1.
+    Past MAX_RUN_PAGES full pages the queue is saturated by any measure
+    (QueueSaturated: skip). Job lists are read 8 at a time (read serially,
+    one probe took ~3 min).
     """
     run_ids: list[int] = []
     for state in OPEN_RUN_STATES:
-        runs = api(f"repos/{repo}/actions/runs?status={state}&per_page=100").get("workflow_runs") or []
-        for run in runs:
-            run_id = int(run["id"])
-            if run_id != own_run_id and run_id not in run_ids:
-                run_ids.append(run_id)
+        for page in range(1, MAX_RUN_PAGES + 1):
+            path = f"repos/{repo}/actions/runs?status={state}&per_page={PAGE_SIZE}&page={page}"
+            runs = api(path).get("workflow_runs") or []
+            for run in runs:
+                run_id = int(run["id"])
+                if run_id != own_run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+            if len(runs) < PAGE_SIZE:
+                break
+        else:
+            raise QueueSaturated(f"{MAX_RUN_PAGES * PAGE_SIZE}+ {state} runs")
 
     def jobs(run_id: int) -> list[dict[str, Any]]:
         return api(f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100").get("jobs") or []
@@ -72,6 +88,8 @@ def decide(event: str, api: Api, repo: str, own_run_id: int) -> tuple[bool, str]
         return True, f"{event} run: not gated"
     try:
         waiting = find_waiting(api, repo, own_run_id)
+    except QueueSaturated as exc:
+        return False, f"{exc} open; skipping this slot"
     except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError) as exc:
         # Any read failure (gh error/timeout, bad JSON, missing field) fails open to testing.
         return True, f"could not read the mini's queue ({exc}); running anyway"

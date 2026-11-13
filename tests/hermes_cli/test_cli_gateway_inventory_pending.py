@@ -2,6 +2,7 @@
 (``inventory_pending``, gateway/session_local_inventory.reply_info). The classic CLI printed the
 gateway-judged startup lines (``unknown_toolsets``, ``tool_availability_warnings``) only from that
 reply, so under load they never showed: they now print when the late ``session.info`` settles it."""
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -67,6 +68,26 @@ def test_late_inventory_prints_the_startup_notices_once(pending_store, monkeypat
     assert len(printed) == 3, printed
 
 
+def test_two_settled_frames_reaching_the_wait_print_the_notices_once(pending_store, monkeypatch):
+    """Two settled ``session.info`` deliveries can both reach the wait: each ``apply_event`` snapshots
+    the listener list before it calls it, so a republish whose delivery snapshotted the list before the
+    first one removed the listener still calls it. The second call must print nothing and not raise."""
+    db, _client = pending_store
+    _host, printed = _launch(monkeypatch, db)
+    state = db.connection.state("local-new")
+    assert len(state.info_listeners) == 1
+    waiting = state.info_listeners[0]  # what a second delivery's snapshot of the list holds
+
+    async def deliver_twice():
+        state.apply_event("session.info", dict(LATE))  # the first settled frame: prints, ends the wait
+        waiting(dict(LATE))  # the second delivery, from a snapshot taken before the removal
+
+    asyncio.run_coroutine_threadsafe(deliver_twice(), db.connection.loop).result(10)
+    assert len(printed) == 3, printed
+    assert "gone_plugin" in printed[0] and printed[1:] == ["", "⚠ web: set FIRECRAWL_API_KEY"], printed
+    assert state.info_listeners == [] and db.switch_listeners == []
+
+
 def _settle_after_switch(db, client):
     """The first session's late settled frame, then a marker frame: the pump applies frames in order, so
     once the marker is in, every listener the settled frame reached has returned."""
@@ -84,6 +105,20 @@ def test_a_switch_while_pending_never_prints_the_left_sessions_notices(pending_s
     _settle_after_switch(db, client)
     assert printed == [], printed
     assert host.enabled_toolsets is None  # nor is the left session's toolset list adopted
+
+
+def test_a_settle_racing_the_switch_listeners_sees_the_new_session(pending_store, monkeypatch):
+    """The pump thread can apply the left session's late settled frame while ``set_current`` is still
+    running the switch listeners, before ``left`` claims the wait: the switch must already show the new
+    session as current, so that settle prints nothing and adopts nothing."""
+    db, client = pending_store
+    host, printed = _launch(monkeypatch, db)
+    db.switch_listeners.insert(0, lambda: _settle_after_switch(db, client))  # runs before ``left``
+    db.attach("local-old")
+    assert printed == [], printed
+    assert host.enabled_toolsets is None
+    assert db.connection.state("local-new").info_listeners == []
+    assert db.switch_listeners == []
 
 
 def test_the_wait_is_dropped_when_the_cli_switches_session(pending_store, monkeypatch):

@@ -405,7 +405,7 @@ describe('noteRemoteAnswer', () => {
     const log = (line: string) => lines.push(line)
 
     remoteAnswerLedger.forget(url)
-    noteRemoteConnect(url, 'conn:hermes-hub::default', Date.now() - 250)
+    noteRemoteConnect(url, 'conn:hermes-hub::default', Date.now() - 250, () => undefined)
     noteRemoteAnswer(url, '/api/status', 40, log)
     noteRemoteAnswer(url, '/api/profiles', 40, log)
 

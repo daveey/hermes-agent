@@ -103,6 +103,111 @@ describe('coalescedBackendRead', () => {
     expect(once).toHaveBeenCalledTimes(4)
   })
 
+  it('keeps reads apart for multiplexed native grants of different profiles on one api_origin', async () => {
+    const coalescer = new ReadCoalescer()
+
+    const once = vi.fn(
+      async (descriptor: { gatewayEndpoint?: Record<string, unknown> }) =>
+        descriptor.gatewayEndpoint?.profile_id ?? 'none'
+    )
+
+    const grant = {
+      profile_id: '/h/.hermes',
+      instance_id: 'i-1',
+      authority_epoch: 3,
+      api_origin: 'http://127.0.0.1:9147'
+    }
+
+    const native = { ...hub, authMode: 'native', gatewayEndpoint: grant }
+
+    const reads = [
+      coalescedBackendRead(coalescer, native, '/api/sessions', {}, once),
+      coalescedBackendRead(
+        coalescer,
+        { ...native, gatewayEndpoint: { ...grant, profile_id: '/h/.hermes/profiles/b' } },
+        '/api/sessions',
+        {},
+        once
+      ),
+      coalescedBackendRead(
+        coalescer,
+        { ...native, gatewayEndpoint: { ...grant, instance_id: 'i-2' } },
+        '/api/sessions',
+        {},
+        once
+      ),
+      coalescedBackendRead(
+        coalescer,
+        { ...native, gatewayEndpoint: { ...grant, authority_epoch: 4 } },
+        '/api/sessions',
+        {},
+        once
+      ),
+      coalescedBackendRead(coalescer, { ...native, gatewayEndpoint: undefined }, '/api/sessions', {}, once),
+      // The same grant (a fresh descriptor object for it) still shares.
+      coalescedBackendRead(coalescer, { ...native, gatewayEndpoint: { ...grant } }, '/api/sessions', {}, once)
+    ]
+
+    expect(await Promise.all(reads)).toEqual([
+      '/h/.hermes',
+      '/h/.hermes/profiles/b',
+      '/h/.hermes',
+      '/h/.hermes',
+      'none',
+      '/h/.hermes'
+    ])
+    expect(once).toHaveBeenCalledTimes(5)
+  })
+
+  it('a read issued after a write settles never joins one sent while the write was in flight', async () => {
+    const coalescer = new ReadCoalescer()
+    const write = deferred<string>()
+    const during = deferred<string>()
+    const after = deferred<string>()
+    const reads = [during, after]
+
+    const once = vi.fn((_d: unknown, _p: string, opts: { method?: string; body?: unknown }) =>
+      opts.method === 'POST' ? write.promise : (reads.shift() as ReturnType<typeof deferred<string>>).promise
+    )
+
+    const writing = coalescedBackendRead(coalescer, hub, '/api/sessions/x/archive', { method: 'POST', body: {} }, once)
+    const racing = coalescedBackendRead(coalescer, hub, LIST, {}, once) // may be answered before the write lands
+
+    write.resolve('wrote')
+    await writing
+    const fresh = coalescedBackendRead(coalescer, hub, LIST, {}, once)
+
+    during.resolve('while writing')
+    after.resolve('after the write')
+    expect(await racing).toBe('while writing')
+    expect(await fresh).toBe('after the write')
+    expect(once).toHaveBeenCalledTimes(3)
+  })
+
+  it('a write announced from elsewhere (a WS-RPC session mutation) starts a new generation on every backend', async () => {
+    const coalescer = new ReadCoalescer()
+    const gates = [deferred<string>(), deferred<string>(), deferred<string>()]
+    const queue = [...gates]
+    const once = vi.fn(() => (queue.shift() as ReturnType<typeof deferred<string>>).promise)
+    const other = { ...hub, baseUrl: 'http://127.0.0.1:60000' }
+
+    const stale = coalescedBackendRead(coalescer, hub, LIST, {}, once)
+    const staleOther = coalescedBackendRead(coalescer, other, LIST, {}, once)
+    coalescer.noteWriteEverywhere()
+    const fresh = coalescedBackendRead(coalescer, hub, LIST, {}, once)
+    // Unchanged by the notice: reads issued after it still share with each other.
+    const freshJoin = coalescedBackendRead(coalescer, hub, LIST, {}, once)
+
+    gates.forEach((gate, n) => gate.resolve(`answer ${n}`))
+    expect(await Promise.all([stale, staleOther, fresh, freshJoin])).toEqual([
+      'answer 0',
+      'answer 1',
+      'answer 2',
+      'answer 2'
+    ])
+    expect(once).toHaveBeenCalledTimes(3)
+  })
+
   it('shares a failure with every caller and then lets the next read try again', async () => {
     const coalescer = new ReadCoalescer()
     const answer = deferred<unknown>()
@@ -149,5 +254,12 @@ describe('main.ts wiring', () => {
     )
     // Nothing else calls the uncoalesced transport, so no read can bypass the sharing.
     expect(main.match(/\bfetchJsonForBackendOnce\b/g)).toHaveLength(2)
+  })
+
+  it('a renderer WS-RPC write notice reaches the shared coalescer', () => {
+    const preload = readFileSync(join(__dirname, 'preload.ts'), 'utf8')
+
+    expect(preload).toContain("noteBackendWrite: () => ipcRenderer.send('hermes:backend:note-write')")
+    expect(main).toContain("ipcMain.on('hermes:backend:note-write', () => backendReadCoalescer.noteWriteEverywhere())")
   })
 })

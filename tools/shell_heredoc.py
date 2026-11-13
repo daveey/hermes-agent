@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 import shlex
 
+from tools.shell_arith_sink import DATE_PRODUCER_BODY, substitution_in_arithmetic
+
 # Non-shell interpreters whose quoted heredoc bodies are data for THAT interpreter, judged on the
 # command the owner actually runs: VAR=... assignments and stdin-passing wrappers (``timeout 20``,
 # ``nice``, ``env VAR=1``, ``command``) are peeled, a path prefix is allowed, positional arguments
@@ -500,7 +502,7 @@ _SHELL_SINK_TEMPLATE = (
 # position (t_01a1d67ff0075752). Only this producer is exempt: inside `$((`/`((` bash still runs
 # code from other substitutions' output (`a[$(cmd)]` subscripts, `((` falling back to nested
 # subshells; review 5897778680).
-_NUMERIC_PRODUCER = r"""(?![ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\))"""
+_NUMERIC_PRODUCER = rf"(?!{DATE_PRODUCER_BODY})"
 _SHELL_SINK_RE = re.compile(_SHELL_SINK_TEMPLATE + r"|`)", re.MULTILINE)
 _SHELL_SINK_NUMERIC_RE = re.compile(_SHELL_SINK_TEMPLATE + _NUMERIC_PRODUCER + r"|`)", re.MULTILINE)
 # What could make `date` something other than the date binary: a function or alias of that name,
@@ -521,8 +523,12 @@ def output_reaches_shell(command: str) -> bool:
     shell, so ``| grep bash`` / ``| grep -c bash`` count as sinks too: telling a wrapper's operand
     from a filter's pattern needs a per-command grammar, and the false sink only fails closed
     (review 5890784121 nit 3; ``| grep bash.sh`` is no sink only because of the word end)."""
-    sink = _SHELL_SINK_RE if _DATE_REBIND_RE.search(command) else _SHELL_SINK_NUMERIC_RE
-    return sink.search(command) is not None
+    date_exempt = not _DATE_REBIND_RE.search(command)
+    sink = _SHELL_SINK_NUMERIC_RE if date_exempt else _SHELL_SINK_RE
+    # The regex sees a substitution only in command position; inside arithmetic bash also runs
+    # code from its output wherever it sits (`$(( 1 + $(…) ))`, `a[$(…)]`; t_01a1d6ae05c19594).
+    return (sink.search(command) is not None
+            or substitution_in_arithmetic(command, date_exempt=date_exempt))
 
 
 def _nonreading_shell_unit(unit: str, functions: set[str]) -> bool:

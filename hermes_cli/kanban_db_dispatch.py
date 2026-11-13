@@ -1974,9 +1974,8 @@ def _run_reclaim_phase(
         result.released_leftover_claims = _la.timed("dispatch.release_leftover_local_claims", release_leftover_local_claims, conn)  # not gated: not running [daveey]
     if has_running:
         result.stale = _la.timed("dispatch.detect_stale_running", detect_stale_running, conn, stale_timeout_seconds=stale_timeout_seconds)
-    # An ended primary run can still owe post-feed effects even with no running tasks.
-    from hermes_cli.kanban_neutral_release import pending
-    if has_running or pending(conn):
+    from hermes_cli.kanban_db_dispatch_claims import crash_sweep_due  # G2: runs while a local pid may have died
+    if crash_sweep_due(conn, has_running):
         result.crashed = _la.timed("dispatch.detect_crashed_workers", detect_crashed_workers, conn, board=board)
         result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
         result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))

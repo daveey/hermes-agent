@@ -22,6 +22,12 @@ A third family (``s_position == "sink"``) hands a data consumer's OUTPUT to a sh
 <<'PY' | bash``, ``f | sudo bash``, ``eval "$(…)"``, ``. <(…)``, …) under every stdin wrapper and
 nesting form: the printed ``bash ./big.sh`` (over the scan cap) or restart is shell code there.
 
+A fourth family (``s_position == "redirect"``) puts a redirection word before the command word,
+between a wrapper and its program, or among the program's operands: bash's ``{NAME}``
+descriptor-variable forms (``{fd}>/dev/null bash ./restart.sh``) and numeric ``>&``/``>|`` words.
+Each runs ``./restart.sh`` (refused whenever bash ran it) or a clean Python file (must stay
+allowed: ``report`` counts those refusals as ``false_refusals``).
+
 Real bash runs every case with a fake ``hermes`` that writes a marker. The property the test
 asserts: when bash ran the payload and origin/main refuses the command, the tree under test
 refuses it too; a sink case must be refused whenever bash ran it. origin/main's verdicts are
@@ -133,6 +139,34 @@ SINKS = {
     ". <(…)": ("wrap", ". <( ", " )"),
 }
 SINK_NESTINGS = ("plain", "function", "function-keyword", "subshell", "group", "outer", "ssh")
+# Fourth family (``s_position == "redirect"``, card t_01a1d5f876488f96): a redirection word where
+# the command word is read or among its operands, ``{NAME}`` descriptor-variable forms first
+# (``{fd}>/dev/null bash ./restart.sh`` allocates a descriptor into $fd and runs bash), then numeric
+# ``>&``/``>|`` controls, whose ``&``/``|`` the tokenizer once read as a control operator. Places:
+# before the wrapper, between wrapper and program, or after the program. Targets: three that run
+# ``./restart.sh`` (operand, stdin, ``bash -s`` stdin) and ``clean``, a Python file that must stay
+# allowed.
+REDIRECT_PREFIXES = (
+    "{fd}>/dev/null", "{fd}>&2", "{fd}>& 2", "{fd}> /dev/null", "{fd}>>./redir.log",
+    "{fd}<./restart.sh", "{fd}<>./redir.log", "{fd}>|./redir.log", "{fd}<<<x", "{fd}<&0",
+    "{a}>/dev/null {b}>&2", "{a[1]}>/dev/null", "{m[k]}>&2",
+    # A subscript the tokenizer cuts at a space, glued to its operator (one bash word), and a
+    # `{NAME[` head with no `]}>` tail: an ordinary word that must not end its command.
+    "{a[`echo 1`]}>&2", "{a[x", "{a[1 2]}",
+    "2>&1", ">&2", "2>|./redir.log",
+)
+# Prefixes above that are ordinary words, not redirections: bash runs ./restart.sh only when one
+# is an operand of `bash -s` (elsewhere it is the command word or the script operand).
+REDIRECT_PLAIN_WORDS = frozenset({"{a[x", "{a[1 2]}"})
+REDIRECT_PLACES = ("lead", "wrapped", "operand")
+REDIRECT_TARGETS = {
+    "operand": ("bash", "./restart.sh"),
+    "stdin": ("bash", "< ./restart.sh"),
+    "stdin-s": ("bash -s", "< ./restart.sh"),
+    "clean": ("python3", "./clean.py"),
+}
+REDIRECT_NESTINGS = ("plain", "function", "subshell", "outer")
+RESTART_SCRIPT = 'hermes gateway "restart"\n'
 # Over the 1 MiB scan cap, so a walk that executes it fails closed; bash runs it to the end.
 BIG_SCRIPT = "# padding\n" * 130000 + 'hermes gateway "restart"\n'
 # Startup file: record that it ran, keep the fake bin on PATH, then rewrite the rest of stdin.
@@ -161,6 +195,7 @@ class Case:
     payload: str
     session: str = ""  # a SESSIONS key (session cases only): aliases the shell already holds
     sink: str = ""  # a SINKS key (sink cases only): what runs the consumer's output
+    place: str = ""  # a REDIRECT_PLACES entry (redirect cases only): where the redirection sits
 
 
 def build_sink_command(sink: str, wrapper: str, nesting: str, consumer: str, line: str) -> str:
@@ -189,6 +224,22 @@ def build_sink_command(sink: str, wrapper: str, nesting: str, consumer: str, lin
     if kind == "pipe":
         return f"{prelude}{head} | {parts[0]}{tail}"
     return f"{prelude}{parts[0]}{head}{tail}{parts[1]}\n"
+
+
+def build_redirect_command(prefix: str, place: str, wrapper: str, nesting: str, target: str) -> str:
+    """*target*'s program run behind *wrapper* with the redirection *prefix* at *place*."""
+    program, rest = REDIRECT_TARGETS[target]
+    line = {
+        "lead": f"{prefix} {wrapper}{program} {rest}",
+        "wrapped": f"{wrapper}{prefix} {program} {rest}",
+        "operand": f"{wrapper}{program} {prefix} {rest}",
+    }[place]
+    return {
+        "plain": f"{line}\n",
+        "function": f"f() {{\n{line}\n}}\nf\n",
+        "subshell": f"(\n{line}\n)\n",
+        "outer": f"bash -s <<'OUTER'\n{line}\nOUTER\n",
+    }[nesting]
 
 
 def session_alias_names(session: str) -> frozenset[str]:
@@ -262,6 +313,12 @@ def generate_full_corpus() -> list[Case]:
         key = hashlib.sha1(command.encode()).hexdigest()[:16]
         cases.setdefault(key, Case(key, command, "bash", (), "sink", wrapper, nesting,
                                    f"{consumer}-{line}", sink=sink))
+    for prefix, place, wrapper, nesting, target in itertools.product(
+            REDIRECT_PREFIXES, REDIRECT_PLACES, WRAPPERS, REDIRECT_NESTINGS, REDIRECT_TARGETS):
+        command = build_redirect_command(prefix, place, wrapper, nesting, target)
+        key = hashlib.sha1(command.encode()).hexdigest()[:16]
+        cases.setdefault(key, Case(key, command, "bash", (prefix,), "redirect", wrapper, nesting,
+                                   target, place=place))
     return list(cases.values())
 
 
@@ -271,6 +328,11 @@ def _cover_keys(case: Case) -> set[tuple]:
     if case.s_position == "sink":
         return {("sink", case.sink, case.nesting, case.payload),
                 ("sink-wrapper", case.sink, case.wrapper, case.nesting)}
+    if case.s_position == "redirect":  # every prefix with every place x target, wrapper, nesting
+        prefix = case.words[0]
+        return {("redirect", prefix, case.place, case.payload),
+                ("redirect-wrapper", prefix, case.wrapper), ("redirect-nesting", prefix, case.nesting),
+                ("redirect-form", case.wrapper, case.nesting, case.payload)}
     where = (case.s_position, case.nesting)
     words = [word for word in case.words if word != "-s"]
     return ({("option", word, *where) for word in words} | {("wrapper", case.wrapper, *where)}
@@ -308,6 +370,8 @@ def prepare(root: Path) -> dict[str, str]:
     (home / ".profile").write_text(REWRITE_STARTUP_POSIX)
     (root / "rc").write_text(REWRITE_STARTUP)
     (root / "big.sh").write_text(BIG_SCRIPT)
+    (root / "restart.sh").write_text(RESTART_SCRIPT)
+    (root / "clean.py").write_text("print('clean')\n")
     for session, aliases in SESSIONS.items():
         (root / f"session-{session}.sh").write_text(f"{aliases}\nshopt -s expand_aliases\n")
     (root / "evil").mkdir(exist_ok=True)
@@ -428,10 +492,19 @@ def evaluate(root: Path, cases: list[Case]) -> list[tuple[Case, bool, bool]]:
 
 
 def violations(results, main_refuses) -> list[Case]:
-    """Cases bash ran, main refuses, and the guard under test allows. A sink case must be refused
-    whenever bash ran it, whatever main says: main allows most of them (the nit-3 gap)."""
+    """Cases bash ran, main refuses, and the guard under test allows. A sink or redirect case must
+    be refused whenever bash ran it, whatever main says: main allows most of them (the nit-3 gap,
+    and card t_01a1d5f876488f96's `{fd}>x bash ./restart.sh`)."""
     return [case for case, executed, refused in results
-            if executed and (case.s_position == "sink" or main_refuses(case)) and not refused]
+            if executed and (case.s_position in ("sink", "redirect") or main_refuses(case))
+            and not refused]
+
+
+def false_refusals(results) -> list[Case]:
+    """Redirect cases whose program is the clean Python file, refused anyway: a redirection word
+    must not turn an allowed command into a refusal."""
+    return [case for case, _executed, refused in results
+            if case.s_position == "redirect" and case.payload == "clean" and refused]
 
 
 def corpus_digest(cases: list[Case]) -> str:
@@ -466,16 +539,20 @@ def _main(argv: list[str]) -> int:
         _fixture, main_refuses = load_main_verdicts(Path(paths[0]) if paths else FIXTURE)
         results = evaluate(root, cases)
         bad = violations(results, main_refuses)
+        clean = false_refusals(results)
         print(f"cases={len(cases)} bash_ran={sum(r[1] for r in results)} "
-              f"refused={sum(r[2] for r in results)} violations={len(bad)}")
+              f"refused={sum(r[2] for r in results)} violations={len(bad)} "
+              f"false_refusals={len(clean)}")
         for case in bad:
             print(f"VIOLATION {case.key} {case.command!r}")
+        for case in clean:
+            print(f"FALSE-REFUSAL {case.key} {case.command!r}")
         if "--ran" in argv:
             for case, executed, refused in results:
                 if executed:
                     print(f"RAN refused={refused} {case.shell} {case.words} {case.wrapper!r} "
                           f"{case.nesting} {case.payload}")
-        return 1 if bad else 0
+        return 1 if bad or clean else 0
 
 
 if __name__ == "__main__":

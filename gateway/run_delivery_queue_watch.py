@@ -38,7 +38,9 @@ class DeliveryQueueWatch:
     stable, while a worker that enqueued during the drain still moves it again.
     A stamp seen within ``MTIME_GRANULARITY_NS`` of its newest mtime is racy: the next
     look reports a change even when the stamp matches (at worst one empty pass),
-    because a write in the same timestamp granule would not have moved it.
+    because a write in the same timestamp granule would not have moved it. A newest mtime
+    ahead of the clock (wall clock stepped back, skewed writer on a network FS) is racy only
+    on the look that first sees it, or every poll would drain until the clock passed it.
     """
 
     def __init__(self, homes: Callable[[], Iterable[Optional[Path]]], drain: Callable[[], None]) -> None:
@@ -46,7 +48,7 @@ class DeliveryQueueWatch:
         self.drain = drain
         self._served: list = list(homes())
         self._seen = self._stamp()
-        self._seen_racy = self._is_racy(self._seen)
+        self._seen_racy = self._is_racy(self._seen, first_sight=True)
 
     def refresh_homes(self) -> None:
         """Re-resolve the served profiles once per tick (a directory read under multiplex),
@@ -68,17 +70,21 @@ class DeliveryQueueWatch:
         return tuple(stamps)
 
     @staticmethod
-    def _is_racy(stamp: tuple) -> bool:
+    def _is_racy(stamp: tuple, first_sight: bool) -> bool:
         # Read the clock after the stat: any later write carries a timestamp past this granule.
         newest = max((mtime_ns for _path, mtime_ns, _size in stamp), default=None)
-        return newest is not None and _now_ns() - newest <= MTIME_GRANULARITY_NS
+        if newest is None:
+            return False
+        age_ns = _now_ns() - newest
+        return age_ns <= MTIME_GRANULARITY_NS and (age_ns >= 0 or first_sight)
 
     def changed(self) -> bool:
         current = self._stamp()
         if current == self._seen and not self._seen_racy:
             return False
+        first_sight = current != self._seen
         self._seen = current
-        self._seen_racy = self._is_racy(current)
+        self._seen_racy = self._is_racy(current, first_sight)
         return True
 
 

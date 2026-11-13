@@ -73,6 +73,7 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None =
     import shutil
 
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_scratch_preserve import preserved
 
     days = retention_days() if older_than_days is None else older_than_days
     removed = 0
@@ -105,6 +106,8 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None =
                     exc_info=True)
     for row in rows:
         path = Path(row["workspace_path"] or (kb.workspaces_root() / row["id"])).expanduser()
+        if preserved(row["id"], path):
+            continue  # kanban.scratch_gc_preserve: never walked, archived or removed
         if not path.is_dir() or path.is_symlink() or not ws._is_managed_scratch_path(path):
             continue
         if ws._has_active_children(conn, row["id"]):
@@ -172,6 +175,8 @@ def _sweep_detached_trash(root: Path, rows) -> None:
     and only touches names this GC mints."""
     import shutil
 
+    from hermes_cli.kanban_scratch_preserve import preserved
+
     parents = {root}
     for row in rows:
         if row["workspace_path"]:
@@ -185,6 +190,9 @@ def _sweep_detached_trash(root: Path, rows) -> None:
             continue
         for trash in entries:
             if trash.is_symlink() or not trash.is_dir():
+                continue
+            if preserved(None, trash):
+                log.info("Scratch preserved: reason=scratch_gc_preserve path=%s", trash)
                 continue
             shutil.rmtree(trash, ignore_errors=True)
             if os.path.lexists(trash):
@@ -235,6 +243,10 @@ def _report_unowned_scratch(root: Path, known_paths: set[Path]) -> None:
         if path.is_symlink() or not path.is_dir() or _is_detached_trash(path):
             continue  # detached trash is swept by gc_task_scratch, not an unknown owner
         if path.resolve() not in represented:
+            from hermes_cli.kanban_scratch_preserve import preserved
+            if preserved(path.name, path):
+                log.info("Scratch preserved: reason=scratch_gc_preserve path=%s", path)
+                continue
             log.warning("Scratch preserved: reason=owner_unverified path=%s; "
                         "no local task workspace record; moved or unknown ownership; "
                         "no deletion deadline", path)

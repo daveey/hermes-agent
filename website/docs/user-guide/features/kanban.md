@@ -1422,6 +1422,27 @@ Dirty trees, locked trees, active tasks, active children and live shared workspa
 are preserved. Custom branches remain; generated `wt/` branches are pruned only
 when their tip still matches the archived commit.
 
+`kanban.scratch_gc_preserve` pins scratch trees explicitly: a list of task ids
+(default `[]`) whose workspaces no cleanup path touches — completion cleanup,
+deferred parent cleanup, retention GC and its archive pass, custody GC for evicted
+cards, custody receipt discovery and the worker disk-pressure reclaimer. A tree is
+pinned when its task id is listed or any component of its path is a listed id.
+A value that is not a list of task-id strings, or a config that cannot be read,
+keeps every scratch tree and logs a warning.
+
+```yaml
+kanban:
+  scratch_gc_preserve: [t_01a1a7927a933768, t_01a19fc2faa99ef8]
+```
+
+On a Board worker, a scratch tree whose card was evicted from the local board is
+reclaimed through a custody receipt and the Board's terminal evidence. A Board row
+`archived` without `completed_at` uses the newest of its update time and its last
+ended run as the retention clock. A `<root>/t_<16 hex>` tree with neither a local
+row nor a receipt (an eviction before receipts existed) gets a receipt only when the
+Board row is a scratch task and the Board shows a claim of it by this machine's
+hostname whose runs have all ended; otherwise it stays `owner_unverified`.
+
 CLI worktree startup maintenance applies the same policy across the current home's
 boards. Registered `t_<hex>` worktrees with no known owning workspace are not
 silently deleted: they receive JSON tombstones in

@@ -106,3 +106,57 @@ def test_storage_and_unreachable_proofs_are_distinct_kinds(home):
         task = kb.get_task(conn, tid)
         proof = storage.proven(conn, tid, task.current_run_id, task.claim_lock)
         assert proof == {"kind": hr.OWNER_UNREACHABLE, "phase": "midrun", "reason": "owner_unavailable"}
+
+
+# Sibling path: the resend's redial reached the gateway, but send 2/2 still got no receipt or the
+# owner dropped the link again (``runtime_session_store.exhausted_resend_code``).
+_SILENT_RESEND = ["worker_receipt_timeout", "owner_link_closed"]
+
+
+@pytest.mark.parametrize("code", _SILENT_RESEND)
+def test_exhausted_resend_requeues_without_spending_budget(home, code):
+    with kbc.connect() as conn:
+        tid, _ = helpers._admitted_run(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET max_retries=1 WHERE id=?", (tid,))
+        _result(conn, tid, last_output=_TURN_TEXT)
+        _result(conn, tid, last_output=f"Worker failed: WorkerPersistenceError: {code}")
+        kbd.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        run = helpers._runs(conn, tid)[-1]
+        assert run["outcome"] == "owner_unavailable"
+        assert f"could not reach its profile owner to save the turn ({code}:" in run["error"]
+        assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='gave_up'", (tid,)).fetchone()
+
+
+@pytest.mark.parametrize("code", _SILENT_RESEND)
+def test_exhausted_resend_streak_still_reaches_the_breaker(home, code):
+    from hermes_cli import kanban_owner_unavailable as ou
+    with kbc.connect() as conn:
+        tid = None
+        for i in range(ou.NEUTRAL_STREAK_LIMIT + 1):
+            tid, _ = helpers._admitted_run(conn, tid, submitter=74000 + i)
+            _result(conn, tid, last_output=f"Worker failed: WorkerPersistenceError: {code}")
+            kbd.detect_crashed_workers(conn)
+        runs = helpers._runs(conn, tid)
+        assert [r["outcome"] for r in runs[:-1]] == ["owner_unavailable"] * ou.NEUTRAL_STREAK_LIMIT
+        assert runs[-1]["outcome"] == "crashed"
+        assert kb.get_task(conn, tid).consecutive_failures == 1
+
+
+@pytest.mark.parametrize("output", [
+    "Worker failed: TimeoutError: worker_receipt_timeout",  # not the store's latched envelope
+    "Worker failed: WorkerPersistenceError: worker_receipt_timeout_extra",
+    # A close code that may answer this frame keeps its raw text and stays the card's.
+    "Worker failed: WorkerPersistenceError: received 1009 (message too big); then sent 1009 (message too big)",
+    "Worker failed: WorkerPersistenceError: owner_link_closed\nAnother failure",
+])
+def test_inexact_resend_envelope_still_counts(home, output):
+    with kbc.connect() as conn:
+        tid, _ = helpers._admitted_run(conn)
+        _result(conn, tid, last_output=output)
+        kbd.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).consecutive_failures == 1
+        assert not helpers._notices(conn)

@@ -198,7 +198,17 @@ describe('duplicate-turn protection for an identityless send is unchanged', () =
       'a 4001 whose prose only mentions it',
       () => new JsonRpcGatewayError('tool failed: session not found in cache', { code: 4001 })
     ],
-    ['a timeout', () => new Error('request timed out after 1800s: prompt.submit')]
+    ['a timeout', () => new Error('request timed out after 1800s: prompt.submit')],
+    // Only 4001 is the stale-runtime frame: another gateway code with the same bare message is not.
+    [
+      'a non-4001 gateway error reading exactly "session not found"',
+      () => new JsonRpcGatewayError('session not found', { code: -32000 })
+    ],
+    // A transport or wrapper error that copied the code is not a gateway answer.
+    [
+      'a plain Error carrying code 4001 and exactly "session not found"',
+      () => Object.assign(new Error('session not found'), { code: 4001 })
+    ]
   ])('%s keeps the identityless send unconfirmed: no automatic resend', async (_label, staleError) => {
     const backend = rolledBackend('refused', staleError)
     const handle = await render(backend.requestGateway)

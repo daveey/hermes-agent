@@ -166,6 +166,15 @@ def test_a_difference_on_a_board_first_unreadable_counts_from_its_first_readable
     assert report["clean"] is True and report["in_flight"]["only_in_ledger"] == {"s1": [stuck[1]]}
 
 
+def test_an_entry_on_a_board_no_read_could_read_is_in_flight_not_a_difference(clock):
+    # Every read lists t_x on B and none could read B: no read confirms it, so it stays in flight (the merged
+    # #2520 review kept this shape there); the report is unclean through ``unreadable``, not ``only_in_*``.
+    stuck = ("s1", ("hub", "B", "t_x"))
+    report = _run(clock, [_report([stuck], unreadable=["B"]), _report([stuck], unreadable=["B"])])
+    assert report["clean"] is False and report["unreadable"] == ["B"]
+    assert report["only_in_ledger"] == {} and report["in_flight"]["only_in_ledger"] == {"s1": [stuck[1]]}
+
+
 def test_the_last_sleep_stops_at_the_window(clock):
     _run(clock, [_report([("s1", ("hub", "default", "t_x"))])], settle_s=25.0)
     assert clock["sleeps"] == [10.0, 10.0, 5.0]

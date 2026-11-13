@@ -184,6 +184,55 @@ def test_retryable_classification():
     assert not is_retryable_owner_error(ValueError('worker_receipt_timeout'))
 
 
+def _closed(rcvd=None, sent=None):
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+    rcvd = Close(rcvd, 'owner text that varies') if rcvd else None
+    sent = Close(sent, 'ours') if sent else None
+    return ConnectionClosedError(rcvd, sent, True if rcvd and sent else None)
+
+
+@pytest.mark.parametrize('exc, code', [
+    (TimeoutError('worker_receipt_timeout'), 'worker_receipt_timeout'),
+    (ConnectionResetError(104, 'Connection reset by peer'), 'owner_link_closed'),
+    (ConnectionRefusedError(111, 'Connection refused'), 'owner_link_closed'),
+    (_closed(), 'owner_link_closed'),  # socket dropped, no close frame
+    (_closed(rcvd=1001, sent=1001), 'owner_link_closed'),  # owner going away
+    (_closed(rcvd=1011), 'owner_link_closed'),  # owner internal error
+    (_closed(rcvd=1012, sent=1012), 'owner_link_closed'),  # owner restarting
+])
+def test_exhausted_resend_latches_a_fixed_owner_code(exc, code):
+    assert store_module.exhausted_resend_code(exc) == code
+
+
+@pytest.mark.parametrize('exc', [
+    _closed(rcvd=1009, sent=1009),  # the owner refused THIS frame's size
+    _closed(rcvd=1008),  # policy violation
+    _closed(sent=1009),  # this side failed the link on an oversized reply
+    _closed(rcvd=1000, sent=1000),
+])
+def test_a_close_that_may_answer_the_frame_keeps_its_text(exc):
+    assert store_module.exhausted_resend_code(exc) == str(exc)
+
+
+@pytest.mark.parametrize('stall, code', [('closed', 'owner_link_closed'), ('before_commit', 'worker_receipt_timeout')])
+def test_exhausted_resend_terminal_envelope_is_exact(owner_store, stall, code):
+    """The bound worker's terminal line is the whole-line envelope the dispatcher books as an owner fault."""
+    from gateway.session_kanban import failure_line
+    from hermes_cli import kanban_owner_storage_refusal as refusal
+    owner, store = owner_store
+    owner.stalls.extend([stall] * store_module._RETRYABLE_ATTEMPTS)
+    with pytest.raises(WorkerPersistenceError) as raised:
+        store.queue_token_counts('s', input_tokens=1)
+    assert str(raised.value) == code and store.failure == code
+    line = failure_line(raised.value, 'Worker failed')
+    assert line == f'Worker failed: WorkerPersistenceError: {code}'
+    assert refusal._proof({'exit_code': 1, 'last_output': line})['kind'] == 'owner_unreachable'
+    with pytest.raises(WorkerPersistenceError) as latched:  # a later write re-raises the same code
+        store.queue_token_counts('s', input_tokens=2)
+    assert failure_line(latched.value, 'Worker failed') == line
+
+
 def test_lost_receipt_stays_sticky(owner_store):
     owner, store = owner_store
     owner.commits.append((0, 'phantom'))  # the owner expects 2; the journal holds no acked entry 1

@@ -341,3 +341,219 @@ def test_probe_thread_is_detached_from_the_first_subscribers_scope(tmp_path):
     finally:
         token.reset()
         feed.stop()
+
+
+# ---- subscribe() racing an in-flight probe keeps its seed (PR #2682 review nit) ------------------------------
+
+
+def _racing_feed(baseline_first: bool):
+    """A feed whose read of ``state:/a`` subscribes ``state:/b`` once: that subscribe lands after the poll took
+    its state-topic snapshot and before it commits (the probe thread's window)."""
+    keys = {"/a": 1, "/b": 5}
+    late: list[hcf.Subscription] = []
+
+    def state_probe(path):
+        if str(path) == "/a" and armed and not late:
+            late.append(feed.subscribe("late", ["state:/b"]))
+        return keys[str(path)]
+
+    armed = False
+    feed = hcf.HostChangeFeed(_Source(replica=1), autostart=False, state_probe=state_probe)
+    if not baseline_first:
+        feed.poll_once()
+    feed.subscribe("early", ["state:/a"])
+    armed = True
+    return feed, late
+
+
+@pytest.mark.parametrize("baseline_first", [False, True], ids=["after-baseline", "during-baseline"])
+def test_subscribe_during_an_in_flight_probe_keeps_its_seed(baseline_first):
+    feed, late = _racing_feed(baseline_first)
+    assert feed.poll_once() == frozenset()  # the racing poll commits without dropping the new topic's seed
+    assert late, "the probe did not subscribe mid-read"
+    assert feed.keys()["state:/b"] == 5
+    assert feed.poll_once() == frozenset()  # and the next probe wakes nobody for it
+    assert late[0].wait(0.0) == frozenset()
+
+
+# ---- surviving mutants E1-E17 of the post-merge check (card t_01a1d7006d37d5dc, PR #2633 review items 3a-c) --
+
+
+class _RecordingLoop:
+    """Stands in for an async waiter's event loop: records every wake handed to it."""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def call_soon_threadsafe(self, fn, *args):
+        self.calls.append(fn)
+
+
+def test_wait_returns_at_once_when_stop_is_set():
+    feed = _feed(_Source(replica=1))
+    sub = feed.subscribe("x", ["replica"])
+    stop = threading.Event()
+    stop.set()
+    started = time.monotonic()
+    assert sub.wait(5.0, stop=stop) == frozenset()
+    assert time.monotonic() - started < 1.0  # the stop event ends the wait, not the 5 s due time
+
+
+def test_wait_async_returns_pending_without_waiting():
+    src = _Source(replica=1)
+    feed = _feed(src)
+    sub = feed.subscribe("notifier", ["replica"])
+    src.keys["replica"] = 2
+    feed.poll_once()  # the change lands while the loop is busy
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        assert await sub.wait_async(5.0) == {"replica"}
+        assert loop.time() - started < 1.0  # returned at once, not after a slice or the due time
+        assert sub._async == []  # and never registered a waiter
+
+    asyncio.run(scenario())
+
+
+def test_wait_async_keeps_yielding_after_a_wake_with_nothing_pending():
+    """A wake whose topics another reader already took must re-arm the event, not spin on it: a set event would
+    make every ``event.wait()`` return without yielding, starving the rest of the loop until the due time."""
+    feed = _feed(_Source(replica=1))
+    sub = feed.subscribe("notifier", ["replica"])
+
+    async def scenario():
+        ticks = 0
+
+        async def ticker():  # another task on the same loop: it only advances while the waiter yields
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0)
+                ticks += 1
+
+        async def steal_wake():
+            while not sub._async:
+                await asyncio.sleep(0)
+            sub._async[0][1].set()  # woken, but the moved topics were consumed elsewhere
+
+        waiter = asyncio.ensure_future(sub.wait_async(0.5))
+        await asyncio.sleep(0)
+        await steal_wake()
+        tick_task = asyncio.ensure_future(ticker())
+        assert await waiter == frozenset()
+        mid_ticks = ticks
+        tick_task.cancel()
+        assert mid_ticks >= 100, mid_ticks  # the loop kept running while the waiter waited out its due time
+        with pytest.raises(asyncio.CancelledError):
+            await tick_task
+
+    asyncio.run(scenario())
+
+
+def test_wait_returns_only_its_own_topics_of_a_wider_move():
+    src = _Source(replica=1, other=1)
+    feed = _feed(src)
+    sub = feed.subscribe("remote", ["replica"])
+    src.keys["replica"] = 2
+    src.keys["other"] = 2
+    assert feed.poll_once() == {"replica", "other"}
+    assert sub.wait(0.0) == {"replica"}
+
+
+def test_unsubscribed_topic_move_does_not_wake():
+    feed = _feed(_Source(replica=1))
+    sub = feed.subscribe("remote", ["replica"])
+    loop = _RecordingLoop()
+    sub._async.append((loop, asyncio.Event()))
+    notified: list[int] = []
+    real_notify_all = sub._cond.notify_all
+    sub._cond.notify_all = lambda: (notified.append(1), real_notify_all())
+    sub._notify(["board:/b/kanban.db"])
+    assert loop.calls == [] and notified == []  # no async waiter woken, no thread waiter woken
+    assert sub.pending() == frozenset()
+    sub._notify(["replica"])
+    assert len(loop.calls) == 1 and notified == [1]  # control: its own topic does wake both
+
+
+def test_probe_wakes_only_the_subscribers_of_a_moved_topic():
+    src = _Source(replica=1, **{"board:/b/kanban.db": 1})
+    feed = _feed(src)
+    boards = feed.subscribe("boards", ["board:*"])
+    feed.subscribe("remote", ["replica"])
+    called: list[object] = []
+    boards._notify = lambda topics: called.append(topics)
+    src.keys["replica"] = 2
+    assert feed.poll_once() == {"replica"}
+    assert called == []  # the board loop is not handed a move it did not subscribe to
+    assert feed.wakes == 1
+
+
+def test_start_twice_keeps_one_probe_thread():
+    name = "host-change-feed-start-twice"
+    feed = hcf.HostChangeFeed(_Source(replica=1), interval=0.01, name=name)
+    try:
+        feed.subscribe("a", ["replica"])  # autostart
+        first = feed._thread
+        feed.subscribe("b", ["replica"])  # autostart again
+        assert feed.start() is True
+        assert feed._thread is first
+        assert [t for t in threading.enumerate() if t.name == name] == [first]
+    finally:
+        feed.stop()
+
+
+def test_unreadable_board_is_unknown(tmp_path, monkeypatch):
+    from hermes_cli import kanban_session_activity as ksa
+
+    good, bad = tmp_path / "good" / "kanban.db", tmp_path / "bad" / "kanban.db"
+
+    def content_key(path):
+        if path == bad:
+            raise sqlite3.OperationalError("disk I/O error")
+        return ("revision", 1)
+
+    monkeypatch.setattr(ksa, "_board_db_paths", lambda: [good, bad])
+    monkeypatch.setattr(ksa, "_board_content_key", content_key)
+    keys = hcf.board_keys()
+    assert keys["board:" + str(good)] == ("revision", 1)
+    assert keys["board:" + str(bad)] is hcf.UNKNOWN  # fail-closed: never a stable key that hides a change
+
+
+def test_state_key_without_a_fingerprint_is_unknown(tmp_path, monkeypatch):
+    from tui_gateway import kanban_replica_observer
+
+    db = tmp_path / "state.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(kanban_replica_observer, "fingerprint", lambda path: None)
+    assert hcf.state_key(db) is hcf.UNKNOWN  # an unreadable existing db is unknown, not "absent" (None)
+    assert hcf.state_key(tmp_path / "missing.db") is None  # control: a missing db is absent
+
+
+def test_replica_key_reopens_a_replaced_hub_db(tmp_path):
+    hub = tmp_path / "hub.db"
+
+    def write(path, cursor):
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+            conn.execute("INSERT INTO meta VALUES ('cursor', ?)", (cursor,))
+        conn.close()
+
+    write(hub, "10")
+    first = hcf.replica_key(hub)
+    assert first[-1] == "10"
+    fresh = tmp_path / "hub.db.new"
+    write(fresh, "20")
+    fresh.replace(hub)  # the hub client swaps in a rebuilt replica
+    second = hcf.replica_key(hub)
+    assert second[-1] == "20"  # read through a new connection, not the one kept on the old file
+    assert second[:2] != first[:2]
+
+
+@pytest.mark.parametrize("topic", ["replicas", "replicX", "replica:/x"])
+def test_exact_pattern_does_not_match_as_a_prefix(topic):
+    feed = hcf.HostChangeFeed(_Source(), autostart=False)
+    sub = feed.subscribe("x", ["replica"])
+    assert sub.wants("replica")
+    assert not sub.wants(topic)
+    star = feed.subscribe("y", ["board:*"])
+    assert star.wants("board:/b/kanban.db")  # control: only a trailing * makes a prefix

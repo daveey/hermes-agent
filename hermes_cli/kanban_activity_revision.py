@@ -24,11 +24,21 @@ change always reads afresh.
 The update trigger names each read column, so SQLite refuses ``ALTER TABLE ... DROP COLUMN`` of a watched column
 while it is installed. Call ``drop_triggers(conn)`` first; the next writer init reinstalls them for the new columns
 (readers fall back to the stat key in between).
+
+Per-task change cursor (P2, t_01a1d59d3ef805c4). Every bumping trigger also upserts ``kanban_task_change(task_id,
+rev)`` with the bumped revision, for each task the row belongs to (a task's ``id``; both ends of a link; the
+``task_id`` of every other table; OLD and NEW when an update moves it; OLD on delete). ``kanban_task_change`` then says
+which tasks moved after any earlier revision (``kanban_task_change.changed_since``). A bump no task explains (a
+trigger (re)install) upserts the ``FULL_MARK`` row, which tells a cursor older than it to read everything. Triggers of
+this design carry ``EPOCH_MARK`` in their SQL; ``ensure_revision`` never drops or rewrites triggers a newer epoch
+installed, so a newer writer's coverage survives this one's init (an older writer still replaces ours: the cursor's
+trust rules catch that).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -40,11 +50,12 @@ PREFIX = "kanban_activity_rev_"
 # details (_read_session_tasks, _add_card_details), wait info. Not task_wake_checks (rewritten by every probe).
 LOCAL_TABLES = ("tasks", "task_links", "task_runs", "task_events", "task_comments", "kanban_notify_subs",
                 "task_chat_links")
-# A sync replica (``sync-shadow/<board>.db``) is read only for this gateway's chat links and their card rows
-# (``kanban_chat_links._read_replica``). Its events/runs mirror the whole board's traffic; the one read of them (the
-# linked running cards' newest liveness event, ``kanban_replica_execution.read_runs``) runs on every read, outside
-# any cache keyed on this revision, so their (bookkeeping) heartbeat writes need not, and do not, move it.
-SHADOW_TABLES = ("tasks", "task_chat_links")
+# A sync replica (``sync-shadow/<board>.db``) is read for this gateway's chat links and their card rows
+# (``kanban_chat_links._read_replica``), and by the sync loop's parent evidence (``kanban_move_parent_evidence``: the
+# replica's ``task_runs``/``task_events``) and remote-parent refresh. [daveey] P2/R8 (t_01a1d59d3ef805c4): it watches
+# the same task tables as a local board, so the per-task change cursor covers runs, events, links and comments too,
+# with the same exclusions (bookkeeping columns, heartbeat events): a pulled heartbeat still does not move it.
+SHADOW_TABLES = ("tasks", "task_links", "task_runs", "task_events", "task_comments", "task_chat_links")
 # Columns no activity reader selects, written by claims, leases, heartbeats, the sync apply path and the notifier's
 # delivery claim. An update that changes only these is bookkeeping.
 BOOKKEEPING_COLUMNS: dict[str, frozenset[str]] = {
@@ -62,6 +73,62 @@ BOOKKEEPING_COLUMNS: dict[str, frozenset[str]] = {
 # other kind, and any update or delete of an event row, still bumps.
 UNREAD_EVENT_KINDS = ("heartbeat",)
 _BUMP = f"UPDATE {REVISION_TABLE} SET revision = revision + 1 WHERE id = 1;"
+# [daveey] P2 per-task change cursor (t_01a1d59d3ef805c4): which tasks each bump touched.
+CHANGE_TABLE = "kanban_task_change"
+FULL_MARK = ""  # a bump no task explains (trigger (re)install): cursors older than its rev read in full
+EPOCH = 2  # 1 = the bump-only triggers (no marker); 2 = bump + kanban_task_change upsert
+EPOCH_MARK = f"/* kanban-activity-epoch:{EPOCH} */"
+_EPOCH_RE = re.compile(r"/\* kanban-activity-epoch:(\d+) \*/")
+# The task(s) a row belongs to. Every other watched table names it in ``task_id``.
+TASK_KEYS: dict[str, tuple[str, ...]] = {"tasks": ("id",), "task_links": ("parent_id", "child_id")}
+CHANGE_INDEX = f"idx_{CHANGE_TABLE}_rev"
+# A rowid table, not WITHOUT ROWID: generic every-table readers (``SELECT * ... ORDER BY rowid`` snapshots, recovery
+# scans) expect a rowid on every board table, and the cost difference on a one-row-per-task table is noise.
+_CHANGE_DDL = (f"CREATE TABLE IF NOT EXISTS {CHANGE_TABLE} (task_id TEXT PRIMARY KEY NOT NULL, "
+               "rev INTEGER NOT NULL)",
+               f"CREATE INDEX IF NOT EXISTS {CHANGE_INDEX} ON {CHANGE_TABLE}(rev)")
+
+
+def _mark(ref: str, when: str = "") -> str:
+    """Upsert the task ``ref`` (``NEW.x``/``OLD.x``, NULL = ``FULL_MARK``) at the revision just bumped.
+
+    An ``ON CONFLICT DO UPDATE`` upsert, never ``INSERT OR REPLACE``: an outer statement's conflict policy overrides a
+    trigger body's ``OR`` policy, so ``INSERT OR IGNORE INTO task_links`` silently dropped the mark (while the bump
+    stayed) and ``INSERT OR ABORT`` raised UNIQUE on this table. No outer policy overrides an upsert clause. (The
+    ``WHERE`` is required: it keeps SQLite from parsing ``ON CONFLICT`` as a join constraint.)"""
+    return (f"INSERT INTO {CHANGE_TABLE} (task_id, rev) SELECT COALESCE({ref}, '{FULL_MARK}'), revision "
+            f"FROM {REVISION_TABLE} WHERE id = 1{when} ON CONFLICT(task_id) DO UPDATE SET rev = excluded.rev;")
+
+
+def _marks(op: str, keys: tuple[str, ...]) -> str:
+    if not keys:  # an unexpected schema with no task column: the bump is unattributable
+        return _mark("NULL")
+    if op == "INSERT":
+        return " ".join(_mark(f"NEW.{_quote(k)}") for k in keys)
+    if op == "DELETE":
+        return " ".join(_mark(f"OLD.{_quote(k)}") for k in keys)
+    return " ".join(_mark(f"NEW.{_quote(k)}") + " " + _mark(
+        f"OLD.{_quote(k)}", f" AND OLD.{_quote(k)} IS NOT NEW.{_quote(k)}") for k in keys)
+
+
+def trigger_epoch(sql: str | None) -> int:
+    """The design epoch a trigger's SQL was generated by (1 for the unmarked bump-only triggers)."""
+    found = _EPOCH_RE.search(sql or "")
+    return int(found.group(1)) if found else 1
+
+
+# [daveey] Columns the sync insert trigger stamps onto the row it just inserted (``kanban_db_sync._insert_trigger``:
+# ``UPDATE task_events SET uid = ... WHERE id = NEW.id AND uid IS NULL``), inside the inserting statement. On a synced
+# board that update re-bumped every heartbeat the INSERT trigger had excluded, so heartbeats still moved the revision
+# (and would mark their task). NULL -> value is that stamp; any later change of the column still counts.
+SYNC_STAMPED: dict[str, frozenset[str]] = {"task_events": frozenset({"uid"})}
+
+
+def _moved(table: str, column: str) -> str:
+    q = _quote(column)
+    if column in SYNC_STAMPED.get(table, frozenset()):
+        return f"(OLD.{q} IS NOT NULL AND OLD.{q} IS NOT NEW.{q})"
+    return f"OLD.{q} IS NOT NEW.{q}"
 
 
 def is_shadow(path: str | os.PathLike) -> bool:
@@ -84,28 +151,36 @@ def wanted_triggers(conn: sqlite3.Connection, tables: Iterable[str]) -> dict[str
         columns = [r[1] for r in conn.execute(f"PRAGMA table_info({_quote(table)})")]
         if not columns:
             continue  # table absent: nothing to read, nothing to watch
+        keys = tuple(k for k in TASK_KEYS.get(table, ("task_id",)) if k in columns)
         for op in ("INSERT", "DELETE"):
             name = f"{PREFIX}{table}_{op.lower()}"
             when = ""
             if op == "INSERT" and table == "task_events" and "kind" in columns:
                 when = " WHEN COALESCE(NEW.kind, '') NOT IN ({})".format(", ".join(f"'{k}'" for k in UNREAD_EVENT_KINDS))
-            out[name] = f"CREATE TRIGGER {name} AFTER {op} ON {_quote(table)}{when} BEGIN {_BUMP} END"
+            out[name] = (f"CREATE TRIGGER {name} AFTER {op} ON {_quote(table)}{when} BEGIN {EPOCH_MARK} {_BUMP} "
+                         f"{_marks(op, keys)} END")
         read = [c for c in columns if c not in BOOKKEEPING_COLUMNS.get(table, frozenset())]
-        changed = " OR ".join(f"OLD.{_quote(c)} IS NOT NEW.{_quote(c)}" for c in read)
+        changed = " OR ".join(_moved(table, c) for c in read)
         name = f"{PREFIX}{table}_update"
-        out[name] = f"CREATE TRIGGER {name} AFTER UPDATE ON {_quote(table)} WHEN {changed} BEGIN {_BUMP} END"
+        out[name] = (f"CREATE TRIGGER {name} AFTER UPDATE ON {_quote(table)} WHEN {changed} BEGIN {EPOCH_MARK} "
+                     f"{_BUMP} {_marks('UPDATE', keys)} END")
     return out
 
 
 def ensure_revision(conn: sqlite3.Connection, tables: Iterable[str]) -> None:
-    """Install or repair the counter and its triggers. No write on the normal (already installed) path; a
-    (re)install bumps the counter so readers that cached a key before the gap re-read."""
+    """Install or repair the counter, the change table and the triggers. No write on the normal (already installed)
+    path; a (re)install bumps the counter and marks ``FULL_MARK`` at it, so readers that cached a key or a cursor
+    before the gap re-read. Triggers of a newer epoch (``trigger_epoch``) are left alone, with every other trigger of
+    the set: the newer writer that installed them owns the file's coverage."""
     tables = tuple(tables)
-    wanted = wanted_triggers(conn, tables)
     found = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name GLOB ?",
                               (PREFIX + "*",)))
-    has_row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                           (REVISION_TABLE,)).fetchone() and conn.execute(
+    if any(trigger_epoch(sql) > EPOCH for sql in found.values()):
+        return
+    wanted = wanted_triggers(conn, tables)
+    present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE name IN (?, ?, ?)",
+                                          (REVISION_TABLE, CHANGE_TABLE, CHANGE_INDEX))}
+    has_row = present == {REVISION_TABLE, CHANGE_TABLE, CHANGE_INDEX} and conn.execute(
         f"SELECT 1 FROM {REVISION_TABLE} WHERE id = 1").fetchone()
     if has_row and found == wanted:
         return
@@ -114,7 +189,10 @@ def ensure_revision(conn: sqlite3.Connection, tables: Iterable[str]) -> None:
         conn.execute(f"CREATE TABLE IF NOT EXISTS {REVISION_TABLE} "
                      "(id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL)")
         conn.execute(f"INSERT OR IGNORE INTO {REVISION_TABLE} VALUES (1, 0)")
+        for ddl in _CHANGE_DDL:
+            conn.execute(ddl)
         conn.execute(_BUMP)
+        conn.execute(_mark("NULL"))  # whatever changed while the triggers were absent or older is unknown
         for name in set(found) - set(wanted):
             conn.execute(f"DROP TRIGGER IF EXISTS {name}")
         for name, sql in wanted.items():

@@ -1366,6 +1366,20 @@ def test_a_worker_keeps_a_card_naming_its_own_artifact_by_a_home_spelling(on_w2,
     assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-artifact"
 
 
+def test_a_worker_reads_every_home_relative_hit_as_its_home_path(on_w2, tmp_path):
+    """Every relative ``.hermes/<p>`` after a cd home reads as ``~/.hermes/<p>``, not only the first one (post-merge
+    mutants M8/M8b on PR #2585): the first span names hub state, the second this worker's own artifact, which keeps."""
+    log = tmp_path / ".hermes" / "kanban" / "workspaces" / "t_0000000000000005" / "log.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("x\n")
+    out = _kept(on_w2.conn, _create(
+        title="cd ~ && cat .hermes/.env; cd ~ && cat .hermes/kanban/workspaces/t_0000000000000005/log.txt"))
+    assert "exists only on this worker" in out["note"], out
+    marker = _home_marker(on_w2.conn, out["task_id"])
+    assert marker["class"] == "a-artifact", marker
+    assert marker["hit"] == "~/.hermes/kanban/workspaces/t_0000000000000005/log.txt", marker
+
+
 def test_a_repo_relative_hermes_after_a_later_cd_is_no_home_marker(on_w2, tmp_path):
     """A later cd elsewhere ends the home-relative span (PR #2463 review 5895947424 nit): the repo's own
     ``.hermes/kanban/...`` is not read as this worker's ``~/.hermes/kanban/...`` artifact."""

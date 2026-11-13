@@ -500,6 +500,17 @@ def test_disabled_by_config(schedule_env, marker_home, monkeypatch):
     assert not schedule_env
 
 
+def test_unparseable_max_attempts_keeps_the_default_cap(schedule_env, marker_home, monkeypatch):
+    """``max_attempts: "abc"`` parses as the default cap (2), the same parse the sidebar reader uses
+    (``auto_continue_bounds``): attempt 1 still continues instead of the config raising."""
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"desktop": {"auto_continue": {"max_attempts": "abc"}}})
+    assert server._auto_continue_config() == (True, 900.0, 2)
+    record_turn_start(marker_home, "session-key", "prompt", attempts=1)
+
+    assert server._maybe_schedule_auto_continue("sid", _session(), "session-key") is not None
+    assert len(schedule_env) == 1
+
+
 def test_no_marker_means_no_continuation(schedule_env, marker_home):
     assert server._maybe_schedule_auto_continue("sid", _session(), "session-key") is None
     assert not schedule_env

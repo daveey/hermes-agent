@@ -251,6 +251,13 @@ const VALUE_OPERATIONS = new Set(['rename', 'archive', 'model', 'reasoning', 'wo
 // token, as the owner asked it (a deferred pick's confirmation): the same request the TUI resends.
 const MUTATION_METHODS = new Set(['session.title', 'session.archive', 'session.compress', 'session.rewind', 'session.model', ...BRANCH_METHODS])
 
+/** [daveey] An RPC that can change what the backend's REST reads answer (a session's title, archive state, model,
+ *  a new session). Main shares identical in-flight REST reads (electron/read-coalescing.ts) and must hear of these
+ *  writes, which never pass through its REST sink. A policy edit counts even when it turns out not to mutate. */
+export function isBackendWriteMethod(method: string): boolean {
+  return MUTATION_METHODS.has(method) || POLICY_EDIT_METHODS.has(method) || method === 'session.create'
+}
+
 export class CanonicalDesktopProtocol {
   private creates = new Map<string, string>()
   private revisions = new Map<string, number>()

@@ -43,9 +43,11 @@ def _on_connection(conn, statuses, kinds, exclude_statuses=False):
     if stamp is not None and cache.get(key, (None,))[0] == stamp:
         return cache[key][1]
     operator = 'NOT IN' if exclude_statuses else 'IN'
+    # [daveey] G2: drive from the event-kind index (a handful of rows) rather than probing it once per task in the
+    # status set (~6k done/archived cards on the hub board, ~5 ms a call, 5 calls a tick). Same rows.
     found = tuple(row[0] for row in conn.execute(
-        f"SELECT t.id FROM tasks t WHERE t.status {operator} ({','.join('?' * len(statuses))}) AND EXISTS "
-        f"(SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind IN ({','.join('?' * len(kinds))}))",
+        f"SELECT t.id FROM tasks t WHERE t.status {operator} ({','.join('?' * len(statuses))}) AND t.id IN "
+        f"(SELECT e.task_id FROM task_events e WHERE e.kind IN ({','.join('?' * len(kinds))}))",
         (*statuses, *kinds),
     ).fetchall())
     if stamp is not None:
@@ -57,17 +59,35 @@ def _on_connection(conn, statuses, kinds, exclude_statuses=False):
 
 
 def sweep_shared_blockers(conn, result) -> None:
-    """Skip proven-empty lanes; positive candidates still obey time-based policy."""
+    """Skip proven-empty lanes; positive candidates still obey time-based policy.
+
+    [daveey] G2: each lane also skips while the board's content revision, this gateway's id and the config hold
+    and none of its clocks ran out (``kanban_sweep_gate``). Both lanes read only content rows (``task_runs``
+    outcomes and metadata, statuses, events). Their clocks: the probe interval of a blocker the probe lane deferred,
+    and the 14-day lookback, whose oldest assertion leaving the window reruns both lanes."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_shared_blockers import probe_stranded_blockers, release_cleared_blockers
+    from hermes_cli.kanban_sweep_gate import config_key, gated
+    from hermes_cli.kanban_wake_check import own_gateway
+
+    def probe(c):
+        due: list = []  # lookback expiry of the oldest assertion + each deferred blocker's next probe moment
+        out = probe_stranded_blockers(c, due_out=due)
+        return out, min(due, default=None)
+
+    def release(c):
+        due: list = []
+        return release_cleared_blockers(c, oldest_out=due), min(due, default=None)
 
     for statuses, handler, field in (
-        (('blocked', 'scheduled', 'ready', 'review'), release_cleared_blockers, 'shared_blocker_released'),
-        (('blocked',), probe_stranded_blockers, 'shared_blocker_probed'),
+        (('blocked', 'scheduled', 'ready', 'review'), release, 'shared_blocker_released'),
+        (('blocked',), probe, 'shared_blocker_probed'),
     ):
         try:
             if conn.execute(f"SELECT 1 FROM tasks WHERE status IN ({','.join('?' * len(statuses))}) LIMIT 1",
                             statuses).fetchone():
-                setattr(result, field, handler(conn))
+                out, _due = gated(f"dispatch.{field}", conn, handler, conn, skipped=([], None),
+                                  extra=lambda c: (own_gateway(c), config_key()), run_due=lambda r: r[1])
+                setattr(result, field, out)
         except Exception:  # health: allow BLE001 -- each independent maintenance source must leave the tick alive
             kb._log.warning('kanban: %s failed', field, exc_info=True)

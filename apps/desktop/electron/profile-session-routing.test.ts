@@ -22,6 +22,7 @@ import {
   pathWithRemoteOwnerScope,
   primaryAggregateConnectionId,
   primaryRowsOwnerTag,
+  profileNamesOf,
   remoteOwnerRoutePath,
   remoteProfileQueryScope,
   settleRemoteProfileSessions,
@@ -1880,4 +1881,14 @@ test('the primary aggregate names this device only for a local backend', async (
     }),
     null
   )
+})
+
+test('profileNamesOf: the named profiles of a /api/profiles listing, in order; anything else yields none', () => {
+  assert.deepEqual(
+    profileNamesOf({ profiles: [{ name: 'default' }, { name: '' }, {}, null, { name: 7 }, { name: 'coder' }] }),
+    ['default', 'coder']
+  )
+  assert.deepEqual(profileNamesOf({ profiles: 'default' }), [])
+  assert.deepEqual(profileNamesOf(null), [])
+  assert.deepEqual(profileNamesOf(undefined), [])
 })

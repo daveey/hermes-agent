@@ -329,3 +329,39 @@ def test_a_write_in_the_same_mtime_granule_still_wakes_the_watch(tmp_path, monke
     assert watch.changed() is True, "the previous look was still racy"
     assert watch.changed() is False
     assert watch.changed() is False
+
+
+def test_a_future_mtime_is_racy_once_then_settles(tmp_path, monkeypatch):
+    """An mtime ahead of the clock (wall clock stepped back, skewed writer on a network FS)
+    never comes within a granule of `now`, so the racy rule alone would run an empty drain on
+    every poll until the clock caught up. It is racy on first sight only, then settles."""
+    import os
+
+    from cron import delivery_queue
+    from gateway import run_delivery_queue_watch as queue_watch
+    from gateway.run_delivery_queue_watch import DeliveryQueueWatch
+
+    granule = queue_watch.MTIME_GRANULARITY_NS
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", tmp_path / "deliveries.db")
+    queue = tmp_path / "deliveries.db"
+    queue.write_bytes(b"pending!")
+    mtime_ns = os.stat(queue).st_mtime_ns
+    now_ns = [mtime_ns - 30 * granule]
+    monkeypatch.setattr(queue_watch, "_now_ns", lambda: now_ns[0])
+    watch = DeliveryQueueWatch(lambda: [None], lambda: None)
+
+    # First sight is still racy: a same-size rewrite under the same skewed mtime wakes the watch.
+    queue.write_bytes(b"settled!")
+    os.utime(queue, ns=(mtime_ns, mtime_ns))
+    assert watch.changed() is True, "a same-size write under a future mtime went unseen"
+    for _ in range(5):
+        now_ns[0] += granule
+        assert now_ns[0] < mtime_ns
+        assert watch.changed() is False, "a future mtime kept the stamp racy on every poll"
+
+    # A new write under another future mtime is a new sighting: it wakes, rechecks once, settles.
+    queue.write_bytes(b"queued again")
+    os.utime(queue, ns=(mtime_ns + 1, mtime_ns + 1))
+    assert watch.changed() is True
+    assert watch.changed() is True, "the new future stamp was not racy on first sight"
+    assert watch.changed() is False

@@ -51,6 +51,30 @@ def test_real_managed_counts_reach_the_short_wait(tmp_path):
     assert runner._kanban_restart_wait_state(tmp_path / 'intent', 16.0, since) == (None, False)
 
 
+@pytest.mark.parametrize('body, expires_at', [
+    ('{"kind": "unfenced", "checkpoint": true, "cron_cut": true}', 2.0),   # the drainer already waited: short settle
+    ('{"kind": "fenced", "checkpoint": true, "cron_cut": true}', 15.0),    # a Mac's fenced intent keeps the wait
+    ('{"checkpoint": true, "cron_cut": true}', 15.0), ('{"kind": "unfenced", "checkpoint": true}', 15.0),
+    ('{"kind": "unfenced", "checkpoint": 1, "cron_cut": true}', 15.0), ('{"kind": "unfenced", "cron_cut": true}', 15.0),
+    ('[]', 15.0), ('not json', 15.0), (None, 15.0)])   # anything else keeps the full wait
+def test_checkpoint_intent_shortens_only_the_kanban_wait(tmp_path, body, expires_at):
+    from gateway.session_managed_worker import ManagedWorker
+    runner, _ = make_restart_runner()
+    card = ManagedWorker(SimpleNamespace())
+    card.kanban_card = True
+    runner.session_authority = SimpleNamespace(_managed_workers={'s': card}, sessions={})
+    intent = tmp_path / 'intent'
+    if body is not None:
+        intent.write_text(body)
+    since, expired = runner._kanban_restart_wait_state(intent, 0.0, None)
+    assert (since, expired) == (0.0, False)
+    assert runner._kanban_restart_wait_state(intent, expires_at - 0.1, since) == (0.0, False)
+    assert runner._kanban_restart_wait_state(intent, expires_at, since) == (0.0, True)
+    # Human work beside the card is never under either cap, checkpoint or not.
+    runner.session_authority._managed_workers['human'] = ManagedWorker(SimpleNamespace())
+    assert runner._kanban_restart_wait_state(intent, 60.0, since) == (None, False)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('other', [None, 'chat', 'cron', 'api', 'mutation', 'unclassified'])
 async def test_core_update_caps_only_kanban_wait(monkeypatch, tmp_path, other):

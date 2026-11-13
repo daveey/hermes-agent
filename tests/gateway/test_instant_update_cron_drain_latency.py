@@ -23,7 +23,9 @@ async def test_cron_floor_does_not_restore_spent_update_grace(tmp_path, monkeypa
     clock = cut._virtual_clock(monkeypatch)
     if mode == "instant":
         assert await runner._await_active_work_before_restart() is False
-        assert 15 <= clock[0] < 15.2
+        # An unfenced checkpoint intent that cuts cron: the drainer already waited, so the gateway settles 2 s
+        # (CORE_UPDATE_CHECKPOINT_KANBAN_WAIT_S), not the 15 s Kanban-only wait.
+        assert 2 <= clock[0] < 2.2
     else:
         runner._core_update_kanban_cap_spent = mode != "unspent"
     intent = runner._restart_update_intent
@@ -58,7 +60,7 @@ async def test_cron_floor_does_not_restore_spent_update_grace(tmp_path, monkeypa
         # checkpoint/install/restart costs of attempt5. Not live delivery proof.
         composed = 197 - 30 + observed["cron_timeout"]
         assert composed <= 180
-        assert clock[0] < 15.2
+        assert clock[0] < 2.2
     else:
         assert 30 <= clock[0] < 30.2
 

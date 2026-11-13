@@ -365,8 +365,10 @@ _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Python program runners whose file operand (or stdin) is scanned as Python source.
 _PYTHON_RUNNER_RE = re.compile(r"^(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?$|^py(?:\.exe)?$")
 _PYTHON_SOURCE_SUFFIXES = (".py", ".pyw")
-# A redirection word: optional fd, operator, optional glued target (`<f`, `0<f`, `2>>log`).
-_REDIRECTION = re.compile(r"^(\d*)(<<<|<<-|<<|<>|<&|>&|>>|>\||<|>)(.*)$", re.DOTALL)
+# A redirection word: optional fd or `{NAME}` (NAME may be an array element, `{a[1]}`),
+# operator, optional glued target (`<f`, `0<f`, `2>>log`, `{fd}>&2`, `{a[1]}>/dev/null`).
+_REDIRECTION = re.compile(
+    r"^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\})(<<<|<<-|<<|<>|<&|>&|>>|>\||<|>)(.*)$", re.DOTALL)
 
 # Bound the walk: a pathological token run must not spin here.
 _MAX_PREFIX_PEELS = 8

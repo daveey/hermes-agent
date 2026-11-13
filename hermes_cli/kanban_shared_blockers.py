@@ -91,9 +91,13 @@ def run_effect(outcome: Optional[str], metadata) -> tuple[str, Optional[str]]:
     (a neutral outcome or a re-park without the id: says nothing). [daveey]"""
     from hermes_cli import kanban_db as kb
 
-    meta = kb._json_dict(metadata)
     if (outcome or "") in CLEAR_OUTCOMES:
         return "clear", None
+    # [daveey] G2: most runs carry neither key; skip their JSON decode (the blocker lanes walk ~750 run histories
+    # a pass on the hub board). Writers use json.dumps, which never escapes an ASCII key name.
+    if isinstance(metadata, str) and '"blocker_id"' not in metadata and f'"{CLEAR_FLAG}"' not in metadata:
+        return "pass", None
+    meta = kb._json_dict(metadata)
     bid = normalize_blocker_id(meta.get("blocker_id"))
     if bid is not None:
         return "assert", bid
@@ -272,8 +276,20 @@ def _explicit_clear(kb, metadata) -> bool:
     return kb._json_dict(metadata).get(CLEAR_FLAG) is True
 
 
-def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict[str, BlockerState]:
-    """Derive every recently asserted blocker's state from ``task_runs`` (read-only)."""
+def _note_window_exit(out: Optional[list], asserting) -> None:
+    """G2: when the oldest in-window assertion leaves the lookback, ``blocker_states`` can change unwritten."""
+    from hermes_cli import kanban_db as kb
+
+    if out is not None and asserting:
+        out.append(min(kb._to_epoch(r["ended_at"]) or 0 for r in asserting) + _LOOKBACK_SECONDS + 1)
+
+
+def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
+                   oldest_out: Optional[list] = None) -> dict[str, BlockerState]:
+    """Derive every recently asserted blocker's state from ``task_runs`` (read-only).
+
+    ``oldest_out`` (G2) receives the moment the oldest assertion inside the lookback window leaves it: then
+    this derivation can change with no row changing."""
     from hermes_cli import kanban_db as kb
 
     now = int(time.time()) if now is None else int(now)
@@ -283,6 +299,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
         "ORDER BY id",
         (now - _LOOKBACK_SECONDS,),
     ).fetchall()
+    _note_window_exit(oldest_out, asserting)
     states: dict[str, BlockerState] = {}
     scopes: dict[str, set[Optional[str]]] = {}
     task_ids: set[str] = set()
@@ -508,7 +525,8 @@ def _released_as_probe(conn: sqlite3.Connection, st: BlockerState, task_id: str)
     return False
 
 
-def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
+def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = None,
+                             oldest_out: Optional[list] = None) -> list[str]:
     """Wake parked cards and retire ready/review hold evidence after a clear.
     Returns only task ids whose lane changed (ready/review cards remain queued)."""
     from hermes_cli import kanban_db as kb
@@ -517,7 +535,7 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
     # Retained executor copies own host-local wake probes, not shared-wall policy writes.
     foreign = kwc.foreign_ids(conn)
     released: list[str] = []
-    for st in blocker_states(conn, now=now).values():
+    for st in blocker_states(conn, now=now, oldest_out=oldest_out).values():
         if st.is_open or st.cleared_by is None:
             continue
         by_task, by_run = st.cleared_by
@@ -559,7 +577,7 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
 
 
 def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = None,
-                            interval: Optional[int] = None) -> list[str]:
+                            interval: Optional[int] = None, due_out: Optional[list] = None) -> list[str]:
     """Unblock ONE ``blocked`` card per open blocker that nothing else would probe. Returns task ids.
 
     :func:`shared_blocker_guard` only spaces out ``ready`` cards, so a blocker whose cards are all
@@ -576,7 +594,7 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
     if interval is None:
         interval = probe_interval_seconds()
     probed: list[str] = []
-    for st in blocker_states(conn, now=now).values():
+    for st in blocker_states(conn, now=now, oldest_out=due_out).values():
         if not st.is_open or not st.behind:
             continue
         ids = sorted(t for t in st.behind if task_applies(conn, st, t))
@@ -589,6 +607,8 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
             continue   # the ready-card guard already spaces those probes
         last = max([st.asserted_at, *st.probe_starts.values()])
         if now - last < interval:
+            if due_out is not None:
+                due_out.append(last + interval)  # G2: the time policy's next due moment for this blocker
             continue
         candidates = sorted((st.behind[r["id"]], r["id"]) for r in rows
                             if r["status"] == "blocked" and not r["human_request"])

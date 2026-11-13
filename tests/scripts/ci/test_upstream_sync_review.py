@@ -301,3 +301,82 @@ def test_a_ship_tool_without_the_review_entry_points_refuses(world, land_stub, m
     assert "review_reply_guard lacks reply" in capsys.readouterr().out
     assert review.contract_errors(review.load_land_tool(str(tmp_path / "hermes-core-wt-land"))) == []
 
+
+# --- Hardening (t_01a1d6cc89d51f84): each fix has a named test its revert fails ----------------------------------
+
+@pytest.mark.parametrize("url", ["https://github.com/someone/hermes-agent.git", "local-path"])
+def test_an_upstream_remote_that_is_not_the_real_upstream_refuses(world, land_stub, capsys, url):
+    """An ``upstream`` remote naming a fork that holds the conflict-resolution merge would make that merge look
+    like upstream's own (excluded from the range: a mechanical sync landing with no review). It refuses."""
+    root, checkout = world
+    head = conflict_sync(root, checkout)
+    before = main_of(root)
+    actions = staged_green(root, checkout, head)
+    forkish = root / "forkish.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(forkish)], check=True)
+    git(checkout, "push", "-q", str(forkish), f"{head}:refs/heads/main")
+    if url == "local-path":
+        url = str(forkish)
+    else:
+        git(checkout, "config", f"url.{forkish}.insteadOf", url)
+    git(checkout, "remote", "set-url", "upstream", url)
+    git(checkout, "fetch", "-q", "upstream")
+    assert git(checkout, "rev-parse", "upstream/main") == head  # the whole sync now looks like upstream's
+    capsys.readouterr()
+
+    assert gate(checkout, head, actions) == sync.REFUSED
+    out = capsys.readouterr().out
+    assert main_of(root) == before
+    assert f"REFUSED: upstream sync evidence/publication failed: cannot classify {head[:10]}" in out, out
+    assert f"is {url}, not github.com/NousResearch/hermes-agent" in out, out
+    assert land_stub.read()["gates"] == []
+    assert sync.main(["--repo", str(checkout), "--classify", head]) == sync.REFUSED
+    assert "not github.com/NousResearch/hermes-agent" in capsys.readouterr().out
+
+
+def test_a_local_upstream_ref_moved_onto_fork_commits_is_refetched(world, land_stub, capsys):
+    """The right URL, but a local upstream/main pointing at the fork's sync head: the ref is re-fetched from the
+    real upstream, so the conflict resolution is still fork-authored and parks for review."""
+    root, checkout = world
+    head = conflict_sync(root, checkout)
+    before = main_of(root)
+    actions = staged_green(root, checkout, head)
+    git(checkout, "update-ref", "refs/remotes/upstream/main", head)
+    capsys.readouterr()
+    assert gate(checkout, head, actions) == sync.NOT_YET
+    out = capsys.readouterr().out
+    assert main_of(root) == before
+    assert "fork-authored" in out and "shared.txt" in out, out
+    assert git(checkout, "rev-parse", "upstream/main") == git(root / "upstream.git", "rev-parse", "main")
+
+
+def test_an_unexpected_ship_tool_error_refuses_naming_it(world, land_stub, monkeypatch, tmp_path, capsys):
+    """A ship-tool exception other than ReviewRefused / ReviewCIStopped / SharedQuotaBrake is REFUSED with its
+    name, not a traceback out of advance(); nothing merges."""
+    root, checkout = world
+    head = conflict_sync(root, checkout)
+    before = main_of(root)
+    actions = staged_green(root, checkout, head)
+    broken = tmp_path / "broken-land"
+    broken.write_text(STUB_LAND.replace('def review_gate(gh, slug, pr, sha, branch, base, review_task, impl_task=""):\n',
+                                        'def review_gate(gh, slug, pr, sha, branch, base, review_task, impl_task=""):\n'
+                                        '    raise RuntimeError("ship tool fault")\n'))
+    monkeypatch.setenv("HERMES_CORE_WT_LAND", str(broken))
+    capsys.readouterr()
+    assert gate(checkout, head, actions) == sync.REFUSED
+    out = capsys.readouterr().out
+    assert main_of(root) == before  # GitHub's merge never ran: main is exactly as it was
+    assert "REFUSED: " in out and "review gate failed: RuntimeError: ship tool fault" in out, out
+
+
+def test_impl_task_comes_from_the_flag_only(world, land_stub, monkeypatch):
+    """--impl-task (ShipReview(impl_task=...)) is the only source; no HERMES_* env var duplicates it."""
+    root, checkout = world
+    head = conflict_sync(root, checkout)
+    actions = staged_green(root, checkout, head)
+    monkeypatch.setenv("HERMES_UPSTREAM_SYNC_IMPL_TASK", "t_from_env")
+    assert gate(checkout, head, actions) == sync.NOT_YET
+    assert land_stub.read()["gates"][-1][5] == ""
+    assert gate(checkout, head, actions, review=review.ShipReview(checkout, impl_task="t_from_flag")) == sync.NOT_YET
+    assert land_stub.read()["gates"][-1][5] == "t_from_flag"
+

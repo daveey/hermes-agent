@@ -4,13 +4,17 @@ Two exact managed-worker exception envelopes are owner faults, never the card's:
 ``storage_unavailable`` (the owner answered and refused: its store could not be read) and
 ``owner_unavailable`` (the worker could not reach its owner at all: ``WorkerRPC`` rediscovery found no
 answering gateway, e.g. one wedged after an aborted core-update drain; hermes-hub 2026-11-13 20:06Z).
+Its sibling, where the redial reached the gateway but the resend still got no receipt
+(``worker_receipt_timeout``) or the owner dropped the link again (``owner_link_closed``), is the same
+owner-silent fault (``runtime_session_store.exhausted_resend_code``).
 """
 from hermes_cli.kanban_host_refusal import OWNER_STORAGE_UNAVAILABLE, OWNER_UNREACHABLE, _run_events
 
 _ENVELOPE = "Worker failed: WorkerPersistenceError: "
 # Terminal persistence wire code -> host-refusal kind. Worker-local codes (outbox_full, lost_receipt,
 # stale_generation, ...) stay card failures.
-_KINDS = {"storage_unavailable": OWNER_STORAGE_UNAVAILABLE, "owner_unavailable": OWNER_UNREACHABLE}
+_KINDS = {"storage_unavailable": OWNER_STORAGE_UNAVAILABLE, "owner_unavailable": OWNER_UNREACHABLE,
+          "worker_receipt_timeout": OWNER_UNREACHABLE, "owner_link_closed": OWNER_UNREACHABLE}
 
 
 def _proof(result):

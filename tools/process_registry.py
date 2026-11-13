@@ -25,7 +25,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 # (not merely "not Windows") so macOS and other POSIX platforms never touch systemd.
 # See #70716.
 _IS_LINUX = platform.system() == "Linux"
-from tools.process_registry_bg_shell import bg_command_env, bg_login_argv
+from tools.process_registry_bg_shell import arm_start_gate, bg_command_env, bg_login_argv, clean_shell_noise, gate_start_output, new_start_marker, release_start_output
 from tools.environments.sandbox_scope import hosted_scope, producer_fields
 from tools.environments.local import _append_dropped_path_entries, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env, process_cwd, routed_terminal_base
 from hermes_cli._subprocess_compat import windows_hide_flags
@@ -572,6 +572,7 @@ class ProcessSession:
     output_log: str = ""                        # file the process writes to (worker spawns; no pipe to lose)
     pty_fallback: str = ""                      # why a pty=true local spawn runs in pipe mode instead
     shell_markers: list = field(default_factory=list)  # foreground wrapper trailer markers its log carries [daveey]
+    start_marker: str = ""  # the login shell prints it after its rc files; output before it is dropped [daveey]
     # Sandbox spawns: how a later process re-opens the sandbox (``env.reattach_handle()``) and where the
     # wrapper's hermes_bg_<id>.{log,pid,exit} files live, so a restart can re-attach the watcher. [daveey]
     sandbox_handle: dict = field(default_factory=dict)
@@ -625,12 +626,15 @@ class ProcessSession:
     # sink (park + wake the chat), since the chat may not be open in this backend. [daveey]
     _completion_via_readopt_sink: bool = field(default=False, repr=False)
     _owned_pgid: Optional[int] = field(default=None, repr=False)  # see ProcessOwnershipMixin
+    _start_held: Optional[str] = field(default=None, repr=False)  # output held until start_marker; None = passing
 
     def __post_init__(self):
         # A session built without an explicit owner is owned by its own task, so ownership checks compare
         # ``owner_task_id`` alone instead of repeating an ``or task_id`` fallback at every call site.
         if not self.owner_task_id:
             self.owner_task_id = self.task_id
+        if self.start_marker and self._start_held is None:  # re-adopted: its log is re-read from the start
+            self._start_held = ""
 
     def append_output(self, text: str) -> None:
         """Append to the rolling output buffer under the session lock, keeping the tail."""
@@ -672,7 +676,8 @@ _CHECKPOINT_FIELDS = (
     "started_at", "task_id", "owner_task_id", "session_key",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
     "parent_session_id", "notify_on_complete", "completion_output_chars", "watch_patterns",
-    "heartbeat_seconds", "persist_on_release", "output_log", "sandbox_handle", "sandbox_temp_dir", "shell_markers")
+    "heartbeat_seconds", "persist_on_release", "output_log", "sandbox_handle", "sandbox_temp_dir", "shell_markers",
+    "start_marker")
 _CHECKPOINT_DEFAULTS = {
     f.name: (f.default if f.default is not MISSING
              else f.default_factory() if f.default_factory is not MISSING else MISSING)  # type: ignore[misc]
@@ -693,10 +698,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
 
-    _SHELL_NOISE_SUBSTRINGS = (
-        "no job control in this shell", "cannot set terminal process group",
-        "tcsetattr: Inappropriate ioctl for device")
-
+    _clean_shell_noise = staticmethod(clean_shell_noise)
     # Class default so registries built via __new__ (tests) still restore on first drain.
     _completions_restored = False
 
@@ -798,14 +800,6 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
         }
         _redact_process_result(notification)
         self.completion_queue.put(notification)
-
-    @staticmethod
-    def _clean_shell_noise(text: str) -> str:
-        """Strip shell startup warnings from the beginning of output."""
-        lines = text.split("\n")
-        while lines and any(noise in lines[0] for noise in ProcessRegistry._SHELL_NOISE_SUBSTRINGS):
-            lines.pop(0)
-        return "\n".join(lines)
 
     def _emit_output(self, session: ProcessSession, chunk: str) -> None:
         """Forward a chunk to the live-output sink; called from reader threads, never raises."""
@@ -1122,7 +1116,9 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
         """Login-shell argv (rc files sourced, user tools on PATH, then the foreground's bash runs
         the command), wrapped in a transient systemd scope when we are the supervised gateway
         (own cgroup: an OOM kills only the worker, not the gateway and its messaging control plane)."""
-        argv = bg_login_argv(safe_command)
+        marker = new_start_marker()
+        argv = bg_login_argv(safe_command, marker)
+        arm_start_gate(session, argv, marker)
         # This applies to both pipe mode and the PTY path above. See #70716.
         in_supervised_gateway = _IS_LINUX and _is_supervised_gateway_process()
         if in_supervised_gateway and _systemd_run_user_scope_available():
@@ -1421,6 +1417,8 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             tail = decoder.decode(b"", final=True)
             if tail:
                 append(tail)
+            if held := release_start_output(session):  # the shell never reached the command
+                append(held)
         try:
             wait()
         except Exception as e:
@@ -1495,6 +1493,8 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
     def _ingest_output(self, session: ProcessSession, text: str, *, unless_exited: bool = False) -> None:
         """Buffer a freshly-read chunk, then scan watch patterns and stream it live.
         ``unless_exited`` drops the chunk once the session has exited (atomically with a kill)."""
+        if session._start_held is not None and not (text := gate_start_output(session, text)):
+            return  # the login shell's rc output, before the command
         if not unless_exited:
             session.append_output(text)
         elif not session.append_output_if_running(text):

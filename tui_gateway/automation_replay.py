@@ -118,26 +118,23 @@ def replay_due(now: float, resets_at: Any = None) -> float:
 
 
 def stale_code_reason() -> str | None:
-    """Why this process's code may be behind the checkout (host loops retired, or the boot commit is no longer
-    the checkout's), else None. Never raises."""
+    """Why this process is being replaced by one on newer code (its host loops are retired), else None. Code skew
+    alone does not count: a skewed process that is not retiring runs the replay itself, on the same stale code, so
+    only a retired one hands it to a successor. Never raises."""
     try:
         from hermes_cli.host_loop_lease import host_loops_retired
-        retired = host_loops_retired()
-        if retired:
-            return retired
-        from gateway.code_skew import detect_code_skew
-        skew = detect_code_skew()
-    except Exception:  # health: allow BLE001 -- an unreadable revision is no proof of stale code
+        return host_loops_retired()
+    except Exception:  # health: allow BLE001 -- an unreadable state is no proof of a successor
         return None
-    return "this process loaded {} but the checkout is at {}".format(*skew) if skew else None
 
 
 def trusted_resets_at(failure: Any) -> Any:
     """[daveey] A build failure's ``failure_resets_at`` (``failure`` is the ``agent_failure`` dict or the value
-    itself), or None when the failing process ran stale code: a quota or route wall it hit may be one the
-    checkout's code already routes around, so the replay and the deferred close-out take the short delay instead
-    of waiting days for that wall's reset (hub :9148 booked Nov 17 for a wake that failed on pre-fix code,
-    t_01a1d65520e78e7d)."""
+    itself), or None when this process is retired (``host_loops_retired``): a successor on the checkout's code
+    runs the replay, and that code may already route around the quota or route wall, so the replay and the
+    deferred close-out take the short delay instead of waiting days for that wall's reset (hub :9148 booked Nov 17
+    for a wake that failed on pre-fix code, t_01a1d65520e78e7d). A skewed process that is not retiring keeps the
+    reset: a short-delay replay would run on the same stale code, fail again and give up (t_01a1d6b19bf73072)."""
     resets_at = failure.get("failure_resets_at") if isinstance(failure, dict) else failure
     if resets_at is None:
         return None
@@ -166,7 +163,7 @@ def replay_failed_wake(key: str, text: str, session: dict, display_kind: str | N
                        display_metadata: dict | None, label: str) -> None:
     """[daveey] A wake that carried an automation delivery (sweep-wake, owner-wake, a notice) failed before its turn
     could start (agent build): ONE delayed replay, at the build failure's recorded quota/route reset when it has one
-    (``agent_failure.failure_resets_at``, unless this process ran stale code: ``trusted_resets_at``), else
+    (``agent_failure.failure_resets_at``, unless this process is retired: ``trusted_resets_at``), else
     ``REPLAY_MIN_DELAY_S``. The delivery is not in the transcript, so a later successful turn does not cancel it.
     A replay's own failure gives up. A chat close-out wake is included: ``notice_guarantee`` stamps its row
     ``closeout.state = "deferred"`` with a ``retry_at`` after this replay's due time (the durable fallback when this

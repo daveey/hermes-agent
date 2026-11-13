@@ -67,13 +67,15 @@ def _info_frames(authority, sid):
 @pytest.mark.asyncio
 async def test_create_reply_does_not_wait_on_a_60s_inventory_and_info_follows(tmp_path, monkeypatch):
     gateway = await _gateway(tmp_path, monkeypatch)
+    from gateway.session_local_inventory import REPLY_INVENTORY_BUDGET_S
     from tui_gateway.contracts.registry import CANONICAL_METHODS
     release, calls = _slow_inventory(monkeypatch, hold_s=60)
     try:
         started = time.monotonic()
         created = await gateway.call('session.create', request_id='slow', source='tui', cwd=gateway.cwd)
         elapsed = time.monotonic() - started
-        assert elapsed < 3, f'session.create reply took {elapsed:.1f}s behind the inventory'
+        # The budget plus room for a loaded worker (3.1 s seen at load 26), far below the 60 s build.
+        assert elapsed < REPLY_INVENTORY_BUDGET_S + 10, f'session.create reply took {elapsed:.1f}s behind the inventory'
         CANONICAL_METHODS['session.create'].result.model_validate(created)
         info = created['info']
         assert info['inventory_pending'] is True and info['tools'] == {} and info['skills'] == {}, info
@@ -139,6 +141,63 @@ async def test_concurrent_opens_of_one_session_share_one_build(tmp_path, monkeyp
         release.set()
     await async_wait_until(lambda: frames, what='late session.info published')
     assert len(frames) == 1 and frames[0]['tools'] == {'terminal': ['terminal']}
+    assert session_local_inventory._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_a_shared_build_publishes_only_after_every_pending_reply_holding_it(tmp_path, monkeypatch):
+    """Two opens of one session wait on the same build and both reply pending. The build finishes
+    while both replies are still being assembled: releasing the first reply's hold publishes nothing
+    (the second reply's pending shape would overwrite the inventory), the second publishes it once."""
+    gateway = await _gateway(tmp_path, monkeypatch)
+    from gateway import session_controls, session_local_inventory
+    release, calls = _slow_inventory(monkeypatch, hold_s=60)
+    monkeypatch.setattr(session_local_inventory, 'REPLY_INVENTORY_BUDGET_S', 0.05)
+    try:
+        created = await gateway.call('session.create', request_id='holds', source='tui', cwd=gateway.cwd)
+        sid = created['session_id']
+        assert created['info']['inventory_pending'] is True
+        order = []
+        gateway.authority.sessions[sid].event_stream.observers.add(
+            lambda frame: order.append(frame['params']['payload']) if frame['params']['type'] == 'session.info' else None)
+        gates, real_transcript = [], session_controls._resume_transcript
+
+        async def gated_transcript(*args):
+            gate = asyncio.Event()
+            gates.append(gate)
+            await gate.wait()  # this reply is still being assembled
+            return await real_transcript(*args)
+
+        monkeypatch.setattr(session_controls, '_resume_transcript', gated_transcript)
+
+        async def resume(label):
+            reply = await gateway.call('session.resume', session_id=sid)
+            order.append(label)
+            return reply
+
+        first, second = (asyncio.ensure_future(resume(label)) for label in ('first reply', 'second reply'))
+        await async_wait_until(lambda: len(gates) == 2, what='both replies past reply_info')
+        (entry,) = session_local_inventory._pending.values()
+        assert entry.holds == 2 and calls == ['tui']
+    finally:
+        release.set()
+    await async_wait_until(lambda: entry.task.done(), what='shared inventory built')
+    for _ in range(5):
+        await asyncio.sleep(0)  # the build's done callback (_settle) has run
+    assert order == [], order  # both replies still hold it
+    gates[0].set()
+    await asyncio.wait({first, second}, return_when=asyncio.FIRST_COMPLETED)
+    for _ in range(5):
+        await asyncio.sleep(0)  # the first reply's hold is released (call_soon)
+    assert entry.holds == 1 and len(order) == 1 and isinstance(order[0], str), order
+    gates[1].set()
+    replies = await asyncio.gather(first, second)
+    assert all(reply['info']['inventory_pending'] is True for reply in replies)
+    await async_wait_until(lambda: len(order) == 3, what='late session.info published')
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert sorted(order[:2]) == ['first reply', 'second reply'] and len(order) == 3, order
+    assert order[2]['inventory_pending'] is False and order[2]['tools'] == {'terminal': ['terminal']}
     assert session_local_inventory._pending == {}
 
 

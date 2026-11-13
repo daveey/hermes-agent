@@ -585,14 +585,29 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # the span ran to the end of the text). A cd/pushd into the state directory itself (``cd ~/.hermes && cat .env``,
 # or ``cd .hermes`` after a cd home) counts too (review 5895947424). A bare ``~/.hermes`` anywhere else does not:
 # "the hermes-agent tree under ~/.hermes" is ordinary repo work and must reach the worker pool (9328cbc2d9b).
+# PR #2585 review 5897242912: only a cd/pushd in a command position of this shell (line start, ``&&``, ``||``,
+# ``;``, ``{``, backtick) ends the span. A subshell ``(cd repo && make)``/``$(cd ..)``, a pipeline stage
+# ``| cd x`` and a prose "cd" change no cwd here; ``cd -``, ``popd`` and a bare/rotating ``pushd`` go somewhere
+# unknown. Those keep the span open, failing toward the pin. Any later cd home still ends it (that cd starts its
+# own span over the same tail), which keeps spans disjoint and the scan linear. A cd into ~/.hermes followed at
+# once by a cd into its code tree (``cd ~/.hermes && cd hermes-agent``) is that tree, like ``cd
+# ~/.hermes/hermes-agent``, not the state directory (nit 2).
 HOME_PREFIX = r"(?:~|/home/[^/\s]+|\$HOME\b|\$\{HOME\}|\"\$HOME\"|\"\$\{HOME\}\")"
 # ``cd ~ 2>/dev/null`` ends the cd too (an fd-numbered redirect); ``cd ~2>x`` is a dir word, not a redirect.
-_CMD_END = r"(?=[ \t]*(?:$|[\n;&|)>])|[ \t]+(?:#|\d+>))"
+# Redirects (``>``, ``>>``, ``&>``, ``N>``, ``N>&M`` plus their target word) are skipped, and the command must
+# then end: ``cd 2>/dev/null repo`` enters ``repo``, not home (PR #2603 review nit 1).
+_REDIR = (r"(?:[ \t]*&?>|[ \t]+\d+>)>?[ \t]*&?"
+          r"(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|()<>\"'])+")
+_CMD_END = r"(?=(?:" + _REDIR + r")*(?:[ \t]*(?:$|[\n;|)]|&(?!>))|[ \t]+#))"
 _CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)" + _CMD_END)
-_CHDIR = r"(?<![\w./-])(?-i:cd|pushd|popd)(?![\w.-])(?![ \t]+[\"']?(?:\./)?\.hermes(?![\w.-]))"
+_CHDIR = (r"(?:" + _CD_HOME + r"|(?:(?<=\n)|&&|\|\||;|`|\{)[ \t]*"
+          r"(?-i:cd(?![\w.-])(?![ \t]+-" + _CMD_END + r")|pushd(?![\w.-])(?![ \t]+[+-]\d+" + _CMD_END + r")(?!"
+          + _CMD_END + r"))(?![ \t]+[\"']?(?:\./)?\.hermes(?![\w.-])))")
 _CD_INTO = r"(?<![\w./-])(?-i:cd|pushd)[ \t]+[\"']?"
-_STATE_SUB = r"\.hermes/(?!(?:hermes-agent|repos|bin)(?:/|\b))[\w.-]"
-_STATE_DIR = r"\.hermes/?[\"']?" + _CMD_END
+_CODE_TREE = r"(?:hermes-agent|repos|bin)"
+_STATE_SUB = r"\.hermes/(?!" + _CODE_TREE + r"(?:/|\b))[\w.-]"
+_STATE_DIR = (r"\.hermes/?[\"']?" + _CMD_END + r"(?![ \t]*(?:#[^\n]*)?(?:&&|;|\n)\s*(?-i:cd|pushd)[ \t]+[\"']?(?:\./)?"
+              + _CODE_TREE + r"(?![\w.-]))")
 HERMES_STATE_PATH = (r"(?:" + HOME_PREFIX + r"/" + _STATE_SUB + r"|" + _CD_INTO + HOME_PREFIX + r"/" + _STATE_DIR +
                      r"|" + _CD_HOME + r"(?:(?!" + _CHDIR + r")[\s\S])*?"
                      r"(?:(?<![\w./~$}-])(?:\./)?" + _STATE_SUB + r"|" + _CD_INTO + r"(?:\./)?" + _STATE_DIR + r"))")

@@ -90,9 +90,36 @@ def test_tilde_root_path_still_clears(attested):
     "cd ~ 2>/dev/null && cat .hermes/.env",
     "cd $HOME 2>&1 >/dev/null; cat .hermes/.env",
     "cd ~ &>/dev/null && cat .hermes/.env",
+    # A multi-digit fd (``12>``) is a redirect too, after a home word or a bare cd.
+    "cd ~ 12>/dev/null && cat .hermes/.env",
+    "cd 12>/dev/null && cat .hermes/.env",
+    # PR #2603 review nit 1: a bare cd with only redirects (and no operand after them) still goes home.
+    "cd 2>/dev/null && cat .hermes/.env",
+    "cd >/dev/null; cat .hermes/.env",
+    "cd 2>x 3>y && cat .hermes/.env",
+    "cd >>log 2>&1 # home\ncat .hermes/.env",
+    'cd 2>"/dev/null" && cat .hermes/.env',
+    "pushd ~ >>log 2>&1 && cat .hermes/.env",
+    # PR #2603 review nit 2: the fd-redirect end reaches a cd into the state dir itself too.
+    "cd ~/.hermes 2>/dev/null && cat .env",
+    "cd ~ && cd .hermes 2>x && cat .env",
 ])
 def test_pushd_and_commented_cd_home_are_state_paths(body):
     assert _hit(body)
+
+
+# PR #2603 review nit 1: an operand after the redirect is the cd target (``cd 2>/dev/null repo`` enters ``repo``), so
+# the span is not home and a portable card must not be routed to the hub.
+@pytest.mark.parametrize("body", [
+    "cd 2>/dev/null repo && cat .hermes/.env",
+    "cd >/dev/null repo && cat .hermes/.env",
+    "cd &>/dev/null repo && cat .hermes/.env",
+    "cd 2>&1 >/dev/null repo; cat .hermes/.env",
+    "cd >>log repo\ncat .hermes/.env",
+    'cd 2>"x y" repo && cat .hermes/.env',
+])
+def test_cd_with_operand_after_a_redirect_is_not_cd_home(body):
+    assert not _hit(body)
 
 
 @pytest.mark.parametrize("body", [
@@ -126,6 +153,13 @@ def test_many_cd_home_lines_without_a_state_path_scan_in_linear_time():
      "~/.hermes/kanban/workspaces/t_x/f"),
     # The state-path rule is case-insensitive, so an upper-case relative path is still named as its ``~/`` path.
     ("cd ~ && cat .HERMES/logs/x.log", "b", "~/.HERMES/logs/x.log"),
+    ("cd ~ && cat .HERMES/.env", "b", "~/.HERMES/.env"),
+    # A span that starts mid-text: the ``.hermes/`` offset is taken in the span, so it must be shifted by its start.
+    ("echo hi; cd ~ && make all && cat .hermes/logs/x.log", "b", "~/.hermes/logs/x.log"),
+    # A span holding two ``.hermes/``: the first is a code tree or a non-home ``.hermes``, so the span's last one names
+    # the state path.
+    ("cd ~ && cat .hermes/hermes-agent/x .hermes/.env", "b", "~/.hermes/.env"),
+    ("cd ~ && cat src/.hermes/x .hermes/logs/y.log", "b", "~/.hermes/logs/y.log"),
 ])
 def test_relative_state_path_hit_is_the_home_path_not_the_cd_span(body, cls, path, tmp_path, monkeypatch):
     from hermes_cli import kanban_home_marker_placement as hm
@@ -135,3 +169,15 @@ def test_relative_state_path_hit_is_the_home_path_not_the_cd_span(body, cls, pat
     [(decision, got_cls, hit, labels, note)] = hm._state_path(kp.HERMES_STATE_PATH, match, "worker-2", hm._Probe())
     assert (decision, got_cls, hit, labels) == ("queue", cls, path, ("capability:hub-write",))
     assert "make all" not in note
+
+
+def test_each_cd_home_span_names_its_own_relative_state_path(tmp_path, monkeypatch):
+    # Two cd-home spans: each is named from its own span (and its own offset), so the second span's workspace
+    # artifact is a hit of its own, not lost behind the first span's path.
+    from hermes_cli import kanban_home_marker_placement as hm
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    body = "cd ~ && cat .hermes/logs/x.log; cd ~ && cat .hermes/kanban/workspaces/t_x/f"
+    got = [v[:3] for v in hm._state_path(kp.HERMES_STATE_PATH, _hit(body), "worker-2", hm._Probe())]
+    assert got == [("queue", "b", "~/.hermes/logs/x.log"),
+                   ("queue", "artifact-not-here", "~/.hermes/kanban/workspaces/t_x/f")]

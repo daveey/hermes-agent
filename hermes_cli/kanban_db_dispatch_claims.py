@@ -84,3 +84,20 @@ def release_leftover_local_claims(conn: sqlite3.Connection) -> list[str]:
     if released:
         _kb()._log.info("kanban: released leftover local claims on non-running cards: %s", released)
     return released
+
+
+def crash_sweep_due(conn: sqlite3.Connection, has_running: bool) -> bool:
+    """Whether ``detect_crashed_workers`` runs this tick. [daveey]
+
+    A running card, or an ended primary run that still owes post-feed effects (``kanban_neutral_release.pending``).
+    G2/C12: also a local worker pid on any card. Process death (``_pid_alive``) moves no revision and has no due
+    time, so this sweep is never gated and runs every tick while such a pid exists (``idx_tasks_claim_lock``).
+    """
+    from hermes_cli.kanban_neutral_release import pending
+
+    if has_running or pending(conn):
+        return True
+    prefix = _kb()._host_prefix()
+    return conn.execute(
+        "SELECT 1 FROM tasks WHERE claim_lock IS NOT NULL AND worker_pid IS NOT NULL "
+        "AND substr(claim_lock, 1, ?) = ? LIMIT 1", (len(prefix), prefix)).fetchone() is not None

@@ -154,6 +154,47 @@ def test_foreign_orphan_is_recovered_on_an_idle_board(board, opens, monkeypatch)
     assert row['inflight_from'] is None and row['last_event_id'] == before
 
 
+def test_board_whose_revision_cannot_vouch_is_never_skipped(board, opens, routed):
+    """Without the activity triggers the key is the stat fallback (``_content_key``), which reuses the kept reader
+    and can repeat across ticks; a commit inside one mtime tick that leaves the WAL size unchanged would hide a task
+    write behind it. The probe hands back no key, so such a board runs its full pass every tick."""
+    from hermes_cli import kanban_activity_revision as revision
+    task = kb.create_task(board, title='unvouched', assignee='default')
+    notify.add_notify_sub(board, task_id=task, platform='telegram', chat_id='chat')
+    with kbc.write_txn(board):
+        revision.drop_triggers(board)
+    runner = _runner('telegram')
+    for _ in range(3):
+        assert _tick(runner) == (False, [])
+    assert revision.read_key(board, revision.LOCAL_TABLES) is None  # still unvouched: no pass reinstalled them
+    _event(board, task, 'completed')
+    skipped, deliveries = _tick(runner)
+    assert not skipped and [ev.kind for ev in deliveries[0]['events']] == ['completed']
+    assert _tick(runner) == (False, [])
+
+
+def test_tui_row_with_only_kinds_its_claim_never_takes_lets_the_board_skip(board, opens, monkeypatch):
+    """With the LOCAL route serving tui rows, a tui row is pending only on the kinds its claim reads
+    (``kanban_tui_owner.notify_kinds``). ``review_requested`` is a TERMINAL kind the tui claim never takes, so a
+    row whose only unseen event is one is not listed and the gate closes, instead of a pass every tick."""
+    assert 'review_requested' not in kanban_tui_owner.notify_kinds()
+    assert 'review_requested' in watcher.TERMINAL_KINDS
+    task = kb.create_task(board, title='tui review', assignee='default')
+    notify.add_notify_sub(board, task_id=task, platform='tui', chat_id='session')
+    claim = Mock(return_value=None)
+    monkeypatch.setattr(kanban_tui_owner, 'claim', claim)
+    runner = _runner('local')
+    assert _tick(runner) == (False, [])
+    assert _tick(runner) == (True, [])
+    _event(board, task, 'review_requested')
+    assert _tick(runner) == (False, [])
+    assert claim.call_count == 0  # never listed
+    assert _tick(runner) == (True, [])
+    _event(board, task, 'completed')
+    assert _tick(runner)[0] is False
+    assert claim.call_count == 1
+
+
 def test_adapter_reconnect_delivers_without_a_new_event(board, opens, routed):
     task = kb.create_task(board, title='waiting', assignee='default')
     notify.add_notify_sub(board, task_id=task, platform='telegram', chat_id='chat')
