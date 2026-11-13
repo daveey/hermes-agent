@@ -139,13 +139,18 @@ def release_client(client: Any, close: Callable[[Any], None], abandoned: list[Pr
 
     # Defer before the shutdown wakes the daemon: shutting down first let a woken daemon finish before the
     # defer, so the close fell back to this thread (FD-safe then, but no longer the daemon's).
-    deferred = sum(attempt.defer(daemon_done) for attempt in abandoned)
+    # The defers run inside the try: if one raises after another succeeded (or an async KeyboardInterrupt
+    # lands here), the finally still opens the gate and counts down every attempt that took no share, so the
+    # daemons already holding one close the client instead of parking forever in swept.wait().
+    deferred = 0
     try:
+        for attempt in abandoned:
+            deferred += bool(attempt.defer(daemon_done))
         shutdown_count = force_close_tcp_sockets(getattr(client, "_real_client", None) or client) if deferred else 0
     finally:
         swept.set()
-    for _ in range(len(abandoned) - deferred):
-        one_done()
+        for _ in range(len(abandoned) - deferred):
+            one_done()
     if deferred:
         logger.info("auxiliary client close handed to %d abandoned provider daemon(s) (tcp_shutdown=%d)",
                     deferred, shutdown_count)

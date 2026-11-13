@@ -282,6 +282,31 @@ def test_mixed_finished_and_reading_daemons_close_once_on_the_last_reader(monkey
     assert log == ["sweep", "close"]
 
 
+def test_a_defer_raising_after_another_succeeded_still_closes_on_the_first_daemon(monkeypatch):
+    """[daveey] One daemon took the deferred close, then the next defer() raised (or an async KeyboardInterrupt
+    landed on the owner): the sweep gate must still open and the attempts that took no share must still count
+    down, or the first daemon parks forever in ``swept.wait()`` and the client never closes."""
+    from agent import agent_runtime_helpers
+    log: list = []
+    reading, broken = handoff.ProviderAttempt(), handoff.ProviderAttempt()
+
+    def defer_raises(release):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(broken, "defer", defer_raises)
+    monkeypatch.setattr(agent_runtime_helpers, "force_close_tcp_sockets", lambda c: log.append("sweep") or 1)
+    with pytest.raises(KeyboardInterrupt):
+        with handoff.client_scope("client", lambda c: log.append(("close", threading.current_thread().name))):
+            handoff.note_abandoned(reading)
+            handoff.note_abandoned(broken)
+    assert log == []  # the sweep never ran, and the reading daemon still owns the close
+    daemon = threading.Thread(target=reading.finish, name="hermes-protected-aux-provider", daemon=True)
+    daemon.start()
+    daemon.join(5)
+    assert not daemon.is_alive(), "the deferred daemon parked in swept.wait()"
+    assert log == [("close", "hermes-protected-aux-provider")]
+
+
 def test_note_abandoned_outside_a_scope_is_a_no_op():
     handoff.note_abandoned(handoff.ProviderAttempt())
 
