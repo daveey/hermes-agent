@@ -117,17 +117,15 @@ def _unanswered(history):
     return _unanswered_tool_calls(history)
 
 
-# What the agent's own executor writes for a tool call a hard interrupt cancelled or skipped
-# (agent/tool_executor.py). With a killed command's own interrupted output (replay_cleanup's
-# ``is_interrupted_tool_result`` shape) these become the update-pause text after a restart Stop.
-_STOP_RESULT_PREFIXES = ('[Tool execution cancelled \u2014 ', '[Tool execution skipped \u2014 ')
-
-
 def _stop_result_rows(session_db, session_id) -> list:
     """``(row id, content)`` of the stopped turn's cancelled, skipped or interrupted tool results: the tool
     rows right after the transcript's last assistant tool-call message, past the closing assistant rows the
     stopped turn wrote (its empty final reply, the interrupted-delivery note) and nothing else."""
     from agent.replay_cleanup import is_interrupted_tool_result
+    # The executor's cancel/skip text (agent/tool_executor.py) and a killed command's own interrupted output
+    # become the update-pause text after a restart Stop. One prefix tuple with with_own_result, so a wording
+    # change can't classify the executor's text differently on the two paths.
+    from agent.update_pause_cancel import EXECUTOR_CANCEL_PREFIXES
     found = []
     for row in reversed(session_db.get_messages(session_id, latest=True, limit=256)):
         role = row.get('role')
@@ -140,7 +138,7 @@ def _stop_result_rows(session_db, session_id) -> list:
         if role != 'tool':
             return []
         content = row.get('content')
-        if isinstance(content, str) and (content.startswith(_STOP_RESULT_PREFIXES)
+        if isinstance(content, str) and (content.startswith(EXECUTOR_CANCEL_PREFIXES)
                                          or is_interrupted_tool_result(content)):
             found.append((int(row['id']), content))
     return []

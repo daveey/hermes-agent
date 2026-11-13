@@ -67,7 +67,17 @@ def test_a_real_owner_restart_mid_turn_continues_the_same_run(tmp_path, mid_tool
         first, *own = receipt['mid_tool_results'][0].split('\n')
         assert re.fullmatch(r'\[interrupted by Hermes update at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: check its outcome before re-running\]',
                             first), receipt['mid_tool_results']
-        assert not own or (own[0] == OWN_RESULT_INTRO and own[-1] == OWN_RESULT_END), receipt['mid_tool_results']
+        # Not pinned to the own-result form: it is a wall-clock race. The sequential executor waits 3 s for the
+        # interrupted call (agent/tool_executor.py, ``concurrent.futures.wait([future], timeout=3.0)``), and the
+        # terminal's kill + output-drain join (tools/environments/base.py ``_kill_and_join``) can use most of
+        # that on a loaded runner; past it the executor writes its own "[Tool execution cancelled — ..." text,
+        # which carries no result of the call, so the bare stamp is right then. Locally 5 of 5 runs kept it.
+        # When the own part is there it is exactly the killed command's interrupted envelope.
+        if own:
+            assert own[0] == OWN_RESULT_INTRO and own[-1] == OWN_RESULT_END, receipt['mid_tool_results']
+            envelope = json.loads('\n'.join(own[1:-1]))
+            assert (envelope['output'].endswith('[Command interrupted]'), envelope['exit_code']) == (True, 130), \
+                receipt['mid_tool_results']
 
 
 # --- the worker: a fake owner that restarts mid-turn -------------------------------------------

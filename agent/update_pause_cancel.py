@@ -96,7 +96,8 @@ OWN_RESULT_INTRO = "The call's own result when the update cancelled it:"
 OWN_RESULT_END = "[end of the cancelled call's own result]"
 # The executor's own text for a call the interrupt abandoned or skipped (tool_executor): no result of the call.
 # Its ``emit_cancelled`` JSON for a KeyboardInterrupt mid-tool is the same (``_executor_cancelled_json``).
-_EXECUTOR_CANCEL_PREFIXES = ("[Tool execution cancelled \u2014 ", "[Tool execution skipped \u2014 ")
+# The one definition: gateway/session_kanban_continue.py classifies a restart Stop's rows with it too.
+EXECUTOR_CANCEL_PREFIXES = ("[Tool execution cancelled \u2014 ", "[Tool execution skipped \u2014 ")
 
 
 def with_own_result(stamp: str, result: Any) -> str:
@@ -106,7 +107,7 @@ def with_own_result(stamp: str, result: Any) -> str:
     result whose last line is an executor's ``[Command interrupted]`` marker from reading as an interrupted
     result on replay (``replay_cleanup.is_interrupted_tool_result``), which would rewrite it away again."""
     if not isinstance(result, str) or not result.strip() or result == stamp \
-            or result.startswith(_EXECUTOR_CANCEL_PREFIXES) or _executor_cancelled_json(result):
+            or result.startswith(EXECUTOR_CANCEL_PREFIXES) or _executor_cancelled_json(result):
         return stamp
     kept = result.strip()
     if len(kept) > OWN_RESULT_HEAD + OWN_RESULT_TAIL:
