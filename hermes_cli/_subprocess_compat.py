@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Mapping, NoReturn, Sequence
+from typing import Callable, Mapping, NoReturn, Sequence
 
 __all__ = [
     "FILTER_DISCOVERY_FAILED",
@@ -514,6 +514,8 @@ FILTER_DISCOVERY_FAILED = "git filter discovery failed"
 def noninteractive_repo_git_env(
     cwd: str | os.PathLike[str],
     base: Mapping[str, str] | None = None,
+    *,
+    budget: Callable[[float], float] | None = None,
 ) -> dict[str, str] | None:
     """Harden internal git for one repository, including named clean/smudge/process filters.
 
@@ -522,8 +524,11 @@ def noninteractive_repo_git_env(
     Discover the effective filter command keys for this checkout and append empty command
     overrides plus required=false to the already-isolated config block. Discovery is
     bounded and fail-closed: if filter discovery cannot be trusted, callers skip the
-    automatic git operation instead of running with only partial hardening.
+    automatic git operation instead of running with only partial hardening. With ``budget``
+    (:mod:`hermes_cli.git_budget`) each probe draws its timeout from it (a spent budget raises).
     """
+    def probe_timeout() -> float:
+        return 2 if budget is None else budget(2)
     env = noninteractive_git_env(base)
     # bounded_probe_run, not subprocess.run: Windows' post-timeout communicate() can deadlock and
     # a bare spawn flashes a console. (Not bounded_git_probe: rc 1 = "no filters" is a verdict.)
@@ -532,7 +537,7 @@ def noninteractive_repo_git_env(
     proc = bounded_probe_run(
         ["git", "-C", str(cwd), "config", "--includes", "--show-origin", "-z", "--get-regexp",
          _DISCOVERY_KEYS_REGEXP],
-        timeout=2, env=env,
+        timeout=probe_timeout(), env=env,
     )
     if proc is None or proc.returncode not in (0, 1):
         return None
@@ -555,7 +560,7 @@ def noninteractive_repo_git_env(
                 return None
             if toplevel is None:
                 top = bounded_probe_run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-                                        timeout=2, env=env)
+                                        timeout=probe_timeout(), env=env)
                 if top is None or top.returncode != 0:
                     return None
                 toplevel = Path(top.stdout.rstrip("\r\n"))  # a checkout path may end in a space
@@ -569,7 +574,7 @@ def noninteractive_repo_git_env(
         targets.add(target)
         probe = bounded_probe_run(
             ["git", "config", "--file", str(target), "--name-only", "-z", "--get-regexp", _DISCOVERY_KEYS_REGEXP],
-            timeout=2, env=env,
+            timeout=probe_timeout(), env=env,
         )
         if probe is None or probe.returncode not in (0, 1):
             return None

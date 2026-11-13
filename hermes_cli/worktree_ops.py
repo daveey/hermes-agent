@@ -442,17 +442,20 @@ _REMOTE_TRUNK_CANDIDATES = ("origin/HEAD", "origin/main", "origin/master")
 _LOCAL_TRUNK_CANDIDATES = ("main", "master")
 
 
-def _worktree_local_trunk(path: str, timeout: float = 5) -> Optional[str]:
+def _worktree_local_trunk(path: str, timeout: float = 5, *, budget=None) -> Optional[str]:
     """Local trunk of a repo with NO remote-tracking refs: ``main``/``master``, else the branch
     checked out in the main worktree. None = no baseline at all; callers must preserve.
 
     Nothing in such a repo was ever pushed, so "merged into the local trunk" is the only fact
-    that can tell redundant scratch work from unique commits. May raise like ``_git``.
+    that can tell redundant scratch work from unique commits. May raise like ``_git``; each call
+    draws its timeout from ``budget`` (:mod:`hermes_cli.git_budget`) when one is given.
     """
+    from hermes_cli.git_budget import timeout_for
     for name in _LOCAL_TRUNK_CANDIDATES:
-        if _git_out(["rev-parse", "--verify", "--quiet", f"refs/heads/{name}"], path, timeout=timeout):
+        if _git_out(["rev-parse", "--verify", "--quiet", f"refs/heads/{name}"], path,
+                    timeout=timeout_for(budget, timeout)):
             return name
-    porcelain = _git_out(["worktree", "list", "--porcelain"], path, timeout=timeout) or ""
+    porcelain = _git_out(["worktree", "list", "--porcelain"], path, timeout=timeout_for(budget, timeout)) or ""
     for line in porcelain.split("\n\n", 1)[0].splitlines():  # first block = the main worktree
         if line.startswith("branch refs/heads/"):
             return line[len("branch refs/heads/"):].strip() or None
@@ -472,28 +475,38 @@ def _worktree_merge_base_ref(path: str, timeout: float = 5) -> Optional[str]:
     return None
 
 
-def _worktree_has_unpushed_commits(worktree_path: str, timeout: float = 10) -> bool:
+def _worktree_has_unpushed_commits(worktree_path: str, timeout: float = 10, *, budget=None) -> bool:
     """Whether a worktree has commits unreachable from any remote branch. Fails SAFE toward True.
 
     No remote-tracking refs = nothing was ever pushed, so the tree is compared against the local
     trunk instead (``_worktree_local_trunk``); no trunk either -> True. A shallow boundary can
     disconnect an older HEAD from origin/* so public commits look unpushed;
     ``_deepen_shallow_repo`` first if affordable.
+
+    With ``budget`` (:mod:`hermes_cli.git_budget`) every git call draws its timeout from it, and a
+    spent budget or a git timeout raises ``GitUnchecked`` instead of reading as unpushed.
     """
+    from hermes_cli.git_budget import GitUnchecked, timed_out, timeout_for
     try:
         remote_refs = _git_out(["for-each-ref", "--format=%(refname)", "refs/remotes"], worktree_path,
-                               timeout=timeout)
+                               timeout=timeout_for(budget, timeout))
         if remote_refs is None:
             return True
         baseline = ["--remotes"]
         if not remote_refs:
-            trunk = _worktree_local_trunk(worktree_path, timeout=timeout)
+            trunk = _worktree_local_trunk(worktree_path, timeout=timeout, budget=budget)
             if trunk is None:
                 return True
             baseline = [trunk]
         unpushed = _git_out(["log", "--oneline", "HEAD", "--not", *baseline], worktree_path,
-                            timeout=timeout)
+                            timeout=timeout_for(budget, timeout))
         return unpushed is None or bool(unpushed)
+    except GitUnchecked:
+        raise
+    except subprocess.TimeoutExpired:
+        if budget is not None:
+            raise timed_out(budget) from None
+        return True
     except Exception:
         return True
 
@@ -517,7 +530,7 @@ def _include_symlink_paths(worktree_path: str, repo_root) -> set:
     return paths
 
 
-def _worktree_is_dirty(worktree_path: str, repo_root, timeout: float = 10) -> bool:
+def _worktree_is_dirty(worktree_path: str, repo_root, timeout: float = 10, *, budget=None) -> bool:
     """Whether a worktree has staged/unstaged/untracked changes. Fails SAFE toward True.
 
     Untracked ``.worktreeinclude`` directory symlinks back to the main checkout *repo_root* are
@@ -525,25 +538,39 @@ def _worktree_is_dirty(worktree_path: str, repo_root, timeout: float = 10) -> bo
     repo forever. ``status.showUntrackedFiles=no`` is overridden (it would hide new files), and
     skip-worktree / assume-unchanged files whose bytes differ from the index count as changes
     (``git status`` trusts both flags).
+
+    With ``budget`` (:mod:`hermes_cli.git_budget`) every git call, the hardening probes and the
+    hidden-edit scan included, draws its timeout from it; a spent budget, a git timeout or a probe
+    with no answer raises ``GitUnchecked`` instead of reading as dirty.
     """
     from hermes_cli._subprocess_compat import noninteractive_repo_git_env
+    from hermes_cli.git_budget import GitUnchecked, ensure_left, timed_out, timeout_for
     try:
         # Reclaimers run this unattended; status reads the index (core.fsmonitor, clean filters).
-        env = noninteractive_repo_git_env(worktree_path)
+        env = noninteractive_repo_git_env(worktree_path, budget=budget)
         if env is None:
+            if budget is not None:
+                ensure_left(budget)
+                raise GitUnchecked("git config probe gave no answer")
             return True
         result = _git(["status", "--porcelain", "-z", "--untracked-files=normal"], worktree_path,
-                      timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+                      timeout=timeout_for(budget, timeout), stdin=subprocess.DEVNULL, env=env)
         if result.returncode != 0:
             return True
         entries = [e for e in result.stdout.split("\0") if e]
         if not entries:
             from hermes_cli.worktree_retention import hidden_index_edits
-            return bool(hidden_index_edits(worktree_path))
+            return bool(hidden_index_edits(worktree_path, budget=budget))
         if any(not e.startswith("?? ") for e in entries):
             return True
         include_links = _include_symlink_paths(worktree_path, repo_root)
         return any(e[3:].rstrip("/") not in include_links for e in entries)
+    except GitUnchecked:
+        raise
+    except subprocess.TimeoutExpired:
+        if budget is not None:
+            raise timed_out(budget) from None
+        return True
     except Exception:
         return True
 

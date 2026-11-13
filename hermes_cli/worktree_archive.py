@@ -57,10 +57,14 @@ class Archive:
     staged: str = ""  # staged_state() of exactly the index this archive captured
 
 
-def _env(cwd, index: Optional[str] = None) -> dict:
+def _env(cwd, index: Optional[str] = None, *, budget=None) -> dict:
     from hermes_cli._subprocess_compat import noninteractive_repo_git_env
-    env = noninteractive_repo_git_env(cwd)
+    env = noninteractive_repo_git_env(cwd, budget=budget)
     if env is None:
+        if budget is not None:  # a budgeted scan reports the tree unchecked (hermes_cli.git_budget)
+            from hermes_cli.git_budget import GitUnchecked, ensure_left
+            ensure_left(budget)
+            raise GitUnchecked("git config probe gave no answer")
         raise ArchiveError("git filter discovery failed")
     env.update(_IDENTITY)
     start = int(env["GIT_CONFIG_COUNT"])
