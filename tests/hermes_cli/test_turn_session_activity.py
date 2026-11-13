@@ -283,3 +283,59 @@ def test_producer_and_reader_parse_auto_continue_bounds_alike():
         "enabled": "off", "freshness_minutes": "5", "max_attempts": -1}}}) == (False, 300.0, 2)
     assert auto_continue_bounds({"desktop": {"auto_continue": {"freshness_minutes": "x", "max_attempts": 0}}}) \
         == (True, 900.0, 0)
+    # Unparseable max_attempts falls back to the default; a negative window floors at 0 (never negative).
+    assert auto_continue_bounds({"desktop": {"auto_continue": {"max_attempts": "abc"}}}) == (True, 900.0, 2)
+    assert auto_continue_bounds({"desktop": {"auto_continue": {"freshness_minutes": -5}}}) == (True, 0.0, 2)
+
+
+_PINNED_NOW = 1_800_000_000.0  # integral, so now - (now - 900.0) is exactly 900.0
+
+
+def test_tui_pause_exactly_at_the_freshness_window_counts(home):
+    """The producer continues a pause whose age equals the window (it drops only ``age > window``), so the
+    reader must count it too, or the row reads idle while its turn is about to resume."""
+    _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=0,
+            started_at=_PINNED_NOW - 7200, paused_at=_PINNED_NOW - 900.0)
+    assert tsa._update_paused_tui_turns(home, _PINNED_NOW) == {"tui_chat"}
+    assert tsa._update_paused_tui_turns(home, _PINNED_NOW + 0.5) == set()  # just past it: stale
+
+
+def test_tui_pause_with_negative_freshness_floors_the_window_at_zero(home):
+    """``freshness_minutes: -5`` floors at a zero window: a pause of age 0 still counts (as the producer
+    continues it); without the floor the window is -300 s and nothing ever counts."""
+    _auto_continue_config(home, freshness_minutes=-5)
+    _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=0,
+            started_at=_PINNED_NOW - 7200, paused_at=_PINNED_NOW)
+    assert tsa._update_paused_tui_turns(home, _PINNED_NOW) == {"tui_chat"}
+    assert tsa._update_paused_tui_turns(home, _PINNED_NOW + 1) == set()
+
+
+def test_tui_pause_with_unparseable_max_attempts_uses_the_default_cap(home):
+    """``max_attempts: "abc"`` parses as the default cap (2), as the producer parses it: attempt 1 counts,
+    attempt 2 is exhausted. The reader must not raise on it."""
+    _auto_continue_config(home, max_attempts="abc")
+    for attempts, expected in ((1, {"tui_chat"}), (2, set())):
+        _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=attempts,
+                started_at=_PINNED_NOW - 7200, paused_at=_PINNED_NOW - 60)
+        assert tsa._update_paused_tui_turns(home, _PINNED_NOW) == expected
+
+
+def test_garbage_home_config_falls_open_to_default_bounds(home):
+    """A torn/invalid home config.yaml reads as the defaults (enabled, 15 min, 2 attempts), never raises."""
+    (home / "config.yaml").write_bytes(b"\xff\xfe desktop: [unclosed\n  - : :")
+    assert tsa._auto_continue_bounds(home) == (True, 900.0, 2)
+
+
+def test_unreadable_home_config_falls_open_to_default_bounds(home, monkeypatch):
+    """When loading the home's config raises (unreadable file, loader bug), the reader falls open to the
+    defaults like the producer's ``_load_cfg``, so a fresh pause still counts instead of the sweep raising."""
+    from hermes_cli import config_effective
+
+    def _unreadable(path, **_kw):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(config_effective, "load_profile_config_effective", _unreadable)
+    assert tsa._auto_continue_bounds(home) == (True, 900.0, 2)
+    _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=0,
+            started_at=_PINNED_NOW - 7200, paused_at=_PINNED_NOW - 60)
+    assert tsa._update_paused_tui_turns(home, _PINNED_NOW) == {"tui_chat"}
