@@ -1,4 +1,5 @@
 """Selective rejection retirement uses authoritative evidence, never replica absence."""
+import copy
 import json
 
 import pytest
@@ -376,6 +377,17 @@ def test_fake_lease_release_is_fenced_on_the_holders_run(live, kanban_home, gate
      {"error": "rate_limited", "retry_status": "ready"}, "ready"),
     ({"outcome": "terminal_provider", "error": "bad key"}, "ready", "crashed", "crashed",
      {"failure_notice": "canonical", "error": "bad key", "retry_status": "ready", "terminal_provider": True}, "ready"),
+    # The holder's diagnostic belongs to a canonical failure: merged into run metadata and the event payload.
+    ({"outcome": "timed_out", "diagnostic": {"exit_code": 124}}, "ready", "timed_out", "timed_out",
+     {"exit_code": 124, "failure_notice": "canonical", "error": "timed_out", "retry_status": "ready"}, "ready"),
+    ({"outcome": "crashed", "diagnostic": {"tail": "x" * 9000}}, "ready", "crashed", "crashed",
+     {"diagnostic_truncated": True, "failure_notice": "canonical", "error": "crashed", "retry_status": "ready"},
+     "ready"),
+    # ...but not to a plain release; a neutral release merges the holder's extra instead.
+    ({"diagnostic": {"exit_code": 0}}, "ready", "released", "released", {"error": None, "retry_status": "ready"},
+     "ready"),
+    ({"outcome": "owner_down", "extra": {"host": "mini"}}, "ready", "owner_down", "owner_down",
+     {"host": "mini", "error": "owner_down", "retry_status": "ready"}, "ready"),
 ])
 def test_fake_lease_release_emits_run_outcome_event(live, kanban_home, extra, lane, run_outcome, kind, payload,
                                                     status):
@@ -394,6 +406,52 @@ def test_fake_lease_release_emits_run_outcome_event(live, kanban_home, extra, la
     assert [(e["kind"], json.loads(e["payload"])) for e in events] == [(kind, payload)]
     assert (rows["task_runs"][RUN]["outcome"], rows["tasks"][tid]["status"]) == (run_outcome, status)
     assert rows["tasks"][tid]["lease_run_uid"] is None
+
+
+def _leased(live, svc):
+    hub = svc.hub(ME)
+    tid = kb.create_task(live, title="leased", assignee="worker")
+    client.push(live, hub, BOARD, ME, primary=False)
+    grant = {"action": "grant", "task": tid, "run_uid": RUN, "client_op_id": "g"}
+    assert hub.leases(BOARD, grant)["status"] == "applied"
+    return hub, tid
+
+
+def test_fake_lease_release_merges_diagnostic_into_run_metadata(live, kanban_home):
+    """As releaseTask: a crashed release's diagnostic and protocol_violation flag land in the run metadata."""
+    svc = FakeService(lease_runs=True)
+    hub, tid = _leased(live, svc)
+    release = {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r", "outcome": "crashed",
+               "diagnostic": {"exit_code": 1}, "protocol_violation": True}
+    assert hub.leases(BOARD, release)["status"] == "applied"
+    run = svc.board(BOARD)["rows"]["task_runs"][RUN]
+    assert json.loads(run["metadata"]) == {"exit_code": 1, "protocol_violation": True}
+
+
+@pytest.mark.parametrize("lease_runs", [True, False])
+def test_fake_lease_release_rejects_unknown_outcome(live, kanban_home, lease_runs):
+    """As releaseTask's RELEASE_OUTCOMES guard: a typo'd outcome is ``invalid`` and changes nothing."""
+    svc = FakeService(lease_runs=lease_runs)
+    hub, tid = _leased(live, svc)
+    before = copy.deepcopy(svc.board(BOARD))
+    release = {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r", "outcome": "crashd"}
+    res = hub.leases(BOARD, release)
+    assert (res["status"], res["reason"]) == ("rejected", "invalid")
+    assert svc.board(BOARD) == before
+    b = svc.board(BOARD)
+    op = {"op": "release", "task": tid, "run_uid": RUN, "client_op_id": "o", "outcome": "crashd"}
+    assert svc.release_op(b, op, ME) == {"status": "rejected", "reason": "invalid"}
+    assert svc.board(BOARD) == before
+
+
+def test_fake_lease_release_spawn_failed_is_not_modelled(live, kanban_home):
+    """releaseTask hands spawn_failed to endCustody + recordTaskFailure; the fake refuses it loudly."""
+    svc = FakeService(lease_runs=True)
+    hub, tid = _leased(live, svc)
+    with pytest.raises(NotImplementedError):
+        hub.leases(BOARD, {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r",
+                           "outcome": "spawn_failed"})
+    assert svc.board(BOARD)["leases"][tid]["run_uid"] == RUN
 
 
 def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):

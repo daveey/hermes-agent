@@ -129,11 +129,17 @@ class FakeService:
     NEUTRAL = {"rate_limited": ("rate_limited", "rate_limited"), "owner_restart": ("reclaimed", "owner_restart_lost"),
                "owner_unavailable": ("owner_unavailable", "owner_unavailable"), "owner_down": ("owner_down", "owner_down"),
                "reboot_bystander": ("host_reboot", "host_reboot")}
+    # transitions.ts RELEASE_OUTCOMES: releaseTask rejects any other outcome as ``invalid``.
+    RELEASE_OUTCOMES = frozenset({"released", *NEUTRAL, "crashed", "timed_out", "spawn_failed", "terminal_provider"})
+    # transitions.ts MAX_DIAGNOSTIC_CHARS: a larger holder diagnostic is replaced by ``{diagnostic_truncated: true}``.
+    MAX_DIAGNOSTIC_CHARS = 8000
 
     def release_op(self, b: dict, op: dict, gw: str) -> dict:
         """As transitions.ts releaseTask: only the lease holder's run is released; the Board ends that run, emits
         its one outcome event (carrying the holder's ``diagnostic``) and books a charged outcome exactly once."""
         task, run = op["task"], op["run_uid"]
+        if op.get("outcome", "released") not in self.RELEASE_OUTCOMES:
+            return {"status": "rejected", "reason": "invalid"}
         lease = b["leases"].get(task)
         if not lease or lease["holder"] != gw or lease["run_uid"] != run:
             return {"status": "rejected", "reason": "lease_lost"}
@@ -264,6 +270,12 @@ class FakeHub:
             if not cur or cur["holder"] != self.gateway or cur["run_uid"] != run:
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
         else:
+            if str(body.get("outcome") or "released") not in self.svc.RELEASE_OUTCOMES:
+                # releaseTask checks the outcome before its fence: an unknown one (a test typo) is ``invalid``.
+                return {"status": "rejected", "reason": "invalid", "lease": cur}
+            if self.svc.lease_runs and body.get("outcome") == "spawn_failed":
+                raise NotImplementedError("FakeHub.leases: spawn_failed release (endCustody + recordTaskFailure) is "
+                                          "not modelled; see _release_run")
             if self.svc.lease_runs and (not cur or cur["holder"] != gw or cur["run_uid"] != run):
                 # releaseTask's fence(): a release that does not name this gateway's live lease run is refused and
                 # changes nothing (the card keeps its lease and mirror).
@@ -289,11 +301,19 @@ class FakeHub:
         a running card goes back to ``retry`` (retryStatusForRun) and the run-outcome event always carries it as
         ``retry_status``.
 
-        A neutral outcome (``FakeService.NEUTRAL`` = NEUTRAL_RELEASES) ends the run as its mapped outcome and emits
-        its mapped event; anything else ends as ``outcome`` (``terminal_provider`` -> ``crashed``) and emits that
-        kind. Failure accounting (recordTaskFailure for crashed/timed_out/spawn_failed) is not modelled on this
-        path; :meth:`FakeService.release_op` covers it for the ops path. ``unused_grant`` (live t_01a1a1dea9c64d6a
-        run 164239) marks the run metadata and the event only for a plain ``released`` outcome."""
+        Modelled outcomes (anything outside ``FakeService.RELEASE_OUTCOMES`` is refused ``invalid`` before this):
+        - neutral (``FakeService.NEUTRAL`` = NEUTRAL_RELEASES): the run ends as its mapped outcome and emits its
+          mapped event; the holder's ``extra`` (plus ``owner_restart: true``) is merged into run metadata and payload.
+        - ``released``, ``crashed``, ``timed_out``, ``terminal_provider`` (-> ``crashed``): the run ends as that
+          outcome and emits that kind. For the canonical failures the holder's ``diagnostic`` is merged into run
+          metadata and payload (``{diagnostic_truncated: true}`` past MAX_DIAGNOSTIC_CHARS), and a ``crashed``
+          release with ``protocol_violation: true`` marks the run metadata. ``unused_grant`` (live
+          t_01a1a1dea9c64d6a run 164239) marks the run metadata and the event only for a plain ``released``.
+
+        Not modelled: failure accounting (recordTaskFailure: consecutive_failures, failure_finalized, the breaker,
+        the protocol-violation streak); :meth:`FakeService.release_op` covers it for the ops path. ``spawn_failed``
+        is refused with NotImplementedError by :meth:`leases`: the real releaseTask hands it to endCustody +
+        recordTaskFailure(releaseClaim, endRun), whose run/event shape is that accounting."""
         gw, svc = self.gateway, self.svc
         outcome = str(body.get("outcome") or "released")
         error = str(body.get("error") or outcome)[:500]
@@ -302,7 +322,7 @@ class FakeHub:
         neutral = svc.NEUTRAL.get(outcome)
         if neutral:
             ended, kind = neutral
-            meta = {"owner_restart": True} if outcome == "owner_restart" else {}
+            meta = {**(body.get("extra") or {}), **({"owner_restart": True} if outcome == "owner_restart" else {})}
             run_fields = {"error": error, "metadata": json.dumps(meta, separators=(",", ":")) if meta else None}
             payload: dict = {**meta, "error": error, "retry_status": retry}
             task_fields = {"status": retry, "last_failure_error": error} if running else {}
@@ -311,10 +331,15 @@ class FakeHub:
             unused = bool(body.get("unused_grant")) and outcome == "released" and running
             canonical = outcome in ("crashed", "timed_out", "terminal_provider")
             err = None if outcome == "released" else error
-            run_fields = {"error": err, **({"metadata": json.dumps({"unused_grant": True}, separators=(",", ":"))}
-                                           if unused else {})}
-            payload = {**({"failure_notice": "canonical"} if canonical else {}), "error": err, "retry_status": retry,
-                       **({"terminal_provider": True} if outcome == "terminal_provider" else {}),
+            diag = dict(body.get("diagnostic") or {}) if canonical else {}
+            if len(json.dumps(diag, separators=(",", ":"))) > svc.MAX_DIAGNOSTIC_CHARS:
+                diag = {"diagnostic_truncated": True}
+            meta = {**diag, **({"protocol_violation": True}
+                               if outcome == "crashed" and body.get("protocol_violation") is True else {}),
+                    **({"unused_grant": True} if unused else {})}
+            run_fields = {"error": err, **({"metadata": json.dumps(meta, separators=(",", ":"))} if meta else {})}
+            payload = {**diag, **({"failure_notice": "canonical"} if canonical else {}), "error": err,
+                       "retry_status": retry, **({"terminal_provider": True} if outcome == "terminal_provider" else {}),
                        **({"unused_grant": True} if unused else {})}
             task_fields = {"status": retry, **({"last_failure_error": error} if outcome == "rate_limited" else {})} \
                 if running else {}
