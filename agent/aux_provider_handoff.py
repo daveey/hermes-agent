@@ -17,11 +17,14 @@ which runs it right after its callback returns, on the thread that owns the sock
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import logging
 import threading
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, TypeVar
+
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,38 @@ def note_abandoned(attempt: ProviderAttempt) -> None:
     abandoned = _ABANDONED.get()
     if abandoned is not None:
         abandoned.append(attempt)
+
+
+async def run_in_thread(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """``asyncio.to_thread`` for a provider call that reads a client's socket.
+
+    A cancelled await does not stop the worker: it keeps reading while the awaiting task unwinds through its
+    ``client_scope`` on the loop thread. The worker is then recorded as abandoned there, so the scope only
+    shuts the sockets down and the worker closes the client once ``fn`` returns. A worker cancelled before
+    it started never touches the socket and is not recorded.
+    """
+    attempt, lock, state = ProviderAttempt(), threading.Lock(), ["pending"]
+
+    def worker() -> _T:
+        with lock:
+            if state[0] == "dropped":
+                return None  # type: ignore[return-value]  # nobody awaits it
+            state[0] = "running"
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            attempt.finish()
+
+    try:
+        return await asyncio.to_thread(worker)
+    except asyncio.CancelledError:
+        with lock:
+            started = state[0] == "running"
+            if not started:
+                state[0] = "dropped"
+        if started:
+            note_abandoned(attempt)
+        raise
 
 
 @contextlib.contextmanager

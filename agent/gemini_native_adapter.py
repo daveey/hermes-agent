@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
+from agent.aux_provider_handoff import run_in_thread
 from agent.bounded_response import read_streaming_error_body
 from agent.gemini_long_decode import continuation_token, long_decode_hops, merge_hop_responses, merge_hop_usage, split_stream_continuation
 from agent.retry_utils import parse_retry_after_seconds
@@ -1034,11 +1035,12 @@ class AsyncGeminiNativeClient:
     # GeminiNativeClient is itself the leaf (no OpenAI client beneath it), so we point at the sync_client
     # directly.
     async def _create_chat_completion(self, **kwargs: Any) -> Any:
-        result = await asyncio.to_thread(self._sync.chat.completions.create, **kwargs)
+        # run_in_thread: a cancelled await leaves the client's close to the worker still reading its socket.
+        result = await run_in_thread(self._sync.chat.completions.create, **kwargs)
         return self._async_stream(result) if kwargs.get("stream") else result
 
     async def _async_stream(self, iterator: Iterator[_GeminiStreamChunk]) -> Any:
-        while not (step := await asyncio.to_thread(self._sync._advance_stream_iterator, iterator))[0]:
+        while not (step := await run_in_thread(self._sync._advance_stream_iterator, iterator))[0]:
             yield step[1]
 
     async def close(self) -> None:

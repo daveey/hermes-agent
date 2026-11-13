@@ -339,18 +339,23 @@ def class_routed_async(callback):
             client, _ = aux._to_async_client(sync_client, runtime["model"])
             client._managed_subscription_runtime = runtime
             terminal = None
-            try:
-                async def create(request_kwargs):
-                    return await aux._acreate_with_progress(
-                        client, request_kwargs, task, force_stream=aux._provider_requires_stream(
-                            runtime["provider"], runtime["base_url"]), provider=runtime["provider"])
-                return aux._validate_llm_response(await aux._relay_async_completion(
-                    client, kwargs, provider=runtime["provider"], api_mode=runtime["api_mode"], create=create), task)
-            except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
-                terminal = _recover(runtime, sync_client, exc, attempted, failed)
-            finally:
-                aux._close_cached_client(client, close_async=True)
-                aux._close_cached_client(sync_client, close_async=True)
+            # Adapter clients read on a to_thread worker that outlives a cancelled await: the scope then shuts
+            # the sockets down and that worker closes both clients, never this loop thread (as the sync twin).
+            with client_scope(sync_client, lambda _, pair=(client, sync_client): _close_pair(aux, *pair)):
+                try:
+                    async def create(request_kwargs):
+                        return await aux._acreate_with_progress(
+                            client, request_kwargs, task, force_stream=aux._provider_requires_stream(
+                                runtime["provider"], runtime["base_url"]), provider=runtime["provider"])
+                    return aux._validate_llm_response(await aux._relay_async_completion(
+                        client, kwargs, provider=runtime["provider"], api_mode=runtime["api_mode"], create=create), task)
+                except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
+                    terminal = _recover(runtime, sync_client, exc, attempted, failed)
             if terminal is not None:
                 raise terminal
     return wrapped
+
+
+def _close_pair(aux, client, sync_client) -> None:
+    aux._close_cached_client(client, close_async=True)
+    aux._close_cached_client(sync_client, close_async=True)
