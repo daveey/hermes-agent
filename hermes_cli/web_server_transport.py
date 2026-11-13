@@ -3,6 +3,14 @@ from __future__ import annotations
 
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+# [daveey] Idle keep-alive lifetime of an HTTP connection on every Hermes listener. uvicorn's default (5 s)
+# is shorter than the gap between a remote Desktop's polls, and the server's FIN crosses the SSH tunnel
+# only after Desktop has already picked that pooled socket for its next request: on hermes-hub
+# (2026-11-13) 197 requests in 7 min were written into server-closed sockets, each a `socket hang up`
+# that marked the whole remote down. The side that closes an idle connection must be the client, so this
+# stays well above Desktop's pooled-socket idle timeout (CLIENT_KEEPALIVE_IDLE_MS in api-transport.ts).
+KEEP_ALIVE_IDLE_S = 120
+
 
 def transport_observed_app(app, *, proxy_headers: bool, forwarded_allow_ips):
     """Compose raw observation outside Uvicorn's unchanged proxy middleware.

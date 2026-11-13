@@ -1303,7 +1303,7 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
 
     _uvicorn_console_logging()  # log_config=None: uvicorn's dictConfig would close every live handler
     from hermes_cli.web_server_skew_exit import wrap_asgi_close_when_draining
-    from hermes_cli.web_server_transport import transport_observed_app
+    from hermes_cli.web_server_transport import KEEP_ALIVE_IDLE_S, transport_observed_app
 
     # [daveey] A superseded always-on backend closes keep-alive sockets after each response (drain).
     served_app = wrap_asgi_close_when_draining(served_app)
@@ -1328,6 +1328,7 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
         # mid-turn request orphans the backend past that budget (#76244). 3s
         # leaves room for lifespan shutdown + cron_stop before the kill.
         timeout_graceful_shutdown=3,
+        timeout_keep_alive=KEEP_ALIVE_IDLE_S,
     )
     return config, uvicorn.Server(config)
 

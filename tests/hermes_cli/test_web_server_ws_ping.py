@@ -399,3 +399,27 @@ def test_gateway_listener_compresses_only_for_remote_peers(host, auth_required, 
     config, _server = build_listener_server(lambda scope, receive, send: None, host, 0,
                                             auth_required=auth_required)
     assert config.ws_per_message_deflate is deflate
+
+
+def test_start_server_keeps_idle_http_connections_open_longer_than_desktop_does(monkeypatch):
+    """uvicorn's 5 s default idle close raced remote Desktop's pooled sockets across the SSH tunnel: the
+    server's FIN arrived after Desktop had written its next request, a `socket hang up` that marked the
+    whole remote down (hermes-hub 2026-11-13). The backend keeps an idle keep-alive connection open long
+    enough that the client (30 s, api-transport.ts CLIENT_KEEPALIVE_IDLE_MS) always closes first."""
+    from hermes_cli.web_server_transport import KEEP_ALIVE_IDLE_S
+
+    captured = _stub_uvicorn(monkeypatch)
+
+    web_server.start_server(host="127.0.0.1", port=0, open_browser=False)
+
+    assert captured["timeout_keep_alive"] == KEEP_ALIVE_IDLE_S
+    assert KEEP_ALIVE_IDLE_S >= 90
+
+
+def test_gateway_listener_keeps_idle_http_connections_open_longer_than_desktop_does():
+    """The gateway session listener (``build_listener_server``) uses the same idle keep-alive lifetime."""
+    from hermes_cli.web_server_lifecycle import build_listener_server
+    from hermes_cli.web_server_transport import KEEP_ALIVE_IDLE_S
+
+    config, _server = build_listener_server(lambda scope, receive, send: None, "127.0.0.1", 0, auth_required=True)
+    assert config.timeout_keep_alive == KEEP_ALIVE_IDLE_S
