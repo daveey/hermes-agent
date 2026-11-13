@@ -115,7 +115,9 @@ def detect_code_skew() -> tuple[str, str] | None:
 # watchdogs poll every few seconds and would otherwise run two git commands per poll for the same pair. A transient
 # git failure (None: timeout, OSError, git not found) is not cached: it reads as skew now and is asked again on the
 # next poll, so it never pins the pair as skewed for the life of the process (t_01a1d49d2f2a8ae2). A sha git says
-# is no commit (boot commit gc'd after a force-push) is a definite False and is cached (PR #2151 review).
+# is no commit (boot commit gc'd after a force-push) is a definite False and is cached (PR #2151 review). A disk
+# sha may still appear later (shallow checkout deepened, ref written before its objects): the cached False then
+# keeps that pair skewed until the cache clears or the process restarts, failing closed (at worst one restart).
 _restart_free_verdicts: dict[tuple[str, str], bool] = {}
 
 

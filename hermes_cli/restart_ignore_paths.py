@@ -89,7 +89,9 @@ def range_restart_verdict(root: str, base: str, head: str,
     """``range_restart_free`` with the transient case kept apart: True/False are final for the pair (a commit
     range never changes), None means git did not answer (not found, timeout, OSError, an unexpected exit) and
     the same question may get a definite answer later, so callers must not cache it. A sha that names no commit
-    in the repo (a boot commit gc'd after a force-push) is a definite False: it never comes back."""
+    in the repo (a boot commit gc'd after a force-push) is a definite False. A disk sha can still appear later
+    (a shallow checkout deepened by fetch, a ref written before its objects), but a cached False only keeps the
+    pair reading as skew until the cache clears or the process restarts: fail closed, at worst one extra restart."""
     if not (_is_sha(base) and _is_sha(head)) or base == head:
         return False
     globs = tuple(globs)

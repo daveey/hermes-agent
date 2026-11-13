@@ -224,8 +224,9 @@ def _counting_git(monkeypatch):
 
 @pytest.mark.parametrize("missing", ["boot", "disk"])
 def test_a_missing_commit_is_a_definite_verdict_cached_as_skew(repo, monkeypatch, missing):
-    """A boot sha gc'd after a force-push (or an absent disk sha) never comes back: merge-base exits 128 for it,
-    which is a definite False, cached so the watchdog polls stop running git for that pair (PR #2151 review)."""
+    """A boot sha gc'd after a force-push (or an absent disk sha): merge-base exits 128 for it, which is a definite
+    False, cached so the watchdog polls stop running git for that pair (PR #2151 review). A disk sha that appears
+    later stays skew until the cache clears or the process restarts: fail closed, at worst one extra restart."""
     root, base = repo
     head = _commit(root, {"tests/test_a.py": "x\n"}, "t1")
     gone = "f" * 40
@@ -243,6 +244,32 @@ def test_a_missing_commit_is_a_definite_verdict_cached_as_skew(repo, monkeypatch
     assert code_skew._restart_free_verdicts == {(boot, disk): False}
     assert code_skew.detect_code_skew() == (boot[:10], disk[:10])
     assert len(calls) == first  # cached: the next poll runs no git
+
+
+def test_a_rev_parse_that_gives_no_answer_after_merge_base_128_stays_uncached(repo, monkeypatch):
+    """merge-base exits 128 for a missing sha, then rev-parse times out (``_git`` None): no verdict, not cached."""
+    root, base = repo
+    gone = "f" * 40
+    real_git = rip._git
+    rev_parse_ok = {"on": False}
+
+    def flaky(root_, *args):
+        if args[0] == "rev-parse" and not rev_parse_ok["on"]:
+            return None  # timed out / OSError
+        return real_git(root_, *args)
+
+    monkeypatch.setattr(rip, "_git", flaky)
+    assert rip.range_restart_verdict(str(root), base, gone) is None
+
+    monkeypatch.setattr(code_skew, "_PROJECT_ROOT", root)
+    monkeypatch.setattr(code_skew, "_restart_free_verdicts", {})
+    monkeypatch.setattr(code_skew, "_boot_fingerprint", f"git:refs/heads/main:{base}")
+    monkeypatch.setattr(code_skew, "_fingerprint", lambda: f"git:refs/heads/main:{gone}")
+    assert code_skew.detect_code_skew() == (base[:10], gone[:10])  # fail closed meanwhile
+    assert code_skew._restart_free_verdicts == {}  # not pinned: asked again next poll
+    rev_parse_ok["on"] = True
+    assert code_skew.detect_code_skew() == (base[:10], gone[:10])
+    assert code_skew._restart_free_verdicts == {(base, gone): False}  # now a definite answer, cached
 
 
 def test_a_non_commit_object_is_a_definite_verdict(repo):
