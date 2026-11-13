@@ -112,6 +112,11 @@ def test_courier_and_host_work_bypass_worker_policy(hub_judge):
     "hermes-hub client: retry a 409 from the Board",
     "Fix a typo in ~/code/_wtf/notes.md",
     "Read the hermes-agent tree under ~/.hermes for context",
+    # A cd into ~/.hermes then into its code tree is the hermes-agent tree, like cd ~/.hermes/hermes-agent
+    # (PR #2585 review 5897242912 nit 2).
+    "cd ~/.hermes && cd hermes-agent && git fetch -q origin && git log -1 origin/main",
+    "cd ~/.hermes; cd ./hermes-agent/ && git pull --ff-only",
+    "cd ~ && cd .hermes && cd hermes-agent && git status",
     # Near-misses of the home-rooted .worktrees marker stay portable.
     "Fix the parser bug in ~/code/babybear/src/parser.py and open a PR",
     "Patch /home/ubuntu/code/askeve/app/routes.py and push",

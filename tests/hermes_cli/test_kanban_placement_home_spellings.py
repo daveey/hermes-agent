@@ -72,6 +72,58 @@ def test_a_later_cd_elsewhere_ends_the_home_relative_span(body):
     assert helpers._hub({"title": "Maintenance", "body": body})["runs_on"] == ["machine:worker-1"]
 
 
+# PR #2585 review 5897242912 nit 1: only a cd that changes this shell's directory ends the span. A subshell
+# ``(cd repo ...)`` does not; ``cd -``/``popd``/a bare ``pushd`` go somewhere unknown, so the span stays open (fails
+# toward the pin); a prose "cd" outside a command position does not end it either.
+@pytest.mark.parametrize("body", [
+    "Run pytest, then cd ~ && (cd repo && make) && cat .hermes/.env",
+    "Run pytest, then cd ~\n(cd repo && make)\ncat .hermes/.env",
+    "Run pytest, then cd ~ && x=$(cd repo && pwd) && cat .hermes/.env",
+    "Run pytest, then cd ~ && cd - && cat .hermes/.env",
+    "Run pytest, then pushd ~ && popd && cat .hermes/.env",
+    "Run pytest, then cd ~ && pushd && cat .hermes/.env",
+    "Run pytest, then cd ~ && echo you can cd later && cat .hermes/.env",
+    "Run pytest, then cd ~  # no need to cd anywhere else\ncat .hermes/.env",
+    "Run pytest, then cd ~ && ls | cd repo && cat .hermes/.env",
+    "Run pytest, then cd ~ && (cd repo && cat .hermes/.env)",
+    "Run pytest, then cd ~/.hermes && cd hermes-agent-old && cat ../.env",
+    "Run pytest, then cd ~/.hermes && echo cd hermes-agent && cat .env",
+])
+def test_only_a_cd_of_this_shell_ends_the_span(body):
+    d = helpers._hub({"title": "Maintenance", "body": body})
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
+@pytest.mark.parametrize("body", [
+    "Run pytest, then cd ~ && cd repo && cat .hermes/notes.md",
+    "Run pytest, then cd ~ || cd repo && cat .hermes/notes.md",
+    "Run pytest, then cd ~; cd repo; cat .hermes/notes.md",
+    "Run pytest, then cd ~\n  cd repo\ncat .hermes/notes.md",
+    "Run pytest, then cd ~ and run `cd repo && cat .hermes/notes.md`",
+    "Run pytest, then cd ~ && { cd repo; cat .hermes/notes.md; }",
+    "Run pytest, then cd ~ && pushd repo && cat .hermes/notes.md",
+    "Run pytest, then cd ~ && cd .. && cat .hermes/notes.md",
+    # PR #2585 review 5897242912 nit 2: ~/.hermes then its code tree is the code tree, not state.
+    "Run pytest, then cd ~/.hermes && cd hermes-agent && git pull",
+    "Run pytest, then cd \"$HOME/.hermes\"  # state root\ncd 'hermes-agent' && git pull",
+    "Run pytest, then pushd ~/.hermes; pushd repos/x && git pull",
+    "Run pytest, then cd ~ && cd .hermes && cd hermes-agent/scripts && ls",
+])
+def test_a_cd_of_this_shell_still_ends_the_span(body):
+    assert helpers._hub({"title": "Maintenance", "body": body})["runs_on"] == ["machine:worker-1"]
+
+
+def test_a_large_no_match_prose_cd_body_is_linear():
+    """Spans no longer end at a prose cd, so a later cd home must still end one: no O(n^2) on one long line."""
+    from hermes_cli import kanban_placement as kp
+    body = "Run pytest, then " + "".join(
+        f"(cd ~) then say cd somewhere in prose, step {i} padded to a realistic length " for i in range(5000))
+    assert len(body) > 180_000
+    start = time.monotonic()
+    assert re.search(kp.HERMES_STATE_PATH, body, re.IGNORECASE) is None
+    assert time.monotonic() - start < 1.0
+
+
 def test_a_large_no_match_body_is_linear():
     """(2) Before, each qualifying cd ran a lazy span to the end of the text: 16.9 s at 180 KB / 5000 cd lines."""
     from hermes_cli import kanban_placement as kp
