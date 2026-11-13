@@ -124,6 +124,24 @@ def test_handle_dropped_without_verified_exit_keeps_token_and_latches_unknown(re
     assert "kanban-worker-exit-unverified" in snap.unknowns
 
 
+def test_unreadable_birth_after_popen_keeps_custody_and_latches_unknown(registry, monkeypatch, tmp_path):
+    """The child exists once Popen returns: a raising birth fingerprint must not orphan the token
+    (RED on 95089d00fb: the exception escaped before adopt, the token was never attached)."""
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    def boom(pid):
+        raise OSError("proc unreadable")
+
+    monkeypatch.setattr(kbd, "_process_fingerprint", boom)
+    proc = FakeProc(51004)
+    assert _spawn(monkeypatch, tmp_path, proc) == 51004
+    snap = registry.snapshot()
+    assert snap.active == 1 and "kanban-worker-birth-unreadable" in snap.unknowns
+    proc.returncode = 0
+    assert kbd.reap_worker_zombies() == [51004]
+    assert registry.snapshot().active == 0  # the verified exit still releases the attached token
+
+
 def test_no_registry_is_inert(monkeypatch, tmp_path):
     from hermes_cli import kanban_db_dispatch as kbd
     monkeypatch.setattr(local_work, "_registry", None)

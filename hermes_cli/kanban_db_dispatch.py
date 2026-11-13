@@ -2767,13 +2767,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
     _live_worker_procs[proc.pid] = proc
-    try:
-        birth = _process_fingerprint(proc.pid)
-    except Exception:  # health: allow BLE001 -- the child exists: custody must still attach; an unknown birth latches unknown
-        birth = None
-        if held is not None:
-            held.mark_unknown("kanban-worker-birth-unreadable")
-    _custody.adopt(proc, held, birth)
+    _custody.adopt_spawned(proc, held, _process_fingerprint)
     return proc.pid
 
 

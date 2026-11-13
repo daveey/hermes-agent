@@ -193,6 +193,7 @@ def test_audio_cancelled_queued_job_releases_and_never_runs(tmp_path, monkeypatc
     still queued releases the reservation, and the job never runs (RED on 95089d00fb: token leaked)."""
     from hermes_cli import local_work
     from hermes_cli.web_routers import audio
+    from tests.waiting import async_wait_until
 
     registry, home = setup_owner(tmp_path)
     monkeypatch.setattr(local_work, "_registry", registry)
@@ -206,8 +207,7 @@ def test_audio_cancelled_queued_job_releases_and_never_runs(tmp_path, monkeypatc
         blocker = loop.run_in_executor(None, lambda: (entered.set(), release.wait(5)))
         assert entered.wait(5)
         task = asyncio.ensure_future(audio._run_reserved("test.audio", ran.set))
-        await asyncio.sleep(0.05)
-        assert registry.snapshot().active == 1
+        await async_wait_until(lambda: registry.snapshot().active == 1, timeout=5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

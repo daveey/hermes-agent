@@ -38,6 +38,19 @@ def adopt(proc, held, birth: Optional[str]) -> None:
         held.mark_unknown("kanban-worker-custody-unattachable")
 
 
+def adopt_spawned(proc, held, fingerprint) -> None:
+    """Adopt right after Popen: the child exists, so custody must attach even when reading its birth
+    fingerprint raises (the token is kept and the registry latches unknown)."""
+    if held is None:
+        return
+    try:
+        birth = fingerprint(proc.pid)
+    except Exception:  # health: allow BLE001 -- the child exists: custody must still attach; an unknown birth latches unknown
+        birth = None
+        held.mark_unknown("kanban-worker-birth-unreadable")
+    adopt(proc, held, birth)
+
+
 def _take(pid: int, proc) -> list:
     with _lock:
         keys = [k for k, (p, _h) in _custody.items() if k[0] == int(pid) and p is proc]
