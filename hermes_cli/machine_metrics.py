@@ -86,12 +86,15 @@ _LOCAL_SQL = f"SELECT (SELECT count(*) FROM pragma_table_info('tasks') WHERE nam
 
 def _running_rows(db) -> Optional[tuple[bool, Any, list]]:
     """``(synced, own gateway id, [(task_id, run_id, pool, class, origin), ...])`` for the running rows this host
-    counts, read in one statement; ``None`` when the board's schema predates claim receipts, or has lease holders
-    without sync state (read it the long way, which decides those exactly as before)."""
+    counts, read in one statement; ``None`` when the board's schema predates claim receipts, when this SQLite lacks
+    JSON1 (``no such function: json_group_array``), or when it has lease holders without sync state (read it the long
+    way, which decides those exactly as before)."""
     for synced, sql in ((True, _SYNCED_SQL), (False, _LOCAL_SQL)):
         try:
             head, rows = db.execute(sql).fetchone()
         except sqlite3.OperationalError as exc:
+            # "no such table/column" (pre-receipt schema, unsynced board) or "no such function" (no JSON1): both
+            # fall through to the long path, which needs neither.
             if str(exc).startswith("no such "):
                 continue
             raise

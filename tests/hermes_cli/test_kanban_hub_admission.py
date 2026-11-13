@@ -18,6 +18,8 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_queue_reason as queue
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
+from tests.hermes_cli import hub_admission_support as support
+from tests.hermes_cli.hub_admission_support import advisory, claim, configure, fake_sample, refused, runs, task
 from tests.tools import test_kanban_tools as tool_helpers
 
 pytestmark = pytest.mark.platforms("posix")
@@ -25,50 +27,7 @@ pytestmark = pytest.mark.platforms("posix")
 
 @pytest.fixture
 def board(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
-    conn = kbc.connect(tmp_path / "kanban.db")
-    try:
-        yield conn, tmp_path
-    finally:
-        conn.close()
-
-
-def configure(home, limit=50, cap=None):
-    lines = ["kanban:"]
-    if cap is not None:
-        lines.append(f"  max_in_progress: {cap}")
-    if limit is not None:
-        lines += ["  admission:", f"    cpu_busy_below_pct: {limit}"]
-    (home / "config.yaml").write_text("\n".join(lines) + "\n")
-
-
-def advisory(home, pct=10.0, age_ms=0):
-    mm.record_hub_cpu_sample({"cpu_busy_pct": pct, "cpu_busy_window_ms": 1000,
-                              "cpu_busy_sample_end_ms": int(time.time() * 1000) - age_ms}, root=home)
-
-
-def task(conn, review=False, title="gate"):
-    t = kb.create_task(conn, title=title, assignee="default")
-    with kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET status=? WHERE id=?", ("review" if review else "ready", t))
-    return t
-
-
-def claim(conn, t, review):
-    return (kb.claim_review_task if review else kb.claim_task)(conn, t)
-
-
-def fake_sample(pct, calls=None, check=None):
-    def sample(*a, **k):
-        if check:
-            check()
-        if calls is not None:
-            calls.append(time.monotonic())
-        if pct is None:
-            return None
-        return {"cpu_busy_pct": pct, "cpu_busy_window_ms": 1000, "cpu_busy_sample_end_ms": int(time.time() * 1000)}
-    return sample
+    yield from support.open_board(tmp_path, monkeypatch)
 
 
 def locked(monkeypatch, read):
@@ -811,16 +770,6 @@ def test_cli_create_capacity_without_frees_refuses_cleanly(board, monkeypatch, c
     assert cli._cmd_create(args) == 2
     assert "capacity requires a one-line frees: claim" in capsys.readouterr().err
     assert kb.list_tasks(conn) == []
-
-
-def runs(conn):
-    return conn.execute("SELECT count(*) FROM task_runs").fetchone()[0]
-
-
-def refused(conn, t, review, reason):
-    assert kb.get_task(conn, t).status == ("review" if review else "ready")
-    assert runs(conn) == 0
-    assert sync.pop_claim_deferral(t) == reason
 
 
 @pytest.mark.parametrize("review", [False, True])

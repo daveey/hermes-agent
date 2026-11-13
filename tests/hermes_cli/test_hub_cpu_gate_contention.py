@@ -25,10 +25,16 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
-from tests.hermes_cli.test_kanban_hub_admission import advisory, claim, fake_sample, refused, task
-from tests.hermes_cli.test_kanban_hub_admission import board as board  # noqa: PLC0414 -- pytest fixture re-export
+from tests.hermes_cli import hub_admission_support as support
+from tests.hermes_cli.hub_admission_support import advisory, claim, fake_sample, refused, task
 
 pytestmark = pytest.mark.platforms("posix")
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    yield from support.open_board(tmp_path, monkeypatch)
+
 
 HUB_BOARDS = 10  # hermes-hub: the default board plus 9 named boards with a kanban.db
 
