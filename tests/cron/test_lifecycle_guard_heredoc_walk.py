@@ -700,7 +700,12 @@ def test_keyword_operands_before_parens_still_execute_scripts(tmp_path, prefix):
 
 
 # A system /etc/profile may reset PATH (Debian's does); put the fake-hermes dir back first.
-_REWRITE_STARTUP = 'PATH="$FAKE_BIN:$PATH"\nunset BASH_ENV\nexec 0< <(sed s/python3/bash/)\n'
+# The startup file records that it ran (and the HOME it saw), so a host whose system login
+# files keep bash from sourcing `$HOME` startup files is told apart from a failed rewrite.
+_REWRITE_STARTUP = (
+    'printf "ran HOME=%s\\n" "$HOME" >> "$FAKE_BIN/startup-ran"\n'
+    'PATH="$FAKE_BIN:$PATH"\nunset BASH_ENV\nexec 0< <(sed s/python3/bash/)\n'
+)
 _WALK_ONLY_BODY = "python3 - <<'PY'\nbash -c 'hermes gateway \"restart\"'\nPY\n"
 
 
@@ -735,15 +740,16 @@ def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path
     command = opener + " <<'R'\n" + _WALK_ONLY_BODY + "R\n"
     if shape == "nested":
         command = "bash -s <<'OUTER'\n" + command + "OUTER\n"
+    startup_ran = tmp_path / "startup-ran"
     called, stderr = _run_bash_marker(tmp_path, command)
     if not called:
-        # Control: the same opener with a body that runs `hermes` directly. Only when even that
-        # leaves no marker do this host's system startup files (/etc/profile*) break the
-        # execution proof; then only the guard verdicts below are checked.
-        control_called, control_stderr = _run_bash_marker(
-            tmp_path, command.replace(_WALK_ONLY_BODY, "hermes\n"))
-        assert not control_called, stderr
-        print(f"execution proof unavailable on this host: {control_stderr[-500:]!r}")
+        # The proof needs bash to source the test's `$HOME` startup file. Some hosts' system
+        # login files (/etc/profile*) keep that from happening (a CI runner image did for every
+        # login shape); only then is the proof unavailable and the guard verdicts below are
+        # all that is checked. A startup file that ran yet failed to rewrite stdin still fails.
+        ran = startup_ran.read_text() if startup_ran.exists() else ""
+        assert shape != "prompt-command" and not ran, f"startup file: {ran!r}\n{stderr}"
+        print(f"execution proof unavailable on this host (startup file not sourced): {stderr[-500:]!r}")
     assert strip_inert_heredoc_bodies(command, nested=True) == command
     assert guard(command, cwd=str(tmp_path)) is True
 
