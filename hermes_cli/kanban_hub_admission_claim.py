@@ -176,7 +176,7 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
             counts.defer(tid)
             continue
         calls += 1
-        fields = pickup._fields(card, board)
+        fields = pickup.card_fields(card, board)
         try:
             found = judge.admit({"title": fields["title"], "body": fields["body"]})
         except Exception:  # health: allow BLE001 -- a failed judge is unavailable: claimed as before, unjudged

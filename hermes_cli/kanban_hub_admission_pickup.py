@@ -67,7 +67,10 @@ def _labels(raw: Any) -> Optional[list[str]]:
     return wn._parse(raw)
 
 
-def _fields(card: Mapping[str, Any], board: str) -> dict:
+def card_fields(card: Mapping[str, Any], board: str) -> dict:
+    """The admission view of a ``tasks`` row, shared by the claim screen and placement-recovery promotion.
+
+    A non-list ``requires``/``skills`` reads as None; a missing column raises KeyError."""
     from hermes_cli.kanban_placement import without_placement_note
 
     def _list(raw):
@@ -147,7 +150,7 @@ def screen(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, ids:
                 _log.warning("hub admission: pickup of %s deferred, the board connection is in a transaction", tid)
             skips[tid] = ("other", UNAVAILABLE)
             continue
-        fields = _fields(card, board)
+        fields = card_fields(card, board)
         try:
             found = judge.admit({"title": fields["title"], "body": fields["body"]})
         except Exception:  # health: allow BLE001 -- a failed judge is unavailable: never claimed unjudged

@@ -96,7 +96,7 @@ def denied_target(conn, row, gateway, cfg, *, board, now=None):
     verdict = pickup.verdict(conn, row["id"])
     if not verdict or verdict.get("admit") is not False or verdict.get("forced"):
         return None
-    fields = pickup._fields(row, board)
+    fields = pickup.card_fields(row, board)
     if claim.keep_reason(conn, row, fields, cfg):
         return None
     waited = (time.time() if now is None else now) - unclaimed.ready_since(conn, row["id"], row["created_at"])

@@ -55,7 +55,7 @@ def unavailable_endpoint(hub, board, gateway, error, mode):
 
 def available_mode(conn, row, cfg, hub, board, gateway):
     # Existing policy cards still renew through reserve while recovery is unavailable.
-    return recovery_mode(conn, row, cfg) if endpoint_available(hub, board, gateway) else None
+    return recovery_mode(conn, row, cfg, board=board) if endpoint_available(hub, board, gateway) else None
 
 
 def request_assignment(hub, board, row, mode, candidates):
@@ -74,7 +74,7 @@ def unchanged_ready(conn, row):
         "AND state IN ('pending','rejected') LIMIT 1", (row["id"],)).fetchone()
 
 
-def recovery_mode(conn, row, cfg):
+def recovery_mode(conn, row, cfg, *, board="default"):
     """Propose a stale-pin recovery only from an affirmative registry observation."""
     from hermes_cli import kanban_worker_node as node
     from hermes_cli.kanban_worker_placement import requested_move
@@ -82,7 +82,7 @@ def recovery_mode(conn, row, cfg):
     if row.get("placement_policy") and requested_move(conn, row["id"]) is not None:
         return None  # an unapplied owner move takes precedence over automatic recovery
     if row.get("runs_on") is None:
-        return promotion_mode(conn, row, cfg) if row.get("placement_policy") is None else None
+        return promotion_mode(conn, row, cfg, board=board) if row.get("placement_policy") is None else None
     try:
         labels = node.normalize_runs_on(row["runs_on"])
     except (TypeError, ValueError):
@@ -136,7 +136,7 @@ def current_portable(conn, row, cfg):
         return False
 
 
-def promotion_mode(conn, row, cfg):
+def promotion_mode(conn, row, cfg, *, board="default"):
     """Legacy local routing was not a machine pin; preserve explicit durable intent.
 
     An old policy cleared by an owner repin must never be silently re-enrolled.
@@ -159,19 +159,20 @@ def promotion_mode(conn, row, cfg):
         return None
     if not current_portable(conn, row, cfg):
         return None
-    return None if hub_keep_reason(conn, row, cfg) else "promote"
+    return None if hub_keep_reason(conn, row, cfg, board=board) else "promote"
 
 
-def hub_keep_reason(conn, row, cfg):
+def hub_keep_reason(conn, row, cfg, *, board="default"):
     """The hub claim screen's reason to keep this card here (``kanban_hub_admission_claim.keep_reason``: a
     hub-local wake_check, a hub worktree in the brief, host_repo, ...), or None.
 
     Promotion must not move a card the claim screen would keep: whichever of the two reaches a legacy-routed hub
     card first decides it, so both read the same rules. An unreadable card keeps it (no promotion).
+    ``board`` is the reevaluated board (only "default" today: ``reevaluate`` returns early for any other).
     """
     from hermes_cli.kanban_hub_admission_claim import keep_reason
-    from hermes_cli.kanban_hub_admission_pickup import _fields
+    from hermes_cli.kanban_hub_admission_pickup import card_fields
     try:
-        return keep_reason(conn, row, _fields(row, "default"), cfg)
+        return keep_reason(conn, row, card_fields(row, board), cfg)
     except (KeyError, TypeError, ValueError):
         return "card fields unreadable"
