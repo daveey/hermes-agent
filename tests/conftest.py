@@ -311,9 +311,9 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     reads ``~/.hermes/*`` can't touch the real one, and pins TZ/LANG so
     datetime/locale-sensitive tests are deterministic.
     """
-    # 1. Blank every credential-shaped env var that's currently set.
+    # 1. Blank credential-shaped env vars and HERMES_BRIDGED_* markers an earlier config load leaked.
     for name in list(os.environ.keys()):
-        if _looks_like_credential(name):
+        if _looks_like_credential(name) or name.startswith("HERMES_BRIDGED_"):
             monkeypatch.delenv(name, raising=False)
 
     # 2. Blank behavioral HERMES_* vars that could change test semantics.
