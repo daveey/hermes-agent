@@ -100,6 +100,23 @@ def test_an_undelivered_steer_transfer_goes_back_with_the_wake_in_the_same_write
     assert again['admission_id'] == row['admission_id']
 
 
+def test_a_failed_steer_hand_back_rolls_the_wake_requeue_back_too(claimed, monkeypatch):
+    """[daveey] t_01a1d576521fde36: the wake re-queue and the transfer hand-back are one transaction. A hand-back
+    that fails rolls the whole write back: committed apart, a lost second write (a crash, an epoch fence, a refusal)
+    would leave the wake queued and its steer terminal ``steering`` on the dead generation, a lost user steer."""
+    db, epoch, row = claimed
+    steer = _steered(db, epoch, row)
+
+    def lost(conn, **kwargs):
+        raise RuntimeError('hand-back lost')
+    monkeypatch.setattr(rt, '_requeue_transfer', lost)
+    with pytest.raises(RuntimeError, match='hand-back lost'):
+        _requeue(db, epoch, row, transfers={steer: False})
+    wake = rt.get_session_admission(db, admission_id=row['admission_id'])
+    assert (wake['status'], wake['generation']) == ('started', row['generation'])
+    assert rt.get_session_admission(db, admission_id=steer)['outcome'] == rt.STEERING
+
+
 def test_a_steer_transfer_the_turn_took_refuses_the_requeue(claimed):
     db, epoch, row = claimed
     steer = _steered(db, epoch, row)
