@@ -541,6 +541,23 @@ class GatewayControlServer:
                 "instance_id": self.ticket_store.instance_id,
                 "profile_id": params["profile_id"], "runtime_protocol": 1}
 
+    # How long a "no symlinked component in the home's path" verdict is reused. The check is a
+    # realpath (an lstat per component) and ran on the event loop for every control connection;
+    # under FS pressure each one stalled the loop for seconds (session-ticket bootstraps queued
+    # behind it). The home itself is still lstat'ed per connection: it turning into a symlink, or
+    # its owner/mode changing, is caught at once; only an ancestor swap waits for this window.
+    _HOME_REALPATH_TTL_SECS = 30.0
+
+    def _home_unsymlinked(self, home: Path) -> bool:
+        cached = getattr(self, "_home_realpath_verdict", None)
+        now = time.monotonic()
+        if cached is not None and cached[0] == home and now - cached[1] < self._HOME_REALPATH_TTL_SECS:
+            return True
+        verdict = home.absolute() == home.resolve()
+        # Only a pass is reused: a refusal is re-checked, so a repaired home is admitted at once.
+        self._home_realpath_verdict = (home, now) if verdict else None
+        return verdict
+
     def _posix_peer_subject(self, writer) -> Optional[str]:
         # The legacy diagnostic channel may operate without bootstrap-safe metadata.
         if os.name == "nt":
@@ -549,7 +566,7 @@ class GatewayControlServer:
             from hermes_cli.gateway_runtime_discovery import home_mode_unsafe, socket_peer_uid
             home = self._home
             info = home.lstat()
-            if (home.absolute() != home.resolve() or not stat.S_ISDIR(info.st_mode)
+            if (not stat.S_ISDIR(info.st_mode) or not self._home_unsymlinked(home)
                     or info.st_uid != os.getuid() or home_mode_unsafe(info, home)):  # windows-footgun: ok — POSIX-only helper
                 return None
             uid = socket_peer_uid(writer.get_extra_info("socket"))

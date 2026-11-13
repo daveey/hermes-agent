@@ -39,6 +39,8 @@ _GATEWAY_CREDENTIAL_HEADERS = frozenset({
 _GATEWAY_QUERY_KEYS = frozenset({"token", "ticket", "internal", "display_ticket", "attach", "profile"})
 
 _profile_plugins: dict[str, list] = {}
+# Per home: the cached list last proven current (plugin dirs present) and when (monotonic).
+_profile_plugins_checked: dict[str, tuple] = {}
 # Bumped by each explicit rescan of a profile: a scan begun before it publishes neither its list nor a miss.
 _profile_rescans: dict[str, int] = {}
 # Guards these module dicts only; disk scans run without it, so a scan never blocks another caller.
@@ -87,10 +89,29 @@ def _published(key: str, rescans: int, plugins: list) -> list:
     return plugins
 
 
+def fresh_profile_dashboard_plugins(home: Path) -> Optional[list]:
+    """``home``'s cached list when its plugin dirs were proven present within the launch list's
+    stale-check window (``web_server.DASHBOARD_PLUGINS_STALE_CHECK_SECS``), else None. No disk access."""
+    from hermes_cli.web_server import DASHBOARD_PLUGINS_STALE_CHECK_SECS
+    from hermes_constants import hermes_home_key
+    key = hermes_home_key(home)
+    with _profile_plugins_lock:
+        cached = _profile_plugins.get(key)
+        checked, at = _profile_plugins_checked.get(key, (None, 0.0))
+    if cached is not None and checked is cached and time.monotonic() - at < DASHBOARD_PLUGINS_STALE_CHECK_SECS:
+        return cached
+    return None
+
+
 def profile_dashboard_plugins(home: Path, force_rescan: bool = False) -> list:
     """Dashboard plugins of the profile at ``home`` (:func:`_scan_profile_plugins`), cached per home
-    like the launch profile's list. An explicit rescan also forgets the profile's cached misses."""
+    like the launch profile's list (its plugin dirs re-checked at most once per stale-check window).
+    An explicit rescan also forgets the profile's cached misses."""
     from hermes_constants import hermes_home_key
+    if not force_rescan:
+        fresh = fresh_profile_dashboard_plugins(home)
+        if fresh is not None:
+            return fresh
     key = hermes_home_key(home)
     with _profile_plugins_lock:
         if force_rescan:
@@ -100,6 +121,9 @@ def profile_dashboard_plugins(home: Path, force_rescan: bool = False) -> list:
         cached, rescans = _profile_plugins.get(key), _profile_rescans.get(key, 0)
     if cached is None or force_rescan or any(not Path(p["_dir"]).is_dir() for p in cached):
         cached = _published(key, rescans, _scan_profile_plugins(home))
+    with _profile_plugins_lock:
+        if _profile_plugins.get(key) is cached:
+            _profile_plugins_checked[key] = (cached, time.monotonic())
     return cached
 
 
