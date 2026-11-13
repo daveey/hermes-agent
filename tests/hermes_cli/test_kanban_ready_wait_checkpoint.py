@@ -444,3 +444,30 @@ def test_board_with_nothing_due_ends_its_stall(tmp_path, monkeypatch, caplog):
         assert deferred == ["WARNING", "INFO", "WARNING"]
     finally:
         a.close()
+
+
+def test_nothing_due_sweep_of_unwarned_board_skips_lag_hold(tmp_path, monkeypatch):
+    """PR #2072 review nit 2: a sweep with nothing due never reads the replica lag for a board outside
+    ``_LAG_WARNED``, so a healthy board pays no extra replica read per tick. Another board's stall stays recorded."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    other = str(tmp_path / "lagging.db")
+    monkeypatch.setattr(cw, "_LAG_WARNED", {other})  # non-empty, so the nothing-due discard path runs
+    calls = []
+
+    def _lag_hold(conn, now=None):
+        calls.append(_db_file(conn))
+        raise AssertionError("lag_hold read on a nothing-due sweep of an unwarned board")
+
+    monkeypatch.setattr(fresh, "lag_hold", _lag_hold)
+    a = kbc.connect(tmp_path / "a.db")
+    try:
+        assert cw.sweep(a) == 0
+        assert calls == []
+        assert cw._LAG_WARNED == {other}
+    finally:
+        a.close()
