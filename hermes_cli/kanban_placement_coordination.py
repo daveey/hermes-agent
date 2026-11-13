@@ -197,12 +197,14 @@ _BACKTICK = re.compile(r"`")
 _CHDIR = re.compile(r"(?<![\w.-])(?:cd|pushd|popd)(?![\w.-])(?![ \t]+(?:~|/)(?![^\s;&|]*\.hermes)[\w./-]*(?=$|[\s;&|)]))")
 # Bash removes a whole backslash-newline before it splits words, so ``.\<NL>.`` is a ``..`` and ``c\<NL>d`` a cd
 # (review 5896219134 nit). Only ``\n`` continues a line: a backslash before ``\r`` quotes the CR, and the newline
-# after it starts a new command. Both spellings are judged, so neither join can hide a cd or ``..`` from the other.
-_CONTINUATION = re.compile(r"\\\n")
+# after it starts a new command. Only an odd run of backslashes continues: in ``x\\<NL>`` the first backslash
+# quotes the second and the newline ends the command (review 5896823155). Both spellings are judged, so neither
+# join can hide a cd or ``..`` from the other.
+_CONTINUATION = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
 
 
 def _strip_read_paths(text, roots):
-    splits = {_SPLIT.sub("", text), _SPLIT.sub("", _CONTINUATION.sub("", text))}
+    splits = {_SPLIT.sub("", text), _SPLIT.sub("", _CONTINUATION.sub(r"\1", text))}
     if (_DOTDOT.search(text) or _EXPANSION.search(text) or _PARAMETER.search(text) or _BACKTICK.search(text)
             or any(_DOTDOT.search(split) or _CHDIR.search(split) for split in splits)):
         return text
