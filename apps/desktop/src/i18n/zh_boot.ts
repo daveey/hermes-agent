@@ -11,7 +11,8 @@ export const zhBoot = {
       loadingSessions: '正在加载最近会话',
       retryingRemoteBackend: '正在重新连接远程 Hermes 后端…',
       startingDesktopConnection: '正在启动桌面连接',
-      startingHermesDesktop: '正在启动 Hermes 桌面版…'
+      startingHermesDesktop: '正在启动 Hermes 桌面版…',
+      waitingForRemoteUpdate: '正在等待远程 Hermes 更新完成…'
     },
     errors: {
       backgroundExited: 'Hermes 后台进程已退出。',

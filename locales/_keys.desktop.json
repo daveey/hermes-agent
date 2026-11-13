@@ -584,6 +584,7 @@
     "boot.steps.retryingRemoteBackend",
     "boot.steps.startingDesktopConnection",
     "boot.steps.startingHermesDesktop",
+    "boot.steps.waitingForRemoteUpdate",
     "boot.updateHold.checkAgain",
     "boot.updateHold.confirmBody",
     "boot.updateHold.confirmKeepWaiting",

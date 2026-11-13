@@ -11,7 +11,8 @@ export const enBoot = {
       loadingSessions: 'Loading recent sessions',
       retryingRemoteBackend: 'Reconnecting to the remote Hermes backend…',
       startingDesktopConnection: 'Starting desktop connection',
-      startingHermesDesktop: 'Starting Hermes Desktop…'
+      startingHermesDesktop: 'Starting Hermes Desktop…',
+      waitingForRemoteUpdate: 'Waiting for the remote Hermes update to finish…'
     },
     errors: {
       backgroundExited:

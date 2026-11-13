@@ -11,7 +11,8 @@ export const deBoot = {
       loadingSessions: 'Letzte Sessions werden geladen',
       retryingRemoteBackend: 'Wird mit dem Remote-Hermes-Backend neu verbunden…',
       startingDesktopConnection: 'Desktop-Verbindung wird gestartet',
-      startingHermesDesktop: 'Hermes Desktop wird gestartet…'
+      startingHermesDesktop: 'Hermes Desktop wird gestartet…',
+      waitingForRemoteUpdate: 'Warten, bis das Update des Remote-Hermes abgeschlossen ist…'
     },
     errors: {
       backgroundExited: 'Der Hermes-Hintergrundprozess wurde beendet.',

@@ -11,7 +11,8 @@ export const esBoot = {
       loadingSessions: 'Cargando sesiones recientes',
       retryingRemoteBackend: 'Reconectando al backend remoto de Hermes…',
       startingDesktopConnection: 'Iniciando la conexión de escritorio',
-      startingHermesDesktop: 'Iniciando Hermes Desktop…'
+      startingHermesDesktop: 'Iniciando Hermes Desktop…',
+      waitingForRemoteUpdate: 'Esperando a que termine la actualización del Hermes remoto…'
     },
     errors: {
       backgroundExited:

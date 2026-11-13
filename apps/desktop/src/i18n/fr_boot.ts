@@ -11,7 +11,8 @@ export const frBoot = {
       loadingSessions: 'Chargement des sessions récentes',
       retryingRemoteBackend: 'Reconnexion au backend Hermes distant…',
       startingDesktopConnection: 'Démarrage de la connexion desktop',
-      startingHermesDesktop: 'Démarrage de Hermes Desktop…'
+      startingHermesDesktop: 'Démarrage de Hermes Desktop…',
+      waitingForRemoteUpdate: 'En attente de la fin de la mise à jour du Hermes distant…'
     },
     errors: {
       backgroundExited: "Le processus en arrière-plan de Hermes s'est arrêté.",
