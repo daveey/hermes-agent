@@ -438,7 +438,13 @@ def test_token_authority_expires_with_the_lease(env):
     snap = ok(env, "quiet-observe-snapshot", follow_params(env, token))
     assert snap["valid"] is False and "lease_inactive" in snap["reasons"]
     env.control._lease_reader = None  # the lease is back, but the episode died with it
-    assert "PermissionError" in call(env, "quiet-observe-snapshot", follow_params(env, token))["error"]
+    dead = ok(env, "quiet-observe-snapshot", follow_params(env, token))
+    assert dead["valid"] is False and dead["phase"] == "ended" and dead["reasons"] == ["episode_ended"]
+    # The observer's best-effort end on the expired episode is answered, not a foreign-episode error.
+    ended = ok(env, "quiet-observe-end", follow_params(env, token))
+    assert ended["valid"] is False and ended["reasons"] == ["episode_ended"]
+    # A token that never belonged to the episode is still refused.
+    assert "PermissionError" in call(env, "quiet-observe-snapshot", follow_params(env, "forged"))["error"]
 
 
 def test_bookkeeping_handlers_do_not_reserve(env):

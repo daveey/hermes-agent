@@ -176,6 +176,52 @@ def test_failed_submit_keeps_enqueued_target_custody(tmp_path, monkeypatch):
     assert registry.snapshot().unknowns  # no optimistic recovery after uncertainty
 
 
+def test_submit_to_shut_down_pool_releases_without_latching(tmp_path):
+    """A stdlib pool refuses a submit after shutdown BEFORE enqueuing: release, no sticky unknown
+    (RED on 95089d00fb: the reservation leaked and 'submit-outcome-uncertain' latched)."""
+    registry, home = setup_owner(tmp_path)
+    pool = ThreadPoolExecutor(max_workers=1)
+    pool.shutdown(wait=True)
+    with pytest.raises(RuntimeError, match="shutdown"):
+        submit_tracked(pool, lambda: None, registry=registry, home=home, source="after-shutdown")
+    snap = registry.snapshot()
+    assert snap.active == 0 and snap.unknowns == ()
+
+
+def test_audio_cancelled_queued_job_releases_and_never_runs(tmp_path, monkeypatch):
+    """hermes_cli.web_routers.audio._run_reserved: cancelling the awaiting request while the job is
+    still queued releases the reservation, and the job never runs (RED on 95089d00fb: token leaked)."""
+    from hermes_cli import local_work
+    from hermes_cli.web_routers import audio
+
+    registry, home = setup_owner(tmp_path)
+    monkeypatch.setattr(local_work, "_registry", registry)
+    monkeypatch.setenv("HERMES_HOME", home)
+    entered, release, ran = threading.Event(), threading.Event(), threading.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        pool = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(pool)
+        blocker = loop.run_in_executor(None, lambda: (entered.set(), release.wait(5)))
+        assert entered.wait(5)
+        task = asyncio.ensure_future(audio._run_reserved("test.audio", ran.set))
+        await asyncio.sleep(0.05)
+        assert registry.snapshot().active == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert registry.snapshot().active == 0
+        release.set()
+        await blocker
+        pool.shutdown(wait=True)
+
+    asyncio.run(scenario())
+    assert not ran.is_set()
+    snap = registry.snapshot()
+    assert snap.active == 0 and snap.unknowns == ()
+
+
 def test_initializer_failure_releases_verified_never_started_target(tmp_path):
     registry, home = setup_owner(tmp_path)
     def fail_initializer():
