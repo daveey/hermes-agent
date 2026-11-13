@@ -64,6 +64,23 @@ def _write(conn, sql, params=()):
         conn.execute(sql, params)
 
 
+def test_in_memory_board_never_issues_a_trusted_cursor(board):
+    """Even a fully initialized board cannot vouch for a cursor without a file identity."""
+    tid = kb.create_task(board, title="in memory", assignee="w")
+    disk_cursor = _armed(board)
+    conn = sqlite3.connect(":memory:")
+    try:
+        board.backup(conn)
+        assert conn.execute("SELECT title FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "in memory"
+        assert tc.changed_since(conn, None) == (FULL, None)
+        assert tc.changed_since(conn, disk_cursor) == (FULL, None)
+        conn.execute("UPDATE tasks SET title = 'changed' WHERE id = ?", (tid,))
+        conn.commit()
+        assert tc.changed_since(conn, None) == (FULL, None)
+    finally:
+        conn.close()
+
+
 def test_a_task_write_marks_only_that_task_and_rearms(board):
     a = kb.create_task(board, title="a", assignee="w")
     b = kb.create_task(board, title="b", assignee="w")
