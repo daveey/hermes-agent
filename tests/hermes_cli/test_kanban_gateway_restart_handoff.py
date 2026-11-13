@@ -85,6 +85,7 @@ def test_managed_gateway_worker_is_spawned_in_restart_safe_scope(
     # First runs get 2x the base cap when MemAvailable admits it; pin it so the cap is host-independent.
     monkeypatch.setattr("hermes_cli.kanban_worker_scope.mem_available_bytes", lambda: 16 * 1024**3)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+    monkeypatch.setattr("hermes_cli.kanban_worker_scope._oom_continue_supported", True)  # systemd >= 253
 
     assert kbd._default_spawn(task, str(workspace)) == 4242
     assert captured_cmd[:4] == ["/usr/bin/systemd-run", "--user", "--scope", "--quiet"]
@@ -92,6 +93,8 @@ def test_managed_gateway_worker_is_spawned_in_restart_safe_scope(
     assert captured_cmd[unit_index + 1] == "hermes-worker-kanban-t_candidate_restart-run-23"
     assert "MemoryMax=1073741824" in captured_cmd
     separator = captured_cmd.index("--")
+    assert "OOMPolicy=continue" in captured_cmd[:separator]
+    assert captured_env["HERMES_KANBAN_SCOPE_OOM_POLICY"] == "continue"
     assert captured_cmd[separator + 1 :] == [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]  # Fork: -P, the workspace cwd never shadows the install
     assert task.assignee is not None
     assert captured_env["HERMES_PROFILE"] == task.assignee

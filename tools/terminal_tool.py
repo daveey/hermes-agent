@@ -963,6 +963,7 @@ from tools.terminal_tool_guards import (
 from tools.terminal_tool_background import _YIELDED_NOTE, spawn_background_process, yield_to_background_handler
 from tools.process_registry_survivable import default_persist
 from tools.terminal_tool_result import finalize_foreground_result
+from tools.terminal_oom import OomWatch
 
 
 def _resolve_notification_flag_conflict(*, notify_on_complete: bool, watch_patterns, background: bool) -> tuple:
@@ -1407,12 +1408,15 @@ def _run_foreground(
             if survivable is not None:
                 exec_kwargs.update(survivable=survivable, yield_handler=functools.partial(survivable.handoff, yielded=True))
             result = None
+            oom_watch = OomWatch() if env_type == "local" else None  # run-scope OOM kills [daveey]
             try:
                 result = env.execute(command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
                                      **exec_kwargs)
             finally:
                 if survivable is not None:
                     survivable.release(result)
+            if oom_watch is not None and isinstance(result, dict):
+                result["oom_note"] = oom_watch.note(result.get("returncode"))
             break
         except Exception as e:
             # A backend exception (e.g. an SSH connect timeout) never reached an exit status, so it

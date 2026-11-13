@@ -25,7 +25,7 @@ pytest_plugins = ["tests.hermes_cli.test_kanban_model_tier"]
 def test_classification_to_guard_and_strong_retry(board, monkeypatch, result, outcome, output):
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    monkeypatch.setattr(scope, "read_failure", lambda *a: {
+    monkeypatch.setattr(scope, "read_failure", lambda *a, **kw: {
         "scope_result": result, "systemd_unit": "test.scope",
         "memory_max_bytes": 67108864, "memory_peak_bytes": 67239936,
     } if result else None)
@@ -91,7 +91,7 @@ def test_oom_reclaim_does_not_take_a_second_write_txn(board, monkeypatch):
     """
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    monkeypatch.setattr(scope, "read_failure", lambda *a: {
+    monkeypatch.setattr(scope, "read_failure", lambda *a, **kw: {
         "scope_result": "oom-kill", "systemd_unit": "test.scope",
         "memory_max_bytes": 67108864, "memory_peak_bytes": 67239936,
     })

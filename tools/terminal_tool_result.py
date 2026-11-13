@@ -242,7 +242,7 @@ def finalize_foreground_result(
     # prefix. Real prefixes, auth headers, JWTs, private keys are masked in both modes. See issue #43025.
     output = redact_terminal_output(output.strip(), command) if output else ""
 
-    exit_note = _interpret_exit_code(command, returncode)
+    exit_note = result.get("oom_note") or _interpret_exit_code(command, returncode)
     failure_hint = _failure_hint(command, returncode, output, exit_note)
     # cwd echo when the command changed directory (gated on the observation
     # flag so an interrupted command can't echo another session's cwd).

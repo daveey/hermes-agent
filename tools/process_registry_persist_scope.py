@@ -1,7 +1,8 @@
 """A persist_on_release job leaves its spawner's systemd user unit. [daveey]
 
-A Kanban worker runs in ``hermes-worker-kanban-<task>-run-<n>.scope`` (OOMPolicy=stop,
-KillMode=control-group), which systemd stops when the run OOMs and the dispatcher stops after the
+A Kanban worker runs in ``hermes-worker-kanban-<task>-run-<n>.scope`` (KillMode=control-group;
+OOMPolicy=continue on systemd >= 253, else stop, which stops the run on any OOM kill), which the
+dispatcher stops after the
 run ends. A ``persist_on_release`` job spawned inside it died with the worker (a paid-rental
 watchdog on the hub, 2026-11-03), so it gets its own transient scope in the same
 aggregate-bounded ``hermes-kanban.slice``, with the run scope's own memory cap.
