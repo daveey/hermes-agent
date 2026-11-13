@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import subprocess
 import sys
@@ -34,10 +35,11 @@ def claim_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 
 
 def remote_head(url: str, branch: str, *, timeout: float = 30.0) -> Optional[str]:
-    """``git ls-remote <url> <branch>`` (the manifest's branch ref), None when absent."""
+    """``git ls-remote <url> <branch>`` (the manifest's branch ref), None when absent. Never prompts (batch env)."""
+    from hermes_cli.kanban_source_clones import _BATCH_ENV
     out = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "ls-remote", url, branch], capture_output=True,
                          text=True, encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL,
-                         check=False)
+                         check=False, env={**os.environ, **_BATCH_ENV})
     if out.returncode != 0:
         raise RuntimeError(f"git ls-remote {url} failed: {out.stderr.strip()[-200:]}")
     for line in out.stdout.splitlines():

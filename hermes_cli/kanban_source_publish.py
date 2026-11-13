@@ -295,6 +295,7 @@ def publish(conn: sqlite3.Connection, task: Any, run: board_calls.AttachedRun, c
     if not seen.head or not seen.branch:
         raise PublishRefused("source_lost", f"{path} is gone or has no branch checked out")
     clone = prove_origin(path, cfg, lookup=lookup)
+    deadline.left()  # the proof (GitHub API + ls-remote, each with its own cap) counts against the S6 budget
     default_name, default_sha = _default_branch(deadline, path)
     remote = ls_remote(deadline, path, seen.branch)
     check_branch(task.id, seen.branch, manifest_branch=(prior or {}).get("branch"),

@@ -196,9 +196,7 @@ def release_with_receipt(conn: sqlite3.Connection, task_id: str, run_id: int, re
                           error=error)
         return "outbox"
     with write_txn(conn):
-        conn.execute("CREATE TABLE IF NOT EXISTS kanban_failure_commands (run_uid TEXT PRIMARY KEY, task_id TEXT NOT "
-                     "NULL REFERENCES tasks(id) ON DELETE CASCADE, op_id TEXT NOT NULL)")
-        conn.execute("INSERT OR IGNORE INTO kanban_failure_commands VALUES (?, ?, ?)", (uid, task_id, "sync"))
+        release.mark_sent(conn, uid, task_id)
     return "sync"
 
 

@@ -53,6 +53,18 @@ def queued(conn: sqlite3.Connection, run_id: int | None) -> bool:
                         (sync.run_uid(conn, run_id),)).fetchone() is not None
 
 
+def _ensure_commands(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS kanban_failure_commands ("
+                 "run_uid TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, "
+                 "op_id TEXT NOT NULL)")
+
+
+def mark_sent(conn: sqlite3.Connection, run_uid: str, task_id: str) -> None:
+    """Record that ``run_uid``'s release went to the Board synchronously (first wins: no later outbox release)."""
+    _ensure_commands(conn)
+    conn.execute("INSERT OR IGNORE INTO kanban_failure_commands VALUES (?, ?, ?)", (run_uid, task_id, "sync"))
+
+
 def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
           outcome: str, error: str, **policy) -> bool:
     """True means Board authority owns this failure (including an already queued run).
@@ -70,9 +82,7 @@ def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
         raise ValueError("failure release run belongs to another task")
     if not conn.in_transaction:
         raise ValueError("failure release requires a write transaction")
-    conn.execute("CREATE TABLE IF NOT EXISTS kanban_failure_commands ("
-                 "run_uid TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, "
-                 "op_id TEXT NOT NULL)")
+    _ensure_commands(conn)
     op_id = sync.uuid7()
     inserted = conn.execute("INSERT OR IGNORE INTO kanban_failure_commands VALUES (?, ?, ?)",
                             (uid, task_id, op_id)).rowcount

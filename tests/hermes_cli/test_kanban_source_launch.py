@@ -147,6 +147,20 @@ def test_grant_carries_source_protocol_only_from_dispatcher(conn, board):
     assert kbs.grant_protocol() is None
 
 
+def test_dispatcher_admitted_claim_acquires_with_source_protocol(conn, board, monkeypatch):
+    """The real admitted_claim -> claim gate -> lease acquire path carries ``source_protocol: 1``."""
+    from hermes_cli import kanban_db_dispatch as d
+    from hermes_cli import kanban_db_dispatch_admission as admission
+    monkeypatch.setattr("hermes_cli.kanban_capsule_admission.claim_refusal", lambda *a, **kw: None)
+    tid = kb.create_task(conn, title="dispatched", assignee="worker")
+    claimed = admission.admitted_claim(conn, tid, "worker", "ready", 900, lambda task, path: None,
+                                       d.DispatchResult())
+    assert claimed is not None and claimed.id == tid
+    acquires = [b for k, b in board.calls if k == "acquire"]
+    assert acquires and acquires[-1].get("source_protocol") == 1
+    assert kbs.grant_protocol() is None  # the protocol never leaks past that one call
+
+
 def test_attach_refused_releases_unused_grant_and_never_spawns(conn, board, dispatcher):
     dispatcher.snapshot = _source_snapshot()
     board.refuse["source_attach"] = "custody_attached"
@@ -238,6 +252,49 @@ def test_post_pid_failure_kills_worker_and_sends_retained(conn, board, dispatche
     assert dispatcher.terminated == [4242]
     receipt = board.body("release")["source_receipt"]
     assert receipt["state"] == "retained" and receipt["reason"] == "post_spawn_failure"
+
+
+def _git_source(dispatcher):
+    """Make the resolver's directory a real worktree on ``wt/exact``; returns its HEAD."""
+    from tests.hermes_cli.test_kanban_source_resolver import git as _git
+    path = dispatcher.path
+    _git(path.parent, "init", "-q", str(path))
+    _git(path, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty", "-m", "x")
+    _git(path, "checkout", "-q", "-b", "wt/exact")
+    return _git(path, "rev-parse", "HEAD")
+
+
+def test_admission_refusal_after_attach_is_a_pre_spawn_abort(conn, board, dispatcher, monkeypatch):
+    """A model/admission refusal raised after attach but before spawn (stage pre_spawn) never started a process:
+    one receipt-carrying release (unchanged + abort pre_spawn), nothing spawned, no second release."""
+    head = _git_source(dispatcher)
+    dispatcher.snapshot = kws.SourceSnapshot(json.dumps(manifest(commit=head)), kws.Custody("hub", "published", 3))
+
+    def refuse(*a, **kw):
+        raise RuntimeError("no independent reviewer model is available")
+    monkeypatch.setattr("hermes_cli.kanban_model_tier.apply_model_tier", refuse)
+    spawned = []
+    tid, _, used = dispatcher.run(lambda task, path: spawned.append(task.id))
+    assert not used and spawned == []
+    assert "source_attach" in board.actions()
+    releases = [b for k, b in board.calls if k == "release"]
+    assert len(releases) == 1
+    receipt = releases[0]["source_receipt"]
+    assert (receipt["state"], receipt["abort"], receipt["commit"]) == ("unchanged", "pre_spawn", head)
+    assert _outbox_releases(conn, tid) == []
+
+
+def test_old_board_attach_400_on_source_card_never_spawns(conn, board, dispatcher):
+    """A source card whose grant carried a snapshot but whose attach meets an old Board (400 action list) must not
+    run outside custody: the grant is released unused and nothing spawns."""
+    dispatcher.snapshot = _source_snapshot()
+    board.old = True
+    spawned = []
+    _, result, used = dispatcher.run(lambda task, path: spawned.append(task.id))
+    assert not used and spawned == []
+    assert any(code.startswith("workspace_source_attach_refused:board_lacks_source")
+               for _, code in result.respawn_guarded)
+    assert kbs.board_lacks_source()
 
 
 def test_spawn_error_of_unknown_kind_is_not_trusted_as_not_started(conn, board, dispatcher):
