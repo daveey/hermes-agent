@@ -14,6 +14,7 @@ import shlex
 import socket
 import threading
 import time
+from pathlib import Path
 
 from agent.thread_scoped_output import thread_scoped_silence
 from tools.registry import tool_error
@@ -113,6 +114,8 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
         logger.error("Tool call failed in %s: %s", where, exc, exc_info=True)
         result = tool_error(str(exc))
     tool_call_counter[0] += 1
+    if tool_name == "terminal":
+        result = _complete_terminal_output(result)
     entry = {"tool": tool_name, "args_preview": str(tool_args)[:80],
              "duration": round(time.monotonic() - call_start, 2)}
     error = _result_error(result)
@@ -120,6 +123,44 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
         entry["error"] = error
     tool_call_log.append(entry)
     return result
+
+
+_FULL_OUTPUT_READ_CAP_BYTES = 20 * 1024 * 1024
+_SPILL_CAPPED_MARK = "[spill capped at "
+
+
+def _read_full_output(path) -> str | None:
+    """The terminal spill file's text when it holds the WHOLE output, else None (missing,
+    unreadable, over the read cap, or itself capped by the collector)."""
+    try:
+        spill = Path(str(path))
+        if spill.stat().st_size > _FULL_OUTPUT_READ_CAP_BYTES:
+            return None
+        text = spill.read_text(encoding="utf-8-sig", errors="replace")
+    except (OSError, ValueError):
+        return None
+    return None if _SPILL_CAPPED_MARK in text[-200:] else text.strip()
+
+
+def _complete_terminal_output(result):
+    """Give code the complete stdout of a sandbox ``terminal()`` call. The terminal tool
+    renders a head+tail window sized for the chat; a script that writes ``output`` to disk
+    as data must not get that window (defect agent-7ac9c5fa93: a checksum manifest shipped
+    the truncation marker). The spill file is already ANSI-stripped and redacted by the
+    terminal tool. ``truncated`` tells the script whether ``output`` is whole."""
+    try:
+        body = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(body, dict) or not isinstance(body.get("output"), str):
+        return result
+    spill_path = body.get("full_output_path")
+    full = _read_full_output(spill_path) if spill_path else None
+    if full is not None:
+        body["output"] = full
+        body.pop("truncation_note", None)
+    body["truncated"] = bool(spill_path) and full is None
+    return json.dumps(body, ensure_ascii=False)
 
 
 def _result_error(result) -> str:

@@ -718,6 +718,16 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
             result["cwd"] = cwd_path
         result["output"] = cleaned
 
+    def strip_session_markers(self, text: str) -> str:
+        """*text* without this session's pipe-status and cwd marker lines. The spill file holds
+        the raw stream, so it still carries the markers ``_extract_cwd_from_output`` removed
+        from the rendered window."""
+        for marker in (self._pipe_marker, self._cwd_marker):
+            split = _split_cwd_marker(text, marker) if marker else None
+            if split is not None:
+                text = split[1]
+        return text
+
     # --- Hooks ---
     def _before_execute(self) -> None:
         """Hook before each command. Remote backends (SSH, Modal, Daytona)
