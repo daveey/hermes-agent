@@ -499,10 +499,13 @@ def test_unjudged_claims_is_empty_before_the_gate_and_ignores_later_verdicts(gws
     with kb.write_txn(hub.conn):  # a verdict recorded after the claim does not make that claim judged
         kb._append_event(hub.conn, early, "hub_admission", {"admit": True, "entry": "move"})
         # Same second as the claim: the gate opens no later than the claim (else the claim predates the gate
-        # and is rightly ignored), but the verdict still follows it by event id.
+        # and is rightly ignored), but the verdict still follows it by event id. The claim is the Board's
+        # holder-tagged one, stamped at grant time: the local lock claim lands after it and can fall in the next
+        # second, which would open the gate after the claim.
         hub.conn.execute(
             "UPDATE task_events SET created_at = (SELECT MAX(created_at) FROM task_events WHERE task_id = ? "
-            "AND kind = 'claimed') WHERE task_id = ? AND kind = 'hub_admission'", (early, early))
+            "AND kind = 'claimed' AND json_extract(payload, '$.holder') = ?) "
+            "WHERE task_id = ? AND kind = 'hub_admission'", (early, HUB, early))
     assert [tid for tid, _at in hac.unjudged_claims(hub.conn, HUB)] == [early]
     audited = _hub_card(hub, title="admitted at creation",
                         placement_audit={"hub_admission": {"admit": True, "entry": "create", "why": "ok"}})
