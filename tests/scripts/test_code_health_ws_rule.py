@@ -1,4 +1,4 @@
-"""HX018: a websockets connection opened without ``logger=`` (the library then logs a handled keepalive drop as
+"""HX902: a websockets connection opened without ``logger=`` (the library then logs a handled keepalive drop as
 ERROR + traceback; regression for self-heal defect agent-ac35b4d534)."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from scripts.code_health.py_rules import CHECKERS, Ctx, canonical_tree
 
 
 def _hits(src: str) -> list[int]:
-    return sorted(set(CHECKERS["HX018"](canonical_tree(ast.parse(src)), Ctx())))
+    return sorted(set(CHECKERS["HX902"](canonical_tree(ast.parse(src)), Ctx())))
 
 
 @pytest.mark.parametrize("src, flagged", [
@@ -39,7 +39,7 @@ def test_ws_without_logger_shapes(src, flagged):
 
 
 def test_scope_is_production_code():
-    rule = RULES_BY_ID["HX018"]
+    rule = RULES_BY_ID["HX902"]
     assert rule_applies(rule, "hermes_cli/kanban_sync_client.py")
     assert rule_applies(rule, "plugins/platforms/buzz/adapter.py")
     assert not rule_applies(rule, "tests/hermes_cli/test_kanban_feed_keepalive.py")

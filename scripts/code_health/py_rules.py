@@ -16,6 +16,7 @@ import itertools
 from scripts.code_health.py_ast import _FUNCS, Ctx, _call_name, _deferred_parts, _dotted, _eager
 from scripts.code_health.py_rules_contextmanager import swallowed_yield
 from scripts.code_health.py_rules_error_predicate import private_error_predicate
+from scripts.code_health.py_rules_log_content import user_content_in_log
 from scripts.code_health.py_rules_sleep import wall_clock_sleep
 from scripts.code_health.py_rules_websockets import ws_without_logger
 from scripts.code_health.py_rules_sqlite import untracked_state_connect
@@ -922,6 +923,7 @@ CHECKERS: dict[str, Callable[[ast.Module, Ctx], Iterable[int]]] = {
     "HX014": private_error_predicate,
     "HX015": untracked_state_connect,
     "HX016": legacy_profile_setter,
-    "HX017": swallowed_yield,
-    "HX018": ws_without_logger,
+    "HX017": user_content_in_log,
+    "HX901": swallowed_yield,
+    "HX902": ws_without_logger,
 }

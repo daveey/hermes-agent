@@ -164,20 +164,26 @@ RULES: tuple[Rule, ...] = (
          " `sleep(0)` to yield is fine. A delay that IS the behaviour under test takes"
          " `# health: allow HX013 -- <why>`", "ast", include=TESTS, exclude=()),
 
+    # Fork-only rules are numbered HX9xx so upstream's HX0xx sequence cannot collide with them.
     # Error handling: the caller's exception is thrown in at a contextmanager's yield.
-    Rule("HX017", "@contextmanager swallows the caller's error at a yield it can reach again", "a broad `except`"
+    Rule("HX901", "@contextmanager swallows the caller's error at a yield it can reach again", "a broad `except`"
          " around `yield` eats the `with` block's own error and, on a second yield, becomes \"generator"
          " didn't stop after throw()\". Find the resource inside the `try`, then yield it outside any"
          " handler (keep what it opened alive with `contextlib.ExitStack`), or re-raise", "ast"),
     # Logs: websockets reports a handled keepalive drop as ERROR + traceback unless the caller owns the logger.
-    Rule("HX018", "websockets connection without logger=", "pass `logger=ws_logger()`"
+    Rule("HX902", "websockets connection without logger=", "pass `logger=ws_logger()`"
          " (`hermes_cli.ws_logging`; `ws_logger(\"server\")` for `serve`): the library logs a peer that stopped"
          " answering pings as `ERROR keepalive ping failed` + traceback even when this code handles the drop",
          "ast", exclude=TESTS + ("scripts/*", "evals/*")),
     Rule("HX014", "private API-error predicate", "use `classify_api_error` (`agent.auxiliary_error_policy`"
          " on the aux path); add the phrasing to its pattern tables", "ast",
          include=("agent/auxiliary*.py", "agent/context_compressor*.py", "agent/turn_*.py")),
-
+    # Logs reach `hermes debug share` and bug reports: user content and identities stay out of INFO+.
+    Rule("HX017", "user content or identity logged at INFO+", "log the metadata, not the value:"
+         " `len(text)`, an id or a short hash (`gateway.platforms.helpers.hash_for_log`), or a"
+         " redacted form (`redact_phone`); the verbatim value goes to `logger.debug`. A content-named"
+         " value that holds no user data (a config string) takes `# health: allow HX017 -- <why>`",
+         "ast", include=("gateway/*", "plugins/platforms/*")),
 )
 
 RULES_BY_ID = {rule.id: rule for rule in RULES}
