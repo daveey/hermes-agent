@@ -95,6 +95,7 @@ OWN_RESULT_TAIL = 512
 OWN_RESULT_INTRO = "The call's own result when the update cancelled it:"
 OWN_RESULT_END = "[end of the cancelled call's own result]"
 # The executor's own text for a call the interrupt abandoned or skipped (tool_executor): no result of the call.
+# Its ``emit_cancelled`` JSON for a KeyboardInterrupt mid-tool is the same (``_executor_cancelled_json``).
 _EXECUTOR_CANCEL_PREFIXES = ("[Tool execution cancelled \u2014 ", "[Tool execution skipped \u2014 ")
 
 
@@ -105,13 +106,26 @@ def with_own_result(stamp: str, result: Any) -> str:
     result whose last line is an executor's ``[Command interrupted]`` marker from reading as an interrupted
     result on replay (``replay_cleanup.is_interrupted_tool_result``), which would rewrite it away again."""
     if not isinstance(result, str) or not result.strip() or result == stamp \
-            or result.startswith(_EXECUTOR_CANCEL_PREFIXES):
+            or result.startswith(_EXECUTOR_CANCEL_PREFIXES) or _executor_cancelled_json(result):
         return stamp
     kept = result.strip()
     if len(kept) > OWN_RESULT_HEAD + OWN_RESULT_TAIL:
         omitted = len(kept) - OWN_RESULT_HEAD - OWN_RESULT_TAIL
         kept = f"{kept[:OWN_RESULT_HEAD]}\n[... {omitted} chars omitted ...]\n{kept[-OWN_RESULT_TAIL:]}"
     return f"{stamp}\n{OWN_RESULT_INTRO}\n{kept}\n{OWN_RESULT_END}"
+
+
+def _executor_cancelled_json(result: str) -> bool:
+    """``result`` is ``_ToolCallRef.emit_cancelled``'s JSON (a KeyboardInterrupt mid-tool): the executor's own
+    text, not the call's result (t_01a1d4b4c463cc06, review 5890290599 on #2062)."""
+    if '"cancelled"' not in result:
+        return False
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("status") == "cancelled" \
+        and str(parsed.get("error") or "").startswith("Tool execution cancelled")
 
 
 @contextmanager

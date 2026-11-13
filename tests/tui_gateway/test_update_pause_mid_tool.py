@@ -501,6 +501,23 @@ def test_a_cancelled_calls_resume_handle_survives_the_stamp(tmp_path):
     assert "check its outcome before re-running" in stamp and "re-run if still needed" not in text
 
 
+def test_the_executors_cancelled_json_is_no_own_result(tmp_path):
+    """t_01a1d4b4c463cc06 (review 5890290599 on #2062): ``_ToolCallRef.emit_cancelled``'s JSON is the executor's
+    text for a KeyboardInterrupt mid-tool, not the call's result, so the bare stamp is committed."""
+    from agent.tool_executor import _ToolCallRef
+
+    agent = _make_agent(tmp_path, "long_job")
+    update_pause_cancel.started(agent, "c1")
+    assert update_pause_cancel.cancel(agent, "stamp") == ["c1"]
+    with patch("agent.tool_executor._emit_terminal_post_tool_call"):
+        executor_text = _ToolCallRef("long_job", {}, "t", "c1", []).emit_cancelled(agent, time.time())
+    assert json.loads(executor_text)["status"] == "cancelled"
+    assert update_pause_cancel.committed(agent, "c1", executor_text) == ("stamp", True)
+    # A tool's own JSON that only says cancelled (no executor wording) is still its result.
+    own = json.dumps({"status": "cancelled", "error": "job cancelled by the remote", "job_id": "j-1"})
+    assert update_pause_cancel.with_own_result("stamp", own) != "stamp"
+
+
 def test_a_long_own_result_keeps_its_head_and_tail_within_about_2kb():
     head, middle, tail = '{"job_id": "j-1", "output": "', "x" * 50_000, '", "session_id": "proc_9"}'
     text = update_pause_cancel.with_own_result("stamp", head + middle + tail)
