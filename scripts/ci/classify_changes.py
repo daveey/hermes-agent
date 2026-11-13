@@ -55,10 +55,15 @@ Lanes:
   terminal tool, or the real-backend tests runs it on the PR.
 * ``hermes_state`` — tests/hermes_state/ on the real macOS mini
   (hermes-state-macos.yml): the state modules, their tests, the shared pytest
-  harness and the dependency manifests. An empty diff, a ``.github/`` change or
-  a list at the compare API's 300-file cap runs it. ci.yaml's ``detect`` turns
-  it off on a non-release main push: the standalone workflow's 4-hourly
-  schedule tests main.
+  harness and the dependency manifests. An empty diff, a list at the compare
+  API's 300-file cap or a CI-config change outside ``.github/`` runs it. Under
+  ``.github/`` only the lane's own wiring (:data:`HERMES_STATE_WIRING`) does: the
+  lane runs no local action, so another workflow edit cannot change what it does
+  on the mini, and 3 of 31 mini runs on 2026-11-13 were for such edits
+  (t_01a1d58663f79436). ci.yaml's ``detect`` turns it off on a non-release main
+  push: the standalone workflow's 4-hourly schedule tests main. On a
+  same-repository PR, ``detect`` also turns it off when this PR already passed
+  the lane on the same lane-surface content (scripts/ci/macos_state_reuse.py).
 * ``native_memory`` — the Darwin memory reader's ABI and no-fork tests on the
   real macOS mini (native-memory-macos.yml). Those tests are
   ``platforms("macos")`` and skip on every Linux lane, so a PR that touches one
@@ -79,7 +84,9 @@ must never skip one a change could break:
 * The slow lanes above are the one deliberate exception. On a pull request
   they skip changes that could still break them, and main is where those
   changes meet the suite. Their path lists decide which PRs run them early.
-* An empty diff, or any ``.github/`` change, runs everything.
+* An empty diff, or any ``.github/`` change, runs everything, except the two
+  mini lanes: a ``.github/`` change starts ``native_memory`` or ``hermes_state``
+  only when it is that lane's own wiring.
 * ``python`` is a denylist: skipped only when *every* file is provably prose
   or a frontend-only package; an unrecognized path keeps it on.
 * ``skills/`` (incl. ``SKILL.md``) is python-relevant — the skill-doc tests
@@ -307,6 +314,15 @@ HERMES_STATE_IMPORTS = (
 _HERMES_STATE_PATHS = (
     "hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS, *HERMES_STATE_IMPORTS,
 )
+# The only .github/ files that change what the macOS state lane runs: the lane itself and
+# its caller. The lane uses no local action (tests/ci/test_macos_state_routing.py checks).
+HERMES_STATE_WIRING = (".github/workflows/hermes-state-macos.yml", ".github/workflows/ci.yaml")
+
+
+def hermes_state_files(files: list[str]) -> list[str]:
+    """The changed files that start the macOS state lane, ignoring the empty-diff and cap rules."""
+    return [f for f in files
+            if f.startswith(_HERMES_STATE_PATHS) or f in HERMES_STATE_WIRING or f in _CI_CONFIG_FILES]
 # The native memory lane (native-memory-macos.yml): the Darwin memory reader, its one
 # caller, their macOS-only tests and the lane's own wiring. Exact files, kept equal to the
 # standalone workflow's ``push.paths`` by tests/ci/test_native_memory_gate.py.
@@ -775,9 +791,8 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         "rust": any(_is_rust(f) for f in files),
         "remote_backends": any(f.startswith(_REMOTE_BACKEND_PATHS) for f in files),
         "catalog": catalog,
-        # A capped list may omit the state files, so it runs the lane.
-        "hermes_state": len(files) >= COMPARE_FILE_CAP
-        or any(f.startswith(_HERMES_STATE_PATHS) for f in files),
+        # A capped list may omit the state files, so it runs the lane; so does an empty diff.
+        "hermes_state": not files or len(files) >= COMPARE_FILE_CAP or bool(hermes_state_files(files)),
         # Exact paths only: an empty diff or a capped list may hide them, so those run it.
         "native_memory": not files or len(files) >= COMPARE_FILE_CAP
         or any(f in NATIVE_MEMORY_PATHS for f in files),
@@ -803,7 +818,8 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         ret["rust"] = True
         ret["remote_backends"] = True
         ret["catalog"] = True
-        ret["hermes_state"] = True
+        # hermes_state is not forced here: only its own wiring under .github/ starts it,
+        # and the empty diff and CI-config files already do above.
         ret.update(dict.fromkeys(_slow_lanes([]), True))
     return ret
 

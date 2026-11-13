@@ -55,6 +55,9 @@ DEFAULT = {
 }
 # An empty (failed) diff may hide the native memory paths, so it runs that lane too.
 EMPTY_DIFF = {**DEFAULT, "native_memory": True}
+# A .github/ change outside the mini lanes' own wiring holds neither: those lanes run no local
+# action, so the edit cannot change what runs on the mini (t_01a1d58663f79436).
+GITHUB_CHANGE = {**DEFAULT, "hermes_state": False}
 
 SLOW_LANES = {"docker", "nix", "e2e", "e2e_upgrade", "e2e_desktop_core", "e2e_desktop_update"}
 
@@ -348,7 +351,7 @@ CASES = {
     ),
     "workflow yml → fail-open all": (
         [".github/workflows/typecheck.yml"],
-        DEFAULT,
+        GITHUB_CHANGE,
     ),
     # The bootstrap installer lane: shell installer, dev-checkout wrapper,
     # and the Tauri app's non-Rust sources.
@@ -366,7 +369,7 @@ CASES = {
     ),
     "composite action → fail-open all": (
         [".github/actions/retry/action.yml"],
-        DEFAULT,
+        GITHUB_CHANGE,
     ),
     "desktop src → frontend only": (
         ["apps/desktop/src/app.tsx"],
@@ -476,8 +479,11 @@ CASES = {
         _lanes(python=True, scan=True, catalog=True),
     ),
     # Fail open: CI-config / empty / blank diffs run everything.
-    ".github change → all": ([".github/workflows/tests.yml"], DEFAULT),
-    "action change → all": ([".github/actions/detect-changes/action.yml"], DEFAULT),
+    ".github change → all": ([".github/workflows/tests.yml"], GITHUB_CHANGE),
+    "action change → all": ([".github/actions/detect-changes/action.yml"], GITHUB_CHANGE),
+    # The state lane's own wiring: the lane workflow and its caller.
+    "state lane workflow → all": ([".github/workflows/hermes-state-macos.yml"], DEFAULT),
+    "ci caller → all": ([".github/workflows/ci.yaml"], DEFAULT),
     # Workflows call just recipes, so the recipes are CI config too.
     "justfile change → all": (["justfile"], DEFAULT),
     "recipe python wrapper → all": (["scripts/hermes-python"], DEFAULT),
@@ -488,7 +494,7 @@ CASES = {
         ["hermes_cli/machine_metrics.py"], _lanes(python=True, scan=True, native_memory=True),
     ),
     "native memory workflow → native_memory only of the mac lanes": (
-        [".github/workflows/native-memory-macos.yml"], DEFAULT | {"native_memory": True},
+        [".github/workflows/native-memory-macos.yml"], GITHUB_CHANGE | {"native_memory": True},
     ),
     "neighbouring memory module → no native_memory": (
         ["hermes_cli/machine_memory.py"], _lanes(python=True, scan=True),

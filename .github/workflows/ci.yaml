@@ -113,6 +113,7 @@ jobs:
       e2e_desktop_core: ${{ steps.gate-lanes.outputs.e2e_desktop_core }}
       e2e_desktop_update: ${{ steps.gate-lanes.outputs.e2e_desktop_update }}
       hermes_state: ${{ steps.gate-lanes.outputs.hermes_state }}
+      hermes_state_reuse_key: ${{ steps.state-reuse-key.outputs.key }}
       native_memory: ${{ steps.gate-lanes.outputs.native_memory }}
       event_name: ${{ github.event_name }}
       python_changed: ${{ steps.python-plan.outputs.changed }}
@@ -128,6 +129,24 @@ jobs:
         uses: ./.github/actions/detect-changes
         with:
           github-token: ${{ github.token }}
+      - name: Key the macOS state lane by its surface content
+        # A same-repository PR whose earlier run already passed the mini lane on the same
+        # content of every changed file that routes it skips the lane (scripts/ci/
+        # macos_state_reuse.py). No key (fork PR, release, empty/capped diff) = no reuse.
+        id: state-reuse-key
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && inputs.release != true && steps.classify.outputs.hermes_state == 'true'
+        run: python3 scripts/ci/macos_state_reuse.py key --files "$RUNNER_TEMP/detect-changed-files.txt"
+      - name: Look up this PR's earlier mini lane pass
+        # Saved by macOS state required (v1) after a pass. A PR run reads only its own
+        # PR's and main's caches, and main never saves one. A lookup error is a miss.
+        id: state-reuse
+        if: steps.state-reuse-key.outputs.key != ''
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/hermes-state-macos-pass
+          key: ${{ steps.state-reuse-key.outputs.key }}
+          lookup-only: true
       - name: Force all lanes on release; E2E only on release or dispatch
         # Overwrite the classifier outputs with 'true' when inputs.release. The E2E
         # lanes are forced off unless this is a release run or a manual dispatch
@@ -136,25 +155,33 @@ jobs:
         # native memory lanes are off on a main push (hermes-state-macos.yml tests
         # main from its own 4-hourly schedule, and native-memory-macos.yml from
         # its own push trigger, so required PR jobs never queue behind a main-push
-        # CI run on the one mini runner) and on for a dispatch or a release.
+        # CI run on the one mini runner) and on for a dispatch or a release. A PR's
+        # macOS state lane is off when this PR already passed it on the same
+        # lane-surface content (state-reuse above).
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
           EVENT_NAME: ${{ github.event_name }}
           TEST_REF: ${{ inputs.commit || github.ref }}
           CLASSIFIED: ${{ toJSON(steps.classify.outputs) }}
+          STATE_REUSED: ${{ steps.state-reuse.outputs.cache-hit }}
         run: |
           python3 - <<'PY'
           import json, os
           values = json.loads(os.environ['CLASSIFIED'])
           release = os.environ['RELEASE'] == 'true'
           e2e_allowed = release or os.environ['EVENT_NAME'] == 'workflow_dispatch'
+          reused = (os.environ['STATE_REUSED'] == 'true' and os.environ['EVENT_NAME'] == 'pull_request'
+                    and not release)
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               for lane, value in values.items():
                   if lane.startswith('e2e') and not e2e_allowed:
                       value = 'false'
                   elif (lane in ('hermes_state', 'native_memory') and os.environ['EVENT_NAME'] == 'push'
                         and os.environ['TEST_REF'] == 'refs/heads/main' and not release):
+                      value = 'false'
+                  elif lane == 'hermes_state' and reused:
+                      print('hermes_state: this PR already passed the mini lane on this surface content')
                       value = 'false'
                   elif release and value in ('true', 'false'):
                       value = 'true'
@@ -648,3 +675,16 @@ jobs:
           if [ "$RELEASE" = true ]; then args+=(--release);
           elif [ "$EVENT_NAME" = pull_request ]; then args+=(--allow-superseded); fi
           printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"
+      - name: Record the mini lane pass for this PR's later runs
+        # Only a lane that ran and passed in this run; the key is empty off a same-repo PR.
+        id: state-pass
+        if: success() && needs.hermes-state-macos.result == 'success' && needs.detect.outputs.hermes_state_reuse_key != ''
+        continue-on-error: true
+        run: printf '%s\n' "$GITHUB_RUN_ID" > /tmp/hermes-state-macos-pass
+      - name: Save the mini lane pass
+        if: steps.state-pass.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/hermes-state-macos-pass
+          key: ${{ needs.detect.outputs.hermes_state_reuse_key }}
