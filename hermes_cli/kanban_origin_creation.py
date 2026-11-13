@@ -86,10 +86,17 @@ OWNER_WRITTEN = "owner_written"
 
 def origin_link_fields(conn, task_id: str, origin: dict) -> dict:
     """``{"origin_chat_link": "owner_written"}`` for the courier result when this owner holds the origin chat's
-    unreleased ``created`` link and its Board sync runs, so the link reaches the Board without the origin; ``{}``
-    otherwise. [daveey] The origin reads this answer instead of guessing from the chat id's shape: an owner on older
-    core (no ``_link_origin``) or with its sync off or stopped writes nothing that reaches the Board, and a
-    ``local-<sha256>`` chat an ancestor already proves does get a link. Never raises."""
+    unreleased ``created`` link and its Board sync is enabled and not recorded stopped, so the link reaches the
+    Board without the origin; ``{}`` otherwise. [daveey] The origin reads this answer instead of guessing from the
+    chat id's shape: an owner on older core (no ``_link_origin``) or with its sync off or stopped writes nothing that
+    reaches the Board, and a ``local-<sha256>`` chat an ancestor already proves does get a link.
+
+    "Not recorded stopped" is ``kanban_sync_runstate.down()`` being None. There is no positive running marker (a
+    completed round deletes the record), so an enabled sync that has not started yet also answers; its link row
+    waits in this owner's own outbox and goes out with the first round, while a refusal to start or a crash records
+    a stop and withholds the answer. The origin reads the field from its replica's ``done`` row, which the owner's
+    hermes-hub builds as ``{**creation, ...}`` over this result, so the field survives the binding accept. Never
+    raises."""
     try:
         from hermes_cli import kanban_db_sync as sync
         from hermes_cli import kanban_sync_runstate as runstate

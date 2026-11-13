@@ -5,6 +5,9 @@ import json
 import logging
 from typing import Any, Callable
 
+# The owner's answer is defined once, where the owner writes it (PR #2157 review). [daveey]
+from hermes_cli.kanban_origin_creation import OWNER_WRITTEN
+
 logger = logging.getLogger(__name__)
 
 # Tools whose success writes a row other hosts must see (pushed through this gateway's Board sync outbox).
@@ -18,16 +21,15 @@ BOARD_WRITE_TOOLS = frozenset({
 # (``placed.chat_link: owner_written``, from ``kanban_origin_creation.origin_link_fields``), the link no longer waits
 # in this gateway's outbox; what still depends on this gateway is its replica of the Board, which this chat's task
 # list reads and the stopped sync no longer pulls. Only an owner on this core or newer whose Board sync is on (it has
-# a task_chat_links table) and running gives that answer. Without it the link waits here: no answer yet (a queued
-# request, whose owner_written would only be the expected outcome, not a fact, so it is never claimed), an owner on
-# older core (it writes no link), an owner with its sync off, or a ``local-<sha256>`` chat it does not link.
+# a task_chat_links table) and not recorded stopped gives that answer. Without it the link waits here: no answer yet
+# (a queued request, whose owner_written would only be the expected outcome, not a fact, so it is never claimed), an
+# owner on older core (it writes no link), an owner with its sync off, or a ``local-<sha256>`` chat it does not link.
 # kanban_tools builds its placed-create notes from these fragments, so the rewrites below always find them. The
 # queued note is CHAT_TASKS_HEAD + CHAT_TASKS_SEP; the rewrites insert after the exact head, whatever the separator.
 CHAT_TASKS_SHOWS = " and shows in this chat's tasks"
 CHAT_TASKS_HEAD = "(this chat's tasks"
 CHAT_TASKS_SEP = ", "
 _LATER = " once this gateway's copy of the Board refreshes"
-OWNER_WRITTEN = "owner_written"
 _QUEUED_LATER = " once this gateway's Board sync recovers"
 
 

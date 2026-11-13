@@ -541,3 +541,19 @@ def test_when_this_gateways_sync_recovers_its_reconcile_keeps_the_one_link(home,
     ksc._pull_replica(BOARD, board.hub(ME), ME)
     assert [t["id"] for t in ksa.session_tasks([CHAT])] == [tid]
     assert links.reconcile(conn, BOARD, ME) == {"added": 0, "changed": 0, "released": 0, "retired": 0}
+
+
+def test_owner_written_wire_value_has_one_source():
+    """PR #2157 review 5890952298: ``OWNER_WRITTEN`` was spelled out in this module and in
+    ``kanban_origin_creation``, so a reworded wire value would split the owner's answer from the origin's reading of
+    it. The origin side now imports the owner's constant. [daveey]"""
+    import ast
+    import inspect
+
+    from hermes_cli import kanban_origin_creation
+    from tools import kanban_tools_board_delivery as kbd
+    tree = ast.parse(inspect.getsource(kbd))
+    assigned = {t.id for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign))
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]) if isinstance(t, ast.Name)}
+    assert "OWNER_WRITTEN" not in assigned
+    assert kbd.OWNER_WRITTEN is kanban_origin_creation.OWNER_WRITTEN

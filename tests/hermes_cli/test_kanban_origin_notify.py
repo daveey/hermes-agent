@@ -400,3 +400,40 @@ def test_session_poller_delivers_remote_notice_through_collect(tmp_path, monkeyp
     srv._kb_rewind_refused(session, texts)  # a refused turn hands the notice back
     again = srv._collect_kanban_notifications({"session_key": CHAT}, [])
     assert [str(t) for t in again if "t_done" in t]
+
+
+def test_owner_answer_means_enabled_and_not_recorded_stopped(synced_owner):
+    """[daveey] PR #2157 review 5890952298: ``origin_link_fields`` reads "sync runs" as enabled and not recorded
+    stopped. No positive "running" marker exists (a completed round deletes the record), so an enabled sync with no
+    record still answers ``owner_written``: the link row sits in this owner's own outbox and goes out with its first
+    round. A recorded stop (refusal to start, crash, graceful stop) withholds the answer."""
+    from hermes_cli import kanban_origin_creation as oc
+    from hermes_cli import kanban_sync_runstate as runstate
+    res = json.loads(str(registry.dispatch("kanban_create", {"title": "Build", "assignee": "default"},
+                                           origin_intent=synced_owner)))
+    assert not runstate.path().exists()  # never started: no record either way
+    with kbc.connect_closing() as conn:
+        assert oc.origin_link_fields(conn, res["task_id"], synced_owner["origin"]) == {
+            "origin_chat_link": "owner_written"}
+        runstate.record_down("not starting: board default: test")
+        assert oc.origin_link_fields(conn, res["task_id"], synced_owner["origin"]) == {}
+
+
+def test_owner_answer_survives_the_hubs_done_row_to_the_origin(synced_owner, monkeypatch):
+    """[daveey] PR #2157 review 5890952298: the origin reads ``origin_chat_link`` from its replica's ``done`` row. The
+    owner's hermes-hub (``advance_origin_create``) finishes the request with ``{**creation, "ok": True, "code":
+    "origin_bound", "handoff_complete": True, "origin_receipt": receipt}``, where ``creation`` is this courier
+    create's own result, and the origin's ``fetch_outcomes`` stores that result verbatim in ``sent.result``. Real hub
+    row placement:macbook:24a806162e8729d0b6f2bf21 (11-13) keeps every creation key that way (``origin_creation``,
+    ``placement``, ``gated`` ...), so the field rides through; this drives the real create output through that
+    merge."""
+    from hermes_cli import kanban_placement as kp
+    creation = json.loads(str(registry.dispatch("kanban_create", {"title": "Build", "assignee": "default"},
+                                                origin_intent=synced_owner)))
+    receipt = {"status": "accepted", "request_id": creation["origin_creation"]["child_request_id"]}
+    done = {**creation, "ok": True, "code": "origin_bound", "handoff_complete": True, "origin_receipt": receipt}
+    monkeypatch.setattr(kp, "_sent_row", lambda rid: ("done", json.dumps(done)))
+    seen: dict = {}
+    tid, _ = kp.await_task_id(synced_owner["request_id"], hub_cli="hermes-hub", budget=0, result_out=seen)
+    assert tid == creation["task_id"]
+    assert kp.owner_chat_link(seen["result"]) == {"chat_link": "owner_written"}
