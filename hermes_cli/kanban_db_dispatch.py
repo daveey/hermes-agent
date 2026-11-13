@@ -1181,7 +1181,7 @@ def _classify_dead_worker(
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
     log = _kb.read_worker_log(task_id, tail_bytes=None, board=board) if task_id and run_id else ""
-    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid) if task_id else None
+    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid, started_at=_worker_scope.run_started_at(conn, run_id)) if task_id else None
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
         if kind == "oom_killed" and task_id:
@@ -2682,7 +2682,7 @@ def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[st
         require_restart_safe_scope=True,
         outlives_parent=True,
     ).argv)
-    argv = _worker_scope.oom_policy_continue(_worker_scope.apply_oom_recovery(argv, task.id, board))  # raised cap; OOM kill takes a command, not the run
+    argv = _worker_scope.oom_policy_continue(_worker_scope.apply_oom_recovery(argv, task.id, board))  # before bounded_scope: its `-- nice -n 15` must follow OOMPolicy, which apply_toolchain_env reads before the first `--`
     return _aggregate_scope.bounded_scope(argv, task_id=task.id, board=str(_kb.kanban_db_path(board=board).resolve()))  # pool + per-card slice
 
 

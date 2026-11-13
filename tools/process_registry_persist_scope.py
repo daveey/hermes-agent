@@ -2,10 +2,9 @@
 
 A Kanban worker runs in ``hermes-worker-kanban-<task>-run-<n>.scope`` (KillMode=control-group;
 OOMPolicy=continue on systemd >= 253, else stop, which stops the run on any OOM kill), which the
-dispatcher stops after the
-run ends. A ``persist_on_release`` job spawned inside it died with the worker (a paid-rental
-watchdog on the hub, 2026-11-03), so it gets its own transient scope in the same
-aggregate-bounded ``hermes-kanban.slice``, with the run scope's own memory cap.
+dispatcher stops after the run ends. A ``persist_on_release`` job spawned inside it died with the
+worker (a paid-rental watchdog on the hub, 2026-11-03), so it gets its own transient scope in the
+same aggregate-bounded ``hermes-kanban.slice``, with the run scope's own memory cap.
 
 Any other user unit kills it the same way: Desktop's hub backend runs in
 ``hermes-always-on-dashboard.service`` (KillMode=control-group), which every hub update restarts, so

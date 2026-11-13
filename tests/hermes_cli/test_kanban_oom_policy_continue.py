@@ -196,3 +196,81 @@ def test_continue_policy_worker_itself_oom_killed_still_fails(monkeypatch):
     assert failure["scope_result"] == "oom-kill"
     assert failure["memory_max_bytes"] == 8388608 * 1024  # from the kernel record; the scope is gone
     assert "kernel victim: the worker itself, python3 pid 1870933" in scope.describe(failure)
+
+
+def _journal_argv(monkeypatch, text=KERNEL, props=""):
+    """Like ``_kernel``, and returns the list of journalctl argvs it was asked to run."""
+    seen = []
+
+    def run(argv, **kwargs):
+        if argv[0] == "journalctl":
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, text, "")
+        return subprocess.CompletedProcess(argv, 0, props, "")
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("tools.process_registry.systemd_user_bus_env", dict)
+    return seen
+
+
+def test_fresh_dispatcher_still_finds_the_agent_as_oom_victim(monkeypatch):
+    """Restarted after the spawn: no probe verdict in this process, no snapshot (SIGKILL), scope GC'd."""
+    monkeypatch.setattr(scope, "_oom_continue_supported", None)
+    seen = _journal_argv(monkeypatch, props="LoadState=not-found\n")
+    failure = scope.read_failure("t_x", 1, "", pid=1870933)
+    assert failure is not None and failure["scope_result"] == "oom-kill"
+    assert failure["oom_victim"]["is_worker"]
+    assert all(argv[0] == "journalctl" for argv in seen)  # no systemd-run probe was needed
+    assert scope._oom_continue_supported is None
+    # A child victim is still no failure of the run.
+    assert scope.read_failure("t_x", 1, "", pid=999) is None
+
+
+def test_kernel_log_read_is_bounded_by_the_run_start(monkeypatch):
+    """It runs under the reclaim write txn: read from the run's start, not a day back."""
+    seen = _journal_argv(monkeypatch, props="LoadState=loaded\nResult=oom-kill\nMemoryMax=8589934592\n")
+    scope.read_failure("t_x", 1, "", pid=999, started_at=1794550650)
+    scope.read_failure("t_x", 1, "", pid=1870933, started_at=1794550650.9)
+    assert [argv[argv.index("-S") + 1] for argv in seen] == ["@1794550650", "@1794550650"]
+    seen.clear()
+    scope.read_failure("t_x", 1, "", pid=999)  # unknown start: the old day-long window
+    assert seen[0][seen[0].index("-S") + 1] == "-24h"
+
+
+def test_classify_dead_worker_passes_the_run_start(monkeypatch):
+    import sqlite3
+    from hermes_cli import kanban_db_dispatch as kbd
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, started_at INTEGER)")
+    conn.execute("INSERT INTO task_runs VALUES (5, 1794550650)")
+    assert scope.run_started_at(conn, 5) == 1794550650
+    assert scope.run_started_at(conn, 6) is None and scope.run_started_at(None, 5) is None
+    seen = {}
+    monkeypatch.setattr(kbd._kb, "read_worker_log", lambda *a, **kw: "")
+    monkeypatch.setattr(kbd._worker_scope, "read_failure",
+                        lambda *a, **kw: seen.update(kw) or {"systemd_unit": UNIT, "scope_result": "signal",
+                                                             "memory_max_bytes": None, "memory_peak_bytes": None})
+    monkeypatch.setattr(kbd, "crash_worker_output", lambda *a, **kw: "")
+    kbd._classify_dead_worker(4242, "h:1", None, task_id="t_x", run_id=5, conn=conn)
+    assert seen == {"pid": 4242, "started_at": 1794550650}
+
+
+def test_compute_policy_nice_wrapper_keeps_the_oom_policy_env(probe, monkeypatch):
+    """bounded_scope's own ``-- nice -n 15`` comes after the policy; the worker env still learns it."""
+    from hermes_cli import kanban_aggregate_scope
+    from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import worker_compute_capacity as wcc
+    from tools import process_registry as pr
+    monkeypatch.setattr(kanban_aggregate_scope, "configure_pool", lambda: None)
+    monkeypatch.setattr(wcc, "worker_enabled", lambda: True)
+    monkeypatch.setattr(wcc, "configure_card", lambda board, task_id: "hermes-kanban-" + "0" * 64 + ".slice")
+    monkeypatch.setattr(scope, "consecutive_oom_runs", lambda *a, **kw: 0)
+    monkeypatch.setattr(pr, "restart_safe_gateway_child_argv",
+                        lambda command, **kw: SimpleNamespace(argv=["systemd-run", "--user", "--scope", "--collect",
+                                                                    "--", *command], mode="scoped"))
+    argv = kbd._restart_safe_worker_argv(SimpleNamespace(id="t_x", current_run_id=1), ["hermes", "chat"])
+    boundary = argv.index("--")
+    assert "OOMPolicy=continue" in argv[:boundary]
+    assert argv[boundary:boundary + 4] == ["--", "nice", "-n", "15"]
+    env = {}
+    scope.apply_toolchain_env(env, argv)
+    assert env[scope.OOM_POLICY_ENV] == "continue"

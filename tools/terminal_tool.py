@@ -1433,7 +1433,7 @@ def _run_foreground(
             if survivable is not None:
                 exec_kwargs.update(survivable=survivable, yield_handler=functools.partial(survivable.handoff, yielded=True))
             result = None
-            oom_watch = OomWatch() if env_type == "local" else None  # run-scope OOM kills [daveey]
+            oom_watch = OomWatch(survivable) if env_type == "local" else None  # OOM kills in its scope [daveey]
             try:
                 result = env.execute(command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
                                      **exec_kwargs)
