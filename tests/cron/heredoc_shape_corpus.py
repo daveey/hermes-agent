@@ -11,9 +11,20 @@ only when the outer shell reads its stdin verbatim. Two payloads try to make it 
 - ``history``: ``timeout !!:1-3 python3 -`` becomes ``timeout 5 bash -s python3 -`` once
   history expansion is on.
 
+A second family (``s_position == "session"``) runs top-level commands in a shell that already
+holds aliases defined outside the walked text, the way the terminal backend sources its login
+snapshot (``alias -p`` + ``shopt -s expand_aliases``) before ``eval``-ing the command:
+keyword-prefix aliases (``alias t='time '``) turn ``t ( bash ./big.sh )`` into a subshell that
+runs an unscannable script, and ``alias python3=bash`` runs a "Python" heredoc body as shell. The
+guard is told the session's alias names (``scan_gateway_lifecycle(session_aliases=…)``).
+
 Real bash runs every case with a fake ``hermes`` that writes a marker. The property the test
 asserts: when bash ran the payload and origin/main refuses the command, the tree under test
 refuses it too. origin/main's verdicts are checked in (``main_verdicts.json``) with its sha.
+
+Startup-file payloads need bash to source the test's ``$HOME`` files; ``startup_shell_prefix``
+finds an argv prefix that makes it do so on this host (none, or bubblewrap masking the system
+startup files), else those rows run unproven and the tests that need them skip.
 
 CLI, run from the repo root with the tree under test first on PYTHONPATH:
     python3 tests/cron/heredoc_shape_corpus.py main-verdicts OUT.json   # regenerate the fixture
@@ -22,11 +33,16 @@ CLI, run from the repo root with the tree under test first on PYTHONPATH:
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import inspect
 import itertools
 import json
 import os
 import random
+import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,6 +82,25 @@ REVIEW_ROWS = (
     ("bash -s -H -o history", "plain", "history"),
     ("bash -o history -o histexpand -s", "ssh", "history"),
 )
+# Aliases the command's shell holds before its first line (the backend's login snapshot).
+SESSIONS = {
+    "none": "",
+    "time": "alias t='time '",  # review 5888336995 nit 2, verbatim
+    "blank": "alias t=' '",
+    "bang": "alias t='! '",
+    "python": "alias python3=bash",
+    "benign": "alias ll='ls -l'",
+}
+SESSION_PAYLOADS = {
+    "alias-subshell": "t ( bash ./big.sh )\n",
+    "alias-source": "t ( . ./big.sh )\n",
+    "consumer": _INNER,
+    "consumer-function": "q() { " + _INNER + "}\nq\n",
+    "consumer-wrapped": "timeout 5 env A=1 " + _INNER,
+}
+SESSION_FORMS = ("plain", "function", "subshell")
+# Over the 1 MiB scan cap, so a walk that executes it fails closed; bash runs it to the end.
+BIG_SCRIPT = "# padding\n" * 130000 + 'hermes gateway "restart"\n'
 # Startup file: record that it ran, keep the fake bin on PATH, then rewrite the rest of stdin.
 REWRITE_STARTUP = (
     'printf "ran HOME=%s\\n" "$HOME" >> "$FAKE_BIN/startup-ran"\n'
@@ -86,10 +121,21 @@ class Case:
     command: str
     shell: str
     words: tuple[str, ...]
-    s_position: str  # "before" / "after" (relative to the option words), "bundled", "none"
+    s_position: str  # "before" / "after" (option words), "bundled", "none", "review", "session"
     wrapper: str
     nesting: str
     payload: str
+    session: str = ""  # a SESSIONS key (session cases only): aliases the shell already holds
+
+
+def session_alias_names(session: str) -> frozenset[str]:
+    """Alias names a SESSIONS snapshot defines (what the backend reports to the guard)."""
+    return frozenset(re.findall(r"alias ([^=\s]+)=", SESSIONS[session]))
+
+
+def build_session_command(form: str, payload: str) -> str:
+    body = SESSION_PAYLOADS[payload]
+    return {"plain": body, "function": f"g() {{\n{body}}}\ng\n", "subshell": f"(\n{body})\n"}[form]
 
 
 def build_command(shell: str, words: tuple[str, ...], wrapper: str, nesting: str, payload: str) -> str:
@@ -142,6 +188,11 @@ def generate_full_corpus() -> list[Case]:
             position = "bundled" if form == "bundle" else "mixed"
         add(rng.choice(SHELLS), words, position, rng.choice(WRAPPERS), rng.choice(NESTINGS),
             rng.choice(tuple(PAYLOADS)))
+    for session, form, payload in itertools.product(SESSIONS, SESSION_FORMS, SESSION_PAYLOADS):
+        command = build_session_command(form, payload)
+        # Old keys stay command-only; a session case's key also names its session.
+        key = hashlib.sha1(f"session {session}\n{command}".encode()).hexdigest()[:16]
+        cases.setdefault(key, Case(key, command, "bash", (), "session", "", form, payload, session))
     return list(cases.values())
 
 
@@ -156,11 +207,11 @@ def _cover_keys(case: Case) -> set[tuple]:
 def generate_cases(size: int = SAMPLE_SIZE) -> list[Case]:
     """A seeded sample of :func:`generate_full_corpus` that still covers every option word,
     wrapper, shell and payload with ``-s`` before, after, bundled and absent in every nesting
-    form, plus every review row; the rest is filled at random up to *size*."""
+    form, plus every review row and every session case; the rest is filled at random up to *size*."""
     full = generate_full_corpus()
     order = list(full)
     random.Random(SEED).shuffle(order)
-    chosen = {case.key: case for case in full if case.s_position == "review"}
+    chosen = {case.key: case for case in full if case.s_position in ("review", "session")}
     covered: set[tuple] = set()
     for case in order:
         keys = _cover_keys(case)
@@ -175,13 +226,17 @@ def generate_cases(size: int = SAMPLE_SIZE) -> list[Case]:
 
 
 def prepare(root: Path) -> dict[str, str]:
-    """Fake ``hermes``/``ssh`` bin, a ``$HOME`` and ``./rc`` that rewrite stdin; return the env."""
+    """Fake ``hermes``/``ssh`` bin, a ``$HOME`` and ``./rc`` that rewrite stdin, ``./big.sh`` and
+    the session snapshots; return the env."""
     home = root / "home"
     home.mkdir(parents=True, exist_ok=True)
     for name in (".bash_profile", ".bashrc"):
         (home / name).write_text(REWRITE_STARTUP)
     (home / ".profile").write_text(REWRITE_STARTUP_POSIX)
     (root / "rc").write_text(REWRITE_STARTUP)
+    (root / "big.sh").write_text(BIG_SCRIPT)
+    for session, aliases in SESSIONS.items():
+        (root / f"session-{session}.sh").write_text(f"{aliases}\nshopt -s expand_aliases\n")
     (root / "evil").mkdir(exist_ok=True)
     evil_python = root / "evil" / "python3"
     evil_python.write_text('#!/bin/sh\nexec /bin/bash "$@"\n')
@@ -196,29 +251,104 @@ def prepare(root: Path) -> dict[str, str]:
             "BASH_ENV": "", "ENV": str(home / ".profile"), "LANG": "C.UTF-8"}
 
 
-def bash_runs_payload(root: Path, env: dict[str, str], case: Case) -> bool:
-    """Run *case* in real bash (cwd *root*); True when the fake hermes wrote its marker."""
+def bash_input(case: Case) -> str:
+    """What the outer bash reads: the command itself, or, for a session case, the backend's own
+    shape (``tools/environments/base_session_env._wrap_command_script``): source the snapshot,
+    then ``eval`` the command."""
+    if not case.session:
+        return case.command
+    return (f"source ./session-{case.session}.sh >/dev/null 2>&1 || true\n"
+            f"eval {shlex.quote(case.command)}\n")
+
+
+def bash_runs_payload(root: Path, env: dict[str, str], case: Case,
+                      prefix: tuple[str, ...] = ()) -> bool:
+    """Run *case* in real bash (cwd *root*, under argv *prefix*); True when the fake hermes wrote
+    its marker."""
     marker = root / "markers" / case.key
     marker.parent.mkdir(exist_ok=True)
     try:
-        subprocess.run(["/bin/bash"], input=case.command, text=True, capture_output=True,
-                       timeout=20, check=False, cwd=root, env={**env, "MARKER": str(marker)})
+        subprocess.run([*prefix, "/bin/bash"], input=bash_input(case), text=True,
+                       capture_output=True, timeout=20, check=False, cwd=root,
+                       env={**env, "MARKER": str(marker)})
     except subprocess.TimeoutExpired:
         pass
     return marker.exists() and marker.read_text() == "called"
 
 
 def guard_refuses(root: Path, case: Case) -> bool:
-    from cron.lifecycle_guard import contains_gateway_lifecycle_command_or_referenced_script
+    """The tree's verdict. A session case passes its alias names when the tree's guard takes them
+    (origin/main's does not: it never sees the snapshot, which is main's real behavior)."""
+    from cron import lifecycle_guard
 
-    return contains_gateway_lifecycle_command_or_referenced_script(case.command, cwd=str(root)) is True
+    scan = lifecycle_guard.scan_gateway_lifecycle
+    if case.session and "session_aliases" in inspect.signature(scan).parameters:
+        return scan(case.command, cwd=str(root),
+                    session_aliases=session_alias_names(case.session))[0] is True
+    return lifecycle_guard.contains_gateway_lifecycle_command_or_referenced_script(
+        case.command, cwd=str(root)) is True
+
+
+def _startup_prefixes():
+    """Candidate argv prefixes for ``startup_shell_prefix``: none, then bubblewrap with the system
+    startup files masked (a runner image's ``/etc/profile*`` may keep a login bash from sourcing
+    ``$HOME`` files; bwrap needs unprivileged user namespaces, which the CI job enables)."""
+    yield "plain", ()
+    bwrap = shutil.which("bwrap")
+    if bwrap:
+        args = [bwrap, "--unshare-user", "--dev-bind", "/", "/"]
+        for path in ("/etc/profile", "/etc/bash.bashrc", "/etc/bashrc"):
+            if os.path.isfile(path):
+                args += ["--ro-bind", "/dev/null", path]
+        if os.path.isdir("/etc/profile.d"):
+            args += ["--tmpfs", "/etc/profile.d"]
+        yield "bwrap with /etc/profile* masked", tuple(args)
+
+
+@functools.cache
+def startup_shell_prefix() -> tuple[tuple[str, ...] | None, str]:
+    """``(argv prefix, how)`` under which ``HOME=<dir> bash -l -s`` sources ``<dir>/.bash_profile``
+    on this host, or ``(None, diagnostics)`` when no candidate does (startup-file execution
+    proofs are then unavailable here)."""
+    notes = []
+    with tempfile.TemporaryDirectory(prefix="heredoc-startup-probe-") as tmp:
+        home, ran = Path(tmp) / "home", Path(tmp) / "ran"
+        home.mkdir()
+        (home / ".bash_profile").write_text('printf ok > "$PROBE"\n')
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "PROBE": str(ran), "LANG": "C.UTF-8"}
+        probe = ('shopt -q login_shell && echo login; echo "HOME=$HOME"; '
+                 'ls /etc/profile.d 2>/dev/null | tr "\\n" " "\n')
+        for how, prefix in _startup_prefixes():
+            ran.unlink(missing_ok=True)
+            try:
+                result = subprocess.run([*prefix, "/bin/bash", "-l", "-s"], input=probe, text=True,
+                                        capture_output=True, timeout=20, check=False, env=env)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                notes.append(f"{how}: {exc}")
+                continue
+            if ran.exists():
+                return prefix, how
+            notes.append(f"{how}: rc={result.returncode} out={result.stdout.strip()[-300:]!r} "
+                         f"err={result.stderr.strip()[-300:]!r}")
+    return None, "; ".join(notes)
+
+
+def note_ci_skip(test_id: str, reason: str) -> None:
+    """Append a skipped execution proof to ``$GITHUB_STEP_SUMMARY`` (run_tests.sh forwards it):
+    the per-file runner keeps skip counts but drops reasons and warnings."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as summary:
+            summary.write(f"- heredoc execution proof skipped (untested on CI): `{test_id}`: "
+                          f"{reason}\n")
 
 
 def evaluate(root: Path, cases: list[Case]) -> list[tuple[Case, bool, bool]]:
     """``(case, bash ran the payload, guard refuses)`` for every case."""
     env = prepare(root)
+    prefix = startup_shell_prefix()[0] or ()
     with ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2))) as pool:
-        ran = list(pool.map(lambda case: bash_runs_payload(root, env, case), cases))
+        ran = list(pool.map(lambda case: bash_runs_payload(root, env, case, prefix), cases))
     return [(case, executed, guard_refuses(root, case)) for case, executed in zip(cases, ran)]
 
 

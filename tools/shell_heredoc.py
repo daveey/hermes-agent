@@ -80,12 +80,19 @@ _FUNCTION_HEADER_RE = re.compile(
 _MAX_NESTED_HEREDOC_DEPTH = 4
 # A command that (re)defines a consumer, wrapper or outer-shell name as a function or alias
 # anywhere (``python3() { bash; }``) may run a shell where the peeled word says "python": mask nothing.
+_SHADOWABLE_NAMES = (r"(?:python[\d.]*|osascript|cat|timeout|nice|ionice|nohup|setsid|stdbuf|env|command"
+                     r"|exec|eatmydata|sudo|doas|ssh|bash|sh|dash|zsh|ksh|echo|printf|set|tail|cut|ls)")
 _CONSUMER_SHADOW_RE = re.compile(
-    r"(?:^|[\s;&|(){{}}])(?:(?:function\s+)?{names}\s*\(\s*\)|function\s+{names}\s+\{{"
-    r"|alias\s+{names}=)".format(
-        names=r"(?:python[\d.]*|osascript|cat|timeout|nice|ionice|nohup|setsid|stdbuf|env|command"
-              r"|exec|eatmydata|sudo|doas|ssh|bash|sh|dash|zsh|ksh|echo|printf|set|tail|cut|ls)"),
+    rf"(?:^|[\s;&|(){{}}])(?:(?:function\s+)?{_SHADOWABLE_NAMES}\s*\(\s*\)"
+    rf"|function\s+{_SHADOWABLE_NAMES}\s+\{{|alias\s+{_SHADOWABLE_NAMES}=)",
     re.IGNORECASE)
+_SHADOWABLE_NAME_RE = re.compile(_SHADOWABLE_NAMES, re.IGNORECASE)
+
+
+def shadows_heredoc_consumer(name: str) -> bool:
+    """Whether an alias or function called *name* may rename a heredoc consumer, stdin wrapper or
+    shell the masking trusts (the names ``_CONSUMER_SHADOW_RE`` guards in the command text)."""
+    return _SHADOWABLE_NAME_RE.fullmatch(name) is not None
 
 
 def _peel_stdin_wrappers(words: list[str], index: int) -> int | None:

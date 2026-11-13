@@ -201,6 +201,9 @@ _pf86="$(env | sed -n 's/^ProgramFiles(x86)=//p' | head -n1)"
 #     tests/e2e/core/terminal instead of a skip (set by the e2e CI job).
 #   * CI / GITHUB_ACTIONS tell suites they run on a disposable runner (e.g.
 #     tests/e2e/core/upgrade runs the real updater unsandboxed only there).
+#     GITHUB_STEP_SUMMARY lets a test name a skipped proof in the job summary
+#     (tests/cron/heredoc_shape_corpus.note_ci_skip): the runner keeps skip
+#     counts but drops skip reasons and warnings.
 #   * HERMES_E2E_WINDOWS_INSTALL opts tests/e2e/core/windows_update into running
 #     the real install.ps1 (it writes HKCU PATH); HERMES_E2E_MACHINE_ROOT,
 #     HERMES_E2E_PROFILES_ROOT and HERMES_E2E_ARTIFACTS place its fake machines,
@@ -235,7 +238,7 @@ for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   HERMES_TEST_FILE_TIMEOUT HERMES_TEST_FILE_RETRIES HERMES_TEST_SLICE HERMES_TEST_FORKSERVER \
   HERMES_TEST_SLOW_CASE_S HERMES_TEST_FLAKY_REPORT HERMES_TEST_REQUIRE_EXTRAS \
   HERMES_TEST_HOST_SLOTS HERMES_TEST_SLOT_DIR HERMES_TEST_SLOT_HELD HERMES_TEST_USER_STEPS_API \
-  SSL_CERT_FILE SSL_CERT_DIR HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS \
+  SSL_CERT_FILE SSL_CERT_DIR HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS GITHUB_STEP_SUMMARY \
   HERMES_E2E_WINDOWS_INSTALL HERMES_E2E_MACHINE_ROOT HERMES_E2E_PROFILES_ROOT HERMES_E2E_ARTIFACTS \
   HERMES_E2E_STRICT_ACCEPTANCE HERMES_E2E_UPGRADE_BASE HERMES_E2E_N1_REF \
   HERMES_E2E_INSTALL_REF HERMES_E2E_GIT_OBJECTS HERMES_E2E_KEEP_ROOT \

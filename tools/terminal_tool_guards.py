@@ -561,6 +561,23 @@ def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes
     return None
 
 
+def _session_aliases_for_guard(env: Any) -> Optional[frozenset[str]]:
+    """Alias names the backend's command shell holds before the command runs (its login
+    snapshot turns ``expand_aliases`` on); ``None`` = unknown. Looked up on the class so a test
+    double's auto-attributes (``MagicMock``) never stand in for a backend's answer; a backend
+    without the hook has no snapshot."""
+    hook = getattr(type(env), "lifecycle_guard_session_aliases", None)
+    if hook is None:
+        return frozenset()
+    try:
+        names = hook(env)
+    except (AttributeError, TypeError, ValueError, OSError):  # a half-built backend: unknown
+        return None
+    if names is None or isinstance(names, frozenset):
+        return names
+    return None
+
+
 def gateway_lifecycle_block(
     *,
     command: str,
@@ -625,6 +642,7 @@ def gateway_lifecycle_block(
         command,
         cwd=guard_cwd,
         read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES),
+        session_aliases=_session_aliases_for_guard(env),
     )
     if unsafe and refusal:
         # Not a lifecycle command: a script the command EXECUTES could not be scanned (budget,

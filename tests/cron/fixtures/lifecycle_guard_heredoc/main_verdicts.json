@@ -1,7 +1,26 @@
 {
- "cases": 17320,
- "corpus_digest": "2b1ee923f05c3902560ec8dae4211f99f7689cb4dd5c9b0348c64c0294dbd1b0",
- "main_allows": [],
+ "cases": 17410,
+ "corpus_digest": "4d46887a400878c76be79a4a39b232edda25eef34b501acd2d6070fe2644b236",
+ "main_allows": [
+  "068f6b9fccb98384",
+  "099666096503950b",
+  "1063caa4d3aa4022",
+  "44ae2c7fd84f309e",
+  "4c3995bbbbabae1e",
+  "60354970c31e1649",
+  "6c3a8ff7c8e34c09",
+  "71a3fc0272b4b1d8",
+  "84d0254ec159ae1f",
+  "8d2972b7beaeb77e",
+  "970a83dacb6fd831",
+  "9f6aa6102575c155",
+  "ad4bbe0033fb340c",
+  "b5c6fa2207de29c9",
+  "badf6317e898705f",
+  "bd7354ede9c73648",
+  "de1e4f64a3081e38",
+  "e367d5b9efcddc00"
+ ],
  "main_sha": "da52aff8f4c0177a1786c3db09431fafaf8d267f",
  "seed": 20261113
 }

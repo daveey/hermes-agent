@@ -591,8 +591,9 @@ def test_refused_scripts_verbatim_are_not_refused(tmp_path, monkeypatch, script,
 
 
 # Independent review: prove execution with a fake hermes, never a real gateway.
-def _run_bash_marker(tmp_path, command):
-    """Run `command` in real Bash with a fake `hermes`; return (marker written, stderr)."""
+def _run_bash_marker(tmp_path, command, prefix=()):
+    """Run `command` in real Bash (under argv *prefix*) with a fake `hermes`; return
+    (marker written, stderr)."""
     import os
     import subprocess
 
@@ -602,11 +603,26 @@ def _run_bash_marker(tmp_path, command):
     hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
     hermes.chmod(0o755)
     result = subprocess.run(
-        ["/bin/bash"], input=command, text=True, capture_output=True, timeout=10, check=False,
-        env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "FAKE_BIN": str(tmp_path),
-             "MARKER": str(marker), "BASH_ENV": "", "ENV": ""}, cwd=tmp_path,
+        [*prefix, "/bin/bash"], input=command, text=True, capture_output=True, timeout=10,
+        check=False, env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "FAKE_BIN": str(tmp_path),
+                          "MARKER": str(marker), "BASH_ENV": "", "ENV": ""}, cwd=tmp_path,
     )
     return marker.exists() and marker.read_text() == "called", result.stderr
+
+
+def _startup_shell_prefix_or_skip(request):
+    """Argv prefix under which a login bash sources the test's `$HOME` startup files on this host
+    (none, or bubblewrap masking the system /etc/profile*). Without one the execution proof is
+    impossible here: a real skip (the runner counts it) that also names the test in
+    $GITHUB_STEP_SUMMARY, since the runner drops skip reasons and warnings."""
+    from tests.cron import heredoc_shape_corpus as corpus
+
+    prefix, how = corpus.startup_shell_prefix()
+    if prefix is None:
+        reason = f"no shell on this host sources $HOME startup files ({how})"
+        corpus.note_ci_skip(request.node.nodeid, reason)
+        pytest.skip(reason)
+    return prefix
 
 
 def _assert_bash_marker(tmp_path, command):
@@ -713,11 +729,11 @@ _WALK_ONLY_BODY = "python3 - <<'PY'\nbash -c 'hermes gateway \"restart\"'\nPY\n"
     "home-login", "home-long-login", "home-interactive", "env-home-login", "separate-line-home",
     "prompt-command", "combined-flags", "nested", "remote",
 ])
-def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path, shape):
+def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path, shape, request):
     """Review 5882059941 #1: login/interactive shells source `$HOME` startup files and run
-    PROMPT_COMMAND before each line; either can rewrite the stdin script (main refuses)."""
-    import warnings
-
+    PROMPT_COMMAND before each line; either can rewrite the stdin script (main refuses).
+    Review 5888336995 nit 1: the execution proof runs wherever some shell on the host sources
+    `$HOME` startup files (CI: bubblewrap masking the runner's /etc/profile*), else it skips."""
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
     home = tmp_path / "home"
@@ -742,20 +758,14 @@ def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path
     command = opener + " <<'R'\n" + _WALK_ONLY_BODY + "R\n"
     if shape == "nested":
         command = "bash -s <<'OUTER'\n" + command + "OUTER\n"
-    startup_ran = tmp_path / "startup-ran"
-    called, stderr = _run_bash_marker(tmp_path, command)
-    if not called:
-        # The proof needs bash to source the test's `$HOME` startup file. Some hosts' system
-        # login files (/etc/profile*) keep that from happening (a CI runner image did for every
-        # login shape); only then is the proof unavailable and the guard verdicts below are
-        # all that is checked. A startup file that ran yet failed to rewrite stdin still fails.
-        ran = startup_ran.read_text() if startup_ran.exists() else ""
-        assert shape != "prompt-command" and not ran, f"startup file: {ran!r}\n{stderr}"
-        # A warning (not a print, which pytest captures) so a CI log shows the proof was skipped.
-        warnings.warn(f"{shape}: execution proof unavailable on this host (startup file not "
-                      f"sourced); guard verdicts only: {stderr[-300:]!r}", stacklevel=1)
+    # The guard verdicts hold on every host; only the execution proof below may skip.
     assert strip_inert_heredoc_bodies(command, nested=True) == command
     assert guard(command, cwd=str(tmp_path)) is True
+    prefix = () if shape == "prompt-command" else _startup_shell_prefix_or_skip(request)
+    startup_ran = tmp_path / "startup-ran"
+    called, stderr = _run_bash_marker(tmp_path, command, prefix)
+    ran = startup_ran.read_text() if startup_ran.exists() else ""
+    assert called, f"startup file: {ran!r}\n{stderr}"
 
 
 @pytest.mark.parametrize("opener", [
@@ -849,12 +859,14 @@ def test_keyword_led_subshells_still_execute_scripts(tmp_path, shape):
     assert unsafe is True and refusal is not None and "scan cap" in refusal
 
 
-def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp_path):
+def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp_path, request):
     """Card comment 10718 item 2: a seeded sample of the product of shell option words (``-s``
     before, after, bundled or absent) x stdin wrappers x nesting forms x payloads. Real bash runs
     every case; whenever it ran the walk-only payload and origin/main refuses the command (the
     checked-in verdicts), this tree must refuse it too. The six rows of review 5887281618 are in
-    the sample. Regenerate the main verdicts with the CLI in ``heredoc_shape_corpus``."""
+    the sample, and so is every session-alias case (review 5888336995 nit 2: aliases the
+    backend's login snapshot defines outside the walked text). Regenerate the main verdicts with
+    the CLI in ``heredoc_shape_corpus``."""
     import time
     import warnings
 
@@ -877,6 +889,9 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
                 option, position)
     review = [case for case in cases if case.s_position == "review"]
     assert len(review) == len(corpus.REVIEW_ROWS)
+    session = [case for case in cases if case.s_position == "session"]
+    assert len(session) == (len(corpus.SESSIONS) * len(corpus.SESSION_FORMS)
+                            * len(corpus.SESSION_PAYLOADS))
 
     started = time.monotonic()
     results = corpus.evaluate(tmp_path, cases)
@@ -885,23 +900,23 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
     assert not bad, "\n".join(case.command for case in bad[:10])
     ran = {case.key for case, executed, _refused in results if executed}
     allowed = sum(not refused for _case, _executed, refused in results)
-    # Not vacuous: the history review rows run their payload on any bash. Startup-file rows need
-    # bash to source the test's `$HOME` files, which some hosts' system login files prevent.
+    # Not vacuous: the history review rows run their payload on any bash, and so does the nit-2
+    # repro (`alias t='time '` then `t ( bash ./big.sh )`) in every form.
     assert all(case.key in ran for case in review if case.payload == "history")
+    assert all(case.key in ran for case in session
+               if case.session == "time" and case.payload == "alias-subshell")
+    # Startup-file rows need a shell that sources the test's `$HOME` files (see
+    # corpus.startup_shell_prefix): every one of them must run when there is one.
+    prefix, how = corpus.startup_shell_prefix()
     missed = [case.command.split("\n", 1)[0] for case in review if case.key not in ran]
-    probe = ""
-    if missed:  # why this host's login shell skipped the test's `$HOME` startup files
-        import subprocess
-
-        probe = subprocess.run(
-            ["/bin/bash", "-l", "-s"], text=True, capture_output=True, timeout=20, check=False,
-            input='shopt login_shell; echo "HOME=$HOME BASH_ENV=$BASH_ENV"; ls -a "$HOME"; '
-                  'cat "$FAKE_BIN/startup-ran" 2>&1 | head -3; ls /etc/profile.d 2>&1\n',
-            env={**corpus.prepare(tmp_path), "MARKER": str(tmp_path / "probe")}, cwd=tmp_path,
-        ).stdout[-600:]
     warnings.warn(f"shape corpus: {len(cases)} cases in {elapsed:.1f}s, bash ran the payload in "
-                  f"{len(ran)}, guard allows {allowed}, 0 violations; review rows without an "
-                  f"execution proof on this host: {missed} {probe!r}", stacklevel=1)
+                  f"{len(ran)}, guard allows {allowed}, 0 violations; startup shell: {how}",
+                  stacklevel=1)
+    if prefix is None:
+        reason = f"review rows without an execution proof on this host: {missed} ({how})"
+        corpus.note_ci_skip(request.node.nodeid, reason)
+        pytest.skip(reason)
+    assert not missed, f"startup shell {how!r} ran but these rows did not: {missed}"
 
 
 _LIVE_SSH_BODY = (

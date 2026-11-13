@@ -391,8 +391,9 @@ def _contains_launchctl_gateway_lifecycle(normalized_text: str) -> bool:
     )
 
 
-def contains_gateway_lifecycle_command(text: str) -> bool:
-    """Return True if *text* contains a gateway lifecycle command pattern.
+def contains_gateway_lifecycle_command(text: str, *, mask_heredocs: bool = True) -> bool:
+    """Return True if *text* contains a gateway lifecycle command pattern. ``mask_heredocs=False``
+    scans inert-looking heredoc bodies too (a session alias may shadow their consumer).
 
     Passes, in order: raw-text regex (the only pass that fires on inputs shlex cannot tokenize, e.g.
     Python source); profile-flag form; the same regex on each shell-tokenized segment with quotes/
@@ -420,7 +421,8 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     # restart" inside such a body is documentation, not a command this shell will execute.
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
-    text = strip_inert_heredoc_bodies(text)
+    if mask_heredocs:
+        text = strip_inert_heredoc_bodies(text)
     normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
     if _GATEWAY_LIFECYCLE_PATTERN.search(normalized):
         return True
@@ -481,6 +483,7 @@ class _LifecycleScanBudget:
         "aliases_possible",
         "bytes_remaining",
         "lines_remaining",
+        "mask_heredocs",
         "overrun",
         "paths_remaining",
         "refusal",
@@ -488,7 +491,8 @@ class _LifecycleScanBudget:
         "separator_lines",
     )
 
-    def __init__(self, *, separator_lines: int = 0) -> None:
+    def __init__(self, session_aliases: Optional[frozenset[str]] = frozenset(), *,
+                 separator_lines: int = 0) -> None:
         # Read the module constants at construction so tests/operators can lower them at runtime.
         self.bytes_remaining = _MAX_LIFECYCLE_SCAN_BYTES
         self.lines_remaining = _MAX_LIFECYCLE_SCAN_LINES
@@ -502,8 +506,12 @@ class _LifecycleScanBudget:
         # join). Charged like any line, never reported as the text's own; spent on the first charge.
         self.separator_lines = separator_lines
         # Sticky for the whole walk: any walked text (the command, an eval payload, a sourced
-        # script) that may define an alias makes `NAME ( … )` possibly a keyword-led subshell.
-        self.aliases_possible = False
+        # script) that may define an alias makes `NAME ( … )` possibly a keyword-led subshell. So do
+        # aliases the command's shell already holds (*session_aliases*, see `scan_gateway_lifecycle`).
+        self.aliases_possible = session_aliases is None or bool(session_aliases)
+        # False when a session alias may shadow a heredoc consumer, wrapper or shell name
+        # (`alias python3=bash`): then no heredoc body is provably inert, so none is masked.
+        self.mask_heredocs = not _session_aliases_shadow_consumers(session_aliases)
 
     def note_aliases(self, text: str) -> None:
         """Record (sticky) that walked *text* may define or enable an alias."""
@@ -783,6 +791,18 @@ def _may_define_alias(text: str) -> bool:
     return "alias" in re.sub(r"[\"'\\\\]", "", text).lower() or "$'" in text
 
 
+def _session_aliases_shadow_consumers(session_aliases: Optional[frozenset[str]]) -> bool:
+    """Whether aliases the command's shell already holds may rename a heredoc consumer, wrapper
+    or shell (``alias python3=bash`` runs a "Python" body as shell). ``None`` means the names
+    are unknown, so any name may be shadowed."""
+    from tools.shell_heredoc import shadows_heredoc_consumer
+
+    if session_aliases is None:
+        return True
+    return any(not isinstance(name, str) or shadows_heredoc_consumer(name)
+               for name in session_aliases)
+
+
 def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
     """``_iter_command_segments`` plus whether each segment is the argument list of a call
     (``True``): the segment right after a ``(`` that follows an ordinary word."""
@@ -910,19 +930,20 @@ def _mask_data_sink_arguments(text: str) -> str:
     return "\n".join(lines_out) if changed else text
 
 
-def _lifecycle_command_scan_with_data_exemption(text: str) -> bool:
+def _lifecycle_command_scan_with_data_exemption(text: str, *, mask_heredocs: bool = True) -> bool:
     """Lifecycle scan exempting matches inside data arguments: cheap regex first (no-match pays
     nothing), then re-scan with data-sink arguments masked; only a surviving match blocks."""
-    if not contains_gateway_lifecycle_command(text):
+    if not contains_gateway_lifecycle_command(text, mask_heredocs=mask_heredocs):
         return False
     normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
-    return contains_gateway_lifecycle_command(_mask_data_sink_arguments(normalized))
+    return contains_gateway_lifecycle_command(
+        _mask_data_sink_arguments(normalized), mask_heredocs=mask_heredocs)
 
 
-def _direct_lifecycle_scan(command: str) -> bool:
+def _direct_lifecycle_scan(command: str, *, mask_heredocs: bool = True) -> bool:
     """Pure-string direct scans: lifecycle regex (data-exempted) + submit."""
     return (
-        _lifecycle_command_scan_with_data_exemption(command)
+        _lifecycle_command_scan_with_data_exemption(command, mask_heredocs=mask_heredocs)
         or contains_launchctl_submit_command(command)
     )
 
@@ -1294,7 +1315,7 @@ def _contains_unsafe_gateway_action(
     # Charge BEFORE _direct_lifecycle_scan: every scan in it tokenizes with shlex.
     if not budget.charge_text(command):
         return _budget_exhausted(budget, "text", depth, source=source) if executed else False
-    if _direct_lifecycle_scan(command):
+    if _direct_lifecycle_scan(command, mask_heredocs=budget.mask_heredocs):
         return True
     budget.note_aliases(command)
     if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
@@ -1311,7 +1332,8 @@ def _contains_unsafe_gateway_action(
     # oversized data file mentioned there otherwise fails closed as a "script".
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
-    walk_command = strip_inert_heredoc_bodies(command, nested=True)
+    walk_command = (strip_inert_heredoc_bodies(command, nested=True) if budget.mask_heredocs
+                    else command)
 
     for payload in _iter_shell_command_payloads(walk_command):
         # An `sh -c` payload is text of the same file (or command) it appears in.
@@ -1378,12 +1400,20 @@ def scan_gateway_lifecycle(
     read_remote_script: Optional[_ReadRemoteScriptFn] = None,
     source: Optional[str] = None,
     separator_lines: int = 0,
+    session_aliases: Optional[frozenset[str]] = frozenset(),
 ) -> tuple[bool, Optional[str]]:
     """``(unsafe, refusal)``: *refusal* names a non-lifecycle reason the walk failed closed (budget,
     size, device, live SQLite, cloud) so callers can tell the model; ``None`` when the verdict is a
     real lifecycle command or the command is allowed. *source* names the root text in a budget
     refusal (default "the command"); *separator_lines* counts newlines the caller added to join it,
     left out of a refusal's reported line count (the budget still charges them).
+
+    *session_aliases* are the alias names the shell running *command* already holds before its
+    first line, outside the walked text: the terminal backend sources a login snapshot holding
+    ``alias -p`` and ``shopt -s expand_aliases`` (``tools/environments/base_session_env.py``).
+    ``None`` means it may hold aliases with unknown names. Any session alias makes ``NAME ( … )``
+    possibly a keyword-led subshell (``alias t='time '``), and one that may rename a heredoc
+    consumer, wrapper or shell (``alias python3=bash``) leaves every heredoc body visible.
 
     Total by construction: never raises. Direct scans are pure string ops; the referenced-script
     walk (filesystem, remote backends, shlex on decoded bytes) is best-effort defense-in-depth — an
@@ -1394,7 +1424,7 @@ def scan_gateway_lifecycle(
     every terminal command until the gateway restarts (#77780, #78256), which is strictly worse than either
     verdict.
     """
-    budget = _LifecycleScanBudget(separator_lines=separator_lines)
+    budget = _LifecycleScanBudget(session_aliases, separator_lines=separator_lines)
     try:
         unsafe = _contains_unsafe_gateway_action(
             command, cwd=cwd, depth=0, visited=set(), budget=budget,
@@ -1408,10 +1438,10 @@ def scan_gateway_lifecycle(
             exc_info=True,
         )
         try:
-            return _direct_lifecycle_scan(command), None
+            return _direct_lifecycle_scan(command, mask_heredocs=budget.mask_heredocs), None
         except Exception:
             # If even the data-argument masker fails, fall to raw regex + submit scan: stay total.
-            return (contains_gateway_lifecycle_command(command)
+            return (contains_gateway_lifecycle_command(command, mask_heredocs=budget.mask_heredocs)
                     or contains_launchctl_submit_command(command)), None
 
 
