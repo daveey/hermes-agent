@@ -12,7 +12,13 @@ this module saves each standalone repo's unique work under
 * ``tracked.diff``: ``git diff --binary HEAD`` (omitted when empty);
 * ``untracked.tar``: ``git ls-files --others --exclude-standard`` (omitted when
   empty);
+* ``remote_base.json`` / ``remote_base.tar`` (partial clones only): paths whose
+  HEAD blob only the promisor remote holds, left out of ``tracked.diff`` and
+  never fetched, plus the worktree side of those still present;
 * ``meta.json``: remotes, HEAD, branch, task id, completed_at.
+
+Every git call runs offline (no lazy fetch, no transport): a blobless clone
+with no credential used to be refused here forever.
 
 Alongside those (layout v1 unchanged) every archive also carries a complete,
 versioned filesystem payload under ``.hermes-complete-archive-v1/``:
@@ -147,10 +153,21 @@ def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
 
 
 def _env(repo: Path) -> dict[str, str]:
-    from hermes_cli._subprocess_compat import noninteractive_repo_git_env
+    """Hardened, offline git env: archiving reads local objects only and never fetches.
+
+    A partial clone's missing objects would otherwise be lazily fetched from its
+    promisor remote (unbounded network, or a credential failure on workers). Git
+    >= 2.44 honours ``GIT_NO_LAZY_FETCH``; ``protocol.allow=never`` also fails
+    every transport on older git (2.43 on the pool workers) before it connects.
+    """
+    from hermes_cli._subprocess_compat import NO_LAZY_FETCH_ENV, noninteractive_repo_git_env
     env = noninteractive_repo_git_env(repo)
     if env is None:
         raise ArchiveRefused(f"cannot harden git for {repo} (filter discovery failed)")
+    count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    env.update(NO_LAZY_FETCH_ENV)
+    env.update({f"GIT_CONFIG_KEY_{count}": "protocol.allow", f"GIT_CONFIG_VALUE_{count}": "never",
+                "GIT_CONFIG_COUNT": str(count + 1)})
     return env
 
 
@@ -167,6 +184,66 @@ def _git(repo: Path, env: dict[str, str], *args: str, ok=(0,)) -> subprocess.Com
 
 def _text(proc: subprocess.CompletedProcess) -> str:
     return proc.stdout.decode("utf-8", "replace").strip()
+
+
+def _is_partial_clone(repo: Path, env: dict[str, str]) -> bool:
+    """Whether *repo* has a promisor remote (objects it may lack are promised, not lost)."""
+    proc = _git(repo, env, "config", "--get-regexp", r"^(remote\..*\.promisor|extensions\.partialclone)$",
+                ok=(0, 1))
+    return any(line.split()[-1].lower() not in ("false", "no", "off", "0")
+               for line in _text(proc).splitlines())
+
+
+def _raw_changes(repo: Path, env: dict[str, str], base: str) -> list[dict]:
+    """``git diff --raw`` of *base* against the worktree: reads no blob content, so it never fetches."""
+    out = _git(repo, env, "diff", "--raw", "-z", "--no-renames", "--no-abbrev", "--no-ext-diff", base).stdout
+    fields = out.split(b"\0")
+    changes = []
+    for info, path in zip(fields[0::2], fields[1::2]):
+        # ":<old mode> <new mode> <old oid> <new oid> <status>"; anything else raises ValueError (kept).
+        old_mode, _new_mode, old_oid, _new_oid, status = info[1:].decode("ascii").split()
+        changes.append({"status": status, "old_mode": old_mode, "old_oid": old_oid,
+                        "path": os.fsdecode(path)})
+    return changes
+
+
+def _missing_objects(repo: Path, env: dict[str, str]) -> set[str]:
+    """Objects of HEAD's tree absent locally (left on the promisor remote), listed without fetching."""
+    out = _text(_git(repo, env, "rev-list", "--objects", "--missing=print", "--no-walk", "HEAD"))
+    return {line[1:].split()[0] for line in out.splitlines() if line.startswith("?")}
+
+
+def _batches(paths: list[str], limit: int = 64 * 1024) -> list[list[str]]:
+    """Split *paths* into argv-sized batches (well under ARG_MAX)."""
+    out: list[list[str]] = []
+    size = limit
+    for path in paths:
+        if size + len(path) + 1 > limit:
+            out.append([])
+            size = 0
+        out[-1].append(path)
+        size += len(path) + 1
+    return out
+
+
+def _write_remote_base(repo: Path, dest: Path, entries: list[dict]) -> list[str]:
+    """Record paths whose HEAD blob only the promisor remote holds; keep their worktree side.
+
+    Their base is not local work (git promises it is on the remote), so it is not
+    fetched. Whatever the worktree holds at such a path is local and goes into
+    ``remote_base.tar`` (stored as is, symlinks never followed).
+    """
+    (dest / "remote_base.json").write_text(json.dumps({
+        "note": "HEAD-side blobs of these paths are only on the promisor remote; not fetched",
+        "entries": entries,
+    }, indent=1) + "\n", encoding="utf-8")
+    present = [e["path"] for e in entries if os.path.lexists(repo / e["path"])]
+    if not present:
+        return ["remote_base.json"]
+    with tarfile.open(dest / "remote_base.tar", "w") as tar:
+        for rel in present:
+            tar.add(str(repo / rel), arcname=rel, recursive=False)
+    return ["remote_base.json", "remote_base.tar"]
 
 
 def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional[int]) -> dict:
@@ -196,10 +273,26 @@ def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional
         files.append(bundle.name)
 
     base = head or _text(_git(repo, env, "hash-object", "-t", "tree", "--stdin"))
-    diff = _git(repo, env, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", base).stdout
+    changes = _raw_changes(repo, env, base) if head and _is_partial_clone(repo, env) else []
+    missing = _missing_objects(repo, env) if changes else set()
+    remote_base = [c for c in changes if c["old_oid"] in missing]
+    diff_args = ["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", base]
+    if not remote_base:
+        diff = _git(repo, env, *diff_args).stdout
+    else:
+        # Only paths whose base blob is local, literal pathspecs in bounded batches (no renames
+        # across batches); the rest are recorded below, never fetched.
+        keep = [c["path"] for c in changes if c["old_oid"] not in missing]
+        literal = dict(env, GIT_LITERAL_PATHSPECS="1")
+        diff = b"".join(_git(repo, literal, *diff_args, "--no-renames", "--", *batch).stdout
+                        for batch in _batches(keep))
     if diff:
         (dest / "tracked.diff").write_bytes(diff)
         files.append("tracked.diff")
+    extra: dict = {}
+    if remote_base:
+        files.extend(_write_remote_base(repo, dest, remote_base))
+        extra["remote_base_count"] = len(remote_base)
 
     raw = _git(repo, env, "ls-files", "--others", "--exclude-standard", "-z").stdout
     untracked = [os.fsdecode(p) for p in raw.split(b"\0") if p]
@@ -213,7 +306,7 @@ def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional
     meta = {
         "task_id": task_id, "completed_at": completed_at, "source": str(repo),
         "head": head, "branch": branch, "remotes": remotes, "unpushed_refs": unpushed,
-        "untracked_count": len(untracked), "files": files, "archived_at": int(time.time()),
+        "untracked_count": len(untracked), "files": files, "archived_at": int(time.time()), **extra,
     }
     (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return meta
