@@ -1012,7 +1012,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
     # Dropped first, so a round that fails or finds nothing to repair never leaves a stale deferral that would
     # make the sync loop reselect this board without waiting; a deferring round sets it again.
     _REPAIR_DEFERRED.pop(str(path), None)
-    backlog.note(path, False)  # likewise: only a round that completes behind the head reruns at once
+    backlog.round_started(path)  # likewise: only a round that completes behind the head reruns at once
     with connection(path, lambda: _connect(path)) as live:
         mode = sync.board_mode(live)
         result = RoundResult(board=slug, mode=mode)
@@ -1097,7 +1097,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             from hermes_cli.kanban_worker_placement import reevaluate
             with credited(live):  # reservation observations and the feed pull after them
                 reevaluate(live, hub, slug, gateway)
-        backlog.note(path, result.behind)
+        backlog.completed(slug, path, result.behind)  # at the head: this process's claims on it open
         return result
 
 

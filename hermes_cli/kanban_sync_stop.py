@@ -22,6 +22,8 @@ def stop_scope(keep_running: Callable[[], bool]):
 def run_loop(loop, keep_running: Callable[[], bool], interval) -> None:
     """Keep shutdown normal, crashes visible, and diagnostics cleanup unconditional."""
     from hermes_cli import kanban_sync_runstate as runstate, kanban_sync_timing as timing
+    from hermes_cli.kanban_sync_claims import loop_started
+    loop_started()  # this process's claims wait for its first round at the feed head (t_01a1d6c4e700958e)
     try:
         with stop_scope(keep_running):
             loop(keep_running, interval, runstate)

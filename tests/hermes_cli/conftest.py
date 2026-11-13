@@ -31,6 +31,8 @@ def _isolate_kanban_worker_process_registries(monkeypatch):
     monkeypatch.setattr(kanban_db_dispatch, "_live_worker_procs", {})
     monkeypatch.setattr(kanban_db_dispatch, "_recent_worker_exits", {})
     monkeypatch.setattr(kanban_queue_reason, "_streaks", {})  # transient Board-failure streaks are per test
+    from hermes_cli import kanban_sync_claims
+    monkeypatch.setattr(kanban_sync_claims, "_STATE", kanban_sync_claims._State())  # a test's sync loop gates only it
 
 
 @pytest.fixture

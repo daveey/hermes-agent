@@ -47,7 +47,8 @@ def sendable_before_head(conn: Any, hub: Any, board: str, rows: list[dict], seen
 
 
 _LOCK = threading.Lock()
-_BEHIND: set[str] = set()  # live board paths whose last round stopped before the feed head
+_DUE: set[str] = set()  # live board paths whose last completed round stopped before the feed head: rerun at once
+_AT_HEAD: set[str] = set()  # live board paths whose last completed round (this process) reached the feed head
 _EVIDENCE: dict[str, dict] = {}  # live board path -> its latest round's Board reads ({card id: may hold terminal})
 
 
@@ -83,26 +84,46 @@ class Pulled(int):
         return out
 
 
+def round_started(path: Path) -> None:
+    """A round on this board starts: it is no longer due at once (a round that fails, or finds the board in mode
+    off, never leaves a stale rerun). :func:`behind` still reads the last completed round."""
+    with _LOCK:
+        _DUE.discard(str(path))
+
+
 def note(path: Path, more: bool) -> None:
-    """Record whether this round left the board behind the feed head."""
+    """Record whether this round's pulls left the board behind the feed head."""
     key = str(path)
     with _LOCK:
         if more:
-            _BEHIND.add(key)
+            _DUE.add(key)
+            _AT_HEAD.discard(key)
         else:
-            _BEHIND.discard(key)
+            _DUE.discard(key)
+            _AT_HEAD.add(key)
+
+
+def completed(slug: str, path: Path, more: bool) -> None:
+    """A round on this board completed (its sends too): :func:`note`, and a round at the head opens this process's
+    claims on the board (``kanban_sync_claims``)."""
+    from hermes_cli import kanban_sync_claims as claims
+    note(path, more)
+    claims.note_round(slug, path, at_head=not more)
 
 
 def due(boards: Iterable[tuple[str, Path]]) -> list[tuple[str, Path]]:
-    """The boards to run again now: their last round stopped at the page budget."""
+    """The boards to run again now: their last completed round stopped at the page budget."""
     with _LOCK:
-        return [(slug, path) for slug, path in boards if str(path) in _BEHIND]
+        return [(slug, path) for slug, path in boards if str(path) in _DUE]
 
 
 def behind(path: Path) -> bool:
-    """The board's last round stopped before the feed head (its run rows are held back meanwhile)."""
+    """Run rows are held back on this board (``sendable_before_head``) until a round reaches the head: its last
+    completed round stopped before the feed head, or no round of this process has reached it yet. A round in
+    progress changes nothing here (t_01a1d6c4e700958e: clearing it at round start made the outbox alarm age the
+    run rows a long first round holds on purpose)."""
     with _LOCK:
-        return str(path) in _BEHIND
+        return str(path) not in _AT_HEAD
 
 
 def replica_at_head(slug: str, hub: Any, gateway: str, live_path: Path) -> None:
@@ -172,5 +193,6 @@ def _expedite(live_path: Path, changed: dict) -> None:
 def reset() -> None:
     """Tests: forget every board."""
     with _LOCK:
-        _BEHIND.clear()
+        _DUE.clear()
+        _AT_HEAD.clear()
         _EVIDENCE.clear()

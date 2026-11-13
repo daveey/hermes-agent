@@ -67,6 +67,13 @@ def _join_api_turn_workers():
         thread.join(30)
 
 
+@pytest.fixture(autouse=True)
+def _no_sync_claim_gate(monkeypatch):
+    """A sync watcher a test starts gates claims only in that test (``kanban_sync_claims``)."""
+    from hermes_cli import kanban_sync_claims
+    monkeypatch.setattr(kanban_sync_claims, "_STATE", kanban_sync_claims._State())
+
+
 @pytest.fixture
 def private_db_probe_cleanup(tmp_path):
     """Release only this test's probe fds after its explicit SQLite-handle finalizers.

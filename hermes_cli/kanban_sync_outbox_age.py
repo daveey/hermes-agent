@@ -68,8 +68,10 @@ class _NoBoardReads:
 
 
 def sendable_age_s(conn: sqlite3.Connection, path: Path, now: Optional[float] = None) -> Optional[float]:
-    """While a board is behind the feed head: the age of the oldest unanswered op among exactly the ops the push
-    before the head would send (``kanban_sync_backlog.sendable_before_head``, with the latest round's Board reads).
+    """While a board is behind the feed head (``kanban_sync_backlog.behind``: its last completed round ended behind,
+    or no round of this process has reached the head yet): the age of the oldest unanswered op among exactly the
+    ops the push before the head would send (``kanban_sync_backlog.sendable_before_head``, with the latest round's
+    Board reads).
     Held ops (from the first pending run row on, a stale wake on a card the Board completed) wait on purpose for the
     head, possibly over a long catch-up: they age the alarm again once the board reaches it. (t_01a1d41c2612ebc0)"""
     from hermes_cli import kanban_sync_backlog as backlog

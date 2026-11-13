@@ -465,6 +465,8 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli import kanban_db_sync as _sync
         if not _sync.sync_enabled():
             return
+        from hermes_cli.kanban_sync_claims import loop_expected
+        loop_expected()  # this gateway's dispatcher claims nothing until its sync loop's first round reaches the head
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_sync_client as _ksc
         # Same retrying, root-preferring lease as the dispatcher: a gateway that loses the boot race

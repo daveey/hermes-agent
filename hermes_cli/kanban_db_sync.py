@@ -907,6 +907,10 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
         return ClaimGate(expires, deferred=True)
     if board_mode(conn) != "primary":
         return ClaimGate(expires)
+    from hermes_cli.kanban_sync_claims import DEFERRAL, held
+    if held(conn):  # this host's first sync round has not reached the feed head (t_01a1d6c4e700958e)
+        defer_claim(task_id, DEFERRAL, ORIGIN_LOCAL)
+        return ClaimGate(expires, deferred=True)
     state = _state(conn)
     ids = (state["board_id"], state["gateway_id"], task_id)
     run_uid = uuid7()

@@ -44,6 +44,8 @@ def _status(args: argparse.Namespace) -> int:
         out = {"board": slug, **ksc.status(conn)}
     finally:
         conn.close()
+    from hermes_cli.kanban_sync_claims import describe
+    out["claims"] = describe(_path(slug), out.get("mode") or "off")  # the dispatcher's first-round gate
     shadow = ksc.shadow_path(slug)
     if shadow.exists():
         sconn = kbc.connect(shadow)
