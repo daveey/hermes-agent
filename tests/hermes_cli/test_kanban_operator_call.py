@@ -313,6 +313,27 @@ def test_unblock_refuses_human_gate_and_hand_hold(fleet):
     assert ksr.get_request(f.w, out["request_id"])["status"] == "done"
 
 
+def test_unblock_of_a_terminal_held_stale_copy_names_the_completion_and_reopen(fleet):
+    """#2271: the home's row still reads blocked (its own agent's block) but the card's ``completed`` event reached
+    the file after it, so ``unblock_task`` refuses (an unblock is a reopen). The refusal must say why and how to
+    revive it, not the bare "(state changed)" fallback."""
+    f = fleet
+    stale = f.card(f.h, "completed elsewhere, stale blocked copy here")
+    kb.block_task(f.h, stale, reason="waiting on CI", actor=f"agent (task {stale})", kind="transient")
+    with kb.write_txn(f.h):  # the completion's event reached the hub's file, the row did not
+        kb._append_event(f.h, stale, "completed", {"result_len": 12})
+    assert kb.get_task(f.h, stale).status == "blocked"
+    f.board()
+    _submit(f, {"op": "operator", "action": "unblock", "task_id": stale, "reason": "CI is green"})
+    _round(f)
+    assert kb.get_task(f.h, stale).status == "blocked"
+    row = next(r for r in _log(f.h, "execute") if r["target_task_id"] == stale)
+    assert row["outcome"] == "refused", row
+    assert "its completed event holds it done" in row["detail"], row["detail"]
+    assert f"hermes kanban reopen {stale} --reason" in row["detail"], row["detail"]
+    assert "state changed" not in row["detail"]
+
+
 def test_running_target_is_not_moved(fleet):
     f = fleet
     kb.claim_task(f.h, f.target)
