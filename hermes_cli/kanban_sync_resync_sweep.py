@@ -25,6 +25,8 @@ row is then missing from the snapshot although the Board holds it, and its op is
 rows and every row of the cards they name. A link written after that read and acked by such a push before the
 sweep has neither an op nor a creation time, so the links present at that read bound the ``task_links`` sweep, and
 the child card's ``linked``/``unlinked`` events since ``since`` spare a key that was unlinked and re-created.
+This conservatively keeps all links of that child, including a Board-deleted edge that may linger until another
+rebuild or be re-pushed by repair; as with outbox-held rows, preserving local work wins over tombstoning it.
 [daveey] t_01a1d5f9de4020fa t_01a1d62f0a4187d8 t_01a1d6660108bedb
 """
 
