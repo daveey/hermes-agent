@@ -39,6 +39,7 @@ _COMMENT_PRECEDERS = frozenset(" \t\n;&|(")
 
 # Frame kinds. A frame is [kind, closer, depth, in_double_quotes].
 _CMD, _ARITH, _PARAM = "cmd", "arith", "param"
+_PARAM_ARITH = "param_arith"  # parameter word feeding an arithmetic evaluator
 
 
 def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int = 0) -> bool:
@@ -87,7 +88,7 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
             stack.append([_ARITH, "))", 0, False])
             continue
         if token == "$(":
-            if kind == _ARITH and not (
+            if kind in (_ARITH, _PARAM_ARITH) and not (
                     date_exempt and _DATE_PRODUCER_RE.match(command, pos)):
                 return True
             stack.append([_CMD, ")", 0, False])
@@ -184,7 +185,11 @@ def _open_parameter(command: str, pos: int, stack: list[list]) -> int:
     """Push the frame for a ``${`` opened before *pos*; return where scanning resumes."""
     name = _PARAM_NAME_RE.match(command, pos)
     after = name.end() if name else pos
-    stack.append([_PARAM, "}", 0, False])
+    # Default/alternate/assignment words feed the surrounding evaluator; pattern
+    # operands do not. Preserve parameter lexical rules (not arithmetic brackets).
+    operator = command[after:after + 2].lstrip(":")[:1]
+    inherited = stack[-1][0] in (_ARITH, _PARAM_ARITH) and operator in ("-", "=", "+")
+    stack.append([_PARAM_ARITH if inherited else _PARAM, "}", 0, False])
     return _after_parameter_name(command, after, stack)
 
 
