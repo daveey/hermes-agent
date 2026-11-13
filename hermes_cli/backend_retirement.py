@@ -135,6 +135,15 @@ def _reserve(root, busy_wait_s, what):
                    time.monotonic() - started, "admitted" if pending is not None else "held", tries)
     return pending, (None if pending is not None else "held")
 
+
+
+def _describe(pending, purpose, session=None):
+    """Label a reservation for ``admission_fence state-details``; a test double without the method is fine."""
+    describe = getattr(pending, "describe", None)
+    if describe is not None:
+        describe(purpose, session)
+
+
 # [daveey] Background reviews (the post-turn memory/skill review fork) run on a daemon thread with
 # no session turn lease and no admission reservation, so the idle proof read a backend mid-review
 # as idle and retirement hard-interrupted the review mid-call (2026-10-28 04:38, two reviews lost).
@@ -143,15 +152,52 @@ def _reserve(root, busy_wait_s, what):
 # BACKGROUND_REVIEW_HARD_CAP_S a wedged review no longer holds retirement, so it cannot starve it.
 BACKGROUND_REVIEW_WAIT_S = 300.0
 BACKGROUND_REVIEW_HARD_CAP_S = 900.0
+# [daveey] Why a review was asked to stop (``BackgroundReviewHold.wind_down_reason``); the fork's turn exit
+# reason is ``review_<reason>_wind_down``.
+WIND_DOWN_RETIREMENT = "retirement"
+WIND_DOWN_UPDATE_PAUSE = "update_pause"
 
 
 class BackgroundReviewHold:
-    """One running review's claim on the fence; ``wind_down`` asks the fork to stop between calls."""
+    """One running review's claim on the fence; ``wind_down`` asks the fork to stop between calls.
 
-    def __init__(self, started_at, reservation=None):
+    ``root`` is the installation root whose update fence the review reserved (None where the fence is
+    unsupported): ``review_stop_reason`` reads that root's core-update pause request."""
+
+    def __init__(self, started_at, reservation=None, root=None, session=None):
         self.started_at = started_at
         self.wind_down = threading.Event()
+        self.wind_down_reason = None
         self.reservation = reservation
+        self.root = root
+        self.session = session
+
+
+def review_stop_reason(hold):
+    """Why the review holding ``hold`` must stop before its next provider call, or None to go on.
+
+    [daveey] t_01a1d521213ff881: called at every review step boundary. A core-update drain window's pause
+    request (``admission_fence.pause_requested``: the request AND the hold, before its expiry) sets the
+    review's ``wind_down``, as a pending retirement does past BACKGROUND_REVIEW_WAIT_S. The review held its
+    admission reservation for its whole run and read only the retirement signal, so hermes-sync's worker
+    reclaim, which waits for every reservation, never opened while one long review ran and the update gave
+    up at its 3-minute claim hold (David-MBP 2026-11-13 05:25). Never mid-call: writes from the calls that
+    already ran have landed, and the spawner requeues the review to run after the update."""
+    wind_down = getattr(hold, "wind_down", None)
+    if wind_down is None:
+        return None
+    root = getattr(hold, "root", None)
+    if not wind_down.is_set() and root is not None:
+        from hermes_cli.admission_fence import pause_requested
+
+        if pause_requested(root):
+            hold.wind_down_reason = WIND_DOWN_UPDATE_PAUSE
+            wind_down.set()
+            _log.info("Background review (session=%s) stopping before its next provider call: a Hermes update "
+                      "asked turns to pause", str(getattr(hold, "session", None) or "?")[-12:])
+    if wind_down.is_set():
+        return getattr(hold, "wind_down_reason", None) or WIND_DOWN_RETIREMENT
+    return None
 
 
 class RetirementFence:
@@ -197,30 +243,34 @@ class RetirementFence:
             self._expire()
             return self._preparing or self._token is not None
 
-    def begin_background_review(self):
+    def begin_background_review(self, session_id=None):
         """Admit a review under BOTH the process and cross-process update fences.
 
         The sync drainer cannot see this process's review set. Keep a locked
         admission reservation until the review thread exits, including mid-call
         waits. A drain window closes new admissions and waits for this claim;
-        if the call outlasts the window, the window expires rather than killing it.
+        its pause request stops the review before its next provider call
+        (``review_stop_reason``). Only a single call that outlasts the window
+        makes the window expire rather than killing it. The reservation names
+        the review and its session for the drainer's ``state-details`` read.
         """
         from hermes_constants import get_default_hermes_root, get_hermes_home
         from hermes_cli.admission_fence import SUPPORTED
 
-        pending = None
+        pending = root = None
         if SUPPORTED:
-            pending, _reason = _reserve(get_default_hermes_root(home=get_hermes_home()), BUSY_WAIT_S,
-                                        "Review update admission")
+            root = get_default_hermes_root(home=get_hermes_home())
+            pending, _reason = _reserve(root, BUSY_WAIT_S, "Review update admission")
             if pending is None:
                 return None
+            _describe(pending, "background_review", session_id)
         with self._lock:
             self._expire()
             if self._preparing or self._token is not None:
                 if pending is not None:
                     pending.close()
                 return None
-            hold = BackgroundReviewHold(self._now(), pending)
+            hold = BackgroundReviewHold(self._now(), pending, root, session_id)
             self._reviews.add(hold)
             return hold
 
@@ -284,6 +334,8 @@ class RetirementFence:
                                            busy_wait_s, "Update admission")
                 if reason == "held":
                     _log.info(HOLD_MESSAGE)
+                elif pending is not None:
+                    _describe(pending, "turn_admission")
             _refusal.set(reason)
             yield admitted and pending is not None
         finally:
@@ -308,6 +360,8 @@ class RetirementFence:
                 now = self._now()
                 if any(now - h.started_at >= BACKGROUND_REVIEW_WAIT_S for h in reviews):
                     for hold in reviews:
+                        if not hold.wind_down.is_set():
+                            hold.wind_down_reason = WIND_DOWN_RETIREMENT
                         hold.wind_down.set()
                 return {"ok": False, "idle": False}
             self._preparing = True

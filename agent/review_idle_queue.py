@@ -81,6 +81,7 @@ class ReviewIdleQueue:
         # Test seams — replaced by unit tests, never in production.
         self._now: Callable[[], float] = time.monotonic
         self._server_idle: Callable[[], bool] = _managed_server_idle
+        self._update_held: Callable[[], bool] = _update_admission_held
 
     def note_turn_started(self) -> None:
         with self._lock:
@@ -130,6 +131,13 @@ class ReviewIdleQueue:
 
     def _pop_dispatchable(self) -> Optional[_PendingReview]:
         """Oldest aged-out item, else the oldest item once quiet+idle hold."""
+        with self._lock:
+            if not self._pending:
+                return None
+        # [daveey] Under a core-update admission hold a spawned review is refused and lost
+        # (backend_retirement.begin_background_review): keep every item queued until the hold lifts.
+        if self._update_held():
+            return None
         with self._lock:
             if not self._pending:
                 return None
@@ -212,6 +220,45 @@ def _managed_server_idle() -> bool:
         )
     except Exception:
         return True
+
+
+def _update_admission_held() -> bool:
+    """A core-update drain holds admission on this installation root. Unreadable reads not held (fail open:
+    the spawn's own reservation still refuses under a real hold)."""
+    try:
+        from hermes_cli.admission_fence import SUPPORTED, is_held
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        return bool(SUPPORTED and is_held(get_default_hermes_root(home=get_hermes_home()) / "core-update"))
+    except (ImportError, OSError):
+        return False
+
+
+def requeue_update_paused_review(agent: Any, hold: Any, session_key: str, kwargs: dict[str, Any],
+                                 max_attempts: int) -> bool:
+    """[daveey] t_01a1d521213ff881: a review a core-update pause request stopped between provider calls
+    (``backend_retirement.review_stop_reason``) is queued to run again once the update's admission hold lifts,
+    whatever its runtime; out of attempts, or if the queue refuses it, it is dropped and logged (a review is
+    best-effort, and the queue is in-memory: a backend the update restarts loses it). Returns whether ``hold``
+    was such a stop (the caller then skips its other requeue rules). Never raises."""
+    from hermes_cli.backend_retirement import WIND_DOWN_UPDATE_PAUSE
+
+    if getattr(hold, "wind_down_reason", None) != WIND_DOWN_UPDATE_PAUSE:
+        return False
+    session = session_key[-12:]
+    try:
+        attempts = int(kwargs.get("_requeue_attempts", 0))
+        if attempts > max_attempts:
+            logger.info("Background review stopped for a Hermes update: dropped after %d requeues (session=%s)",
+                        max_attempts, session)
+            return True
+        QUEUE.enqueue(agent, session_key, dict(kwargs))
+        logger.info("Background review stopped for a Hermes update before its next provider call: requeued to "
+                    "run after the update (session=%s, attempt=%d)", session, attempts)
+    except Exception:  # health: allow BLE001 -- best-effort requeue on the review thread's exit; logged with traceback
+        logger.warning("Background review stopped for a Hermes update: dropped, requeue failed (session=%s)",
+                       session, exc_info=True)
+    return True
 
 
 # Module singleton — one queue per process, like the load-progress watcher.

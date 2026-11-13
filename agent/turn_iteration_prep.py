@@ -455,16 +455,22 @@ def begin_iteration(
         return _verdict("break")
 
     # [daveey] A backend retiring while this review fork runs asks it to stop before the next
-    # provider call (backend_retirement.BACKGROUND_REVIEW_WAIT_S), so the shutdown never cuts a
-    # review off mid-call; writes from the calls that already ran have landed.
+    # provider call (backend_retirement.BACKGROUND_REVIEW_WAIT_S), and so does a core-update drain
+    # window's pause request (t_01a1d521213ff881: the review's admission reservation otherwise holds
+    # the drain's worker reclaim shut). Never mid-call; writes from the calls that already ran have landed.
     _hold = getattr(agent, "_retirement_review_hold", None)
-    _wind_down = getattr(_hold, "wind_down", None)
-    if _wind_down is not None and _wind_down.is_set():
-        _turn_exit_reason = "review_retirement_wind_down"
-        if not agent.quiet_mode:
-            agent._safe_print("\n⏹️  Backend is retiring — stopping the review before the next "
-                              "provider call.", diagnostic=True)
-        return _verdict("break")
+    if _hold is not None:
+        from hermes_cli.backend_retirement import WIND_DOWN_UPDATE_PAUSE, review_stop_reason
+
+        _stop = review_stop_reason(_hold)
+        if _stop:
+            _turn_exit_reason = f"review_{_stop}_wind_down"
+            if not agent.quiet_mode:
+                agent._safe_print(
+                    "\n⏹️  " + ("A Hermes update asked turns to pause" if _stop == WIND_DOWN_UPDATE_PAUSE
+                                 else "Backend is retiring")
+                    + " — stopping the review before the next provider call.", diagnostic=True)
+            return _verdict("break")
 
     api_call_count += 1
     agent._api_call_count = api_call_count

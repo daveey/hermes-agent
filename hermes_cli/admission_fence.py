@@ -88,6 +88,22 @@ class Reservation:
         self.path = path
         self._lock = threading.Lock()
 
+    def describe(self, purpose, session=None):
+        """[daveey] Record who holds this reservation, for ``state-details`` (t_01a1d521213ff881).
+
+        Diagnostic only: the lock, not the body, is the claim, so the v1 count protocol is unchanged and
+        an empty or unreadable body (an older core, a write that failed) only reads as an unnamed holder.
+        Never raises."""
+        body = json.dumps({"purpose": str(purpose), "pid": os.getpid(),
+                           "session": None if session is None else str(session), "created_at": time.time()})
+        with self._lock:
+            if self.fd is None:
+                return
+            try:
+                os.pwrite(self.fd, body.encode("utf-8"), 0)
+            except OSError:
+                pass
+
     def close(self):
         with self._lock:
             if self.fd is not None:
@@ -200,6 +216,7 @@ def _state_locked(root, *, details=False):
 
     count = 0
     reservation_ids = []
+    records = []
     directory = root / "reservations"
     try:
         paths = list(directory.iterdir())
@@ -218,6 +235,8 @@ def _state_locked(root, *, details=False):
                     raise
                 count += 1
                 reservation_ids.append(path.name)
+                if details:
+                    records.append(_reservation_record(fd, path.name))
             else:
                 path.unlink(missing_ok=True)  # crashed owner; no age/PID heuristic
         finally:
@@ -225,7 +244,32 @@ def _state_locked(root, *, details=False):
     result = {"version": 1, "held": is_held(root), "reservations": count}
     if details:
         result["reservation_ids"] = sorted(reservation_ids)
+        result["reservation_records"] = sorted(records, key=lambda r: r["id"])
     return result
+
+
+def _reservation_record(fd, name):
+    """One held reservation's owner record (``Reservation.describe``); unnamed fields are None. Never raises."""
+    record = {"id": name, "purpose": None, "pid": None, "session": None, "age_s": None}
+    created = None
+    try:
+        body = json.loads(os.pread(fd, 4096, 0).decode("utf-8"))
+        if isinstance(body, dict):
+            purpose, pid, session = body.get("purpose"), body.get("pid"), body.get("session")
+            record["purpose"] = purpose if isinstance(purpose, str) else None
+            record["pid"] = pid if type(pid) is int else None
+            record["session"] = session if isinstance(session, str) else None
+            if isinstance(body.get("created_at"), (int, float)):
+                created = float(body["created_at"])
+    except (OSError, ValueError):
+        pass
+    try:
+        if created is None:  # an unlabelled file is written once, at creation
+            created = os.fstat(fd).st_mtime
+        record["age_s"] = round(max(0.0, time.time() - created), 1)
+    except OSError:
+        pass
+    return record
 
 
 def state(home, *, details=False, timeout=10.0):

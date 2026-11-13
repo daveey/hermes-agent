@@ -820,7 +820,7 @@ class AIAgent(
         # retirement waits for it instead of hard-interrupting it mid-call; a backend that already
         # holds a retirement permit skips the review cleanly (it would be cut off at shutdown).
         from hermes_cli.backend_retirement import retirement
-        hold = retirement.begin_background_review()
+        hold = retirement.begin_background_review(getattr(self, "session_id", None))
         if hold is None:
             logger.info("Background review skipped: this backend is retiring")
             finish_background_review_run(self, review_run)
@@ -837,10 +837,15 @@ class AIAgent(
                     target()
                 finally:
                     retirement.end_background_review(hold)
-                self._maybe_requeue_preempted_review(review_run, dict(
+                requeue = dict(
                     messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
                     focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1,
-                    explicit=explicit))
+                    explicit=explicit)
+                # [daveey] A review a core-update pause stopped runs again after the update (bounded).
+                from agent.review_idle_queue import requeue_update_paused_review
+                if not requeue_update_paused_review(self, hold, _review_queue_key(self), requeue,
+                                                    self._REVIEW_REQUEUE_MAX_ATTEMPTS):
+                    self._maybe_requeue_preempted_review(review_run, requeue)
 
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.

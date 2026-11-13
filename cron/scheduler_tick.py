@@ -143,6 +143,8 @@ def update_admission():
     try:
         root = get_default_hermes_root(home=_sched._get_hermes_home())
         pending = admission_fence.reserve(root, timeout=BUSY_WAIT_S)
+        if pending is not None:
+            getattr(pending, "describe", lambda *_: None)("cron_tick")
     except AdmissionBusy:  # before OSError: AdmissionBusy is a TimeoutError, i.e. an OSError
         logger.info("cron dispatch deferred: core update admission lock still busy after %.1fs under %s; "
                     "due jobs fire on a later tick", BUSY_WAIT_S, root)
