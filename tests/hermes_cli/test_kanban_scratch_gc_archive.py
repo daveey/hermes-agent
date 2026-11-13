@@ -943,6 +943,17 @@ def test_marker_read_through_the_scans_own_directory_fd(board, monkeypatch):
     assert (cache.with_name("moved") / ".git").read_bytes() == b""
 
 
+def test_unjudged_marker_fails_closed(board, monkeypatch):
+    """A regular .git the scan never judged is refused, not a KeyError."""
+    from hermes_cli import kanban_scratch_archive as sa
+
+    _tid, path = _plain_task(lambda p: _uv_cache(p))
+    real_scan = sa._scan
+    monkeypatch.setattr(sa, "_scan", lambda root, on_git_file=None, **kw: real_scan(root, **kw))
+    with pytest.raises(sa.ArchiveRefused, match="linked worktree or submodule"):
+        sa.find_repos(path)
+
+
 def test_marker_rewritten_into_gitlink_after_judgement_keeps_workspace(board, monkeypatch):
     from hermes_cli import kanban_scratch_archive as sa
 

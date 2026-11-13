@@ -137,7 +137,8 @@ def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
             if stat.S_ISDIR(gst.st_mode):
                 repos.append(directory)
                 continue
-            if not stat.S_ISREG(gst.st_mode) or verdicts[gitrel]:
+            # A marker the scan never judged counts as a gitlink (fail closed).
+            if not stat.S_ISREG(gst.st_mode) or verdicts.get(gitrel, True):
                 raise ArchiveRefused(f"linked worktree or submodule at {directory / '.git'} (left to the worktree GC)")
             markers[gitrel] = _signature(gst)  # plain data (e.g. uv's empty cache marker)
         if {"HEAD", "objects"} <= names and names & {"refs", "reftable"}:
