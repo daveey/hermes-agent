@@ -15,7 +15,9 @@ from typing import Any, Callable, List, Optional, Tuple
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.delegation_context import is_dispatcher_owned_worker_context
 from agent.interrupt_control import interrupted_during_api_call_reason
-from agent.turn_failure_copy import PARTIAL_FAILED_TURN_NOTICE, exit_reason_failure, stamp_failure
+from agent.turn_failure_copy import (
+    FAILED_TURN_DISPLAY_KIND, PARTIAL_FAILED_TURN_NOTICE, exit_reason_failure, stamp_failure,
+)
 from agent.context_compressor import _DB_PERSISTED_MARKER
 from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
@@ -724,12 +726,34 @@ def _silent_tool_tail(agent, final_response, interrupted, messages) -> bool:
     )
 
 
+def _stamp_exit_failure(agent, result, failed, turn_exit_reason, response, exit_failure) -> dict:
+    """Stamp ``error`` and the failure verdict a failed exit reason carries onto ``result`` (in
+    place; returns it). Shared by the turn result and the failed-tool-tail close row, so the row's
+    display metadata matches what the failed-turn boundary writer derives from the result."""
+    if failed and str(turn_exit_reason) == "session_persistence_failed":
+        from hermes_constants import profile_cli_selector
+
+        result["error"] = response or (
+            "session storage could not be written — check the state database "
+            f"health (`hermes {profile_cli_selector()}doctor`), then send your message again"
+        )
+        _cause = getattr(agent, "_last_persistence_error_cause", None)
+        result["failure_reason"] = "session_persistence_failed:" + (_cause or "unknown")
+    elif exit_failure is not None:
+        if failed:
+            result["error"] = response or str(turn_exit_reason)
+        stamp_failure(result, exit_failure.reason, exit_failure.retryable)
+    return result
+
+
 def _close_failed_tool_tail(agent, messages, failed, turn_exit_reason, logger) -> bool:
     """Close the tool tail of a turn that already failed (``failed``, or an exit reason that
     fails the turn, e.g. ``session_persistence_failed`` when the tool result could not be
     saved) with that reason's own explanation; return False for a turn that had not failed.
     Relabelling such a turn ``pending_tool_result`` would hide the real cause behind "send
-    continue", which cannot help (gateway-a8b8d01aa4)."""
+    continue", which cannot help (gateway-a8b8d01aa4). The close row is the turn's failed-turn
+    boundary (``FAILED_TURN_DISPLAY_KIND`` + failure ``display_metadata``): it closes the durable
+    tail, so ``_close_durable_failed_turn`` no-ops and would never add one."""
     verdict = exit_reason_failure(turn_exit_reason)
     if not failed and not (verdict is not None and verdict.fails_turn):
         return False
@@ -748,7 +772,17 @@ def _close_failed_tool_tail(agent, messages, failed, turn_exit_reason, logger) -
     except Exception:
         logger.warning("turn-completion explainer failed for %r", turn_exit_reason, exc_info=True)
     # The tool already ran, so the fallback is the partial-failure notice.
-    append_message(messages, {"role": "assistant", "content": text or PARTIAL_FAILED_TURN_NOTICE})
+    row = {"role": "assistant", "display_kind": FAILED_TURN_DISPLAY_KIND, "content": text or PARTIAL_FAILED_TURN_NOTICE}
+    try:
+        from agent.conversation_loop import _failed_turn_display_metadata
+
+        probe = {"failed": True, "turn_exit_reason": turn_exit_reason}
+        _stamp_exit_failure(agent, probe, True, turn_exit_reason, text, verdict)
+        if metadata := _failed_turn_display_metadata(agent, probe):
+            row["display_metadata"] = metadata
+    except Exception:
+        logger.warning("failed-turn display metadata unavailable for %r", turn_exit_reason, exc_info=True)
+    append_message(messages, row)
     return True
 
 
@@ -976,21 +1010,9 @@ def finalize_turn(
     # Persistence failures already set failed=True; also stamp `error` so the gateway
     # surfaces status="error" (desktop can toast) instead of a quiet complete frame, plus
     # the machine-readable cause 'session_persistence_failed:<locked|compression|...>'.
-    if failed and str(_turn_exit_reason) == "session_persistence_failed":
-        from hermes_constants import profile_cli_selector
-
-        # Never rebind final_response here: the memory sync and the background-review gate
-        # below must still see an empty response on a persistence-failed turn.
-        result["error"] = final_response or (
-            "session storage could not be written — check the state database "
-            f"health (`hermes {profile_cli_selector()}doctor`), then send your message again"
-        )
-        _cause = getattr(agent, "_last_persistence_error_cause", None)
-        result["failure_reason"] = "session_persistence_failed:" + (_cause or "unknown")
-    elif _exit_failure is not None:
-        if failed:
-            result["error"] = final_response or str(_turn_exit_reason)
-        stamp_failure(result, _exit_failure.reason, _exit_failure.retryable)
+    # Never rebind final_response here: the memory sync and the background-review gate
+    # below must still see an empty response on a persistence-failed turn.
+    _stamp_exit_failure(agent, result, failed, _turn_exit_reason, final_response, _exit_failure)
     _stamp_unresolved_failure(result, goal_unresolved)
     # Cleanup failures are surfaced, but the response is returned either way (#8049).
     if _cleanup_errors:

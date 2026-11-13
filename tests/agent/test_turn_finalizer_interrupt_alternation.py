@@ -354,3 +354,45 @@ def test_persistence_failed_tool_tail_close_uses_the_storage_explainer():
     assert expected and messages[-1] == {**messages[-1], "role": "assistant", "content": expected}
     assert messages[-1]["content"] != pending
     assert result["failure_reason"] == "session_persistence_failed:locked"
+
+
+def _persistence_failed_tool_tail_turn(explainer: bool):
+    from agent.turn_explainers import TurnExplainersMixin
+
+    agent = _StubAgent()
+    if explainer:
+        agent._turn_completion_explainer_enabled = lambda: True
+        agent._format_turn_completion_explanation = TurnExplainersMixin._format_turn_completion_explanation
+    agent._last_persistence_error_cause = "locked"
+    messages = _pending_tool_result_tail()
+    result = _finalize_failed(agent, messages, exit_reason="session_persistence_failed", failed=True)
+    return agent, messages, result
+
+
+def test_persistence_failed_tool_tail_close_is_the_failed_turn_boundary():
+    """The close row of a failed tool-tail turn closes the durable tail, so the boundary writer
+    (``_close_durable_failed_turn``) no-ops: the row itself must be the typed failed-turn row
+    carrying the failure display metadata the writer would derive from the turn result, and the
+    writer must not add a second one."""
+    from agent.conversation_loop import _close_durable_failed_turn, _failed_turn_display_metadata
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND
+
+    for explainer in (True, False):
+        agent, messages, result = _persistence_failed_tool_tail_turn(explainer)
+        tail = messages[-1]
+        assert tail["role"] == "assistant" and tail["display_kind"] == FAILED_TURN_DISPLAY_KIND, explainer
+        assert tail["display_metadata"] == _failed_turn_display_metadata(agent, result), explainer
+        assert tail["display_metadata"]["error_surface"]["code"].startswith("session_persistence_failed"), explainer
+        assert tail["display_metadata"]["error"] == result["error"], explainer
+
+        durable = [dict(m) for m in agent.persisted_messages]
+
+        class _DB:
+            def latest_conversation_role(self, _sid):
+                return durable[-1]["role"]
+
+        agent._session_db = _DB()
+        agent._flush_messages_to_session_db = lambda msgs: durable.append(dict(msgs[-1]))
+        _close_durable_failed_turn(agent, result)
+        rows = [m for m in durable if m.get("display_kind") == FAILED_TURN_DISPLAY_KIND]
+        assert len(rows) == 1 and rows[0] == tail, explainer
