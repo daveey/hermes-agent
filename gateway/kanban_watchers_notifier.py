@@ -321,7 +321,8 @@ class _Collector:
         try:
             count, inflight, key = _kbn().notify_gate_probe(
                 board=slug, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
-        except (sqlite3.Error, OSError, ValueError) as exc:  # unreadable DB / bad slug: the writable open decides
+        # unreadable DB / bad slug / Path.resolve symlink loop (RuntimeError before 3.13): the writable open decides
+        except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
             logger.debug("kanban notifier: read-only subscription probe failed "
                          "for board %s (%s); falling back to writable open", slug, exc)
             return True, 0, None

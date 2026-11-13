@@ -92,6 +92,21 @@ def test_bookkeeping_only_write_moves_the_key(board, opens, routed):
     assert not _tick(runner)[0]
 
 
+@pytest.mark.parametrize('exc', [RuntimeError('symlink loop'), OSError('gone')])
+def test_probe_failure_falls_back_to_the_writable_open(board, opens, routed, monkeypatch, exc):
+    """A probe error (Path.resolve raises RuntimeError on a symlink loop before 3.13) must not abort the tick:
+    the board runs its full pass, as before the gate."""
+    task = kb.create_task(board, title='probe', assignee='default')
+    notify.add_notify_sub(board, task_id=task, platform='telegram', chat_id='chat')
+    _event(board, task, 'completed')
+
+    def boom(**_kw):
+        raise exc
+    monkeypatch.setattr(notify, 'notify_gate_probe', boom)
+    skipped, deliveries = _tick(_runner('telegram'))
+    assert not skipped and [ev.kind for ev in deliveries[0]['events']] == ['completed']
+
+
 @pytest.mark.parametrize('why', ['holder_died', 'claim_went_stale'])
 def test_orphaned_claim_on_idle_board_is_redelivered_within_one_tick(board, opens, routed, monkeypatch, why):
     task = kb.create_task(board, title='held', assignee='default')
