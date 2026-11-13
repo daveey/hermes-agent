@@ -387,14 +387,21 @@ def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
     """The turn's end: it ended paused for the update AND the session still keeps this turn's marker (a Stop
     that won dropped it). A turn whose hook paused it but which did not end paused (the Stop won in the agent
     loop) drops the session's keep here, before its marker is retired, and a carried turn takes back the
-    write-ahead ``carried_turn_paused`` stamp its hook added, so the continuation does not name a stopped turn."""
+    write-ahead ``carried_turn_paused`` stamp its hook added, so the continuation does not name a stopped turn.
+
+    A backend exit's own interrupt (no user Stop before it) keeps that stamp: the exit keeps the pause, and the
+    notification turn it cut short after its hook paid did not finish, so the next backend's continuation still
+    names it (``CARRIED_TURN_NOTE``), as it would had the turn ended paused."""
+    from tui_gateway.exit_job_receipts import USER_STOP_AT_EXIT
     with session["history_lock"]:
         mine = bool(marker_key) and session.get("_update_pause_marker_key") == marker_key
         stands = mine and isinstance(result, dict) and bool(result.get("paused_for_update"))
-        if mine and not stands and not session.get("_exit_keeps_turn_marker"):
+        exiting = bool(session.get("_exit_keeps_turn_marker"))
+        if mine and not stands and not exiting:
             _drop_pause(session)
         stamped = session.pop("_carried_pause_stamped", None) == marker_key
-    if stamped and not stands:  # a carried turn's hook paid the pause but the turn did not end paused
+        cut_short_by_exit = exiting and not session.get(USER_STOP_AT_EXIT)
+    if stamped and not stands and not cut_short_by_exit:  # its hook paid the pause but the turn ended otherwise
         from tui_gateway.turn_marker import clear_carried_turn_paused
         clear_carried_turn_paused(_home(session), marker_key)
     return stands

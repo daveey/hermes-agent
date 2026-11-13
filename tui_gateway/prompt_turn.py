@@ -273,7 +273,11 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     until_tool = bool(session.pop("_marker_until_tool", False))
     # [daveey] A core-update pause kept the previous turn's marker; this turn owns (and retires) its own.
     session.pop("_update_pause_marker_key", None)
-    session.pop("_carried_pause_stamped", None)  # a carried turn that raised before pause_stands left it
+    # A carried turn that raised before pause_stands left this in-memory flag. Its on-disk carried_turn_paused stamp
+    # is kept on purpose: the hook paid the pause and the notification turn then raised, so it did not finish and
+    # the continuation should name it (CARRIED_TURN_NOTE). Only a turn that ran on (job stop failed) or that the user
+    # stopped takes the stamp back (update_pause.boundary_pause_hook / pause_stands).
+    session.pop("_carried_pause_stamped", None)
     if not synthesized:  # the continuation (or a typed message) started: automatic turns may run again
         session.pop("_update_pause_due_until", None)
     if synthesized and not marker_attempt and _carry_paused_marker(session, marker_home, marker_key):
