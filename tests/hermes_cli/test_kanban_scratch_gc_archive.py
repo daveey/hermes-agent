@@ -31,15 +31,23 @@ def board(tmp_path, monkeypatch):
 
 
 def _run(*args, cwd=None):
+    # maintenance.auto/gc.auto off: a fixture commit must not leave a detached
+    # `git maintenance run --auto` writing objects/maintenance.lock under a
+    # tree the scratch archive is about to scan (it would fail closed).
     return subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
-         "-c", "init.defaultBranch=main", *args],
+         "-c", "init.defaultBranch=main",
+         "-c", "maintenance.auto=false", "-c", "gc.auto=0", *args],
         cwd=cwd, check=True, capture_output=True, text=True,
     ).stdout.strip()
 
 
 @pytest.fixture
 def remote(tmp_path):
+    return _seed_remote(tmp_path)
+
+
+def _seed_remote(tmp_path):
     src = tmp_path / "seed"
     src.mkdir()
     _run("init", "-q", cwd=src)
@@ -134,6 +142,24 @@ def test_unpushed_commit_lands_in_verified_bundle(board, remote, tmp_path):
     _run("clone", "-q", str(remote), str(check))
     _run("bundle", "verify", str(bundle), cwd=check)
     assert sha in _run("bundle", "list-heads", str(bundle), cwd=check)
+
+
+def test_fixture_git_never_spawns_background_maintenance(board, tmp_path, monkeypatch):
+    # A commit inside a scanned clone would otherwise launch `git maintenance run
+    # --auto`; git >= 2.47 detaches it, so objects/maintenance.lock can come and go
+    # while _gc scans the tree and the archive fails closed ("scan uncertain").
+    trace = tmp_path / "git-trace2.jsonl"
+    monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
+    _, path = _task(remote=_seed_remote(tmp_path))
+    (path / "repo" / "tracked.txt").write_text("two\n")
+    _run("commit", "-q", "-am", "unpushed work", cwd=path / "repo")
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert any(e.get("event") == "start" and "commit" in e.get("argv", []) for e in events)
+    maintenance = [
+        e for e in events
+        if e.get("event") == "child_start" and e.get("argv", [])[:2] in (["git", "maintenance"], ["git", "gc"])
+    ]
+    assert not maintenance, maintenance
 
 
 def test_workspace_that_is_itself_a_clone(board, remote):
