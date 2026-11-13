@@ -113,6 +113,27 @@ def test_a_cd_of_this_shell_still_ends_the_span(body):
     assert helpers._hub({"title": "Maintenance", "body": body})["runs_on"] == ["machine:worker-1"]
 
 
+# Post-merge mutants on PR #2585 (card t_01a1d6cc4a9eaa0a): cd/pushd match lowercase only, as the shell does. An
+# uppercase "CD" in prose (a disc, CI/CD) neither ends a home-relative span nor starts or names one.
+@pytest.mark.parametrize("body", [
+    "Run pytest, then cd ~ && read the CI/CD notes, then cat .hermes/.env",
+    "Run pytest, then cd ~ && read the notes\nCD burns are out of scope; cat .hermes/.env",
+    "Run pytest, then cd ~; CD repo; cat .hermes/.env",
+    "Run pytest, then cd ~ && CD ~/x && cat .hermes/.env",
+])
+def test_an_uppercase_cd_does_not_end_the_span(body):
+    d = helpers._hub({"title": "Maintenance", "body": body})
+    assert d["where"] == "local" and "runs_on" not in d, d
+
+
+@pytest.mark.parametrize("body", [
+    "Run pytest, then label the backup CD; then cat .hermes/notes.md in the repo",
+    "Run pytest, then label the backup CD ~/.hermes; it holds the hermes-agent tree",
+])
+def test_an_uppercase_cd_is_no_home_marker(body):
+    assert helpers._hub({"title": "Maintenance", "body": body})["runs_on"] == ["machine:worker-1"]
+
+
 def test_a_large_no_match_prose_cd_body_is_linear():
     """Spans no longer end at a prose cd, so a later cd home must still end one: no O(n^2) on one long line."""
     from hermes_cli import kanban_placement as kp
