@@ -19,7 +19,8 @@ move would write:
   (active, unheld, copies cards, carries the target's ``capability:<requires>`` and ``profile:<assignee>``, not
   draining, seen recently, a free card slot); or exactly the pool queue ``[POOL_LABEL]``
   (:data:`hermes_cli.kanban_placement.POOL_LABEL`) while some pool machine other than M is eligible now by the same
-  rules (t_01a1d0214f3e63e8: ``machine:<pool worker>`` needs a ``host_reason`` (:mod:`hermes_cli.kanban_move_pool`)
+  rules plus the target's ``skill:<skills>`` (the Board's ``requiredLabels``) (t_01a1d0214f3e63e8:
+  ``machine:<pool worker>`` needs a ``host_reason`` (:mod:`hermes_cli.kanban_move_pool`)
   that no alarm path passes, so with every eligible machine a pool worker the alarm could re-place nothing).
 
 The move itself is the ordinary queued move (``kanban_move.move_queued``) with its own guards. Nothing here reads
@@ -99,29 +100,55 @@ def _requires(target: Any) -> list:
     return [r for r in requires if isinstance(r, str)] if isinstance(requires, list) else []
 
 
-def malformed_requires(target: Any) -> Optional[str]:
-    """Why the Board cannot read ``target``'s stored ``requires``, else None.
+def _stored(target: Any, col: str) -> Any:
+    """``target``'s stored ``col`` (NULL when the row has no such column, e.g. an older replica)."""
+    return target[col] if col in _cols(target) else None
 
-    Mirrors the Board's ``stringList`` (worker_placement.ts): NULL is ``[]``; anything else must parse as a JSON list
-    of strings, or the Board answers ``task_metadata_invalid`` and never pool-places the card. :func:`_requires` maps
-    such a row to ``[]`` for the need, so this check is what keeps a pool move from looking eligible."""
+
+def _string_list(raw: Any) -> Optional[list]:
+    """The Board's ``stringList`` (worker_placement.ts): NULL is ``[]``; anything else must parse as a JSON list of
+    strings, else None (the Board then answers ``task_metadata_invalid`` and never pool-places the card)."""
     import json
-    raw = target["requires"]
     if raw is None:
-        return None
+        return []
     try:
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
     except (TypeError, ValueError):
-        value = None
-    if isinstance(value, list) and all(isinstance(r, str) for r in value):
         return None
-    return (f"its stored requires {str(raw)[:80]!r} is not a JSON list of strings, so the Board's pool selection "
-            "answers task_metadata_invalid; fix the card's requires or move it to one machine:<X>")
+    return value if isinstance(value, list) and all(isinstance(r, str) for r in value) else None
+
+
+def _malformed(target: Any, col: str) -> Optional[str]:
+    raw = _stored(target, col)
+    if _string_list(raw) is not None:
+        return None
+    return (f"its stored {col} {str(raw)[:80]!r} is not a JSON list of strings, so the Board's pool selection "
+            f"answers task_metadata_invalid; fix the card's {col} or move it to one machine:<X>")
+
+
+def malformed_requires(target: Any) -> Optional[str]:
+    """Why the Board cannot read ``target``'s stored ``requires`` (:func:`_string_list`), else None.
+
+    :func:`_requires` maps such a row to ``[]`` for the need, so this check is what keeps a pool move from looking
+    eligible."""
+    return _malformed(target, "requires")
+
+
+def malformed_skills(target: Any) -> Optional[str]:
+    """Why the Board cannot read ``target``'s stored ``skills``, else None: the Board's ``requiredLabels`` reads
+    ``skills`` through the same ``stringList`` (t_01a1d2f66de283de)."""
+    return _malformed(target, "skills")
 
 
 def _need(target: Any) -> set:
     from hermes_cli.kanban_placement_coordination import requirement_label
     return {requirement_label(r) for r in _requires(target)} | {f"profile:{target['assignee']}"}
+
+
+def _pool_need(target: Any) -> set:
+    """:func:`_need` plus the ``skill:<s>`` labels the Board's ``requiredLabels`` adds for a pool worker, built
+    verbatim as the Board builds them. A machine:<X> move keeps :func:`_need`."""
+    return _need(target) | {f"skill:{s}" for s in (_string_list(_stored(target, "skills")) or [])}
 
 
 def eligible_now(name: str, own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], need: set,
@@ -159,13 +186,13 @@ def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: An
     except ValueError as exc:
         return str(exc)
     if labels == [pool_label()]:
-        # A worker may attest ssh access, but the Board's pool selection cannot place it, nor a requires it cannot
-        # read (not a JSON list of strings): the card would sit in task_requirement_unsupported or
-        # task_metadata_invalid instead of leaving the stalled machine.
+        # A worker may attest ssh access, but the Board's pool selection cannot place it, nor a requires or skills it
+        # cannot read (not a JSON list of strings): the card would sit in task_requirement_unsupported or
+        # task_metadata_invalid instead of leaving the stalled machine. A pool worker must also carry skill:<s>.
         from hermes_cli.kanban_placement_coordination import board_refusal
-        if why := malformed_requires(target) or board_refusal(_requires(target)):
+        if why := malformed_requires(target) or malformed_skills(target) or board_refusal(_requires(target)):
             return f"{target['id']} cannot go to {pool_label()}: {why}"
-        return pool_refusal(own, machines, _need(target), now_ms)
+        return pool_refusal(own, machines, _pool_need(target), now_ms)
     if len(labels) != 1 or not labels[0].startswith("machine:"):
         return f"runs_on must be exactly [\"{pool_label()}\"] or exactly one machine:<X> label"
     name = labels[0].split(":", 1)[1]

@@ -266,6 +266,43 @@ def test_a_requires_the_board_reads_still_takes_the_pool_queue(board, stored):
     assert board.why(runs_on=[POOL], machines=machines) is None
 
 
+@pytest.mark.parametrize("stored", ['{"a":1}', '"kanban-worker"', '["kanban-worker", 3]', "null", "not json"])
+def test_skills_the_board_cannot_read_refuse_the_pool_queue_only(board, stored):
+    """t_01a1d2f66de283de: the Board's ``requiredLabels`` reads ``skills`` through the same ``stringList`` as
+    ``requires`` and answers ``task_metadata_invalid`` for a row it cannot read, so a pool move would stall. A move to
+    one machine is unchanged."""
+    board.set(board.target, skills=stored)
+    why = board.why(runs_on=[POOL], machines=_pooled())
+    assert why is not None and "task_metadata_invalid" in why and "stored skills" in why, why
+    assert board.why(machines=_pooled()) is None  # machine:<X> still moves
+
+
+def test_the_pool_queue_needs_the_cards_skill_labels(board):
+    """t_01a1d2f66de283de: the Board's ``requiredLabels`` adds ``skill:<s>``; a pool worker without it never takes the
+    card, so the pool move is refused until one attests it. A move to one machine does not need the skill label."""
+    board.set(board.target, skills=json.dumps(["kanban-worker", "github"]))
+    why = board.why(runs_on=[POOL], machines=_pooled())
+    assert why is not None and "skill:kanban-worker" in why and "skill:github" in why, why
+    partial = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, "skill:kanban-worker"]})
+    assert board.why(runs_on=[POOL], machines=partial) is not None
+    full = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, "skill:kanban-worker", "skill:github"]})
+    assert board.why(runs_on=[POOL], machines=full) is None
+    assert board.why(machines=_pooled()) is None  # machine:<X> unchanged
+
+
+@pytest.mark.parametrize("stored", [None, "[]"])
+def test_no_skills_still_takes_the_pool_queue(board, stored):
+    board.set(board.target, skills=stored)
+    assert board.why(runs_on=[POOL], machines=_pooled()) is None
+
+
+def test_a_row_without_a_skills_column_reads_as_no_skills():
+    """An older replica row has no ``skills`` column: NULL, as the Board reads a missing value."""
+    row = {"requires": None, "assignee": "default"}
+    assert rp.malformed_skills(row) is None
+    assert rp._pool_need(row) == rp._need(row) == {"profile:default"}
+
+
 @pytest.mark.parametrize("name, label", [("hub:write", "capability:hub-write"), ("hub:read", "capability:hub-read"),
                                          ("ssh:mbp", "capability:ssh-mbp"), ("ssh:mini", "capability:ssh-mini"),
                                          ("terminal", "capability:terminal")])
