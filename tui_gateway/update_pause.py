@@ -580,10 +580,13 @@ def _age_label(at: float) -> str:
     return f"{age / 3600:.1f} h"
 
 
-def later_turns_since(session: dict, session_key: str, since: float | None) -> int | None:
+def later_turns_since(session: dict, session_key: str, since: float | None,
+                      prompt: str | None = None) -> int | None:
     """[daveey] User-originated rows the stored transcript holds after the pause stamp ``since``: turns that ran
-    over the paused turn (notices carried over it, the owner's queued turns). The paused turn wrote none after its
-    pause. None when it cannot be read. The compression tip is counted too (a rotation moves the chat)."""
+    over the paused turn (notices carried over it, the owner's queued turns). The paused turn's own request row
+    (``prompt``) never counts, even when it was persisted or stamped after the pause (a late step flush): a turn is
+    never later than itself. None when it cannot be read. The compression tip is counted too (a rotation moves the
+    chat)."""
     if not session_key or since is None:
         return 0 if since is None else None
     try:
@@ -600,7 +603,8 @@ def later_turns_since(session: dict, session_key: str, since: float | None) -> i
             with read_ctx() as conn:
                 row = conn.execute(
                     f"SELECT COUNT(*) FROM messages WHERE session_id IN ({marks}) AND role='user' AND timestamp>? "
-                    "AND COALESCE(_compressed_summary, 0)=0", (*ids, float(since))).fetchone()
+                    "AND COALESCE(_compressed_summary, 0)=0 AND content IS NOT ?",
+                    (*ids, float(since), prompt)).fetchone()
         return int(row[0] or 0) if row else 0
     except Exception:
         logger.debug("core-update pause: could not count later turns of %s", session_key, exc_info=True)

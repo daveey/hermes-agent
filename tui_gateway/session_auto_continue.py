@@ -269,7 +269,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         attempt, text = marker["attempts"], pause_note(
             marker["prompt"], marker.get("killed_jobs"), carried=bool(marker.get("carried_turn_paused")),
             paused_at=marker.get("paused_at"), pauses=int(marker.get("pauses") or 0),
-            later_turns=later_turns_since(session, session_key, marker.get("paused_at")))
+            later_turns=later_turns_since(session, session_key, marker.get("paused_at"), marker.get("prompt")))
     elif receipt:
         attempt, text = marker["attempts"], jobs_stopped_note(marker.get("killed_jobs"))
     else:
@@ -400,7 +400,8 @@ def _paused_turn_to_ledger_owner(sid: str, session: dict, session_key: str, mark
     # It runs after the owner's queued turns, so it is never worded as the chat's previous turn.
     text = pause_note(marker["prompt"], marker.get("killed_jobs"), carried=bool(marker.get("carried_turn_paused")),
                       paused_at=marker.get("paused_at"), queued=True, pauses=int(marker.get("pauses") or 0),
-                      later_turns=later_turns_since(session, session_key, marker.get("paused_at")))
+                      later_turns=later_turns_since(session, session_key, marker.get("paused_at"),
+                                                    marker.get("prompt")))
     try:
         receipt = owner_forward.forward_prompt(sid, session, text)
     except owner_forward.OwnerUnconfirmed:

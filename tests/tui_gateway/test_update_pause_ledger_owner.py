@@ -231,6 +231,15 @@ def test_continuation_right_after_the_pause_keeps_the_previous_turn_note(env, mo
     assert env.ran == [up.pause_note(PROMPT)]
 
 
+def test_the_paused_turns_own_request_row_is_never_a_later_turn(env, monkeypatch):
+    """The paused request's row stamped after the pause (a late step flush; the CI fixtures back-date the marker)
+    is the paused turn itself, not a turn that ran over it: the note stays the previous-turn note."""
+    env.ledger["status"] = None
+    _shift_pause(env.home, -3 * up.STALE_NOTE_AFTER_S)  # the transcript rows now postdate the pause stamp
+    server._maybe_schedule_auto_continue("sid", _session(env.home), "chat")
+    assert env.ran == [up.pause_note(PROMPT)]
+
+
 def test_continuation_that_paused_again_is_forwarded_once_and_named_as_a_chain(env, monkeypatch):
     """David-MBP 03:07-03:29 PST: the 02:24 continuation of the 00:55 pause paused again (``pauses: 2``, the marker
     keeping the chain's root prompt, the 00:33 notice). The ledger refused it while the gateway continued its own
