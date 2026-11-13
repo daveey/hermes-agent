@@ -1391,27 +1391,10 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image
 from agent.replay_cleanup import canonicalize_replay_history
 
 
-_AUTO_CONTINUE_NOTE_PREFIX = "[System note: Your previous turn"
-_AUTO_CONTINUE_FALLBACK_PREFIX = "[System note: A new message"
-
-
-def _is_auto_continue_noise(content: Any) -> bool:
-    """Return True if this user-message content is a gateway-injected auto-continue note (never replay it)."""
-    return isinstance(content, str) and content.startswith(  # + tui_gateway.update_pause.PAUSE_REPLAY_NOTE_PREFIX
-        (_AUTO_CONTINUE_NOTE_PREFIX, _AUTO_CONTINUE_FALLBACK_PREFIX, "[System note: A turn of yours paused for a"))
-
-
-def _strip_auto_continue_noise(content: Any) -> Any:
-    """Strip leading persisted auto-continue notes from user text; the trailing real question is preserved."""
-    if not _is_auto_continue_noise(content):
-        return content
-    text = str(content)
-    while _is_auto_continue_noise(text):
-        end = text.find("]")
-        if end < 0:
-            return ""
-        text = text[end + 1 :].lstrip()
-    return text
+# Auto-continue note recognition (re-exported: callers and tests import these names from gateway.run).
+from gateway.run_auto_continue_noise import (
+    _AUTO_CONTINUE_FALLBACK_PREFIX, _AUTO_CONTINUE_NOTE_PREFIX, _PAUSE_REPLAY_NOTE_PREFIX, _is_auto_continue_noise,
+    _strip_auto_continue_noise)
 
 # Tools whose deliverable is a JSON payload with a local-file path field rather than a literal ``MEDIA:`` tag.
 _JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image")

@@ -7,6 +7,8 @@ import re
 
 from .method_ctx import bind_module
 from agent.prompt_builder import STEER_DISPLAY_KIND
+# [daveey] The note's producer owns the prefix; update_pause loads only the stdlib, so this import is cheap.
+from tui_gateway.update_pause import PAUSE_REPLAY_NOTE_PREFIX as _PAUSE_REPLAY_NOTE_PREFIX
 
 # Discord routing note (gateway/run_inbound.py::discord_triggering_note) persisted as user
 # ``content`` by gateways before the authored-text fix; presentation-only heal for those rows.
@@ -259,9 +261,8 @@ def _expand_skill_invocation_for_replay(text: str, task_id: str) -> str:
 # Opening of the crash-recovery note synthesized by _auto_continue_note; matched (not just built) for
 # rows persisted before display typing existed and for the messaging gateway's twin note.
 _AUTO_CONTINUE_NOTE_PREFIX = "[System note: Your previous turn was interrupted mid-run"
-# [daveey] update_pause.PAUSE_REPLAY_NOTE_PREFIX: a paused request continued after later turns ran over it, or
-# forwarded to the gateway that owns the chat (which persists it untyped).
-_PAUSE_REPLAY_NOTE_PREFIX = "[System note: A turn of yours paused for a Hermes update"
+# [daveey] A paused request continued after later turns ran over it, or forwarded to the gateway that owns the chat
+# (which persists it untyped): update_pause.PAUSE_REPLAY_NOTE_PREFIX, imported at the top (one definition).
 
 
 def _legacy_display_kind(role: str, text: str) -> str | None:

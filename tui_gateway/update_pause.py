@@ -534,8 +534,8 @@ def pause_note(prompt: str, killed_jobs: list | None = None, *, carried: bool = 
     prompt, which earlier continuations already worked on, so the note says so instead of presenting it as new."""
     stale = paused_at is not None and (queued or bool(later_turns) or (
         later_turns is None and _now() - float(paused_at) > STALE_NOTE_AFTER_S))
-    if stale and paused_at is not None:
-        at = float(paused_at)
+    if stale:
+        at = float(paused_at)  # type: ignore[arg-type]  # stale implies a pause stamp
         since = (f"{later_turns} later turn{'s' if later_turns != 1 else ''} ran in this chat since" if later_turns
                  else "it was queued behind other turns in this chat, which may have run first" if queued
                  else "other turns may have run in this chat since")

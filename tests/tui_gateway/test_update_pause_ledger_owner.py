@@ -10,8 +10,9 @@ interrupted mid-run", quoting the 2 h old notice that a later turn had already h
 Contract pinned here:
 - A paused continuation refused by the gateway's ledger goes to the owner's FIFO exactly once (no legacy turn), and
   the pause is retired here, within one watcher poll of the window's end plus the kickoff (build wait, admit
-  receipt). Work no running gateway will finish, or an owner that does not take it, retires the pause with a
-  logged reason instead of waiting out the freshness window.
+  receipt). Work no running gateway will finish, or an owner that definitively refuses it, retires the pause with a
+  logged reason instead of waiting out the freshness window; an owner that turns it away for a passing reason
+  (nothing queued) keeps the 30 s backoff, up to OWNER_FORWARD_TRIES forwards per pause.
 - "window ended without an update" is logged once per pause, however many watchers re-arm on it.
 - A continuation that runs after later turns ran over the pause never says the previous turn was interrupted: it
   names when the pause happened and that later turns ran since.
@@ -143,15 +144,18 @@ def test_forwarded_continuation_is_never_worded_as_the_previous_turn(env, monkey
     assert _legacy_display_kind("user", note) == "auto_continue"  # the owner persists it untyped
 
 
-@pytest.mark.parametrize("failure", ["unknown", "not_running", "unavailable", "unconfirmed"])
+@pytest.mark.parametrize("failure", ["unknown", "not_running", "unconfirmed", "permission_denied", "bug"])
 def test_owner_that_will_not_run_it_retires_the_pause_with_a_reason(env, monkeypatch, caplog, failure):
     caplog.set_level(logging.INFO)
     if failure == "unknown":
         env.ledger["status"] = "unknown"  # only Discard resolves an outcome-unknown admission
     else:
+        from hermes_cli.gateway_client import GatewayRPCError
         exc = {"not_running": owner_forward.OwnerNotRunning("no gateway serves this home"),
-               "unavailable": owner_forward.OwnerUnavailable("queue_full"),
-               "unconfirmed": owner_forward.OwnerUnconfirmed("the gateway did not confirm it in time")}[failure]
+               "unconfirmed": owner_forward.OwnerUnconfirmed("the gateway did not confirm it in time"),
+               # A refusal that names the request itself: no later forward of the same request clears it.
+               "permission_denied": GatewayRPCError("permission_denied", data={"reason": "permission_denied"}),
+               "bug": KeyError("admission_id")}[failure]
 
         def refuse(sid, s, text, **kw):
             raise exc
@@ -165,6 +169,80 @@ def test_owner_that_will_not_run_it_retires_the_pause_with_a_reason(env, monkeyp
     retired = [r for r in caplog.records if "retired the paused turn of chat" in r.getMessage()]
     assert len(retired) == 1 and retired[0].levelno == logging.WARNING
     assert "Paused request" in retired[0].getMessage()
+
+
+def _transient(kind):
+    from hermes_cli.gateway_client import GatewayRPCError
+    return {"not_admitted": owner_forward.OwnerUnavailable("the gateway did not admit it"),
+            "queue_full": GatewayRPCError("queue_full", data={"reason": "queue_full"}),
+            "draining": GatewayRPCError("runtime_draining", data={"reason": "runtime_draining"}),
+            "dial": ConnectionRefusedError(111, "Connection refused")}[kind]
+
+
+@pytest.mark.parametrize("kind", ["not_admitted", "queue_full", "draining", "dial"])
+def test_transient_forward_failure_keeps_the_backoff_then_retires_after_the_cap(env, monkeypatch, caplog, kind):
+    """PR #2167 review: an owner that turned the forward away for a passing reason (nothing queued there) keeps the
+    pause and the 30 s backoff, so the next poll forwards again; only OWNER_FORWARD_TRIES such failures retire it."""
+    caplog.set_level(logging.INFO)
+    tries = []
+
+    def refuse(sid, s, text, **kw):
+        tries.append(text)
+        raise _transient(kind)
+    monkeypatch.setattr(owner_forward, "forward_prompt", refuse)
+    session = _session(env.home)
+
+    for attempt in range(1, server.OWNER_FORWARD_TRIES):
+        server._maybe_schedule_auto_continue("sid", session, "chat")
+        assert len(tries) == attempt and env.ran == []
+        assert read_turn_marker(env.home, "chat") is not None, "a transient owner failure retired the pause"
+        assert session["_auto_continue_retry_after"] > time.monotonic() + 20.0
+        assert not session.get("_auto_continue_scheduled") and not session.get("running")
+        assert f"retrying after the 30s backoff (attempt {attempt}/{server.OWNER_FORWARD_TRIES})" in caplog.text
+        server._maybe_schedule_auto_continue("sid", session, "chat")  # inside the backoff: no forward
+        assert len(tries) == attempt
+        session["_auto_continue_retry_after"] = 0.0  # the backoff passed
+
+    server._maybe_schedule_auto_continue("sid", session, "chat")
+
+    assert len(tries) == server.OWNER_FORWARD_TRIES and env.ran == []
+    assert read_turn_marker(env.home, "chat") is None
+    retired = [r for r in caplog.records if "retired the paused turn of chat" in r.getMessage()]
+    assert len(retired) == 1 and f"({server.OWNER_FORWARD_TRIES} attempts)" in retired[0].getMessage()
+
+
+def test_transient_forward_failure_then_success_hands_over_once(env, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    answers = [_transient("not_admitted"), {"admission_id": "adm-2"}]
+
+    def forward(sid, s, text, **kw):
+        answer = answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        env.forwarded.append(text)
+        return answer
+    monkeypatch.setattr(owner_forward, "forward_prompt", forward)
+    session = _session(env.home)
+
+    server._maybe_schedule_auto_continue("sid", session, "chat")
+    assert env.forwarded == [] and read_turn_marker(env.home, "chat") is not None
+    session["_auto_continue_retry_after"] = 0.0
+    server._maybe_schedule_auto_continue("sid", session, "chat")
+
+    assert len(env.forwarded) == 1 and env.ran == [] and answers == []
+    assert read_turn_marker(env.home, "chat") is None
+    assert "queued in the FIFO of the gateway that owns the chat (admission adm-2)" in caplog.text
+
+
+def test_a_new_pause_gets_a_fresh_forward_budget(env, monkeypatch):
+    def refuse(sid, s, text, **kw):
+        raise _transient("not_admitted")
+    monkeypatch.setattr(owner_forward, "forward_prompt", refuse)
+    session = _session(env.home)
+    session["_owner_forward_failures"] = (("chat", 0.0, 0.0, 1), server.OWNER_FORWARD_TRIES)  # an older pause's
+    server._maybe_schedule_auto_continue("sid", session, "chat")
+    assert read_turn_marker(env.home, "chat") is not None
+    assert session["_owner_forward_failures"][1] == 1
 
 
 def test_other_owner_refusals_keep_the_existing_backoff(env, monkeypatch):

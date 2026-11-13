@@ -385,7 +385,12 @@ def _paused_turn_to_ledger_owner(sid: str, session: dict, session_key: str, mark
     2-3 min for 87 min while the gateway ran 9 turns. One owner, one FIFO (owner_forward): forwardable work gets
     the continuation queued behind it in the owner's FIFO, which runs it exactly once; work no running gateway will
     finish (``unknown``, no owner) retires the pause with the reason logged. Either way the marker goes.
-    False for any other refusal (a sibling backend mid-turn): the caller's backoff applies, as before."""
+    False for any other refusal (a sibling backend mid-turn): the caller's backoff applies, as before.
+    A forward the owner refused before queuing anything for a passing reason (``_owner_forward_transient``: it
+    did not admit it, draining, queue full, a dropped dial) also returns False, so the 30 s backoff retries it,
+    up to OWNER_FORWARD_TRIES forwards per pause; then, and on a definitive refusal (no owner running, permission,
+    profile, not found), the pause is retired with the reason logged. An unconfirmed forward is never retried:
+    it may already be queued there, and a resend would run it twice."""
     status = getattr(refusal, "ledger_status", None)
     if status is None:
         return False
@@ -408,14 +413,46 @@ def _paused_turn_to_ledger_owner(sid: str, session: dict, session_key: str, mark
         retire_paused_turn(session, session_key, marker, "went to the gateway that owns the chat, which did not "
                            "confirm it in time (it may be queued there)")
         return True
-    except Exception as exc:  # health: allow BLE001 -- every owner failure is the same named, logged retirement
+    except Exception as exc:  # health: allow BLE001 -- transient: bounded backoff; anything else: logged retirement
         why = str(exc) if isinstance(exc, owner_forward.OwnerUnavailable) else type(exc).__name__
+        if _owner_forward_transient(exc):
+            pause_id = (session_key, marker.get("started_at"), marker.get("paused_at"), marker.get("pauses"))
+            with session["history_lock"]:
+                last = session.get("_owner_forward_failures")
+                count = last[1] + 1 if isinstance(last, tuple) and last[0] == pause_id else 1
+                session["_owner_forward_failures"] = (pause_id, count)
+            if count < OWNER_FORWARD_TRIES:
+                logger.warning("core-update pause: the gateway that owns %s did not take the continuation (%s); "
+                               "retrying after the 30s backoff (attempt %d/%d)", session_key, why, count,
+                               OWNER_FORWARD_TRIES)
+                return False
+            why = f"{why} ({count} attempts)"
         retire_paused_turn(session, session_key, marker, f"the gateway owns the chat ({status} work in its ledger) "
                            f"and did not take the continuation: {why}")
         return True
     retire_paused_turn(session, session_key, marker, "queued in the FIFO of the gateway that owns the chat "
                        f"(admission {receipt.get('admission_id')}); it runs there after the current turn", handed=True)
     return True
+
+
+# [daveey] Forwards of one pause's continuation the owner turned away for a passing reason before it is retired.
+OWNER_FORWARD_TRIES = 3
+# Owner refusals (``data.reason``, raised before its durable write) that a later forward may clear.
+_TRANSIENT_OWNER_REFUSALS = frozenset({"runtime_draining", "stale_epoch", "admission_conflict", "queue_full"})
+
+
+def _owner_forward_transient(exc: BaseException) -> bool:
+    """[daveey] Whether a failed forward is worth another try after the backoff: nothing was queued there (never
+    ``OwnerUnconfirmed``), and the owner may take it later (not ``OwnerNotRunning``; not a refusal that names the
+    request itself, such as ``permission_denied``, ``profile_mismatch``, ``not_found`` or ``runtime_retired``)."""
+    from hermes_cli.gateway_client import GatewayRPCError
+    from tui_gateway import owner_forward
+    if isinstance(exc, (owner_forward.OwnerNotRunning, owner_forward.OwnerUnconfirmed)):
+        return False
+    if isinstance(exc, GatewayRPCError):
+        reason = exc.data.get("reason", str(exc)) if isinstance(exc.data, dict) else str(exc)
+        return reason in _TRANSIENT_OWNER_REFUSALS
+    return isinstance(exc, (owner_forward.OwnerUnavailable, OSError))
 
 
 _KICKOFF_MARKER_INPUTS = ("_auto_continue_attempt", "_auto_continue_prompt", "_auto_continue_pauses",
