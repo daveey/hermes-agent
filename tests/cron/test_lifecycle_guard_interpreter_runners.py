@@ -84,6 +84,10 @@ def test_other_interpreter_spellings_are_scanned(files, template):
         "while true; do bash < {sh}; done",
         "! cat {sh} | bash",
         "bash <> {sh}",
+        # Clustered `-o` values are option values, not the script operand (stdin still read).
+        "bash -euo pipefail < {sh}",
+        "bash -euo pipefail -s < {sh}",
+        "cat {sh} | bash -eo pipefail",
     ],
 )
 def test_program_fed_on_stdin_is_scanned(files, template):

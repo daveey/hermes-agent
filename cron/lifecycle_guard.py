@@ -271,7 +271,8 @@ _LAUNCHCTL_LIFECYCLE_VERBS_RE = re.compile(
 _HERMES_GATEWAY_LABEL_RE = re.compile(r"(?i)\bhermes[.\-]?gateway\b")
 
 _SHELL_EXECUTABLES = frozenset({"sh", "bash", "dash", "ksh", "zsh"})
-_SHELL_OPTIONS_WITH_VALUES = frozenset({"-O", "+O", "-o", "+o"})
+# bash long options that consume the NEXT token (`bash --rcfile FILE script`).
+_SHELL_LONG_OPTIONS_WITH_VALUES = frozenset({"--rcfile", "--init-file"})
 _SHELL_COMMAND_FLAGS = {"-c", "--command"}
 _MAX_REFERENCED_SCRIPT_BYTES = 1024 * 1024
 _MAX_REFERENCED_SCRIPT_DEPTH = 8
@@ -766,11 +767,43 @@ def _iter_command_segments(command: str) -> Iterator[list[str]]:
         yield from _split_segments(tokens)
 
 
-# Words after which `(` still opens a command list (`if (cd x && ./y)`, `! (…)`, `time (…)`).
-_SUBSHELL_OPENING_WORDS = frozenset({
+# Reserved words that may lead a segment before the command it runs or the `(` that opens a
+# command list: `if (cd x && ./y)`, `then x`, `! x`, `time -p x`, `{ x; }`, `coproc NAME { x; }`,
+# `function NAME ( … )`. `fi`/`done`/`}` close a list and run nothing.
+_RESERVED_PREFIX_WORDS = frozenset({
     "if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc", "in", "{",
     "function",
 })
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _peel_reserved_words(segment: list[str]) -> int:
+    """Index of the first word of *segment* past its leading reserved words and their operands
+    (bash's ``time [-p] [--]``, ``coproc NAME`` before a compound command, ``function NAME``).
+
+    The one keyword walk shared by the ``(`` classifier and the executed-command scan, so the two
+    cannot disagree about what a leading keyword hides. An ordinary command's argument named
+    ``time`` is not a keyword: only words before the first non-keyword are peeled."""
+    index = 0
+    while index < len(segment) and segment[index] in _RESERVED_PREFIX_WORDS:
+        word = segment[index]
+        index += 1
+        if index >= len(segment):
+            break
+        if word == "time":
+            if segment[index] == "-p":
+                index += 1
+            if index < len(segment) and segment[index] == "--":
+                index += 1
+        elif word == "function":
+            # `function NAME ( … )` defines (does not run) NAME; its body is a command list.
+            index += 1
+        elif word == "coproc" and _SHELL_NAME.fullmatch(segment[index]) and (
+            index + 1 == len(segment) or segment[index + 1] == "{"
+        ):
+            # `coproc NAME ( … )` / `coproc NAME { …; }`; `coproc cmd args` runs cmd itself.
+            index += 1
+    return index
 
 
 def _opens_call_arguments(segment: list[str]) -> bool:
@@ -781,22 +814,7 @@ def _opens_call_arguments(segment: list[str]) -> bool:
     these executable subshells for inert interpreter arguments. Conversely an
     ordinary command's argument named ``time`` is not a shell keyword.
     """
-    index = 0
-    while index < len(segment):
-        word = segment[index]
-        if word not in _SUBSHELL_OPENING_WORDS:
-            break
-        index += 1
-        if word == "time":
-            if index < len(segment) and segment[index] == "-p":
-                index += 1
-            if index < len(segment) and segment[index] == "--":
-                index += 1
-        elif word in ("coproc", "function") and index < len(segment):
-            # `coproc NAME ( … )`; `function NAME ( … )` defines a function whose body is a subshell.
-            if word == "function" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", segment[index]):
-                index += 1
-    if index == len(segment):
+    if _peel_reserved_words(segment) == len(segment):
         return False
     return not segment[-1].endswith(("$", "<", ">", "="))
 
@@ -985,34 +1003,35 @@ def contains_launchctl_submit_command(command: str) -> bool:
     return False
 
 
-# Reserved words that may precede a simple command in the same segment (`if hermes-sync`,
-# `then x`, `! x`, `time -p x`, `{ x; }`, `coproc x`, `function f { x; }`); `fi`/`done`/`}` close
-# a list and run nothing.
-_COMMAND_PREFIX_KEYWORDS = frozenset({
-    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{", "coproc", "function",
-})
 _MAX_EXECUTES_NAMED_DEPTH = 4
-_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# External time(1) options that consume the NEXT token (`env time -o log -f %e cmd`).
+_EXTERNAL_TIME_VALUE_OPTIONS = frozenset({"-f", "--format", "-o", "--output"})
 
 
-def _peel_command_keywords(segment: list[str]) -> list[str]:
-    """*segment* without its leading reserved words (and ``time``'s ``-p``/``--``, and the NAME of
-    ``coproc NAME { … }`` and ``function NAME { … }``)."""
-    index = 0
-    while index < len(segment) and segment[index] in _COMMAND_PREFIX_KEYWORDS:
-        word = segment[index]
+def _peel_external_time(segment: list[str], index: int) -> int:
+    """Index of the command an external ``time`` runs. After an assignment or a wrapper
+    (``x=1 time cmd``, ``env time cmd``) ``time`` is not the keyword but /usr/bin/time, which
+    the reserved-word walk cannot see; unchanged when *segment[index]* is not ``time``. May be
+    ``len(segment)`` — callers must bounds-check."""
+    for _ in range(_MAX_PREFIX_PEELS):
+        if index >= len(segment) or _executable_name(segment[index]) != "time":
+            return index
         index += 1
-        if word == "time":
-            while index < len(segment) and segment[index] in ("-p", "--"):
+        while index < len(segment):
+            token = segment[index]
+            if token == "--":
                 index += 1
-        elif (word == "coproc" and index + 1 < len(segment) and segment[index + 1] == "{"
-              and _SHELL_NAME.fullmatch(segment[index])):
-            index += 1
-        elif word == "function" and index < len(segment):
-            # The NAME after `function` is never a command, and bash accepts names `_SHELL_NAME`
-            # rejects (`function f-x.y { … }`), so skip any word. `function f() {` splits at `(`.
-            index += 1
-    return segment[index:]
+                break
+            if token in _EXTERNAL_TIME_VALUE_OPTIONS:
+                index += 2
+                continue
+            if token.startswith("-"):
+                index += 1
+                continue
+            break
+        index = _peel_transparent_prefixes(segment, index)
+    return index
 
 
 def _command_segment_views(segment: list[str]) -> list[list[str]]:
@@ -1020,7 +1039,7 @@ def _command_segment_views(segment: list[str]) -> list[list[str]]:
     read every view, so peeling only ever ADDS a reference. Without the peeled view `time ./x.sh`,
     `if true; then ./x.sh; fi` and `{ ./x.sh; }` read the keyword as the command and never open
     ``./x.sh``."""
-    peeled = _peel_command_keywords(segment)
+    peeled = segment[_peel_reserved_words(segment):]
     return [segment, peeled] if peeled and len(peeled) != len(segment) else [segment]
 
 
@@ -1030,25 +1049,40 @@ def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
         yield from _command_segment_views(segment)
 
 
-def _shell_script_operand(arguments: list[str]) -> Optional[str]:
-    """The script a POSIX shell runs from *arguments*, skipping options and the values of
-    ``-o``/``-O``/``+o``/``+O``; ``None`` for ``-c`` (inline source) or no operand."""
+def _shell_options_end(arguments: list[str]) -> tuple[int, bool, bool]:
+    """``(operand_index, command_string, reads_stdin)`` for a POSIX shell's *arguments*: the index
+    of the first operand past the options, whether a ``-c``/``--command`` flag ends them (inline
+    source follows), and whether a short-option cluster holds ``s`` (commands come from stdin).
+    Each ``o``/``O`` in a short-option cluster (``-o x``, ``-euo pipefail``, ``+O extglob``)
+    consumes the next token, as do ``--rcfile`` and ``--init-file``; a lone ``-`` ends the
+    options like ``--``."""
     index = 0
+    reads_stdin = False
     while index < len(arguments):
         argument = arguments[index]
-        if argument == "--":
-            index += 1
-            break
+        if argument in ("--", "-"):
+            return index + 1, False, reads_stdin
         if argument in _SHELL_COMMAND_FLAGS:
-            return None
-        if argument in _SHELL_OPTIONS_WITH_VALUES:
+            return index, True, reads_stdin
+        if argument in _SHELL_LONG_OPTIONS_WITH_VALUES:
             index += 2
             continue
-        if argument.startswith(("-", "+")):
+        if argument.startswith("--"):
             index += 1
             continue
+        if argument.startswith(("-", "+")):
+            reads_stdin = reads_stdin or (argument[0] == "-" and "s" in argument[1:])
+            index += 1 + sum(letter in "oO" for letter in argument[1:])
+            continue
         break
-    return arguments[index] if index < len(arguments) else None
+    return index, False, reads_stdin
+
+
+def _shell_script_operand(arguments: list[str]) -> Optional[str]:
+    """The script a POSIX shell runs from *arguments*; ``None`` for ``-c`` (inline source) or no
+    operand. Options and their values are skipped as ``_shell_options_end`` describes."""
+    index, command_string, _ = _shell_options_end(arguments)
+    return arguments[index] if not command_string and index < len(arguments) else None
 
 
 def executes_command_named(command: str, name: str, *, _depth: int = 0) -> bool:
@@ -1060,9 +1094,12 @@ def executes_command_named(command: str, name: str, *, _depth: int = 0) -> bool:
     if name not in command or not lifecycle_scan_root_within_budget(command):
         return False
     for raw_segment in _iter_command_segments(command):
-        segment = _peel_command_keywords(raw_segment)
+        segment = raw_segment[_peel_reserved_words(raw_segment):]
         index = _executed_command_index(segment)
         if index is None:
+            continue
+        index = _peel_external_time(segment, index)
+        if index >= len(segment):
             continue
         executable = _executable_name(segment[index])
         if executable == name:
@@ -1261,27 +1298,18 @@ def _references_at(
 
     if executable_name in _SHELL_EXECUTABLES:
         arguments, stdin = _split_redirections(segment[index + 1 :])
-        reads_stdin = False
-        arg_index = 0
-        while arg_index < len(arguments):
-            argument = arguments[arg_index]
-            if argument == "--":
-                arg_index += 1
+        # An rc file a shell may source (`bash --rcfile x.sh -i`) is scanned like its script.
+        for arg_index, argument in enumerate(arguments[:-1]):
+            if argument in _SHELL_COMMAND_FLAGS or argument == "--":
                 break
-            if argument in _SHELL_COMMAND_FLAGS:
-                break
-            if argument in _SHELL_OPTIONS_WITH_VALUES:
-                arg_index += 2
-                continue
-            if argument.startswith("-"):
-                reads_stdin = reads_stdin or (not argument.startswith("--") and "s" in argument)
-                arg_index += 1
-                continue
-            break
-        command_string = arg_index < len(arguments) and arguments[arg_index] in _SHELL_COMMAND_FLAGS
-        if arg_index < len(arguments) and not command_string:
-            yield from _resolved_or_nothing(arguments[arg_index], cwd)
-        elif not command_string:
+            if argument in _SHELL_LONG_OPTIONS_WITH_VALUES:
+                yield from _resolved_or_nothing(arguments[arg_index + 1], cwd)
+        operand_index, command_string, reads_stdin = _shell_options_end(arguments)
+        if command_string:
+            return
+        if operand_index < len(arguments):
+            yield from _resolved_or_nothing(arguments[operand_index], cwd)
+        else:
             reads_stdin = True
         if reads_stdin:
             for source in stdin or piped or []:
@@ -1471,8 +1499,7 @@ def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
     if not any(name in command for name in _ARGUMENT_PRINTERS):
         return  # skip a second tokenization of a large generator that never echoes
     for segment in _iter_command_segments(command):
-        while segment and segment[0] in _SUBSHELL_OPENING_WORDS:  # `{ echo …; }`, `then echo …`
-            segment = segment[1:]
+        segment = segment[_peel_reserved_words(segment):]  # `{ echo …; }`, `then echo …`
         index = _executed_command_index(segment)
         if index is None:
             continue

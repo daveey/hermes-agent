@@ -113,6 +113,12 @@ def test_hint_names_the_root_sync_log_from_a_profile_gateway(tmp_path, monkeypat
     "bash -o pipefail {script} mods-pull",
     "sh +o errexit -- {script} mods-pull",
     "bash -O extglob {script} mods-pull",
+    # PR #2191 review nits: a clustered `o`/`O` and --rcfile/--init-file also take a value.
+    "bash -euo pipefail {script} mods-pull",
+    "bash -eo pipefail {script} mods-pull",
+    "sh +eo errexit {script} mods-pull",
+    "bash --rcfile /dev/null {script} mods-pull",
+    "bash --init-file /dev/null {script} mods-pull",
 ])
 def test_hint_survives_shell_options_with_values(tmp_path, monkeypatch, template):
     script = _script(tmp_path, "hermes-sync", _RESTART)
@@ -130,6 +136,9 @@ def test_hint_survives_shell_options_with_values(tmp_path, monkeypatch, template
     "if {script} mods-pull; then echo ok; fi",
     "while false; do {script} mods-pull; done",
     "{{ {script} mods-pull; }}",
+    # PR #2191 review nits: external time(1) after an assignment or wrapper, and `coproc`.
+    "x=1 time {script} mods-pull",
+    "env time -f %e {script} mods-pull",
     "coproc {script} mods-pull",
 ])
 def test_hint_survives_reserved_words(tmp_path, monkeypatch, template):
@@ -150,6 +159,20 @@ def test_a_shell_option_value_is_not_the_script(tmp_path, monkeypatch):
     assert _ROUTE not in error
 
 
+@pytest.mark.parametrize("template", [
+    "bash -euo pipefail {deploy} hermes-sync",
+    "bash --rcfile {deploy} -i",
+])
+def test_clustered_option_value_and_rcfile_stay_refused(tmp_path, monkeypatch, template):
+    # The clustered `-o` value is not the script, and an rc file the shell sources is still scanned.
+    deploy = _script(tmp_path, "deploy.sh", _RESTART)
+
+    error = _refuse(tmp_path, monkeypatch, template.format(deploy=deploy))
+
+    assert "hermes gateway restart" in error
+    assert _ROUTE not in error
+
+
 @pytest.mark.parametrize(("command", "expected"), [
     ("hermes-sync mods-pull", True),
     ("bash -O extglob /x/hermes-sync", True),
@@ -164,6 +187,22 @@ def test_a_shell_option_value_is_not_the_script(tmp_path, monkeypatch):
     ("grep hermes-sync log", False),
     ("echo time hermes-sync", False),
     ("fi hermes-sync", False),
+    # PR #2191 review nits: clustered `o`/`O` and --rcfile/--init-file consume a value; external
+    # time(1) after an assignment or wrapper; the shared keyword walk peels `coproc`.
+    ("bash -euo pipefail /x/hermes-sync", True),
+    ("bash -eo pipefail -- /x/hermes-sync", True),
+    ("sh +eo errexit /x/hermes-sync", True),
+    ("bash -oO pipefail extglob /x/hermes-sync", True),
+    ("bash --rcfile /etc/rc /x/hermes-sync", True),
+    ("bash --init-file /etc/rc /x/hermes-sync", True),
+    ("bash -euo pipefail /x/deploy.sh hermes-sync", False),
+    ("x=1 time hermes-sync", True),
+    ("env time -f %e hermes-sync", True),
+    ("sudo -u ubuntu time -o /tmp/t -- nohup hermes-sync", True),
+    ("coproc hermes-sync mods-pull", True),
+    ("coproc SYNC { hermes-sync; }", True),
+    ("time -- -p hermes-sync", False),
+    ("function hermes-sync { true; }", False),
 ])
 def test_executes_command_named(command, expected):
     from cron.lifecycle_guard import executes_command_named
