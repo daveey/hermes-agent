@@ -87,6 +87,9 @@ def test_repair_worker_unblocks_its_child_attributed_to_the_repair_card(board, m
         [payload] = _unblocked(conn, kb, child)
         assert payload["actor"] == f"agent (task {repair})"
         assert payload["repair_task_id"] == repair
+        # Review 5890066480: the same audit row the self-heal and owner-wake grants write.
+        audit = [e.payload for e in kb.list_events(conn, child) if e.kind == "missing_parent_requeue"]
+        assert audit == [{"by": repair, "repair_card": repair, "target": child}]
     finally:
         conn.close()
 
@@ -228,11 +231,11 @@ def test_child_on_another_gateway_is_forwarded_as_an_operator_call(board, monkey
     from tools import kanban_tools_graph as ktg
 
     conn = kbc.connect()
-    repair = kb.create_task(conn, title="Recover missing dependencies for t_feedfacecafe0001", assignee="default",
-                            created_by="missing-parent-detector")
+    foreign = "t_feedfacecafe0001"
+    repair = kb.create_task(conn, title=f"Recover missing dependencies for {foreign}", assignee="default",
+                            created_by="missing-parent-detector", creator_task_id=foreign)
     _as_worker(monkeypatch, conn, kb, repair)
     conn.close()
-    foreign = "t_feedfacecafe0001"
     monkeypatch.setattr(kfc, "refusal", lambda c, tid: f"{tid} lives on macbook" if tid == foreign else None)
     sent = []
     monkeypatch.setattr(ktg, "handle_supervisor_request",
@@ -250,6 +253,20 @@ def _rehold(conn, kb, child, events):
     """Release the parent_missing child, then re-hold it with no new ``blocked`` event (e.g. the failure breaker)."""
     if "unblocked" in events:
         assert kb.unblock_task(conn, child)
+    if {"promoted", "promoted_manual"} & set(events):
+        # The lost parent is found done elsewhere: the link goes, so every parent is done and the blocked child
+        # leaves `blocked` through a promotion (the readiness pass, or `hermes kanban promote`), not an unblock.
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_links WHERE child_id = ?", (child,))
+            if "promoted" in events:
+                # What the readiness pass writes when it moves a blocked card on (no `unblocked`). The real pass
+                # skips this child (recovery_held: its newest blocked event is unreleased), so write it directly.
+                conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+                kb._append_event(conn, child, "promoted", {})
+        if "promoted_manual" in events:
+            assert kb.promote_task(conn, child, actor="user") == (True, None)
+        assert kb.get_task(conn, child).status != "blocked"
+        assert not [e for e in kb.list_events(conn, child) if e.kind == "unblocked"]
     with kb.write_txn(conn):
         if "gave_up" in events:
             kb._append_event(conn, child, "gave_up", {"kind": "transient", "reason_code": "worker_failures_exhausted",
@@ -257,10 +274,13 @@ def _rehold(conn, kb, child, events):
         conn.execute("UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ?", (child,))
 
 
-@pytest.mark.parametrize("events", [("unblocked", "gave_up"), ("unblocked",), ("gave_up",)],
-                         ids=["unblocked-then-breaker", "unblocked-only", "breaker-only"])
+@pytest.mark.parametrize("events", [("unblocked", "gave_up"), ("unblocked",), ("gave_up",), ("promoted",),
+                                    ("promoted_manual",)],
+                         ids=["unblocked-then-breaker", "unblocked-only", "breaker-only", "readiness-promoted",
+                              "manually-promoted"])
 def test_hold_placed_after_the_parent_missing_block_stays_refused(board, monkeypatch, events):
-    """Review 5888194553: an unblock or a breaker trip after the parent_missing block ends the repair card's grant.
+    """Review 5888194553: an unblock, a promotion or a breaker trip after the parent_missing block ends the repair
+    card's grant (review 5890066480 added the promotions).
 
     The child was released and is now held by something that writes no ``blocked`` event (the failure breaker
     writes ``gave_up``), so the newest ``blocked`` event still names the repair card. That hold is a policy hold.
@@ -442,5 +462,59 @@ def test_grant_needs_the_child_to_still_be_blocked(board, status):
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, child))
         assert kr.missing_parent_repair_grant(conn, repair, child) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("creator", [None, "t_0ther0000000001"], ids=["creator-unknown", "another-creator"])
+def test_repair_card_without_this_child_as_creator_is_not_forwarded(board, monkeypatch, creator):
+    """Review 5889436348: forward only the repair card's own child. A repair card whose creator this board cannot
+    read (or names another card) gets the plain local refusal, not an operator call its home would refuse."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_foreign_card as kfc
+    from tools import kanban_tools_graph as ktg
+
+    conn = kbc.connect()
+    foreign = "t_feedfacecafe0001"
+    repair = kb.create_task(conn, title=f"Recover missing dependencies for {foreign}", assignee="default",
+                            created_by="missing-parent-detector",
+                            **({"creator_task_id": creator} if creator else {}))
+    _as_worker(monkeypatch, conn, kb, repair)
+    conn.close()
+    monkeypatch.setattr(kfc, "refusal", lambda c, tid: f"{tid} lives on macbook" if tid == foreign else None)
+    sent = []
+    monkeypatch.setattr(ktg, "handle_supervisor_request",
+                        lambda args, **kw: (sent.append(args), json.dumps({"ok": True, "request_id": 7}))[1])
+
+    out = _unblock(foreign)
+    assert out.get("ok") is not True, out
+    assert sent == []
+
+
+def test_real_breaker_trip_after_a_release_leaves_no_grant(board, monkeypatch):
+    """Review 5889436348: the production breaker (``_record_task_failure``) lands the re-held child in ``triage``,
+    which the status check refuses before ``current_block_payload``'s ``gave_up`` arm is reached."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_requeue as kr
+
+    conn = kbc.connect()
+    child, repair = _parent_missing_child(conn, kb)
+    assert kb.unblock_task(conn, child)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
+    assert kb._record_task_failure(conn, child, "spawn unavailable", outcome="spawn_failed", force_trip=True)
+    assert kb.get_task(conn, child).status == "triage"
+    assert [e.kind for e in kb.list_events(conn, child)][-1] == "gave_up"
+    assert kr.missing_parent_repair_grant(conn, repair, child) is None
+    _as_worker(monkeypatch, conn, kb, repair)
+    conn.close()
+
+    assert _unblock(child).get("ok") is not True
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "triage"
+        assert len(_unblocked(conn, kb, child)) == 1
     finally:
         conn.close()

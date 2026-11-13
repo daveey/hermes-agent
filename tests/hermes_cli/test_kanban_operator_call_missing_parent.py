@@ -12,6 +12,7 @@ import json
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_operator_call as kox
 from hermes_cli import kanban_supervisor_requests as ksr
 from tests.hermes_cli import test_kanban_operator_call as base
 
@@ -182,3 +183,45 @@ def test_breaker_hold_after_releasing_an_own_agent_block_is_refused_at_home(flee
     row = _execute_row(f, held)
     assert row["outcome"] == "refused" and "not blocked by its own agent run" in row["detail"], row
     assert kb.get_task(f.h, held).status == "blocked"
+
+
+def test_worker_kanban_unblock_tool_forwards_to_the_home_end_to_end(fleet, monkeypatch):
+    """Review 5889810989 nit 4: the repair worker's own ``kanban_unblock`` call on worker-5, with no stub between
+    the tool and the home. The tool sees the child only in the Board replica (``kfc.refusal``), files the operator
+    call (``handle_supervisor_request`` -> ``ksr.submit``), and the hub applies it attributed to the repair card."""
+    from pathlib import Path
+
+    from hermes_cli import kanban_foreign_card as kfc
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from tools import kanban_tools as kt
+
+    f = fleet
+    child, repair, run_id = _home_repair(f)
+    # A Board-synced copy carries the repair card's created event (its creator_task_id is the child).
+    created = f.h.execute("SELECT kind, payload, created_at, uid FROM task_events WHERE task_id = ? AND "
+                          "kind = 'created'", (repair,)).fetchone()
+    with kb.write_txn(f.w):
+        f.w.execute("INSERT INTO task_events (task_id, kind, payload, created_at, uid) VALUES (?,?,?,?,?)",
+                    (repair, *created))
+    worker_db, replica_db = _main_db_file(f.w), _main_db_file(f.rep)
+    monkeypatch.setenv("HERMES_KANBAN_DB", worker_db)
+    # The tool opens its own connection to worker-5's file; the fixture names gateways per connection object.
+    monkeypatch.setattr(kox, "_own_gateway",
+                        lambda c: f.name(c) or ("worker-5" if _main_db_file(c) == worker_db else None))
+    monkeypatch.setattr(kfc, "replica_path",
+                        lambda p: Path(replica_db) if p and Path(p).resolve() == Path(worker_db).resolve() else None)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", repair)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    assert kb.get_task(f.w, child) is None and kfc.refusal(f.w, child)
+
+    out = json.loads(kt._handle_unblock({"task_id": child}))
+    assert out.get("ok") is True and out["status"] == "pending", out
+    for var in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID"):  # the drains run in the gateways, not the worker
+        monkeypatch.delenv(var)
+    _round(f)
+    assert _execute_row(f, child)["outcome"] == "applied", _execute_row(f, child)
+    assert kb.get_task(f.h, child).status in ("ready", "todo")
+    [payload] = _unblocked(f, child)
+    assert payload["operator_caller"] == {**payload["operator_caller"], "task_id": repair, "gateway": "worker-5"}
+    assert payload["repair_task_id"] == repair
+    assert ksr.get_request(f.w, out["request_id"])["status"] == "done"

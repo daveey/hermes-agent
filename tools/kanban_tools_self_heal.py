@@ -73,8 +73,13 @@ def check_unblock() -> bool:
 def _log_requeue(conn, kb, tid: str, env_tid: str, via: str, source: Optional[str]) -> None:
     """Audit row in its own txn. ``unblock_task`` already committed the transition."""
     from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_requeue import MISSING_PARENT_VIA
     with write_txn(conn):
-        if via == "owner-wake-requeue":
+        if via == MISSING_PARENT_VIA:  # the same audit row as the other grants; source is the repair card [daveey]
+            kb._append_event(conn, tid, "missing_parent_requeue", {
+                "by": env_tid, "repair_card": source, "target": tid,
+            })
+        elif via == "owner-wake-requeue":
             kb._append_event(conn, tid, "owner_wake_requeue", {
                 "by": env_tid, "supervisor_card": source, "target": tid,
                 "supervisor_board": kb.get_current_board(),
@@ -89,7 +94,10 @@ def _forward_missing_parent_unblock(env_tid: str, tid: str) -> Optional[str]:
     """A missing-parent repair card whose child lives on another gateway: forward the unblock as an operator call.
 
     The child's home applies it only when its newest parent_missing block names this repair card
-    (``kanban_operator_call._agent_block``), and records the call's caller on the ``unblocked`` event. [daveey]
+    (``kanban_operator_call._agent_block``), and records the call's caller on the ``unblocked`` event. Only the
+    repair card's own child is forwarded: the detector always records ``creator_task_id`` on the created event, and
+    a card whose creator this board cannot read gets the plain local refusal, not a forwarded call the home would
+    refuse anyway. [daveey]
     """
     from tools import kanban_tools as kt
     if not kt._is_dispatcher_owned_worker():
@@ -99,7 +107,7 @@ def _forward_missing_parent_unblock(env_tid: str, tid: str) -> Optional[str]:
         from hermes_cli import kanban_requeue as kr
         if not kr.is_missing_parent_repair_card(kb.get_task(conn, env_tid)):
             return None
-        if kr._creator_task_id(conn, env_tid) not in (None, tid) or not kfc.refusal(conn, tid):
+        if kr._creator_task_id(conn, env_tid) != tid or not kfc.refusal(conn, tid):
             return None
     from tools.kanban_tools_graph import handle_supervisor_request
     return handle_supervisor_request({"ops": [{
@@ -164,6 +172,7 @@ def handle_unblock(args: dict, **kw) -> str:
                     ok = kb.unblock_task(conn, tid, precondition=precondition, event_extra={
                         "actor": tool_actor(worker_task=env_tid), "repair_task_id": source, "via": via})
                     kt._check(ok, f"could not unblock {tid} (missing-parent repair grant no longer holds)")
+                    _log_requeue(conn, kb, tid, env_tid, via, source)
                     return kt._ok(task_id=tid, via=via, **kt._fields(kb.get_task(conn, tid), ("status",)))
                 ok = kb.unblock_task(conn, tid, precondition=precondition)
                 kt._check(ok, f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")

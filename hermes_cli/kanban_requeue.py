@@ -93,10 +93,11 @@ def missing_parent_repair_grant(conn, worker_task_id: Optional[str], target_id: 
     recovery. That repair card (``created_by='missing-parent-detector'``) may unblock exactly the child that
     created it (``creator_task_id``), and only while the child is blocked, has no human request, and its NEWEST
     ``blocked`` event is ``source: parent_missing`` naming this very card as ``repair_task_id``. A later hand
-    block, a block naming another repair card, or any ``unblocked``/``gave_up`` event after it (the child was
-    released, then re-held by a policy such as the failure breaker; ``current_block_payload``) revokes it.
-    Both entry paths use it: the ``kanban_unblock``
-    tool (same gateway) and the operator call's home check (another gateway). [daveey]
+    block, a block naming another repair card, or any release event after it (``current_block_payload``)
+    revokes it. The failure breaker's real trip (``kanban_failure_accounting``) lands the child in ``triage``,
+    which the status check already refuses; the ``gave_up`` arm is defence in depth for a re-hold that writes
+    no ``blocked`` event. Both entry paths use it: the ``kanban_unblock`` tool (same gateway) and the operator
+    call's home check (another gateway). [daveey]
     """
     if not worker_task_id or not target_id or worker_task_id == target_id:
         return None
@@ -113,18 +114,35 @@ def missing_parent_repair_grant(conn, worker_task_id: Optional[str], target_id: 
     return worker_task_id if payload.get("repair_task_id") == worker_task_id else None
 
 
+# INVARIANT (this grant and ``kanban_operator_call._agent_block`` rely on it): every write that puts a card into
+# ``blocked`` appends a ``blocked`` event (``kanban_db.block_task``, the missing-parent detector,
+# ``kanban_continuation._enforce_wake_invariant``, ``kanban_source_refusal_block``). While it holds, the newest
+# ``blocked`` event of a blocked card describes its current hold. These events are the fallback for a write that
+# breaks it: a ``blocked`` event older than any of them is over, so ``current_block_payload`` returns ``{}`` and
+# every grant refuses. A new path that re-holds a card WITHOUT a ``blocked`` event must append one; if it cannot,
+# the event kind the card left ``blocked`` with must be listed here, or the stale payload (its actor, its
+# ``repair_task_id``) grants a release of the new hold. Listed kinds: ``unblocked`` (every unblock path),
+# ``promoted`` (the readiness pass leaves ``blocked`` with no ``unblocked``; ``recovery_held`` keeps it off a card
+# whose newest ``blocked`` event is unreleased today, so this arm only keeps the helper true to its contract),
+# ``promoted_manual`` (``hermes kanban promote`` from blocked) and ``gave_up``. ``gave_up``
+# is defence in depth: the breaker's real trip (``kanban_failure_accounting``) lands in ``triage``, which both
+# callers already refuse on status. [daveey]
+BLOCK_RELEASE_EVENTS = ("unblocked", "promoted", "promoted_manual", "gave_up")
+
+
 def current_block_payload(conn, task_id: str) -> dict:
     """The payload of the ``blocked`` event that placed the card's current hold, else ``{}``.
 
-    That is the newest ``blocked`` event, unless an ``unblocked`` or ``gave_up`` event is newer: then the card was
-    released after it, and the hold it is in now came from somewhere that writes no ``blocked`` event (the failure
-    breaker writes ``gave_up``). ``{}`` names no source and no actor, so every grant keyed on them refuses. [daveey]
+    That is the newest ``blocked`` event, unless a ``BLOCK_RELEASE_EVENTS`` event is newer: then the card was
+    released after it, and any hold it is in now came from a write with no ``blocked`` event (see the invariant on
+    ``BLOCK_RELEASE_EVENTS``). ``{}`` names no source and no actor, so every grant keyed on them refuses. [daveey]
     """
     ev = conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
                       "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    marks = ", ".join("?" * len(BLOCK_RELEASE_EVENTS))
     if ev is None or conn.execute(
-            "SELECT 1 FROM task_events WHERE task_id = ? AND kind IN ('unblocked', 'gave_up') AND id > ? LIMIT 1",
-            (task_id, ev[0])).fetchone() is not None:
+            f"SELECT 1 FROM task_events WHERE task_id = ? AND kind IN ({marks}) AND id > ? LIMIT 1",
+            (task_id, *BLOCK_RELEASE_EVENTS, ev[0])).fetchone() is not None:
         return {}
     try:
         payload = json.loads(ev[1] or "{}")
