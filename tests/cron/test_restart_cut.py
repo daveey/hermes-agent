@@ -107,6 +107,48 @@ def test_rerun_cut_again_is_not_rerun_a_second_time(home, monkeypatch):
     assert int(saved.get("failure_streak") or 0) == 0
 
 
+def _cut_with_clock(awake, wall):
+    def run_job(job, **_kwargs):
+        # The owner's drain stopped the run and measured it (gateway/session_cron.py).
+        job["_restart_cut"] = True
+        job["_run_clock"] = {"awake": awake, "wall": wall}
+        return (False, "", "", "interrupted")
+    return run_job
+
+
+def test_owner_cut_of_a_rerun_the_host_slept_through_is_rerun_again(home, monkeypatch):
+    """cron-7dfb141525: a MacBook asleep on battery; the restart cut the run and the immediate
+    rerun was cut by the same sleep after ~30 awake seconds in an hour. That rerun never ran, so it
+    is re-armed (rerun 2 of 3), not dropped."""
+    job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
+    monkeypatch.setattr("cron.restart_rerun.host_fully_awake", lambda: True, raising=False)
+    monkeypatch.setattr(scheduler, "run_job", _cut_with_clock(900, 900))
+    first = jobs.claim_job_for_fire(job["id"], force=True, return_job=True)
+    assert scheduler.run_one_job(first) is True
+    assert _due(job["id"])
+    monkeypatch.setattr(scheduler, "run_job", _cut_with_clock(30, 3600))
+    rerun = jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert isinstance(rerun, dict)
+    assert scheduler.run_one_job(rerun) is True
+    marker = jobs.get_job(job["id"])["restart_rerun"]
+    assert not marker.get("settled"), f"the slept-through rerun was dropped: {marker}"
+    assert marker["execution_id"] == rerun["execution_id"] and marker["reruns"] == 2
+    assert _due(job["id"])
+    assert int(jobs.get_job(job["id"]).get("failure_streak") or 0) == 0
+
+
+def test_owner_cut_of_a_rerun_that_was_awake_ten_minutes_stops(home, monkeypatch):
+    job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
+    monkeypatch.setattr(scheduler, "run_job", _cut_with_clock(900, 900))
+    first = jobs.claim_job_for_fire(job["id"], force=True, return_job=True)
+    assert scheduler.run_one_job(first) is True
+    rerun = jobs.claim_job_for_fire(job["id"], return_job=True)
+    monkeypatch.setattr(scheduler, "run_job", _cut_with_clock(601, 700))
+    assert scheduler.run_one_job(rerun) is True
+    assert jobs.get_job(job["id"])["restart_rerun"]["settled"] is True
+    assert not _due(job["id"]), "a rerun that really ran keeps rerun-once"
+
+
 def test_an_ordinary_failure_still_counts(home, monkeypatch):
     job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
     monkeypatch.setattr(scheduler, "run_job", lambda job, **_k: (False, "", "", "agent broke"))

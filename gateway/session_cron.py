@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 
 from gateway.session_contract import SessionActor, SessionRef
 from hermes_state_keys import CRON_PRINCIPAL_ID, cron_request_id
@@ -381,6 +382,8 @@ async def execute(authority, ref, row, policy):
             stop = _CombinedCancelEvent(
                 CancelRequest(execution_id),
                 ShutdownAwareCancel(cancel, _stopped_by_own_shutdown))
+            # [daveey] The attempt's clock: monotonic stops in host sleep, wall time does not.
+            started_awake, started_wall = time.monotonic(), time.time()
             try:
                 result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
                                                  extra_prompt=data['extra_prompt'], cancel_event=stop)
@@ -395,8 +398,11 @@ async def execute(authority, ref, row, policy):
             # [daveey] This owner's restart stopped the run (killed its tools, interrupted its agent,
             # or cleared its claim): whatever it returned is not the job's verdict. The firer books
             # an interruption and reruns it once (cron/restart_cut.py), never a failure.
-            from cron.restart_cut import RESTART_CUT_FLAG, RESTART_CUT_REASON
+            from cron.restart_cut import AWAKE_FLAG, RESTART_CUT_FLAG, RESTART_CUT_REASON
             flags[RESTART_CUT_FLAG] = True
+            # How long the host was awake for it: a rerun the host slept through is re-armed.
+            flags[AWAKE_FLAG] = {'awake': round(time.monotonic() - started_awake, 1),
+                                 'wall': round(max(0.0, time.time() - started_wall), 1)}
             result = (False, result[1], '', result[3] or RESTART_CUT_REASON)
         authority.pending_results[row['admission_id']] = {
             'result': {'final_response': result[2], 'cron_result': list(result), 'cron_job_flags': flags,

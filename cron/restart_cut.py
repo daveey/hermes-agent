@@ -7,7 +7,9 @@ books that result settles it here: the attempt's firer (its run tail) or, when t
 the admission journal's recovery in the new gateway (``scheduler_authority.reconcile_pending``).
 The job keeps its failure streak, no failure notice is sent, and the job runs again once
 (``cron/restart_rerun.py``: an extra fire that keeps the next slot, a one-shot re-armed with its
-repeat budget given back). A rerun cut again is not rerun a second time.
+repeat budget given back). A rerun cut again is not rerun a second time, unless the owner's clock
+(``AWAKE_FLAG``) shows it was awake under ten minutes or the host slept through most of it: then
+it is re-armed, up to three reruns.
 
 A fire the owner refused because it was draining for a restart was never admitted: it is deferred
 to the next gateway (``defer_unadmitted``), not failed.
@@ -20,6 +22,10 @@ from typing import Any, Optional
 logger = logging.getLogger("cron.jobs")
 
 RESTART_CUT_FLAG = "_restart_cut"
+# [daveey] The owner's clock of a cut attempt, riding the canonical result beside RESTART_CUT_FLAG:
+# ``{"awake": <time.monotonic delta>, "wall": <time.time delta>}`` in seconds. The monotonic clock
+# stops while the host sleeps, so a rerun the host slept through is re-armed (restart_rerun.py).
+AWAKE_FLAG = "_run_clock"
 RESTART_CUT_REASON = "Interrupted by a gateway restart before the run finished"
 # Owner refusals that mean "not ready yet, retry on the next gateway", never "this job is refused".
 NOT_READY_REFUSALS = frozenset({"runtime_draining"})
@@ -37,15 +43,18 @@ def _detail(error: Any) -> str:
     return RESTART_CUT_REASON if not error or error == RESTART_CUT_REASON else f"{RESTART_CUT_REASON} ({error})"
 
 
-def _reschedule(job_id: str, execution_id: str, *, deferred: bool = False) -> bool:
+def _reschedule(job_id: str, execution_id: str, *, deferred: bool = False,
+                clock: Optional[dict[str, Any]] = None) -> bool:
     from cron.executions import get_execution
     from cron.restart_rerun import reschedule_interrupted
 
     record = get_execution(execution_id)
     if record is None or record.get("job_id") != job_id:
         return False
+    clock = clock if isinstance(clock, dict) else {}
     try:
-        return reschedule_interrupted(record, restart_cut=True, deferred=deferred)
+        return reschedule_interrupted(record, restart_cut=True, deferred=deferred,
+                                      awake_seconds=clock.get("awake"), wall_seconds=clock.get("wall"))
     except Exception:  # health: allow BLE001 -- the attempt is already booked; a missed rerun is logged
         logger.warning("cron: rescheduling %s after its restart cut failed", job_id, exc_info=True)
         return False
@@ -74,6 +83,11 @@ def settle_restart_cut(job: dict[str, Any], execution_id: str, error: Any, fire_
 
     job_id = job["id"]
     detail = _detail(error)
+    clock = job.pop(AWAKE_FLAG, None)
+    if isinstance(clock, dict) and isinstance(clock.get("awake"), (int, float)):
+        # Recorded per attempt so a slept-through cut is visible in errors.log without the ledger.
+        logger.info("Job '%s': cut attempt %s was awake %.0fs of %.0fs", job_id, execution_id,
+                    clock["awake"], clock.get("wall") or 0)
     mark_kwargs: dict[str, Any] = {"shutdown_interrupted": True}
     if not job.get("no_agent"):
         mark_kwargs["execution_id"] = execution_id
@@ -86,7 +100,7 @@ def settle_restart_cut(job: dict[str, Any], execution_id: str, error: Any, fire_
     else:
         scheduler.finish_execution(execution_id, success=False, error=detail, delivery_outcome="suppressed")
     _retire_journal(job_id, execution_id)
-    rerun = _reschedule(job_id, execution_id)
+    rerun = _reschedule(job_id, execution_id, clock=clock)
     logger.warning("Job '%s': %s; %s", job_id, detail,
                    "rerunning it once on the current gateway" if rerun else "not rerun")
     return rerun

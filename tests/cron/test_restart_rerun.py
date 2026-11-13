@@ -688,3 +688,157 @@ def test_chronos_fallback_ticker_does_not_rerun(clock, monkeypatch, tmp_path):
     after = get_job(job["id"])
     assert executions.latest_execution(job["id"])["status"] == "unknown"
     assert after["next_run_at"] == natural_next and after.get("restart_rerun") is None
+
+
+# --- [daveey] a host asleep through the rerun (cron-7dfb141525) ------------------------------
+
+def _owner_cut(job_id, clock, *, awake=None, wall=None, minutes=1):
+    """Claim the job's due fire, then the owner reports its restart cut it with this clock."""
+    from cron.restart_rerun import reschedule_interrupted
+
+    claimed, record = _start(job_id)
+    clock["now"] += timedelta(minutes=minutes)
+    # What settle_restart_cut books before it reschedules (the restart-window clock included).
+    assert mark_job_run(job_id, False, "cut", shutdown_interrupted=True, execution_id=record["id"],
+                        expected_fire_owner=claimed["fire_claim"]["by"])
+    executions.finish_execution(record["id"], success=False, error="cut")
+    return record, reschedule_interrupted(executions.get_execution(record["id"]), restart_cut=True,
+                                          awake_seconds=awake, wall_seconds=wall)
+
+
+@pytest.fixture()
+def awake_host(monkeypatch):
+    state = {"awake": True}
+    monkeypatch.setattr("cron.restart_rerun.host_fully_awake", lambda: state["awake"], raising=False)
+    return state
+
+
+def test_rerun_cut_while_the_host_slept_is_rearmed(clock, awake_host, caplog):
+    job = create_job("post", "every 120m", name="post")
+    clock["now"] += timedelta(minutes=121)
+    natural_next = None
+    _first, rerun_armed = _owner_cut(job["id"], clock, awake=900, wall=900)
+    assert rerun_armed
+    natural_next = get_job(job["id"])[extra_fire_key()]
+    with caplog.at_level(logging.INFO, logger="cron.jobs"):
+        rerun, again = _owner_cut(job["id"], clock, awake=30, wall=3 * 3600, minutes=50)
+    assert again, caplog.text
+    assert f"cron: rescheduled {job['id']} (execution {rerun['id']}) {RESCHEDULED} (deferred rerun 2/3" in caplog.text
+    after = get_job(job["id"])
+    assert after["restart_rerun"]["reruns"] == 2 and not after["restart_rerun"].get("settled")
+    assert after[extra_fire_key()] == natural_next, "the natural slot is kept"
+    assert _due_ids() == [job["id"]]
+
+
+def extra_fire_key():
+    from cron import extra_fire
+
+    return extra_fire.RESTORE_KEY
+
+
+def test_rerun_cut_after_ten_awake_minutes_is_not_rearmed(clock, awake_host):
+    job = create_job("post", "every 120m", name="post")
+    clock["now"] += timedelta(minutes=121)
+    _owner_cut(job["id"], clock, awake=900, wall=900)
+    _rerun, again = _owner_cut(job["id"], clock, awake=600, wall=700)
+    assert not again
+    assert get_job(job["id"])["restart_rerun"]["settled"] is True
+    assert _due_ids() == []
+
+
+def test_unmeasured_rerun_keeps_rerun_once(clock, awake_host):
+    job = create_job("post", "every 120m", name="post")
+    clock["now"] += timedelta(minutes=121)
+    _owner_cut(job["id"], clock)
+    _rerun, again = _owner_cut(job["id"], clock)
+    assert not again and _due_ids() == []
+
+
+def test_slept_rerun_cap_is_three_per_original_cut(clock, awake_host):
+    job = create_job("post", "every 600m", name="post")
+    clock["now"] += timedelta(minutes=601)
+    assert _owner_cut(job["id"], clock, awake=5, wall=5)[1]  # the original cut: rerun 1
+    for expected in (2, 3):
+        assert _owner_cut(job["id"], clock, awake=5, wall=1800)[1]
+        assert get_job(job["id"])["restart_rerun"]["reruns"] == expected
+    _rerun, again = _owner_cut(job["id"], clock, awake=5, wall=1800)
+    assert not again, "three reruns per original cut, then the schedule"
+    assert get_job(job["id"])["restart_rerun"]["settled"] is True
+    assert _due_ids() == []
+
+
+@pytest.mark.parametrize("awake,wall,slept", [
+    (None, None, False), (599, 599, True), (600, 600, False),
+    (700, 3 * 3600, True),  # ~10 awake minutes in 3 h 17 m: the incident's rerun
+    (1200, 1700, False), (True, 10, False), (-1, 10, False)])
+def test_slept_through_reads_the_owner_clock(awake, wall, slept):
+    from cron.restart_rerun import slept_through
+
+    assert slept_through(awake, wall) is slept
+
+
+def test_pending_rerun_waits_for_full_wake_until_the_next_slot(clock, awake_host, caplog):
+    job = create_job("post", "every 120m", name="post")
+    clock["now"] += timedelta(minutes=121)
+    awake_host["awake"] = False
+    assert _owner_cut(job["id"], clock, awake=900, wall=900)[1]
+    assert _due_ids() == [], "a restart rerun never fires into a DarkWake"
+    awake_host["awake"] = True
+    assert _due_ids() == [job["id"]], "it fires on the first fully awake tick"
+
+    # Held all the way to the natural slot: that slot settles it (no double run).
+    awake_host["awake"] = False
+    slot = get_job(job["id"])[extra_fire_key()]
+    clock["now"] = datetime.fromisoformat(slot) + timedelta(seconds=1)
+    with caplog.at_level(logging.WARNING, logger="cron.jobs"):
+        assert _due_ids() == []
+    assert f"pending restart rerun of {job['id']} settled by its next slot" in caplog.text
+    after = get_job(job["id"])
+    assert after["next_run_at"] == slot and after.get("manual_run_at") is None
+    assert extra_fire_key() not in after and after["restart_rerun"]["settled"] is True
+    assert _due_ids() == [job["id"]], "the slot fires as itself"
+    claimed = claim_job_for_fire(job["id"], return_job=True)
+    assert isinstance(claimed, dict) and not claimed["fire_claim"].get("extra_slot")
+
+
+def test_oneshot_rerun_held_past_grace_fires_on_full_wake(clock, awake_host):
+    # A one-shot rerun held through a DarkWake longer than the one-shot grace window is the cut
+    # work redone, not a missed one-shot: the grace gate must not retire it.
+    job = create_job("remind me", "in 30m", name="reminder")
+    clock["now"] += timedelta(minutes=31)
+    awake_host["awake"] = False
+    assert _owner_cut(job["id"], clock, awake=900, wall=900)[1]
+    assert _due_ids() == []
+    clock["now"] += timedelta(minutes=10)
+    assert _due_ids() == [], "still held in the DarkWake"
+    awake_host["awake"] = True
+    assert _due_ids() == [job["id"]], "it fires on the first fully awake tick"
+    assert get_job(job["id"]) is not None
+
+
+def test_full_wake_probe_reads_pmset_assertions(monkeypatch):
+    from cron import restart_rerun
+
+    # The probe's parsing, host-independent: _on_macos is the seam, never the interpreter's platform.
+    monkeypatch.setattr(restart_rerun, "_on_macos", lambda: True)
+    outputs = {}
+    monkeypatch.setattr(restart_rerun, "_pmset", lambda what: outputs[what])
+    monkeypatch.setattr(restart_rerun, "_lid_closed", lambda: outputs["lid"])
+    outputs.update(assertions="Assertion status system-wide:\n   UserIsActive                   1\n",
+                   batt="Now drawing from 'Battery Power'", lid=True)
+    assert restart_rerun.host_fully_awake()
+    outputs["assertions"] = "Assertion status system-wide:\n   UserIsActive                   0\n"
+    assert not restart_rerun.host_fully_awake(), "a DarkWake on battery"
+    outputs.update(batt="Now drawing from 'AC Power'", lid=False)
+    assert restart_rerun.host_fully_awake(), "lid open on AC"
+    outputs["lid"] = True
+    assert not restart_rerun.host_fully_awake(), "clamshell on AC with no user is a DarkWake"
+
+    def broken(_what):
+        raise OSError("no pmset")
+
+    monkeypatch.setattr(restart_rerun, "_pmset", broken)
+    assert restart_rerun.host_fully_awake(), "a broken probe never holds a rerun"
+    monkeypatch.setattr(restart_rerun, "_on_macos", lambda: False)
+    monkeypatch.setattr(restart_rerun, "_pmset", lambda _w: pytest.fail("probed off macOS"))
+    assert restart_rerun.host_fully_awake()

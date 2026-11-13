@@ -3321,7 +3321,10 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     d.next_run_dt = _rearm_stale_error_recurring(d)
     if _instant_after(d.next_run_dt, now):
         return False
-
+    from cron.restart_rerun import hold_for_wake, pending_rerun
+    if hold_for_wake(job, scan):  # [daveey] a restart rerun never fires into a DarkWake
+        return False
+    rerun = pending_rerun(job)  # [daveey] a held one-shot rerun is redone work, never "missed"
     # Only the dispatch snapshot carries this field; never infer it from a later stamp.
     job["_scheduled_instant"] = None if manual_run else scheduled_instant(job.get("next_run_at"))
 
@@ -3334,7 +3337,7 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
         return False
     if kind == "once":
         from cron.planned_pause import covers
-        if (not covers(job) and retire_expired_oneshot(d)) or _oneshot_dispatch_limit_reached(job, scan):
+        if (not covers(job) and not rerun and retire_expired_oneshot(d)) or _oneshot_dispatch_limit_reached(job, scan):
             return False
         # Durably claim the one-shot for the DURATION of its run: a second scheduler process on the
         # same HERMES_HOME must not re-dispatch it while in flight, and advancing next_run_at by a
