@@ -131,7 +131,9 @@ def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Calla
         for slug, path in boards:
             seconds = age(path) if _loop_healthy(slug, now) else None
             if seconds is None or seconds < STALE_S:
-                _FILED.discard(slug)  # answered (or the loop is failing, which other alarms cover): incident over
+                # Answered, or the loop is failing: incident over. No alarm covers a failing loop yet;
+                # t_01a1d3df5e5d0757 adds a replica-freshness check here.
+                _FILED.discard(slug)
                 continue
             if slug in _FILED:
                 continue

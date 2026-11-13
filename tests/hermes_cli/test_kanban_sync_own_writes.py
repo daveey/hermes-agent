@@ -114,12 +114,12 @@ def test_another_connections_write_during_the_round_still_repairs(live, svc, kan
     parent, child = credit._settle(live, svc, kanban_home)
     calls = credit._spy(monkeypatch)
     real_push = ksc.push
-    done = []
+    sends = []
 
     def push_and_race(conn, *a, **k):
-        # On the round's send after its inputs read (it also sends before its pulls, t_01a1d36ddcea59fe).
-        if not done and not k.get("before_pull"):
-            done.append(1)
+        # On the round's second send, after its inputs read (the first goes before its pulls, t_01a1d36ddcea59fe).
+        sends.append(1)
+        if len(sends) == 2:
             credit._uncaptured_edit(live, child, "raced")
         return real_push(conn, *a, **k)
     monkeypatch.setattr(ksc, "push", push_and_race)
