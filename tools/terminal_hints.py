@@ -153,6 +153,13 @@ _FAILURE_SHAPES = re.compile(
     r"|BUILD FAILED|Build FAILED"             # gradle/msbuild/echoed fallbacks
     r"|FAILED: "                              # ninja
     r"|(?m:^make(?:\[\d+\])?: \*\*\*)"        # make
+    # A missing command: the shell's own message, or a wrapper (timeout/env/nice/...) that
+    # could not exec it. Behind `| tail` the run "passed" without running at all
+    # (agent-dab059c232). A tool's own file argument (`cat: x: No such file`) is not matched.
+    r"|(?m:^[^\n]*: command not found$)"
+    r"|failed to run command [\u2018'\"][^\u2019'\"\n]+[\u2019'\"]: No such file or directory"
+    r"|(?m:^(?:env|nice|nohup|stdbuf|xargs|timeout|sudo|ionice|setsid|chrt|taskset): "
+    r"[\u2018'\"][^\u2019'\"\n]+[\u2019'\"]: No such file or directory)"
     r")")
 
 

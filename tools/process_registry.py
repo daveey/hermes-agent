@@ -2666,8 +2666,8 @@ def _handle_process(args, **kw):
         if not session_id:
             return tool_error(f"session_id is required for {action}")
         handler, redact = _SESSION_ACTIONS[action]
-        from tools.process_registry_wait_policy import apply_wait_poll_policy
-        result = apply_wait_poll_policy(action, session_id, handler(session_id, args))
+        from tools.process_registry_wait_policy import apply_wait_poll_policy, with_masked_success_hint
+        result = with_masked_success_hint(apply_wait_poll_policy(action, session_id, handler(session_id, args)))
         return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
     return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff")
 

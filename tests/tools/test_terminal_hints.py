@@ -2,6 +2,7 @@
 
 from unittest.mock import patch as mock_patch
 
+import pytest
 
 from tools.terminal_hints import annotate_failure, annotate_masked_success
 
@@ -275,3 +276,54 @@ class TestStatusEchoWrapper:
         out = "error: could not compile `x`\n"
         assert "pipeline" in (annotate_masked_success("cargo build | tail -5", out) or "")
         assert "`||` fallback" in (annotate_masked_success("cargo build || echo FAILED", out) or "")
+
+
+class TestMaskedMissingCommand:
+    """A missing command hidden behind a pipe's exit 0 (incident agent-dab059c232: a background
+    `timeout 600 hermes-core-wt test ... | tail -15` printed `timeout: failed to run command
+    'hermes-core-wt': No such file or directory` and reported exit 0)."""
+
+    INCIDENT = "timeout 600 hermes-core-wt test --wt x tests/foo.py 2>&1 | tail -15"
+
+    @pytest.mark.parametrize("output", [
+        "timeout: failed to run command 'hermes-core-wt': No such file or directory\n",
+        "timeout: failed to run command \u2018hermes-core-wt\u2019: No such file or directory\n",
+        "bash: line 1: hermes-core-wt: command not found\n",
+        "nice: \u2018hermes-core-wt\u2019: No such file or directory\n",
+        "env: 'hermes-core-wt': No such file or directory\n",
+    ])
+    def test_missing_command_behind_pipe_flagged(self, output):
+        assert "pipeline" in (annotate_masked_success(self.INCIDENT, output) or "")
+
+    def test_ordinary_no_such_file_not_flagged(self):
+        # A plain ENOENT from a tool's own file argument is content, not a missing command.
+        out = "cat: notes.txt: No such file or directory\n"
+        assert annotate_masked_success("make docs 2>&1 | tail -5", out) is None
+
+
+class TestProcessResultMaskedHint:
+    """poll/wait results on a background process carry the same masked-success hint as the
+    foreground terminal result and the completion notice."""
+
+    def test_wait_result_gets_hint(self, monkeypatch):
+        import json
+
+        from tools import process_registry as pr
+
+        result = {"session_id": "proc_x", "status": "exited", "exit_code": 0,
+                  "command": TestMaskedMissingCommand.INCIDENT,
+                  "output": "timeout: failed to run command 'hermes-core-wt': No such file or directory\n"}
+        monkeypatch.setitem(pr._SESSION_ACTIONS, "wait", (lambda sid, a: dict(result), True))
+        out = json.loads(pr._handle_process({"action": "wait", "session_id": "proc_x"}))
+        assert "pipeline" in out.get("hint", ""), out
+
+    def test_clean_wait_result_has_no_hint(self, monkeypatch):
+        import json
+
+        from tools import process_registry as pr
+
+        result = {"session_id": "proc_x", "status": "exited", "exit_code": 0,
+                  "command": TestMaskedMissingCommand.INCIDENT, "output": "12 passed\n"}
+        monkeypatch.setitem(pr._SESSION_ACTIONS, "wait", (lambda sid, a: dict(result), True))
+        out = json.loads(pr._handle_process({"action": "wait", "session_id": "proc_x"}))
+        assert "hint" not in out

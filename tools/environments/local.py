@@ -354,10 +354,14 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
 
 
 def _terminal_env(env: dict) -> dict:
-    """*env* with the user's tools first on PATH (``_user_tools_first``), for background commands."""
+    """*env* with the foreground terminal's PATH completion, for background commands: missing
+    sane / Hermes-managed (``$HERMES_HOME/bin``, pm node) / ``~/.local/bin`` dirs appended, then
+    the user's tools first. Same composition as ``_make_run_env``, so a command that resolves in
+    the foreground also resolves under ``terminal(background=true)`` on a gateway whose service
+    PATH lacks those dirs (systemd on the hub)."""
     path_key = _path_env_key(env)
     if path_key is not None:
-        env[path_key] = _user_tools_first(env[path_key])
+        env[path_key] = _user_tools_first(_append_missing_sane_path_entries(env[path_key]))
     return env
 
 
