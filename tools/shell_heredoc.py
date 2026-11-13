@@ -502,7 +502,10 @@ def output_reaches_shell(command: str) -> bool:
     """Whether some command's output in *command* may be run as shell code (see
     ``_SHELL_SINK_RE``). Deliberately broad: a match only stops treating consumer heredoc bodies
     and printed string literals as data (the lifecycle walk then scans them as commands); it never
-    refuses on its own."""
+    refuses on its own. The pipe alternative takes ANY later word of the pipe segment as the
+    shell, so ``| grep bash`` / ``| grep -c bash`` count as sinks too: telling a wrapper's operand
+    from a filter's pattern needs a per-command grammar, and the false sink only fails closed
+    (review 5890784121 nit 3; ``| grep bash.sh`` is no sink only because of the word end)."""
     return _SHELL_SINK_RE.search(command) is not None
 
 

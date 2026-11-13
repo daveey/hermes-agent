@@ -1285,31 +1285,61 @@ def _iter_shell_command_payloads(command: str) -> Iterator[str]:
 
 
 # Quoted string literals (shell or interpreter quoting alike), each kind on its own; a literal may
-# span lines (`eval "$( cat <<'PY'` … `)"`).
-_QUOTED_LITERAL_RES = (re.compile(r"'([^']+)'"), re.compile(r"\"([^\"]+)\""))
+# span lines (`eval "$( cat <<'PY'` … `)"`). The lookahead yields the span after EVERY quote up to
+# the next one of its kind, not just alternate pairs: an apostrophe inside the other kind
+# (`print("it's")`) must not shift which spans count as literals (review 5890784121 nit 1).
+_QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r"(?=\"([^\"]+)\")"))
+# C-style escapes a producer turns into whitespace (`printf 'bash /x/a.sh\n'`, `print('…\n')`):
+# left in, `\n` would glue onto the path and hide the script it names.
+_PRINTED_ESCAPE_RE = re.compile(r"\\[ntrvf]")
+# Producers that print their own arguments, quoted or not (`echo bash /x/a.sh | bash`).
+_ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
+
+
+def _with_escapes_decoded(text: str) -> Iterator[str]:
+    yield text
+    if "\\" in text:
+        yield _PRINTED_ESCAPE_RE.sub("\n", text)
 
 
 def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
     """When some output in *command* is run as shell code (``python3 - <<'PY' | bash``,
-    ``eval "$(…)"``, ``bash <(…)``), yield every quoted string literal in it: the producer may
-    print one as the shell's command (``print('bash /x/big.sh')``), so its paths are executed,
-    not mentions. Single and double quotes are matched independently, so a literal nested in the
-    other kind (``python3 -c "print('bash x')"``) is yielded too.
+    ``eval "$(…)"``, ``bash <(…)``), yield what a producer may print as the shell's command:
+    every quoted string literal (``print('bash /x/big.sh')``) and the argument line of every
+    ``echo``/``printf`` (``echo bash /x/big.sh``), each also with ``\\n``-style escapes turned into
+    newlines. Their paths are executed, not mentions. Single and double quotes are matched
+    independently, so a literal nested in the other kind (``python3 -c "print('bash x')"``) is
+    yielded too, and every span between two consecutive quotes of a kind is yielded, so a stray
+    apostrophe (``print("it's")``) cannot pair the quotes around a later literal the wrong way.
 
     Fails closed by design (review 5890191993 nits): every yielded literal is walked as an
     executed command, so a producer that merely reads an oversized data file
     (``sqlite3.connect('/d/big.db')``) refuses on the scan cap, and the literals charge the shared
-    line/byte budget, so a generator of ~16k lines piped to a shell refuses on the line cap."""
+    line/byte budget, so a generator of ~16k lines piped to a shell refuses on the line cap (~8k
+    lines when each prints a literal; the between-quote spans dedupe and leave both unchanged)."""
     from tools.shell_heredoc import output_reaches_shell
 
     if not output_reaches_shell(command):
         return
     seen: set[str] = set()
+
+    def unseen(text: str) -> Iterator[str]:
+        for variant in _with_escapes_decoded(text):
+            if variant not in seen:
+                seen.add(variant)
+                yield variant
+
     for pattern in _QUOTED_LITERAL_RES:
         for match in pattern.finditer(command):
-            if match[1] not in seen:
-                seen.add(match[1])
-                yield match[1]
+            yield from unseen(match[1])
+    if not any(name in command for name in _ARGUMENT_PRINTERS):
+        return  # skip a second tokenization of a large generator that never echoes
+    for segment in _iter_command_segments(command):
+        while segment and segment[0] in _SUBSHELL_OPENING_WORDS:  # `{ echo …; }`, `then echo …`
+            segment = segment[1:]
+        index = _executed_command_index(segment)
+        if index is not None and _executable_name(segment[index]) in _ARGUMENT_PRINTERS:
+            yield from unseen(" ".join(segment[index + 1 :]))
 
 
 # --- referenced-script reading ----------------------------------------------------------------

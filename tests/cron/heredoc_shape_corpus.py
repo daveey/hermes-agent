@@ -108,9 +108,16 @@ SESSION_FORMS = ("plain", "function", "subshell")
 # handed to a shell, so the line it prints is shell code. Consumers print one line; sinks pipe,
 # ``eval``, process-substitute or source that output; nestings wrap the consumer. ``big`` prints
 # ``bash ./big.sh`` (over the scan cap: the walk must fail closed); ``direct`` prints the restart.
+# Review 5890784121: ``python-apostrophe`` holds a stray ``'`` in a double-quoted literal before
+# the print (it must not shift the single-quote pairing; it is not printed, or bash would stop on
+# the unterminated quote and never run the line); ``printf``/``echo`` are one-line producers
+# with no heredoc (body ``None``): an escaped ``\n`` and unquoted words.
 SINK_CONSUMERS = {
     "python": ("python3 - <<'PY'", "print('{line}')\n"),
     "cat": ("cat <<'PY'", "{line}\n"),
+    "python-apostrophe": ("python3 - <<'PY'", "s = \"it's\"\nprint('{line}')\n"),
+    "printf": ("printf '{line}\\n'", None),
+    "echo": ("echo {line}", None),
 }
 SINK_LINES = {"big": "bash ./big.sh", "direct": 'hermes gateway "restart"'}
 SINKS = {
@@ -161,7 +168,10 @@ def build_sink_command(sink: str, wrapper: str, nesting: str, consumer: str, lin
         opener = "bash -s <<'OUTER'" if nesting == "outer" else "ssh h 'bash -s' <<'OUTER'"
         return f"{opener}\n{inner}OUTER\n"
     opener, body = SINK_CONSUMERS[consumer]
-    opener, body = wrapper + opener, body.format(line=SINK_LINES[line]) + "PY\n"
+    if body is None:  # a one-line producer: no heredoc body
+        opener, body = wrapper + opener.format(line=SINK_LINES[line]), ""
+    else:
+        opener, body = wrapper + opener, body.format(line=SINK_LINES[line]) + "PY\n"
     prelude = ""
     if nesting == "function":
         prelude, head, tail = f"f() {{\n{opener}\n{body}}}\n", "f", "\n"

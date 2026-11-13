@@ -32,6 +32,22 @@ _SINK_SHAPES = {
     "variable-eval": "o=$(\npython3 - <<'PY'\n" + _PRINT + "PY\n)\neval \"$o\"\n",
     "python-c": "python3 -c \"print('bash {big}')\" | bash\n",
     "outer-shell": "bash -s <<'R'\npython3 - <<'PY' | bash\n" + _PRINT + "PY\nR\n",
+    # Review 5890784121 nit 1: a stray quote of the other kind must not shift literal pairing.
+    "apostrophe-in-double": "python3 - <<'PY' | bash\nprint(\"it's\")\n" + _PRINT + "PY\n",
+    "double-in-single": "python3 - <<'PY' | bash\nprint('say \"hi')\nprint(\"bash {big}\")\nPY\n",
+    "apostrophe-in-comment": "python3 - <<'PY' | bash\n# don't\n" + _PRINT + "PY\n",
+    # Nit 2: producers with no heredoc (an escaped newline glued to the path, unquoted words).
+    "printf-escape": "printf 'bash {big}\\n' | bash\n",
+    "printf-format": "printf '%s\\n' 'bash {big}' | bash\n",
+    "print-escape": "python3 - <<'PY' | bash\nprint('bash {big}\\n')\nPY\n",
+    "echo-unquoted": "echo bash {big} | bash\n",
+    "echo-wrapped": "timeout 5 echo bash {big} | sudo bash\n",
+    "echo-eval": "eval \"$(echo bash {big})\"\n",
+    "echo-function": "f() { echo bash {big}; }; f | bash\n",
+    "echo-then": "if true; then echo bash {big}; fi | bash\n",
+    # Nit 3 (intended, fails closed): any later pipe word counts as the shell, a grep pattern too.
+    "pipe-grep-bash": "python3 - <<'PY' | grep bash\n" + _PRINT + "PY\n",
+    "pipe-grep-c-bash": "echo bash {big} | grep -c bash\n",
 }
 
 
@@ -74,6 +90,10 @@ _NO_SINK_SHAPES = {
     "function-no-sink": "f() { python3 - <<'PY'\n" + _PRINT + "PY\n}; f\n",
     "subst-argument": "hermes kanban comment t_x \"$(cat /tmp/f.md)\"\npython3 - <<'PY'\n"
                       + _PRINT + "PY\n",
+    "apostrophe-no-sink": "python3 - <<'PY'\nprint(\"it's\")\n" + _PRINT + "PY\n",
+    "printf-no-sink": "printf 'bash {big}\\n'\n",
+    "echo-no-sink": "echo bash {big}\n",
+    "echo-or-list": "echo bash {big} || bash -c true\n",
 }
 
 
@@ -88,13 +108,16 @@ def test_consumer_output_not_fed_to_a_shell_stays_a_mention(tmp_path, shape):
     "x | timeout 5 bash -s", "eval \"$o\"", ". <(x)", "source /dev/stdin", "bash <(x)",
     "sh -c \"$(x)\"", "bash <<< \"$o\"", "$(x)", "a; `x`", "if true; then $(x); fi",
     "x | sudo -s", "x | zsh",
+    # Deliberate (review 5890784121 nit 3): any later pipe word is taken as the shell, so a grep
+    # pattern named bash is a sink. It only fails closed; see output_reaches_shell.
+    "x | grep bash", "x | grep -c bash",
 ])
 def test_output_reaches_shell(text):
     assert output_reaches_shell(text)
 
 
 @pytest.mark.parametrize("text", [
-    "x | grep bash.sh", "x || bash y.sh", "X=$(x)", "cd \"$(dirname \"$0\")\"",
+    "x | grep bash.sh", "x | grep bashrc", "x || bash y.sh", "X=$(x)", "cd \"$(dirname \"$0\")\"",
     "ssh h \"python3 -c '$(printf x)'\"", ". ./venv/bin/activate", "diff <(x) y",
     "x | sed 's/^/h /'", "bash -s \"$1\" <<'R'", "echo $((1 + 2))",
 ])
