@@ -114,3 +114,94 @@ def test_inline_source_and_mentions_stay_allowed(paths, template):
 )
 def test_payload_extraction(command, payloads):
     assert list(lifecycle_guard._iter_shell_command_payloads(command)) == payloads
+
+
+# `--` and a lone `-` end a shell's options, so the next word is the operand even when it starts
+# with `-` or `+` (bash and dash run `./-x.sh` for `bash -- -x.sh` / `sh - -x.sh`). Read as an
+# unknown long option or an empty cluster instead, the end marker is skipped and the dashed word
+# parsed as one more option cluster: the script (or `-c` payload) is then never read. A plain
+# word after the marker (`bash -c -- 'x'`, `bash -e -- run.sh`) cannot tell the two reads apart.
+@pytest.fixture
+def dashed_scripts(tmp_path) -> str:
+    (tmp_path / "-restart.sh").write_text(f"#!/bin/sh\n{LIFECYCLE}\n", encoding="utf-8")
+    (tmp_path / "+restart.sh").write_text(f"#!/bin/sh\n{LIFECYCLE}\n", encoding="utf-8")
+    (tmp_path / "-clean.sh").write_text("echo ok\n", encoding="utf-8")
+    return str(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -- -restart.sh",
+        "bash -e -- -restart.sh",
+        "bash -e -- +restart.sh",
+        "sh -- -restart.sh",
+    ],
+)
+def test_double_dash_ends_options_before_a_dashed_script(dashed_scripts, command):
+    assert scan_gateway_lifecycle(command, cwd=dashed_scripts) == (True, None)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash - -restart.sh",
+        "bash -e - -restart.sh",
+        "bash -e - +restart.sh",
+        "sh - -restart.sh",
+    ],
+)
+def test_lone_dash_ends_options_before_a_dashed_script(dashed_scripts, command):
+    assert scan_gateway_lifecycle(command, cwd=dashed_scripts) == (True, None)
+
+
+@pytest.mark.parametrize("marker", ["--", "-"])
+def test_dashed_clean_script_after_the_option_end_stays_allowed(dashed_scripts, marker):
+    assert scan_gateway_lifecycle(f"bash -e {marker} -clean.sh", cwd=dashed_scripts) == (
+        False, None)
+
+
+@pytest.mark.parametrize(
+    ("command", "payloads"),
+    [
+        ("bash -c -- '-a'", ["-a"]),
+        ("bash -ec -- '+a'", ["+a"]),
+        ("bash -c - '-a'", ["-a"]),
+        ("bash -ec - '+a'", ["+a"]),
+    ],
+)
+def test_option_end_marks_a_dashed_payload(command, payloads):
+    assert list(lifecycle_guard._iter_shell_command_payloads(command)) == payloads
+
+
+# An rc file before a clustered `-c` is scanned like the shell's script, but the `-c` payload is
+# inline source: it is walked as commands, never opened as a file. Here the payload word `deploy`
+# also names a file in the cwd that holds a lifecycle command; bash runs `deploy` from PATH (or
+# fails), never `./deploy`, so the rc file is the only reference.
+@pytest.fixture
+def rcfile_dir(tmp_path) -> str:
+    (tmp_path / "deploy").write_text(f"#!/bin/sh\n{LIFECYCLE}\n", encoding="utf-8")
+    (tmp_path / "rc.sh").write_text("echo rc\n", encoding="utf-8")
+    (tmp_path / "restart-rc.sh").write_text(f"{LIFECYCLE}\n", encoding="utf-8")
+    return str(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash --rcfile rc.sh -ec deploy",
+        "bash --init-file rc.sh -lc deploy",
+        "bash --rcfile rc.sh -c -e deploy",
+    ],
+)
+def test_rcfile_scan_stops_at_a_clustered_c_payload(rcfile_dir, command):
+    assert scan_gateway_lifecycle(command, cwd=rcfile_dir) == (False, None)
+    references = set(lifecycle_guard._iter_referenced_shell_scripts(command, cwd=rcfile_dir))
+    assert {path.name for path in references} == {"rc.sh"}
+
+
+def test_restart_rcfile_before_a_clustered_c_payload_is_scanned(rcfile_dir):
+    command = "bash --rcfile restart-rc.sh -ec true"
+    assert scan_gateway_lifecycle(command, cwd=rcfile_dir) == (True, None)
+    references = set(lifecycle_guard._iter_referenced_shell_scripts(command, cwd=rcfile_dir))
+    assert {path.name for path in references} == {"restart-rc.sh"}
