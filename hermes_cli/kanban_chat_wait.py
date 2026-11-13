@@ -34,7 +34,8 @@ THRESHOLD_SECONDS = pu.THRESHOLD_SECONDS
 MAX_EPISODE_SECONDS = 6 * 3600
 # Boards (main DB file of the swept conn) whose current lag stall has logged its WARNING; the rest of that stall logs
 # at INFO. Keyed per board: the dispatcher sweeps each board separately, so a healthy board's undeferred sweep must
-# not re-arm a lagging board's WARNING every tick. A board leaves the set on its own undeferred sweep.
+# not re-arm a lagging board's WARNING every tick. A board leaves the set on its own undeferred sweep, or on its own
+# sweep with nothing due (a stall that ends with no card waiting would otherwise make the next one log only at INFO).
 _LAG_WARNED: set[str] = set()
 NO_PROMISE = "check placement and available capacity first; re-place if suitable; don't promise a pickup"
 
@@ -197,7 +198,9 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
         ready_for = now - since
         if THRESHOLD_SECONDS <= ready_for <= MAX_EPISODE_SECONDS:
             due.append((row, since, ready_for))
-    if not due:
+    if not due:  # nothing waits on this board, so its stall (if any) is over
+        if _LAG_WARNED:
+            _LAG_WARNED.discard(_board_key(conn))
         return 0
     lag = fresh.lag_hold(conn, now=now)
     board = _board_key(conn)
