@@ -19,7 +19,9 @@ apps/desktop/electron/delta-reads.ts).
   ``compression.zstd``) passes through untouched.
 - Every hashed or delta answer says ``Vary: X-Hermes-Delta-Accept, X-Hermes-Delta-Base`` (merged into the
   handler's own Vary), and a delta drops the handler's ``ETag``: its bytes are a frame, not that entity. A caching
-  proxy in front of the gateway then cannot replay a delta to a client that did not ask for one.
+  proxy in front of the gateway then cannot replay a delta to a client that did not ask for one. A delta also
+  replaces the handler's ``Cache-Control`` with ``no-store`` (Cloudflare ignores Vary names other than
+  Accept-Encoding); a whole hashed body is the handler's entity and keeps the handler's Cache-Control.
 
 Bodies are remembered per credential: the store key is (hash of the request's session-token / Authorization /
 Cookie headers, hash of the body), so a caller can only name a base that was served to that same credential. A
@@ -231,6 +233,9 @@ class _DeltaSend:
         _merge_vary(headers)
         if frame is not None:
             del headers["etag"]  # the handler's validator names the whole body, not this frame
+            # Only the client holding this base can use it, and Cloudflare ignores the Vary names above.
+            del headers["cache-control"]
+            headers["cache-control"] = "no-store"
             headers[DELTA_HEADER] = ENCODING
             headers[BASE_HEADER] = self._base_digest
             headers["content-type"] = DELTA_MEDIA_TYPE

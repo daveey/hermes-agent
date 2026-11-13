@@ -71,7 +71,7 @@ def served():
         return StreamingResponse(chunks(), media_type="application/json", headers={"content-length": str(len(body))})
 
     async def cookie(request):
-        response = JSONResponse(state["board"], headers={"cache-control": "no-store", "etag": '"abc"'})
+        response = JSONResponse(state["board"], headers={"cache-control": "private, max-age=5", "etag": '"abc"'})
         response.set_cookie("a", "1")
         response.set_cookie("b", "2")
         return response
@@ -82,8 +82,16 @@ def served():
         response.headers.append("vary", "Origin")
         return response
 
+    async def cached(request):
+        return JSONResponse(state["board"], headers={"cache-control": "max-age=60"})
+
+    async def cached_twice(request):
+        response = JSONResponse(state["board"], headers={"cache-control": "public"})
+        response.headers.append("cache-control", "max-age=60")
+        return response
+
     app = Starlette(routes=[
-        Route("/varied", varied),
+        Route("/varied", varied), Route("/cached", cached), Route("/cached-twice", cached_twice),
         Route("/board", get_board, methods=["GET", "POST", "HEAD"]),
         Route("/small", small), Route("/text", text), Route("/missing", missing),
         Route("/zipped", zipped), Route("/stream", stream), Route("/chunked", chunked), Route("/cookie", cookie),
@@ -257,7 +265,9 @@ def test_other_headers_survive_a_delta_duplicates_included(served):
     client.cookies.clear()  # the test client would send them back, which is another credential (see below)
     second = client.get("/cookie", headers={**ASK, "X-Hermes-Delta-Base": first.headers[wdr.HASH_HEADER]})
     assert second.headers[wdr.DELTA_HEADER] == "zstd"
-    assert second.headers["cache-control"] == "no-store"
+    # The whole answer keeps the handler's Cache-Control; a delta is no-store (see the Cache-Control test below).
+    assert first.headers["cache-control"] == "private, max-age=5"
+    assert second.headers.get_list("cache-control") == ["no-store"]
     assert first.headers["etag"] == '"abc"' and "etag" not in second.headers  # a frame is not the handler's entity
     assert sorted(second.headers.get_list("set-cookie"))[0].startswith("a=1")
     assert len(second.headers.get_list("set-cookie")) == 2
@@ -445,3 +455,25 @@ def test_vary_star_is_left_alone():
     headers = MutableHeaders(raw=[(b"vary", b"*")])
     wdr._merge_vary(headers)
     assert headers.getlist("vary") == ["*"]
+
+
+@needs_zstd
+@pytest.mark.parametrize(
+    "path, handler_says",
+    [("/cached", ["max-age=60"]), ("/cached-twice", ["public", "max-age=60"]), ("/board", [])],
+)
+def test_a_delta_is_no_store_and_a_whole_answer_keeps_the_handlers_cache_control(served, path, handler_says):
+    """Cloudflare ignores Vary names other than Accept-Encoding; Cache-Control is what it honors.
+
+    A delta is only meaningful to the one client holding its base, so no cache may store it. A whole hashed body is
+    the handler's entity, so it keeps the handler's Cache-Control, and an unasked answer keeps it byte for byte."""
+    client, _, _ = served
+    plain = client.get(path)
+    assert wdr.HASH_HEADER not in plain.headers
+    assert plain.headers.get_list("cache-control") == handler_says
+    whole = client.get(path, headers=ASK)
+    assert wdr.DELTA_HEADER not in whole.headers
+    assert whole.headers.get_list("cache-control") == handler_says
+    delta = client.get(path, headers={**ASK, "X-Hermes-Delta-Base": whole.headers[wdr.HASH_HEADER]})
+    assert delta.headers[wdr.DELTA_HEADER] == "zstd"
+    assert delta.headers.get_list("cache-control") == ["no-store"]
