@@ -1,4 +1,5 @@
 import { type PluginRestOptions, type PluginStorage, queryClient } from '@hermes/plugin-sdk'
+import { QueryObserver } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // Opening /events with no since replayed the board's whole task_events history.
@@ -222,6 +223,68 @@ describe('kanban event cursor', () => {
       expect(boardReads()).toBe(2)
 
       invalidate.mockRestore()
+      dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // [daveey] A read slower than EVENTS_BOARD_REFRESH_MIN_MS (hub tunnel) used to absorb the trailing
+  // refresh: cancelRefetch: false joined the in-flight promise and its success cleared isInvalidated,
+  // so the frames after its server snapshot waited for the 15 s/60 s poll.
+  it('re-reads the board once after a read that a trailing refresh found still in flight', async () => {
+    vi.useFakeTimers()
+
+    try {
+      queryClient.setQueryData(boardKey('local', 'ops', false), BOARD(10))
+      const frames: Array<(data: unknown) => void> = []
+
+      const dispose = bindApi(
+        async () => {
+          throw new Error('cached snapshot must not refetch')
+        },
+        storage('ops'),
+        vi.fn((_path: string, onMessage: (data: unknown) => void) => {
+          frames.push(onMessage)
+
+          return vi.fn()
+        })
+      )
+
+      const reads: Array<{ resolve: (board: ReturnType<typeof BOARD>) => void; signal: AbortSignal }> = []
+
+      const observer = new QueryObserver(queryClient, {
+        queryFn: ({ signal }) =>
+          new Promise<ReturnType<typeof BOARD>>(resolve => {
+            reads.push({ resolve, signal })
+          }),
+        queryKey: boardKey('local', 'ops', false),
+        staleTime: Infinity
+      })
+
+      const unsubscribe = observer.subscribe(() => undefined)
+      const frame = (id: number) => frames.at(-1)!({ cursor: id, events: [{ id, kind: 'heartbeat', task_id: 't_1' }] })
+
+      frame(11)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(reads).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS / 2)
+      frame(12)
+      // The trailing refresh fires while the first read is still on the wire: it neither cancels nor duplicates it.
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(1)
+      expect(reads[0].signal.aborted).toBe(false)
+
+      reads[0].resolve(BOARD(11))
+      await vi.advanceTimersByTimeAsync(EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(2)
+
+      reads[1].resolve(BOARD(12))
+      await vi.advanceTimersByTimeAsync(10 * EVENTS_BOARD_REFRESH_MIN_MS)
+      expect(reads).toHaveLength(2)
+
+      unsubscribe()
       dispose()
     } finally {
       vi.useRealTimers()

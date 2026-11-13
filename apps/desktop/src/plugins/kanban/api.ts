@@ -221,18 +221,52 @@ export const EVENTS_BOARD_REFRESH_MIN_MS = 2000
 
 const boardRefreshAt = new Map<string, number>()
 const boardRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** Board-wide refreshes waiting for a read already in flight to settle, by query key. */
+const boardRefreshWaits = new Map<string, () => void>()
+
+/** [daveey] Invalidate `queryKey` now, or right after the read in flight on it settles.
+ *  Never cancel that read (its HTTP request would stay on the wire) and never join it
+ *  either: with cancelRefetch: false an invalidation of a fetching query reuses its
+ *  promise, and that read's success clears isInvalidated, so events newer than its
+ *  server snapshot would wait for the next frame or the 15 s/60 s board poll. At most
+ *  one wait per key; a refresh requested meanwhile is already covered by it. */
+function invalidateAfterInFlight(scope: string, queryKey: readonly unknown[]): void {
+  if (queryClient.isFetching({ queryKey }) === 0) {
+    void queryClient.invalidateQueries({ queryKey }, { cancelRefetch: false })
+
+    return
+  }
+
+  const id = JSON.stringify(queryKey)
+
+  if (boardRefreshWaits.has(id)) {
+    return
+  }
+
+  const unsubscribe = queryClient.getQueryCache().subscribe(() => {
+    if (queryClient.isFetching({ queryKey }) > 0) {
+      return
+    }
+
+    unsubscribe()
+    boardRefreshWaits.delete(id)
+    // The deferred re-read starts the coalescing interval over, so a steady stream
+    // of frames over a slow tunnel still re-reads at most once per interval.
+    boardRefreshAt.set(scope, Date.now())
+    // Out of the settling query's dispatch; a read that started in between is waited on again.
+    void Promise.resolve().then(() => invalidateAfterInFlight(scope, queryKey))
+  })
+
+  boardRefreshWaits.set(id, unsubscribe)
+}
 
 function refreshBoardReads(scope: string): void {
   boardRefreshAt.set(scope, Date.now())
-  // cancelRefetch: false — a read already in flight answers this frame too
-  // instead of being orphaned (still on the wire) by a duplicate.
-  const keep = { cancelRefetch: false }
-
-  void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) }, keep)
+  invalidateAfterInFlight(scope, boardKeyPrefix(scope))
   // Any event can change a board's card count — keep the switcher badge honest.
-  void queryClient.invalidateQueries({ queryKey: boardsKey(scope) }, keep)
+  invalidateAfterInFlight(scope, boardsKey(scope))
   // [daveey] The sidebar's Blocked section spans every board.
-  void queryClient.invalidateQueries({ queryKey: blockedKey(scope) }, keep)
+  invalidateAfterInFlight(scope, blockedKey(scope))
 }
 
 function scheduleBoardRefresh(scope: string): void {
@@ -260,6 +294,8 @@ function scheduleBoardRefresh(scope: string): void {
 function resetBoardRefresh(): void {
   boardRefreshTimers.forEach(timer => clearTimeout(timer))
   boardRefreshTimers.clear()
+  boardRefreshWaits.forEach(unsubscribe => unsubscribe())
+  boardRefreshWaits.clear()
   boardRefreshAt.clear()
 }
 
