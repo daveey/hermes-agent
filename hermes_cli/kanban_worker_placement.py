@@ -528,8 +528,12 @@ def _selfcheck_unrefused(key, row, labels, why):
 
 
 def _remember_selfcheck_refusal(key, revision, why, exc):
-    """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead)."""
-    if why is None or rejection_code(exc) == "not_claimable":
+    """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead).
+
+    Only a coded 4xx is the Board's answer: a 5xx/429 (an outage) or an uncoded body is retried on the next tick."""
+    status, code = getattr(exc, "status", None), rejection_code(exc)
+    transient = type(status) is not int or not 400 <= status <= 499 or status == 429
+    if why is None or transient or code in (None, "not_claimable"):
         return
     _selfcheck_refused[key] = revision  # popped by _selfcheck_unrefused first, so this is the newest entry
     if len(_selfcheck_refused) > 1024:  # cards that left the query never come back to clear theirs
