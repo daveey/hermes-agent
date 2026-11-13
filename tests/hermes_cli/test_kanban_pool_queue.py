@@ -27,8 +27,12 @@ from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gate
 
 POOL = "pool:worker"
 CFG = {"worker_queue": {HUB: POOL}}
-W1 = {**MACHINES[WORKER], "labels": ["linux", POOL]}
-W2 = {**MACHINES[WORKER], "name": "worker-2", "labels": ["linux", POOL]}
+TAILNET = "capability:tailnet-exec"
+HUB_WRITE = "capability:hub-write"
+# The live pool workers' labels (Board registry, 11-13): every one reaches the hub, the Macs and token-broker.
+LIVE = ["linux", POOL, HUB_WRITE, TAILNET, "capability:token-broker"]
+W1 = {**MACHINES[WORKER], "labels": LIVE}
+W2 = {**MACHINES[WORKER], "name": "worker-2", "labels": LIVE}
 
 
 def _machines(*, held=()):
@@ -841,7 +845,6 @@ def test_a_callers_runs_on_beats_a_queued_landing(monkeypatch):
 # runs_on cards). No Board machine a card can lease runs macOS, so the creator was never better than the pool.
 # Observed: t_01a1d2434cf3676c, and t_01a1d2662553185d itself (its spec names Chrome).
 
-TAILNET = "capability:tailnet-exec"
 SHIP_TITLE = "Independent exact-head review PR #1789 @370a13d80c (core-wt ship review required)"
 SHIP_BODY = (
     "Independent exact-head review of https://github.com/softmax-universe/daveey-hermes/pull/1789 at "
@@ -856,10 +859,8 @@ SHIP_BODY = (
     '"reviewed_pr": "https://github.com/softmax-universe/daveey-hermes/pull/1789"}\n')
 
 
-def _pool_machines():
-    w1 = {**W1, "labels": ["linux", POOL, TAILNET]}
-    w2 = {**W2, "labels": ["linux", POOL, TAILNET]}
-    return {m["name"]: m for m in (MACHINES[HUB], w1, w2, MACHINES["macbook"])}
+def _pool_machines(*, held=()):
+    return {m["name"]: {**m, "hold": m["name"] in held} for m in (MACHINES[HUB], W1, W2, MACHINES["macbook"])}
 
 
 def _on(monkeypatch, gateway, cfg, machines):
@@ -933,7 +934,8 @@ def test_direct_create_task_of_a_keychain_card_on_a_pool_worker_joins_the_pool(o
 
 
 def _no_live_tailnet_pool_worker(kind):
-    machines = _machines()  # worker-1/2: linux + pool:worker, no tailnet attestation
+    # worker-1/2: linux + pool:worker, no tailnet attestation (the live-set fixture labels minus TAILNET)
+    machines = {name: {**m, "labels": [x for x in m["labels"] if x != TAILNET]} for name, m in _machines().items()}
     if kind == "held":
         machines["worker-1"] = {**machines["worker-1"], "labels": ["linux", POOL, TAILNET], "hold": True}
     elif kind == "split":  # a live machine has the tailnet label but not the queue label
@@ -959,7 +961,8 @@ POOLS_CFG = {**CFG, "worker_pools": {HUB: ["worker-5"]}}
 
 
 def _hub_write_registry(kind):
-    machines = _machines()  # worker-1/2: linux + pool:worker, no hub-write attestation
+    # worker-1/2: linux + pool:worker, no hub-write attestation (the live-set fixture labels minus HUB_WRITE)
+    machines = {name: {**m, "labels": [x for x in m["labels"] if x != HUB_WRITE]} for name, m in _machines().items()}
     machines["worker-5"] = {**W1, "name": "worker-5", "labels": ["linux", HUB_WRITE]}  # no queue label
     if kind == "held":
         machines["worker-1"] = {**machines["worker-1"], "labels": ["linux", POOL, HUB_WRITE], "hold": True}
@@ -1008,6 +1011,23 @@ def test_machine_ok_seam_judges_the_whole_label_set_on_both_paths(w2, monkeypatc
     out = wp.queue_decision(keychain, w2_cfg, "worker-2", "", machine_ok=ok)
     assert out is not None and out["runs_on"] == [POOL, TAILNET] and seen == [(POOL, TAILNET)], (out, seen)
     assert wp.queue_decision(keychain, w2_cfg, "worker-2", "", machine_ok=lambda _labels: False) is None
+
+
+# The seam stays the one liveness source on the home-marker path too: with every registry pool member held, an
+# injected machine_ok that sees a joint holder still queues the card (no separate bare-label registry check).
+def test_machine_ok_seam_alone_judges_liveness_for_a_home_marker_card(w2, monkeypatch):
+    from hermes_cli import kanban_worker_placement as wp
+    seen = []
+
+    def ok(labels):
+        seen.append(labels)
+        return True
+    w2_cfg = {"worker_queue": {"worker-2": POOL}}
+    _on(monkeypatch, "worker-2", w2_cfg, _machines(held=("worker-1", "worker-2")))
+    card = {"title": "Fix the hermes-sync drain window parse"}
+    out = wp.queue_decision(card, w2_cfg, "worker-2", "", machine_ok=ok)
+    assert out is not None and out["runs_on"] == [POOL, HUB_WRITE] and seen == [(POOL, HUB_WRITE)], (out, seen)
+    assert wp.queue_decision(card, w2_cfg, "worker-2", "", machine_ok=lambda _labels: False) is None
 
 
 def test_every_built_in_local_marker_has_a_group():
@@ -1062,11 +1082,318 @@ def test_pool_worker_keeps_an_operator_marker(w2, monkeypatch, cfg, title):
 
 
 @pytest.mark.parametrize("card", [
-    {"title": "systemctl " + "restart x"},
+    # "systemctl restart x" was a keep here until t_01a1d2856e5fec44: a home-gateway marker on a pool worker now
+    # joins the pool with capability:hub-write (test_systemctl_on_a_pool_worker_joins_the_pool_with_hub_write).
     {"title": "rotate the CI token in the Keychain", "placement": "local"},
     {"title": "rotate the CI token in the Keychain", "workspace_kind": "dir", "workspace_path": "/srv/x"},
+    {"title": "fix the hermes-sync drain", "placement": "local"},
+    {"title": "fix the hermes-sync drain", "workspace_kind": "dir", "workspace_path": "/srv/x"},
 ])
 def test_pool_worker_leaves_other_keeps_unchanged(on_w2, card):
     from tools import kanban_tools as kt
     out = json.loads(kt._handle_create({"assignee": "default", "requires": [], **card}))
     assert out.get("task_id") and _runs_on(on_w2.conn, out["task_id"]) is None, out
+
+
+# --- home-gateway markers on a pool worker (t_01a1d2856e5fec44) -------------------------------------------------
+# 11-13: in 24 h, 473 worker-created cards hit a home-gateway marker (a ~/.hermes path, a _wt path, hermes-sync,
+# "on the hub", cron, ssh, ...) and stayed local rows only their creating worker could claim. Observed:
+# t_01a1d264e2d198d5 ('on the hub', worker-4), t_01a1ce17ce25fbc7 (_wt path, worker-2), t_01a1d259636f336f
+# (~/.hermes/kanban path, worker-5). Every pool worker reaches hub state with hub-admin (capability:hub-write), so
+# only this worker's own unpushed tree or files, 'this host' and operator markers keep a card on its creator.
+
+def _home_marker(conn, tid):
+    return _created(conn, tid).get("home_marker")
+
+
+def _queued(conn, out, labels):
+    assert out.get("ok"), out
+    assert _runs_on(conn, out["task_id"]) == sorted([POOL, *labels]), out
+    assert out["placement"]["runs_on"] == [POOL, *sorted(labels)], out
+    assert out["placement"]["why"].startswith("portable: queued for any machine labelled pool:worker"), out
+    assert "(home gateway marker " in out["placement"]["why"], out
+    assert out["placement"].get("note") == out.get("note") and out.get("note"), out
+    card = dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (out["task_id"],)).fetchone())
+    assert wn.eligible(card, "worker-1", _pool_machines()) is None  # any pool worker may claim it
+    assert _created(conn, out["task_id"])["portable_reason"] == "home gateway marker"  # the audit stays truthful
+    return out
+
+
+def _kept(conn, out):
+    assert out.get("ok") and _runs_on(conn, out["task_id"]) is None, out
+    assert out["placement"]["why"].startswith("home gateway marker: "), out
+    assert out.get("note", "").startswith("kept on worker-2: "), out
+    assert out["placement"].get("note") == out["note"], out
+    assert _home_marker(conn, out["task_id"])["decision"] == "keep", out
+    return out
+
+
+def test_a_hermes_sync_card_from_a_pool_worker_joins_the_pool_with_hub_write(on_w2):  # (a)
+    out = _queued(on_w2.conn, _create(title="Fix the hermes-sync drain window parse"), [HUB_WRITE])
+    assert "hub-admin" in out["note"] and "worker-2" in out["note"], out
+    assert _home_marker(on_w2.conn, out["task_id"]) == {"decision": "queue", "class": "b", "hit": "hermes-sync"}
+
+
+def test_an_on_the_hub_kanban_db_card_from_a_pool_worker_joins_the_pool_with_hub_write(on_w2):  # (b)
+    _queued(on_w2.conn, _create(title="Investigate the stall on the hub; read the hub kanban.db"), [HUB_WRITE])
+
+
+def test_systemctl_on_a_pool_worker_joins_the_pool_with_hub_write(on_w2):  # (c), reverses the sibling's control
+    _queued(on_w2.conn, _create(title="systemctl " + "restart x"), [HUB_WRITE])
+
+
+def test_an_ssh_card_from_a_pool_worker_joins_the_pool_with_no_extra_label(on_w2):  # (d)
+    out = _queued(on_w2.conn, _create(title="use ssh to pull the CI box log"), [])
+    assert "every pool worker carries" in out["note"], out
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "d"
+
+
+def test_a_review_naming_a_clean_pushed_wt_tree_joins_the_pool(on_w2, tmp_path):  # (e)
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "pool-card")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tree, capture_output=True, text=True,
+                          check=True).stdout.strip()
+    out = _queued(on_w2.conn, _create(
+        title="Independent exact-head review PR #1900",
+        body=(f"Review https://github.com/softmax-universe/daveey-hermes/pull/1900 at {head}.\n"
+              "The implementer's tree is ~/code/_wt/pool-card (read-only; fetch the PR head into your own tree).")),
+        [])
+    assert "~/code/_wt/pool-card is not unpublished state on worker-2" in out["note"], out
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "worktree-not-here"
+
+
+def test_a_wt_path_absent_on_this_worker_joins_the_pool(on_w2):  # (f)
+    _queued(on_w2.conn, _create(title="Re-run the tests in ~/code/_wt/gone"), [])
+
+
+def test_an_evidence_path_absent_on_this_worker_joins_the_pool_with_hub_write(on_w2):  # (g)
+    out = _queued(on_w2.conn, _create(title="read ~/.hermes/kanban/evidence/t_0000000000000001/report.md"),
+                  [HUB_WRITE])
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "artifact-not-here"
+
+
+def test_cli_create_of_a_hermes_sync_card_on_a_pool_worker_joins_the_pool(on_w2):  # (h)
+    from hermes_cli import kanban as kcli
+    out = kcli.run_slash('create "fix the hermes-sync drain" --assignee default --json')
+    assert _runs_on(on_w2.conn, json.loads(out)["id"]) == sorted([POOL, HUB_WRITE]), out
+
+
+def test_direct_create_task_of_a_hermes_sync_card_on_a_pool_worker_joins_the_pool(on_w2):
+    tid = kb.create_task(on_w2.conn, title="fix the hermes-sync drain", assignee="default", requires=[])
+    assert _runs_on(on_w2.conn, tid) == sorted([POOL, HUB_WRITE])
+
+
+def test_a_keychain_and_systemctl_card_carries_both_reach_labels(on_w2):  # (i)
+    out = _create(title="rotate the Keychain token, then restart it via systemctl")
+    assert _runs_on(on_w2.conn, out["task_id"]) == sorted([POOL, HUB_WRITE, TAILNET]), out
+    assert "tailnet_exec" in out["note"] and "hub-admin" in out["note"], out
+
+
+def test_every_home_gateway_marker_has_a_class():
+    assert set(kp.HOME_MARKER_CLASSES) == set(kp.HOME_GATEWAY_MARKERS)
+    assert set(kp.HOME_MARKER_CLASSES.values()) <= {"worktree", "state-path", "a", "b", "c", "d"}
+    assert kp.HOME_MARKER_CLASSES[r"\bthis host\b"] == "a"
+    assert kp.HOME_CLASS_LABELS == {"b": HUB_WRITE, "c": TAILNET}
+
+
+def test_home_marker_hits_lists_every_hit_and_tags_operator_patterns():
+    from hermes_cli.kanban_placement_diagnostics import home_marker_hits
+    hits = home_marker_hits({"title": "on the hub, fix the grafana panel via ssh"},
+                            {"extra_home_markers": [r"\bgrafana\b"]})
+    assert [(p, m.group(0)) for p, m in hits] == [
+        (r"\bon the hub\b", "on the hub"), (r"\bssh\b", "ssh"), ("operator", "grafana")]
+
+
+# Controls: unchanged before and after.
+
+# What a MacBook (routed to the hub) decides for a home-gateway marker at base 141bcec62a: home markers bind only a
+# routeless gateway, so it routes to the hub. This card changes no routed gateway.
+MACBOOK_HOME_DECISION = {"where": "hub", "why": "no local-only need"}
+
+
+def test_hub_hermes_sync_card_still_asks_the_admission_judge(hub, judge):
+    from tools import kanban_tools as kt
+    _registry()
+    out = json.loads(kt._handle_create({"title": "fix hermes-sync on the hub", "assignee": "default",
+                                        "requires": []}))
+    assert out.get("task_id") and len(judge.calls) == 1, out
+    assert "home_marker" not in _created(hub.conn, out["task_id"])  # the hub is not a worker gateway
+
+
+def test_macbook_hermes_sync_card_is_unchanged(w2, monkeypatch):
+    _on(monkeypatch, "macbook", {"route": {"macbook": HUB}, "worker_queue": {"macbook": POOL}}, _pool_machines())
+    d = kp.decide({"title": "fix hermes-sync on the hub"}, live=lambda _t: None, carries=True)
+    assert d == MACBOOK_HOME_DECISION, d
+
+
+def test_pool_worker_keeps_a_home_marker_card_when_the_registry_is_unreadable(w2, monkeypatch):
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}}, _pool_machines())
+
+    def down():
+        raise OSError("board unreachable")
+    wn.set_registry_fetch(down)
+    out = _create(title="fix the hermes-sync drain")
+    assert _runs_on(w2.conn, out["task_id"]) is None, out
+    assert out["placement"]["why"].startswith("home gateway marker: "), out
+    # The live check lists these: a worker kept a home-marker card only because it could not test its gateway.
+    assert _home_marker(w2.conn, out["task_id"]) == {
+        "decision": "keep", "class": "gateway-test-failed", "hit": "hermes-sync"}
+
+
+def test_pool_worker_keeps_a_home_marker_card_when_every_pool_member_is_held(w2, monkeypatch):
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}},
+        _pool_machines(held=("worker-1", "worker-2")))
+    out = _create(title="fix the hermes-sync drain")
+    assert _runs_on(w2.conn, out["task_id"]) is None, out
+    assert out["placement"]["why"].startswith("home gateway marker: "), out
+    assert _home_marker(w2.conn, out["task_id"])["class"] == "gateway-test-failed"
+
+
+def test_pool_worker_keeps_a_home_marker_card_no_live_machine_can_claim(w2, monkeypatch):
+    """No live pool member attests capability:hub-write: the (b) card keeps the legacy local keep (cfc3d681ce), and
+    its audit says the gateway could not queue it, not that it queued."""
+    machines = {name: {**m, "labels": [x for x in m["labels"] if x != HUB_WRITE]} for name, m in _machines().items()}
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}}, machines)
+    out = _create(title="fix the hermes-sync drain")
+    assert _runs_on(w2.conn, out["task_id"]) is None, out
+    assert out["placement"]["why"].startswith("home gateway marker: "), out
+    assert _home_marker(w2.conn, out["task_id"]) == {
+        "decision": "keep", "class": "gateway-test-failed", "hit": "hermes-sync"}
+
+
+def test_a_marker_card_another_reason_keeps_stays_kept(on_w2):
+    """A pool worker re-checks every other portability reason: an unattested mandatory model pin still keeps a
+    Keychain card here (no pool member carries capability:mandatory-model-pin)."""
+    out = _create(title="rotate the CI token in the Keychain", model="claude-opus-5-5", provider="anthropic",
+                  pin_mandatory=True)
+    assert _runs_on(on_w2.conn, out["task_id"]) is None, out
+
+
+def test_a_marker_card_stays_kept_when_one_pool_member_lacks_the_pin_label(w2, monkeypatch):
+    """worker-1 alone attests the mandatory pin: one live machine holds the whole label set (cfc3d681ce), but the
+    pin is unattested across the pool (every eligible member must carry it), so the card must still stay here."""
+    from hermes_cli.kanban_mandatory_pin import LABEL
+    machines = _pool_machines()
+    machines["worker-1"] = {**machines["worker-1"], "labels": [*LIVE, LABEL]}
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}}, machines)
+    out = _create(title="rotate the CI token in the Keychain", model="claude-opus-5-5", provider="anthropic",
+                  pin_mandatory=True)
+    assert _runs_on(w2.conn, out["task_id"]) is None, out
+
+
+def test_a_worker_keeps_a_card_naming_a_non_git_directory_under_wt(on_w2, tmp_path):
+    """A named ``_wt`` root that exists here but is not a git tree fails toward keep."""
+    (tmp_path / "code" / "_wt" / "plain").mkdir(parents=True)
+    out = _kept(on_w2.conn, _create(title="copy the logs out of ~/code/_wt/plain"))
+    assert f"{tmp_path / 'code' / '_wt' / 'plain'} exists only on this worker" in out["note"], out
+
+
+def test_a_worker_keeps_a_card_naming_more_trees_than_the_probe_budget(on_w2, tmp_path):
+    """Only MAX_TREES trees are probed per create; a further existing tree is kept, never assumed pushed."""
+    from hermes_cli import kanban_home_marker_placement as khm
+    names = [f"t{i}" for i in range(khm.MAX_TREES + 1)]
+    for name in names:
+        _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / name)
+    out = _kept(on_w2.conn, _create(title="compare " + ", ".join(f"~/code/_wt/{n}" for n in names)))
+    assert "was not checked in the probe budget" in out["note"], out
+
+
+def test_a_create_probe_bounds_every_git_call_by_its_budget(on_w2, tmp_path, monkeypatch):
+    """The create's tree probe hands its remaining PROBE_BUDGET_S to ``tree_state``: every git call it makes
+    (dirty, unpushed, ls-remote) times out within that budget, not the move guard's longer default."""
+    from hermes_cli import kanban_home_marker_placement as khm, worktree_ops
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "bounded")
+    _commit(tree, "b.txt")
+    original, timeouts = worktree_ops._git_out, []
+
+    def observe(args, cwd, **kwargs):
+        timeouts.append((args[0], kwargs.get("timeout")))
+        return original(args, cwd, **kwargs)
+    monkeypatch.setattr(worktree_ops, "_git_out", observe)
+    out = _kept(on_w2.conn, _create(title="finish the fix in ~/code/_wt/bounded"))
+    assert f"unpushed commits in {tree}" in out["note"], out
+    assert "ls-remote" in [c for c, _ in timeouts], timeouts
+    assert all(t is not None and 0 < t <= khm.PROBE_BUDGET_S for _, t in timeouts), timeouts
+
+
+def test_a_worker_resolves_its_own_home_spelled_out(on_w2, tmp_path):
+    """``/home/<this user>/...`` names this worker's home just like ``~``."""
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "spelled")
+    _commit(tree, "b.txt")
+    out = _kept(on_w2.conn, _create(title=f"finish the fix in /home/{tmp_path.name}/code/_wt/spelled"))
+    assert f"unpushed commits in {tree}" in out["note"], out
+
+
+@pytest.mark.parametrize("state", ["unpushed", "dirty"])
+def test_a_worker_keeps_a_card_naming_its_own_unpublished_tree(on_w2, tmp_path, state):
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "held-card")
+    if state == "unpushed":
+        _commit(tree, "b.txt")
+    else:
+        (tree / "wip.txt").write_text("not committed\n")
+    out = _kept(on_w2.conn, _create(title="finish the parser fix in ~/code/_wt/held-card"))
+    word = "unpushed commits in" if state == "unpushed" else "dirty worktree"
+    assert f"{word} {tree}" in out["note"], out
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-worktree"
+
+
+def test_a_worker_keeps_a_card_naming_its_own_artifact(on_w2, tmp_path):
+    log = tmp_path / ".hermes" / "kanban" / "workspaces" / "t_0000000000000002" / "log.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("x\n")
+    out = _kept(on_w2.conn, _create(title="read ~/.hermes/kanban/workspaces/t_0000000000000002/log.txt"))
+    assert "exists only on this worker" in out["note"], out
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-artifact"
+
+
+def test_a_worker_keeps_a_this_host_card(on_w2):
+    out = _kept(on_w2.conn, _create(title="apply the next hermes update on this host"))
+    assert "'this host' names this worker" in out["note"], out
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-this-host"
+
+
+def test_a_worker_keeps_an_operator_home_marker(w2, monkeypatch):
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}, "extra_home_markers": [r"\bgrafana\b"]},
+        _pool_machines())
+    out = _kept(w2.conn, _create(title="fix the grafana panel"))
+    assert "operator marker" in out["note"], out
+
+
+def test_a_hub_hit_with_an_unpushed_tree_stays_kept(on_w2, tmp_path):
+    """Every hit decides, not the first: 'on the hub' alone would queue."""
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "mixed")
+    _commit(tree, "b.txt")
+    out = _kept(on_w2.conn, _create(title="on the hub, finish the fix in ~/code/_wt/mixed"))
+    assert _home_marker(on_w2.conn, out["task_id"])["class"] == "a-worktree"
+
+
+def test_an_explicit_runs_on_beats_a_home_marker(on_w2):
+    out = _create(title="fix the hermes-sync drain", runs_on=["machine:worker-1"])
+    assert _runs_on(on_w2.conn, out["task_id"]) == ["machine:worker-1"], out
+
+
+def test_tree_state_without_refresh_never_fetches(tmp_path, monkeypatch):
+    """Creation probes a named tree with ``refresh=False``: only ``ls-remote``, no fetch. Park and move keep the
+    default (``refresh=True``), which refreshes a stale tracking ref (test_url_push_moved_tip_...)."""
+    from hermes_cli import kanban_move_pool as kmp, worktree_ops
+    tree = _pushed_clone(tmp_path, tmp_path / "norefresh")
+    _git(tree, "fetch", "-q", "origin")
+    _commit(tree, "b.txt")
+    other = tmp_path / "norefresh-other"
+    _git(tmp_path, "clone", "-q", "-b", "wt/x", str(tmp_path / "norefresh-remote.git"), str(other))
+    _git(tree, "push", "-q", str(tmp_path / "norefresh-remote.git"), "HEAD:refs/heads/wt/x")  # by URL
+    _commit(other, "advanced.txt")
+    _git(other, "pull", "-q", "--rebase", "origin", "wt/x")
+    _git(other, "push", "-q", "origin", "HEAD:refs/heads/wt/x")  # the remote moved past HEAD
+    original, calls = worktree_ops._git_out, []
+
+    def observe(args, cwd, **kwargs):
+        calls.append((args[0], kwargs.get("timeout")))
+        return original(args, cwd, **kwargs)
+    monkeypatch.setattr(worktree_ops, "_git_out", observe)
+    assert kmp.tree_state([str(tree)], refresh=False, budget=5) == f"unpushed commits in {tree}"
+    # every git call, ls-remote included, ends inside the create's budget (main's deadline shrinks the timeouts)
+    assert "fetch" not in [c for c, _ in calls] and "ls-remote" in [c for c, _ in calls], calls
+    assert all(t is not None and 0 < t <= 5 for _, t in calls), calls
+    calls.clear()
+    assert kmp.tree_state([str(tree)]) is None  # the default refresh finds HEAD on the moved branch
+    assert "fetch" in [c for c, _ in calls], calls

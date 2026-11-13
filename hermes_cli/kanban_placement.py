@@ -527,9 +527,15 @@ def builtin_marker_groups(args: dict, cfg: Optional[dict] = None) -> Optional[di
 
 def markers_unmeetable_here(self_gw: Optional[str], cfg: Optional[dict], machines: Optional[dict] = None) -> bool:
     """True when this gateway is a Linux Board machine other than the hub: no built-in local marker can be met here
-    better than by any pool worker (see :data:`LOCAL_MARKER_GROUPS`). Reads the attested registry labels, not
-    ``sys.platform`` (Linux CI simulates the MacBook gateway); an unreadable registry or no entry for this gateway
-    is False, which keeps today's local keep. [daveey]"""
+    better than by any pool worker (see :data:`LOCAL_MARKER_GROUPS`). See :func:`linux_pool_gateway`. [daveey]"""
+    return linux_pool_gateway(self_gw, cfg, machines)
+
+
+def linux_pool_gateway(self_gw: Optional[str], cfg: Optional[dict], machines: Optional[dict] = None) -> bool:
+    """True when this gateway is a Linux Board machine other than the hub (a pool worker): the gateway test both
+    local markers (:func:`markers_unmeetable_here`) and home-gateway markers (:data:`HOME_MARKER_CLASSES`) use.
+    Reads the attested registry labels, not ``sys.platform`` (Linux CI simulates the MacBook gateway); an
+    unreadable registry or no entry for this gateway is False, which keeps today's local keep. [daveey]"""
     from hermes_cli.kanban_hub_admission_placement import is_hub
     if not self_gw or is_hub(self_gw, cfg or {}):
         return False
@@ -587,6 +593,25 @@ HOME_GATEWAY_MARKERS = (
     r"\bjournalctl\b", r"\bthis host\b",
     r"\brestart(ing)? (the )?gateway\b", r"\bhermes config (set|edit|unset)\b",
 )
+# On a pool worker (:func:`linux_pool_gateway`) a home-gateway marker no longer keeps a card by itself
+# (t_01a1d2856e5fec44): in 24 h to 11-13, 473 worker-created cards hit one and only their creator could claim them,
+# though every pool worker reaches hub state with ``hub-admin`` (``capability:hub-write``). Each marker has a class
+# (a test enforces it): ``worktree`` and ``state-path`` are probed on this worker
+# (:mod:`hermes_cli.kanban_home_marker_placement`): only a named tree here that is dirty or unpushed, or a named
+# Kanban/scratch artifact that exists here, keeps the card. ``a`` ('this host' names the creating worker) keeps it.
+# ``b`` (hub or fleet state), ``c`` (Mac work) and ``d`` (a tool every pool worker carries) queue it for the pool,
+# with :data:`HOME_CLASS_LABELS`. Operator ``extra_home_markers`` still keep it.
+HOME_MARKER_CLASSES = {
+    HOST_WORKTREE_PATH: "worktree", LOCAL_WORKTREE_PATH: "worktree", HERMES_STATE_PATH: "state-path",
+    r"\bthis host\b": "a",
+    **dict.fromkeys((HUB_CLI_COMMAND, r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b", r"\bhermes-sync\b",
+                     r"\bon the hub\b", r"\bthe hub's\b", r"\bgateway (restart|config|service)\b", r"\bsystemctl\b",
+                     r"\bjournalctl\b", r"\brestart(ing)? (the )?gateway\b", r"\bhermes config (set|edit|unset)\b"),
+                    "b"),
+    r"\blaunchd\b": "c",
+    r"\bssh\b": "d", r"\btoken-broker\b": "d",
+}
+HOME_CLASS_LABELS = {"b": "capability:hub-write", "c": "capability:tailnet-exec"}
 
 
 # The note :func:`remote_body` appends when another gateway places a card here. It lists the origin's own

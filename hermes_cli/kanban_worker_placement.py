@@ -80,16 +80,15 @@ def _hit_name(why):
     return why.removeprefix("mentions ")
 
 
-def unmet_markers(args, cfg, gateway):
-    """``{labels, note, hit}`` when this gateway cannot meet any of the card's local markers better than the pool and
-    nothing else keeps the card here; else None (t_01a1d2662553185d). [daveey]"""
+def unmet_markers(args, cfg):
+    """``{labels, note, hit}`` for the card's built-in local markers, which a pool worker cannot meet better than
+    the pool; None when it has none or any hit is an operator pattern (t_01a1d2662553185d). The gateway test and
+    every other keep are the caller's (:func:`hermes_cli.kanban_home_marker_placement.pool_worker_markers`).
+    [daveey]"""
     from hermes_cli import kanban_placement as placement
-    from hermes_cli.kanban_placement_diagnostics import portability
 
     groups = placement.builtin_marker_groups(args, cfg)
-    if not groups or not placement.markers_unmeetable_here(gateway, cfg):
-        return None
-    if portability(args, cfg, local_markers=False)[0]:
+    if not groups:
         return None
     labels, notes = set(), []
     for group, why in groups.items():
@@ -108,11 +107,13 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``,
     non-portable work, or when no active, unheld machine carries the label. Courier and origin-bound creates queue
     too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). On a pool worker a built-in local-marker
-    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`). Either way the card queues only
-    when one active, unheld machine holds the whole label set (queue, group and coordination labels), judged by
+    hit, and a home-gateway-marker hit this worker holds no state for, queue too, with their labels and a ``note``
+    (:func:`hermes_cli.kanban_home_marker_placement.pool_worker_markers`). Either way the card queues only when one
+    active, unheld machine holds the whole label set (queue, marker and coordination labels), judged by
     ``machine_ok`` (given the label tuple) or the registry; else the local keep stands. The registry counts only
     machines seen within ``FRESH_S`` (:func:`kanban_placement.label_machines`), so during a Board outage the card
-    stays local once the last good snapshot ages out, instead of queueing on ``pool:worker``. [daveey]
+    stays local once the last good snapshot ages out, instead of queueing on ``pool:worker``. A home-marker keep
+    there is returned as ``{"where": "local", "why": "home gateway marker: ...", "note": ...}``. [daveey]
     """
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
@@ -122,10 +123,16 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
         return None
     unmet = None
     reason = placement.portable_reason(args, cfg)
-    if reason == "local marker":
-        unmet = unmet_markers(args, cfg, gateway)
+    if reason in ("local marker", "home gateway marker"):
+        from hermes_cli.kanban_home_marker_placement import pool_worker_markers
+        # An injected machine_ok seam is the one liveness source and judges the whole label set below; only the
+        # registry path checks the bare queue label first (the gateway test).
+        unmet = pool_worker_markers(args, cfg, gateway, reason,
+                                    lambda: machine_ok is not None or placement._machine_picks_up(label))
         if unmet is None:
             return None
+        if unmet.get("keep"):
+            return unmet["keep"]
     elif reason:
         return None
     extra = coordination.required_labels(args, cfg)
@@ -137,11 +144,14 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     # One liveness source for the whole set, marker hit or not: an active, unheld pickup machine must hold every
     # label, else nobody could claim the card and today's local keep stands. The machine_ok seam sees the set.
     if not (machine_ok or placement._machine_picks_up)(label if len(runs_on) == 1 else tuple(runs_on)):
+        if unmet is not None:
+            from hermes_cli.kanban_home_marker_placement import unclaimable
+            unclaimable(args)  # a home-marker queue record (if any) becomes gateway-test-failed
         return None
     if unmet is None:
         return {"where": "local", "runs_on": runs_on, "why": QUEUED_WHY.format(label=label)}
     return {"where": "local", "runs_on": runs_on, "note": unmet["note"],
-            "why": QUEUED_WHY.format(label=label) + UNMET_WHY.format(hit=unmet["hit"], gateway=gateway)}
+            "why": QUEUED_WHY.format(label=label) + unmet["why"]}
 
 
 def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, queue=True):
@@ -181,7 +191,11 @@ def creation_audit(args, cfg=None):
     intent = "explicit" if explicit else "auto"
     try:
         cfg = placement.config() if cfg is None else cfg
-        return {"portable_reason": placement.portable_reason(args, cfg), "placement_intent": intent}
+        audit = {"portable_reason": placement.portable_reason(args, cfg), "placement_intent": intent}
+        from hermes_cli.kanban_home_marker_placement import recorded
+        if (home := recorded(args)) is not None:  # how a pool worker resolved its home-marker hits
+            audit["home_marker"] = home
+        return audit
     except Exception:  # health: allow BLE001 -- an audit field never blocks a create
         logger.warning("portable_reason audit failed", exc_info=True)
         return {"portable_reason": "audit failed", "placement_intent": intent}

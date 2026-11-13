@@ -171,6 +171,16 @@ def test_expired_budget_fails_closed(published):
     assert not pw._published(published[0], 0, 'unused')
 
 
+def test_home_marker_hits_skip_a_published_worktree(published):
+    """A pool worker classifies every home-marker hit (t_01a1d2856e5fec44): a published root is not one of them,
+    so the exemption still runs first and another hit ('on the hub') alone decides the card."""
+    from hermes_cli.kanban_placement_diagnostics import home_marker_hits
+    head = git(published[0], 'rev-parse', 'HEAD')
+    body = (f'On the hub, continue in ~/code/_wt/fix.\n'
+            f'Fetch https://github.com/example/project branch wt/fix and check out {head}.')
+    assert [m.group(0) for _, m in home_marker_hits({'title': 'Fix parser', 'body': body}, {})] == ['On the hub']
+
+
 def test_structural_host_requirements_stay_local(published):
     assert reason('~/code/_wt/fix', workspace_kind='dir') == 'host workspace'
     assert reason('~/code/_wt/fix', requires=['host_repo']) == 'uncarried requirement'

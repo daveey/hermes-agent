@@ -36,6 +36,12 @@ def publication_scope(fn):
     return wrapped
 
 
+def create_observation() -> dict | None:
+    """The current create's shared observation dict (None outside :func:`publication_scope`): other bounded
+    create-time probes keep their results here, for the rest of that create only. [daveey]"""
+    return _observation.get()
+
+
 def without_published_worktrees(text: str) -> str:
     """Remove only verified roots, within one shared three-second probe budget.
 

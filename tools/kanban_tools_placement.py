@@ -167,6 +167,8 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
     if why.startswith("local marker"):
         return {"where": "local", "why": why, "remedy": kp.marker_remedy(why, None, view)}
     placement = {"where": "local", "why": why}
+    if decision.get("note"):  # a pool worker's home-marker keep: what it holds, and how to free the card
+        placement["note"] = decision["note"]
     if note_local_pin and why == kp.PINNED_LOCAL_WHY:
         # Unpinned means placement omitted: an explicit 'auto' would also drop a skill marker (marker_skills).
         unpinned = kp.decide({k: v for k, v in view.items() if k != "placement"}, machine_ok=machine_ok)
@@ -228,6 +230,8 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
         out["remedy"] = marker_placement["remedy"]
     if marker_placement.get("note"):
         out["note"] = marker_placement["note"]  # a local pin on a card with no local need
+        if marker_placement["why"].startswith("home gateway marker"):
+            out["placement"]["note"] = marker_placement["note"]  # a pool worker's home-marker keep
     return out
 
 

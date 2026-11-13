@@ -128,7 +128,8 @@ _MAX_ANCESTRY_CHECKS = 50
 _MAX_REFRESHES = 5
 
 
-def pushed_on_remote(tree: str, *, budget: Optional[Callable[[float], float]] = None) -> bool:
+def pushed_on_remote(tree: str, *, budget: Optional[Callable[[float], float]] = None,
+                     refresh: bool = True) -> bool:
     """Whether a tree the local refs call unpushed has HEAD on a remote branch after all. Fails toward False.
 
     ``git push https://github.com/<o>/<r>.git HEAD:wt/x`` (a URL, not the remote's name: the HTTPS-credential push
@@ -137,7 +138,8 @@ def pushed_on_remote(tree: str, *, budget: Optional[Callable[[float], float]] = 
     its worker (11-12: t_01a1d0a1eaa00371 sat ready on ``machine:worker-2`` while worker-2 was on a Board hold).
     So ask the remote: HEAD is a remote branch tip, or a stale tracking ref HEAD builds on, once refreshed from
     the remote, contains HEAD. Every git call draws its timeout from ``budget`` (:mod:`hermes_cli.git_budget`); a
-    spent budget raises ``GitUnchecked`` (no verdict) rather than answering False ("unpushed")."""
+    spent budget raises ``GitUnchecked`` (no verdict) rather than answering False ("unpushed"). ``refresh=False``
+    (a create's bounded probe) asks only whether HEAD is a remote branch tip: no ancestry checks, no fetch."""
     from functools import partial
     from hermes_cli.git_budget import GitUnchecked, ensure_left, timeout_for
     from hermes_cli.worktree_ops import _git_out, _worktree_has_unpushed_commits
@@ -166,6 +168,10 @@ def pushed_on_remote(tree: str, *, budget: Optional[Callable[[float], float]] = 
             listing = git_out(["ls-remote", "--heads", remote], tree, timeout=t(_REMOTE_TIMEOUT))
             if not listing:
                 continue
+            if not refresh:
+                if any(line.partition("\t")[0] == head for line in listing.splitlines()):
+                    return True
+                continue
             tracked = dict(line.split(" ", 1)[::-1] for line in (git_out(
                 ["for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}"], tree, timeout=t(10))
                 or "").splitlines() if " " in line)
@@ -188,12 +194,12 @@ def pushed_on_remote(tree: str, *, budget: Optional[Callable[[float], float]] = 
                 fallback.append(candidate)
         # Spend the bounded refresh budget on this branch's likely destinations first,
         # not the first five alphabetic heads of a large remote.
-        refresh = sorted(stale + fallback, key=lambda c: (
+        fetches = sorted(stale + fallback, key=lambda c: (
             (c[0], c[1]) not in preferred, c[1] != branch,
         ))[:_MAX_REFRESHES]
-        for remote, ref, tracking in refresh:
+        for remote, ref, tracking in fetches:
             git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=t(_REMOTE_TIMEOUT))
-        return bool(refresh) and not _worktree_has_unpushed_commits(tree, timeout=10, budget=budget)
+        return bool(fetches) and not _worktree_has_unpushed_commits(tree, timeout=10, budget=budget)
     except GitUnchecked:
         raise
     except subprocess.TimeoutExpired:
@@ -228,10 +234,12 @@ def _clock() -> float:
     return time.monotonic()
 
 
-def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S) -> Optional[str]:
+def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S,
+               refresh: bool = True) -> Optional[str]:
     """``dirty worktree <p>`` / ``unpushed commits in <p>`` for the first tree with state, else None. Git runs at
     most ``budget`` seconds in all (per-call timeouts shrink to the time left); a tree it could not check (budget
-    spent, git timed out) reads ``unchecked worktree <p> (<cause>)``, which callers treat as state (fail safe)."""
+    spent, git timed out) reads ``unchecked worktree <p> (<cause>)``, which callers treat as state (fail safe).
+    ``refresh`` goes to :func:`pushed_on_remote` (a create probes with ``refresh=False`` and a short ``budget``)."""
     from hermes_cli.git_budget import BUDGET_SPENT, GitUnchecked, deadline_budget
     from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     timeouts = deadline_budget(budget, clock=lambda: _clock())
@@ -242,7 +250,7 @@ def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S) -> Optio
             if _worktree_is_dirty(tree, tree, timeout=10, budget=timeouts):
                 return f"{_DIRTY}{tree}"
             if (_worktree_has_unpushed_commits(tree, timeout=10, budget=timeouts)
-                    and not pushed_on_remote(tree, budget=timeouts)):
+                    and not pushed_on_remote(tree, budget=timeouts, refresh=refresh)):
                 return f"{_UNPUSHED}{tree}"
         except GitUnchecked as exc:
             cause = f"git checks of the card's trees took over {budget:g}s" if str(exc) == BUDGET_SPENT else str(exc)
