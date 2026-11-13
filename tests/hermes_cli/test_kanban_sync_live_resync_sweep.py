@@ -115,10 +115,34 @@ def test_the_sweep_skips_rows_held_by_the_outbox_a_tombstone_or_written_after_th
         live.execute("UPDATE kanban_sync_outbox SET state = 'rejected'")  # still a local write the Board never took
         live.execute("INSERT INTO kanban_sync_tombstones (table_name, row_uid, deleted_at) VALUES ('tasks', ?, 1)",
                      (stone,))
+        live.execute("UPDATE kanban_sync_state SET applying = 1")  # capture off: no outbox op keeps 'fresh'
         live.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (int(time.time()) + 60, fresh))
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE row_uid = ?", (fresh,)).fetchone()
     swept = sweep.sweep_absent(live, {t: set() for t in ksc.IMPORT_ORDER}, BOARD, ME, since=int(time.time()))
     assert swept.get("tasks") == 1
     assert _ids(live) == {held, stone, fresh}
+    assert absent not in _ids(live)
+
+
+def test_a_row_that_gains_an_outbox_op_after_the_candidate_read_is_not_swept(live, svc, monkeypatch):
+    racer = kb.create_task(live, title="edited between the candidate read and the apply")
+    absent = kb.create_task(live, title="really gone")
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox")
+    real_apply = sync.apply_remote_changes
+
+    def local_edit_then_apply(conn, changes, **kw):  # a local write lands after the candidates were read
+        assert {c.uid for c in changes if c.table == "tasks"} == {racer, absent}
+        with kbc.write_txn(conn):
+            conn.execute("UPDATE tasks SET title = 'edited locally' WHERE id = ?", (racer,))
+        assert conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE row_uid = ?", (racer,)).fetchone()
+        return real_apply(conn, changes, **kw)
+
+    monkeypatch.setattr(sync, "apply_remote_changes", local_edit_then_apply)
+    swept = sweep.sweep_absent(live, {t: set() for t in ksc.IMPORT_ORDER}, BOARD, ME, since=int(time.time()) + 60)
+    assert swept.get("tasks") == 1  # the in-transaction re-check refused the racer
+    assert racer in _ids(live)
     assert absent not in _ids(live)
 
 
