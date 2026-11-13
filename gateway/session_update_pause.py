@@ -162,11 +162,15 @@ def unstarted_result(authority, row):
 async def requeue_unstarted(authority, live, ref, row):
     """Hand an unstarted claim back to its FIFO place (caller holds the claim gate and mutation lock); the
     waiter and media stay with the queued row. None when the store refuses: the caller's checkpoint path
-    then decides (and settles it interrupted, as any unparkable pause)."""
+    then decides (and settles it interrupted, as any unparkable pause).
+
+    [daveey] t_01a1d4a0ecd9bd54: a Stop that ``interrupt_update`` latched while the write ran (it found the claim
+    still started and told its caller the turn stops) cancels the re-queued row instead of letting the notice run
+    after the hold (``_stopped_after_requeue``)."""
     from gateway.session_runtime_workers import tracked_write, persist_work_count
+    from gateway.session_settlement_recovery import _transfers
     from hermes_state_runtime import RuntimeStoreError
     from hermes_state_update_pause import requeue_unstarted_input
-    from gateway.session_settlement_recovery import _transfers
     # [daveey] t_01a1d4d4c30c7e43: read after execution returned (no steer can reach the turn now); each
     # undelivered transfer goes back to its own FIFO place in the same write, behind the wake.
     transfers = _transfers(authority, live, row) or {}
@@ -180,6 +184,7 @@ async def requeue_unstarted(authority, live, ref, row):
                                             'admission=%s (%s%s)', ref.session_id, row['admission_id'], exc,
                                             f': {detail}' if detail else '')
         return None
+    stopped_meanwhile = stopped(authority, row)  # read before the claim's latch is cleared below
     authority.pending_results.pop(row['admission_id'], None)
     previous = authority.update_claims.pop(ref.session_id, None)
     if previous is not None:
@@ -190,9 +195,45 @@ async def requeue_unstarted(authority, live, ref, row):
         entry = authority.steer_transfers.get(ref.session_id)
         if entry is not None and entry[0] == row['generation']:
             authority.steer_transfers.pop(ref.session_id, None)
+    if stopped_meanwhile:
+        return await _stopped_after_requeue(authority, ref, row)
     logging.getLogger(__name__).info('Re-queued unstarted gateway turn for update hold: session=%s admission=%s '
                                      'generation=%s%s', ref.session_id, row['admission_id'], row['generation'],
                                      f' (with {len(transfers)} steer transfer(s))' if transfers else '')
+    authority._publish_pending(ref)
+    persist_work_count(authority)
+    return True
+
+
+async def _stopped_after_requeue(authority, ref, row):
+    """[daveey] t_01a1d4a0ecd9bd54: a Stop latched while the requeue write ran. ``interrupt_update`` found the claim
+    still started and told its caller the turn stops; its own settlement (``finish``) waits on the claim gate the
+    caller holds and would then find the row queued. Honour it here: cancel the re-queued row (it never ran, so
+    ``cancelled`` is its exact outcome), answer its waiter and clear the latch, so the notice never runs after the
+    hold and a later claim of the session inherits no Stop. A Stop that lands after this function returns finds the
+    row queued (not started) and is refused, as for any queued row."""
+    from gateway.session_ingress_media import release_admission_media
+    from gateway.session_runtime_workers import tracked_write, persist_work_count
+    from hermes_state_runtime import cancel_session_input
+    admission_id, sid = row['admission_id'], ref.session_id
+    authority.update_stops.discard(admission_id)
+    if authority.pending_stops.get(sid) == row['generation']:
+        authority.pending_stops.pop(sid, None)
+        authority.pending_stop_causes.pop(sid, None)
+    try:
+        cancelled = await tracked_write(authority, partial(cancel_session_input, authority.db,
+                                                           epoch=authority.epoch, admission_id=admission_id))
+    except Exception:
+        # Nothing retries this: the row stays queued and runs once after the hold. Fail loud, never silent.
+        logging.getLogger(__name__).exception('Update requeue: cancelling stopped %s failed; it stays queued and '
+                                              'runs after the hold', admission_id)
+        cancelled = None
+    if cancelled is not None and (cancelled['status'], cancelled['outcome']) == ('terminal', 'cancelled'):
+        authority._settle_cancelled(ref, admission_id)
+        await asyncio.to_thread(release_admission_media, authority.db, admission_id)
+        logging.getLogger(__name__).info('Re-queued gateway turn was stopped during the requeue; cancelled: '
+                                         'session=%s admission=%s generation=%s', sid, admission_id,
+                                         row['generation'])
     authority._publish_pending(ref)
     persist_work_count(authority)
     return True
