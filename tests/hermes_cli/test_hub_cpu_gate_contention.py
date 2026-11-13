@@ -24,7 +24,8 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
-from tests.hermes_cli.test_kanban_hub_admission import advisory, board, claim, fake_sample, refused, task
+from tests.hermes_cli.test_kanban_hub_admission import advisory, claim, fake_sample, refused, task
+from tests.hermes_cli.test_kanban_hub_admission import board as board  # noqa: PLC0414 -- pytest fixture re-export
 
 pytestmark = pytest.mark.platforms("posix")
 
