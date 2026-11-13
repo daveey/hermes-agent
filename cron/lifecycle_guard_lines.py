@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 
 # Characters after which an unquoted `#` starts a word, so a comment (bash's metacharacters).
-_WORD_BREAKS = frozenset(" \t\r\n;&|()<>")
+_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 # A backslash-newline continuation and the indentation after it (what the regex scans collapse).
 _CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
 
@@ -26,7 +26,7 @@ def _scan(text: str, *, split: bool, keep_comments: bool) -> list[str]:
     current: list[str] = []
     comment: list[str] = []
     in_single = in_double = escape = in_comment = False
-    previous = "\n"
+    word_start = True
     for ch in text:
         if in_comment:
             if ch != "\n":
@@ -41,24 +41,27 @@ def _scan(text: str, *, split: bool, keep_comments: bool) -> list[str]:
             if ch == "\n":  # a continuation joins the word: `a\<newline>#b` is `a#b`
                 current.append(ch)
                 continue
+            current.append(ch)
+            word_start = False  # escaped metacharacters are word content
+            continue
         elif ch == "\\" and not in_single:
             escape = True
         elif ch == "'" and not in_double:
             in_single = not in_single
         elif ch == '"' and not in_single:
             in_double = not in_double
-        elif ch == "#" and not in_single and not in_double and previous in _WORD_BREAKS:
+        elif ch == "#" and not in_single and not in_double and word_start:
             in_comment = True
             comment = [ch]
             continue
         elif split and ch == "\n" and not in_single and not in_double:
             lines.append("".join(current))
             current = []
-            previous = ch
+            word_start = True
             continue
         current.append(ch)
         if not escape:
-            previous = ch
+            word_start = not in_single and not in_double and ch in _WORD_BREAKS
     if in_comment and keep_comments:
         current.append("".join(comment))
     if current or not split:

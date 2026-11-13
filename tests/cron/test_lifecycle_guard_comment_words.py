@@ -19,6 +19,12 @@ from cron.lifecycle_guard_lines import (
 )
 
 RUN = [
+    # Escaped separators and a bare CR are word content, not comment boundaries.
+    "echo a\\ #b; bash ./r.sh",
+    "echo a\\;#b; bash ./r.sh",
+    "echo a\\|#b; bash ./r.sh",
+    "echo a\\<#b; bash ./r.sh",
+    "echo a\r#b; bash ./r.sh",
     # A `#` inside a word is text.
     "echo a#b; bash ./r.sh",
     "echo a#b && bash ./r.sh",
@@ -30,6 +36,8 @@ RUN = [
     "echo a#b; hermes gateway \"restart\"",
     "echo a#b; hermes gateway re\"start\"",
     "echo a#b 2>/dev/null; bash ./r.sh",
+    "x=1#2 {fd}>/dev/null bash ./r.sh",
+    "echo a#b {fd}>/dev/null; bash ./r.sh",
     # A quote inside a comment is text: the next line is its own command.
     "echo hi # it's\nbash -s -<./r.sh",
     "echo # it's\nbash<./r.sh",
@@ -52,6 +60,15 @@ RUN = [
     "grep x /dev/null a\\\n#b; hermes gateway \"restart\"",
 ]
 ALLOWED = [
+    "echo a\\ #b; python3 ./clean.py",
+    "echo a\\;#b; python3 ./clean.py",
+    "echo a\\|#b; python3 ./clean.py",
+    "echo a\\<#b; python3 ./clean.py",
+    "echo a\r#b; python3 ./clean.py",
+    "x=1#2 {fd}>/dev/null python3 ./clean.py",
+    "echo a#b {fd}>/dev/null; python3 ./clean.py",
+    "echo ''#b; python3 ./clean.py",
+    "echo a\\ #b # bash ./r.sh",
     "echo a#b; python3 ./clean.py",
     "x=1#2 python3 ./clean.py",
     "echo hi # it's\npython3 ./clean.py",
