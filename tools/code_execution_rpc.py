@@ -66,9 +66,10 @@ def _wire_bytes(text: str) -> bytes:
     ``\\uXXXX`` escape, which inside a JSON string (where ``json.dumps`` puts every one)
     decodes back to the same text. Only for RPC results: a shipped file (script, env file)
     stays strict, since there the escape would be literal text."""
-    # Exact for lone surrogates only: a high+low pair held as two code points would ship as
-    # two escapes that json.loads joins into one astral char. surrogateescape yields only
-    # low surrogates (U+DC80..U+DCFF), so a tool result never holds such a pair.
+    # Exact for lone surrogates only: a high+low pair held as two code points ships as two
+    # escapes that json.loads joins into one astral char. A file read never holds such a
+    # pair (surrogateescape yields only low surrogates, U+DC80..U+DCFF), but an MCP or
+    # plugin tool result could; the only effect is that lossless join on the remote side.
     return text.encode("utf-8", "backslashreplace")
 
 
@@ -144,9 +145,10 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
             result = tool_error(
                 f"{tool_name} ran, but its result is {size:,} bytes, over the "
                 f"{full_output_cap:,}-byte limit of this remote sandbox's tool transport, so "
-                "only its result was dropped: any change the call made stands, do not repeat it "
-                "to get the result. To read data, ask for less (read_file offset/limit, a "
-                "narrower search_files pattern or limit, a shorter web_extract char_limit)",
+                "only its result was dropped: if the call changed anything, that change stands; "
+                "do not repeat it to get the result. To read data, ask for less (read_file "
+                "offset/limit, a narrower search_files pattern or limit, a shorter web_extract "
+                "char_limit)",
                 result_bytes=size, limit_bytes=full_output_cap)
     entry = {"tool": tool_name, "args_preview": str(tool_args)[:80],
              "duration": round(time.monotonic() - call_start, 2)}

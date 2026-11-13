@@ -184,6 +184,9 @@ def test_remote_file_rpc_bounds_a_large_non_terminal_result(monkeypatch):
     # The tool already ran: the error must not read as a failed call to retry.
     assert "read_file ran" in r["error"] and "only its result was dropped" in r["error"]
     assert "do not repeat" in r["error"]
+    # Read-only tools change nothing, so the side-effect clause is conditional, not asserted.
+    assert "if the call changed anything, that change stands" in r["error"]
+    assert "any change the call made stands" not in r["error"]
     assert shipped < 2 * 1024 * 1024
     assert log[-1]["tool"] == "read_file" and "limit" in log[-1]["error"]
     # A result within the cap ships unchanged.
