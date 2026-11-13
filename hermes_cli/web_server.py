@@ -449,6 +449,12 @@ from hermes_cli.web_upload_limit import ChatFileUploadLimitMiddleware
 # and the receive limit runs before FastAPI can spool a multipart attachment.
 app.add_middleware(ChatFileUploadLimitMiddleware)
 
+# [daveey] Inside auth too: a refused request is never remembered or delta-encoded, and what is remembered is
+# kept per credential (web_delta_response.py).
+from hermes_cli.web_delta_response import DeltaResponseMiddleware
+
+app.add_middleware(DeltaResponseMiddleware)
+
 # Endpoints that do NOT require the session token; everything else under /api/
 # is gated below. Shared with the OAuth gate so the two allowlists cannot
 # drift (/api/status once 401'd under the OAuth gate, breaking the portal probe).

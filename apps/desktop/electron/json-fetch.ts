@@ -19,7 +19,7 @@ import {
   startRequestDeadline,
   withRetry
 } from './api-transport'
-import { decodeResponseBody, displayTranscriptHeaders } from './display-transcript'
+import { decodeDeltaBody, readEncodingHeaders } from './delta-reads'
 import { DEFAULT_FETCH_TIMEOUT_MS, resolveTimeoutMs } from './hardening'
 
 /** What main.ts supplies: headers configured for remote gateways, and one-use native gateway grants. */
@@ -80,8 +80,8 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
                 method: options.method || 'GET',
                 headers: {
                   ...deps.remoteHeaders(url),
-                  // [daveey] Transcript pages: slim + gzip when the backend supports it (display-transcript.ts).
-                  ...displayTranscriptHeaders(options.method, url),
+                  // [daveey] Transcript pages slim + gzip (display-transcript.ts); large reads as deltas (delta-reads.ts).
+                  ...readEncodingHeaders(options.method, url),
                   ...(options.headers || {}),
                   'Content-Type': contentType,
                   ...(nativeHeaders || { 'X-Hermes-Session-Token': token }),
@@ -102,7 +102,7 @@ export function fetchJsonWith(deps: JsonFetchDeps, url: string, token: null | st
                   let text: string
 
                   try {
-                    text = decodeResponseBody(Buffer.concat(chunks), res.headers['content-encoding'])
+                    text = decodeDeltaBody(url, res, Buffer.concat(chunks))
                   } catch (error) {
                     reject(error)
 

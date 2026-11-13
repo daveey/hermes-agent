@@ -210,7 +210,10 @@ const TRANSIENT_CODES = new Set([
   'EAI_AGAIN',
   'ENOTFOUND',
   'EHOSTUNREACH',
-  'ENETUNREACH'
+  'ENETUNREACH',
+  // [daveey] delta-reads.ts: a delta response that could not be decoded. The copy it needed is dropped, so the
+  // retry asks without a base and gets the whole body. Only GETs ask for deltas.
+  'HERMES_DELTA_RETRY'
 ])
 
 // Errors that prove the request never reached the server: the TCP connection

@@ -25,6 +25,7 @@
 //   stretched 40 s, and between probes requests wait up to SLOW_LINK_TIMEOUT_CAP_MS (60 s) each. Such a hang now
 //   takes minutes to retire instead of ~10 s.
 
+import { deltaBodyStore } from './delta-reads'
 import { isBackgroundRead, type PowerSettleRequest, PowerSettlingError } from './power-settle'
 import { isRemoteTimeout } from './remote-down-gate'
 import { remoteAnswerLedger } from './remote-liveness'
@@ -261,6 +262,7 @@ export class SlowLinkTracker {
   forgetScope(scope: string): void {
     this.forget(this.#scopes.get(scope))
     this.#scopes.delete(scope)
+    deltaBodyStore.unbindScope(scope) // the tunnel is going away: its port must stop being asked for deltas
   }
 
   #leave(url: string, reason: string): void {
@@ -355,6 +357,7 @@ const remoteFirstRequestPending = new Map<string, { scope: string; startedAt: nu
 
 export function noteRemoteConnect(baseUrl: string, scope: string, startedAt: number): void {
   remoteFirstRequestPending.set(baseUrl, { scope, startedAt })
+  deltaBodyStore.bindRemote(baseUrl, scope) // delta-reads.ts: this tunnel's reads may come back as deltas
 }
 
 /** A backend answered `path` after elapsedMs: the answer ledger, the slow-link tracker and the first-request line. */
