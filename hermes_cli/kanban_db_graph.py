@@ -1,6 +1,7 @@
 """Task graph initialization and atomic decomposition persistence."""
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
@@ -17,7 +18,9 @@ def note_missing_parents(
 
     On a synced board (``remote``) a parent with no status is unknown, not missing, unless the mirror's replica is
     at the feed head (``kanban_replica_freshness.replica_at_head``, read once per readiness pass into ``fresh``):
-    otherwise no streak event is recorded and nothing is blocked. The child still waits: an unknown parent gates."""
+    otherwise no streak event is recorded and nothing is blocked. The child still waits: an unknown parent gates.
+    A streak is scoped (``_streak_open``): a parent missing after an unblock or a link, or one the open streak does
+    not name, starts a fresh ``parent_missing`` and waits its own :data:`PARENT_MISSING_BLOCK_SECONDS`."""
     from hermes_cli import kanban_db as kb
 
     if not states:
@@ -33,14 +36,14 @@ def note_missing_parents(
         if not cache["fresh"]:
             return False
     last = conn.execute(
-        "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN ('parent_missing', 'parent_found') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
+        "SELECT id, kind, created_at, payload FROM task_events WHERE task_id = ? "
+        "AND kind IN ('parent_missing', 'parent_found') ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     if not missing:
         if last is not None and last["kind"] == "parent_missing":
             kb._append_event(conn, task_id, "parent_found", None)
         return False
-    if last is None or last["kind"] != "parent_missing":
+    if not _streak_open(conn, task_id, last, missing):
         kb._append_event(conn, task_id, "parent_missing", {"parents": missing})
         return False
     if int(kb.time.time()) - int(last["created_at"] or 0) < kb.PARENT_MISSING_BLOCK_SECONDS:
@@ -59,6 +62,23 @@ def note_missing_parents(
         "repair_task_id": repair_id,
     })
     return True
+
+
+def _streak_open(conn: sqlite3.Connection, task_id: str, last, missing: list[str]) -> bool:
+    """The newest ``parent_missing`` is this streak only when no ``unblocked``/``linked`` event follows it and it
+    names every parent missing now: a later incident must not inherit an earlier one's elapsed time."""
+    if last is None or last["kind"] != "parent_missing":
+        return False
+    reset = conn.execute(
+        "SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ('unblocked', 'linked')", (task_id,),
+    ).fetchone()[0]
+    if reset is not None and reset > last["id"]:
+        return False
+    try:
+        named = set(json.loads(last["payload"] or "{}").get("parents") or ())
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return set(missing) <= named
 
 
 def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[str]) -> str:
