@@ -21,7 +21,7 @@ pytestmark = pytest.mark.live_system_guard_bypass
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT)) if str(ROOT) not in sys.path else None
-DATA = Path(__file__).resolve().parent / "data"
+DATA = Path(__file__).resolve().parent / "fixtures"
 BACKUP_STUB = DATA / "hermes_redde_stub_2026-10-22.sh"
 BACKUP_ROOT = "/Users/daveey/code/hermes"
 SKIP_DIRS = ("tests/", "website/", "evals/", "scripts/", "optional-skills/", "skills/",

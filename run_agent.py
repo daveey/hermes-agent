@@ -807,7 +807,7 @@ class AIAgent(
 
         custody = [local_work_agent.reserve("background_review", "run_agent._spawn_background_review_now")]
         try:
-            AIAgent._spawn_background_review_run(  # via the class: stand-in agents drive this method
+            __class__._spawn_background_review_run(  # defining class: stand-in agents drive this method
                 self, messages_snapshot, review_memory, review_skills, focus, task_cfg, _requeue_attempts, explicit,
                 _work=custody)
         finally:
