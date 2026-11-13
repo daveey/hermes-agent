@@ -152,6 +152,21 @@ def test_a_newly_missing_parent_waits_its_own_window(local, linked_event):
     assert len(_repairs(local, child)) == 1
 
 
+def test_a_link_to_a_present_parent_does_not_restart_a_missing_ones_window(local):
+    child = kb.create_task(local, title="dependent", assignee="worker")
+    support._link_raw(local, "t_a", child)
+    kb.recompute_ready(local)
+    _age(local, child)
+    with kb.write_txn(local):  # an unrelated, present parent is linked while t_a is still missing
+        local.execute("INSERT INTO tasks (id, title, status, created_at) VALUES ('t_ok', 'ok', 'running', 0)")
+    support._link_raw(local, "t_ok", child)
+    with kb.write_txn(local):
+        kb._append_event(local, child, "linked", {"parent": "t_ok", "child": child})
+    kb.recompute_ready(local)
+    assert kb.get_task(local, child).status == "blocked"  # before: the link restarted t_a's 600 s window
+    assert len(support._events(local, child, "parent_missing")) == 1
+
+
 def test_a_streak_naming_more_parents_still_covers_the_ones_left(local):
     child = kb.create_task(local, title="dependent", assignee="worker")
     support._link_raw(local, "t_a", child)

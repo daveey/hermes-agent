@@ -283,3 +283,21 @@ def test_a_fresh_replica_that_lacks_the_parent_still_blocks_and_files_one_repair
     assert "parent t_ghost missing from this board" in payload
     kb.recompute_ready(live)
     assert len(_repairs(live, child)) == 1
+
+
+def test_a_detached_board_keeps_its_mirror_table_but_still_blocks_a_missing_parent(live, svc, kanban_home):
+    """Sync off (``set_mode('off')``) keeps the mirror table but leaves no replica to judge by: the board is its own
+    authority again, so the freshness gate must not switch the detector off for good."""
+    child = kb.create_task(live, title="child", assignee="worker")
+    _round(kanban_home, svc)
+    _link_raw(live, "t_ghost", child)
+    sync.set_mode(live, "off")
+    support.write_sync_config(kanban_home, False)
+    assert sync.has_remote_parents(live)
+    kb.recompute_ready(live)
+    assert len(_events(live, child, "parent_missing")) == 1  # before the fix: no event, todo forever
+    _age_streak(live, child)
+    kb.recompute_ready(live)
+    assert kb.get_task(live, child).status == "blocked"
+    kb.recompute_ready(live)
+    assert len(_repairs(live, child)) == 1

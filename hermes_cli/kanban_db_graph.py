@@ -27,10 +27,10 @@ def note_missing_parents(
         return False
     missing = [pid for pid, st in states if st is None]
     if missing and remote:
-        from hermes_cli.kanban_replica_freshness import replica_at_head
+        from hermes_cli.kanban_replica_freshness import replica_at_head, synced
         cache = {} if fresh is None else fresh
-        if "fresh" not in cache:
-            cache["fresh"] = replica_at_head(conn)
+        if "fresh" not in cache:  # a detached board (sync off) keeps its mirror table but is its own authority
+            cache["fresh"] = replica_at_head(conn) if synced(conn) else True
             if not cache["fresh"]:
                 _log.debug("parent status unknown: replica not at head")
         if not cache["fresh"]:
@@ -65,20 +65,27 @@ def note_missing_parents(
 
 
 def _streak_open(conn: sqlite3.Connection, task_id: str, last, missing: list[str]) -> bool:
-    """The newest ``parent_missing`` is this streak only when no ``unblocked``/``linked`` event follows it and it
-    names every parent missing now: a later incident must not inherit an earlier one's elapsed time."""
+    """The newest ``parent_missing`` is this streak only when no ``unblocked`` event, nor a ``linked`` event for a
+    parent missing now (or naming none), follows it, and it names every parent missing now: a later incident must
+    not inherit an earlier one's elapsed time, and a link to a present parent does not restart a missing one's."""
     if last is None or last["kind"] != "parent_missing":
         return False
-    reset = conn.execute(
-        "SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ('unblocked', 'linked')", (task_id,),
-    ).fetchone()[0]
-    if reset is not None and reset > last["id"]:
-        return False
+    for kind, payload in conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('unblocked', 'linked')",
+        (task_id, last["id"]),
+    ).fetchall():
+        if kind == "unblocked" or _event_field(payload, "parent") in (None, *missing):
+            return False
+    named = _event_field(last["payload"], "parents")
+    return isinstance(named, list) and set(missing) <= set(named)
+
+
+def _event_field(payload, key: str):
+    """``key`` of a JSON event payload; None when absent or unreadable."""
     try:
-        named = set(json.loads(last["payload"] or "{}").get("parents") or ())
+        return (json.loads(payload or "{}") or {}).get(key)
     except (TypeError, ValueError, AttributeError):
-        return False
-    return set(missing) <= named
+        return None
 
 
 def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[str]) -> str:
