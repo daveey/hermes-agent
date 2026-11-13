@@ -157,6 +157,22 @@ def test_a_deny_with_no_worker_queue_is_kept_and_claimed(gws, hub_judge, monkeyp
     assert verdict["kept"] == hac.NO_QUEUE and _events(hub.conn, tid, "moved") == []
 
 
+def test_a_deny_no_worker_can_claim_is_kept_home_with_the_action_reason(gws, hub_judge, caplog):
+    """The home route (the pickup claim gate refuses the text on every worker) records its own reason and count,
+    not the generic no-queue one: it overrides the judge's deny and spends a hub slot."""
+    from hermes_cli import kanban_placement_coordination as coord
+    hub, _worker, svc = gws
+    hub_judge.admit_next = False
+    tid = _hub_card(hub, title="claim-stall incident", body="Read each request with `hermes-hub outcomes --id <id>`.")
+    with caplog.at_level(logging.INFO, logger=hac.__name__):
+        _tick(hub)
+    assert _holder(svc, tid) == HUB
+    [verdict] = _events(hub.conn, tid, "hub_admission")
+    assert verdict["kept"] == coord.ACTION_REASON and verdict["home"] == coord.ACTION_REASON
+    assert _events(hub.conn, tid, "moved") == []
+    assert "kept=1 home=1" in caplog.text
+
+
 def test_an_unavailable_judge_fails_open_once_per_tick(gws, monkeypatch, caplog):
     hub, _worker, svc = gws
     calls = []
@@ -172,7 +188,7 @@ def test_an_unavailable_judge_fails_open_once_per_tick(gws, monkeypatch, caplog)
     for tid in tids:
         assert _holder(svc, tid) == HUB, tid  # fail open: a judge outage never freezes the hub
         assert _events(hub.conn, tid, "hub_admission") == []  # no verdict: judged at its next ready
-    assert "hub admission: claim screen judged=0 denied=0 moved=0 kept=0 unavailable=3" in caplog.text
+    assert "hub admission: claim screen judged=0 denied=0 moved=0 kept=0 home=0 unavailable=3" in caplog.text
 
 
 def test_an_unavailable_verdict_is_not_recorded(gws, monkeypatch):

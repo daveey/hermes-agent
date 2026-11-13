@@ -299,3 +299,33 @@ def test_claim_stall_template_via_hub_admin_queues_for_hub_write_workers(gate, m
     assert coord.claim_refusal(row, "worker-1") is None
     entry["labels"] = ["capability:coordination-read"]
     assert coord.claim_refusal(row, "worker-1") == coord.REASON
+
+
+@pytest.mark.parametrize("declared,expected", [("terminal", ["terminal"]), (["terminal", "git"], ["terminal", "git"]),
+                                               (("git",), ["git"]), (None, None), ([], None)])
+def test_home_route_returns_the_normalized_declared_requires(declared, expected):
+    """The home branch persists the declaration as a list: a decision card's raw view can carry a bare string."""
+    from hermes_cli import kanban_hub_admission_placement as hap
+    args = {**_claim_stall(CLAIM_STALL_BARE), "requires": declared}
+    out = hap.pool_route(args, HUB_CFG, "hub", {"admit": False}, ["terminal", "hub:write"],
+                         machine_ok=lambda _: True)
+    assert "runs_on" not in out and out["hub_admission"]["home"]
+    assert out.get("requires") == expected
+
+
+def test_decision_card_with_string_requires_stays_home_with_a_list(gate):
+    from hermes_cli import kanban_hub_admission_placement as hap
+    args = {**_claim_stall(CLAIM_STALL_BARE), "requires": "terminal", "initial_status": "blocked",
+            "human_request": {"action": "Reply A or B. Unblock = A; archive = drop."}}
+    out = hap.decision_card_route(args, {"where": "local"}, "hub", HUB_CFG, machine_ok=lambda _: True)
+    assert out is not None
+    assert out["requires"] == ["terminal"] and "runs_on" not in out
+
+
+def test_show_line_names_the_home_override():
+    """`kanban show` says a denied card still holds a hub slot, and why."""
+    from hermes_cli import kanban_hub_admission_placement as hap
+    from hermes_cli import kanban_placement_coordination as coord
+    line = hap.describe({"admit": False, "why": "portable repo work", "home": coord.ACTION_REASON})
+    assert line == f"hub admission: denied (portable repo work); kept home: {coord.ACTION_REASON}"
+    assert hap.describe({"admit": False, "why": "x"}) == "hub admission: denied (x)"

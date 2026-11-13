@@ -95,6 +95,8 @@ def _target(fields: dict, own: str, cfg: dict, audit: dict) -> Optional[list[str
     if kp.portable_reason({**fields, "runs_on": None}, cfg):
         requires = list(dict.fromkeys([*requires, "hub:write"]))
     out = hp.pool_route(fields, cfg, own, audit, requires or None, queue=True)
+    if home := (out.get("hub_admission") or {}).get("home"):
+        audit["home"] = home  # the recorded verdict says why no queue fits: the claim gate refuses the text
     return out.get("runs_on") or None
 
 
@@ -172,7 +174,8 @@ def apply(conn: sqlite3.Connection, own: str, plans: Mapping[str, dict], importe
                 kb._append_event(conn, tid, "hub_admission", audit)
                 if audit["admit"]:
                     continue
-                out[tid] = ("other", why + ("" if target else "; no worker queue fits, left for its creator"))
+                kept = f"kept home ({audit['home']})" if audit.get("home") else "no worker queue fits"
+                out[tid] = ("other", why + ("" if target else f"; {kept}, left for its creator"))
                 if target is None:
                     continue  # the backstop (refusals) keeps it unclaimed here
                 previous = wn._parse(row["runs_on"])

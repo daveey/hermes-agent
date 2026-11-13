@@ -25,7 +25,7 @@ _EXECUTION = re.compile(r"(?:\b(?:run|execute|invoke|call|use|via|with)\s+`?|`|[
 # still-open quote acts with the hub's identity and replica, so it needs ``capability:hub-write`` (the hub-admin
 # attestation), not this worker's own hermes-hub install. A worker's ``hermes-hub outcomes --id`` reads only its
 # OWN sent requests (the hub's request read back as ``state: null`` on worker-1, 11-13), so bare spellings stay home.
-_HUB_ADMIN = re.compile(r"\bhub-admin\s+(['\"])(?:(?!\1).)*$", re.IGNORECASE)
+_HUB_ADMIN = re.compile(r"(?<![\w/.-])hub-admin\s+(['\"])(?:(?!\1).)*$", re.IGNORECASE)
 HUB_WRITE = "capability:hub-write"
 
 

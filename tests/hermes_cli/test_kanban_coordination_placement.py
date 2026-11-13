@@ -518,3 +518,12 @@ def test_hub_admin_wrapped_action_needs_hub_write(text):
 def test_bare_or_unwrapped_action_still_stays_home(text):
     from hermes_cli import kanban_placement_coordination as coord
     assert coord.requirements(text)[1] == coord.ACTION_REASON
+
+
+@pytest.mark.parametrize("prefix", ["my-hub-admin", "hermes-hub-admin", "tools/hub-admin", "x.hub-admin",
+                                    "my_hub-admin"])
+def test_hub_admin_lookalike_names_do_not_open_a_hub_write_quote(prefix):
+    """Only the hub-admin command itself runs on the hub: a longer name ending in it is another tool."""
+    from hermes_cli import kanban_placement_coordination as coord
+    assert coord.requirements(f"{prefix} 'hermes-hub outcomes --id t_x'")[1] == coord.ACTION_REASON
+    assert coord.requirements("run hub-admin 'hermes-hub outcomes --id t_x'") == ({"capability:hub-write"}, None)

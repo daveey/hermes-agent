@@ -175,7 +175,8 @@ def describe(verdict):
         return f"hub admission: not judged ({(verdict.get('why') or verdict['skipped'])[:160]})"
     if verdict.get("admit"):
         return f"hub admission: admitted, {verdict.get('need')}: \"{(verdict.get('evidence') or '')[:120]}\""
-    return f"hub admission: denied ({(verdict.get('why') or '')[:160]})"
+    home = f"; kept home: {verdict['home']}" if verdict.get("home") else ""
+    return f"hub admission: denied ({(verdict.get('why') or '')[:160]}){home}"
 
 
 def _event_verdict(events):
@@ -545,8 +546,10 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
         out = {"where": "local", "why": f"hub admission denied, but the text {coordination.ACTION_REASON} "
                                         "no pool worker is attested for, so it stays here",
                "hub_admission": {**audit, "home": coordination.ACTION_REASON}}
-        if args.get("requires"):
-            out["requires"] = args["requires"]
+        declared = args.get("requires")
+        if declared:
+            # The declared list, normalized: a decision card's raw view can carry a bare string.
+            out["requires"] = [declared] if isinstance(declared, str) else list(declared)
         return out
     if label and (machine_ok or kp._machine_picks_up)(label):
         out = {"where": "local", "runs_on": [label, *sorted(extra - {label})],

@@ -51,6 +51,7 @@ class Counts:
     denied: int = 0
     moved: int = 0
     kept: int = 0
+    home: int = 0  # of ``kept``: denies the claim gate would refuse on every worker (the home route)
     unavailable: int = 0
     deferred: int = 0
     deferred_ids: frozenset = field(default_factory=frozenset)  # not claimable this tick: judged next tick
@@ -61,7 +62,7 @@ class Counts:
 
     def line(self) -> str:
         return ("hub admission: claim screen judged={judged} denied={denied} moved={moved} kept={kept} "
-                "unavailable={unavailable} deferred={deferred}").format(**asdict(self))
+                "home={home} unavailable={unavailable} deferred={deferred}").format(**asdict(self))
 
 
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -154,7 +155,8 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
             kept = keep_reason(conn, card, fields, cfg)
             target = None if kept else pickup._target(fields, own, cfg, audit)
             if kept is None and target is None:
-                kept = NO_QUEUE
+                # A deny pool_route keeps home (the claim gate refuses the text on every worker) names that reason.
+                kept = audit.get("home") or NO_QUEUE
             if kept:
                 audit["kept"] = kept
         applied = _apply(conn, own, tid, audit, target, expected=card, event_head=event_head)
@@ -164,6 +166,7 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
             counts.defer(tid)  # edited while judged: no verdict, so never claimed unjudged this tick
         elif "kept" in audit:
             counts.kept += 1
+            counts.home += "home" in audit
     if counts != Counts():
         _log.info(counts.line())
     return counts
