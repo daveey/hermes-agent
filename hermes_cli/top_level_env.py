@@ -277,15 +277,19 @@ def descends_from_live_pid(pid) -> bool:
     """Whether this process descends from ``pid`` while it is alive. pid 0/1 never count: every process
     descends from init, so it vouches for nothing. [daveey]
 
-    ``pid`` is coerced with ``int()``: a decimal string (``"4242"``) is accepted as that pid, and ``None``,
-    ``""`` or anything ``int()`` refuses is ``False`` rather than a ``TypeError``. This is deliberate: callers
-    pass pids read from board rows and JSON event payloads (``worker_bound``, ``tasks.worker_pid``), whose
-    type depends on the writer, and the proof is the live-ancestor check on that exact pid, so accepting
-    its string spelling vouches for nothing extra. Rejecting it would refuse a real worker's shell (or call
-    it a leaked env) over serialization alone."""
+    ``pid`` must be an integral number or its decimal string: ``4242``, ``"4242"`` and ``4242.0`` are accepted
+    as that pid, and ``None``, ``""``, a non-integral float (``4242.7``, ``inf``, ``nan``) or anything ``int()``
+    refuses is ``False`` rather than an exception. This is deliberate: callers pass pids read from board rows
+    and JSON event payloads (``worker_bound``, ``tasks.worker_pid``), whose type depends on the writer, and the
+    proof is the live-ancestor check on that exact pid, so accepting its string or float spelling vouches for
+    nothing extra. Rejecting those would refuse a real worker's shell (or call it a leaked env) over
+    serialization alone. A non-integral float spells no pid at all, and ``int()`` would truncate it to a
+    different one the caller never named, so it is refused instead."""
+    if isinstance(pid, float) and not pid.is_integer():
+        return False
     try:
         pid = int(pid or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
     return pid > 1 and _pid_alive(pid) and _is_ancestor(pid)
 
