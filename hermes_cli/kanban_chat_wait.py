@@ -32,6 +32,8 @@ THRESHOLD_SECONDS = pu.THRESHOLD_SECONDS
 # A ready episode older than this when first seen is backlog, not a wait the chat just promised; kanban_show's
 # queue_hint covers it. This also bounds the burst on the first tick after deploy.
 MAX_EPISODE_SECONDS = 6 * 3600
+# The current lag stall has logged its WARNING (the rest of it logs at INFO); cleared by a sweep that runs undeferred.
+_LAG_WARNED = False
 NO_PROMISE = "check placement and available capacity first; re-place if suitable; don't promise a pickup"
 
 
@@ -174,7 +176,9 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
     "No worker claiming it" is a Board fact read from this gateway's live copy, so it is checked against the pulled
     replica first (``kanban_replica_freshness``, t_01a1d390d19239dd): while the live feed lags the replica past the
     bound every notice waits (the episode keeps its key, so it fires once when the lag closes, if still ready), and
-    a card whose newer replica row has left this ready episode is skipped."""
+    a card whose newer replica row has left this ready episode is skipped. A deferral that outlasts
+    ``MAX_EPISODE_SECONDS`` drops that episode's notice for good (the stall itself is the sync loop's to report), so
+    the first deferred sweep of each stall logs at WARNING."""
     from hermes_cli import kanban_replica_freshness as fresh
     from hermes_cli.kanban_sync_diagnostics import missing_board, update_hold
     now = time.time() if now is None else now
@@ -188,9 +192,13 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
     if not due:
         return 0
     lag = fresh.lag_hold(conn, now=now)
+    global _LAG_WARNED
     if lag is not None:
-        _log.info("kanban chat-wait: %d notice(s) deferred: %s", len(due), lag["reason"])
+        (_log.info if _LAG_WARNED else _log.warning)(
+            "kanban chat-wait: %d notice(s) deferred: %s", len(due), lag["reason"])
+        _LAG_WARNED = True
         return 0
+    _LAG_WARNED = False
     newer = fresh.newer_rows(conn, [row["id"] for row, _since, _for in due])
     drain = update_hold()
     posted = 0

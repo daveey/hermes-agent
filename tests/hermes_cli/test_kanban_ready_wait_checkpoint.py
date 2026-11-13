@@ -19,6 +19,7 @@ from hermes_cli import kanban_continuation as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kn
+from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_parent_unclaimed as pu
 
 LANDED = "LANDED: PR1148 MERGED 08:15:20Z as main 6948d8bc; NEXT: wait for main CI then live-check"
@@ -225,8 +226,10 @@ def synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
         monkeypatch.delenv(key, raising=False)
     support.write_sync_config(home, True)
+    monkeypatch.setattr(cw, "_LAG_WARNED", False)
     c = kbc.connect(home / "kanban.db")
     ksc.ensure_identity(c, "default", "macbook")
+    sync.set_mode(c, "primary")  # the MacBook's mode: the live board applies the feed
     ksa._reset_cache_for_tests()
     yield c
     c.close()
@@ -234,8 +237,10 @@ def synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _set_live(conn, tid, *, cursor, version):
+    """The live board's feed cursor and the card's revision, with every local change pushed (outbox drained)."""
     conn.execute("UPDATE kanban_sync_state SET cursor = ?", (cursor,))
     conn.execute("UPDATE tasks SET sync_version = ? WHERE id = ?", (version, tid))
+    conn.execute("DELETE FROM kanban_sync_outbox")
     conn.commit()
 
 
@@ -290,6 +295,12 @@ def test_live_feed_lag_defers_the_notice_until_it_closes(synced, caplog):
         assert cw.sweep(synced) == 0
     assert _notices(synced, tid, cw.NOTICE_KIND) == []
     assert "1 notice(s) deferred: live feed" in caplog.text
+    deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+    assert deferred == ["WARNING"]  # the first deferred sweep of a stall warns: a long stall drops the episode
+    with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+        assert cw.sweep(synced) == 0
+    deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+    assert deferred == ["WARNING", "INFO"]
     _set_live(synced, tid, cursor=head, version=5)
     assert cw.sweep(synced) == 1
     assert cw.sweep(synced) == 0
@@ -314,4 +325,41 @@ def test_in_sync_replica_still_ready_posts_once(synced):
     _set_replica((tid, "ready", 5), cursor=1000)
     assert cw.sweep(synced) == 1
     assert cw.sweep(synced) == 0
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+def test_shadow_mode_board_is_not_compared(synced):
+    """In ``shadow`` mode (``sync attach``'s default) the live board never applies the feed, so its cursor stays
+    put while the replica's runs ahead: no lag defer and no cross-check, the live board's own notice goes out."""
+    sync.set_mode(synced, "shadow")
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=0, version=5)
+    _set_replica((tid, "done", 7), cursor=50_000)
+    assert cw.sweep(synced) == 1
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+@pytest.mark.parametrize("how", ["detached", "disabled"])
+def test_detached_or_disabled_board_is_not_compared(synced, tmp_path, how):
+    """A board detached to ``off``, or one this home no longer syncs, keeps its replica on disk while pulls stop:
+    its aging stamp must not hold the notice forever."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    from tests.hermes_cli import kanban_sync_support as support
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=1000, pulled_at=time.time() - fresh.REPLICA_STALE_SECONDS - 86_400)
+    if how == "detached":
+        sync.set_mode(synced, "off")
+        conn = synced
+    else:  # a fresh process of a home whose config no longer syncs the board
+        support.write_sync_config(tmp_path / ".hermes", False)
+        kbc._INITIALIZED_PATHS.clear()
+        sync._SYNCED_PATHS.clear()
+        conn = kbc.connect(tmp_path / ".hermes" / "kanban.db")
+    try:
+        assert fresh.lag_hold(conn) is None
+        assert cw.sweep(conn) == 1
+    finally:
+        if conn is not synced:
+            conn.close()
     assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1

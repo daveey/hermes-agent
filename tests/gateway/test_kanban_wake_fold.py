@@ -468,11 +468,14 @@ def test_every_wake_kind_has_a_status_label():
     assert not missing
 
 
-def test_the_relabel_reads_the_fresher_replica_status(tmp_path, monkeypatch):
+@pytest.mark.parametrize('unpushed', [False, True], ids=['pushed', 'unpushed-local-change'])
+def test_the_relabel_reads_the_fresher_replica_status(tmp_path, monkeypatch, unpushed):
     """(d) t_01a1d390d19239dd: a live board lagging after a sync stall still read the card ready, so a queued
-    ``chat_wait_unclaimed`` wake kept its false premise. The pulled replica holds a newer revision: done."""
+    ``chat_wait_unclaimed`` wake kept its false premise. The pulled replica holds a newer revision: done.
+    With a local change of the card not yet pushed (pending outbox op), the live row is the newer one and stays."""
     import sqlite3
 
+    from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_session_activity as ksa
     from hermes_cli import kanban_sync_client as ksc
     from tests.hermes_cli import kanban_sync_support as support
@@ -484,8 +487,11 @@ def test_the_relabel_reads_the_fresher_replica_status(tmp_path, monkeypatch):
     conn = kbc.connect(home / 'kanban.db')
     try:
         ksc.ensure_identity(conn, 'default', 'macbook')
+        sync.set_mode(conn, 'primary')
         tid = kb.create_task(conn, title='waited on', assignee='worker')
         conn.execute('UPDATE tasks SET sync_version = 5 WHERE id = ?', (tid,))
+        if not unpushed:
+            conn.execute('DELETE FROM kanban_sync_outbox')
         conn.commit()
     finally:
         conn.close()
@@ -510,6 +516,10 @@ def test_the_relabel_reads_the_fresher_replica_status(tmp_path, monkeypatch):
     finally:
         ksa._reset_cache_for_tests()
     lines = refreshed['text'].split('\n')
+    if unpushed:
+        assert lines[0] == f'[kanban] Task {tid} is ready with no worker claiming it.'
+        assert refreshed['kinds'] == ['chat_wait_unclaimed']
+        return
     assert lines[0] == f'[kanban] Task {tid} completed.'
     assert 'Live status: done.' in lines[1]
     assert lines[2] == 'Result: landed PR #1'

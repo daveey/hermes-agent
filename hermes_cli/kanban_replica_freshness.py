@@ -8,7 +8,10 @@ after a sync-loop stall, so the live rows still read ``ready``. Nothing compared
 The replica is the same Board feed applied into ``kanban/sync-shadow/<board>.db``; each successful pull stamps
 ``kanban_sync_state.pulled_at`` (``kanban_db_sync.mark_pulled``), the stamp ``kanban_chat_links`` already derives
 replica staleness from. Two reads, both fail-open (no replica, an unsynced board or an unreadable file is no
-evidence, and callers keep their old behaviour):
+evidence, and callers keep their old behaviour). Only a board this process syncs in ``primary`` mode is compared
+(``kanban_db_sync.board_mode``, which already folds in ``kanban.sync.enabled``, ``kanban.sync.boards`` and a detach
+to ``off``): in ``shadow`` mode the live board never applies the feed, so its cursor never moves and its lag would grow
+without bound; on an ``off``/disabled board the replica stays on disk while pulls stop, so its stamp only ages:
 
 - :func:`lag_hold`: why every ready-wait notice waits now, when the live feed position trails the replica by more
   than :data:`MAX_FEED_LAG_ROWS` rows, or the replica's last pull is older than :data:`REPLICA_STALE_SECONDS` (a
@@ -33,8 +36,12 @@ REPLICA_STALE_SECONDS = 600
 
 
 def _live_state(conn) -> Optional[tuple[str, int]]:
-    """``(board slug, feed cursor)`` of a live board attached to the Board service, else None."""
+    """``(board slug, feed cursor)`` of a live board attached to the Board service that this process syncs in
+    ``primary`` mode (the live board applies the feed), else None."""
+    from hermes_cli import kanban_db_sync as sync
     try:
+        if sync.board_mode(conn) != "primary":
+            return None
         row = conn.execute("SELECT board_id, cursor FROM kanban_sync_state LIMIT 1").fetchone()
     except sqlite3.OperationalError:  # never synced: no sync tables
         return None
@@ -83,7 +90,8 @@ def lag_hold(conn, *, now: Optional[float] = None) -> Optional[dict[str, Any]]:
 def newer_rows(conn, task_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
     """``{task_id: replica row}`` for the cards whose replica row carries a strictly newer Board revision
     (``sync_version``) than the live row. A row is ``{"status", "ready_since", "sync_version", "result",
-    "summary", "live_ready_since"}``. Cards with no replica row, or an older or equal one, are absent; so is
+    "summary", "live_ready_since"}``. Cards with no replica row, or an older or equal one, are absent; so is a
+    card with an unpushed local change (a pending outbox op: the live row is ahead of what the Board has seen), and
     everything when there is no readable replica."""
     ids = [str(t) for t in task_ids if t]
     found = _replica(conn) if ids else None
@@ -94,8 +102,15 @@ def newer_rows(conn, task_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
     try:
         live = {r[0]: (int(r[1] or 0), r[2]) for r in conn.execute(
             f"SELECT id, sync_version, ready_since FROM tasks WHERE id IN ({marks})", ids).fetchall()}
+        unpushed = {r[0] for r in conn.execute(
+            f"SELECT DISTINCT row_uid FROM kanban_sync_outbox WHERE table_name = 'tasks' AND state = 'pending' "
+            f"AND row_uid IN ({marks})", ids).fetchall()}
     except sqlite3.OperationalError:  # a board without the sync columns has no revision to compare
         return {}
+    ids = [t for t in ids if t not in unpushed]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
     from hermes_cli.kanban_session_activity import cached_ro
     try:
         with cached_ro(path) as rconn:
