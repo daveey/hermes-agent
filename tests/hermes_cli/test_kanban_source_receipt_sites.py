@@ -313,6 +313,8 @@ INVOLUNTARY = {  # no receipt: custody becomes ``retained`` (fail closed)
 NOT_FROM_RUNNING = {
     "hermes_cli/kanban_assignment_routing.py::route": "runs inside block_task after apply_block_update left running",
     "hermes_cli/kanban_db.py::recompute_ready": "re-promotes todo/blocked/scheduled cards only",
+    "hermes_cli/kanban_terminal_guard.py::enforce_after_apply": "puts a held card back to done/archived; skips running",
+    "hermes_cli/kanban_terminal_guard.py::_restore_held": "only moves a done/archived row back to its held status",
 }
 
 
