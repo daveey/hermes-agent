@@ -390,6 +390,38 @@ def test_a_legitimate_wake_of_a_scheduled_card_still_lands_ready(board):
     assert _ignored(board, tid) == []
 
 
+def _probe_rows(conn, tid):
+    return conn.execute("SELECT purpose, cmd FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchall()
+
+
+def test_a_wake_that_does_not_land_on_a_live_blocked_card_keeps_its_ask_probe(board):
+    """PR #2187 post-merge mutant (c): only a held card's ``_wake`` drops the probe row. A live ``blocked`` card
+    (not ``scheduled``, so the wake does not land) hit by a producer such as ``supervisor_request_wake`` keeps its
+    ``ask_resolved`` row; hoisting the delete above the ``skip_wake`` guard silently dropped that live probe."""
+    from hermes_cli import kanban_ask_resolved as kar
+    tid = _parked(board)
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET status = 'blocked', human_request = ? WHERE id = ?",
+                      (json.dumps({"action": "a", "resolved_check": "test -f /nonexistent-flag"}), tid))
+        kar.sync_row(board, tid)
+    assert [tuple(r) for r in _probe_rows(board, tid)] == [(kar.PURPOSE, "test -f /nonexistent-flag")]
+    with kb.write_txn(board):
+        assert kwc._wake(board, tid, "supervisor_request_wake", {}) is None
+    assert _status(board, tid) == "blocked"
+    assert [tuple(r) for r in _probe_rows(board, tid)] == [(kar.PURPOSE, "test -f /nonexistent-flag")]
+    assert _ignored(board, tid) == []
+
+
+def test_a_wake_that_lands_drops_the_cards_probe_row(board, tmp_path):
+    """The other side: a live ``scheduled`` card whose wake lands no longer probes."""
+    tid = _parked(board, wake_check=f"test -f {tmp_path / 'flag'}")
+    assert len(_probe_rows(board, tid)) == 1
+    with kb.write_txn(board):
+        assert kwc._wake(board, tid, "supervisor_request_wake", {}) == "supervisor_request_wake"
+    assert _status(board, tid) == "ready"
+    assert _probe_rows(board, tid) == []
+
+
 def test_terminal_hold_orders_by_origin_not_by_arrival():
     """The reopen arrived first (lower id) but was minted after the completion: it still counts."""
     import sqlite3
