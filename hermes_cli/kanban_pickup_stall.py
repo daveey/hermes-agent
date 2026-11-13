@@ -298,7 +298,13 @@ def _ready_now(entry: Mapping[str, Any], now_ms: int) -> bool:
     return free is None or free > 0
 
 
-def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], *, assignee: str,
+def _profile_label(assignee: Optional[str]) -> str:
+    """``profile:<assignee>``, a NULL/empty assignee read as ``default`` like the Board's ``requiredLabels`` and
+    :func:`hermes_cli.kanban_repin_notice.required_labels` (never ``profile:None`` or ``profile:``)."""
+    return f"profile:{assignee or 'default'}"
+
+
+def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], *, assignee: Optional[str],
                     requires: tuple[str, ...] = _REQUIRES, now_ms: Optional[int] = None,
                     ) -> tuple[Optional[list[str]], str]:
     """``(runs_on, why)`` for an alarm about machine ``own``; never ``machine:<own>``. ``machines`` is the registry
@@ -309,7 +315,7 @@ def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]
     from hermes_cli import kanban_worker_node as wn
     now_ms = _now_ms() if now_ms is None else now_ms
     from hermes_cli.kanban_placement_coordination import requirement_label
-    need = {requirement_label(r) for r in requires} | {f"profile:{assignee}"}
+    need = {requirement_label(r) for r in requires} | {_profile_label(assignee)}
     if machines is None:
         if own != OPERATOR_LANE:
             return [f"machine:{OPERATOR_LANE}"], f"the machine registry is unreadable from {own}: hub operator lane"
@@ -355,7 +361,7 @@ def _replace_stranded(conn, task_id: str, own: str, machines, runs_on: list[str]
                            (task_id,)).fetchone()
         if row is None or row["status"] in ("running", "done", "archived") or row["claim_lock"] is not None:
             return
-        need = {requirement_label(r) for r in _REQUIRES} | {f"profile:{row['assignee']}"}
+        need = {requirement_label(r) for r in _REQUIRES} | {_profile_label(row["assignee"])}
         if not _stranded(row["runs_on"], own, machines, need) or wn._parse(row["runs_on"]) == runs_on:
             return
         wn.set_runs_on(conn, task_id, runs_on)

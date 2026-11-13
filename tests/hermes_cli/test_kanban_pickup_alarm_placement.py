@@ -169,6 +169,19 @@ def test_an_alarm_on_a_healthy_machine_stays_when_a_better_one_appears(gws, monk
     assert _pin(worker.conn, alarm) == [f"machine:{OTHER}"] and not _replaced(worker.conn, alarm)
 
 
+@pytest.mark.parametrize("assignee", [None, ""])
+def test_an_alarm_with_no_assignee_is_judged_as_profile_default_and_not_re_pinned(gws, monkeypatch, assignee):
+    # t_01a1d32a914ed152: the Board reads a NULL/empty assignee as profile:default; ``profile:None``/``profile:``
+    # made the healthy pin look stranded, so it moved to the newly better machine with a Re-placed comment.
+    worker, alarm = _held_alarm(gws, monkeypatch)
+    with kb.write_txn(worker.conn):
+        worker.conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (assignee, alarm))
+    monkeypatch.setitem(support.MACHINES, "worker-3", _worker("worker-3", metrics={"active_card_runs": 0}))
+    worker.enter()
+    kps.sweep(worker.conn)
+    assert _pin(worker.conn, alarm) == [f"machine:{OTHER}"] and not _replaced(worker.conn, alarm)
+
+
 def test_a_stranded_alarm_already_on_the_only_choice_is_not_re_commented(gws, monkeypatch):
     worker, alarm = _held_alarm(gws, monkeypatch, other=False, hub=_hub(hold=True))
     assert _pin(worker.conn, alarm) == [f"machine:{HUB}"]  # held too, but not the stalled machine
@@ -289,6 +302,14 @@ def test_an_unreadable_registry_sends_a_worker_alarm_to_the_hub_lane_and_a_hub_a
 def test_an_alarm_about_the_hub_lands_on_a_worker():
     pool = _pool(**{"worker-3": _worker("worker-3", last_seen=NOW)})
     assert _place(pool, own=HUB) == ["machine:worker-3"]
+
+
+@pytest.mark.parametrize("assignee", [None, ""])
+def test_a_null_or_empty_assignee_needs_profile_default_like_the_board(assignee):
+    pool = _pool(**{"worker-3": _worker("worker-3", last_seen=NOW)})
+    assert kps.alarm_placement(WORKER, pool, assignee=assignee, now_ms=NOW)[0] == ["machine:worker-3"]
+    off_hub = kps.alarm_placement(HUB, None, assignee=assignee, now_ms=NOW)[0] or []
+    assert "profile:default" in off_hub and not {"profile:None", "profile:"} & set(off_hub)
 
 
 @pytest.mark.parametrize("runs_on,machines,want", [
