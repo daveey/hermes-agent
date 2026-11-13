@@ -136,7 +136,8 @@ def pushed_on_remote(tree: str, *, deadline: Optional[float] = None) -> bool:
     branch past HEAD again. The local check then reports pushed work as unpushed, and the park pinned a card to
     its worker (11-12: t_01a1d0a1eaa00371 sat ready on ``machine:worker-2`` while worker-2 was on a Board hold).
     So ask the remote: HEAD is a remote branch tip, or a stale tracking ref HEAD builds on, once refreshed from
-    the remote, contains HEAD. Every git call ends by ``deadline`` (:func:`_clock`); past it the answer is False."""
+    the remote, contains HEAD. Every git call ends by ``deadline`` (:func:`_clock`); past it :class:`_BudgetSpent`
+    propagates, so :func:`tree_state` reports the tree as unchecked rather than unpushed."""
     from functools import partial
     from hermes_cli.worktree_ops import _git_out, _worktree_has_unpushed_commits
     # Keep credential helpers for private remotes, but never consume the caller's stdin.
@@ -212,8 +213,9 @@ def state_parts(state: str) -> tuple[str, str]:
 STATE_BUDGET_S = 20.0
 
 
-class _BudgetSpent(ValueError):
-    pass
+class _BudgetSpent(Exception):
+    """Git ran out of time for a tree. Not a ValueError: :func:`pushed_on_remote` swallows those (failing toward
+    False), which turned a spent budget into ``unpushed commits`` instead of ``unchecked worktree``."""
 
 
 def _clock() -> float:
@@ -232,20 +234,34 @@ def _within(deadline: float, cap: float, calls: int = 1) -> float:
 def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S) -> Optional[str]:
     """``dirty worktree <p>`` / ``unpushed commits in <p>`` for the first tree with state, else None. Git runs at
     most ``budget`` seconds in all (per-call timeouts shrink to the time left); a tree it could not check reads
-    ``unchecked worktree <p>``, which callers treat as state (git timeouts already fail safe the same way)."""
+    ``unchecked worktree <p>``, which callers treat as state. So does a check whose git timed out (the
+    ``worktree_ops`` checks fail toward True on a timeout, which is no evidence of dirty or unpushed work)."""
     from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     deadline = _clock() + budget
+
+    def found(check, calls: int) -> bool:
+        # The worktree_ops checks fail safe toward True on a git timeout: a True that took its whole timeout (or
+        # ran past the budget) is a timeout, not seen state, so it reads ``unchecked``, not ``dirty``/``unpushed``.
+        timeout, start = _within(deadline, 10, calls), _clock()
+        if not check(timeout):
+            return False
+        if _clock() - start >= timeout or _clock() >= deadline:
+            raise _BudgetSpent("git timed out")
+        return True
+
     for tree in trees:
         if not Path(tree).is_dir():
             continue
         try:
-            if _worktree_is_dirty(tree, tree, timeout=_within(deadline, 10, calls=2)):
+            if found(lambda t: _worktree_is_dirty(tree, tree, timeout=t), 2):
                 return f"{_DIRTY}{tree}"
-            if (_worktree_has_unpushed_commits(tree, timeout=_within(deadline, 10, calls=3))
+            if (found(lambda t: _worktree_has_unpushed_commits(tree, timeout=t), 3)
                     and not pushed_on_remote(tree, deadline=deadline)):
+                if _clock() >= deadline:  # its git calls failed toward False as the budget ran out
+                    raise _BudgetSpent("git budget spent")
                 return f"{_UNPUSHED}{tree}"
-        except _BudgetSpent:
-            return f"unchecked worktree {tree} (git checks of the card's trees took over {budget:g}s)"
+        except _BudgetSpent as exc:
+            return f"unchecked worktree {tree} ({exc}; git checks of the card's trees get {budget:g}s)"
     return None
 
 

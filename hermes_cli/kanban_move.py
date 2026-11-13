@@ -30,7 +30,8 @@ Guards:
   and linked worktrees named in the body, the newest comment, the newest checkpoint or the move's own checkpoint
   (a text-named tree whose owner marker names another card is that card's work, not this one's). On 11-11 a hub
   card whose ``~/code/_wt`` trees held unpushed commits was moved to worker-2, which could not reach them and moved
-  it back. A worker-first card's Board repin to the worker queue takes the same guard. Limitations: only the host
+  it back. A worker-first card's Board repin to the worker queue takes the same guard, by the same leaving rule
+  (:func:`leaves_here`, matches from the registry). Limitations: only the host
   holding the trees can see them, so a move issued from another host is blind to them; and a move whose matches
   still include this host (``pool:worker`` issued on a pool worker, ``linux``) is not "leaving" and is not
   guarded, though another matching host may claim the card (intentional: this host may still run it).
@@ -195,11 +196,33 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     back = [m for m in matches if m in left]
     if back and len(back) == len(matches) and not force:
         raise MoveRefused("ping_pong", f"the card already left {', '.join(back)}; pass force to move it back")
-    if me not in matches:  # git reads: check() runs before every caller's write transaction
+    if leaves_here(me, matches):  # git reads: check() runs before every caller's write transaction
         if state := unpushed_here(conn, task_id, row["workspace_path"], me=me, force=force, checkpoint=checkpoint):
             host = {**host, "left_unpushed_state": state}
     return {"runs_on": labels, "previous": wn._parse(row["runs_on"]), "matches": matches, "move_no": len(past) + 1,
             "forced": bool(back and force), "me": me, "host": host}
+
+
+def leaves_here(me: str, matches: list[str]) -> bool:
+    """Whether a move leaves ``me`` (and so takes the unpushed-state guard): no machine that matches it is ``me``.
+    A running move's matches never include ``me``. The one rule :func:`check` and the worker-first repin share."""
+    return me not in matches
+
+
+def _repin_leaves(labels: list[str], me: str, machines: Optional[Mapping[str, Mapping[str, Any]]]) -> bool:
+    """:func:`leaves_here` for a worker-first Board repin, which skips :func:`check`: matches come from the
+    registry with ``me`` included (the card is queued). A repin to exactly ``machine:<me>`` stays (the origin need
+    not be registered); an unreadable registry counts as leaving, so the guard runs (fail safe)."""
+    from hermes_cli import kanban_worker_node as wn
+    if labels == [f"machine:{me}"]:
+        return False
+    pool: Mapping[str, Mapping[str, Any]] = machines or {}
+    if machines is None:
+        reg = wn.registry()
+        if reg is None:
+            return True
+        pool = reg.get("machines") or {}
+    return leaves_here(me, matching_machines(labels, pool, me=me, exclude_me=False))
 
 
 def unpushed_here(conn: sqlite3.Connection, task_id: str, workspace_path: Optional[str], *, me: str, force: bool,
@@ -318,7 +341,7 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
             return {"ok": False, "reason_code": "invalid_runs_on", "error": str(exc)}
         extra: dict[str, Any] = {}  # operator provenance rides a marker (kanban_operator_call), not this event
         origin = (sync.sync_state(conn) or {}).get("gateway_id")
-        if origin and list(labels or []) != [f"machine:{origin}"]:  # a repin to the worker queue leaves the origin
+        if origin and _repin_leaves(list(labels or []), str(origin), machines):  # the check() leaving rule
             row = conn.execute("SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)).fetchone()
             try:
                 if state := unpushed_here(conn, task_id, row["workspace_path"] if row else None, me=str(origin),
