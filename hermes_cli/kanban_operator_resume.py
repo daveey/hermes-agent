@@ -7,7 +7,8 @@ process or its tool shells) is refused, so an implementer cannot resume itself.
 
 One continuation: the receipt names the card's latest run by portable identity and
 lapses as soon as a newer run is claimed, so a crash of the resumed run guards again.
-It never authorizes a merge.
+A hermes-sync core-update requeue is a pause, not a run (:mod:`kanban_core_update_requeue`):
+it neither spends the receipt nor stops one recorded after it. It never authorizes a merge.
 """
 from __future__ import annotations
 
@@ -86,12 +87,29 @@ def resume(conn, task_id: str, *, reason: str, actor: str) -> dict:
     return payload
 
 
-def resumed_after(conn, task_id: str, since: int) -> bool:
-    """A receipt strictly after the newest PR comment whose run is still the latest run."""
-    from hermes_cli import kanban_db as kb
+def _still_current(conn, task_id, after) -> bool:
+    """``after`` names the newest run once core-update requeues (pauses) are passed over.
+
+    Walk newest first: a requeue may follow the named run or be the named run itself; the
+    first real run that is not the named one (a claim, crash or other reclaim) spends it."""
+    from hermes_cli.kanban_core_update_requeue import _skipped
     from hermes_cli.kanban_dependency_review import _checkpoint_matches_run
 
-    latest = _latest_run(conn, task_id)
+    for run in conn.execute("SELECT * FROM task_runs WHERE task_id = ? ORDER BY id DESC", (task_id,)):
+        if isinstance(after, dict) and _checkpoint_matches_run(after, run):
+            return True
+        if not _skipped(conn, run):
+            return False
+    return after is None
+
+
+def resumed_after(conn, task_id: str, since: int) -> bool:
+    """A receipt strictly after the newest PR comment whose run is still the latest run.
+
+    "Latest" skips hermes-sync core-update requeues, as ``released_after`` does: a requeue
+    is a pause, so it neither spends the receipt nor stops one recorded right after it."""
+    from hermes_cli import kanban_db as kb
+
     now = int(time.time())
     for event in conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ?",
                               (task_id, EVENT)):
@@ -101,9 +119,7 @@ def resumed_after(conn, task_id: str, since: int) -> bool:
                 or data.get("scope") != "one_continuation" or data.get("merge_authorized") is not False):
             continue
         after = data.get("after_run", False)
-        if after is None and latest is None:
-            return True
-        if isinstance(after, dict) and latest is not None and _checkpoint_matches_run(after, latest):
+        if (after is None or isinstance(after, dict)) and _still_current(conn, task_id, after):
             return True
     return False
 
