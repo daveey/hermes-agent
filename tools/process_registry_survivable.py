@@ -310,8 +310,10 @@ class ProcessForegroundHoldMixin:
             self._track_started(session, self._log_reader_loop, f"proc-log-reader-{session.id}")
 
     def _enter_checkpoint_lock(self, stack: ExitStack) -> bool:
-        """The processes.json lock when it can be had (True); a release or handoff never fails for want of
-        it, but a caller must not rewrite processes.json unlocked when this returns False."""
+        """Enter the processes.json lock context: True once entered, False when it raised (e.g. the .lock
+        file can't be opened). Like every writer's, the context is best-effort: a failed flock inside it
+        is swallowed and still counts as entered. A release or handoff never fails for want of it, but a
+        caller must not rewrite processes.json when this returns False."""
         try:
             stack.enter_context(self._checkpoint_file_lock())
         except Exception:
