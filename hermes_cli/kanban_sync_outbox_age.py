@@ -12,7 +12,8 @@ Three readers of one number, the age of the oldest pending op:
 - The dispatcher tick (:func:`check`) files ONE card per incident on the default board when the same op is that old
   and this process's sync loop is not failing (its last round succeeded, or a round has run for over
   :data:`STALE_S`, which is the stuck-round shape of the incident). The incident ends when the op is answered; the
-  next one comments on the open card (at most hourly) or opens a new card once that card is done.
+  next one comments on the open card (at most hourly) or opens a new card once that card is done. A failing, stalled
+  or stopped loop is the replica-freshness check's (``kanban_sync_replica_age``), which the same tick runs next.
 
 "Unanswered" = pending with no ``retry_after``: the Board never told us to wait. A row the Board deferred
 (``storage_error``, ``depends_on_rejected``) retries on its own backoff and logs its own reason; counting it would
@@ -26,6 +27,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
+
+from hermes_cli import kanban_sync_replica_age as replica_age  # the same tick's replica-freshness alarm
 
 log = logging.getLogger(__name__)
 
@@ -106,10 +109,12 @@ def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
     warned: list[str] = []
     try:
         paths = dict(boards)
+        results = list(results)
         with _LOCK:
             _ROUND_STARTED[0] = None
             for r in results:
                 _LAST_OK[r.board] = not r.error
+        replica_age.note_round(results, mono=mono)  # the replica-freshness card names the last round's outcome
         for r in results:
             if r.error or r.board not in paths:
                 continue
@@ -138,8 +143,8 @@ def _loop_healthy(slug: str, now: float) -> bool:
 def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Callable[[str, str], Optional[str]]] = None,
           boards: Optional[list[tuple[str, Path]]] = None,
           age: Callable[[Path], Optional[float]] = _age) -> list[str]:
-    """One dispatcher-tick observation (at most every :data:`CHECK_EVERY_S`). Returns the card ids it filed or
-    commented. Never raises."""
+    """One dispatcher-tick observation (at most every :data:`CHECK_EVERY_S`): the outbox, then each replica's
+    freshness (``kanban_sync_replica_age.check``). Returns the card ids filed or commented. Never raises."""
     try:
         now = mono()
         if now < _NEXT_CHECK[0]:
@@ -151,12 +156,20 @@ def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Calla
                 return []
             from hermes_cli import kanban_sync_client as ksc
             boards = ksc.board_paths()
+    except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
+        log.warning("kanban: sync outbox age check failed", exc_info=True)
+        return []
+    return _check_outbox(boards, now, file_fn, age) + replica_age.check(boards, now=now)
+
+
+def _check_outbox(boards: list[tuple[str, Path]], now: float, file_fn, age) -> list[str]:
+    try:
         out = []
         for slug, path in boards:
             seconds = age(path) if _loop_healthy(slug, now) else None
             if seconds is None or seconds < STALE_S:
-                # Answered, or the loop is failing: incident over. No alarm covers a failing loop yet;
-                # t_01a1d3df5e5d0757 adds a replica-freshness check here.
+                # Answered, or the loop is failing: incident over here. A failing, stalled or stopped loop is
+                # alarmed by the replica-freshness check (kanban_sync_replica_age.check, run right after this).
                 _FILED.discard(slug)
                 continue
             if slug in _FILED:
@@ -172,33 +185,36 @@ def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Calla
         return []
 
 
-def report(slug: str, detail: str) -> Optional[str]:
-    """Open or comment the stalled-outbox card on the default board. Best effort: never raises."""
+def report(slug: str, detail: str, *, key: str = KEY, author: str = AUTHOR, title: Optional[str] = None,
+           body: Optional[str] = None, what: str = "outbox stalled") -> Optional[str]:
+    """Open or comment the stalled-outbox card on the default board (or, with ``key``/``author``/``title``/
+    ``body``, another alarm's card on the same one-card-per-incident path). Best effort: never raises."""
     try:
         from hermes_cli import kanban_db as kb
         from hermes_cli import kanban_db_connect as kbc
+        log.warning("kanban sync: %s: %s", what, detail)
         with kbc.connect_closing(kb.kanban_home() / "kanban.db") as conn:
-            return _report(conn, slug, detail)
+            return _report(conn, slug, detail, key=key, author=author, title=title, body=body)
     except Exception:  # health: allow BLE001 -- runs on the dispatcher tick
-        log.warning("kanban: could not file the stalled sync outbox card (%s)", detail, exc_info=True)
+        log.warning("kanban: could not file the %s card (%s)", what, detail, exc_info=True)
         return None
 
 
-def _report(conn: sqlite3.Connection, slug: str, detail: str) -> str:
+def _report(conn: sqlite3.Connection, slug: str, detail: str, *, key: str = KEY, author: str = AUTHOR,
+            title: Optional[str] = None, body: Optional[str] = None) -> str:
     from hermes_cli import kanban_db as kb
-    log.warning("kanban sync: outbox stalled: %s", detail)
-    key = f"{KEY}:{slug}"
+    key = f"{key}:{slug}"
     row = conn.execute(
         "SELECT id, status FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
         "ORDER BY status IN ('done', 'failed', 'cancelled'), created_at DESC, rowid DESC LIMIT 1", (key,),
     ).fetchone()
     if row and row[1] not in ("done", "failed", "cancelled"):
         recent = conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND created_at >= ? LIMIT 1",
-                              (row[0], AUTHOR, int(time.time()) - _COMMENT_EVERY)).fetchone()
+                              (row[0], author, int(time.time()) - _COMMENT_EVERY)).fetchone()
         if not recent:
-            kb.add_comment(conn, row[0], AUTHOR, f"Again: {detail}")
+            kb.add_comment(conn, row[0], author, f"Again: {detail}")
         return row[0]
-    body = (
+    body = body or (
         "A local edit on this host has waited over 10 minutes in the Kanban sync outbox, so the Board (and every "
         "worker leasing from it) has not seen it, although the sync loop is not failing.\n\n"
         f"{detail}\n\n"
@@ -207,8 +223,8 @@ def _report(conn: sqlite3.Connection, slug: str, detail: str) -> str:
         "(`hermes_cli/kanban_sync_backlog.py`), so an old op means push is not reached or not accepted. Done when "
         "the op is answered and the cause is fixed (precedent: t_01a1d36ddcea59fe)."
     )
-    tid = kb.create_task(conn, title=f"Kanban sync: {slug} outbox holds a local edit unsent for over 10 min",
-                         body=body, assignee="default", created_by=AUTHOR, priority=50,
+    tid = kb.create_task(conn, title=title or f"Kanban sync: {slug} outbox holds a local edit unsent for over 10 min",
+                         body=body, assignee="default", created_by=author, priority=50,
                          idempotency_key=None if row else key)
     if row:  # the previous card is finished: the key now names this one (newest wins)
         with kb.write_txn(conn, allow_nested=True):
@@ -224,3 +240,4 @@ def reset() -> None:
     _WARNED_AT.clear()
     _FILED.clear()
     _NEXT_CHECK[0] = 0.0
+    replica_age.reset()
