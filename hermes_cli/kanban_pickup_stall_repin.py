@@ -141,9 +141,10 @@ def malformed_skills(target: Any) -> Optional[str]:
 
 
 def _need(target: Any) -> set:
+    from hermes_cli import kanban_repin_notice
     from hermes_cli.kanban_placement_coordination import requirement_label
     # A NULL or empty assignee runs as ``default``, as in the Board's ``requiredLabels`` (``assignee || "default"``).
-    return {requirement_label(r) for r in _requires(target)} | {f"profile:{target['assignee'] or 'default'}"}
+    return {requirement_label(r) for r in _requires(target)} | {kanban_repin_notice.profile_label(target["assignee"])}
 
 
 def _pool_need(target: Any) -> set:

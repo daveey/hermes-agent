@@ -299,9 +299,9 @@ def _ready_now(entry: Mapping[str, Any], now_ms: int) -> bool:
 
 
 def _profile_label(assignee: Optional[str]) -> str:
-    """``profile:<assignee>``, a NULL/empty assignee read as ``default`` like the Board's ``requiredLabels`` and
-    :func:`hermes_cli.kanban_repin_notice.required_labels` (never ``profile:None`` or ``profile:``)."""
-    return f"profile:{assignee or 'default'}"
+    """:func:`hermes_cli.kanban_repin_notice.profile_label`, the Board's ``profile:<assignee or 'default'>``."""
+    from hermes_cli import kanban_repin_notice
+    return kanban_repin_notice.profile_label(assignee)
 
 
 def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], *, assignee: Optional[str],
