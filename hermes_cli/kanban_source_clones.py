@@ -2,7 +2,8 @@
 v3 S5). Only runs when ``kanban.workspace_source.enabled`` (refused until the protocol is complete, so inert).
 
 A clone is proven when all hold: the path is a repo root; the raw ``remote.origin.url`` canonicalizes to a GitHub URL;
-``ls-remote --get-url origin`` returns the same URL and there is no ``pushurl`` and no ``url.*`` rewrite; ``ls-remote
+``ls-remote --get-url origin`` and ``remote get-url --push origin`` return the same URL, there is no ``pushurl``
+and the clone's own config has no ``url.*`` rule (a global one must leave both URLs unchanged); ``ls-remote
 origin HEAD`` succeeds in BatchMode within 5 s; the GitHub API id for the canonical name matches (renames follow the
 id: matching is always by id). The id is cached per clone for 6 h in ``<kanban home>/source-proof.json``.
 """
@@ -59,9 +60,15 @@ def git(path: str | Path, *args: str, timeout: float = 30, check: bool = True) -
 
 def github_repo(full_name: str) -> dict:
     """``{id, full_name}`` from ``GET /repos/{owner}/{name}`` (follows renames) via the gh CLI and its broker token.
-    Raises on any failure: no API access means no proof (fail closed)."""
-    out = subprocess.run(["gh", "api", f"repos/{full_name}", "--jq", "{id: .id, full_name: .full_name}"],
-                         capture_output=True, text=True, encoding="utf-8", timeout=15, check=True)
+    Raises on any failure: no API access means no proof (fail closed).
+
+    The argv is the dispatcher's (:func:`hermes_cli.kanban_gh_argv.dispatcher_gh_argv`: the home's
+    ``kanban.pr_acceptance.gh_command_prefix`` broker wrapper + a resolved ``gh``). The hub's gateway and its card
+    runs have no ambient ``gh`` login or GH_TOKEN, so a bare ``gh api`` failed there and no hub clone ever proved:
+    every hub-held card stayed ``retained`` (t_01a1cc30806b0e62 rollout)."""
+    from hermes_cli.kanban_gh_argv import dispatcher_gh_argv
+    argv = [*dispatcher_gh_argv(), "api", f"repos/{full_name}", "--jq", "{id: .id, full_name: .full_name}"]
+    out = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=30, check=True)
     data = json.loads(out.stdout)
     if not isinstance(data.get("id"), int) or not isinstance(data.get("full_name"), str):
         raise ValueError(f"unexpected GitHub API answer for {full_name}")
@@ -127,10 +134,16 @@ def prove_clone(key: str, path: str, *, expected_id: Optional[int] = None,
     if full_name is None:
         raise ProofFailed("wrong_repo", f"origin {raw or '(none)'} is not a GitHub repository")
     effective = git(root, "ls-remote", "--get-url", "origin", check=False).stdout.strip()
+    push_effective = git(root, "remote", "get-url", "--push", "origin", check=False).stdout.strip()
     pushurl = git(root, "config", "--get-all", "remote.origin.pushurl", check=False).stdout.strip()
-    rewrites = git(root, "config", "--get-regexp", r"^url\.", check=False).stdout.strip()
-    if effective != raw or pushurl or rewrites:
+    # Any url.* rule in the clone's OWN config refuses. A global/system rule counts only when it changes this
+    # origin's fetch or push URL (both expanded above): every pool worker carries install-push-route's
+    # ``url.https://github.com/.pushInsteadOf git@github.com:``, which never touches an https origin, and refusing
+    # it made no worker prove a clone (t_01a1cc30806b0e62 rollout).
+    rewrites = git(root, "config", "--local", "--get-regexp", r"^url\.", check=False).stdout.strip()
+    if effective != raw or push_effective != raw or pushurl or rewrites:
         raise ProofFailed("origin_rewritten", f"origin {raw} resolves to {effective or '?'}"
+                          + (f", pushes to {push_effective or '?'}" if push_effective != raw else "")
                           + (f", pushurl {pushurl}" if pushurl else "") + (" (url.* rewrite set)" if rewrites else ""))
     try:
         git(root, "ls-remote", "origin", "HEAD", timeout=LS_REMOTE_TIMEOUT_S)

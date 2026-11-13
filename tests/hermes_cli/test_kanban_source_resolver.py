@@ -256,6 +256,49 @@ def test_origin_rewrite_refused(world, rewrite):
         assert err.code == "origin_rewritten"
 
 
+def test_global_push_rewrite_that_misses_origin_passes(world):
+    """Every pool worker has install-push-route's global ``url.https://github.com/.pushInsteadOf git@github.com:``.
+    It cannot touch this origin, so the clone proves (it refused as ``origin_rewritten`` on every worker)."""
+    conn, cfg = use_home(world, "worker-2")
+    git(world.tmp, "config", "--global", "url.https://github.com/.pushInsteadOf", "git@github.com:")
+    out = resolve(world, conn, cfg, snap(world))
+    assert out.mode == "materialized"
+
+
+@pytest.mark.parametrize("key", ["pushInsteadOf", "insteadOf"])
+def test_global_rewrite_of_origin_refused(world, key):
+    """A global rule that DOES change this origin's push or fetch URL still refuses."""
+    conn, cfg = use_home(world, "worker-2")
+    git(world.tmp, "config", "--global", f"url.{world.tmp / 'fork.git'}.{key}", str(world.origin))
+    err = refusal(lambda: resolve(world, conn, cfg, snap(world)))
+    assert (err.code, err.scope) == ("origin_rewritten", "host")
+
+
+def test_github_repo_uses_dispatcher_gh_argv(monkeypatch):
+    """The id lookup runs under the home's gh_command_prefix (the hub's gh has no login or GH_TOKEN)."""
+    from hermes_cli import kanban_gh_argv
+    seen = []
+    monkeypatch.setattr(kanban_gh_argv, "dispatcher_gh_argv", lambda: ["/opt/broker", "exec", "--", "/bin/gh"])
+
+    def run(argv, **kw):
+        seen.append(argv)
+        return SimpleNamespace(stdout='{"id": 42, "full_name": "acme/widget"}')
+    monkeypatch.setattr(kcl.subprocess, "run", run)
+    assert kcl.github_repo("acme/widget") == {"id": 42, "full_name": "acme/widget"}
+    assert seen == [["/opt/broker", "exec", "--", "/bin/gh", "api", "repos/acme/widget", "--jq",
+                     "{id: .id, full_name: .full_name}"]]
+
+
+def test_github_repo_without_gh_argv_fails_closed(monkeypatch):
+    from hermes_cli import kanban_gh_argv
+
+    def unavailable():
+        raise kanban_gh_argv.GhArgvUnavailable("kanban.pr_acceptance.gh_command_prefix is unreadable or invalid")
+    monkeypatch.setattr(kanban_gh_argv, "dispatcher_gh_argv", unavailable)
+    with pytest.raises(kanban_gh_argv.GhArgvUnavailable):
+        kcl.github_repo("acme/widget")
+
+
 def test_wrong_repo_clone_refused(world):
     conn, cfg = use_home(world, "worker-2")
     world.monkeypatch.setattr(kcl, "github_repo", lambda full_name: {"id": 7, "full_name": full_name})
