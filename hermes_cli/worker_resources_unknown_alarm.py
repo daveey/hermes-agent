@@ -50,7 +50,7 @@ def record_for(exc: Optional[BaseException]) -> Optional[str]:
 
 def read() -> Optional[dict[str, Any]]:
     try:
-        state = json.loads(_path().read_text(encoding="utf-8"))
+        state = json.loads(_path().read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     return state if isinstance(state, dict) and isinstance(state.get("since"), (int, float)) else None
