@@ -28,7 +28,7 @@ from tools.kanban_tools_placement import (_local_placement, _machine_placement, 
                                           _effective_board_args, _origin_enrollment, _landing_placement, _pinned_note,
                                           _admission_refused, _effective_requires, _with_admission)
 # SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
-from tools.kanban_tools_attach_url import _download_url_with_cap
+from tools.kanban_tools_attach_url import _download_url_with_cap, _store_attachment
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo, _escalated)
@@ -1387,16 +1387,6 @@ def _handle_comment(args: dict, **kw) -> str:
                 "(often a few minutes); a comment_delivered event on the card confirms it")
         return _ok(task_id=tid, comment_id=cid, **extra,
                    **({"subscribed": True} if subscribed else {}))
-
-
-def _store_attachment(board, tid, filename, data, content_type) -> str:
-    """Store via ``kanban_db.store_attachment_bytes`` (shared size cap, per-task
-    dir, metadata row) so agent, dashboard, and CLI surfaces stay in lockstep."""
-    with _board(board) as (kb, conn):
-        att_id = kb.store_attachment_bytes(
-            conn, tid, str(filename), data,
-            content_type=content_type, uploaded_by="agent", board=board)
-        return _ok(task_id=tid, attachment_id=att_id, size=len(data))
 
 
 @_kanban_handler("kanban_attach")
