@@ -2734,10 +2734,18 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
     env = systemd_user_bus_env(env)
     held = _custody.reserve()  # BEFORE the child exists; released by the reap that proves its exit
     try:
-        log_f = _open_worker_log(task, board)
+        proc = _popen_worker(task, board, cmd, workspace, env, observation)
     except BaseException:
-        _custody.abort(held)
+        _custody.abort(held)  # no child was created
         raise
+    _live_worker_procs[proc.pid] = proc
+    _custody.adopt_spawned(proc, held, _process_fingerprint)
+    return proc.pid
+
+
+def _popen_worker(task: Task, board: Optional[str], cmd, workspace: str, env, observation):
+    """Open the worker log and start the detached child; a raise means no child exists."""
+    log_f = _open_worker_log(task, board)
     try:
         proc = (observation or subprocess.Popen)(
             cmd,
@@ -2749,26 +2757,18 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
             start_new_session=True,  # detached-spawn: ok — restart-safe kanban worker, must survive the dispatcher
             creationflags=subprocess.CREATE_NO_WINDOW if _kb._IS_WINDOWS else 0,
         )
-    except PermissionError:
-        log_f.close()
-        _custody.abort(held)
-        raise
     except FileNotFoundError:
         log_f.close()
-        _custody.abort(held)
         raise RuntimeError(
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
     except BaseException:
         log_f.close()
-        _custody.abort(held)  # no child was created
         raise
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
-    _live_worker_procs[proc.pid] = proc
-    _custody.adopt_spawned(proc, held, _process_fingerprint)
-    return proc.pid
+    return proc
 
 
 # ---------------------------------------------------------------------------
