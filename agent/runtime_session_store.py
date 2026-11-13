@@ -56,6 +56,25 @@ _ACKED_MAX_BYTES = 256 * 1024
 #: Operations whose result moved the worker's own identity (target, child, terminal status). A gap
 #: holding one is not re-sent: replaying it under the current scope would not be the same write.
 _UNREPLAYABLE = frozenset({'compression.publish', 'child.reserve', 'execution.finish'})
+#: Consecutive unknown outcomes (no reply in the receipt budget, or a closed owner link) the store
+#: re-sends through before it latches like any other failure. The owner resolves an exact resend of
+#: the pending entry from its receipt row, so one stall need not end the run.
+_RETRYABLE_ATTEMPTS = 3
+
+
+def is_retryable_owner_error(exc) -> bool:
+    """True when the owner's answer to the pending entry is unknown but a resend is safe: the
+    receipt budget ran out (``worker_receipt_timeout``) or the owner link closed. Never a refusal
+    the owner sent (``WorkerPersistenceError``), which an exact resend would only repeat."""
+    if isinstance(exc, TimeoutError):
+        return str(exc) == 'worker_receipt_timeout'
+    if isinstance(exc, ConnectionError):
+        return True
+    try:
+        from websockets.exceptions import ConnectionClosed
+    except ImportError:
+        return False
+    return isinstance(exc, ConnectionClosed)
 
 
 def is_retired_generation_error(exc) -> bool:
@@ -306,6 +325,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         self.max_bytes = max_bytes
         self.lock = threading.RLock()
         self.failure = None
+        self._unknown = None  # {'since', 'attempts', 'operation'} while ``failure`` is a resendable unknown outcome
         self.path = Path(outbox_dir) / 'pending.json'
         make_user_dir(self.path.parent, mode=0o700, parents=True, exist_ok=True)
         if self.path.parent.is_symlink() or self.path.is_symlink():
@@ -389,10 +409,16 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         if session_id != self.scope['session_id']:
             raise WorkerPersistenceError('permission_denied')
 
+    def _resume_unknown(self):
+        """Re-send the pending entry a stalled reply left unknown, or raise the sticky failure."""
+        if self._unknown is None:
+            raise WorkerPersistenceError(self.failure)
+        self.retry_pending()
+
     def _apply(self, operation, payload):
         with self.lock:
             if self.failure:
-                raise WorkerPersistenceError(self.failure)
+                self._resume_unknown()
             if self.journal['pending']:
                 raise WorkerPersistenceError('pending_receipt')
             entry = {'sequence': self.journal['next_sequence'], 'operation': operation, 'payload': payload}
@@ -481,9 +507,33 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                     results.append(result)
             except Exception as exc:
                 self.failure = str(exc)
+                self._note_unknown(exc)
+                if self._unknown is None and is_retryable_owner_error(exc):
+                    raise WorkerPersistenceError(self.failure) from exc  # resends exhausted: sticky
                 raise
+            if self._unknown is not None:
+                logger.warning('worker receipt timeout recovered after %.1fs (op=%s, attempts=%d)',
+                               time.monotonic() - self._unknown['since'], self._unknown['operation'],
+                               self._unknown['attempts'])
             self.failure = None
+            self._unknown = None
             return results
+
+    def _note_unknown(self, exc):
+        """Keep a resendable unknown outcome open for the next write, up to ``_RETRYABLE_ATTEMPTS``."""
+        unknown, self._unknown = self._unknown, None
+        if not is_retryable_owner_error(exc) or not self.journal['pending']:
+            return
+        attempts = (unknown['attempts'] if unknown else 0) + 1
+        operation = self.journal['pending'][0]['operation']
+        if attempts >= _RETRYABLE_ATTEMPTS:
+            logger.error('worker receipt outcome still unknown after %d attempts (op=%s): %s',
+                         attempts, operation, exc)
+            return
+        self._unknown = {'since': unknown['since'] if unknown else time.monotonic(),
+                         'attempts': attempts, 'operation': operation}
+        logger.warning('worker receipt outcome unknown (op=%s, attempt %d/%d): %s; the next write re-sends it',
+                       operation, attempts, _RETRYABLE_ATTEMPTS, exc)
 
     def adopt(self, epoch):
         """Install only a separately verified worker.adopt result; never self-adopt."""
@@ -493,6 +543,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             self.scope = candidate['scope']
             self.journal = candidate
             self.failure = None
+            self._unknown = None
 
     def append_messages_batch(self, session_id, messages, compression_lock_holder=None,
                               turn_lease_holder=None, chunk_rows=None, turn_lease_ttl_seconds=300.0):
@@ -544,7 +595,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
     def flush_token_counts(self, timeout=5.0):
         with self.lock:
             if self.failure:
-                raise WorkerPersistenceError(self.failure)
+                self._resume_unknown()
             if self.journal['pending']:
                 raise WorkerPersistenceError('pending_receipt')
             return True

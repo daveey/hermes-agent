@@ -35,7 +35,7 @@ class ChildSessionStore(RuntimeSessionStore):
     def close(self):
         # The child's agent closes once, after its last write: that is this execution's end.
         try:
-            if not self._outbox_owner.closed and not self.failure:
+            if not self._outbox_owner.closed and (not self.failure or self._unknown is not None):
                 self.finish()
         finally:
             super().close()
