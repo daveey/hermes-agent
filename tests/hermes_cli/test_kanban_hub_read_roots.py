@@ -242,6 +242,20 @@ def test_backtick_spans_follow_main_with_or_without_hub_read(attested, body):
     assert reason(body, cfg) == reason(body, cfg, requires=())
 
 
+@pytest.mark.parametrize("body, cleared", [
+    # Only backslash-LF continues a line: a backslash before a CR quotes that CR, so ``.\<CR><LF>.`` is no ``..``
+    # and the root path is cleared (sweep-2039 mutant 2559-M8 read ``\\\r?\n`` as a continuation and kept it).
+    ("cat ~/.hermes/logs/x.log .\\\r\n./x", True),
+    ("cat ~/.hermes/logs/x.log .\\\n./x", False),
+])
+def test_only_backslash_lf_is_a_continuation(attested, body, cleared):
+    # Judged on without_read_paths itself: portable_reason normalises CRLF to LF first (without_evidence), so
+    # there this body pins either way, fail-closed.
+    cfg, _, _ = attested
+    out = coord.without_read_paths(body, cfg, requires=["hub:read"])
+    assert ("~/.hermes/logs/x.log" not in out) is cleared
+
+
 def test_claim_refusal_unchanged(attested):
     _, entry, _ = attested
     card = {"placement_policy": "worker-first-v1", "title": "t", "body": STEP, "requires": ["hub:read"]}
