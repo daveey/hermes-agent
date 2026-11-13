@@ -233,6 +233,31 @@ def test_a_regressed_revision_alone_reads_full(board):
     assert tc.changed_since(board, cursor)[0] is FULL
 
 
+def test_a_changed_shm_identity_alone_reads_full_and_rearms(board, monkeypatch):
+    """A new WAL generation invalidates even an otherwise unchanged database cursor."""
+    from hermes_cli import kanban_lockguard
+
+    kb.create_task(board, title="a", assignee="w")
+    cursor = _armed(board)
+    path = tc._main_path(board)
+    assert path is not None
+    # Model the OS observation, not a live shm unlink (unsafe with SQLite open).
+    replacement_shm = ("replacement-wal-generation",)
+    assert cursor.shm != replacement_shm
+    monkeypatch.setattr(kanban_lockguard, "shm_identity", lambda _path: replacement_shm)
+    assert tc._main_path(board) == path
+    assert tc._identity(path) == (cursor.dev, cursor.ino, replacement_shm)
+    assert board.execute("PRAGMA schema_version").fetchone()[0] == cursor.schema_version
+    assert board.execute("SELECT revision FROM kanban_activity_revision").fetchone()[0] == cursor.revision
+
+    changed, fresh = tc.changed_since(board, cursor)
+    assert changed is FULL
+    assert fresh == tc.Cursor(cursor.dev, cursor.ino, replacement_shm,
+                              cursor.schema_version, cursor.revision, cursor.tables)
+    assert fresh != cursor
+    assert tc.changed_since(board, fresh) == (frozenset(), fresh)
+
+
 def test_a_replaced_file_reads_full(home, board, tmp_path):
     kb.create_task(board, title="a", assignee="w")
     cursor = _armed(board)
