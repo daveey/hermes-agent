@@ -50,7 +50,9 @@ class Detector:
         self.timeout = timeout
 
     def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=self.timeout)
+        # quota_contradictions.db: local evidence/outbox, never a board; board writes
+        # go through the dispatcher owner's supported create_task/add_comment calls.
+        conn = sqlite3.connect(self.path, timeout=self.timeout)  # noqa: kanban-lockguard (not a board)
         conn.execute('CREATE TABLE IF NOT EXISTS observations (scope TEXT, at REAL, accounts TEXT)')
         if 'accounts' not in [r[1] for r in conn.execute('PRAGMA table_info(observations)')]:
             conn.execute('ALTER TABLE observations ADD COLUMN accounts TEXT')

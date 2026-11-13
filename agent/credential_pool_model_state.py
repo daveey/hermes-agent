@@ -58,16 +58,18 @@ def resync_model_state(pool, entry):
 
 
 def adopt_persisted_row(entry, row, pair):
-    """Adopt merged resets/status as well as tokens without dehydrating reference rows."""
+    """Adopt a peer's newer token pair, else only the merged model-scoped state.
+
+    Account-wide status stays with the in-memory entry unless the pair moved: adopting a
+    merged status on an unchanged (or reference-only) row would re-bench a live credential
+    with a peer's or pre-relogin verdict on every ordinary flush."""
     from dataclasses import replace
     from agent.credential_pool import PooledCredential
-    from hermes_cli.auth_pool_merge import _POOL_STATUS_FIELDS
 
     if row is None:
         return entry
-    updates = {field: row.get(field) for field in (*MODEL_STATE_FIELDS, *_POOL_STATUS_FIELDS)}
-    changed = any(getattr(entry, field) != value for field, value in updates.items())
-    if any(pair):
-        return PooledCredential.from_dict(entry.provider, row) if changed or pair != (
-            entry.access_token, entry.refresh_token) else entry
+    if any(pair) and pair != (entry.access_token, entry.refresh_token):
+        return PooledCredential.from_dict(entry.provider, row)
+    updates = {field: row.get(field) or None for field in MODEL_STATE_FIELDS}
+    changed = any((getattr(entry, field) or None) != value for field, value in updates.items())
     return replace(entry, **updates) if changed else entry

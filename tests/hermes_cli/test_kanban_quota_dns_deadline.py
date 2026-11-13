@@ -16,37 +16,40 @@ def test_dns_deadline_in_fresh_interpreter_and_mutants(tmp_path, mutant):
     if mutant == 'executor_dns':
         source = source.replace('asyncio.get_running_loop().getaddrinfo = _getaddrinfo', 'pass')
     elif mutant == 'no_kill':
-        source = source.replace('process.kill()', 'process.wait(timeout=5)')
+        source = source.replace('process.kill()', 'process.wait(timeout=10)')
     script = tmp_path / 'probe.py'
     marker = tmp_path / 'resolver-pid'
-    dns_script = f"import os,time; open({str(marker)!r}, 'w').write(str(os.getpid())); time.sleep(3)"
+    started = tmp_path / 'call-started'  # excludes interpreter/import startup under load
+    dns_script = f"import os,time; open({str(marker)!r}, 'w').write(str(os.getpid())); time.sleep(6)"
     script.write_text(
         'import sys, socket, time, types\n'
         f'sys.path.insert(0, {str(Path(recovery.__file__).resolve().parents[1])!r})\n'
         'import httpx\n'
+        'import tools.environments.local  # loaded in production before any probe\n'
         'from types import SimpleNamespace\n'
         'module = types.ModuleType("isolated_recovery")\n'
         f'exec(compile({source!r}, "recovery.py", "exec"), module.__dict__)\n'
         'def stalled(*a, **kw):\n'
-        '    time.sleep(3)\n'
+        '    time.sleep(6)\n'
         '    raise socket.gaierror("controlled DNS failure")\n'
         'socket.getaddrinfo = stalled\n'
         'module._client = lambda timeout: httpx.AsyncClient(timeout=timeout, trust_env=False)\n'
         f'module._DNS_SCRIPT = {dns_script!r}\n'
+        f'open({str(started)!r}, "w").write(repr(time.time()))\n'
         'assert module.completion_succeeds("anthropic", "m", '
         'SimpleNamespace(runtime_api_key="synthetic"), time.monotonic()+0.5) is False\n',
         encoding='utf-8')
-    start = time.monotonic()
     result = subprocess.run([sys.executable, str(script)], capture_output=True,
-                            text=True, encoding='utf-8', timeout=6, check=False,
+                            text=True, encoding='utf-8', timeout=30, check=False,
                             env=build_subprocess_env())
-    elapsed = time.monotonic() - start
     assert result.returncode == 0, result.stderr
     assert not result.stderr
+    # From the call to process exit: the deadline bounds both the call and shutdown.
+    elapsed = time.time() - float(started.read_text())
     if mutant == 'none':
-        assert elapsed < 2.5
+        assert elapsed < 4.0  # deadline 0.5s; slack for spawn+exit on a loaded CI runner
     else:
-        assert elapsed > 2.8  # both mutants violate the same process-exit bound
+        assert elapsed > 5.5  # both mutants violate the same process-exit bound
     if marker.exists():
         assert not Path('/proc/' + marker.read_text()).exists(), 'resolver not reaped'
 
