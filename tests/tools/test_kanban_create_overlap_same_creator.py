@@ -82,6 +82,37 @@ def test_recorded_legitimate_fan_out_is_admitted(case):
     assert _replay(case) is None
 
 
+@pytest.mark.parametrize("case", [c for c in CASES if c["kind"] == "reissue"], ids=_cid)
+def test_reissue_that_only_adds_a_round_or_sha_is_refused(case):
+    """PR #2329 review: a title that only adds "(round 2)" or a sha is the same work, not an enumerated leg."""
+    match = _replay(case)
+    assert match is not None, "an added round number or sha must not read as an enumeration marker"
+
+
+@pytest.mark.parametrize("mine, theirs", [
+    ("Fix the overlap guard (PR #2329 review nits)", "Fix the overlap guard (PR #2329 review nits) round 2"),
+    ("Fix the overlap guard (PR #2329 review nits)", "Fix the overlap guard (PR #2329 review nits) at 9baf8d8abc"),
+    ("Fix the overlap guard for PR #2329", "Fix the overlap guard for PR #2329, attempt 3 after 2 crashes"),
+])
+def test_an_added_number_is_not_an_enumeration(mine, theirs):
+    from hermes_cli import kanban_overlap_own as own
+    card = {"title": theirs, "assignee": "default"}
+    assert own.own_distinct(mine, "default", card) is None
+
+
+@pytest.mark.parametrize("mine, theirs", [
+    ("Sleep probe w1-01 (holds one slot)", "Sleep probe w1-02 (holds one slot)"),
+    ("Victim scan on worker-2: live probes", "Victim scan on worker-3: live probes"),
+    ("Energy filter 1/3, write the tool", "Energy filter 3/3, read the results"),
+    ("Two-worker fixture A (idle hold)", "Two-worker fixture B (hostname only)"),
+    ("Review PR #2110 at head 5d2e512cbb", "Review PR #2110 at head 9baf8d8abc"),
+])
+def test_an_index_in_the_same_place_is_an_enumeration(mine, theirs):
+    from hermes_cli import kanban_overlap_own as own
+    card = {"title": theirs, "assignee": "default"}
+    assert (own.own_distinct(mine, "default", card) or "").startswith("enumerated")
+
+
 def test_distinct_from_still_admits_an_own_duplicate():
     case = next(c for c in CASES if c["b"]["id"] == "t_01a1d4e145f389a5")
     match = _replay(case)

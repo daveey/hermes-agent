@@ -74,6 +74,27 @@ def test_other_creator_and_plain_completions_open_nothing(conn):
     assert dd.describe(conn) == []
 
 
+@pytest.mark.parametrize("summary", [
+    "Not a duplicate of {first}: this card fixes the Mac path, that one the hub path.",
+    "No duplicates found; parent {first} owns only the design.",
+    "This isn't a duplicate of {first}, which covers the other module.",
+    "Checked for a non-duplicate scope against {first}.",
+])
+def test_a_completion_that_denies_duplication_opens_nothing(conn, summary):
+    creator = kb.create_task(conn, title="creator", assignee="default")
+    first, second = _pair(conn, creator)
+    assert dd.sibling_named(summary.format(first=first)) == []
+    assert kb.complete_task(conn, second, summary=summary.format(first=first))
+    assert dd.describe(conn) == []
+
+
+def test_a_negation_in_an_earlier_clause_does_not_hide_a_duplicate():
+    assert dd.sibling_named("No code changes; duplicate of t_0123456789abcdef.") == ["t_0123456789abcdef"]
+    assert dd.sibling_named("Not a duplicate of t_0123456789abcdef; superseded by t_fedcba9876543210.") == [
+        "t_fedcba9876543210"]
+    assert dd.sibling_named("No duplicates elsewhere, superseded by t_fedcba9876543210.") == ["t_fedcba9876543210"]
+
+
 def test_a_closed_detector_card_lets_the_next_occurrence_open_a_new_one(conn):
     creator = kb.create_task(conn, title="creator", assignee="default")
     first, second = _pair(conn, creator)

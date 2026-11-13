@@ -13,8 +13,10 @@ the cards are different work (:func:`own_distinct`):
 - another assignee;
 - one title is a review and the other is not;
 - different leading component tags (``[core]`` vs ``[mods]``, ``Board:`` vs ``Core:``);
-- the titles are an enumeration: both carry index markers (a digit token or a lone capital letter) and the
-  markers differ (``w1-01``/``w1-02``, ``worker-2``/``worker-3``, ``1/3``/``3/3``, fixture A/B, two shas).
+- the titles are an enumeration (:func:`enumerated`): in the same place of both titles each carries an index
+  marker (a digit token or a lone capital letter) and the markers differ (``w1-01``/``w1-02``,
+  ``worker-2``/``worker-3``, ``1/3``/``3/3``, fixture A/B, two shas). A marker only one title has (an added
+  ``round 2`` or sha) is a re-issue, not a leg.
 
 Two cards from one owner that name the same rare code identifiers share a fix site even when their titles are
 worded apart, as the PR #2062 pair did (title ratio 0.41). That is :func:`shared_code_reason`: at least
@@ -37,6 +39,7 @@ tree inherits that session, and the 10-11 race of two creators is another cause.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Iterable, Optional
 
@@ -52,6 +55,7 @@ _REVIEW = re.compile(r"\b(?:re-?review|review)\b(?!\s+(?:nits?|follow-?ups?|find
 _COMPONENT = re.compile(r"^\s*(?:\[([a-z0-9_-]+)\]|([a-z0-9_-]+):\s)", re.IGNORECASE)
 _DIGIT_TOKEN = re.compile(r"[a-z0-9]*\d[a-z0-9]*")
 _LETTER_MARK = re.compile(r"(?<![\w'\u2019])([A-Z])(?![\w'\u2019])")
+_TOKEN = re.compile(r"[A-Za-z0-9]+(?:[-/.'\u2019][A-Za-z0-9]+)*")
 
 
 @lru_cache(maxsize=8192)
@@ -94,6 +98,28 @@ def markers(title: str) -> frozenset[str]:
         f"letter:{m}" for m in _LETTER_MARK.findall(plain))
 
 
+def _title_tokens(title: str) -> list[str]:
+    plain = _CARD_ID.sub(" ", title or "")
+    return [m.group(0) for m in _TOKEN.finditer(plain)]
+
+
+def enumerated(title: str, theirs: str) -> Optional[tuple[frozenset[str], frozenset[str]]]:
+    """``(mine, theirs)`` index markers that differ in the same place of both titles, else None.
+
+    Only a replaced span counts, with a marker on both sides (``w1-01``/``w1-02``, ``1/3``/``3/3``, fixture
+    ``A``/``B``, head ``5d2e512cbb``/``9baf8d8abc``). A marker only one title has (an added ``round 2``, an
+    appended sha, ``attempt 3``) is a re-issue of the same work, not a leg (PR #2329 review)."""
+    a, b = _title_tokens(title), _title_tokens(theirs)
+    ops = SequenceMatcher(None, [t.lower() for t in a], [t.lower() for t in b], autojunk=False).get_opcodes()
+    for tag, i1, i2, j1, j2 in ops:
+        if tag != "replace":
+            continue
+        mine_m, their_m = markers(" ".join(a[i1:i2])), markers(" ".join(b[j1:j2]))
+        if mine_m and their_m and mine_m != their_m:
+            return mine_m - their_m, their_m - mine_m
+    return None
+
+
 def _component(title: str) -> Optional[str]:
     m = _COMPONENT.match(title or "")
     return (m.group(1) or m.group(2)).lower() if m else None
@@ -109,10 +135,10 @@ def own_distinct(title: str, assignee: Optional[str], card: dict) -> Optional[st
     mine_c, their_c = _component(title), _component(theirs)
     if mine_c and their_c and mine_c != their_c:
         return f"component {mine_c} != {their_c}"
-    mine_m, their_m = markers(title), markers(theirs)
-    if mine_m and their_m and mine_m != their_m:
-        return f"enumerated ({', '.join(sorted(mine_m - their_m)[:3]) or '-'} vs " \
-               f"{', '.join(sorted(their_m - mine_m)[:3]) or '-'})"
+    diff = enumerated(title, theirs)
+    if diff:
+        mine_m, their_m = diff
+        return f"enumerated ({', '.join(sorted(mine_m)[:3]) or '-'} vs {', '.join(sorted(their_m)[:3]) or '-'})"
     return None
 
 

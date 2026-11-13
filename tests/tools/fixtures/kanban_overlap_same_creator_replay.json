@@ -897,6 +897,56 @@
     "hermes_cli request_changes reviewed_pr reviewed_sha",
     "request_changes reviewed_pr reviewed_sha"
    ]
+  },
+  {
+   "kind": "reissue",
+   "note": "PR #2329 review 5893203646: the hub card t_01a1d56ea127e910 re-issued in a later run with \"(round 2)\" appended; only the title suffix and ids are synthetic",
+   "creator": "t_01a1d522bfce4cbc",
+   "a": {
+    "id": "t_01a1d56ea127e910",
+    "title": "Core overlap same-creator guard follow-ups (PR #2329 review nits): detector regex matches negations; any digit token counts as an enumeration marker",
+    "body": "From independent exact-head review 5893203646 of PR #2329 (softmax-universe/daveey-hermes, card t_01a1d562472349a2). Fix both in core via `hermes-core-wt ship` with its own exact-head review.\n\n1. Detector false positive. `hermes_cli/kanban_dup_detector.py` `_DUP` regex matches negations such as \"Not a duplicate of t_X\" or \"No duplicates found; parent t_X\". Add a negation guard with tests for both phrasings.\n2. Enumeration fail-open. In `hermes_cli/kanban_overlap_own.py`, any digit-bearing token counts as an enumeration marker, so a re-issue whose title adds \"round 2\" or a sha is admitted as enumerated fan-out.",
+    "assignee": "default",
+    "created_at": 1794582159,
+    "has_key": false
+   },
+   "b": {
+    "id": "t_01a1d5f0c0ffee02",
+    "title": "Core overlap same-creator guard follow-ups (PR #2329 review nits): detector regex matches negations; any digit token counts as an enumeration marker (round 2)",
+    "body": "From independent exact-head review 5893203646 of PR #2329 (softmax-universe/daveey-hermes, card t_01a1d562472349a2). Fix both in core via `hermes-core-wt ship` with its own exact-head review.\n\n1. Detector false positive. `hermes_cli/kanban_dup_detector.py` `_DUP` regex matches negations such as \"Not a duplicate of t_X\" or \"No duplicates found; parent t_X\". Add a negation guard with tests for both phrasings.\n2. Enumeration fail-open. In `hermes_cli/kanban_overlap_own.py`, any digit-bearing token counts as an enumeration marker, so a re-issue whose title adds \"round 2\" or a sha is admitted as enumerated fan-out.",
+    "assignee": "default",
+    "created_at": 1794590000,
+    "has_key": true
+   },
+   "b_key": "followup:pr2329:review-nits-r2",
+   "b_parents": [],
+   "run_started": 1794589900,
+   "background": []
+  },
+  {
+   "kind": "reissue",
+   "note": "the same re-issue with the reviewed head sha appended instead of a round number (synthetic suffix and ids)",
+   "creator": "t_01a1d522bfce4cbc",
+   "a": {
+    "id": "t_01a1d56ea127e910",
+    "title": "Core overlap same-creator guard follow-ups (PR #2329 review nits): detector regex matches negations; any digit token counts as an enumeration marker",
+    "body": "From independent exact-head review 5893203646 of PR #2329 (softmax-universe/daveey-hermes, card t_01a1d562472349a2). Fix both in core via `hermes-core-wt ship` with its own exact-head review.",
+    "assignee": "default",
+    "created_at": 1794582159,
+    "has_key": false
+   },
+   "b": {
+    "id": "t_01a1d5f0c0ffee03",
+    "title": "Core overlap same-creator guard follow-ups (PR #2329 review nits @ 9baf8d8abc): detector regex matches negations; any digit token counts as an enumeration marker",
+    "body": "From independent exact-head review 5893203646 of PR #2329 (softmax-universe/daveey-hermes, card t_01a1d562472349a2). Fix both in core via `hermes-core-wt ship` with its own exact-head review.",
+    "assignee": "default",
+    "created_at": 1794590000,
+    "has_key": true
+   },
+   "b_key": "followup:pr2329:review-nits-9baf8d8abc",
+   "b_parents": [],
+   "run_started": 1794589900,
+   "background": []
   }
  ]
 }

@@ -8,7 +8,7 @@ still passes it. This detector is the net behind it.
 
 When a card completes with a summary or result that says it duplicates, or was superseded by, a card id
 (``duplicate of t_X``, ``duplicates t_X``, ``Superseded ... card t_X``), and ``t_X`` has the same creator task,
-one open card on that board collects the pattern:
+one open card on that board collects the pattern (a denial such as ``Not a duplicate of t_X`` does not count):
 - no open detector card: one is created (``ready``, assignee ``default``) naming this pair;
 - an open one exists: this pair is added to it as a comment.
 After that card is done or archived, the next occurrence opens a new one. Never raises.
@@ -27,12 +27,32 @@ KEY_PREFIX = "detector:same-creator-duplicate:"
 TITLE = "Same-creator duplicate cards: create_overlap let a creator file the same work twice"
 _CARD = r"t_[0-9a-f]{8,16}"
 # "duplicate of t_X", "duplicates t_X", "DUPLICATE of t_X", "superseded by ... t_X", "Superseded: ... card t_X".
-_DUP = re.compile(rf"\b(?:duplicat\w*|supersed\w*)\b[^.\n]{{0,120}}?\b({_CARD})\b", re.IGNORECASE)
+_KEYWORD = re.compile(r"\b(?:duplicat\w*|supersed\w*)\b", re.IGNORECASE)
+_AFTER = re.compile(rf"[^.\n]{{0,120}}?\b({_CARD})\b")
+# A denial in the keyword's own clause, up to two words before it: "Not a duplicate of t_X", "No duplicates
+# found; parent t_X", "isn't a duplicate", "non-duplicate" (PR #2329 review). An earlier clause ("No code
+# changes; duplicate of t_X") does not deny it.
+_NEGATED = re.compile(r"\b(?:not|no|never|non|\w+n['\u2019]t)[\s-]+(?:[\w'\u2019]+\s+){0,2}$", re.IGNORECASE)
+_CLAUSE_END = re.compile(r"[.;:!?,\n]")
+
+
+def _negated(text: str, start: int) -> bool:
+    before = text[max(0, start - 80):start]
+    ends = [m.end() for m in _CLAUSE_END.finditer(before)]
+    return bool(_NEGATED.search(before[ends[-1] if ends else 0:]))
 
 
 def sibling_named(text: str) -> list[str]:
-    """Card ids the text says this card duplicates or was superseded by, in order."""
-    return list(dict.fromkeys(m.group(1) for m in _DUP.finditer(text or "")))
+    """Card ids the text says this card duplicates or was superseded by, in order; a denied one is skipped."""
+    text = text or ""
+    found = []
+    for kw in _KEYWORD.finditer(text):
+        if _negated(text, kw.start()):
+            continue
+        card = _AFTER.match(text, kw.end())
+        if card:
+            found.append(card.group(1))
+    return list(dict.fromkeys(found))
 
 
 def _creator(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
