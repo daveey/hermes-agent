@@ -117,6 +117,22 @@ def test_a_reopen_whose_event_is_in_the_next_page_still_reopens(synced_conn):
     assert _status(conn, tid) == "ready"
 
 
+def test_a_push_strip_note_between_the_pages_does_not_lose_the_reopen(synced_conn):
+    """Review of #1958: the restore read the newest note of any source, so a push strip written between the held
+    row's page and the reopen's page left the card done over a legitimate Board reopen."""
+    conn, tid = synced_conn, "t_01a1d1092f3caa32"
+    _done_remote_card(conn, tid)
+    sync.apply_remote_changes(conn, [_ch(3, "tasks", tid, {"status": "ready"}, version=2)], new_cursor=3)
+    assert _status(conn, tid) == "done"
+    with kbc.write_txn(conn):
+        hold = ktg.terminal_hold(conn, tid)
+        assert hold is not None
+        ktg.note_push_strip(conn, tid, hold, "ready")
+    sync.apply_remote_changes(conn, [_ev(4, tid, "unblocked", 1_794_520_600)], new_cursor=4)
+    assert _status(conn, tid) == "ready"
+    assert [n["source"] for n in _ignored(conn, tid)] == ["apply", "push"]
+
+
 # --- (a) the push: a wake fired on a stale copy before the completion reached it -----------------------------------
 
 @pytest.fixture
@@ -197,6 +213,33 @@ def test_divergence_repair_does_not_send_a_stale_wake_over_the_replicas_done_car
         shadow.close()
     _round(kanban_home, svc)
     assert svc.board(BOARD)["rows"]["tasks"][tid]["status"] == "done"
+
+
+def test_divergence_repair_still_sends_an_uncaptured_local_reopen(live, kanban_home, svc):
+    """Review of #1958: the run-less hold read only the replica, so a local reopen written while capture was off
+    (the case the repair exists for) was adopted back to done. The live log's reopen wins."""
+    tid = kb.create_task(live, title="pool card", assignee="worker")
+    _round(kanban_home, svc)
+    now = int(time.time())
+    svc.hub(OTHER).ops(BOARD, [
+        {"client_op_id": "w1-done", "op": "upsert", "table": "tasks", "uid": tid, "hlc": _hlc(1_000, OTHER),
+         "fields": {"status": "done", "completed_at": now, "current_run_uid": None}},
+        {"client_op_id": "w1-ev", "op": "upsert", "table": "task_events", "uid": kb_uuid(), "hlc": _hlc(1_000, OTHER),
+         "fields": {"task_id": tid, "kind": "completed", "payload": "{}", "created_at": now}},
+    ])
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying = 1")  # capture down: neither row nor event queued
+        live.execute("UPDATE tasks SET status = 'ready', completed_at = NULL WHERE id = ?", (tid,))
+        live.execute("INSERT INTO task_events (uid, task_id, kind, payload, created_at) VALUES (?, ?, 'reopened', "
+                     "'{}', ?)", (kb_uuid(), tid, now + 5))
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
+    shadow = kbc.connect(ksc.shadow_path(BOARD))
+    try:
+        assert tid in ksc.repair_divergence(live, shadow, ME)
+    finally:
+        shadow.close()
 
 
 # --- (b) the producers ---------------------------------------------------------------------------------------------

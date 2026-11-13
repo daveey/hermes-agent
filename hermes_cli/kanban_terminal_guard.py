@@ -69,13 +69,21 @@ def is_reopen(event: dict) -> bool:
     return False
 
 
+_LIFECYCLE_KINDS = tuple(sorted({*_TERMINAL_KINDS, *REOPEN_KINDS, *_STATUS_KINDS}))
+_EVENTS_SQL = ("SELECT id, {uid}, kind, payload, created_at FROM task_events WHERE task_id = ? "
+               f"AND kind IN ({','.join('?' * len(_LIFECYCLE_KINDS))})")
+
+
 def _events(conn: sqlite3.Connection, task_id: str) -> list[dict]:
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
-    uid = "uid" if "uid" in cols else "NULL AS uid"
-    kinds = sorted({*_TERMINAL_KINDS, *REOPEN_KINDS, *_STATUS_KINDS})
-    return [dict(r) for r in conn.execute(
-        f"SELECT id, {uid}, kind, payload, created_at FROM task_events WHERE task_id = ? "
-        f"AND kind IN ({','.join('?' * len(kinds))})", (task_id, *kinds))]
+    """The card's terminal and reopen events. One indexed query; a pre-uid schema (no ``task_events.uid``) is the
+    rare fallback, so it costs a failed prepare there instead of a ``PRAGMA`` on every call."""
+    try:
+        rows = conn.execute(_EVENTS_SQL.format(uid="uid"), (task_id, *_LIFECYCLE_KINDS))
+    except sqlite3.OperationalError as exc:
+        if "uid" not in str(exc):
+            raise
+        rows = conn.execute(_EVENTS_SQL.format(uid="NULL AS uid"), (task_id, *_LIFECYCLE_KINDS))
+    return [dict(r) for r in rows]
 
 
 def terminal_hold(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
@@ -197,13 +205,15 @@ def _restore_held(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None or row[0] not in TERMINAL_STATUSES or terminal_hold(conn, task_id) is not None:
         return None
-    last = conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+    # The newest hold the apply guard wrote. A note from another source (a push strip, a producer skip) can sit
+    # between the held row's page and the reopen's page and says nothing about what the apply held back.
+    last = conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = ? "
+                        "AND json_extract(payload, '$.source') = 'apply' ORDER BY id DESC LIMIT 1",
                         (task_id, STALE_WAKE_IGNORED)).fetchone()
     if last is None:
         return None
-    payload = _payload(last[1])
-    held = payload.get("held_status")
-    if payload.get("source") != "apply" or not isinstance(held, str) or held in TERMINAL_STATUSES:
+    held = _payload(last[1]).get("held_status")
+    if not isinstance(held, str) or held in TERMINAL_STATUSES:
         return None
     # Only a hold newer than every terminal event: an older one belongs to an earlier completion.
     newest_terminal = max((e["id"] for e in _events(conn, task_id) if terminal_status(e)), default=0)

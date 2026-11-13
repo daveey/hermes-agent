@@ -166,10 +166,12 @@ def _stale_lifecycle(live: sqlite3.Connection, shadow: sqlite3.Connection, row: 
     copy. [daveey]"""
     if not run_uid:
         # A wake on a stale copy (current run cleared) over the replica's done card: no reopen follows the
-        # completion, so the live status is older, not a local edit (t_01a1d1092f3caa2f). [daveey]
+        # completion, so the live status is older, not a local edit (t_01a1d1092f3caa2f). Both logs must hold it:
+        # a reopen in the live log (an uncaptured local reopen, which this repair exists to send) wins. [daveey]
         from hermes_cli.kanban_terminal_guard import terminal_hold
         return (theirs["status"] in _TERMINAL and row["status"] not in _TERMINAL and row["status"] != "running"
-                and row["claim_lock"] is None and terminal_hold(shadow, row["id"]) is not None)
+                and row["claim_lock"] is None and terminal_hold(shadow, row["id"]) is not None
+                and terminal_hold(live, row["id"]) is not None)
     if row["status"] == "running" and (_run_ended(live, run_uid) or _run_ended(shadow, run_uid)):
         return True
     if row["claim_lock"] is not None:
