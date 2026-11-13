@@ -34,8 +34,11 @@ THRESHOLD_SECONDS = pu.THRESHOLD_SECONDS
 MAX_EPISODE_SECONDS = 6 * 3600
 # Boards (main DB file of the swept conn) whose current lag stall has logged its WARNING; the rest of that stall logs
 # at INFO. Keyed per board: the dispatcher sweeps each board separately, so a healthy board's undeferred sweep must
-# not re-arm a lagging board's WARNING every tick. A board leaves the set on its own undeferred sweep, or on its own
-# sweep with nothing due (a stall that ends with no card waiting would otherwise make the next one log only at INFO).
+# not re-arm a lagging board's WARNING every tick. A stall is one run of replica lag, so a board leaves the set only on
+# its own sweep that finds the lag closed: an undeferred sweep, or one with nothing due whose lag_hold is None (a
+# stall that ends with no card waiting would otherwise make the next one log only at INFO). Cards that come due and
+# get claimed within one lag log at INFO after the first WARNING; lag_hold runs on a nothing-due sweep only for a
+# board in the set.
 _LAG_WARNED: set[str] = set()
 NO_PROMISE = "check placement and available capacity first; re-place if suitable; don't promise a pickup"
 
@@ -187,7 +190,7 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
     bound every notice waits (the episode keeps its key, so it fires once when the lag closes, if still ready), and
     a card whose newer replica row has left this ready episode is skipped. A deferral that outlasts
     ``MAX_EPISODE_SECONDS`` drops that episode's notice for good (the stall itself is the sync loop's to report), so
-    the first deferred sweep of each stall logs at WARNING."""
+    the first deferred sweep of each stall (one run of replica lag, see :data:`_LAG_WARNED`) logs at WARNING."""
     from hermes_cli import kanban_replica_freshness as fresh
     from hermes_cli.kanban_sync_diagnostics import missing_board, update_hold
     now = time.time() if now is None else now
@@ -198,9 +201,11 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
         ready_for = now - since
         if THRESHOLD_SECONDS <= ready_for <= MAX_EPISODE_SECONDS:
             due.append((row, since, ready_for))
-    if not due:  # nothing waits on this board, so its stall (if any) is over
+    if not due:  # the stall is the lag, not the waiting card: it ends when the lag closes, even with nothing due
         if _LAG_WARNED:
-            _LAG_WARNED.discard(_board_key(conn))
+            board = _board_key(conn)
+            if board in _LAG_WARNED and fresh.lag_hold(conn, now=now) is None:
+                _LAG_WARNED.discard(board)
         return 0
     lag = fresh.lag_hold(conn, now=now)
     board = _board_key(conn)
