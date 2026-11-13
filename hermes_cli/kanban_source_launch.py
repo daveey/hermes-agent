@@ -61,8 +61,8 @@ def old_board_grant(conn: sqlite3.Connection, claimed: Any) -> bool:
 
 def _git(path: str, *args: str) -> Optional[str]:
     try:
-        out = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=30,
-                             stdin=subprocess.DEVNULL, check=False)
+        out = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=30, stdin=subprocess.DEVNULL, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout.strip() if out.returncode == 0 else None
@@ -290,7 +290,7 @@ def launch(conn: sqlite3.Connection, claimed: Any, workspace: Any, branch: Optio
         result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
         count_spawn(claimed.assignee)
         return True
-    except Exception as exc:
+    except Exception as exc:  # health: allow BLE001 -- moved spawn-accounting boundary: every failure is recorded below
         from hermes_cli.kanban_review_model import admission_refusal
         # Admission failed before any worker ran; preserve its retry budget (a repeated review refusal: visible block).
         infrastructure, exhausted, extra = admission_refusal(conn, claimed.id, exc)
