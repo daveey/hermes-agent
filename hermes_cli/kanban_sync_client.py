@@ -677,8 +677,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             break
         with write_txn(conn):
             from hermes_cli.kanban_terminal_guard import strip_stale_push  # no wake reopens a done card [daveey]
-            wire = [strip_stale_push(conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)))
-                    for r in rows]
+            wire = [strip_stale_push(conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))) for r in rows]
             parents = _unacked_parents(conn, rows, gateway)
             wire = [op for op, _tid in parents] + wire
         try:
