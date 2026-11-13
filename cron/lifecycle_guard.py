@@ -1073,9 +1073,11 @@ def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
 
 def _shell_options_end(arguments: list[str], shell: str) -> tuple[int, bool, bool]:
     """``(operand_index, command_string, reads_stdin)`` for a POSIX *shell*'s *arguments*: the
-    index of the first operand past the options, whether a ``-c``/``--command`` flag ends them
-    (inline source follows), and whether a short-option cluster holds ``s`` (commands come from
-    stdin). Each ``o`` in a short-option cluster (``-o x``, ``-euo pipefail``) consumes the next
+    index of the first operand past the options, whether a ``-c`` option is among them (that
+    operand is then the inline source, not a script), and whether a short-option cluster holds
+    ``s`` (commands come from stdin). ``c`` counts anywhere in a ``-`` cluster (``-ec``, ``-lc``,
+    ``-xc``, ``-ce``), and the options go on after it (``-c -e 'cmd'``) as the shell reads them.
+    Each ``o`` in a short-option cluster (``-o x``, ``-euo pipefail``) consumes the next
     token, as does each ``O`` (``+O extglob``) except under zsh, whose ``-O`` is the valueless
     CORRECT flag; ``--rcfile`` and ``--init-file`` consume one too; a lone ``-`` ends the options
     like ``--``. Shells without a ``-O`` (dash) reject it, so reading its value there only skips
@@ -1083,12 +1085,15 @@ def _shell_options_end(arguments: list[str], shell: str) -> tuple[int, bool, boo
     value_letters = "o" if shell == "zsh" else "oO"
     index = 0
     reads_stdin = False
+    command_string = False
     while index < len(arguments):
         argument = arguments[index]
         if argument in ("--", "-"):
-            return index + 1, False, reads_stdin
+            return index + 1, command_string, reads_stdin
         if argument in _SHELL_COMMAND_FLAGS:
-            return index, True, reads_stdin
+            command_string = True
+            index += 1
+            continue
         if argument in _SHELL_LONG_OPTIONS_WITH_VALUES:
             index += 2
             continue
@@ -1096,11 +1101,13 @@ def _shell_options_end(arguments: list[str], shell: str) -> tuple[int, bool, boo
             index += 1
             continue
         if argument.startswith(("-", "+")):
-            reads_stdin = reads_stdin or (argument[0] == "-" and "s" in argument[1:])
+            if argument[0] == "-":
+                reads_stdin = reads_stdin or "s" in argument[1:]
+                command_string = command_string or "c" in argument[1:]
             index += 1 + sum(letter in value_letters for letter in argument[1:])
             continue
         break
-    return index, False, reads_stdin
+    return index, command_string, reads_stdin
 
 
 def _shell_script_operand(arguments: list[str], shell: str) -> Optional[str]:
@@ -1453,9 +1460,19 @@ def _iter_shell_command_payloads(command: str) -> Iterator[str]:
         for option in _STRING_COMMAND_OPTIONS.get(_executable_name(segment[index]), ()):
             yield from _iter_option_values(segment, index, option)
         index = _executed_command_index(segment)
-        if index is None or _executable_name(segment[index]) not in _SHELL_EXECUTABLES:
+        if index is None:
+            continue
+        shell = _executable_name(segment[index])
+        if shell not in _SHELL_EXECUTABLES:
             continue
         arguments = segment[index + 1 :]
+        payload_index, command_string, _ = _shell_options_end(arguments, shell)
+        if command_string:
+            if payload_index < len(arguments):
+                yield arguments[payload_index]
+            continue
+        # Kept from the plain `-c` read, fail closed: a `-c` word past the script operand
+        # (`bash run.sh -c 'x'`) still has its next word scanned.
         for arg_index, argument in enumerate(arguments[:-1]):
             if argument in _SHELL_COMMAND_FLAGS:
                 yield arguments[arg_index + 1]
