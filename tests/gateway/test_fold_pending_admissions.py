@@ -3,8 +3,10 @@
 A completion admitted mid-turn waited one full turn per row queued ahead of it: an update-resume
 continuation and a Kanban batch each started without it, 59 min in all on the MacBook. The turn that
 starts now carries every completion and Kanban wake already queued for the session, in admission order,
-with each row's own text intact; each row is acked once by the claim's settlement, and an ending other
-than completed (failed, paused for an update) gives every folded row back to its FIFO place.
+with each row's own text intact; each row is acked once by the claim's settlement, and a failed ending
+gives every folded row back to its FIFO place. A turn paused for an update settles its folded rows with
+the checkpoint once its user message is persisted: the continuation resumes that history, so each notice
+reaches the model exactly once across the pause (t_01a1d6d8bf621f17).
 """
 import asyncio
 from types import SimpleNamespace
@@ -198,8 +200,9 @@ async def test_two_completions_and_a_kanban_row_fold_and_settle_once(tmp_path, m
         if ending == 'paused':
             await async_wait_until(lambda: bool(h.authority.update_parked), timeout=10, what='the turn parked')
             rows = h.rows()
-            # The parked head keeps its checkpoint; the rows it carried are queued again in their places.
-            assert [rows[text]['status'] for text in order] == ['started', 'queued', 'queued']
+            # The parked head keeps its checkpoint; the rows it carried are in its persisted user message,
+            # which the continuation resumes, so they settle delivered with the checkpoint.
+            assert [rows[text]['status'] for text in order] == ['started', 'terminal', 'terminal']
             h.held[0] = False
             h.authority._schedule(h.ref)
         await _idle(h, 2 if ending == 'completed' else 3)
@@ -213,8 +216,73 @@ async def test_two_completions_and_a_kanban_row_fold_and_settle_once(tmp_path, m
             assert len(texts) == 3 and texts[2] == f'{k}\n\n{c2}'
             assert [rows[text]['outcome'] for text in (c1, k, c2)] == ['failed', 'completed', 'steered']
         else:
-            assert len(texts) == 3 and texts[2] == pause_note(k) + f'\n\n{c1}\n\n{c2}'
+            assert len(texts) == 3 and texts[2] == pause_note(k)
             assert [rows[text]['outcome'] for text in order] == ['completed', 'steered', 'steered']
+        assert not [row for row in rows.values() if row['status'] != 'terminal']
+    finally:
+        await h.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('persisted', ['user_row', 'tool_suffix_only'])
+async def test_a_notice_folded_into_a_paused_turn_reaches_the_model_once(tmp_path, monkeypatch, persisted):
+    """Invariant (t_01a1d6d8bf621f17, PR #2618 review point 1): a notice folded into a turn that pauses for an
+    update appears exactly once in the model's input across the pause and the resume, counted over the
+    persisted history the continuation resumes plus every later turn's text, and its row is acked once.
+
+    With the turn's user message persisted (the real shape: it carries head + folded texts) the rows settle
+    ``steered`` at the checkpoint and the continuation does not fold them again. With no user row of the
+    turn persisted the folded text is in no history, so they go back to their FIFO places and ride the
+    continuation."""
+    from tests.waiting import async_wait_until
+    gate = asyncio.Event()
+    k, c1, c2 = ('[kanban] Task t_1 blocked.', '[IMPORTANT: Background process proc_a completed (exit 0)]',
+                 '[IMPORTANT: Background process proc_b completed (exit 1)]')
+    h, sids = None, []
+
+    async def behave(n, event):
+        if n == 1:
+            await gate.wait()
+            return _completed()
+        if n == 2:
+            h.held[0] = True
+            sid, history = _pause(event)
+            sids.append(sid)
+            h.authority.db.append_messages_batch(sid, history if persisted == 'user_row' else history[1:])
+            return None
+        return _completed()
+
+    h = await _harness(tmp_path, monkeypatch, behave)
+    acks = []
+    settle = h.authority._settle_cancelled
+
+    def counted(ref, admission_id, outcome='cancelled'):
+        acks.append((admission_id, outcome))
+        return settle(ref, admission_id, outcome=outcome)
+
+    monkeypatch.setattr(h.authority, '_settle_cancelled', counted)
+    try:
+        await h.notice('[kanban] Task t_0 completed.', 'kanban-wake')
+        await async_wait_until(lambda: len(h.seen) == 1, timeout=10, what='the first turn')
+        for text in (k, c1, c2):
+            await h.notice(text, 'kanban-wake' if text == k else 'completion')
+        gate.set()
+        await async_wait_until(lambda: bool(h.authority.update_parked), timeout=10, what='the turn parked')
+        assert h.seen[1].text == f'{k}\n\n{c1}\n\n{c2}'
+        # The checkpoint released the claim's fold and transfer fences for the rows it settled.
+        assert h.ref.session_id not in h.authority.folded_transfers
+        assert h.ref.session_id not in h.authority.steer_transfers
+        h.held[0] = False
+        h.authority._schedule(h.ref)
+        await _idle(h, 3)
+        history = ' '.join(str(m.get('content') or '') for m in h.db.get_messages(sids[0]))
+        later = ' '.join(event.text for event in h.seen[2:])
+        for text in (c1, c2):
+            assert history.count(text) + later.count(text) == 1, (persisted, text, history, later)
+        rows = h.rows()
+        assert [rows[text]['outcome'] for text in (k, c1, c2)] == ['completed', 'steered', 'steered']
+        for text in (c1, c2):
+            assert acks.count((rows[text]['admission_id'], 'steered')) == 1, acks
         assert not [row for row in rows.values() if row['status'] != 'terminal']
     finally:
         await h.close()

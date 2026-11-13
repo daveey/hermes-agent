@@ -131,15 +131,16 @@ async def park_or_interrupt(authority, live, ref, row):
             requeued = await requeue_unstarted(authority, live, ref, row)
             if requeued is not None:
                 return requeued
+        from gateway.session_fold_pending import checkpoint_folded, release_checkpointed
         try:
-            from gateway.session_fold_pending import unfold_for_checkpoint
-            await unfold_for_checkpoint(authority, live, ref, row)
             receipt = await tracked_write(authority, partial(checkpoint_session_input, authority.db,
                 epoch=authority.epoch, admission_id=row['admission_id'], generation=row['generation'],
-                physical_session_id=authority.physical_target(ref), transcript_mark=row['transcript_mark']))
+                physical_session_id=authority.physical_target(ref), transcript_mark=row['transcript_mark'],
+                folded=checkpoint_folded(authority, row)))
         except Exception:
             logging.getLogger(__name__).exception('Update checkpoint failed for %s', row['admission_id'])
             return await settle_interrupted(authority, live, ref, row)
+        release_checkpointed(authority, live, ref, row)
         if stopped(authority, row):
             return await settle_interrupted(authority, live, ref, row)
         authority.pending_results.pop(row['admission_id'], None)

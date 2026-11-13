@@ -116,11 +116,44 @@ def delete_session_checkpoint(conn, admission_id):
     conn.execute('DELETE FROM state_meta WHERE key=?', (CHECKPOINT_PREFIX + admission_id,))
 
 
-def checkpoint_session_input(db, *, epoch, admission_id, generation, physical_session_id, transcript_mark):
+def _turn_persisted(conn, row, transcript_mark):
+    """The claim's own user message is in the transcript the continuation resumes: a user row of the
+    conversation's chain written after the claim's ``transcript_mark``."""
+    if type(transcript_mark) is not int or transcript_mark < 0:
+        _refuse('invalid transcript mark')
+    from hermes_state_local_lineage import local_physical_target
+    logical = row['target_session_id']
+    chain = sorted({logical, *_canonical_chain(conn, local_physical_target(conn, logical))})
+    marks = ','.join('?' * len(chain))
+    return conn.execute(f"SELECT 1 FROM messages WHERE session_id IN ({marks}) AND id>? AND role='user' LIMIT 1",
+                        (*chain, transcript_mark)).fetchone() is not None
+
+
+def _settle_folded(conn, row, folded, transcript_mark):
+    """[daveey] t_01a1d6d8bf621f17: rows folded into the claim's text (``session_fold_pending``) settle with
+    the checkpoint, in its write. The paused turn's user message carries their text and the continuation
+    resumes that persisted history, so once it is persisted each reads delivered (``steered``, acked once);
+    re-queued, the continuation would fold it again and the model would read it twice. Only when nothing of
+    the turn was persisted does each go back to its own FIFO place."""
+    from hermes_state_runtime import STEERING, _requeue_transfer
+    epoch, generation = row['owner_epoch'], row['generation']
+    durable = _turn_persisted(conn, row, transcript_mark)
+    for admission_id in folded:
+        if not durable:
+            _requeue_transfer(conn, admission_id=admission_id, epoch=epoch, generation=generation)
+            continue
+        conn.execute("UPDATE session_admissions SET outcome='steered' WHERE admission_id=? AND status='terminal' "
+                     "AND outcome=? AND owner_epoch=? AND generation=?",
+                     (admission_id, STEERING, epoch, generation))
+
+
+def checkpoint_session_input(db, *, epoch, admission_id, generation, physical_session_id, transcript_mark,
+                             folded=()):
     """Park an exact started generation at a fresh complete persisted tool suffix.
 
     transcript_mark is the claim's global messages.id high-water mark. The receipt
-    is bounded and immutable: retries must prove the exact same boundary.
+    is bounded and immutable: retries must prove the exact same boundary. ``folded`` are the
+    steering transfers folded into the claim's own text; they settle in this write (``_settle_folded``).
     """
     _text(admission_id)
     _text(physical_session_id)
@@ -129,6 +162,8 @@ def checkpoint_session_input(db, *, epoch, admission_id, generation, physical_se
         row = _admission(conn, admission_id)
         if row['owner_epoch'] != epoch or type(generation) is not int or row['generation'] != generation:
             raise RuntimeStoreError('stale_generation')
+        if folded:
+            _settle_folded(conn, row, folded, transcript_mark)
         receipt = _binding(conn, row, physical_session_id, transcript_mark)
         encoded = _json(receipt)
         if len(encoded.encode('utf-8')) > MAX_RECEIPT_BYTES:

@@ -12,9 +12,11 @@ still queued behind it, up to the first human input, is handed to that claim and
 each with its own envelope text intact. Custody is the queued-steer transfer
 (``hermes_state_runtime.steer_session_input``): each row goes queued -> terminal ``steering`` bound to
 the claim's generation and settles in the claim's own settlement write. It reads delivered only when the
-claim completed (``steered``, acked once); any other ending (failed, interrupted, unknown, a pause for an
-update, an unstarted requeue) puts it back in its own FIFO place (``_requeue_transfer``), so nothing is
-lost and nothing settles twice. The queue's own fold rules and the rows themselves are unchanged.
+claim completed (``steered``, acked once); any other ending (failed, interrupted, unknown, an unstarted
+requeue) puts it back in its own FIFO place (``_requeue_transfer``), so nothing is lost and nothing settles
+twice. A pause for an update settles it ``steered`` once the turn's user message (which carries its text)
+is persisted, because the continuation resumes that history (``checkpoint_folded``). The queue's own fold
+rules and the rows themselves are unchanged.
 """
 from __future__ import annotations
 
@@ -181,22 +183,43 @@ def settle_outcome(authority, row, transfers, outcome):
     return transfers
 
 
-async def unfold_for_checkpoint(authority, live, ref, row):
-    """A turn parking for a Hermes update gives its folded rows back to their FIFO places first (a steering
-    transfer refuses the checkpoint); the continuation folds them again when it starts."""
+def checkpoint_folded(authority, row):
+    """The rows folded into ``row``'s claim, for its update checkpoint write (``checkpoint_session_input``
+    ``folded=``), which settles them in the same transaction (a steering transfer otherwise refuses it).
+
+    [daveey] t_01a1d6d8bf621f17: they were reverted to queued before the checkpoint, but the paused turn's
+    user message (head text + folded texts) is already in the persisted history the continuation resumes,
+    so the continuation folded them again and the model read each notice twice (once more per further
+    pause). Now each settles ``steered`` once that user message is persisted, and goes back to its FIFO
+    place only when nothing of the turn was. The entry stays until the write commits: a refused checkpoint
+    settles the claim interrupted, and ``settle_outcome`` then gives every row back, as before."""
+    entry = folded(authority).get(row['target_session_id'])
+    if entry is None or entry[0] != row['generation']:
+        return ()
+    return tuple(sorted(entry[1]))
+
+
+def release_checkpointed(authority, live, ref, row):
+    """After the checkpoint committed: drop the claim's fold and transfer fences for its folded rows and
+    publish each one's settled outcome (``steered`` to its observers; a re-queued row is listed again)."""
+    from hermes_state_runtime import get_session_admission
     entry = folded(authority).pop(ref.session_id, None)
     if entry is None or entry[0] != row['generation']:
         return
-    from gateway.session_runtime_workers import tracked_write
-    from hermes_state_runtime import revert_steer_input
-    for admission_id in sorted(entry[1]):
-        await tracked_write(authority, partial(revert_steer_input, authority.db, epoch=authority.epoch,
-                                               admission_id=admission_id, generation=row['generation']))
-        with live.event_stream.lock:
-            transfers = authority.steer_transfers.get(ref.session_id)
-            if transfers is not None and transfers[0] == row['generation']:
+    with live.event_stream.lock:
+        transfers = authority.steer_transfers.get(ref.session_id)
+        if transfers is not None and transfers[0] == row['generation']:
+            for admission_id in entry[1]:
                 transfers[1].pop(admission_id, None)
-                if not transfers[1]:
-                    authority.steer_transfers.pop(ref.session_id, None)
-    logger.info('Unfolded %d admission(s) for an update pause: session=%s admission=%s',
-                len(entry[1]), ref.session_id, row['admission_id'])
+            if not transfers[1]:
+                authority.steer_transfers.pop(ref.session_id, None)
+    steered = []
+    for admission_id in sorted(entry[1]):
+        settled = get_session_admission(authority.db, admission_id=admission_id)
+        if settled is not None and settled['status'] == 'terminal' and settled['outcome'] == 'steered':
+            steered.append(admission_id)
+            authority._settle_cancelled(ref, admission_id, outcome='steered')
+    authority._publish_pending(ref)
+    logger.info('Settled folded admission(s) with an update checkpoint: session=%s admission=%s steered=%s '
+                'requeued=%d', ref.session_id, row['admission_id'], ','.join(steered) or '-',
+                len(entry[1]) - len(steered))
