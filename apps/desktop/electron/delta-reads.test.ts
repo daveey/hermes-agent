@@ -97,6 +97,32 @@ describe('asking for a delta', () => {
     expect(deltaRequestHeaders('GET', 'http://127.0.0.1:61511/api/plugins/kanban/board?board=default', store)[DELTA_BASE_HEADER]).toBe(bodyHash(body))
   })
 
+  it('keeps one origin per scope: a rebind without a teardown stops the old port being asked or filed under it', () => {
+    const store = bound()
+    const body = cards(40)
+    const rebuilt = 'http://127.0.0.1:61511/api/plugins/kanban/board?board=default'
+
+    decodeDeltaBody(BOARD, whole(body), body, store)
+    store.bindRemote('http://127.0.0.1:61511', SCOPE) // the tunnel was rebuilt on a new port, no unbindScope
+
+    // The old port: no ask, no key, and a hashed answer from whatever listens there now is not kept.
+    expect(deltaRequestHeaders('GET', BOARD, store)).toEqual({})
+    expect(store.keyFor(BOARD)).toBeNull()
+
+    const stranger = cards(41)
+
+    expect(decodeDeltaBody(BOARD, whole(stranger), stranger, store)).toBe(stranger.toString('utf8'))
+    expect(store.size).toBe(1)
+    // The scope and its copy moved to the new origin.
+    expect(deltaRequestHeaders('GET', rebuilt, store)[DELTA_BASE_HEADER]).toBe(bodyHash(body))
+
+    // Another scope's binding is untouched, and binding the same origin again changes nothing.
+    store.bindRemote('http://127.0.0.1:50999', 'conn:hermes-hub::alpha')
+    store.bindRemote('http://127.0.0.1:61511', SCOPE)
+    expect(store.keyFor('http://127.0.0.1:50999/api/cron/jobs')).toBe('conn:hermes-hub::alpha\u0000/api/cron/jobs')
+    expect(deltaRequestHeaders('GET', rebuilt, store)[DELTA_BASE_HEADER]).toBe(bodyHash(body))
+  })
+
   it('dropping a pooled backend (slowLinkTracker.forgetScope) unbinds its tunnel in the shared store', () => {
     const url = 'http://127.0.0.1:50888/api/cron/jobs'
 

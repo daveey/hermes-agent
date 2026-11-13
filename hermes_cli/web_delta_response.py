@@ -17,6 +17,9 @@ apps/desktop/electron/delta-reads.ts).
   again without a base.
 - Everything else (no ask, other methods and statuses, streams, small or huge bodies, Python without
   ``compression.zstd``) passes through untouched.
+- Every hashed or delta answer says ``Vary: X-Hermes-Delta-Accept, X-Hermes-Delta-Base`` (merged into the
+  handler's own Vary), and a delta drops the handler's ``ETag``: its bytes are a frame, not that entity. A caching
+  proxy in front of the gateway then cannot replay a delta to a client that did not ask for one.
 
 Bodies are remembered per credential: the store key is (hash of the request's session-token / Authorization /
 Cookie headers, hash of the body), so a caller can only name a base that was served to that same credential. A
@@ -58,6 +61,7 @@ MAX_BYTES = 8 * 1024 * 1024
 STORE_MAX_BYTES = 64 * 1024 * 1024
 ZSTD_LEVEL = 3
 CREDENTIAL_HEADERS = ("x-hermes-session-token", "authorization", "cookie")
+VARY_ON = ("X-Hermes-Delta-Accept", "X-Hermes-Delta-Base")
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +147,18 @@ def _encode(body: bytes, base_digest: str, namespace: str, store: BodyStore) -> 
     return digest, frame if len(frame) < len(body) else None
 
 
+def _merge_vary(headers: MutableHeaders) -> None:
+    """One Vary header: the handler's names, then the two request headers the encoding depends on."""
+    names: list[str] = []
+    for value in headers.getlist("vary"):
+        names.extend(name.strip() for name in value.split(",") if name.strip())
+    if "*" not in names:
+        held = {name.lower() for name in names}
+        names.extend(name for name in VARY_ON if name.lower() not in held)
+    del headers["vary"]
+    headers["vary"] = ", ".join(names)
+
+
 class DeltaResponseMiddleware:
     """See the module docstring. Pure ASGI: a response that is not eligible is never buffered."""
 
@@ -177,7 +193,17 @@ class _DeltaSend:
         if message["type"] == "http.response.start" and _eligible(message):
             self._start = message
             return
-        if self._start is None or message["type"] != "http.response.body":
+        if self._start is None:
+            await self._send(message)
+            return
+        if message["type"] != "http.response.body":
+            # Not a body we can collect (http.response.pathsend / zerocopysend: the server sends the file itself).
+            # The held start goes out first, unchanged, with any body collected so far; the rest passes through.
+            start, chunks = self._start, self._chunks
+            self._start, self._chunks = None, []
+            await self._send(start)
+            if chunks:
+                await self._send({"type": "http.response.body", "body": b"".join(chunks), "more_body": True})
             await self._send(message)
             return
         self._chunks.append(message.get("body", b""))
@@ -202,7 +228,9 @@ class _DeltaSend:
             return
         headers = MutableHeaders(raw=list(start["headers"]))
         headers[HASH_HEADER] = digest
+        _merge_vary(headers)
         if frame is not None:
+            del headers["etag"]  # the handler's validator names the whole body, not this frame
             headers[DELTA_HEADER] = ENCODING
             headers[BASE_HEADER] = self._base_digest
             headers["content-type"] = DELTA_MEDIA_TYPE

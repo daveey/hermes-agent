@@ -71,11 +71,16 @@ export class DeltaBodyStore {
   readonly #scopes = new Map<string, string>()
   #bytes = 0
 
-  /** A remote (SSH-tunnelled) backend now answers at baseUrl for this pool scope. */
+  /**
+   * A remote (SSH-tunnelled) backend now answers at baseUrl for this pool scope. A scope has one tunnel, so one
+   * origin: a rebuild on a new local port takes the scope (and its copies) with it, and the old port, which may be
+   * handed to something else, is no longer asked for deltas or able to file answers under this scope.
+   */
   bindRemote(baseUrl: null | string | undefined, scope: string): void {
     const origin = originOf(baseUrl)
 
     if (origin && scope) {
+      this.unbindScope(scope)
       this.#scopes.set(origin, scope)
     }
   }

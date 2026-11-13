@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 
@@ -75,7 +76,14 @@ def served():
         response.set_cookie("b", "2")
         return response
 
+    async def varied(request):
+        response = JSONResponse(state["board"], headers={"etag": '"abc"'})
+        response.headers.append("vary", "Accept-Encoding, x-hermes-delta-base")
+        response.headers.append("vary", "Origin")
+        return response
+
     app = Starlette(routes=[
+        Route("/varied", varied),
         Route("/board", get_board, methods=["GET", "POST", "HEAD"]),
         Route("/small", small), Route("/text", text), Route("/missing", missing),
         Route("/zipped", zipped), Route("/stream", stream), Route("/chunked", chunked), Route("/cookie", cookie),
@@ -249,7 +257,8 @@ def test_other_headers_survive_a_delta_duplicates_included(served):
     client.cookies.clear()  # the test client would send them back, which is another credential (see below)
     second = client.get("/cookie", headers={**ASK, "X-Hermes-Delta-Base": first.headers[wdr.HASH_HEADER]})
     assert second.headers[wdr.DELTA_HEADER] == "zstd"
-    assert second.headers["cache-control"] == "no-store" and second.headers["etag"] == '"abc"'
+    assert second.headers["cache-control"] == "no-store"
+    assert first.headers["etag"] == '"abc"' and "etag" not in second.headers  # a frame is not the handler's entity
     assert sorted(second.headers.get_list("set-cookie"))[0].startswith("a=1")
     assert len(second.headers.get_list("set-cookie")) == 2
 
@@ -348,3 +357,91 @@ def test_the_middleware_sits_inside_every_auth_gate_of_the_dashboard_app():
     outer = chain[:at]
     assert len(outer) >= 5
     assert web_server.ChatFileUploadLimitMiddleware in chain[at + 1:]
+
+
+def _start(body: bytes) -> dict:
+    return {"type": "http.response.start", "status": 200, "headers": [
+        (b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]}
+
+
+async def _run(app, headers) -> list[dict]:
+    """What the server is sent for one GET through the middleware, on a scope that advertises pathsend."""
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {"type": "http", "method": "GET", "path": "/file", "extensions": {"http.response.pathsend": {}},
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+    await wdr.DeltaResponseMiddleware(app, store=wdr.BodyStore())(scope, receive, send)
+    return sent
+
+
+@needs_zstd
+@pytest.mark.parametrize("kind", ["http.response.pathsend", "http.response.zerocopysend"])
+def test_a_file_the_server_sends_itself_still_gets_its_start_first(kind):
+    """An eligible start is held for its body; a pathsend/zerocopysend is not a body, so the start must go first."""
+    body = json.dumps(board(2000)).encode()
+    start = _start(body)
+    file_message = {"type": kind, "path": "/tmp/board.json"}
+
+    async def app(scope, receive, send):
+        await send(start)
+        await send(file_message)
+
+    assert asyncio.run(_run(app, {**ASK, "X-Hermes-Delta-Base": "f" * 32})) == [start, file_message]
+    assert asyncio.run(_run(app, {})) == [start, file_message]  # exactly what an unasked request gets
+
+
+@needs_zstd
+def test_body_collected_before_a_non_body_message_goes_out_after_the_start():
+    body = json.dumps(board(2000)).encode()
+    start = _start(body)
+    head = {"type": "http.response.body", "body": body[:9000], "more_body": True}
+    file_message = {"type": "http.response.pathsend", "path": "/tmp/rest.json"}
+    tail = {"type": "http.response.body", "body": b"", "more_body": False}
+
+    async def app(scope, receive, send):
+        for message in (start, head, file_message, tail):
+            await send(message)
+
+    assert asyncio.run(_run(app, ASK)) == [start, head, file_message, tail]
+
+
+@needs_zstd
+def test_hashed_and_delta_answers_vary_on_the_ask_and_a_delta_drops_the_etag(served):
+    """A caching proxy must not replay a delta (or a hashed answer) to a client that did not ask for one."""
+    client, _, _ = served
+    first = client.get("/board", headers=ASK)
+    assert first.headers.get_list("vary") == ["X-Hermes-Delta-Accept, X-Hermes-Delta-Base"]
+    second = client.get("/board", headers={**ASK, "X-Hermes-Delta-Base": first.headers[wdr.HASH_HEADER]})
+    assert second.headers[wdr.DELTA_HEADER] == "zstd"
+    assert second.headers.get_list("vary") == ["X-Hermes-Delta-Accept, X-Hermes-Delta-Base"]
+
+    # The handler's own Vary names are kept, once each, in one header; a whole body keeps its ETag, a delta does not.
+    merged = ["Accept-Encoding, x-hermes-delta-base, Origin, X-Hermes-Delta-Accept"]
+    whole = client.get("/varied", headers=ASK)
+    assert wdr.DELTA_HEADER not in whole.headers
+    assert whole.headers.get_list("vary") == merged
+    assert whole.headers["etag"] == '"abc"'
+    delta = client.get("/varied", headers={**ASK, "X-Hermes-Delta-Base": whole.headers[wdr.HASH_HEADER]})
+    assert delta.headers[wdr.DELTA_HEADER] == "zstd"
+    assert delta.headers.get_list("vary") == merged
+    assert "etag" not in delta.headers
+
+    # An unasked request, and an asked one that is not encoded, keep exactly the handler's headers.
+    plain = client.get("/varied")
+    assert plain.headers.get_list("vary") == ["Accept-Encoding, x-hermes-delta-base", "Origin"]
+    assert plain.headers["etag"] == '"abc"'
+    assert "vary" not in client.get("/small", headers=ASK).headers
+
+
+def test_vary_star_is_left_alone():
+    from starlette.datastructures import MutableHeaders
+
+    headers = MutableHeaders(raw=[(b"vary", b"*")])
+    wdr._merge_vary(headers)
+    assert headers.getlist("vary") == ["*"]
