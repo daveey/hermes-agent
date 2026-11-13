@@ -17,6 +17,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_pr_acceptance as kpa
 from hermes_cli.kanban_completion_inputs import read_completions
+from hermes_cli.kanban_completion_refs import leased_elsewhere
 from hermes_cli.kanban_origin_ledger import observe_owner_task
 from tests.hermes_cli import kanban_sync_support as support
 
@@ -266,6 +267,30 @@ def test_two_gateways_leasing_one_run_is_ambiguous(boards):
         hub.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'claimed', ?, 1)",
                     (tid, run_id, json.dumps({"holder": "worker-4", "run_uid": uid})))
     assert verified(hub, tid) == (False, False)
+
+
+@pytest.mark.parametrize("holder", ["worker-4", "worker-3"])
+def test_a_recorded_origin_outranks_its_runs_board_lease(boards, holder):
+    """Only a NULL-origin completion consults the Board lease. One that records ``origin_gateway`` keeps that
+    origin and stays non-legacy, so it binds its run's receipt from that gateway, whoever the lease names."""
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    event_id, _ = payload_of(hub, tid)
+    rewrite(hub, event_id, lambda p: (p.pop("pr_acceptance_event_uid", None),
+                                      p.update(pr_acceptance_event_id=p["pr_acceptance_event_id"] + 100000)))
+    run_id, uid = hub.execute("SELECT r.id, r.uid FROM task_events e JOIN task_runs r ON r.id = e.run_id "
+                              "WHERE e.id = ?", (event_id,)).fetchone()
+    with kb.write_txn(hub):
+        hub.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'claimed', ?, 1)",
+                    (tid, run_id, json.dumps({"holder": holder, "run_uid": uid, "expires": 1})))
+    (receipt,) = receipts(hub, tid)
+    # Precondition: origins recorded on the completion and its receipt; the lease is a valid foreign one.
+    assert hub.execute("SELECT origin_gateway FROM task_events WHERE id=?", (event_id,)).fetchone()[0] == "worker-3"
+    assert receipt["origin_gateway"] == "worker-3" and receipt["run_id"] == run_id
+    assert own_gateway(hub) not in ("worker-3", "worker-4")
+    assert leased_elsewhere(hub, {tid: run_id}) == {tid: holder}
+    assert verified(hub, tid) == (True, True)
 
 
 RED = {"ok": False, "classification": "failure", "head_sha": "b" * 40, "pr_url": PR, "pr_state": "OPEN",
