@@ -40,7 +40,13 @@ def gateway_owner(ids: tuple, ledger_status: Optional[str], lease_holders: tuple
     t_01a1d1543b9d13cf) is in ``owner_forward.FORWARDABLE_LEDGER_STATES``, or its process holds the chat's turn
     lease (``_gateway_holds_work``). The row-level half is :func:`claims_row`. No live gateway (its LOCAL
     adapter is what claims), an ``unknown`` admission, no ledger row, a lease held by any other process, or an
-    unreadable answer: None, and this backend keeps the rows as before (a legacy-only chat buffers while busy)."""
+    unreadable answer: None, and this backend keeps the rows as before (a legacy-only chat buffers while busy).
+
+    Residual restore gap (review 5888998970 nit 2): the in-memory half of ``owned_live_session`` (the chat is a
+    live LOCAL session in ``authority.sessions`` whose route matches) is invisible from this process. A gateway
+    that has not restored the chat (just after its restart) has forwardable ledger work but claims nothing, so
+    the notices wait until that work ends; then this answer turns None within one ``OWNER_TTL_S`` and this
+    backend delivers them once (pinned by test_restore_gap_*)."""
     from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
     if ledger_status is not None:
         reason = f"ledger {ledger_status}" if ledger_status in FORWARDABLE_LEDGER_STATES else None
@@ -130,10 +136,31 @@ def legacy_gateway_owns(session: dict, session_lineage, session_db, now: Optiona
     return all(claims_row(owner, c) for c in claims if not c.get("remote"))
 
 
-def _ledger_and_leases(session: dict, ids: tuple, session_db) -> tuple:
-    """(first ledger status over ``ids``, their turn-lease holders), read in one open of the session's store.
-    The lease is read only when no ledger row answers (the common no-work case reads no lease)."""
+def lineage_ledger_status(conn, ids) -> Optional[str]:
+    """The gateway ledger's answer for a chat's lineage ``ids``: the one rule this backend's hand-back and the
+    gateway's claim (``gateway.kanban_tui_owner._gateway_holds_work``) both read, so the two cannot disagree on
+    which row counts (review 5888998970 nit 1: the tip ``queued`` and the root ``unknown`` answered ``queued``
+    key-first here and ``unknown`` sorted there). Order-independent: any non-terminal row outside
+    ``owner_forward.FORWARDABLE_LEDGER_STATES`` (an ``unknown`` admission) answers with its status, which owns
+    nothing, so this backend keeps the chat; else the first forwardable status in sorted id order; None when no
+    id has a non-terminal row. The legacy ids may add compaction parents between the tip and the root the gateway
+    reads; one of them holding forwardable work alone is rare (admissions sit on the root), and only delays."""
+    from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
     from tui_gateway.session_lifecycle import _CANONICAL_PENDING_SQL
+    first = None
+    for sid in sorted({str(s) for s in ids if s}):
+        row = conn.execute(_CANONICAL_PENDING_SQL, (sid, sid)).fetchone()
+        if row is None:
+            continue
+        if str(row[0]) not in FORWARDABLE_LEDGER_STATES:
+            return str(row[0])
+        first = first or str(row[0])
+    return first
+
+
+def _ledger_and_leases(session: dict, ids: tuple, session_db) -> tuple:
+    """(:func:`lineage_ledger_status` over ``ids``, their turn-lease holders), read in one open of the session's
+    store. The lease is read only when no ledger row answers (the common no-work case reads no lease)."""
     with session_db(session) as db:
         if db is None:
             raise RuntimeError("session store unavailable")
@@ -141,11 +168,7 @@ def _ledger_and_leases(session: dict, ids: tuple, session_db) -> tuple:
         read_ctx = getattr(db, "_read_ctx", None)
         if read_ctx is not None:
             with read_ctx() as conn:
-                for sid in ids:
-                    row = conn.execute(_CANONICAL_PENDING_SQL, (sid, sid)).fetchone()
-                    if row is not None:
-                        status = str(row[0])
-                        break
+                status = lineage_ledger_status(conn, ids)
         if status is not None:
             return status, ()
         owner_of = getattr(db, "session_turn_lease_owner", None)

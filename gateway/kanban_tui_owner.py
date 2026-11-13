@@ -71,18 +71,18 @@ def _launch_authority(runner: Any, profile: Optional[str]) -> Any:
 def _gateway_holds_work(authority: Any, ids: set) -> bool:
     """Whether the gateway's ledger holds work that ends on its own for ``ids``, or this process holds
     the turn lease. This is when the legacy backend refuses the chat. A read error answers False and
-    leaves the row to the legacy backend."""
-    from tui_gateway.session_lifecycle import _CANONICAL_PENDING_SQL
+    leaves the row to the legacy backend. The ledger is read by the legacy hand-back's own rule
+    (``kanban_leg_custody.lineage_ledger_status``): an ``unknown`` row on either id owns nothing."""
+    from tui_gateway.kanban_leg_custody import lineage_ledger_status
     db = getattr(authority, "db", None)
     read_ctx = getattr(db, "_read_ctx", None)
     if read_ctx is None:
         return False
     try:
         with read_ctx() as conn:
-            for sid in sorted(filter(None, ids)):
-                row = conn.execute(_CANONICAL_PENDING_SQL, (sid, sid)).fetchone()
-                if row is not None:
-                    return row[0] in _FORWARDABLE_LEDGER_STATES
+            status = lineage_ledger_status(conn, ids)
+            if status is not None:
+                return status in _FORWARDABLE_LEDGER_STATES
         owner_of = getattr(db, "session_turn_lease_owner", None)
         if owner_of is not None:
             mine = f"pid={os.getpid()}:"

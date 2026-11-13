@@ -598,3 +598,93 @@ def test_nit2_the_owner_probe_opens_state_db_at_most_once_per_chat_per_ttl(env, 
     budget = int(polls * step / custody.OWNER_TTL_S)
     assert set(opens) == set(chats) and all(n <= budget for n in opens.values()), (opens, budget)
     assert server._kb_gateway_owns(sessions["chat-0"]) and not server._kb_gateway_owns(sessions["chat-1"])
+
+
+def _clock(monkeypatch):
+    from tui_gateway import kanban_leg_custody as custody
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(custody, "time", type("T", (), {"monotonic": staticmethod(lambda: clock["t"])}))
+    return clock
+
+
+def test_nit1_tip_queued_and_root_unknown_answer_one_rule_on_both_legs(env, monkeypatch):
+    """The tip holds ``queued`` work and the lineage root an ``unknown`` admission. Key-first the legacy leg read
+    ``queued`` and handed the chat back; sorted, the gateway read the older root's ``unknown`` and never claimed
+    (review 5888998970 nit 1). One rule over the ids: neither owns, so the legacy leg keeps the chat."""
+    from gateway.kanban_tui_owner import _gateway_holds_work, owned_live_session
+    from tui_gateway import kanban_leg_custody as custody
+    runner, authority, adapter, admitted = env
+    root = "20261020_101500_a1b2c3"  # older than the tip: first sorted, second key-first
+    monkeypatch.setattr(server, "_session_lineage", lambda key, limit=8: (root,) if key == CHAT else ())
+    monkeypatch.setattr(authority, "logical_owner", lambda chat: root)
+    authority.sessions[root] = _Live(CHAT)
+    authority.db.work(CHAT, "queued")
+    authority.db.work(root, "unknown")
+    with authority.db._read_ctx() as conn:
+        answers = {custody.lineage_ledger_status(conn, ids) for ids in ((CHAT, root), (root, CHAT), {CHAT, root})}
+    assert answers == {"unknown"}
+    assert not _gateway_holds_work(authority, {CHAT, root})
+    assert not server._kb_gateway_owns(_session())
+    tid = _card(local=False)
+    assert owned_live_session(runner, {"chat_id": CHAT, "notifier_profile": "default", "task_id": tid}) is None
+    session = _session()
+    session["running"] = True
+    _complete(tid)
+    _keeps_the_chat_and_holds_it_once(runner, authority, adapter, admitted, tid, session)
+
+
+def test_restore_gap_unrestored_gateway_chat_is_back_within_one_ttl_once_its_work_ends(env, monkeypatch):
+    """The gap ``gateway_owner`` names (review 5888998970 nit 2): the gateway holds forwardable ledger work for the
+    chat but has not restored it as a live LOCAL session (just restarted), so nobody claims the tui row while the
+    work runs. It is bounded: once the work ends, the legacy leg takes the chat back within one ``OWNER_TTL_S`` and
+    claims the notice exactly once."""
+    from tui_gateway import kanban_leg_custody as custody
+    runner, authority, adapter, admitted = env
+    clock = _clock(monkeypatch)
+    tid = _card(local=False)
+    authority.db.work(CHAT)  # ledger work, but no live session in authority.sessions
+    session = _session()
+    session["running"] = True
+    _complete(tid)
+    for _ in range(3):
+        assert _legacy_collect(session) == []  # handed to the gateway, which claims nothing
+        _gateway_tick(runner)
+        assert admitted == [] and adapter.turns == [] and _row(tid)[1] is None
+        clock["t"] += custody.OWNER_TTL_S / 2
+    authority.db.conn.execute("UPDATE session_admissions SET status = 'terminal'")  # the gateway's work ends
+    ended = clock["t"]
+    while not (texts := _legacy_collect(session)):
+        assert clock["t"] - ended <= custody.OWNER_TTL_S, "the legacy leg never took the chat back"
+        clock["t"] += 0.5
+    assert len(texts) == 1 and f"Kanban {tid}" in texts[0] and _row(tid)[1] is not None
+    for _ in range(2):
+        _gateway_tick(runner)
+        clock["t"] += custody.OWNER_TTL_S
+        assert _legacy_collect(session) == []
+    assert _notices(adapter, admitted, tid) == 0 and len(session["_kanban_pending"]) == 1
+
+
+def test_gateway_launch_profile_reads_a_real_gateway_state_json(tmp_path, monkeypatch):
+    """``_gateway_launch_profile`` unstubbed (review 5888998970 nit 3): a real ``gateway_state.json`` under a temp
+    Hermes root, read back through ``gateway.status.read_runtime_status``."""
+    import json
+
+    from hermes_constants import get_default_hermes_root
+    from tui_gateway import kanban_leg_custody as custody
+    home = tmp_path / "hermes-root"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert get_default_hermes_root() == home
+    state = home / "gateway_state.json"
+    assert custody._gateway_launch_profile(4242) == ""  # no record yet
+
+    def record(**fields):
+        state.write_text(json.dumps({"pid": 4242, "gateway_state": "running", **fields}), encoding="utf-8")
+
+    record(served_profiles=["coder", "default"])
+    assert custody._gateway_launch_profile(4242) == "coder"  # served_profiles[0] is the launch profile
+    assert custody._gateway_launch_profile(31337) == ""  # the record names another gateway pid
+    record()
+    assert custody._gateway_launch_profile(4242) == ""  # no served_profiles
+    record(served_profiles=[])
+    assert custody._gateway_launch_profile(4242) == ""  # empty served_profiles
