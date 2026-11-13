@@ -466,3 +466,51 @@ def test_every_wake_kind_has_a_status_label():
     labelled = [kind for kind in _WAKE_KINDS if kind != 'failure_finalized']
     missing = [kind for kind in labelled if t(f'gateway.kanban.wake.{kind}') == f'gateway.kanban.wake.{kind}']
     assert not missing
+
+
+def test_the_relabel_reads_the_fresher_replica_status(tmp_path, monkeypatch):
+    """(d) t_01a1d390d19239dd: a live board lagging after a sync stall still read the card ready, so a queued
+    ``chat_wait_unclaimed`` wake kept its false premise. The pulled replica holds a newer revision: done."""
+    import sqlite3
+
+    from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli import kanban_sync_client as ksc
+    from tests.hermes_cli import kanban_sync_support as support
+    home = support.kanban_home(tmp_path, monkeypatch)
+    for key in ('HERMES_KANBAN_DB', 'HERMES_KANBAN_BOARD'):
+        monkeypatch.delenv(key, raising=False)
+    support.write_sync_config(home, True)
+    ksa._reset_cache_for_tests()
+    conn = kbc.connect(home / 'kanban.db')
+    try:
+        ksc.ensure_identity(conn, 'default', 'macbook')
+        tid = kb.create_task(conn, title='waited on', assignee='worker')
+        conn.execute('UPDATE tasks SET sync_version = 5 WHERE id = ?', (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+    path = ksc.shadow_path('default')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rep = sqlite3.connect(path)
+    rep.executescript(
+        'CREATE TABLE kanban_sync_state (cursor INTEGER, pulled_at REAL);'
+        'CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, ready_since INTEGER, sync_version INTEGER, '
+        'result TEXT);'
+        'CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, summary TEXT, started_at INTEGER, '
+        'ended_at INTEGER);')
+    rep.execute("INSERT INTO tasks VALUES (?, 'done', NULL, 7, NULL)", (tid,))
+    rep.execute("INSERT INTO task_runs (task_id, summary, started_at, ended_at) VALUES (?, 'landed PR #1', 1, 2)",
+                (tid,))
+    rep.commit()
+    rep.close()
+    card = {'task_id': tid, 'board': '', 'kinds': ['chat_wait_unclaimed'],
+            'text': f'[kanban] Task {tid} is ready with no worker claiming it.\nBoard: default'}
+    try:
+        refreshed = kanban_wake_fold.refresh_card(card)
+    finally:
+        ksa._reset_cache_for_tests()
+    lines = refreshed['text'].split('\n')
+    assert lines[0] == f'[kanban] Task {tid} completed.'
+    assert 'Live status: done.' in lines[1]
+    assert lines[2] == 'Result: landed PR #1'
+    assert refreshed['kinds'] == ['completed']

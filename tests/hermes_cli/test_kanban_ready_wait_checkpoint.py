@@ -208,3 +208,110 @@ def test_old_payload_without_the_field_renders_unchanged(render):
     sentence = f'Last checkpoint (08:00Z): "{LANDED}". {SENTENCE} '
     assert sentence in with_field
     assert with_field.replace(sentence, "") == before
+
+
+# --- a live board lagging its pulled replica (t_01a1d390d19239dd) -----------------------------------------------
+# 2026-11-12 22:11 PST, MacBook: chat_wait_unclaimed for t_01a1d1292db9d3cb and t_01a1d12a594c8fd7, done on the Board
+# 30 min earlier. The live feed cursor (1650734) trailed its own replica (1713384) after a sync-loop stall, so the
+# live rows still read ready. These model that pair: a synced live board and a replica at sync-shadow/default.db.
+
+
+@pytest.fixture
+def synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli import kanban_sync_client as ksc
+    from tests.hermes_cli import kanban_sync_support as support
+    home = support.kanban_home(tmp_path, monkeypatch)
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    support.write_sync_config(home, True)
+    c = kbc.connect(home / "kanban.db")
+    ksc.ensure_identity(c, "default", "macbook")
+    ksa._reset_cache_for_tests()
+    yield c
+    c.close()
+    ksa._reset_cache_for_tests()
+
+
+def _set_live(conn, tid, *, cursor, version):
+    conn.execute("UPDATE kanban_sync_state SET cursor = ?", (cursor,))
+    conn.execute("UPDATE tasks SET sync_version = ? WHERE id = ?", (version, tid))
+    conn.commit()
+
+
+def _set_replica(*rows, cursor, pulled_at=None):
+    """The pulled replica: its feed cursor, its ``mark_pulled`` stamp and ``(id, status, sync_version)`` rows."""
+    import sqlite3
+    from hermes_cli import kanban_sync_client as ksc
+    path = ksc.shadow_path("default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rep = sqlite3.connect(path)
+    rep.executescript(
+        "CREATE TABLE IF NOT EXISTS kanban_sync_state (id INTEGER PRIMARY KEY CHECK (id = 1), cursor INTEGER, "
+        "pulled_at REAL);"
+        "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, status TEXT, ready_since INTEGER, "
+        "sync_version INTEGER, result TEXT);"
+        "CREATE TABLE IF NOT EXISTS task_runs (id INTEGER PRIMARY KEY, task_id TEXT, summary TEXT, "
+        "started_at INTEGER, ended_at INTEGER);")
+    rep.execute("INSERT OR REPLACE INTO kanban_sync_state VALUES (1, ?, ?)",
+                (cursor, time.time() if pulled_at is None else pulled_at))
+    rep.executemany("INSERT OR REPLACE INTO tasks (id, status, sync_version) VALUES (?, ?, ?)", rows)
+    rep.commit()
+    rep.close()
+
+
+def _waiting(conn):
+    tid = kb.create_task(conn, title="waited on", assignee="default")
+    _subscribe(conn, tid)
+    _age(conn, tid)
+    return tid
+
+
+def test_replica_completed_later_skips_the_notice(synced, caplog):
+    """(a) Live row ready 31 min; the replica, at the same feed position, has the card done at a newer revision."""
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "done", 7), cursor=1000)
+    with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+        assert cw.sweep(synced) == 0
+    assert _notices(synced, tid, cw.NOTICE_KIND) == []
+    assert f"{tid} skipped: replica has it done (revision 7)" in caplog.text
+
+
+def test_live_feed_lag_defers_the_notice_until_it_closes(synced, caplog):
+    """(b) The replica also has the card ready, but the live feed trails it past the bound: nothing is said until
+    the lag closes, then exactly one notice for the same episode."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    tid = _waiting(synced)
+    head = 1000 + fresh.MAX_FEED_LAG_ROWS + 1
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=head)
+    with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+        assert cw.sweep(synced) == 0
+    assert _notices(synced, tid, cw.NOTICE_KIND) == []
+    assert "1 notice(s) deferred: live feed" in caplog.text
+    _set_live(synced, tid, cursor=head, version=5)
+    assert cw.sweep(synced) == 1
+    assert cw.sweep(synced) == 0
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+def test_stale_replica_pull_defers_the_notice(synced):
+    """A stalled sync loop stops both copies, so their cursors agree: the replica's pull stamp is what shows it."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=1000, pulled_at=time.time() - fresh.REPLICA_STALE_SECONDS - 60)
+    assert cw.sweep(synced) == 0
+    _set_replica((tid, "ready", 5), cursor=1000)
+    assert cw.sweep(synced) == 1
+
+
+def test_in_sync_replica_still_ready_posts_once(synced):
+    """(c) Regression guard: no lag and the replica agrees the card is ready, so the notice goes out once."""
+    tid = _waiting(synced)
+    _set_live(synced, tid, cursor=1000, version=5)
+    _set_replica((tid, "ready", 5), cursor=1000)
+    assert cw.sweep(synced) == 1
+    assert cw.sweep(synced) == 0
+    assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1

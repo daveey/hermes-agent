@@ -179,13 +179,20 @@ def _keep_notices(old, new):
 def _live_task(card):
     """``(status, latest handoff summary)`` of the card on its board, or ``(None, '')``. The board slug
     came from the notifier's board enumeration, so it resolves like the notifier read it
-    (``pin_first_board_resolution``): a ``HERMES_KANBAN_DB`` pin outranks it."""
+    (``pin_first_board_resolution``): a ``HERMES_KANBAN_DB`` pin outranks it. When the board's pulled
+    replica holds a newer Board revision of the card than the live row (a live copy lagging after a sync
+    stall), the replica's status wins (``kanban_replica_freshness``, t_01a1d390d19239dd)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_replica_freshness as fresh
     with kb.pin_first_board_resolution(), contextlib.closing(kbc.connect(board=card.get('board') or None)) as conn:
         task = kb.get_task(conn, card['task_id'])
         if task is None:
             return None, ''
+        newer = fresh.newer_rows(conn, [card['task_id']]).get(card['task_id'])
+        if newer is not None and newer['status']:
+            summary = (newer.get('summary') or newer.get('result') or '') if newer['status'] == 'done' else ''
+            return newer['status'], summary.strip()
         summary = (kb.latest_summary(conn, card['task_id']) or task.result or '') if task.status == 'done' else ''
         return task.status, summary.strip()
 

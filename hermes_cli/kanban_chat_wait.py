@@ -169,16 +169,35 @@ def _clock_hold_unchecked(conn, task_id: str, since: int, now: float) -> dict[st
 
 
 def sweep(conn, *, now: Optional[float] = None) -> int:
-    """Append the once-per-ready-episode notice for every qualifying card; returns how many were appended."""
+    """Append the once-per-ready-episode notice for every qualifying card; returns how many were appended.
+
+    "No worker claiming it" is a Board fact read from this gateway's live copy, so it is checked against the pulled
+    replica first (``kanban_replica_freshness``, t_01a1d390d19239dd): while the live feed lags the replica past the
+    bound every notice waits (the episode keeps its key, so it fires once when the lag closes, if still ready), and
+    a card whose newer replica row has left this ready episode is skipped."""
+    from hermes_cli import kanban_replica_freshness as fresh
     from hermes_cli.kanban_sync_diagnostics import missing_board, update_hold
     now = time.time() if now is None else now
-    drain = update_hold()
-    posted = 0
     rows = conn.execute(_CANDIDATES, (int(now - MAX_EPISODE_SECONDS), int(now - THRESHOLD_SECONDS))).fetchall()
+    due = []
     for row in rows:
         since = pu.ready_since(conn, row["id"], row["created_at"])
         ready_for = now - since
-        if ready_for < THRESHOLD_SECONDS or ready_for > MAX_EPISODE_SECONDS:
+        if THRESHOLD_SECONDS <= ready_for <= MAX_EPISODE_SECONDS:
+            due.append((row, since, ready_for))
+    if not due:
+        return 0
+    lag = fresh.lag_hold(conn, now=now)
+    if lag is not None:
+        _log.info("kanban chat-wait: %d notice(s) deferred: %s", len(due), lag["reason"])
+        return 0
+    newer = fresh.newer_rows(conn, [row["id"] for row, _since, _for in due])
+    drain = update_hold()
+    posted = 0
+    for row, since, ready_for in due:
+        moved = fresh.moved_past(newer.get(row["id"]))
+        if moved:
+            _log.info("kanban chat-wait: %s skipped: %s", row["id"], moved)
             continue
         if pu.post_notice(conn, row["id"], row["id"], wait_key=f"ready@{since}", waited_seconds=ready_for,
                           ready_seconds=ready_for, parent_title=row["title"], kind=NOTICE_KIND,
