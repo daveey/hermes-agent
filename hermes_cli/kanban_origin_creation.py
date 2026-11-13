@@ -56,7 +56,12 @@ def _link_origin(conn, task_id: str, origin: dict, owner_gateway: str) -> None:
     already proves it, as in ``kanban_creator_chats.initialize_ownership``: an unreleased ``created`` link proves a
     foreign chat (``proven_foreign_chats``), only the chat's gateway can tell a Desktop chat from a worker's own
     hash, and ``hermes-hub create-task`` defaults the origin to a worker's ``$HERMES_SESSION_ID``. That link still
-    comes from the origin's ledger reconcile."""
+    comes from the origin's ledger reconcile.
+
+    Relation to ``kanban_chat_links._owner_hub_links``: that reconcile pass already publishes a row with the same uid
+    (``created`` for a courier-bound origin) from the origin's ``hub`` subscription on this owner's next links pass,
+    and skips the owner's own gateway the same way. This write only closes the window until that pass runs, so the
+    chat's link reaches the Board with the card's own capture rather than one reconcile later."""
     import time
 
     from hermes_cli.kanban_chat_links import link_uid
