@@ -31,6 +31,9 @@ def _minimax_frame(tmp_path, monkeypatch, api_key=None):
 def _execute(frame, monkeypatch, base=object, built=None, result=None, sent=None, recover=None):
     from agent import managed_worker as worker
     built = {} if built is None else built
+    if recover is None:
+        def recover(**_k):
+            return None
 
     class Agent(base):
         def __init__(self, **kwargs):
@@ -61,8 +64,7 @@ def _execute(frame, monkeypatch, base=object, built=None, result=None, sent=None
     monkeypatch.setattr(worker, 'WorkerControls', Controls)
     monkeypatch.setattr('agent.runtime_session_store.WorkerRPC', lambda home: lambda *a, **k: {'owner_epoch': 1})
     monkeypatch.setattr('agent.runtime_session_store.RuntimeSessionStore', Store)
-    monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint',
-                        recover or (lambda **_k: None))
+    monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint', recover)
     monkeypatch.setattr('run_agent.AIAgent', Agent)
     monkeypatch.setattr('agent.title_generator.wait_for_title_upgrades', lambda: None)
     sent = [] if sent is None else sent
