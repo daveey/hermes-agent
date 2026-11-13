@@ -146,6 +146,9 @@ def reopen_done_task(
         if previous != "done" and (stale_hold(conn, task_id) or {}).get("status") != "done":
             return None
         new_status = _kb._landing_status_after_parents(conn, task_id)
+        # The UPDATE nulls ``current_run_id``: close the run it points at first, as ``unblock_task`` does.
+        _kb._reclaim_dangling_run(conn, task_id, statuses=("blocked", "scheduled", "triage"), now=int(time.time()),
+                                  note="invariant recovery on reopen")
         cur = conn.execute(
             "UPDATE tasks SET status = ?, completed_at = NULL, current_run_id = NULL, "
             "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "

@@ -1369,6 +1369,9 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
         except kbo.KanbanEditRefused as exc:
             return _err(f"kanban reopen: {exc}", 2)
         if status is None:
+            held = kb.unblock_refusal(conn, args.task_id, verb="reopen")  # an archived stale copy: nothing revives it
+            if held:
+                return _err(held)
             current = kb.get_task(conn, args.task_id)
             what = "unknown id" if current is None else f"status is {current.status!r}, not 'done'"
             return _err(f"cannot reopen {args.task_id} ({what}); use unblock/reopen-review for other states")

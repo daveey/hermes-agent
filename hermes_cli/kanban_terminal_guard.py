@@ -155,14 +155,15 @@ def stale_hold(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     return terminal_hold(conn, task_id) if row is not None and row[0] in _UNBLOCKABLE else None
 
 
-def unblock_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+def unblock_refusal(conn: sqlite3.Connection, task_id: str, *, verb: str = "unblock") -> Optional[str]:
     """The user-facing text for an unblock ``unblock_held`` refused (CLI, dashboard, operator call), else None:
     the row does read blocked/scheduled, so a bare "not blocked/scheduled?" would mislead. A held-done copy is
-    revived by ``reopen`` (``kanban_db_operator.reopen_done_task`` accepts it); nothing revives an archived card."""
+    revived by ``reopen`` (``kanban_db_operator.reopen_done_task`` accepts it); nothing revives an archived card.
+    ``verb="reopen"``: the CLI reopen's refusal, which names only the archived hold (reopen accepts a done one)."""
     hold = stale_hold(conn, task_id)
-    if hold is None:
+    if hold is None or (verb == "reopen" and hold["status"] == "done"):
         return None
-    head = f"cannot unblock {task_id}: its {hold['kind']} event holds it {hold['status']} (this row is a stale copy)"
+    head = f"cannot {verb} {task_id}: its {hold['kind']} event holds it {hold['status']} (this row is a stale copy)"
     if hold["status"] == "done":
         return f"{head}; use `hermes kanban reopen {task_id} --reason <why>` to revive it"
     return f"{head}; an archived card is not revived by unblock or reopen"

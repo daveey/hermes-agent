@@ -616,3 +616,32 @@ def test_unblock_refusal_of_an_archived_copy_names_no_reopen_and_the_dashboard_e
     assert text.startswith(f"cannot unblock {tid}: its archived event holds it archived")
     assert "reopen `" not in text and "not revived" in text
     assert plugin_api._refusal_detail(board, tid, "ready") == text
+
+
+# PR #2271 review 5893184151: reopen's stale-copy branch nulled ``current_run_id`` without closing the run it pointed
+# at (``unblock_task`` reclaims it on the same statuses), and the CLI's archived-copy refusal still named unblock.
+
+def test_reopen_of_a_stale_copy_with_a_live_run_pointer_ends_that_run(board):
+    from hermes_cli.kanban_db_operator import reopen_done_task
+    tid = _parked(board)
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    with kb.write_txn(board):
+        run_id = board.execute("INSERT INTO task_runs (task_id, profile, status, started_at) "
+                               "VALUES (?, 'worker', 'running', ?)", (tid, int(time.time()))).lastrowid
+        board.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, tid))
+    assert reopen_done_task(board, tid, reason="more work", actor="david") == "ready"
+    run = board.execute("SELECT status, ended_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+    assert run["ended_at"] is not None and run["status"] == "reclaimed"
+    assert board.execute("SELECT current_run_id FROM tasks WHERE id = ?", (tid,)).fetchone()[0] is None
+
+
+def test_cli_reopen_of_an_archived_stale_copy_says_nothing_revives_it(board, human, capsys):
+    tid = _parked(board)
+    with kb.write_txn(board):
+        kb._append_event(board, tid, "archived", {})
+    assert _cli("reopen", tid, "--reason", "more work") == 1
+    err = capsys.readouterr().err
+    assert f"cannot reopen {tid}: its archived event holds it archived (this row is a stale copy)" in err
+    assert "not revived by unblock or reopen" in err
+    assert "use unblock/reopen-review" not in err
+    assert _status(board, tid) == "scheduled"
