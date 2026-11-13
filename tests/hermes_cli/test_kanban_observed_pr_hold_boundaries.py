@@ -57,9 +57,22 @@ def test_local_observation_requires_ready_boundary(stores, monkeypatch, case):
         "diagnostic": "UPDATE task_events SET kind='commented' WHERE id=2",
         "wrong_reason": "UPDATE task_events SET payload='{\"reason\":\"other\"}' WHERE id=2",
         "before_boundary": "UPDATE task_events SET created_at='2025-01-01T00:00:00Z' WHERE id=2",
-        # The latest lifecycle boundary is a park, not a ready transition.
-        "parked": "INSERT INTO task_events VALUES (3,'task','blocked','2026-01-01T00:00:00Z','{}','park')",
+        # The card was parked after the hold was seen: the observation is from an older episode.
+        "parked": "INSERT INTO task_events VALUES (3,'task','blocked','2026-01-01T00:00:02Z','{}','park')",
     }
     home.execute(mutations[case])
     monkeypatch.setattr(history, "_with_fresh_replica", lambda *args: False)
     assert not observed.observed(home, "task")
+
+
+@pytest.mark.parametrize("kind", ["blocked", "scheduled", "continued", "assigned", "claimed", "operator_resumed"])
+def test_a_hold_seen_after_any_latest_transition_counts(stores, monkeypatch, kind):
+    # A dispatcher records respawn_guarded only on a card it finds ready, so a hold after a park, a
+    # continuation, a reassign or a released claim shows the card left it through a non-transition event
+    # (a wake, a triage sweep, a release). resume() itself still requires an unclaimed READY card.
+    home, _ = stores
+    home.execute(f"INSERT INTO task_events VALUES (2,'task','{kind}','2026-01-01T00:00:01Z','{{}}','t')")
+    home.execute("INSERT INTO task_events VALUES (3,'task','respawn_guarded',"
+                 "'2026-01-01T00:00:02Z','{\"reason\":\"active_pr\"}','hold')")
+    monkeypatch.setattr(history, "_with_fresh_replica", lambda *args: False)
+    assert observed.observed(home, "task")

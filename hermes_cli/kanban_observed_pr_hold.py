@@ -1,4 +1,13 @@
-"""Current-episode dispatcher observations for operator-only resume."""
+"""Current-episode dispatcher observations for operator-only resume.
+
+The episode starts at the card's latest lifecycle transition, of any kind. A dispatcher
+records ``respawn_guarded`` only for a card it finds in its ready (or review) lane, and
+records it again after every other event (``guard_hold_reason``). So an ``active_pr``
+observation after that transition shows the card is held now, also when it became
+ready again through an event that is no transition itself (a woken continuation or
+park, a released claim, a triage sweep) or through a same-profile reassign. The caller
+still requires an unclaimed READY card before it writes, which refuses review cards.
+"""
 from __future__ import annotations
 
 
@@ -10,7 +19,6 @@ _BOUNDARIES = frozenset({
     "crashed", "timed_out", "completed", "archived", "assigned", "review_requested",
     "review_reopened", "changes_requested", "operator_resumed",
 })
-_READY = frozenset({"promoted", "promoted_manual", "unblocked", "reopened", "reclaimed", "created"})
 
 
 def _episode(conn, task_id):
@@ -22,7 +30,7 @@ def _episode(conn, task_id):
         return None, False
     ordered = sorted(timed, key=lambda pair: (pair[0], pair[1]["id"]))
     boundary = next((e for _, e in reversed(ordered) if e["kind"] in _BOUNDARIES), None)
-    if boundary is None or boundary["kind"] not in _READY:
+    if boundary is None:
         return None, False
     point = (kb._to_epoch(boundary["created_at"]), boundary["id"])
     held = any((at, e["id"]) > point and e["kind"] == "respawn_guarded"
@@ -31,7 +39,7 @@ def _episode(conn, task_id):
 
 
 def observed(conn, task_id):
-    """Local or fresh Board evidence, bound to the home ready episode's UID."""
+    """Local or fresh Board evidence, bound to the home episode's UID."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_dependency_history import _with_fresh_replica
 
