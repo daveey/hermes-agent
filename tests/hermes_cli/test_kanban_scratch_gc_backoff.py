@@ -7,6 +7,7 @@ refused trees every hour (one partial clone cost ~78 s per pass) and ran past th
 import argparse
 import json
 import logging
+import os
 
 import pytest
 
@@ -104,6 +105,33 @@ def test_backoff_doubles_to_a_cap(tmp_path):
     assert waits == [bo.BASE_S * 2 ** i for i in range(4)] + [bo.CAP_S] * 3
     clock[0] += bo.FORGET_S + 1
     assert bo.Refusals("default", now=lambda: clock[0]).entries == {}
+
+
+@pytest.mark.parametrize("change", ["mtime", "completed_at"])
+def test_refusal_count_resets_when_the_refused_tree_changes(tmp_path, change):
+    """A changed tree refused again starts over at count 1 and BASE_S, not the old tree's doubled wait."""
+    clock = [1_000_000.0]
+    refusals = bo.Refusals("default", now=lambda: clock[0])
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    refusals.record("t", tree, 5, "refused")
+    clock[0] += 60
+    refusals.record("t", tree, 5, "refused")
+    assert refusals.entries["t"]["count"] == 2
+    old_fp = refusals.entries["t"]["fingerprint"]
+    completed_at = 5
+    if change == "mtime":
+        st = tree.stat()
+        os.utime(tree, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    else:
+        completed_at = 6
+    assert bo.fingerprint(tree, completed_at) != old_fp
+    clock[0] += 60
+    refusals.record("t", tree, completed_at, "refused again")
+    entry = refusals.entries["t"]
+    assert entry["count"] == 1
+    assert entry["retry_at"] - entry["last_at"] == bo.BASE_S
+    assert entry["fingerprint"] == bo.fingerprint(tree, completed_at)
 
 
 def test_unreadable_state_is_empty_and_never_blocks(remote, archives):
