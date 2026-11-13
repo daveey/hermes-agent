@@ -28,9 +28,13 @@ OPERATOR_DELIVERY_TEXT_MAX = 128
 # Every _text field: no C0 control but tab/newline, and not all str.isspace() (what strip() removes). One regex both
 # _text and the advertised JSON-schema `pattern` (tools/kanban_tools_schemas.py) read, so they cannot drift; anchors,
 # character classes and \x/\u escapes only, valid in Python re, ECMA-262 and llama.cpp's grammar converter.
+# Cost: the schema repeats it on 15 fields (~2.3 KB of KANBAN_COMPLETE_SCHEMA, sent on every worker request), so
+# keep it short: the nonblank class folds _CONTROL, tab, newline and space into one \x00-\x20 range. A shared
+# `$defs` + `$ref` would send it once, but Gemini's legacy `parameters` translator drops `$ref` (the field loses
+# its type) and Google rejects reference indirection, so every field carries the pattern inline.
 _CONTROL = "\\x00-\\x08\\x0b-\\x1f"
-_BLANK = "\\t\\n\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"  # isspace() minus _CONTROL
-TEXT_PATTERN = f"^[^{_CONTROL}]*[^{_CONTROL}{_BLANK}][^{_CONTROL}]*$"
+_SPACE = "\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"  # isspace() above \x20
+TEXT_PATTERN = f"^[^{_CONTROL}]*[^\\x00-\\x20{_SPACE}][^{_CONTROL}]*$"
 _TEXT = re.compile(TEXT_PATTERN)
 _CONTROL_CHAR = re.compile(f"[{_CONTROL}]")
 _QUALIFIED_OWNER = re.compile(r"@(task|session):[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+/[^\s/@]+\Z")

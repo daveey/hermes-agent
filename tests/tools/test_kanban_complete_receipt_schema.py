@@ -169,6 +169,9 @@ def test_text_pattern_is_exactly_the_writers_text_rule():
     # for every BMP character, alone and padded, so the advertised pattern is the writer's real rule.
     import re
 
+    # PR #2031 review nit: the schema repeats the pattern on 15 fields of every worker request (the cost note at
+    # TEXT_PATTERN); the nonblank class folds control, tab, newline and space into one range. Don't regrow it.
+    assert len(hcr.TEXT_PATTERN) <= 115, len(hcr.TEXT_PATTERN)
     rule = re.compile(hcr.TEXT_PATTERN)
     for code in range(0x10000):
         c = chr(code)
