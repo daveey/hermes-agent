@@ -10,10 +10,13 @@ from hermes_cli import kanban_sync_client as client
 from hermes_cli import kanban_worker_placement as wp
 from tests.hermes_cli import test_kanban_worker_reserve_client as fixtures
 from tests.hermes_cli.test_kanban_queue_reason import reply
+from tests.hermes_cli import test_kanban_queue_reason_hold as hold
 
+no_comment_hold = hold.no_comment_hold
 conn = fixtures.conn
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 def test_assigned_to_queued_feed_is_not_a_second_transition(conn):
     tid = fixtures.acknowledged(conn)
     assigned = {**reply("reserved"), "state": "assigned", "machine": "worker-1"}

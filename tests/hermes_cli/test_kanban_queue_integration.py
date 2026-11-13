@@ -12,10 +12,13 @@ from hermes_cli import kanban_sync_client as client
 from hermes_cli import kanban_worker_placement as wp
 from tests.hermes_cli import test_kanban_worker_reserve_client as fixtures
 from tests.hermes_cli.test_kanban_queue_reason import reply
+from tests.hermes_cli import test_kanban_queue_reason_hold as hold
 
+no_comment_hold = hold.no_comment_hold
 conn = fixtures.conn
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 @pytest.mark.parametrize("error", [OSError("private transport text"), client.HubError(500, "private response")])
 def test_initial_pull_failure_is_durable_and_recovers(conn, monkeypatch, error):
     tid = fixtures.acknowledged(conn)
@@ -43,6 +46,7 @@ def test_initial_pull_failure_is_durable_and_recovers(conn, monkeypatch, error):
     assert wp.execution_refusal(conn, dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())) == wp.WAITING
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 @pytest.mark.parametrize("error", [OSError("private transport text"), client.HubError(503, "private response")])
 def test_reserve_failure_dedupes_and_recovers(conn, monkeypatch, error):
     tid = fixtures.acknowledged(conn)

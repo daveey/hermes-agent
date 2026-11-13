@@ -21,7 +21,9 @@ from tests.hermes_cli import test_kanban_worker_policy_db as db_fixtures
 from tests.hermes_cli.test_kanban_worker_move_request import PlacementHub, RecordingHub, _acknowledged
 from tests.hermes_cli.test_kanban_worker_node import BOARD, HUB, WORKER
 from tests.hermes_cli.test_kanban_worker_repin import _policy_card
+from tests.hermes_cli import test_kanban_queue_reason_hold as hold
 
+no_comment_hold = hold.no_comment_hold
 conn = db_fixtures.conn
 gws = node_fixtures.gws
 svc = node_fixtures.svc
@@ -87,6 +89,7 @@ def test_not_claimable_after_the_reserved_worker_claimed_is_recorded_as_picked_u
     assert (row["status"], row["lease_holder"]) == ("running", WORKER)  # recorded as picked up by worker-1
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 def test_not_claimable_without_a_claim_by_the_reserved_machine_is_still_refused(conn, monkeypatch):
     monkeypatch.setattr(ksc, "pull", lambda *a, **kw: None)  # the feed shows no lease: the row is still unclaimed
     tid = _acknowledged(conn)
@@ -112,6 +115,7 @@ def _pull_applying(conn_, tid, *, claims, lease_holder=None, holder="worker-2"):
     return pull
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 def test_not_claimable_while_another_machine_holds_the_lease_is_still_refused(conn, monkeypatch):
     tid = _acknowledged(conn)
     claims = []
