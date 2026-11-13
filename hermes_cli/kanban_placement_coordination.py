@@ -196,29 +196,35 @@ def _strip_read_paths(text, roots):
 
 def requirements(text):
     """Return required labels and an unsupported-action refusal, without changing text."""
+    labels, refusal, _ = _requirements(text)
+    return labels, refusal
+
+
+def _requirements(text):
+    """:func:`requirements` plus the text span that matched a refusal (None without one)."""
     labels = set()
     # Reader/broker attestations do not grant managed-worker board administration.
-    if re.search(r"\binstall-boards\.py\b|\bhermes kanban boards (?:create|subscribe)\b|"
-                 r"\bcreate board replicas\b|\battach primary/pickup subscriptions\b",
-                 text, re.IGNORECASE):
-        return labels, ACTION_REASON
-    for start, _, action in _actions(text, _HUB, _HUB_ACTIONS):
+    if admin := re.search(r"\binstall-boards\.py\b|\bhermes kanban boards (?:create|subscribe)\b|"
+                          r"\bcreate board replicas\b|\battach primary/pickup subscriptions\b",
+                          text, re.IGNORECASE):
+        return labels, ACTION_REASON, admin.group()
+    for start, end, action in _actions(text, _HUB, _HUB_ACTIONS):
         if _HUB_ADMIN.search(text[:start].rsplit("\n", 1)[-1]):
             labels.add(HUB_WRITE)
             continue
         if action not in ("status", "pull"):
-            return labels, ACTION_REASON
+            return labels, ACTION_REASON, text[start:end]
         labels.add("capability:coordination-read")
-    for _, _, action in _actions(text, _CROSS, {"read", "list", "comment"}):
+    for start, end, action in _actions(text, _CROSS, {"read", "list", "comment"}):
         if action not in ("read", "list"):
-            return labels, ACTION_REASON
+            return labels, ACTION_REASON, text[start:end]
         labels.add("capability:coordination-read")
     if re.search(r"\b(?:parent|sibling)[ -]card (?:lookup|read)|\bkanban_show\b", text, re.IGNORECASE):
         labels.add("capability:coordination-read")
     for tool, label in _TOOLS.items():
         if re.search(r"\b" + re.escape(tool) + r"\b", text, re.IGNORECASE):
             labels.add(label)
-    return labels, None
+    return labels, None, None
 
 
 def requirement_label(name):
@@ -348,31 +354,96 @@ def access_text(text, cfg, *, target=None, requires=None):
     return text
 
 
+def _claim_text(card):
+    """The text the pickup gate judges: title plus body, minus evidence and the origin's placement note."""
+    from hermes_cli.kanban_placement import without_evidence, without_placement_note
+    return f"{card.get('title') or ''}\n{without_evidence(without_placement_note(card.get('body') or ''))}"
+
+
+def _claim_requires(card):
+    """The card's declared ``requires`` as a list of names, or None when it is malformed."""
+    requires = card.get("requires")
+    if requires is None or requires == "":
+        return []  # Legacy rows have no declaration.
+    if isinstance(requires, str):
+        try:
+            requires = json.loads(requires)
+        except ValueError:
+            return None
+    if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
+        return None
+    return requires
+
+
+INVALID_REQUIRES = "invalid worker access requirements"
+
+
 def claim_refusal(card, me):
     """Revalidate actual destination of enrolled cards, never override explicit pins."""
     if card.get("placement_policy") != "worker-first-v1":
         return None
-    from hermes_cli.kanban_placement import without_evidence, without_placement_note
-    text = f"{card.get('title') or ''}\n{without_evidence(without_placement_note(card.get('body') or ''))}"
+    text = _claim_text(card)
     from hermes_cli.kanban_runs_on_capabilities import _loads
     # Wire rows can bypass creator validation. Never turn corrupt contracts into
     # empty requirements, or let one malformed card crash the dispatch loop.
-    requires = card.get("requires")
-    if requires is None or requires == "":
-        requires = []  # Legacy rows have no declaration.
-    elif isinstance(requires, str):
-        try:
-            requires = json.loads(requires)
-        except ValueError:
-            return "invalid worker access requirements"
-    if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
-        return "invalid worker access requirements"
+    requires = _claim_requires(card)
+    if requires is None:
+        return INVALID_REQUIRES
     if refusal := check(text, {}, target=me, skills=_loads(card.get("skills"), []), requires=requires):
         return refusal
     from hermes_cli import kanban_mandatory_pin as mandatory
     if (pin := mandatory.requirements(card)) and not attested([me], pin):
         return mandatory.REASON  # this machine's core is not attested to refuse a pin it cannot serve
     return None
+
+
+def pickup_refusals(card, names):
+    """``{machine: {"reason", "quote"[, "missing_labels"]}}`` for each of ``names`` whose pickup gate
+    (:func:`claim_refusal`) refuses ``card`` for a reason no change of that machine's state lifts. [daveey]
+
+    t_01a1d560c6d3bc3c: worker-first placement reserved cards every worker's gate refused, every ~10 s for 42 min.
+    Text the gate reads as a home-only action, or a malformed ``requires``, refuses on every machine (``quote`` is
+    the matched text). Otherwise a member refuses when its registry entry lacks a label the card needs (text,
+    skills, declared access, mandatory pin; ``quote`` names them). Liveness is NOT judged here: a held, stale or
+    pickup-off member may take the card later, and a member the registry does not know, or an unreadable registry,
+    is no refusal either. The card's ``placement_policy`` is ignored: the placement tick asks before reserving.
+    """
+    names = list(dict.fromkeys(n for n in names or [] if isinstance(n, str) and n))
+    requires = _claim_requires(card)
+    if requires is None:
+        return {n: {"reason": INVALID_REQUIRES, "quote": str(card.get("requires"))[:200]} for n in names}
+    required, refusal, quote = _requirements(_claim_text(card))
+    if refusal:
+        return {n: {"reason": refusal, "quote": quote} for n in names}
+    from hermes_cli import kanban_mandatory_pin as mandatory
+    from hermes_cli.kanban_runs_on_capabilities import _loads
+    pin = mandatory.requirements(card)
+    required |= skill_requirements(_loads(card.get("skills"), [])) | access_requirements(requires) | pin
+    machines = _machines() if required and names else None
+    if machines is None:
+        return {}
+    out = {}
+    for name in names:
+        entry = machines.get(name)
+        labels = entry.get("labels") if isinstance(entry, dict) else None
+        if not isinstance(labels, list):
+            continue  # unknown to the registry: not this gate's refusal
+        missing = sorted(required - {v for v in labels if isinstance(v, str)})
+        if missing:
+            out[name] = {"reason": mandatory.REASON if set(missing) <= pin else REASON,
+                         "quote": ", ".join(sorted(required)), "missing_labels": missing}
+    return out
+
+
+def pool_refusal(card, names):
+    """``{"reason", "quote", "machines"}`` when :func:`pickup_refusals` refuses ``card`` on EVERY one of ``names``
+    (so no pool worker could ever claim it), else None. An empty pool is no refusal."""
+    names = list(dict.fromkeys(n for n in names or [] if isinstance(n, str) and n))
+    refused = pickup_refusals(card, names)
+    if not names or len(refused) != len(names):
+        return None
+    first = refused[names[0]]
+    return {"reason": first["reason"], "quote": first["quote"], "machines": refused}
 
 
 def _free_slot(entry):

@@ -384,6 +384,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
     from hermes_cli import kanban_placement_recovery as recovery
     rows = recovery.select_rows(conn, board, gateway, cursor, MAX_RESERVES_PER_TICK)
     from hermes_cli import kanban_queue_reason as queue
+    from hermes_cli import kanban_worker_pickup_gate as pickup_gate
 
     attempted = 0
     last = None
@@ -404,15 +405,11 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
             if row["placement_policy"] is None and mode is None:
                 continue
             key = (board, row["id"])
-            held = _refused.get(key)
-            if held and held[0] == row["sync_version"] and now < held[1]:
+            if _backed_off(key, row["sync_version"], now):
                 continue  # refused not_claimable at this revision: wait for the feed, don't re-ask every tick
-            _refused.pop(key, None)
-            if len(_refused) > 1024:  # cards that left the query never come back to clear their entry
-                for stale in [k for k, (_, until) in _refused.items() if until <= now]:
-                    del _refused[stale]
-            labels, why = (None, None) if mode else _selfcheck_unrefused(
-                key, row, *_move_target(conn, row, gateway, cfg))
+            labels, why, skip = _repin_target(conn, row, key, gateway, cfg, mode, candidates)
+            if skip:
+                continue  # no candidate's pickup gate takes it and no repin may be asked: never reserve
             stage = "recover" if mode else ("reserve" if labels is None else "repin")
             held = _queued.get(key)
             identity = _local_identity(conn, row["id"]) if labels is None else None
@@ -437,7 +434,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
                     from hermes_cli.kanban_placement_recovery import request_assignment
                     reply = request_assignment(hub, board, row, mode, candidates)
                     _remember_queued(reply, key, row["sync_version"], identity)
-                    queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates)
+                    queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates,
+                                     refused=pickup_gate.refusals(row, candidates))
                 attempted += 1
             except OSError as exc:
                 timing = queue.call_timing(budget, started, time.monotonic())
@@ -553,6 +551,35 @@ def _move_target(conn, row, gateway, cfg):
         return labels, None
     from hermes_cli.kanban_worker_first_selfcheck import pool_target
     return pool_target(conn, row, gateway, cfg) or (None, None)
+
+
+def _backed_off(key, revision, now):
+    """True while a ``not_claimable`` refusal of ``key`` at ``revision`` holds (:data:`_refused`); otherwise clear
+    it and prune expired entries (cards that left the query never come back to clear their own)."""
+    held = _refused.get(key)
+    if held and held[0] == revision and now < held[1]:
+        return True
+    _refused.pop(key, None)
+    if len(_refused) > 1024:
+        for stale in [k for k, (_, until) in _refused.items() if until <= now]:
+            del _refused[stale]
+    return False
+
+
+def _repin_target(conn, row, key, gateway, cfg, mode, candidates):
+    """``(labels, why, skip)`` for one selected row: a recovery reserves (``mode`` set); else the self-check's
+    pool repin, else the origin repin when no candidate's pickup gate takes the card
+    (:func:`kanban_worker_pickup_gate.origin_target`, t_01a1d560c6d3bc3c), else the reserve ``(None, None)``.
+    ``skip``: such a card has no repin to ask now; it must not be reserved either."""
+    from hermes_cli import kanban_worker_pickup_gate as pickup_gate
+
+    if mode:
+        return None, None, False
+    labels, why = _selfcheck_unrefused(key, row, *_move_target(conn, row, gateway, cfg))
+    if labels is None and (home := pickup_gate.origin_target(
+            conn, row, gateway, candidates, refused_at=_selfcheck_refused.get(key))) is not None:
+        return home[0], home[1], home[0] is None
+    return labels, why, False
 
 
 def _selfcheck_unrefused(key, row, labels, why):

@@ -21,6 +21,9 @@ CODES = {"reserved", "draining", "admission_limits", "no_live_candidate", "capab
 _REJECTIONS = {"invalid_policy", "not_creator", "not_claimable", "worker_pool_disabled",
                "unauthorized_candidate", "explicit_pin", "revision_conflict", "not_found"}
 _TOKEN = re.compile(r"^[A-Za-z0-9_.:/+-]{1,120}$")
+# Origin-side candidate reason: that machine's pickup gate (coordination.claim_refusal) refuses the card, so the
+# Board's own per-candidate rollup must not show it as eligible (t_01a1d560c6d3bc3c).
+PICKUP_REFUSED = "pickup_gate_refused"
 # Board-authored structural return (state "origin"): no configured pool worker is attested to run the card.
 _ORIGIN_REASON = re.compile(r"^no pool worker can run it: missing [A-Za-z0-9_.:/+-]{1,120}(, [A-Za-z0-9_.:/+-]{1,120}){0,63}$")
 
@@ -269,6 +272,9 @@ def describe(value):
     for key in ("error_class", "rejection_code"):
         if value.get(key):
             details.append(value[key])
+    gate = value.get("pickup_gate")
+    if isinstance(gate, dict) and gate.get("reason"):
+        details.insert(0, f"pickup gate: {gate['reason']} (`{gate.get('quote') or ''}`)")
     at = value.get("observed_at_ms", value.get("recorded_at_ms"))
     if at is not None:
         details.append(f"observed {_stamp(at)}")
@@ -339,14 +345,28 @@ def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
             return False
         kb._append_event(conn, task_id, EVENT, value)
         if comment and commented:  # a card no pool worker can run gets the owner's repin notice as its comment
-            kb.add_comment(conn, task_id, "worker-placement", describe(value), origin_gateway=gateway)
+            kb.add_comment(conn, task_id, "worker-placement", comment if isinstance(comment, str) else describe(value),
+                           origin_gateway=gateway)
         return True
 
 
-def record_reply(conn, task_id, gateway, reply, pool=None):
+def mark_refused(value, refused):
+    """``value`` with :data:`PICKUP_REFUSED` (and the missing labels) on each candidate whose pickup gate refuses the
+    card (``refused``: :func:`hermes_cli.kanban_placement_coordination.pickup_refusals`)."""
+    for candidate in value.get("candidates", []):
+        why = (refused or {}).get(candidate["machine"])
+        if why is None:
+            continue
+        candidate["reasons"] = sorted({*candidate["reasons"], PICKUP_REFUSED})
+        if labels := _tokens(why.get("missing_labels")):
+            candidate["missing_labels"] = sorted({*candidate.get("missing_labels", []), *labels})
+    return value
+
+
+def record_reply(conn, task_id, gateway, reply, pool=None, refused=None):
     from hermes_cli import kanban_repin_notice as repin
 
-    value = normalize(reply)
+    value = mark_refused(normalize(reply), refused)
     clear_streak(gateway, task_id)  # the Board answered for this card: a transient failure streak is over
     recorded = _record(conn, task_id, gateway, value, comment=not repin.no_pool_worker(value, pool))
     # Every reply, not only a changed one: a card queued before the notice existed gets it on the next pass.
