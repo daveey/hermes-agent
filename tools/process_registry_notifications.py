@@ -159,6 +159,8 @@ def _is_truncated(entry: dict) -> bool:
 
 # A stop the parent or user asked for is not a failure the parent has to recover from.
 _STOPPED = frozenset({"interrupted", "cancelled"})
+# Public name for the gateway's validation of a requested-stop admission (gateway/session_automation.py).
+DELEGATION_STOPPED_STATUSES = _STOPPED
 
 
 def delegation_wakes_parent(evt: dict) -> bool:

@@ -97,6 +97,12 @@ async def note_if_unviewed(authority, ref, row):
         await reopen_for_turn(authority, ref)
         return None
     metadata = note_metadata(descriptor)
+    if descriptor.get('requested_stop'):
+        # Unfinished work someone stopped, and nobody is watching to see it: the parent stays asleep on it.
+        import logging
+        logging.getLogger(__name__).warning(
+            'parent %s not woken: delegation %s stopped on request (%s), kept as a note (no viewer attached)',
+            ref.session_id, descriptor['identity'], ','.join(descriptor['requested_stop']))
     # Keyed by its admission: a claim is never replayed, and this keeps a write retry exact.
     target = await _write_note(authority, ref, lambda target: tracked_write(authority, partial(
         authority.db.append_completion_note, target, row['admission_id'], row['payload']['text'],

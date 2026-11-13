@@ -431,7 +431,7 @@ def automation_display_metadata(metadata):
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
     'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick',
-    'completion_wakes_parent', 'kanban_cards', 'kanban_event_keys'})
+    'completion_wakes_parent', 'completion_requested_stop', 'kanban_cards', 'kanban_event_keys'})
 
 
 def admission_display(payload):
@@ -550,6 +550,20 @@ def _local_automation_owner(authority, adapter, event, entry):
     return ref, live
 
 
+def requested_stop_metadata(metadata):
+    """A delegation result stopped on request (``completion_requested_stop``): its stopped statuses, so
+    the executor logs a parent left asleep only when it lands as a note (gateway/session_completion_notes.py).
+    Stored only when present, so an older admission's fingerprint is unchanged."""
+    if 'completion_requested_stop' not in metadata:
+        return {}
+    from tools.process_registry_notifications import DELEGATION_STOPPED_STATUSES
+    stopped = metadata['completion_requested_stop']
+    if (not isinstance(stopped, list) or not stopped
+            or not all(isinstance(s, str) and s in DELEGATION_STOPPED_STATUSES for s in stopped)):
+        raise RuntimeStoreError('invalid_params')
+    return {'requested_stop': sorted(set(stopped))}
+
+
 def snapshot_local_automation(authority, adapter, event, identity, entry):
     ref, _live = _local_automation_owner(authority, adapter, event, entry)
     descriptor = {'identity': identity, 'owner': ref.session_id,
@@ -566,6 +580,7 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
         if event.metadata['completion_wakes_parent'] is not True:
             raise RuntimeStoreError('invalid_params')
         descriptor['wakes_parent'] = True
+    descriptor.update(requested_stop_metadata(event.metadata))
     if event.metadata.get('turn_author') is not None:
         from agent.turn_author import parse_turn_author
         descriptor['turn_author'] = parse_turn_author(event.metadata['turn_author'])

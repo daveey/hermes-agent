@@ -1588,17 +1588,28 @@ def _interrupt_records(targets: list[dict[str, Any]], caller: str, reason: str, 
     return count
 
 
+def _mark_stop(targets: list[dict[str, Any]], reason: str, *, by_shutdown: bool) -> None:
+    """Record why *targets* were stopped; the first stop's intent wins (caller holds ``_records_lock``).
+    A requested stop (``/stop``, a session ending) marks ``_stop_requested``; a later shutdown sweep that
+    reaches the unit before its runner unwinds must not restamp it as ``interrupted_by`` and wake the
+    parent on work someone chose to stop. A shutdown stop stays stamped if a requested stop follows."""
+    for r in targets:
+        if not by_shutdown:
+            r.setdefault("_stop_requested", reason)
+        elif not r.get("_stop_requested"):
+            r.setdefault("_interrupted_by", reason)
+
+
 def interrupt_all(reason: str = "shutdown", *, by_shutdown: bool = False) -> int:
     """Signal every running async delegation to stop (``/stop``, shutdown). Returns how
     many. The child still emits a completion event (status='interrupted') via the
     normal finalize path. ``by_shutdown`` (the gateway's shutdown sweep) stamps *reason* on each
     unit's result as ``interrupted_by``: nobody asked for that stop, so its parent wakes to
-    re-dispatch or report (``delegation_wakes_parent``) instead of sleeping on a note."""
+    re-dispatch or report (``delegation_wakes_parent``) instead of sleeping on a note. A unit already
+    stopped on request keeps that intent (``_mark_stop``)."""
     with _records_lock:
         targets = [r for r in _records.values() if r.get("status") in _ACTIVE_STATES]
-        if by_shutdown:
-            for r in targets:
-                r["_interrupted_by"] = reason
+        _mark_stop(targets, reason, by_shutdown=by_shutdown)
     return _interrupt_records(targets, "interrupt_all", reason, "Interrupted %d async delegation(s) (%s)")
 
 
@@ -1608,6 +1619,8 @@ def interrupt_for_session(
     """Signal running async delegations owned by ONE ending session to stop (any
     selector matches, see ``_session_records``). Returns how many."""
     targets = _session_records(_ACTIVE_STATES, session_key, origin_ui_session_id, parent_session_id)
+    with _records_lock:
+        _mark_stop(targets, reason, by_shutdown=False)
     return _interrupt_records(
         targets, "interrupt_for_session", reason, "Interrupted %d async delegation(s) for ending session (%s)")
 

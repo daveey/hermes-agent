@@ -182,10 +182,10 @@ def _watch_notification_metadata(evt: dict, source) -> dict[str, Any]:
         if delegation_wakes_parent(evt):
             metadata["completion_wakes_parent"] = True
         elif evt.get("role") != "cron_run" and (unfinished := delegation_unfinished_statuses(evt)):
-            # A stop someone asked for: with no viewer attached it becomes a note and nothing runs. Say so,
-            # so a parent left asleep on unfinished work is visible in the log, not only to the user.
-            logger.warning("Async delegation %s: parent %s not woken: %s (a requested stop; a note if unviewed)",
-                           evt.get("delegation_id"), parent_session_id or session_key or "?", ",".join(unfinished))
+            # A stop someone asked for: a viewed parent runs it as its turn, an unviewed one gets a note,
+            # which the executor logs once it knows (gateway/session_completion_notes.py) so a parent left
+            # asleep on unfinished work is visible in the log, not only to the user.
+            metadata["completion_requested_stop"] = sorted(set(unfinished))
     proven_session_id = str(evt.get("proven_session_id") or "").strip()
     if proven_session_id:
         metadata["gateway_proven_session_id"] = proven_session_id

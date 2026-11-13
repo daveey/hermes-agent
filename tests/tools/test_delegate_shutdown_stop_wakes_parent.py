@@ -80,24 +80,102 @@ def test_shutdown_stamp_without_stopped_children_has_no_stop_guidance(statuses):
     assert delegation_wakes_parent(evt) is ("failed" in statuses)
 
 
-@pytest.mark.parametrize("extra,warns", [
+@pytest.mark.parametrize("extra,flagged", [
     ({}, True),
     ({"type": "completion"}, False),
     ({"task_failure_notice": True}, False),
     ({"role": "cron_run"}, False),
 ])
-def test_requested_stop_warning_only_for_final_delegations(caplog, extra, warns):
+def test_requested_stop_is_flagged_only_for_final_delegations(caplog, extra, flagged):
+    """The metadata step cannot know whether a viewer will be attached when the admission runs, so it only
+    flags the requested stop; the executor logs it if it becomes a note (test_unviewed_delegation_failure_turn)."""
+    import logging
     from gateway.config import Platform
     from gateway.run_notifications import _watch_notification_metadata
 
+    caplog.set_level(logging.WARNING)
     evt = {"type": "async_delegation", "delegation_id": "deleg_warning", "status": "interrupted",
            "parent_session_id": "parent-warning", **extra}
     metadata = _watch_notification_metadata(evt, SimpleNamespace(platform=Platform.LOCAL))
     assert not metadata.get("completion_wakes_parent")
-    warnings = [record.getMessage() for record in caplog.records if "not woken" in record.getMessage()]
-    assert bool(warnings) is warns, warnings
-    if warns:
-        assert "parent-warning" in warnings[0] and "interrupted" in warnings[0]
+    assert ("completion_requested_stop" in metadata) is flagged, metadata
+    if flagged:
+        assert metadata["completion_requested_stop"] == ["interrupted"]
+    assert not [r.getMessage() for r in caplog.records if "not woken" in r.getMessage()]
+
+
+@pytest.mark.parametrize("value,ok", [
+    (["interrupted"], True), (["cancelled", "interrupted", "cancelled"], True),
+    ([], False), ("interrupted", False), (["failed"], False), ([None], False), (True, False),
+])
+def test_requested_stop_admission_metadata_is_validated(value, ok):
+    from gateway.session_automation import requested_stop_metadata
+    from hermes_state_runtime import RuntimeStoreError
+
+    assert requested_stop_metadata({}) == {}
+    if ok:
+        assert requested_stop_metadata({"completion_requested_stop": value}) == {
+            "requested_stop": sorted(set(value))}
+    else:
+        with pytest.raises(RuntimeStoreError):
+            requested_stop_metadata({"completion_requested_stop": value})
+
+
+def _dispatch_held_batch(stopped: threading.Event, release: threading.Event, **kwargs):
+    """A unit whose runner unwinds only on *release*: a stop sets *stopped* but leaves it active (running),
+    the window between a stop request and the unit's finalize."""
+    def runner():
+        assert release.wait(timeout=10)
+        return {"results": [{"task_index": 0, "status": "interrupted", "summary": "partial"}]}
+    res = ad.dispatch_async_delegation_batch(
+        goals=["wait on CI"], context=None, toolsets=None, role="leaf", model="m", session_key="", runner=runner,
+        interrupt_fn=stopped.set, max_async_children=1, parent_session_id="parent-1", **kwargs)
+    assert res["status"] == "dispatched", res
+    return res["delegation_id"]
+
+
+_REQUESTED_STOPS = {
+    "slash-stop": lambda: ad.interrupt_all(reason="/stop"),
+    "gateway-stop-command": lambda: ad.interrupt_for_session(parent_session_id="parent-1", reason="stop_command"),
+}
+
+
+@pytest.mark.parametrize("first", [*_REQUESTED_STOPS, None], ids=[*_REQUESTED_STOPS, "shutdown-only"])
+def test_shutdown_before_finalize_keeps_the_first_stops_intent(first):
+    """A user stopped the unit, then the gateway shut down before its runner unwound: the shutdown sweep
+    still reaches the active unit, but the stop was asked for, so the parent is not woken. With no earlier
+    stop the sweep's stop is the only one and wakes the parent (the control)."""
+    stopped, release = threading.Event(), threading.Event()
+    delegation_id = _dispatch_held_batch(stopped, release)
+    if first is not None:
+        assert _REQUESTED_STOPS[first]() == 1
+        assert stopped.is_set()
+        stopped.clear()
+    assert ad.interrupt_all(reason="gateway shutdown (restart)", by_shutdown=True) == 1, "still active"
+    assert stopped.is_set(), "the sweep still stops it"
+    release.set()
+    evt = _drain_for(delegation_id, timeout=5.0)
+    assert evt is not None and [r["status"] for r in evt["results"]] == ["interrupted"], evt
+    if first is None:
+        assert evt.get("interrupted_by") == "gateway shutdown (restart)", evt
+        assert delegation_wakes_parent(evt)
+    else:
+        assert "interrupted_by" not in evt, evt
+        assert not delegation_wakes_parent(evt)
+        assert "not by you or the user" not in (format_process_notification(evt) or "")
+
+
+@pytest.mark.parametrize("then", list(_REQUESTED_STOPS))
+def test_shutdown_stop_stays_stamped_when_a_requested_stop_follows(then):
+    """The first stop decides: work the shutdown already stopped still wakes its parent."""
+    stopped, release = threading.Event(), threading.Event()
+    delegation_id = _dispatch_held_batch(stopped, release)
+    assert ad.interrupt_all(reason="gateway shutdown (restart)", by_shutdown=True) == 1
+    assert _REQUESTED_STOPS[then]() == 1
+    release.set()
+    evt = _drain_for(delegation_id, timeout=5.0)
+    assert evt is not None and evt.get("interrupted_by") == "gateway shutdown (restart)", evt
+    assert delegation_wakes_parent(evt)
 
 
 def test_requested_stop_stays_asleep():
