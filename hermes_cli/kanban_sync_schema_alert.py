@@ -18,7 +18,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -216,13 +216,15 @@ def _report(host, why, since, runner, hub_cli, info, now) -> Optional[str]:
     return rid
 
 
-def on_give_up(gateway: str, why: str) -> None:
-    """``run_forever``'s hook, right after it recorded the stop: the incident is that record's ``since``.
+def on_give_up(state: Any, gateway: str, prefix: str, why: str) -> None:
+    """``run_forever``'s give-up: record the stop (``prefix + why``) in ``state``, then report it; the incident is
+    that record's ``since``.
 
     A give-up while this host's own core update is under way (the installed checkout moved past the commit this
     process started on, and this process runs that checkout) is the update's transition, not an incident: the
     update restarts this gateway on the new core."""
     from hermes_cli import kanban_sync_runstate as runstate
+    state.record_down(prefix + why)
     if _updating():
         log.warning("kanban sync: gave up the sync role while this host's core update is under way (%s -> %s); "
                     "no hub card", (_START_HEAD or "")[:12], (_installed_head() or "")[:12])
