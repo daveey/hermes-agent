@@ -1197,7 +1197,12 @@ def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
     ``eval "$(…)"``, ``bash <(…)``), yield every quoted string literal in it: the producer may
     print one as the shell's command (``print('bash /x/big.sh')``), so its paths are executed,
     not mentions. Single and double quotes are matched independently, so a literal nested in the
-    other kind (``python3 -c "print('bash x')"``) is yielded too."""
+    other kind (``python3 -c "print('bash x')"``) is yielded too.
+
+    Fails closed by design (review 5890191993 nits): every yielded literal is walked as an
+    executed command, so a producer that merely reads an oversized data file
+    (``sqlite3.connect('/d/big.db')``) refuses on the scan cap, and the literals charge the shared
+    line/byte budget, so a generator of ~16k lines piped to a shell refuses on the line cap."""
     from tools.shell_heredoc import output_reaches_shell
 
     if not output_reaches_shell(command):

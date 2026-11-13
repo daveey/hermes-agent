@@ -6,6 +6,8 @@ an interpreter string literal. The shape corpus (``heredoc_shape_corpus``, ``s_p
 "sink"``) crosses every sink with every wrapper and nesting form under real bash.
 """
 
+import time
+
 import pytest
 
 from cron.lifecycle_guard import scan_gateway_lifecycle
@@ -98,6 +100,35 @@ def test_output_reaches_shell(text):
 ])
 def test_output_does_not_reach_shell(text):
     assert not output_reaches_shell(text)
+
+
+def test_sink_regex_is_linear_on_masked_newline_runs():
+    """Review 5890191993: a masked no-sink heredoc body is a run of newlines, and the
+    command-word-substitution alternative was quadratic on it (16k lines: 1.5s -> 15.4s)."""
+    text = "python3 - <<'PY'\n" + "\n" * 50_000 + "PY\n"
+    started = time.monotonic()
+    assert not output_reaches_shell(text)
+    assert time.monotonic() - started < 2.0
+
+
+def test_large_no_sink_heredoc_scan_stays_fast(tmp_path):
+    body = "".join(f"x{i} = {i}\n" for i in range(8000))
+    command = "python3 - <<'PY'\n" + body + "PY\n"
+    started = time.monotonic()
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+    assert time.monotonic() - started < 5.0
+
+
+def test_producer_reading_an_oversized_data_file_under_a_sink_fails_closed(tmp_path):
+    """Intended (review 5890191993 nit): under a sink every quoted literal is walked as executed,
+    so a >1 MiB file the producer only reads still refuses on the scan cap."""
+    data = tmp_path / "d" / "big.db"
+    data.parent.mkdir()
+    data.write_text("# padding\n" * 130000, encoding="utf-8")
+    command = (f"python3 - <<'PY' | bash\nimport sqlite3\nsqlite3.connect('{data}')\n"
+               "print('echo ok')\nPY\n")
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe is True and refusal is not None and "scan cap" in refusal, refusal
 
 
 def test_shape_corpus_catches_a_guard_that_keeps_masking_sink_bodies(tmp_path, monkeypatch):

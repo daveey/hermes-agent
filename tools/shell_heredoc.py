@@ -492,7 +492,9 @@ _SHELL_SINK_RE = re.compile(
     r"|(?:^|[\s;&|({])(?:source|\.)\s+(?:<\s*\(|/dev/(?:stdin|fd/)|/proc/self/fd/)"
     rf"|{_WORD_START}{_SINK_SHELLS}{_WORD_END}[^|;&\n]*?(?:<\(|<<<)"
     rf"|{_WORD_START}(?:ba|da|z|k|mk|a)?sh\s+(?:[-+][A-Za-z]+\s+)*-[A-Za-z]*c\s*\"?(?:\$\(|`)"
-    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b)\s*\"?(?:\$\((?!\()|`)",
+    # [ \t]* not \s*: newline is already an anchor, and \s* made this alternative quadratic on
+    # the all-newline bodies strip_inert_heredoc_bodies leaves (review 5890191993).
+    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b)[ \t]*\"?(?:\$\((?!\()|`)",
     re.MULTILINE)
 
 
