@@ -167,8 +167,13 @@ def test_gateway_names_does_not_keep_the_answer_of_a_failed_hub_db_read(tmp_path
 # --- divergence repair ----------------------------------------------------------------------------------------------
 
 
+class _Rows(list):
+    def fetchall(self):
+        return list(self)
+
+
 class _VanishingReplica:
-    """The replica connection, losing one task row right after the pass's first read."""
+    """The replica connection, losing one task row right after the pass's first read of its tasks."""
 
     def __init__(self, conn, task_id):
         self._conn, self._task_id, self._reads = conn, task_id, 0
@@ -177,15 +182,19 @@ class _VanishingReplica:
         return getattr(self._conn, name)
 
     def execute(self, sql, *params):
-        if self._reads == 0:
+        if self._reads == 0 and "FROM tasks" in sql:
             self._reads = 1
             rows = self._conn.execute(sql, *params).fetchall()
             self._conn.execute("DELETE FROM tasks WHERE id = ?", (self._task_id,))
-            return iter(rows)
+            return _Rows(rows)
         return self._conn.execute(sql, *params)
 
 
-def test_divergence_repair_skips_a_row_that_left_the_replica_mid_pass(tmp_path, monkeypatch):
+@pytest.mark.parametrize("prefilter", [True, False])
+def test_divergence_repair_skips_a_row_that_left_the_replica_mid_pass(tmp_path, monkeypatch, prefilter):
+    if not prefilter:  # the full Python scan, used when the SQLite pre-filter cannot run
+        from hermes_cli import kanban_sync_divergence
+        monkeypatch.setattr(kanban_sync_divergence, "_differing_settled", lambda *_a: None)
     home = support.kanban_home(tmp_path, monkeypatch)
     support.write_sync_config(home, True)
     live = kbc.connect(home / "kanban.db")

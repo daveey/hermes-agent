@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 import time
+from pathlib import Path
 from hermes_cli import kanban_db_sync as sync
 
 _log = logging.getLogger(__name__)
@@ -25,12 +26,23 @@ def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gate
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli.kanban_sync_omissions import repair_holds
     held = repair_holds(live, "tasks")
-    seen = {r[0]: r[1] for r in shadow.execute(
-        "SELECT id, sync_version FROM tasks WHERE (created_on = ? OR created_on IS NULL) AND sync_version IS NOT NULL",
-        (gateway,))}
     repaired: dict[str, list[str]] = {}
-    rows = [r for r in live.execute("SELECT * FROM tasks WHERE sync_version IS NOT NULL").fetchall()
-            if r["id"] not in held and seen.get(r["id"]) == r["sync_version"]]
+    candidates = _differing_settled(live, shadow, gateway)
+    if candidates is None:  # cannot pre-filter in SQLite (in-memory/unknown files, an error): scan every card
+        seen = {r[0]: r[1] for r in shadow.execute(
+            "SELECT id, sync_version FROM tasks WHERE (created_on = ? OR created_on IS NULL) "
+            "AND sync_version IS NOT NULL", (gateway,))}
+        rows = [r for r in live.execute("SELECT * FROM tasks WHERE sync_version IS NOT NULL").fetchall()
+                if r["id"] not in held and seen.get(r["id"]) == r["sync_version"]]
+    else:
+        # Only the cards whose raw columns differ come back to Python; the replica row read below re-checks the
+        # settled condition (version, creator), since either file may have moved since the pre-filter read.
+        ids = sorted(candidates - held)
+        rows = []
+        for index in range(0, len(ids), _CHUNK):
+            part = ids[index:index + _CHUNK]
+            rows += live.execute(f"SELECT * FROM tasks WHERE sync_version IS NOT NULL AND id IN "
+                                 f"({','.join('?' * len(part))}) ORDER BY rowid", part).fetchall()
     # One replica read per chunk and one omissions read per pass, not one of each per settled card: the scan
     # visits every synced card each round (13% of hub gateway CPU at 4,948 cards, 2026-11-12). [daveey]
     omissions: dict[str, set[str]] = {}
@@ -47,6 +59,9 @@ def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gate
         theirs = replica.get(tid)
         if theirs is None:  # left the replica since ``seen`` was read: nothing to compare this pass
             continue
+        if candidates is not None and (theirs["sync_version"] != row["sync_version"]
+                                       or theirs["created_on"] not in (gateway, None)):
+            continue  # not settled (or not this gateway's card) as of this read
         mine, remote = _row_fields(live, "tasks", row), _row_fields(shadow, "tasks", theirs)
         omitted = omissions.get(tid, ())
         fields = {k: v for k, v in mine.items() if k in remote and remote[k] != v and k not in omitted}
@@ -76,6 +91,59 @@ def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gate
                      "re-queued", tid, ", ".join(repaired[tid]))
     return repaired
 
+
+def _db_file(conn: sqlite3.Connection) -> str | None:
+    """The main database file of ``conn``; None for an in-memory or temporary database."""
+    for _seq, name, file in conn.execute("PRAGMA database_list").fetchall():
+        if name == "main":
+            return file or None
+    return None
+
+
+def _task_columns(conn: sqlite3.Connection, schema: str = "main") -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA {schema}.table_info(tasks)").fetchall()}
+
+
+def _differing_settled(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> set[str] | None:
+    """Ids of this gateway's settled cards (same ``sync_version`` in both copies) whose synced columns differ.
+
+    One SQLite join over both files, in a private read-only connection: the comparison runs in C and only the
+    differing ids cross into Python. Scanning every settled card in Python made each round fetch every task row
+    twice (``SELECT *``, ~5.5k rows on the hub); under the gateway's GIL contention each fetched row waits for the
+    GIL, so the scan held the sync loop 40+ s per pass and the replica went 11+ min stale (hub py-spy 04:17Z
+    2026-11-13, t_01a1d2cc49634a78: 100% of the sync thread in ``repair_divergence``). Equal raw values always
+    give equal ``_row_fields`` values, so this is a superset of the cards the Python comparison flags; the caller
+    re-compares each candidate exactly. None when the pre-filter cannot run: the caller scans every card. [daveey]"""
+    from hermes_cli import kanban_lockguard
+    live_file, replica_file = _db_file(live), _db_file(shadow)
+    if not live_file or not replica_file:
+        return None
+    try:
+        conn = kanban_lockguard.connect(Path(live_file).resolve().as_uri() + "?mode=ro", uri=True)
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    try:
+        conn.execute("ATTACH DATABASE ? AS rep", (Path(replica_file).resolve().as_uri() + "?mode=ro",))
+        skip = sync.LOCAL_COLUMNS["tasks"] | sync.KEY_COLUMNS["tasks"] | sync.SERVER_COLUMNS.get("tasks", frozenset())
+        columns = sorted((sync.SYNCED_COLUMNS["tasks"] - skip) & _task_columns(conn) & _task_columns(conn, "rep"))
+        terms = []
+        for column in columns:
+            if ("tasks", column) in sync.REF_COLUMNS:  # local run ids differ per file: compare the run uids
+                terms.append(f"(SELECT uid FROM main.task_runs WHERE id = l.{column}) IS NOT "
+                             f"(SELECT uid FROM rep.task_runs WHERE id = r.{column})")
+            else:
+                terms.append(f"l.{column} IS NOT r.{column}")
+        if not terms:
+            return set()
+        return {row[0] for row in conn.execute(
+            "SELECT l.id FROM main.tasks l JOIN rep.tasks r ON r.id = l.id "
+            "WHERE l.sync_version IS NOT NULL AND r.sync_version = l.sync_version "
+            "AND (r.created_on = ? OR r.created_on IS NULL) AND (" + " OR ".join(terms) + ")", (gateway,))}
+    except sqlite3.Error as exc:
+        _log.debug("kanban sync: divergence pre-filter unavailable (%s); scanning every card", exc)
+        return None
+    finally:
+        conn.close()
 
 _TERMINAL = frozenset({"done", "archived"})
 
