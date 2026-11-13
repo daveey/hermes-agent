@@ -23,6 +23,8 @@ import os
 import subprocess
 from typing import Iterable, Optional
 
+from hermes_platform.resolver import locate_command
+
 RESTART_IGNORE_GLOBS = (
     "tests/**",
     "docs/**",
@@ -57,28 +59,45 @@ def _is_sha(value: object) -> bool:
 
 
 def _git(root: str, *args: str) -> Optional[subprocess.CompletedProcess]:
+    """None when git could not run at all (not found, OSError, timeout): no verdict, as opposed to a git exit."""
+    # Resolved like boot_pinned_imports does (t_01a1d49d2f2a8ae2), not by a bare "git" from the ambient PATH.
+    command = locate_command("git").command
+    if not command:
+        return None
     env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
     try:
-        return subprocess.run(["git", "--no-replace-objects", "-C", root, *args], capture_output=True,
+        return subprocess.run([command[0], "--no-replace-objects", "-C", root, *args], capture_output=True,
                               timeout=_GIT_TIMEOUT_S, env=env, stdin=subprocess.DEVNULL, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def range_restart_verdict(root: str, base: str, head: str,
+                          globs: Iterable[str] = RESTART_IGNORE_GLOBS) -> Optional[bool]:
+    """``range_restart_free`` with the transient case kept apart: True/False are final for the pair (a commit
+    range never changes), None means git did not answer (not found, timeout, OSError, an unexpected exit) and
+    the same question may get a definite answer later, so callers must not cache it."""
+    if not (_is_sha(base) and _is_sha(head)) or base == head:
+        return False
+    globs = tuple(globs)
+    ancestor = _git(root, "merge-base", "--is-ancestor", base, head)
+    if ancestor is None or ancestor.returncode not in (0, 1):
+        return None
+    if ancestor.returncode == 1:
+        return False
+    # --ignore-submodules=none: a diff.ignoreSubmodules=all config must not hide a gitlink bump (a code change).
+    listed = _git(root, "log", "-m", "--no-renames", "--ignore-submodules=none", "--submodule=short",
+                  "--name-only", "-z", "--format=", f"{base}..{head}")
+    if listed is None or listed.returncode != 0:
+        return None
+    paths = [p.decode("utf-8", "surrogateescape").strip("\n") for p in listed.stdout.split(b"\0")]
+    paths = [p for p in paths if p]
+    # A range of empty commits only is left to the old rule (a move is a move): nothing proves it needs no restart.
+    return bool(paths) and all(path_restart_ignored(p, globs) for p in paths)
 
 
 def range_restart_free(root: str, base: str, head: str, globs: Iterable[str] = RESTART_IGNORE_GLOBS) -> bool:
     """True when ``base`` is a strict ancestor of ``head`` and every commit in ``base..head`` (merges against
     each parent) touches only ``globs`` paths. Anything unprovable (not full shas, equal, unrelated or reversed
     revisions, a git failure) is False: the caller then treats the move as a code change, exactly as before."""
-    if not (_is_sha(base) and _is_sha(head)) or base == head:
-        return False
-    globs = tuple(globs)
-    ancestor = _git(root, "merge-base", "--is-ancestor", base, head)
-    if ancestor is None or ancestor.returncode != 0:
-        return False
-    listed = _git(root, "log", "-m", "--no-renames", "--name-only", "-z", "--format=", f"{base}..{head}")
-    if listed is None or listed.returncode != 0:
-        return False
-    paths = [p.decode("utf-8", "surrogateescape").strip("\n") for p in listed.stdout.split(b"\0")]
-    paths = [p for p in paths if p]
-    # A range of empty commits only is left to the old rule (a move is a move): nothing proves it needs no restart.
-    return bool(paths) and all(path_restart_ignored(p, globs) for p in paths)
+    return range_restart_verdict(root, base, head, globs) is True

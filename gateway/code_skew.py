@@ -111,8 +111,10 @@ def detect_code_skew() -> tuple[str, str] | None:
     return _short(_boot_fingerprint), _short(current)
 
 
-# (boot sha, disk sha) -> range_restart_free verdict. A commit range never changes, so a verdict is final; the
-# watchdogs poll every few seconds and would otherwise run two git commands per poll for the same pair.
+# (boot sha, disk sha) -> range_restart_verdict. A commit range never changes, so a definite verdict is final; the
+# watchdogs poll every few seconds and would otherwise run two git commands per poll for the same pair. A transient
+# git failure (None: timeout, OSError, git not found) is not cached: it reads as skew now and is asked again on the
+# next poll, so it never pins the pair as skewed for the life of the process (t_01a1d49d2f2a8ae2).
 _restart_free_verdicts: dict[tuple[str, str], bool] = {}
 
 
@@ -122,11 +124,13 @@ def _drift_restart_free(boot_fingerprint: str | None, current: str) -> bool:
     key = (boot_sha, disk_sha)
     verdict = _restart_free_verdicts.get(key)
     if verdict is None:
-        # range_restart_free never raises: an unprovable drift (git failure, odd revisions) is False = skew, as before
-        verdict = _restart_ignore_paths.range_restart_free(str(_PROJECT_ROOT), boot_sha, disk_sha)
+        # range_restart_verdict never raises: an unprovable drift is False/None = skew, as before
+        answer = _restart_ignore_paths.range_restart_verdict(str(_PROJECT_ROOT), boot_sha, disk_sha)
+        if answer is None:
+            return False
         if len(_restart_free_verdicts) > 64:
             _restart_free_verdicts.clear()
-        _restart_free_verdicts[key] = verdict
+        _restart_free_verdicts[key] = verdict = answer
     return verdict
 
 
@@ -147,6 +151,9 @@ def note_import_error(exc: BaseException, where: str) -> bool:
         return False
     current = _fingerprint()
     if not current or current == boot:
+        return False
+    if _drift_restart_free(boot, current):
+        # a tests/docs/CI-only drift: the process runs the code on disk, so this is no mix (t_01a1d49d2f2a8ae2)
         return False
     pair = (boot, current)
     if pair not in _import_mix_noted:
