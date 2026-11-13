@@ -152,9 +152,9 @@ REFUSAL = json.dumps({"ok": False, "created": False, "code": "create_overlap", "
     "total_matches": 1, "note": "No card was created: 1 open card(s) already look like this work."})
 
 
-def _rejected_request(env, rid: str) -> None:
-    env["hub"].execute("INSERT INTO sent VALUES (?, ?, 'rejected', ?, 0, 0, 1)",
-                       (rid, json.dumps({"to_gw": "macbook", "key": "default/default/new"}),
+def _rejected_request(env, rid: str, state: str = "rejected") -> None:
+    env["hub"].execute("INSERT INTO sent VALUES (?, ?, ?, ?, 0, 0, 1)",
+                       (rid, json.dumps({"to_gw": "macbook", "key": "default/default/new"}), state,
                         json.dumps({"error": REFUSAL})))
     env["hub"].commit()
 
@@ -181,3 +181,38 @@ def test_one_rejected_request_wakes_even_while_another_is_pending(env):
     _rejected_request(env, rejected)
     rc, msg = kcr.wait_check(f"{pending},{rejected}")
     assert rc == 0 and rejected in msg, msg
+
+
+def _next_route(task_id: str, rid: str, generation: int):
+    """What blocking again with the same need does after ``rid``: the next generation, or the typed refusal."""
+    with kbc.connect_closing() as conn:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, kcr.ROUTED_EVENT, {"routes": [
+                {"need": NEED, "gateway": "macbook", "request_id": rid, "generation": generation}]})
+        try:
+            return kcr._route_generations(conn, task_id, [NEED])[NEED]
+        except kcr.CapabilityRouteError as exc:
+            return exc.code
+
+
+def test_wake_text_promises_a_fresh_request_only_when_routing_grants_one(env):
+    """The wake text must match what _route_generations does next: a gen-1 rejected (or expired) request earns
+    generation 2; a gen-2 rejection or any failed request is capability_route_exhausted (PR #2231 review)."""
+    cases = [("rejected", 1, "was rejected by macbook", 2), ("expired", 1, "expired before macbook answered it", 2),
+             ("rejected", 2, "was rejected by macbook", "capability_route_exhausted"),
+             ("failed", 1, "failed on macbook", "capability_route_exhausted")]
+    for state, gen, outcome, nxt in cases:
+        with kbc.connect_closing() as conn:
+            card = kb.create_task(conn, title=f"{TITLE} {state} {gen}", body="spec", assignee="default")
+        rid = kcr.request_id(card, NEED, gen)
+        _rejected_request(env, rid, state)
+        rc, msg = kcr.wait_check(rid)
+        assert rc == 0 and f"{rid} {outcome} (create_overlap" in msg, msg
+        assert state == "rejected" or f"was {state} by" not in msg, msg
+        assert ".. " not in msg, msg
+        assert _next_route(card, rid, gen) == nxt, (state, gen)
+        if nxt == 2:
+            assert "routes one fresh request (generation 2)" in msg and "exhausted" not in msg, msg
+        else:
+            assert "fresh request" not in msg and "refused as capability_route_exhausted" in msg, msg
+            assert "continue that card or link it as a parent" in msg, msg

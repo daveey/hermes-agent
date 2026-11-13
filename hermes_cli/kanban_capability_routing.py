@@ -24,8 +24,8 @@ Refusals are typed (:class:`CapabilityRouteError`), and nothing is written:
 * ``capability_held_locally`` -- this gateway holds it: the wall is the worker's profile
   (kind='assignment') or a real failure, not a missing capability.
 * ``capability_route_exhausted`` -- this card already routed that need once; the existing owner
-  card must finish or report why. A REJECTED owner request may be re-routed once more (a new
-  generation of the request id).
+  card must finish or report why. A REJECTED or EXPIRED owner request may be re-routed once more
+  (generation 2 of the request id); a FAILED one, or a second-generation refusal, is exhausted.
 
 Relay (gateways without a hermes-hub replica, and a holder that is briefly not live-checked):
 
@@ -163,7 +163,9 @@ def overlap_exclusions(conn, task_id: str) -> list[str]:
     return seen + [b for b in bound_cards(conn, task_id) if b not in seen]
 
 
-# The footer kanban_placement_forward.remote_args writes on a card it places on another gateway.
+# The footer kanban_placement_forward.remote_args writes on a card it places on another gateway. Any body
+# line in this shape is trusted, author-written or not: acceptable because it only adds a heuristic
+# create_overlap exemption (distinct_from) to this card's own capability-owner create, never a permission.
 _PLACED_FROM = re.compile(r"^This card was \S+ card (t_[0-9a-f]{8,32}); it completes there when this one is done\.$",
                           re.MULTILINE)
 
@@ -181,6 +183,8 @@ def bound_cards(conn, task_id: str) -> list[str]:
     for tid in _PLACED_FROM.findall((row[0] if row else "") or ""):
         if tid != task_id and tid not in out:
             out.append(tid)
+    # Matched by bare awaiting.ref, ignoring awaiting.gateway: task ids are globally unique, so the ref names
+    # this card whichever gateway the park recorded.
     rows = conn.execute(
         "SELECT t.id FROM tasks t WHERE t.status = 'scheduled' AND t.id != ? AND (SELECT json_extract(e.payload, "
         "'$.awaiting.ref') FROM task_events e WHERE e.kind IN ('scheduled', 'continued') AND e.task_id = t.id "
@@ -964,11 +968,28 @@ def _rejected(rid: str) -> Optional[str]:
     matches = ", ".join(f"{m.get('id')} on {m.get('gateway') or '?'} ({m.get('status') or '?'})"
                         for m in (why.get("matches") or [])[:3])
     gw = ((_sent(rid) or {}).get("body") or {}).get("to_gw") or "the holder"
-    return (f"capability owner request {rid} was {why['state']} by {gw} ({why.get('code') or why['state']}"
-            + (f": matches {matches}" if matches else "") + f"): {str(why.get('error') or '')[:400]}. "
-            "No owner card exists, so this card was woken to re-plan. Blocking again with the same needs routes "
-            "one fresh request (a new generation); if the refusal names a card that really owns this work, "
-            "continue that card instead.")
+    state = why["state"]
+    outcome = {"rejected": f"was rejected by {gw}", "expired": f"expired before {gw} answered it"}.get(
+        state, f"failed on {gw}")
+    head = (f"capability owner request {rid} {outcome} ({why.get('code') or state}"
+            + (f": matches {matches}" if matches else "") + f"): {str(why.get('error') or '')[:400].rstrip('.')}. "
+            "No owner card exists, so this card was woken to re-plan. ")
+    gen = _rid_generation(rid)
+    if state in ("rejected", "expired") and gen < 2:
+        # Mirrors _route_generations: only a first-generation rejected/expired request earns a fresh one.
+        return head + (f"Blocking again with the same needs routes one fresh request (generation {gen + 1}); "
+                       "if the refusal names a card that really owns this work, continue that card instead.")
+    return head + ("This need's route is exhausted: blocking again with the same needs is refused as "
+                   "capability_route_exhausted" + (f" (generation {gen} was the retry)" if gen >= 2 else "")
+                   + ". If the refusal names a card that really owns this work, continue that card or link it "
+                   "as a parent; otherwise fix the cause the refusal names (comment it on this card), or, if "
+                   "only David can clear it, block kind='needs_input' with a human_request.")
+
+
+def _rid_generation(rid: str) -> int:
+    """The generation :func:`request_id` encoded in ``rid`` (its ``::g<N>`` suffix; 1 without one)."""
+    m = re.search(r"::g(\d+)$", rid or "")
+    return int(m.group(1)) if m else 1
 
 
 def wait_check(target: str) -> tuple[int, str]:

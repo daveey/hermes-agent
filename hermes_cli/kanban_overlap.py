@@ -28,9 +28,10 @@ or the slug itself in the title still names it (``Metta-AI/unconventional-collab
 equals a board slug does not count.
 
 Closed cards never match (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
-``<profile>/<board>/<id>`` twin). Heuristic exemptions (singletons ignore these except the capability
-waiting card): the creator's own card, the new card's parents, cards the same chat or the same
-worker created (fan-out), the waiting card a capability-owner create quotes, a local card bound to that
+``<profile>/<board>/<id>`` twin). Heuristic exemptions (singletons ignore these, except the waiting card a
+capability-owner create quotes and a card bound to it, :func:`_bound_to`): the creator's own card, the new
+card's parents, cards the same chat or the same worker created (fan-out), the waiting card a capability-owner
+create quotes, a local card bound to that
 waiting card (its deferred-placement origin, or a card parked on it: :func:`_bound_to`), and another capability-owner
 card for that same waiting card, a card the new one parks/waits/depends on (:func:`waits_on`), a card whose failed
 execution the new one recovers (:func:`recovers`: ``self-heal: kanban card t_X ... failed 2x``), and a card that
@@ -676,6 +677,8 @@ def _bound_to(card: dict, waiting_id: str) -> bool:
     action: counting it as an owner refused every owner create a placed card asked its origin gateway for
     (hub t_01a1d49003c65ca4, macbook placeholder t_01a1d48f676074bc).
     """
+    # ``awaits`` is the park's bare awaiting.ref; awaiting.gateway is ignored. This relies on task ids being
+    # globally unique: a card on another gateway with this id is the same card, not a namesake.
     return waiting_id in (card.get("placed_as"), card.get("awaits"))
 
 
