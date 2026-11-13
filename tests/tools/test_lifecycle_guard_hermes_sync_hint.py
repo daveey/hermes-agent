@@ -140,6 +140,8 @@ def test_hint_survives_shell_options_with_values(tmp_path, monkeypatch, template
     "x=1 time {script} mods-pull",
     "env time -f %e {script} mods-pull",
     "coproc {script} mods-pull",
+    # `coproc CMD ARGS` runs CMD even when CMD reads like a coproc NAME.
+    "coproc sudo -u root {script} mods-pull",
 ])
 def test_hint_survives_reserved_words(tmp_path, monkeypatch, template):
     script = _script(tmp_path, "hermes-sync", _RESTART)
@@ -207,6 +209,10 @@ def test_clustered_option_value_and_rcfile_stay_refused(tmp_path, monkeypatch, t
     ("coproc SYNC { hermes-sync; }", True),
     ("time -- -p hermes-sync", False),
     ("function hermes-sync { true; }", False),
+    # Post-merge check of PR #2249: after a lone `-` the shell's next word is the script even
+    # when it looks like an option, and `coproc CMD ARGS` runs CMD (a NAME needs a `{` group).
+    ("bash - -x /x/hermes-sync", False),
+    ("coproc sudo -u root hermes-sync", True),
 ])
 def test_executes_command_named(command, expected):
     from cron.lifecycle_guard import executes_command_named
