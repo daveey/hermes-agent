@@ -1699,30 +1699,6 @@ def _wake_chat_for_readopted_exit(key: str):
     return None
 
 
-def _replay_failed_wake(key: str, text: str, session: dict, display_kind: str | None,
-                        display_metadata: dict | None, label: str) -> None:
-    """[daveey] A wake that carried an automation delivery (sweep-wake, owner-wake, a notice) failed before its turn
-    could start (agent build): ONE delayed replay, at the build failure's recorded quota/route reset when it has one
-    (``agent_failure.failure_resets_at``), else ``REPLAY_MIN_DELAY_S``. The delivery is not in the transcript, so a
-    later successful turn does not cancel it. A replay's own failure gives up. A chat close-out wake is included:
-    ``notice_guarantee`` stamps its row ``closeout.state = "deferred"`` with a ``retry_at`` after this replay's due
-    time (the durable fallback when this in-process timer dies with its backend), and the replay keeps the
-    close-out's own ``closeout`` metadata, so it cannot start another close-out."""
-    from tui_gateway import automation_replay
-    meta = display_metadata if isinstance(display_metadata, dict) else {}
-    if not automation_replay.is_automation(display_kind):
-        return
-    cause = automation_replay.failure_cause(session.get("agent_error") or "agent build failed")
-    what = automation_replay.subject(display_kind, meta, text)
-    if automation_replay.is_replay(meta):
-        logger.warning("automation-replay: %s", automation_replay.failure_line(what, cause, gave_up=True))
-        return
-    failure = session.get("agent_failure") if isinstance(session.get("agent_failure"), dict) else {}
-    due = automation_replay.replay_due(time.time(), failure.get("failure_resets_at"))
-    automation_replay.schedule(key, text=text, display_kind=str(display_kind), display_metadata=meta, due=due,
-                               cause=f"{label}: {cause}", persisted=False)
-
-
 def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None = None,
                        display_metadata: dict | None = None, label: str = "wake", build_timeout: float = 120.0) -> str:
     """Run ONE agent turn with ``text`` in chat ``session_key`` from this backend: the chat live here is used as is,
@@ -1730,14 +1706,18 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
     path the re-adopted-exit waker uses). For plugins that must close a loop without the user typing (e.g. a chat
     whose kanban cards all finished while no backend held it). [daveey]
 
-    Returns ``"started"`` (the turn was admitted and runs on its own thread), ``"busy"`` (a turn is live or the
-    user stopped the last one), ``"refused"`` (another backend owns the chat, or resume was refused),
-    ``"missing"`` (no store has it) or ``"error"``. Blocks for at most ``build_timeout`` while the agent builds.
-    Never raises."""
+    Returns ``"started"`` (the turn was admitted and runs on its own thread), ``"busy"`` (a turn is live, the user
+    stopped the last one, or this backend is retiring), ``"refused"`` (another backend owns the chat, or resume was
+    refused), ``"missing"`` (no store has it) or ``"error"``. Blocks <= ``build_timeout`` for the build; never raises."""
     import itertools as _it
+
+    # [daveey] Moved to automation_replay; no wake on stale code (t_01a1d65520e78e7d).
+    from tui_gateway.automation_replay import replay_failed_wake as _replay_failed_wake, retiring_backend_refuses
     key = str(session_key or "")
     if not key or not text:
         return "error"
+    if retiring_backend_refuses(label, key):
+        return "busy"
     try:
         live = _find_live_session_by_key(key)
         if live is None:

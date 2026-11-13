@@ -41,6 +41,64 @@ _CONFIRMATIONS = 2
 # ``(boot_rev, disk_rev)`` when the checkout drifted since boot, else None (``detect_code_skew``).
 Skew = Optional[tuple[str, str]]
 
+# [daveey] Retirement keys of ``host_loop_lease.retire_host_loops`` (t_01a1d65520e78e7d). A backend this module
+# will retire (superseded, or its boot commit behind the checkout) gives its host-loop leases up at once: an
+# old always-on backend took ``kanban-unloaded`` while the gateway restarted on a fix, then ran a sweep wake on
+# the pre-fix code during its drain, and that wake's quota-wall failure deferred the chat's notice by 4 days.
+_SUPERSEDED_KEY = "always-on-superseded"
+_SKEW_KEY = "code-skew"
+# A superseded watchdog polls every 2 s; its skew read (git ref files) runs at most this often.
+STALE_CHECK_S = 10.0
+
+
+def _retire_host_loops(key: str, reason: str) -> None:
+    try:
+        from hermes_cli.host_loop_lease import retire_host_loops
+
+        retire_host_loops(key, reason)
+    except Exception:  # health: allow BLE001 -- best effort: a broken lease module must not stop the watchdog
+        _log.warning("could not retire this process's host loops (%s)", reason, exc_info=True)
+
+
+def _resume_host_loops(key: str) -> None:
+    try:
+        from hermes_cli.host_loop_lease import resume_host_loops
+
+        resume_host_loops(key)
+    except Exception:  # health: allow BLE001 -- see _retire_host_loops
+        _log.warning("could not resume this process's host loops (%s)", key, exc_info=True)
+
+
+class StaleCodeLoops:
+    """Host loops of a process whose boot commit is behind the checkout: retired after ``_CONFIRMATIONS``
+    consecutive skew reads, resumed when the checkout reads as the boot commit again. Reads at most every
+    ``every_s`` (``clock`` time); an unreadable revision reads as no skew (never a false retirement)."""
+
+    def __init__(self, skew_fn: Callable[[], Skew], *, every_s: float = 0.0,
+                 clock: Callable[[], float] = time.monotonic):
+        self._skew_fn, self._every_s, self._clock = skew_fn, every_s, clock
+        self._seen = 0
+        self._next = 0.0
+        self.retired = False
+
+    def observe(self, skew: Skew = None, *, read: bool = True) -> None:
+        if read:
+            now = self._clock()
+            if now < self._next:
+                return
+            self._next = now + self._every_s
+            try:
+                skew = self._skew_fn()
+            except Exception:  # health: allow BLE001 -- an unreadable revision is no proof of skew
+                skew = None
+        self._seen = self._seen + 1 if skew else 0
+        if skew and self._seen >= _CONFIRMATIONS and not self.retired:
+            self.retired = True
+            _retire_host_loops(_SKEW_KEY, "this process loaded {} but the checkout is at {}".format(*skew))
+        elif not skew and self.retired:
+            self.retired = False
+            _resume_host_loops(_SKEW_KEY)
+
 
 def should_retire_for_skew(*, skew: Skew, update_in_progress: bool) -> bool:
     """Retire only on a proven code change, and never while the tree may still be mid-swap."""
@@ -196,6 +254,7 @@ def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = 
 
         skew_fn = detect_code_skew
     read_skew: Callable[[], Skew] = skew_fn
+    stale = StaleCodeLoops(read_skew)
     held_until: list[float] = [0.0]
 
     def _ledger() -> Optional[RuntimeRetireLedger]:
@@ -209,6 +268,7 @@ def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = 
 
     def _observe() -> Optional[str]:
         skew = read_skew()
+        stale.observe(skew, read=False)  # a stale process runs no host pass while it waits for its fence
         if skew and should_retire_for_skew(skew=skew, update_in_progress=update_probe()):
             return ("SSH-isolated backend loaded {} but the install is now at {}; "
                     "retiring so its client respawns it on the new code.".format(*skew))
@@ -312,7 +372,9 @@ def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callabl
                               max_polls: Optional[int] = None,
                               http_connections: Optional[Callable[[], Optional[int]]] = None,
                               drain_min_s: float = DRAIN_MIN_S, drain_cap_s: float = DRAIN_CAP_S,
-                              clock: Callable[[], float] = time.monotonic) -> threading.Thread:
+                              clock: Callable[[], float] = time.monotonic,
+                              skew_fn: Optional[Callable[[], Skew]] = None,
+                              stale_check_s: float = STALE_CHECK_S) -> threading.Thread:
     """[daveey] An always-on blue/green backend (``hermes_cli/always_on_rollover``) runs this INSTEAD of the
     code-skew watchdog: the roller replaces it with a warmed successor, so it must not exit on skew before
     that successor serves. It retires (through the same idle fence) once ``active.json`` names neither its
@@ -325,12 +387,21 @@ def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callabl
     check: Callable[[int], bool] = superseded or always_on_rollover.is_superseded
     on_the_way: Callable[[int], bool] = pending or always_on_rollover.successor_pending
     count: Callable[[], Optional[int]] = http_connections or (lambda: open_http_connections(server))
+    if skew_fn is None:
+        from gateway.code_skew import detect_code_skew
+
+        skew_fn = detect_code_skew
+    # The roller replaces a stale always-on backend only once a successor is warm; until then its old code
+    # must not hold host-loop leases (it took kanban-unloaded on 17f28630e4 while the gateway restarted).
+    stale = StaleCodeLoops(skew_fn, every_s=stale_check_s)  # own monotonic clock: ``clock`` times the drain
     since: list[Optional[float]] = [None]
 
     def _observe() -> Optional[str]:
+        stale.observe()
         if not check(port):
             if since[0] is not None:
                 _log.info("always-on backend :%s is active again; keep-alive drain stopped", port)
+                _resume_host_loops(_SUPERSEDED_KEY)
             since[0] = None
             _DRAINING.clear()
             return None
@@ -339,6 +410,9 @@ def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callabl
             since[0] = now
             _DRAINING.set()
             _log.info("always-on backend :%s superseded; draining keep-alive connections", port)
+            # Only the connections already open drain here: host passes and their sweep wakes go to the
+            # successor (or the gateway) now, never to this process's stale code (t_01a1d65520e78e7d).
+            _retire_host_loops(_SUPERSEDED_KEY, f"always-on backend :{port} superseded")
         elapsed = now - since[0]
         if elapsed < drain_cap_s:
             if elapsed < drain_min_s:

@@ -34,7 +34,7 @@ def credential_failure_fields(provider: str, *, pool=None) -> dict:
 
 def client_failure_fields(failure) -> dict:
     """[daveey] ``agent_failure`` as a client may see it. ``failure_resets_at`` is the automation replay's own
-    clock (``session_notifications._replay_failed_wake``): the wire contracts declare ``reset_at`` instead, so it
+    clock (``automation_replay.replay_failed_wake``): the wire contracts declare ``reset_at`` instead, so it
     fills ``reset_at`` when that is unset and never travels under its own name."""
     if not isinstance(failure, dict):
         return failure

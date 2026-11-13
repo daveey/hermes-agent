@@ -117,6 +117,74 @@ def replay_due(now: float, resets_at: Any = None) -> float:
     return max(due, reset) if reset is not None else due
 
 
+def stale_code_reason() -> str | None:
+    """Why this process's code may be behind the checkout (host loops retired, or the boot commit is no longer
+    the checkout's), else None. Never raises."""
+    try:
+        from hermes_cli.host_loop_lease import host_loops_retired
+        retired = host_loops_retired()
+        if retired:
+            return retired
+        from gateway.code_skew import detect_code_skew
+        skew = detect_code_skew()
+    except Exception:  # health: allow BLE001 -- an unreadable revision is no proof of stale code
+        return None
+    return "this process loaded {} but the checkout is at {}".format(*skew) if skew else None
+
+
+def trusted_resets_at(failure: Any) -> Any:
+    """[daveey] A build failure's ``failure_resets_at`` (``failure`` is the ``agent_failure`` dict or the value
+    itself), or None when the failing process ran stale code: a quota or route wall it hit may be one the
+    checkout's code already routes around, so the replay and the deferred close-out take the short delay instead
+    of waiting days for that wall's reset (hub :9148 booked Nov 17 for a wake that failed on pre-fix code,
+    t_01a1d65520e78e7d)."""
+    resets_at = failure.get("failure_resets_at") if isinstance(failure, dict) else failure
+    if resets_at is None:
+        return None
+    stale = stale_code_reason()
+    if stale:
+        logger.info("automation-replay: ignoring the recorded reset %s: %s", resets_at, stale)
+        return None
+    return resets_at
+
+
+def retiring_backend_refuses(label: str, key: str) -> bool:
+    """[daveey] True when this backend is being replaced (superseded always-on, boot commit behind the checkout):
+    it starts no automation turn on its stale code, and the caller reports ``"busy"`` so a later pass, run by
+    the successor, delivers it (hub :9148's sweep wake during its drain, t_01a1d65520e78e7d)."""
+    try:
+        from hermes_cli.host_loop_lease import host_loops_retired
+        retired = host_loops_retired()
+    except ImportError:
+        return False
+    if retired:
+        logger.info("%s: not waking %s here: this backend is retiring (%s)", label, key, retired)
+    return bool(retired)
+
+
+def replay_failed_wake(key: str, text: str, session: dict, display_kind: str | None,
+                       display_metadata: dict | None, label: str) -> None:
+    """[daveey] A wake that carried an automation delivery (sweep-wake, owner-wake, a notice) failed before its turn
+    could start (agent build): ONE delayed replay, at the build failure's recorded quota/route reset when it has one
+    (``agent_failure.failure_resets_at``, unless this process ran stale code: ``trusted_resets_at``), else
+    ``REPLAY_MIN_DELAY_S``. The delivery is not in the transcript, so a later successful turn does not cancel it.
+    A replay's own failure gives up. A chat close-out wake is included: ``notice_guarantee`` stamps its row
+    ``closeout.state = "deferred"`` with a ``retry_at`` after this replay's due time (the durable fallback when this
+    in-process timer dies with its backend), and the replay keeps the close-out's own ``closeout`` metadata, so it
+    cannot start another close-out. (Was ``session_notifications._replay_failed_wake``.)"""
+    meta = display_metadata if isinstance(display_metadata, dict) else {}
+    if not is_automation(display_kind):
+        return
+    cause = failure_cause(session.get("agent_error") or "agent build failed")
+    what = subject(display_kind, meta, text)
+    if is_replay(meta):
+        logger.warning("automation-replay: %s", failure_line(what, cause, gave_up=True))
+        return
+    due = replay_due(time.time(), trusted_resets_at(session.get("agent_failure")))
+    schedule(key, text=text, display_kind=str(display_kind), display_metadata=meta, due=due,
+             cause=f"{label}: {cause}", persisted=False)
+
+
 def _task_ids(display_metadata: Any, text: Any) -> list[str]:
     ids: list[str] = []
     meta = display_metadata if isinstance(display_metadata, dict) else {}

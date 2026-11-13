@@ -250,3 +250,12 @@ def _sync_repair_local_write_window(request, monkeypatch):
         from hermes_cli import kanban_sync_repair_window
         monkeypatch.setattr(kanban_sync_repair_window, "LOCAL_WRITE_REPAIR_MIN_S", 0.0)
 
+
+@pytest.fixture(autouse=True)
+def _reset_retired_host_loops():
+    """A superseded or code-skewed watchdog under test retires this process's host loops; undo it after."""
+    yield
+    import sys
+    if (lease := sys.modules.get("hermes_cli.host_loop_lease")) is not None:
+        with lease._RETIRE_MU:
+            lease._RETIRED.clear()

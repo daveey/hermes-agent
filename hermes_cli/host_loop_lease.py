@@ -50,6 +50,12 @@ home, so profile processes of one install share one owner.
   file this process may not write is opened read-only (flock works on it, as in ``update_lock``); such a
   holder holds the lock but cannot record metadata.
 
+* **Retiring process** (:func:`retire_host_loops`): a backend that is being replaced (a superseded always-on
+  backend draining its keep-alive connections, a backend whose boot commit is behind the checkout) releases
+  every lease at once, and ``held()`` stays False (kill switch included) until :func:`resume_host_loops` clears
+  the last reason. Its stale code must run no further host pass and start no sweep wake while it drains: a fix
+  merged to main kept failing in such a process (hub :9148, t_01a1d65520e78e7d).
+
 ``hermes doctor`` lists the holders (:func:`holders`).
 """
 
@@ -87,6 +93,45 @@ def _span_open(name: str):
 
 def enabled() -> bool:
     return os.environ.get(KILL_SWITCH_ENV, "").strip() != "0"
+
+
+# [daveey] Why this process gave its host loops up (key -> reason); empty while it may run them.
+_RETIRED: dict[str, str] = {}
+_RETIRE_MU = threading.Lock()
+
+
+def host_loops_retired() -> str | None:
+    """The reason this process may run no host pass and start no automation wake, else None."""
+    with _RETIRE_MU:
+        return "; ".join(_RETIRED.values()) or None
+
+
+def retire_host_loops(key: str, reason: str) -> bool:
+    """This process is being replaced: release every host-loop lease now and refuse them until
+    :func:`resume_host_loops` clears ``key`` (and every other key). True when this call retired the process."""
+    with _RETIRE_MU:
+        first = not _RETIRED
+        _RETIRED[key] = reason
+    if not first:
+        return False
+    logger.warning("host loops retired in this process (%s): releasing every host-loop lease and starting no "
+                   "new automation wakes", reason)
+    for lease in list(_LEASES):
+        had = lease._held
+        lease.release()
+        if had:
+            logger.info("host loop %s: released the lease (%s)", lease.name, reason)
+    return True
+
+
+def resume_host_loops(key: str) -> bool:
+    """Clear one retirement reason; True when none is left (the next ``held()`` competes again)."""
+    with _RETIRE_MU:
+        had = _RETIRED.pop(key, None) is not None
+        left = not _RETIRED
+    if had and left:
+        logger.info("host loops resumed in this process (%s cleared)", key)
+    return left
 
 
 def lease_dir(home: str | Path | None = None) -> Path:
@@ -243,6 +288,8 @@ class HostLoopLease:
         return False
 
     def _held_inner(self) -> bool:
+        if _RETIRED:
+            return False
         if not enabled() or self._held:
             return True
         if self._waiting:
@@ -268,8 +315,9 @@ class HostLoopLease:
                 self._unavailable(f"flock failed: {exc}")
                 return True
             want = self._live_want()
-            if want is not None and want.get("pid") != os.getpid() and want.get("priority", 0) >= self.priority:
-                fcntl.flock(fd, fcntl.LOCK_UN)  # a higher-priority waiter is due this lock
+            if _RETIRED or (want is not None and want.get("pid") != os.getpid()
+                            and want.get("priority", 0) >= self.priority):
+                fcntl.flock(fd, fcntl.LOCK_UN)  # retired meanwhile, or a higher-priority waiter is due this lock
                 return False
             self._become_holder()
             return True
@@ -277,7 +325,7 @@ class HostLoopLease:
     def exclusive(self) -> bool:
         """True only while this process really holds the lock: False under the kill switch and when the lease
         failed open, where ``held()`` is True in every process. Size per-holder capacity on this, not ``held()``."""
-        return enabled() and self._held
+        return enabled() and self._held and not _RETIRED
 
     def beat(self) -> None:
         """End of a pass: refresh the heartbeat, then hand off to a live higher-priority ``.want``. Also closes the
@@ -536,6 +584,10 @@ class HostLoopLease:
                 return
             self._waiting = False
             self._stop_want_refresher()
+            if _RETIRED:  # retired while the hand-off waited: the lock goes straight back
+                self._clear_own_want()
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return
             self._become_holder()
             self._clear_own_want()
 
