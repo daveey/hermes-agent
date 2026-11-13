@@ -208,6 +208,61 @@ def test_lease_loss_closes_the_observers(sdb):
     assert delivery._observers == {}, "another process sweeps now: this one must hold no store fds"
 
 
+@pytest.mark.parametrize("exit_mode", ["stop", "wait_error"])
+def test_loop_exit_closes_observer_connections_and_releases_lease(sdb, monkeypatch, exit_mode):
+    import sqlite3
+    import threading
+
+    from hermes_cli import host_loop_lease
+
+    connections = []
+    released = []
+    beats = []
+
+    class _Lease:
+        def held(self):
+            return True
+
+        def beat(self):
+            beats.append(True)
+
+        def release(self):
+            released.append(True)
+
+    class _Stop(threading.Event):
+        waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits == 1:
+                return False  # no wall-clock delay before the real first pass
+            assert self.waits == 2, "shutdown must not run another sweep"
+            assert delivery._observers and delivery._last_pass
+            connections.extend(entry[1] for entry in delivery._observers.values())
+            for conn in connections:
+                assert conn.execute("SELECT 1").fetchone()[0] == 1
+            if exit_mode == "wait_error":
+                raise RuntimeError("injected wait failure")
+            self.set()
+            return True
+
+    monkeypatch.setattr(host_loop_lease, "HostLoopLease", lambda *a, **kw: _Lease())
+    monkeypatch.setattr(host_loop_lease, "process_role", lambda: "test")
+    stop = _Stop()
+    if exit_mode == "wait_error":
+        with pytest.raises(RuntimeError, match="injected wait failure"):
+            delivery._loop(stop)
+    else:
+        delivery._loop(stop)
+        assert stop.is_set()
+    assert beats == [True] and released == [True]
+    assert connections, "exercise actual observers opened by the real sweep"
+    assert delivery._observers == {} and delivery._last_pass == {}
+    for conn in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+
+
 def test_unreadable_store_takes_the_full_path(sdb, opens, monkeypatch):
     def _broken(path):
         raise OSError("observer unavailable")

@@ -136,6 +136,22 @@ def test_answers_are_not_shared_across_probes(files, alive):
     assert (a.calls, b.calls) == (1, 1)
 
 
+@pytest.mark.parametrize("distinct", ["paths", "probes"])
+def test_memo_retention_is_bounded_under_key_churn(files, distinct):
+    """Profile/probe churn must not retain unbounded paths or callable objects."""
+    shared = _Probe(None)
+    # Fixed workload and budget: changing the production cap must not resize this test.
+    for n in range(600):
+        path = files.with_name(f"profile-{n}.pid") if distinct == "paths" else files
+        probe = _Probe(None) if distinct == "probes" else shared
+        before = probe.calls
+        assert memo.running_pid(path, probe=probe, now=0) is None
+        assert probe.calls == before + 1
+        assert memo.running_pid(path, probe=probe, now=1) is None
+        assert probe.calls == before + 1, "bounding retention must preserve immediate reuse"
+        assert 0 < len(memo._memo) <= 256, "retain at most 256 distinct path/probe keys"
+
+
 def test_profiles_check_gateway_running_uses_the_memo(tmp_path, monkeypatch, alive):
     from hermes_cli import profiles
     calls = []
