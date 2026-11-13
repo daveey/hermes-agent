@@ -125,11 +125,12 @@ def note_completion(conn: sqlite3.Connection, task_id: str, *texts: Optional[str
             return None
         sibling, creator = hit
         line = _occurrence(task_id, sibling, creator, text)
-        row = conn.execute("SELECT id FROM tasks WHERE idempotency_key LIKE ? AND status NOT IN ('done', "
+        row = conn.execute("SELECT id, body FROM tasks WHERE idempotency_key LIKE ? AND status NOT IN ('done', "
                            "'archived') ORDER BY created_at LIMIT 1", (KEY_PREFIX + "%",)).fetchone()
         if row:
-            seen = conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND body LIKE ?",
-                                (row[0], f"- {task_id} %")).fetchone()
+            # The first occurrence is the body's line, later ones are comments: either means this card is noted.
+            seen = f"\n- {task_id} " in (row[1] or "") or conn.execute(
+                "SELECT 1 FROM task_comments WHERE task_id = ? AND body LIKE ?", (row[0], f"- {task_id} %")).fetchone()
             if not seen:
                 kb.add_comment(conn, row[0], "dup-detector", line)
             return row[0]
