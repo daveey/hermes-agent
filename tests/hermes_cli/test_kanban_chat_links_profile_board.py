@@ -66,7 +66,8 @@ def test_links_diff_names_trusted_profile_board_rows_and_flags_a_missing_card_of
     assert sorted(got) == ["t_d3e3f88a", "t_work_lost", "t_work_on"]
     assert (got["t_work_lost"]["owner_on_board"], got["t_d3e3f88a"]["owner_on_board"]) == (True, False)
     capsys.readouterr()
-    assert kanban_sync_cli._links_diff(argparse.Namespace(json=False)) == 1
+    # settle=0: one raw read. Without it the CLI's 90 s default window re-reads this unclean report on the real clock.
+    assert kanban_sync_cli._links_diff(argparse.Namespace(json=False, settle=0)) == 1
     assert "profile_board: 1 [('s1', ('hub', 'default', 't_d3e3f88a'))]" in capsys.readouterr().out
 
 
