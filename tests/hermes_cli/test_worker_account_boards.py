@@ -1,9 +1,20 @@
 """Registered installation boards remain visible across dispatcher roots."""
+import errno
+import os
+import shutil
 import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
+import hermes_constants
+import hermes_state_guard
 from hermes_cli import worker_account_boards as inventory
+from hermes_cli import worker_board_retirement
 from hermes_cli import worker_compute_capacity as capacity
 from hermes_cli import machine_metrics, kanban_db as kb
 
@@ -45,8 +56,6 @@ def test_corrupt_inventory_fails_closed(monkeypatch, tmp_path, raw):
 
 
 def test_register_directory_fsync_failure_propagates(monkeypatch, tmp_path):
-    import os
-    import stat
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     real_fsync = os.fsync
     def fsync(fd):
@@ -82,7 +91,6 @@ def _registered(conn_path):
 
 def test_garbage_collected_scratch_board_retires_its_record(monkeypatch, tmp_path):
     """A scratch HERMES_HOME's board whose workspace was pruned no longer holds every claim."""
-    import shutil
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     workspace = tmp_path / 'cache' / 'scratch' / 't_bench-x' / 'home'
     workspace.mkdir(parents=True)
@@ -102,7 +110,6 @@ def test_garbage_collected_scratch_board_retires_its_record(monkeypatch, tmp_pat
 def test_concurrent_register_of_recreated_scratch_board_keeps_its_record(monkeypatch, tmp_path):
     """paths() saw the board collected; a register() of the recreated path then
     kept the existing record. The read must not unlink it afterwards."""
-    import shutil
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     board = tmp_path / 'cache' / 'scratch' / 'run' / 'kanban.db'
     board.parent.mkdir(parents=True)
@@ -129,7 +136,6 @@ def test_concurrent_register_of_recreated_scratch_board_keeps_its_record(monkeyp
 
 def test_missing_board_stays_unknown_unless_its_scratch_dir_is_gone(monkeypatch, tmp_path):
     """Fail closed for real boards: a non-ephemeral root, or a surviving scratch dir."""
-    import shutil
     account = tmp_path / 'account'
     account.mkdir()
     monkeypatch.setattr(capacity, 'policy_root', lambda: account)
@@ -151,16 +157,13 @@ def test_missing_board_stays_unknown_unless_its_scratch_dir_is_gone(monkeypatch,
 def test_record_unlinked_between_listing_and_read_is_skipped(monkeypatch, tmp_path):
     """paths() runs unfenced: a fenced register()/removing() may unlink a record
     after iterdir() listed it. That record is gone, not a reason to fail the census."""
-    from pathlib import Path
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     kept = tmp_path / 'kept' / 'kanban.db'
     gone = tmp_path / 'gone' / 'kanban.db'
     for board in (kept, gone):
         board.parent.mkdir()
         _registered(board)
-    directory = tmp_path / 'worker-resources' / 'boards'
-    import hashlib
-    victim = directory / (hashlib.sha256(str(gone.resolve()).encode()).hexdigest() + '.json')
+    victim = worker_board_retirement.record_paths(gone.resolve())[0]
     assert victim.exists()
     real_read_text = Path.read_text
 
@@ -181,8 +184,6 @@ def test_record_unlinked_between_listing_and_read_is_skipped(monkeypatch, tmp_pa
 def test_unreadable_collected_looking_board_is_not_retired(monkeypatch, tmp_path):
     """_retire_collected and paths() agree: only FileNotFoundError means missing.
     A PermissionError on the board's stat keeps the record and refuses loudly."""
-    import shutil
-    from pathlib import Path
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     board = tmp_path / 'cache' / 'scratch' / 'run' / 'kanban.db'
     board.parent.mkdir(parents=True)
@@ -192,12 +193,12 @@ def test_unreadable_collected_looking_board_is_not_retired(monkeypatch, tmp_path
     denied = {board.resolve(), board.resolve().parent}
     real_stat = Path.stat
 
-    def stat(self, *args, **kwargs):
+    def denied_stat(self, *args, **kwargs):
         if self in denied:
             raise PermissionError(13, 'Permission denied', str(self))
         return real_stat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, 'stat', stat)
+    monkeypatch.setattr(Path, 'stat', denied_stat)
     other = tmp_path / 'cache' / 'scratch' / 'other' / 'kanban.db'
     other.parent.mkdir(parents=True)
     _registered(other)  # runs _retire_collected under the fence
@@ -206,8 +207,68 @@ def test_unreadable_collected_looking_board_is_not_retired(monkeypatch, tmp_path
         inventory.paths()
 
 
+def _deny_os_stat(monkeypatch, *denied):
+    """EACCES from os.stat for *denied*: Path.stat and Path.exists both go through it,
+    so this reproduces an unsearchable directory on every Python version (and as root)."""
+    blocked = {os.fspath(path) for path in denied}
+    real_stat = os.stat
+
+    def denied_stat(path, *args, **kwargs):
+        if isinstance(path, (str, os.PathLike)) and os.fspath(path) in blocked:
+            raise PermissionError(errno.EACCES, 'Permission denied', os.fspath(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'stat', denied_stat)
+
+
+@pytest.mark.parametrize('denied', [
+    ('worker-resources', 'boards'), ('kanban', 'boards'), ('kanban.db',)])
+def test_unreadable_inventory_location_refuses_instead_of_dropping(monkeypatch, tmp_path, denied):
+    """Only ENOENT is absence. Path.exists() returns False on EACCES on Python
+    3.14+ (3.11-3.13 raise): paths() must raise, never return a census that
+    silently dropped every board behind an unsearchable directory."""
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
+    (tmp_path / 'kanban.db').touch()
+    named = tmp_path / 'kanban' / 'boards' / 'other' / 'kanban.db'
+    named.parent.mkdir(parents=True)
+    named.touch()
+    foreign = tmp_path / 'foreign' / 'kanban.db'
+    foreign.parent.mkdir()
+    _registered(foreign)
+    assert len(inventory.paths()) == 3
+    _deny_os_stat(monkeypatch, tmp_path.joinpath(*denied))
+    with pytest.raises(PermissionError):
+        inventory.paths()
+
+
+def test_unreadable_registration_record_is_not_rewritten(monkeypatch, tmp_path):
+    """register() treats only a missing record as absent; EACCES propagates."""
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
+    board = tmp_path / 'board' / 'kanban.db'
+    board.parent.mkdir()
+    _registered(board)
+    record = worker_board_retirement.record_paths(board.resolve())[0]
+    _deny_os_stat(monkeypatch, record)
+    with pytest.raises(PermissionError):
+        _registered(board)
+
+
+def test_retirement_missing_and_discard_treat_only_enoent_as_absent(monkeypatch, tmp_path):
+    absent = tmp_path / 'absent.json'
+    assert worker_board_retirement.missing(absent)
+    worker_board_retirement.discard(absent)  # no-op, no race window between check and unlink
+    present = tmp_path / 'present.json'
+    present.write_text('"x"')
+    assert not worker_board_retirement.missing(present)
+    with monkeypatch.context() as denied:
+        _deny_os_stat(denied, present)
+        with pytest.raises(PermissionError):
+            worker_board_retirement.missing(present)
+    worker_board_retirement.discard(present)
+    assert worker_board_retirement.missing(present)
+
+
 def test_ephemeral_roots_never_cover_the_account(monkeypatch, tmp_path):
-    import tempfile
     account = tmp_path / 'home' / '.hermes'
     monkeypatch.setattr(capacity, 'policy_root', lambda: account)
     monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path / 'home'))
@@ -218,8 +279,6 @@ def test_ephemeral_roots_never_cover_the_account(monkeypatch, tmp_path):
 
 def test_pytest_never_registers_in_the_real_account_inventory(monkeypatch, tmp_path):
     """monkeypatch.undo() drops conftest's policy_root isolation; register must still refuse."""
-    import hermes_constants
-    import hermes_state_guard
     monkeypatch.setattr(hermes_constants, '_account_home', lambda: tmp_path)
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path / '.hermes')
     conn = sqlite3.connect(tmp_path / 'board.db')
@@ -248,10 +307,6 @@ def test_pytest_never_registers_in_the_real_account_inventory(monkeypatch, tmp_p
 
 def test_stripped_env_child_with_isolation_marker_is_refused(tmp_path):
     """A real child process whose env lost PYTEST_* but kept HERMES_TEST_ISOLATION."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
     repo = Path(inventory.__file__).resolve().parents[1]
     env = {k: v for k, v in os.environ.items() if not k.startswith('PYTEST_')}
     env['HERMES_TEST_ISOLATION'] = str(tmp_path)

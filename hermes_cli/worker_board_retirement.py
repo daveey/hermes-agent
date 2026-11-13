@@ -28,11 +28,28 @@ def sync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def missing(path: Path) -> bool:
+    """Only FileNotFoundError (ENOENT) is absence; other OSErrors propagate.
+
+    ``Path.exists()`` is version-dependent: Python 3.14+ returns False on any
+    OSError, while 3.11-3.13 raise e.g. PermissionError. Inventory and
+    retirement decisions must not depend on that: an unreadable path read as
+    absent would drop or retire a board silently instead of refusing loudly.
+    """
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
 def discard(path: Path) -> None:
     """Make invalidation durable before allowing a new claim."""
-    if path.exists():
+    try:
         path.unlink()
-        sync_directory(path.parent)
+    except FileNotFoundError:
+        return
+    sync_directory(path.parent)
 
 
 def prepare(path: Path) -> None:
@@ -61,7 +78,7 @@ def pending(conn) -> Path | None:
     if not raw:
         return None
     _, intent = record_paths(Path(raw).resolve())
-    return intent if intent.exists() else None
+    return None if missing(intent) else intent
 
 
 def recover(path: Path) -> None:
@@ -75,7 +92,7 @@ def recover(path: Path) -> None:
     root = capacity.policy_root().resolve()
     record, intent = record_paths(path)
     with admission_lock(root, timeout=0):
-        if path.exists():
+        if not missing(path):
             raise ValueError('source exists; use normal board removal')
         raw = json.loads(intent.read_text(encoding='utf-8-sig'))
         if (not isinstance(raw, dict) or raw.get('version') != 1
@@ -83,7 +100,7 @@ def recover(path: Path) -> None:
                 or type(raw.get('device')) is not int
                 or type(raw.get('inode')) is not int or raw['inode'] <= 0):
             raise ValueError('invalid board retirement proof')
-        if record.exists():
+        if not missing(record):
             if json.loads(record.read_text(encoding='utf-8-sig')) != str(path):
                 raise ValueError('registered identity differs from retirement proof')
             discard(record)

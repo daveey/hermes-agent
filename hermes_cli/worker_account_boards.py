@@ -28,9 +28,12 @@ import sqlite3
 import json
 from pathlib import Path
 import os
+import stat
 import tempfile
 
 from hermes_cli import worker_compute_capacity as capacity
+from hermes_cli import worker_board_retirement as retirement
+from hermes_cli.worker_board_retirement import missing as _missing
 
 
 def _refuse_test_registration() -> None:
@@ -75,20 +78,6 @@ def _collected(path: Path) -> bool:
     return any(path.is_relative_to(root) for root in _ephemeral_roots())
 
 
-def _missing(path: Path) -> bool:
-    """Only FileNotFoundError is absence, as in ``paths()``.
-
-    ``Path.exists()`` returns False on any OSError, so a board behind a
-    permission error would look collected and be retired silently instead of
-    refused loudly by ``paths()``. Other errors propagate to the caller.
-    """
-    try:
-        path.stat()
-    except FileNotFoundError:
-        return True
-    return False
-
-
 def _retire_collected(directory: Path) -> None:
     """Unlink records of garbage-collected boards. Caller holds the account fence.
 
@@ -120,16 +109,15 @@ def register(conn) -> None:
     if not raw:
         raise ValueError('worker admission requires a file-backed board')
     path = Path(raw).resolve(strict=True)
-    from hermes_cli.worker_board_retirement import record_paths, discard
     # A fresh admission invalidates any interrupted pre-rename idle proof.
     # The caller retains the account fence through the subsequent claim.
-    _, intent = record_paths(path)
-    discard(intent)
+    _, intent = retirement.record_paths(path)
+    retirement.discard(intent)
     directory = capacity.policy_root() / 'worker-resources' / 'boards'
     directory.mkdir(parents=True, exist_ok=True)
     _retire_collected(directory)
     destination = directory / (hashlib.sha256(str(path).encode()).hexdigest() + '.json')
-    if destination.exists():
+    if not _missing(destination):
         if json.loads(destination.read_text(encoding='utf-8-sig')) != str(path):
             raise ValueError('invalid registered board')
         return
@@ -166,7 +154,7 @@ def removing(path: Path):
     record = account / 'worker-resources' / 'boards' / (
         hashlib.sha256(str(path).encode()).hexdigest() + '.json')
     if not SUPPORTED:
-        if capacity.worker_enabled() or record.exists():
+        if capacity.worker_enabled() or not _missing(record):
             raise ValueError('worker board removal requires admission fencing')
         yield
         return
@@ -175,10 +163,10 @@ def removing(path: Path):
         try:
             for root in roots:
                 stack.enter_context(admission_lock(root, timeout=0))
-            registered = record.exists()
+            registered = not _missing(record)
             if registered and json.loads(record.read_text(encoding='utf-8-sig')) != str(path):
                 raise ValueError('invalid registered board')
-            verify = registered or (capacity.worker_enabled() and path.exists())
+            verify = registered or (capacity.worker_enabled() and not _missing(path))
             if verify:
                 conn = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=0)
                 try:
@@ -192,7 +180,6 @@ def removing(path: Path):
         except (AdmissionBusy, sqlite3.Error) as exc:
             raise ValueError(f'board busy or unreadable; retry removal: {exc}') from exc
         # Claims cannot pass their final gate until after removal and retirement.
-        from hermes_cli import worker_board_retirement as retirement
         _, intent = retirement.record_paths(path)
         if verify:
             retirement.prepare(path)
@@ -203,25 +190,39 @@ def removing(path: Path):
         finally:
             # Keep the durable proof if record retirement is interrupted after
             # rename. A later explicit recovery must take the account fence.
-            if succeeded or (verify and not path.exists()):
+            try:
+                removed = verify and _missing(path)
+            except OSError:
+                removed = False  # unreadable is not removed: keep the record
+            if succeeded or removed:
                 retirement.discard(record)
             retirement.discard(intent)
+
+
+def _board_file(path: Path) -> bool:
+    """A named board's DB file; none (or a non-directory slug entry) is no board."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
 
 
 def paths() -> list[Path]:
     root = capacity.policy_root()
     found = []
+    # Only ENOENT is absence (``_missing``): an unreadable directory raises
+    # instead of silently dropping every board under it.
     # Account installation boards count even before their first new claim.
     default = root / 'kanban.db'
-    if default.exists():
+    if not _missing(default):
         found.append(default)
     boards = root / 'kanban' / 'boards'
-    if boards.exists():
+    if not _missing(boards):
         from hermes_cli import kanban_db as kb
         found.extend(child / 'kanban.db' for child in boards.iterdir()
-                     if kb._BOARD_SLUG_RE.match(child.name) and (child / 'kanban.db').is_file())
+                     if kb._BOARD_SLUG_RE.match(child.name) and _board_file(child / 'kanban.db'))
     directory = root / 'worker-resources' / 'boards'
-    if directory.exists():
+    if not _missing(directory):
         for record in directory.iterdir():
             if record.suffix != '.json':
                 continue
