@@ -114,6 +114,53 @@ def test_unreadable_state_is_empty_and_never_blocks(remote, archives):
     assert archives == [path] and _state()[tid]["count"] == 1
 
 
+def _write_entries(entries):
+    bo._path("default").parent.mkdir(parents=True, exist_ok=True)
+    bo._path("default").write_text(json.dumps({"version": 1, "entries": entries}))
+
+
+def test_malformed_memo_entry_is_dropped_and_the_aged_pass_completes(remote, archives, caplog, capsys):
+    """A JSON-valid memo whose entry has ``retry_at: "x"`` / ``count: null`` must not abort the pass."""
+    import time
+    tid, path = _bare_refused(remote)
+    fp = bo.fingerprint(path, OLD)
+    good_tid, good_path = _bare_refused(remote)
+    now = time.time()
+    _write_entries({
+        tid: {"fingerprint": fp, "count": None, "last_at": now, "retry_at": "x", "reason": "r"},
+        good_tid: {"fingerprint": bo.fingerprint(good_path, OLD), "count": 1, "last_at": now,
+                   "retry_at": now + 3600, "reason": "kept"},
+    })
+    caplog.set_level(logging.INFO, logger="hermes_cli.kanban_scratch_backoff")
+    assert helpers._gc() == 0
+    assert "GC complete" in capsys.readouterr().out
+    assert archives == [path], "the malformed entry is no refusal; the valid one still backs off"
+    assert good_path.exists() and path.exists()  # bare repo: refused again, kept
+    entry = _state()[tid]
+    assert entry["count"] == 1 and isinstance(entry["retry_at"], float)
+    assert caplog.text.count("dropped 1 malformed") == 1
+
+
+@pytest.mark.parametrize("bad", [
+    {"retry_at": "x"}, {"count": None}, {"count": "2"}, {"count": True}, {"count": 0},
+    {"last_at": "y"}, {"retry_at": float("inf")}, {"retry_at": 1e300}, {"retry_at": None},
+    {"fingerprint": "p"}, {"reason": 5},
+])
+def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    now = 1_000_000.0
+    good = {"fingerprint": bo.fingerprint(tree, 5), "count": 2, "last_at": now, "retry_at": now + 60,
+            "reason": "r"}
+    entries = {"ok": dict(good), "bad": {**good, **bad}}
+    bo._path("default").parent.mkdir(parents=True, exist_ok=True)
+    bo._path("default").write_text(json.dumps({"version": 1, "entries": entries}, allow_nan=True))
+    refusals = bo.Refusals("default", now=lambda: now)
+    assert set(refusals.entries) == {"ok"}
+    assert bo.skip_logged(refusals, "bad", tree, 5, "t") is False
+    assert bo.skip_logged(refusals, "ok", tree, 5, "t") is True
+
+
 def test_budget_defers_the_rest_oldest_first_and_pass_completes(remote, archives, caplog, capsys):
     _newer, newer_path = _task(remote=remote)
     _older, older_path = _task(remote=remote, completed_at=OLD - 3600)

@@ -17,12 +17,14 @@ Two bounds, both fail-safe (each one only *keeps* a tree for later):
 
 Every guard in the removal path still runs for every tree that is attempted.
 State lives at ``<kanban home>/kanban/scratch-gc/refusals-<board>.json``, host
-local and never synced; an unreadable file is treated as empty.
+local and never synced; an unreadable file is treated as empty and a malformed
+entry (wrong field types) is dropped with one warning, so neither can stop a pass.
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -71,6 +73,22 @@ def fingerprint(path: Path, completed_at) -> Optional[list]:
     return [str(path), completed_at, st.st_ino, st.st_dev, st.st_mtime_ns]
 
 
+def _finite(value) -> bool:
+    """A real epoch-seconds number ``time.gmtime`` can format (no bool, NaN, inf or year > 5000)."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and abs(value) < 1e11)
+
+
+def _well_formed(entry) -> bool:
+    """The shape :meth:`Refusals.record` writes, so :func:`skip_logged` never raises on loaded state."""
+    return (isinstance(entry, dict)
+            and _finite(entry.get("last_at")) and _finite(entry.get("retry_at"))
+            and isinstance(entry.get("count"), int) and not isinstance(entry["count"], bool)
+            and entry["count"] >= 1
+            and (entry.get("fingerprint") is None or isinstance(entry["fingerprint"], list))
+            and (entry.get("reason") is None or isinstance(entry["reason"], str)))
+
+
 class Refusals:
     """Per-tree archive refusals of one board, with exponential retry backoff."""
 
@@ -80,12 +98,23 @@ class Refusals:
         self.entries: dict[str, dict] = {}
         try:
             data = json.loads(self.file.read_text(encoding="utf-8-sig"))
-            if isinstance(data, dict) and isinstance(data.get("entries"), dict):
-                cutoff = now() - FORGET_S
-                self.entries = {k: v for k, v in data["entries"].items()
-                                if isinstance(v, dict) and float(v.get("last_at") or 0) >= cutoff}
         except (OSError, ValueError, TypeError):
-            self.entries = {}
+            return
+        if not (isinstance(data, dict) and isinstance(data.get("entries"), dict)):
+            return
+        cutoff = now() - FORGET_S
+        dropped = 0
+        for key, entry in data["entries"].items():
+            if not _well_formed(entry):
+                dropped += 1
+            elif entry["last_at"] >= cutoff:
+                self.entries[key] = entry
+        if dropped:
+            # Hand-edited or foreign state: those trees count as never refused (fail-safe,
+            # every removal guard still runs on them).
+            log.warning("Scratch GC refusal backoff %s: dropped %d malformed entr%s; "
+                        "those trees are retried as never refused", self.file, dropped,
+                        "y" if dropped == 1 else "ies")
 
     def backing_off(self, key: str, path: Path, completed_at) -> Optional[dict]:
         """The entry when *key* was refused and its retry time is still ahead for the same tree."""
