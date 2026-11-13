@@ -56,6 +56,30 @@ _ACKED_MAX_BYTES = 256 * 1024
 #: Operations whose result moved the worker's own identity (target, child, terminal status). A gap
 #: holding one is not re-sent: replaying it under the current scope would not be the same write.
 _UNREPLAYABLE = frozenset({'compression.publish', 'child.reserve', 'execution.finish'})
+#: Sends of one pending entry, inside the SAME call, while its outcome is unknown (no reply in the
+#: receipt budget, or a closed owner link) before the store latches like any other failure. The owner
+#: resolves an exact resend from its receipt row, so one stall need not end the run. The resend
+#: happens before the caller returns, never on a later write: a caller that saw the exception
+#: re-collects and re-sends its own payload (transcript rows carry no marker on failure), so a
+#: deferred resend would commit that payload twice. Two sends bound the wait at 2x the receipt
+#: budget (180 s), inside the turn lease's remaining authority at a refresh (300 s TTL, 60 s ticks).
+_RETRYABLE_ATTEMPTS = 2
+
+
+def is_retryable_owner_error(exc) -> bool:
+    """True when the owner's answer to the pending entry is unknown but a resend is safe: the
+    receipt budget ran out (``worker_receipt_timeout``) or the owner link closed. Never a refusal
+    the owner sent (``WorkerPersistenceError``), which an exact resend would only repeat."""
+    if isinstance(exc, TimeoutError):
+        return str(exc) == 'worker_receipt_timeout'
+    return isinstance(exc, _retryable_owner_errors())
+
+
+def _retryable_owner_errors():
+    """The exception types ``is_retryable_owner_error`` may accept (it narrows TimeoutError further).
+    websockets is a hard dependency here: ``WorkerRPC._call`` imports it unconditionally."""
+    from websockets.exceptions import ConnectionClosed
+    return (TimeoutError, ConnectionError, ConnectionClosed)
 
 
 def is_retired_generation_error(exc) -> bool:
@@ -455,6 +479,33 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             acked.pop(0)
         return dict(journal, acked=acked)
 
+    def _persist_resending(self, entry):
+        """Send ``entry``; on an unknown outcome send the SAME entry again, inside this call.
+
+        The caller gets the real result (row annotations included) or the exception, never a
+        resend deferred to a later write that would duplicate a payload the caller re-sends.
+        """
+        stalled = None
+        for send in range(1, _RETRYABLE_ATTEMPTS + 1):
+            try:
+                result = self._persist(entry)
+            except _retryable_owner_errors() as exc:
+                if not is_retryable_owner_error(exc):
+                    raise
+                if send >= _RETRYABLE_ATTEMPTS:
+                    logger.error('worker receipt outcome still unknown after %d sends (op=%s): %s',
+                                 send, entry['operation'], exc)
+                    raise WorkerPersistenceError(str(exc)) from exc
+                stalled = time.monotonic()  # the recovery log measures from the last stall
+                logger.warning('worker receipt outcome unknown (op=%s, send %d/%d): %s; re-sending it',
+                               entry['operation'], send, _RETRYABLE_ATTEMPTS, exc)
+                continue  # same entry, same sequence: the owner resolves it from its receipt row
+            if stalled is not None:
+                logger.warning('worker receipt outcome recovered after %.1fs (op=%s, sends=%d)',
+                               time.monotonic() - stalled, entry['operation'], send)
+            return result
+        raise AssertionError('unreachable')  # the last send returns or raises
+
     def retry_pending(self):
         with self.lock:
             results = []
@@ -462,7 +513,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                 while self.journal['pending']:
                     entry = self.journal['pending'][0]
                     try:
-                        result = self._persist(entry)
+                        result = self._persist_resending(entry)
                     except WorkerPersistenceError as exc:
                         if self._strip_refused_child_provenance(entry, exc):
                             continue

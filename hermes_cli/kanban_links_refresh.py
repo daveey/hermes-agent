@@ -54,7 +54,8 @@ class ScopeRefresher:
                 scope = next(iter(self._pending))
                 context = self._pending[scope]
             try:
-                context.run(self._refresh, scope)
+                from hermes_cli import loop_accounting  # one ``links_refresh`` pass per rebuild
+                context.run(loop_accounting.timed, "links_refresh", self._refresh, scope)
             except Exception:  # health: allow BLE001 -- refresh failure retains last-good data; later polls retry
                 _log.warning('kanban remote links: background rebuild failed; serving the previous projection',
                              exc_info=True)

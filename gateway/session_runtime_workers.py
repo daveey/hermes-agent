@@ -192,11 +192,31 @@ async def tracked_write(authority, write, then=None, *, ordered=False, after=Non
 
 def start_turn_worker(runner, worker, agent_holder, run_sync):
     authority = track_turn_worker(runner, worker, agent_holder)
-    worker.executor_task = asyncio.ensure_future(runner._run_in_executor_with_context(run_sync))
+    worker.executor_task = asyncio.ensure_future(_submit_turn_thread(runner, run_sync))
     if authority is not None:
         # Normal settlement releases the retained agent promptly. A cancelled asyncio waiter is
         # not physical completion; leave that entry until worker_done proves the thread exited.
         worker.executor_task.add_done_callback(lambda _: list(physical_workers(authority)))
+
+
+def _submit_turn_thread(runner, run_sync):
+    """Awaitable for the turn thread, reserving BEFORE submit (synchronously, not when the task first
+    runs). The reservation is released by the thread's own exit: cancelling or abandoning the waiter
+    (inactivity timeout) leaves it counted. No registry installed: the plain executor path."""
+    from hermes_cli.local_work_threads import current_home, installed_registry, submit_tracked
+    registry = installed_registry()
+    if registry is not None:
+        import contextvars
+        ctx = contextvars.copy_context()
+        try:
+            executor = runner._get_executor()
+        except RuntimeError:
+            executor = None  # shutting down: let the plain path raise inside the task
+        if executor is not None:
+            future = submit_tracked(executor, ctx.run, run_sync, registry=registry, home=current_home(),
+                                    source="gateway:turn_worker", kind="gateway_worker")
+            return asyncio.wrap_future(future)
+    return runner._run_in_executor_with_context(run_sync)
 
 
 def track_turn_worker(runner, worker, agent_holder):

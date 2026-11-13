@@ -151,3 +151,33 @@ def test_a_claimed_repair_is_left_to_its_run(gws):
     _lift(worker)
     kps.sweep(worker.conn)  # (no dispatcher tick: it would reclaim this fake claim)
     assert kb.get_task(worker.conn, repair["id"]).status == "running"
+
+
+def test_a_non_bool_truthy_hold_is_held_like_pickup_reads_it(gws):
+    """Pickup's ``eligible()`` holds on any truthy ``hold``; so must the alarm and its resolve sweep, or a ``"yes"``
+    hold records ``hold`` skips while reading as lifted: no alarm, and an open repair closed as lifted."""
+    from hermes_cli import kanban_pickup_stall as kps
+    hub, worker = gws
+    a = base._pinned(hub, title="a")
+    worker.round()
+    worker.enter()
+    held = dict(hold="yes", hold_owner="ops@hub", hold_at=int(time.time() * 1000), hold_reason="disk migration")
+    _registry(**held)
+    wn.pickup(worker.conn, budget=4)
+    base._age(worker, a, 900)
+    assert kps.latest(worker.conn, a)["reason"] == "hold"
+    kps.sweep(worker.conn)
+    [repair] = base._repairs(worker.conn)
+    assert "held" in repair["title"].lower() and a in repair["title"]
+    _registry(**held)
+    kps.sweep(worker.conn)  # the resolve sweep must not read the truthy hold as lifted
+    assert kb.get_task(worker.conn, repair["id"]).status == "ready"
+    assert not [c for c in _states(worker, repair["id"]) if "lifted" in c]
+
+
+def test_expected_hold_reads_a_non_bool_truthy_hold_as_held():
+    from hermes_cli import kanban_pickup_stall as kps
+    now_ms = int(time.time() * 1000)
+    entry = {"hold": "1", "hold_at": now_ms, "hold_owner": kps.ROLLOUT_OWNER_PREFIX + "x"}
+    assert kps.expected_hold(entry, now_ms=now_ms, stall_s=600) is not None
+    assert kps.expected_hold({**entry, "hold": ""}, now_ms=now_ms, stall_s=600) is None

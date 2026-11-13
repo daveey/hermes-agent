@@ -4,8 +4,8 @@ On 11-13 a ready worker-first card waiting for pickup (t_01a1d5386cb55abf) got 7
 79 ``worker_queue_reason`` events in 18 min: the Board's reserve reply came back every ~10 s with the same code and
 reservation, and only a candidate's ``load_threshold`` / ``max_card_runs_reached`` flipped. A flap still updates the
 stored latest observation (``latest()``, the ``queue:`` line of ``kanban show``); it writes at most one event and
-comment per ``REFRESH_MS``. A change of meaning (state code, eligibility, a structural reason, origin) still writes
-at once.
+comment per ``REFRESH_MS``. A change of meaning (state code, eligibility, a structural reason, origin) is still an
+event at once; its comment waits until it has held ``HOLD_MS`` (t_01a1d61f47e3f1a0), except a return to origin.
 """
 import pytest
 
@@ -87,49 +87,65 @@ def test_refresh_needs_a_different_volatile_picture(conn, clock):
     assert counts(conn, tid) == (2, 2)
 
 
-def test_state_code_changes_still_comment_at_once(conn, clock):
+def held(clock, send):
+    """Repeat ``send`` once the new meaning has held ``HOLD_MS``: its comment is written then
+    (t_01a1d61f47e3f1a0)."""
+    clock[0] += qr.HOLD_MS / 1000
+    return send()
+
+
+def test_state_code_changes_comment_once_held(conn, clock):
     tid = fixtures.acknowledged(conn)
     qr.record_reply(conn, tid, "hub", assigned(1, flap(0)))
     clock[0] += 5
     qr.record_reply(conn, tid, "hub", assigned(2, flap(1)))  # volatile only: stored, no comment
     clock[0] += 5
     assert qr.record_error(conn, tid, "hub", status=400)
+    assert counts(conn, tid) == (1, 2)  # the event at once, its comment once held
+    held(clock, lambda: qr.record_error(conn, tid, "hub", status=400))
     clock[0] += 5
-    assert qr.record_reply(conn, tid, "hub", queued(4, [{"machine": "worker-2", "reasons": ["last_seen_stale"]}],
-                                                    "no_live_candidate"))
+    no_live = queued(4, [{"machine": "worker-2", "reasons": ["last_seen_stale"]}], "no_live_candidate")
+    assert qr.record_reply(conn, tid, "hub", no_live)
+    held(clock, lambda: qr.record_reply(conn, tid, "hub", no_live))
     bodies = [c.body for c in kb.list_comments(conn, tid)]
     assert len(bodies) == 3
     assert bodies[1].startswith("Board observation failed") and bodies[2].startswith("No live candidate")
     assert qr.latest(conn, tid)["code"] == "no_live_candidate"
 
 
-def test_all_candidates_becoming_ineligible_comments_at_once(conn, clock):
+def test_all_candidates_becoming_ineligible_comments_once_held(conn, clock):
     tid = fixtures.acknowledged(conn)
     qr.record_reply(conn, tid, "hub", assigned(1, flap(0)))
     clock[0] += 10
     none_eligible = [{"machine": m, "reasons": ["load_threshold"]} for m in ("worker-2", "worker-3", "worker-4")]
     assert qr.record_reply(conn, tid, "hub", assigned(2, none_eligible))
+    assert counts(conn, tid) == (1, 2)
+    held(clock, lambda: qr.record_reply(conn, tid, "hub", assigned(3, none_eligible)))
     assert counts(conn, tid) == (2, 2)
     clock[0] += 10
-    assert qr.record_reply(conn, tid, "hub", assigned(3, flap(0)))  # and back
+    assert qr.record_reply(conn, tid, "hub", assigned(4, flap(0)))  # and back
+    held(clock, lambda: qr.record_reply(conn, tid, "hub", assigned(5, flap(0))))
     assert counts(conn, tid) == (3, 3)
 
 
-def test_gaining_or_losing_a_structural_reason_comments_at_once(conn, clock):
+def test_gaining_or_losing_a_structural_reason_comments_once_held(conn, clock):
     tid = fixtures.acknowledged(conn)
     qr.record_reply(conn, tid, "hub", assigned(1, flap(0)))
     clock[0] += 10
     gained = flap(0)
     gained[1] = {"machine": "worker-3", "reasons": ["missing_labels"], "missing_labels": ["skill:five-whys"]}
     assert qr.record_reply(conn, tid, "hub", assigned(2, gained))
+    held(clock, lambda: qr.record_reply(conn, tid, "hub", assigned(2, gained)))
     assert "missing skill:five-whys" in kb.list_comments(conn, tid)[-1].body
     clock[0] += 10
     draining = flap(0)
     draining[2] = {"machine": "worker-4", "reasons": ["draining", "load_threshold"]}
     gained[2] = draining[2]
     assert qr.record_reply(conn, tid, "hub", assigned(3, gained))
+    held(clock, lambda: qr.record_reply(conn, tid, "hub", assigned(3, gained)))
     clock[0] += 10
     assert qr.record_reply(conn, tid, "hub", assigned(4, flap(0)))  # both lost
+    held(clock, lambda: qr.record_reply(conn, tid, "hub", assigned(4, flap(0))))
     assert counts(conn, tid) == (4, 4)
 
 

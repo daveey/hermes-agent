@@ -431,6 +431,9 @@ class GatewayKanbanWatchersMixin:
                         capped = _kbd.all_at_capacity(res for _slug, res in (results or []))
                         # Every ready card waiting on a known clock (quota reset, cooldown) is waiting, not stuck. [daveey]
                         clocked = _kbd.all_clock_held(res for _slug, res in (results or []))
+                        # Intentional claim-quiet defer of every local candidate: explains zero spawns, only
+                        # while nothing else (guards, ownership, caps, ineligibility) holds work back.
+                        clocked = clocked or _kbd.all_quiet_deferred(res for _slug, res in (results or []))
                         bad_ticks = (bad_ticks + 1 if ready_pending and not any_spawned and not capped and not clocked
                                      else 0)
                     from hermes_cli import kanban_hub_cpu_alert  # one card per stale-advisory incident [daveey]

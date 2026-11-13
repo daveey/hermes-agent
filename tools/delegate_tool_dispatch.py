@@ -155,6 +155,7 @@ def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interru
     # Daemon workers (tools.daemon_pool): the `with` block still joins normally, but if the parent is interrupted
     # while a child is wedged, the abandoned worker must not block interpreter exit.
     from tools.daemon_pool import DaemonThreadPoolExecutor
+    from agent import local_work_agent
     parent_agent, n_tasks = batch.parent_agent, len(batch.task_list)
     task_labels = [t["goal"][:40] for t in batch.task_list]
     spinner_ref = getattr(parent_agent, "_delegate_spinner", None)
@@ -184,7 +185,11 @@ def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interru
         from tools.delegate_tool_prefix_gate import PrefixCacheGate
         gate = PrefixCacheGate.for_children(batch.children, _get_prefix_stagger_seconds())
         run = batch.run_child if gate is None else partial(_run_gated, batch, gate, honor_parent_interrupt)
-        futures = {executor.submit(contextvars.copy_context().run, run, i, t, child): i for i, t, child in batch.children}
+        futures = {
+            local_work_agent.submit(
+                executor, partial(contextvars.copy_context().run, run, i, t, child),
+                kind="delegation_worker", source="tools.delegate_tool_dispatch.run_parallel"): i
+            for i, t, child in batch.children}
         pending = set(futures)
         while pending:
             if honor_parent_interrupt and getattr(parent_agent, "_interrupt_requested", False) is True:

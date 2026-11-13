@@ -366,11 +366,18 @@ def _write(conn, meta: dict, key: str, me: str, ledger_id: str, hub: str, cards:
 
 
 def compute(hub: Path, ledger, ledger_file: Path, now: float, key: Optional[str]) -> tuple:
-    """The local build (exactly what ``collect`` did before), then an offer to publish it.
+    """The local build (exactly what ``collect`` did before), then an offer to publish it. One
+    ``remote_index.compute`` pass (loop_accounting).
 
     ``key`` was read before the build; the copy is published only if the replica still has it after ``observe``,
     so rows and first-seen times belong to that one state. ``kanban_remote_notices._lock`` is held only for the
     index build; publishing runs after it is released."""
+    from hermes_cli import loop_accounting
+    with loop_accounting.pass_("remote_index.compute"):
+        return _compute(hub, ledger, ledger_file, now, key)
+
+
+def _compute(hub: Path, ledger, ledger_file: Path, now: float, key: Optional[str]) -> tuple:
     from tui_gateway import kanban_remote_notices as krn
     from tui_gateway import remote_index_projection
     from tui_gateway.kanban_remote_observations import observe
@@ -406,14 +413,20 @@ def published_key(ledger: Path) -> Optional[str]:
 
 
 def refresh(hub: Path, ledger: Path, now: Optional[float] = None) -> bool:
-    """Holder pass: republish when the copy is not of the replica's current state. True when it is current."""
-    key = replica_key(hub)
-    if key is None:
-        return False
-    if published_key(ledger) == key:
-        return True
-    compute(hub, ledger, ledger, time.time() if now is None else now, key)
-    return published_key(ledger) == key
+    """Holder pass: republish when the copy is not of the replica's current state. True when it is current.
+    One ``remote_index.refresh`` pass (loop_accounting): a current copy is a skip, a rebuild a key change."""
+    from hermes_cli import loop_accounting
+    with loop_accounting.pass_("remote_index.refresh") as acct:
+        key = replica_key(hub)
+        if key is None:
+            acct.skip()
+            return False
+        if published_key(ledger) == key:
+            acct.skip()
+            return True
+        acct.change()
+        compute(hub, ledger, ledger, time.time() if now is None else now, key)
+        return published_key(ledger) == key
 
 
 def _hold(lease, hub: Path, ledger: Path, stop: threading.Event, poll: float = REFRESH_POLL_S) -> None:

@@ -48,6 +48,8 @@ def test_declared_read_step_is_portable(attested):
     # Guards for review 5893721470 leave plain reads alone: an unquoted option value, a cd outside ~/.hermes.
     "ssh hermes-hub grep --file=~/.hermes/logs/pat.txt ~/.hermes/logs/x.log",
     "ssh hermes-hub cat ~/.hermes/logs/x.log, then cd /tmp && ls",
+    # A word merely ending in ``cd`` is no directory change.
+    "ssh hermes-hub cat ~/.hermes/logs/x.log; abcd",
 ])
 def test_other_hub_read_shapes_are_portable(attested, body):
     cfg, _, _ = attested
@@ -131,6 +133,25 @@ def test_malformed_roots_clear_nothing(attested, roots):
     'cat "~/.hermes/logs/a b/../../.env"',
     "cat '~/.hermes/logs/a b/../../.env'",
     'cat "/home/ubuntu/.hermes/logs/a b/../../.env"',
+    # A bare parameter or a backtick substitution computes a ``..`` or a cd as well; bash reads <home>/.hermes/.env
+    # for each of the first five. A cd spelled with quotes or a backslash is still a cd into a root.
+    "X=~/.hermes/logs/ && ssh hermes-hub cat $X../.env",
+    "X=.; Y=~/.hermes/logs/; ssh hermes-hub cat $Y$X$X/.env",
+    "set -- ~/.hermes/logs/ . .; IFS=; cat \"$*\"/.env",
+    "Y=~/.hermes/logs/ && ssh hermes-hub cat $Y`printf '\\56\\56'`/.env",
+    "`printf 'c\\x64'` ~/.hermes/logs && cat `printf '\\56\\56'`/.env",
+    "c''d ~/.hermes/logs && cat auth.json",
+    "c\\d ~/.hermes/logs && cat auth.json",
+    # One row per exact anchor of the root-clearing guards: a mutant of each passed every other row.
+    'ssh hermes-hub cat --file="~/.hermes/logs/a b/c"',
+    "ssh hermes-hub cat ~/.hermes/logs/x.log .\\./.env",
+    'ssh hermes-hub cat ~/.hermes/logs/x.log .""./.env',
+    "ssh hermes-hub cat ~/.hermes/logs/x.log .``./.env",
+    "ssh hermes-hub cat ~/.hermes/logs/x.log $'\\56\\56'/.env",
+    "pushd ~/.hermes/logs && cat .env",
+    "popd && cat ~/.hermes/logs/x.log",
+    "cd ~/.hermes/logs && cat auth.json",
+    "cd /tmp/x(y) && cat ~/.hermes/logs/x.log",
     # A relative ``..`` after a cd into a root walks out of it (review 5892779312 nit).
     "cd ~/.hermes/logs && cat ../.env",
     "cd ~/.hermes/logs; chmod -R 777 ../state",

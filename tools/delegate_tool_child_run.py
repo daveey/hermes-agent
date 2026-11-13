@@ -1014,6 +1014,8 @@ class _ChildRun:
             _STALE_RESULT_GRACE_SECONDS, _get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb,
         )
         from tools.daemon_pool import DaemonThreadPoolExecutor
+        from agent import local_work_agent
+        from functools import partial
         child, task_index = self.child, self.task_index
         child_timeout = _get_child_timeout()
         executor = DaemonThreadPoolExecutor(
@@ -1043,7 +1045,9 @@ class _ChildRun:
                     user_message=user_message, task_id=self.child_task_id, stream_callback=self.relay_text, **resume,
                 )
 
-        future = executor.submit(contextvars.copy_context().run, _run_with_thread_capture)
+        future = local_work_agent.submit(
+            executor, partial(contextvars.copy_context().run, _run_with_thread_capture),
+            kind="delegation_worker", source="tools.delegate_tool_child_run.run_in_worker")
         # One wait covers both ways out: the worker finishing, or the heartbeat's stale verdict.
         # Without the second, a worker wedged after its final answer holds a finite (-Q / Bot Chat
         # one-shot) turn — and its session lease — forever, since that runtime has no gateway

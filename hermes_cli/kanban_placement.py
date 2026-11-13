@@ -578,9 +578,14 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # The home prefix also takes ``$HOME``/``${HOME}``, bare or double-quoted, and a relative ``.hermes/`` path counts after
 # a ``cd`` to home (``cd``, ``cd ~``, ``cd $HOME``, ``cd /home/<u>``) anywhere earlier in the text (PR #2405 review
 # 5894942332 nit). A later cd elsewhere is not tracked: such text still pins (fails toward the home gateway).
+# ``pushd <home>`` counts too, and the cd may end in a shell comment; ``cd``/``pushd`` are lowercase words (a prose
+# "CD" is not one) and a bare ``pushd`` only swaps the stack (review 5895876398). The scan from a cd home stops at
+# the next cd home (that one starts its own scan), so a transcript of N ``cd ~`` lines costs O(length), not
+# O(N x length): 20000 such lines took 37 s per search before.
 HOME_PREFIX = r"(?:~|/home/[^/\s]+|\$HOME\b|\$\{HOME\}|\"\$HOME\"|\"\$\{HOME\}\")"
-_CD_HOME = r"(?<![\w./-])cd(?:[ \t]+" + HOME_PREFIX + r"/?)?(?=[ \t]*(?:$|[\n;&|)]))"
-HERMES_STATE_PATH = (r"(?:" + HOME_PREFIX + r"/|" + _CD_HOME + r"[\s\S]*?(?<![\w./~$}-]))"
+_CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)"
+            r"(?=[ \t]*(?:$|[\n;&|)>])|[ \t]+#)")
+HERMES_STATE_PATH = (r"(?:" + HOME_PREFIX + r"/|" + _CD_HOME + r"(?:(?!" + _CD_HOME + r")[\s\S])*?(?<![\w./~$}-]))"
                      r"\.hermes/(?!(?:hermes-agent|repos|bin)(?:/|\b))[\w.-]")
 HOST_WORKTREE_PATH = r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?(?:/|\b)"
 # Any home-rooted ``<dir>/.worktrees`` (``~/code/<repo>/.worktrees/t_*``, ``~/.hermes/hermes-agent/.worktrees``):

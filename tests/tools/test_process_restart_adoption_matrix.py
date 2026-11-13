@@ -337,6 +337,40 @@ def test_foreign_kill_of_a_job_its_spawner_still_supervises_settles_as_killed(ch
         registry.kill_process(session.id)
 
 
+def test_foreign_reads_report_a_recorded_kill_before_the_supervisor_settles(tmp_path, monkeypatch):
+    """The PID is gone, a kill marker sits beside the log (no ``.exit``) and the supervisor has not
+    recorded a result yet: every foreign read answers killed from the marker, not "status unknown"."""
+    import tools.process_registry_foreign as foreign
+    from tools import process_registry_output_log as logs
+    monkeypatch.setattr(logs, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr("tools.process_registry_results.load_completed_results", lambda *a, **k: {})
+    monkeypatch.setattr(foreign, "_SETTLE_GRACE_SECONDS", 0.0)
+    registry = ProcessRegistry()
+    monkeypatch.setattr(registry, "_detached_host_fate", lambda pid, start: "exited")
+    log = tmp_path / "proc_feedface0002.log"
+    log.write_text("started\n")
+    logs.record_kill(log, "process.kill")
+    assert not log.with_suffix(".exit").exists()
+    entry = {"session_id": "proc_feedface0002", "command": "sleep 30", "pid": 424242,
+             "writer_pid": 434343, "output_log": str(log)}
+    killed = {"exit_code": -15, "completion_reason": "killed", "termination_source": "process.kill"}
+    answers = {
+        "poll": foreign.foreign_poll(registry, entry),
+        "log": foreign.foreign_log(registry, entry, None, 200),
+        "wait": foreign.foreign_wait(registry, entry, 5),
+        "kill": foreign.foreign_kill(registry, entry),
+    }
+    for action, answer in answers.items():
+        assert {k: answer.get(k) for k in killed} == killed, (action, answer)
+        assert answer["status"] == ("already_exited" if action == "kill" else "exited"), (action, answer)
+    # Without the marker the same reads report the recorded exit status instead.
+    logs.clear_kill(log)
+    log.with_suffix(".exit").write_text("7\n")
+    polled = foreign.foreign_poll(registry, entry)
+    assert (polled["exit_code"], polled["completion_reason"]) == (7, "exited"), polled
+    assert "termination_source" not in polled
+
+
 def test_a_kill_marker_retires_its_log_like_a_recorded_exit(tmp_path, monkeypatch):
     """A killed job records no ``.exit``: its kill marker ages its log out instead (it never would)."""
     from tools import process_registry_output_log as logs

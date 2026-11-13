@@ -591,12 +591,28 @@ def select(fn: Callable, boards: list, now: float, pending: Callable[[list], boo
     return _DIAG.select(fn, boards, now, pending)
 
 
-def board_start(slug: str, results: list) -> Optional[tuple]:
-    return _DIAG.board_start(slug, results)
+def board_start(slug: str, results: list) -> tuple:
+    """Start one board's service: the timing diagnostics' token (None while off) and its ``loop_accounting``
+    pass ``sync.board/<slug>`` (always on: runs, rows pulled, busy skips, errors, CPU)."""
+    from hermes_cli import loop_accounting
+    diag = _DIAG.board_start(slug, results)
+    acct = loop_accounting.pass_(f"sync.board/{slug}")
+    acct.__enter__()  # last: nothing between here and the caller's ``finally: board_end`` can raise
+    return diag, acct, len(results)
 
 
-def board_end(token: Optional[tuple], results: list) -> None:
-    _DIAG.board_end(token, results)
+def board_end(token: tuple, results: list) -> None:
+    diag, acct, before = token
+    try:
+        _DIAG.board_end(diag, results)
+    finally:
+        result = results[-1] if len(results) > before else None
+        acct.rows(getattr(result, "pulled", 0) or 0)
+        skipped = bool(getattr(result, "skipped", False))
+        if skipped:
+            acct.skip()
+        failed = result is None or (bool(getattr(result, "error", None)) and not skipped)
+        acct.__exit__(RuntimeError if failed else None, None, None)
 
 
 def report(fn: Callable[[], Any]) -> Any:

@@ -86,12 +86,17 @@ def dispatcher(conn, monkeypatch, tmp_path):
     monkeypatch.setattr(d._kbw, "resolve_worktree_for_dispatch", lambda *a, **kw: (src, "wt/legacy"))
     monkeypatch.setattr(d._kbw, "_maybe_emit_scratch_tip", lambda *a, **kw: None)
 
-    def run(spawn_fn, *, kind="worktree", created_on=None):
+    def run(spawn_fn, *, kind="worktree", created_on=None, replica_custody=None):
         tid = kb.create_task(conn, title="src", assignee="worker")
         with kbc.write_txn(conn):
             conn.execute("UPDATE tasks SET workspace_kind=? WHERE id=?", (kind, tid))
             if created_on is not None:
                 conn.execute("UPDATE tasks SET created_on=? WHERE id=?", (created_on, tid))
+            if replica_custody is not None:  # pulled from the Board: the replica carries custody, no branch_name
+                conn.execute("UPDATE kanban_sync_state SET applying=1")
+                conn.execute("UPDATE tasks SET workspace_custody=?, branch_name=NULL WHERE id=?",
+                             (json.dumps(replica_custody), tid))
+                conn.execute("UPDATE kanban_sync_state SET applying=0")
         result = d.DispatchResult()
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
         used = d._dispatch_lane_task(conn, row, "worker", result, lane="ready", dry_run=False, ttl_seconds=900,
@@ -136,6 +141,41 @@ def test_source_attach_precedes_spawn_with_no_renew_between(conn, board, dispatc
     assert ev is not None
     assert set(json.loads(ev[0])) >= {"hostname", "holder", "run_uid", "repository", "branch", "commit",
                                       "manifest_revision", "path", "mode"}
+
+
+def test_source_card_with_replica_custody_and_no_branch_spawns(conn, board, dispatcher):
+    """LIVE t_01a1d5b1c1798e2a: the replica carries custody and branch_name is NULL (the Board refused the legacy
+    branch write as forbidden_field). The launch must not write the fenced branch_name (SourceFenced escaped the tick
+    and the lease went stale twice); the worker gets the source branch in memory and spawns."""
+    dispatcher.snapshot = _source_snapshot()
+    seen = []
+    tid, result, used = dispatcher.run(lambda task, path: seen.append(task.branch_name),
+                                       replica_custody={"source_holder": "hub", "state": "published",
+                                                        "manifest_revision": 3})
+    assert used and result.spawned and seen == ["wt/exact"]
+    task = kb.get_task(conn, tid)
+    assert task is not None and task.branch_name is None
+    ops = [json.loads(r[0]) for r in conn.execute(
+        "SELECT fields FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=?", (tid,))]
+    assert [op["branch_name"] for op in ops if op.get("branch_name")] == []
+
+
+def test_workspace_record_failure_releases_the_claim_instead_of_raising(conn, board, dispatcher, monkeypatch):
+    """Any failure recording the workspace after the claim is released unused and counted; it never raises out of
+    the dispatcher tick (which left the claim to expire as stale_lease and skipped the rest of the tick)."""
+    from hermes_cli import kanban_db_dispatch as d
+
+    def boom(*a, **kw):
+        raise kws.SourceFenced("t: branch_name is fenced on a card with a workspace source (source_fenced)")
+    monkeypatch.setattr(d._kbw, "set_workspace_path", boom)
+    dispatcher.snapshot = _source_snapshot()
+    spawned = []
+    tid, result, used = dispatcher.run(lambda task, path: spawned.append(task.id))
+    assert not used and spawned == []
+    assert ("workspace_prepare_failed:SourceFenced" in [code for _, code in result.respawn_guarded])
+    releases = _outbox_releases(conn, tid)
+    assert len(releases) == 1 and releases[0].get("unused_grant") and "source_receipt" not in releases[0]
+    assert "source_attach" not in board.actions()
 
 
 def test_grant_carries_source_protocol_only_from_dispatcher(conn, board):

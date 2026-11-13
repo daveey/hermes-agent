@@ -55,6 +55,16 @@ def _native_restrictions(result, tid, reference):
                 # Native diagnostic tokens only, never arbitrary error text.
                 native = native if isinstance(native, str) and re.fullmatch(r"[A-Za-z0-9_.:/=-]{1,160}", native) else name
                 rows.append({"source_field": name, "native_code": native, "evidence_ref": reference})
+    # Intentional bounded local automatic-claim defer (claim-quiet lease): not capacity, a stopped dispatcher
+    # or withheld remote work. Episode and lease deadline keep the age/episode identity.
+    for task, episode in getattr(result, "quiet_deferred", ()):
+        if task == tid:
+            row = {"source_field": "quiet_deferred", "native_code": "quiet_claim", "evidence_ref": reference,
+                   "episode_id": str(episode)[:160]}
+            deadline = getattr(result, "quiet_deadlines", {}).get(episode)
+            if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
+                row["deadline_at"] = deadline
+            rows.append(row)
     return rows
 
 

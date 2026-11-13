@@ -111,6 +111,12 @@ def test_a_keyword_does_not_reach_past_a_later_denied_keyword_or_a_none(summary)
     "No-op as duplicate of t_0123456789abcdef.",
     "Done with no changes as duplicate of t_0123456789abcdef.",
     "Closed with no further work, a duplicate of t_0123456789abcdef.",
+    # PR #2481 review 5896093750: a not/never that negates another verb, or a "no" before "because".
+    "Never started as duplicate of t_0123456789abcdef.",
+    "Not run as duplicate of t_0123456789abcdef.",
+    "no work because duplicate of t_0123456789abcdef.",
+    "Not started because duplicate of t_0123456789abcdef.",
+    "Wasn't run, as a duplicate of t_0123456789abcdef.",
 ])
 def test_a_negator_that_does_not_govern_the_keyword_does_not_deny_it(summary):
     """PR #2429 review: "no" denies only "no duplicate(s)" / "not a duplicate", not "no-op" or "no <noun> as"."""
@@ -125,6 +131,11 @@ def test_a_negator_that_does_not_govern_the_keyword_does_not_deny_it(summary):
     "No obvious duplicate of t_0123456789abcdef.",
     "Not an exact duplicate; parent t_0123456789abcdef.",
     "Not marked as duplicate of t_0123456789abcdef.",
+    "Not marked as a duplicate of t_0123456789abcdef.",
+    "Wasn't considered a duplicate of t_0123456789abcdef.",
+    "Never flagged as duplicate of t_0123456789abcdef.",
+    "Not closed as a duplicate of t_0123456789abcdef.",
+    "Not being a duplicate of t_0123456789abcdef, it stays open.",
     "Checked for duplicates: none found, parent t_0123456789abcdef.",
 ])
 def test_a_negator_two_words_before_the_keyword_still_denies_it(summary):
@@ -151,3 +162,17 @@ def test_a_closed_detector_card_lets_the_next_occurrence_open_a_new_one(conn):
     third = kb.create_task(conn, title="third", assignee="default", creator_task_id=creator)
     assert kb.complete_task(conn, third, summary=f"Superseded by {first}.")
     assert len(dd.describe(conn)) == 2
+
+
+def test_a_negator_ending_the_previous_line_does_not_deny_the_next_line():
+    """A newline ends the clause: the "not" of "Tests: not run" does not deny the duplicate on the next line."""
+    assert dd.sibling_named("Tests: not run\nDuplicate of t_0123456789abcdef.") == ["t_0123456789abcdef"]
+
+
+def test_never_denies_the_keyword():
+    assert dd.sibling_named("Never a duplicate of t_0123456789abcdef.") == []
+
+
+def test_a_contraction_with_a_typographic_apostrophe_denies_the_keyword():
+    """U+2019, as pasted from rendered markdown, denies like the ASCII apostrophe."""
+    assert dd.sibling_named("Isn\u2019t a duplicate of t_0123456789abcdef.") == []

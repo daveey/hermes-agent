@@ -6,7 +6,9 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_queue_reason as qr
 from tests.hermes_cli import test_kanban_worker_reserve_client as fixtures
+from tests.hermes_cli import test_kanban_queue_reason_hold as hold
 
+no_comment_hold = hold.no_comment_hold
 conn = fixtures.conn
 
 
@@ -16,6 +18,7 @@ def reply(code="admission_limits", at=1000, reasons=None):
                             "candidates": [{"machine": "worker-1", "reasons": reasons or ["load_threshold"]}]}}
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 def test_reason_persists_once_and_recovers(conn):
     tid = fixtures.acknowledged(conn)
     assert qr.record_reply(conn, tid, "hub", reply())
@@ -29,6 +32,7 @@ def test_reason_persists_once_and_recovers(conn):
     assert conn.execute("SELECT runs_on FROM tasks WHERE id=?", (tid,)).fetchone()[0] is None
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 def test_legacy_and_board_errors_are_honest(conn):
     tid = fixtures.acknowledged(conn)
     qr.record_reply(conn, tid, "hub", {"state": "queued", "reason": "waiting_for_worker_capacity"})

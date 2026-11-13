@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from tui_gateway import wake_slots
+from hermes_cli import loop_accounting as _la
 
 logger = logging.getLogger(__name__)
 
@@ -283,8 +284,11 @@ def _wake_skip_reason(task, texts: list) -> Optional[str]:
 
 
 def _spawn_thread(job: Callable[[], str]) -> str:
+    from agent.local_work_agent import scope as work_scope
     from agent.memory_provider import spawn_context_thread
-    spawn_context_thread(job, name="kanban-sweep-wake").start()  # keeps the sweeper's profile scope
+    # Reserve BEFORE the thread exists: spawn_context_thread then returns a TrackedThread that keeps custody.
+    with work_scope("sweep", "kanban_unloaded.spawn"):
+        spawn_context_thread(job, name="kanban-sweep-wake").start()  # keeps the sweeper's profile scope
     return "dispatched"
 
 
@@ -292,7 +296,9 @@ def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now)
     """Run on a worker: the wake, then (unless it started) the passive row on a fresh board connection."""
     try:
         try:
-            verdict = str(wake(tip, text, {**metadata, "woken": True}) or "error")
+            from agent.local_work_agent import scope as work_scope
+            with work_scope("sweep", "kanban_unloaded.wake"):
+                verdict = str(wake(tip, text, {**metadata, "woken": True}) or "error")
         except Exception:
             logger.warning("kanban sweep wake of %s failed", tip, exc_info=True)
             verdict = "error"
@@ -672,40 +678,42 @@ def sweep_remote_once(live_ids: set[str], *, grace_s: float = GRACE_S, **kwargs)
     return sweep_remote_notices(live_ids=live_ids, waker=_RemoteWaker(wake_turn, _spawn_thread, grace_s), **kwargs)
 
 
+@_la.accounted("unloaded.host_pass")
 def host_pass(grace: float = GRACE_S, *, every_store: bool = True) -> None:
     """Everything this loop does for the whole install; run by the ``kanban-unloaded`` lease holder only.
     ``every_store=False`` (kill switch, lease failed open: every process runs this) retries killed-subagent
-    notices in this process's own store only."""
+    notices in this process's own store only. Each sub-pass is an ``unloaded.<sub>`` pass (loop_accounting)."""
     try:
-        sweep_remote_once(live_session_ids(), grace_s=grace)
-        sweep_once(live_session_ids(), grace_s=grace)
+        _la.timed("unloaded.remote_notices", sweep_remote_once, live_session_ids(), grace_s=grace)
+        _la.timed("unloaded.notices", sweep_once, live_session_ids(), grace_s=grace)
     except Exception:
         logger.warning("kanban unloaded sweep failed", exc_info=True)
     # [daveey] Async-delegation results no live poller delivers (parent unloaded, loaded headless, or held by
     # another backend than the copy's): one turn in the parent, ledger-claimed (delegation_unloaded).
     try:
         from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
-        delegation_sweep_once()
+        _la.timed("unloaded.delegation", delegation_sweep_once)
     except Exception:
         logger.warning("async delegation unloaded sweep failed", exc_info=True)
     # [daveey] Session outcome: refresh chats whose cards moved, then make sure no notice ends a chat unanswered.
     from tui_gateway.notice_fanout import card_change_pass
     from tui_gateway.notice_guarantee import guarantee_pass
-    card_change_pass()
+    _la.timed("unloaded.card_change_pass", card_change_pass)
     # [daveey] A parent that was mid-turn when the orphan reap killed its subagent refused that notice: re-offer
     # it before the guarantee pass, so the same tick can wake the parent on it (desktop-ac1b365935). Every
     # profile store, since one holder now retries for the whole install; without a real lease each process
     # retries its own store, as before the lease.
     if every_store:
         from tui_gateway.reap_notices import retry_pending_killed_notices_all
-        retry_pending_killed_notices_all()
+        _la.timed("unloaded.killed_notices", retry_pending_killed_notices_all)
     else:
         from tui_gateway import server
         from tui_gateway.reap_notices import retry_pending_killed_notices
-        retry_pending_killed_notices(server._get_db())
-    guarantee_pass()
+        _la.timed("unloaded.killed_notices", retry_pending_killed_notices, server._get_db())
+    _la.timed("unloaded.guarantee_pass", guarantee_pass)
 
 
+@_la.accounted("unloaded.residual_pass")
 def residual_pass() -> None:
     """A standby's pass for the chats it holds itself: the delegation and guarantee passes skip a chat another
     backend holds (``skipped:held``), so the holder never delivers those. Nothing to do without live chats."""

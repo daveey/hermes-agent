@@ -4,13 +4,34 @@ Moved out of ``kanban_db_dispatch`` (which re-exports these names). ``results`` 
 """
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Iterable, Optional
 
 from hermes_cli.kanban_db_dispatch_clock import all_clock_held, deadline_suffixes
 from hermes_cli.kanban_repin_notice import MANUAL_REPIN
 
-__all__ = ["all_at_capacity", "all_clock_held", "cap_source", "describe_suppression", "manual_repin_ids",
-           "stuck_warning"]
+__all__ = ["QUIET_COMPATIBLE_FIELDS", "QUIET_HOLD_FIELDS", "all_at_capacity", "all_clock_held",
+           "all_quiet_deferred", "cap_source", "describe_suppression", "manual_repin_ids", "stuck_warning"]
+
+# Every ``DispatchResult`` field is in exactly one of these two sets (tests/hermes_cli/test_quiet_gates_dispatch.py
+# fails on a new, unclassified field). ``all_quiet_deferred`` reads only the allowlist: anything else set on a row,
+# classified or not, means the tick was not explained by the claim-quiet defer alone.
+QUIET_COMPATIBLE_FIELDS = frozenset({
+    "quiet_deferred", "quiet_deadlines",                 # the quiet defer itself
+    "skipped_locked", "skipped_owned",                   # rows filtered out before the check
+    "scheduling_admitted", "dispatch_owner", "lane_candidates", "admission_budget",  # per-tick census
+    "promoted", "auto_assigned_default", "supervisor_requests", "remote_archived", "reaped_terminal_workers",
+    "stopped_run_scopes", "agent_block_escalated", "ask_rechecked", "woken_continuations",
+    "shared_blocker_released", "shared_blocker_probed", "quota_block_released",  # bookkeeping, no held ready card
+})
+QUIET_HOLD_FIELDS = frozenset({
+    "spawned", "skipped_unassigned", "skipped_nonspawnable", "skipped_per_profile_capped", "owner_down",
+    "skipped_ineligible", "claim_deferred", "admission_deferred", "capsule_refused", "pinned_quota_held",
+    "auto_blocked", "respawn_guarded", "no_progress_held", "clock_held", "rate_limited",  # holds / guards
+    "crashed", "timed_out", "stale", "reclaimed", "reconciled_orphans", "released_leftover_claims",
+    "ownership_error",                                    # worker or claim failures
+    "at_capacity", "memory_pressure", "core_update_drain_hold",  # caps and host-wide holds
+})
 
 
 def manual_repin_ids(results: Iterable[Optional[Any]]) -> list[str]:
@@ -54,6 +75,8 @@ def describe_suppression(results: Iterable[Optional[Any]]) -> str:
             counts[reason] = counts.get(reason, 0) + 1
         if res.rate_limited:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+        if getattr(res, "quiet_deferred", None):
+            counts["quiet_claim"] = counts.get("quiet_claim", 0) + len(res.quiet_deferred)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.skipped_owned:
@@ -112,6 +135,7 @@ def held_cards(results: Iterable[Optional[Any]]) -> str:
             continue
         for field in ("respawn_guarded", "claim_deferred", "skipped_ineligible", "capsule_refused"):
             held.update(f"{tid}={reason}" for tid, reason in getattr(res, field, ()))
+        held.update(f"{tid}=quiet_claim({episode})" for tid, episode in getattr(res, "quiet_deferred", ()))
         for field in ("skipped_unassigned", "skipped_nonspawnable", "rate_limited", "admission_deferred"):
             held.update(f"{tid}={field}" for tid in getattr(res, field, ()))
         held.update(f"{tid}=profile_capacity({profile},{count})"
@@ -157,6 +181,22 @@ def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
         return (msg + " The Board lease refused or deferred claims: check the cards' runs_on / placement "
                 "(`hermes kanban show <id>`) and which machine holds or may take their Board lease.")
     return msg + " Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`."
+
+
+def all_quiet_deferred(results: Iterable[Optional[Any]]) -> bool:
+    """True when a zero-spawn tick is explained ONLY by the intentional claim-quiet defer (bounded local lease).
+
+    Narrow on purpose: at least one board deferred a local automatic claim, nothing spawned, and no board
+    reports any other hold, cap, guard, ownership or ineligibility reason. Anything else keeps the ordinary
+    stuck accounting, so quiet never masks an unrelated failure."""
+    ran = [res for res in results if res is not None and not res.skipped_locked and not res.skipped_owned]
+    if not any(getattr(res, "quiet_deferred", None) for res in ran):
+        return False
+    # Positive allowlist: any set field outside QUIET_COMPATIBLE_FIELDS (a hold, failure, cap, or a field added
+    # later and not yet classified) keeps the ordinary accounting. Non-dataclass rows fail closed.
+    return all(dataclasses.is_dataclass(res) and not any(
+        getattr(res, f.name) for f in dataclasses.fields(res) if f.name not in QUIET_COMPATIBLE_FIELDS)
+        for res in ran)
 
 
 def all_at_capacity(results: Iterable[Optional[Any]]) -> bool:

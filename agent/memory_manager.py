@@ -25,6 +25,7 @@ from agent.memory_caller_scope import bound_scope, caller_scope, claim_instance,
 from agent.memory_context import StreamingContextScrubber, build_memory_context_block, sanitize_context
 from agent.memory_manager_tools import (inject_memory_provider_tools, memory_provider_tools_enabled,
                                         memory_provider_tools_exposed, normalize_tool_schema)
+from agent.local_work_agent import scoped as _local_scoped, submit as _local_submit
 from agent.memory_provider import MemoryProvider, PRE_COMPRESS_CHECKPOINT_API_VERSION, ctx_bound, spawn_context_thread
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from hermes_constants import hermes_home_key
@@ -357,6 +358,7 @@ class MemoryManager:
     # providers get just the user's instruction (None for a bare invocation).
     _strip_skill_scaffolding = staticmethod(extract_user_instruction_from_skill_message)
 
+    @_local_scoped("memory_prefetch", "agent.memory_manager.prefetch_all")
     def prefetch_all(self, query: str, *, session_id: str = "") -> str:
         """Merge non-empty prefetch context from all providers (failures are non-fatal)."""
         if self._fork_turn_hooks_suppressed():
@@ -435,6 +437,7 @@ class MemoryManager:
             segments.append(f"{status.glyph} {status.provider_label} — {detail}")
         return "  ".join(segments)
 
+    @_local_scoped("memory_prefetch", "agent.memory_manager.queue_prefetch_all")
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn (see ``sync_all``)."""
         if self._fork_turn_hooks_suppressed():
@@ -456,6 +459,7 @@ class MemoryManager:
         params = _signature_params(provider.sync_turn)
         return params is None or _has_var_kwargs(params) or keyword in params
 
+    @_local_scoped("memory_sync", "agent.memory_manager.sync_all")
     def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "",
                  messages: Optional[list[dict[str, Any]]] = None,
                  turn_author: Optional[dict[str, Any]] = None) -> None:
@@ -516,7 +520,7 @@ class MemoryManager:
                     logger.warning("Memory manager is shutting down; rejecting late %s task", kind)
                     return
                 if executor is not None:
-                    future = executor.submit(fn)
+                    future = _local_submit(executor, fn, kind="memory_job", source="agent.memory_manager._submit_background")
                     self._background_futures[future] = kind
         except RuntimeError:
             if self._shutting_down:
@@ -565,6 +569,7 @@ class MemoryManager:
         with self._sync_executor_lock:
             self._background_futures.pop(future, None)
 
+    @_local_scoped("memory_flush", "agent.memory_manager.flush_pending")
     def flush_pending(self, timeout: Optional[float] = None) -> bool:
         """Block until queued sync/prefetch work has drained (False on timeout).
         With a single worker, a sentinel task completing proves every earlier task ran."""
@@ -946,6 +951,7 @@ class MemoryManager:
             (say or logger.warning)(message)
         return self._has_external
 
+    @_local_scoped("memory_initialize", "agent.memory_manager.initialize_all")
     def initialize_all(self, session_id: str, **kwargs) -> None:
         """Initialize all providers, injecting ``hermes_home`` so they resolve profile-scoped paths."""
         if "hermes_home" not in kwargs:

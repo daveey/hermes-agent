@@ -151,8 +151,9 @@ def _test_policy_override(environ=None) -> Path | None:
     registered its throwaway board in the REAL account inventory, and once the
     test deleted it every claim on the host deferred ``worker_resources_unknown``
     (worker-1, 2026-11-13, t_01a1d5bf526e1344). The suite points the policy at
-    its shard dir instead. Temp roots only: no setting can move a worker's
-    policy anywhere durable, so it cannot disable host CPU policy by accident.
+    its shard dir instead. Temp roots only (:func:`_override_temp_roots`, deny by
+    default): a durable path is never honoured, whatever TMPDIR says, so the
+    override cannot disable host CPU policy by accident.
     """
     import os
     raw = (os.environ if environ is None else environ).get('HERMES_TEST_POLICY_ROOT', '')
@@ -167,16 +168,18 @@ def _test_policy_override(environ=None) -> Path | None:
 
 # no-tmp: ok — recognises a harness's temp root; nothing is written here
 SYSTEM_TEMP_ROOTS: tuple[str, ...] = ('/tmp', '/var/tmp', '/dev/shm')
+# macOS per-user temp: TMPDIR=/var/folders/<xx>/<id>/T (realpath under /private/var/folders).
+MACOS_USER_TEMP_PARENTS: tuple[str, ...] = ('/var/folders', '/private/var/folders')
 
 
 def _override_temp_roots() -> list[Path]:
-    """Roots a policy override may live under: the system temp roots, plus TMPDIR only when it is ephemeral.
+    """Roots a policy override may live under: the system temp roots, plus TMPDIR only when it is known-ephemeral.
 
-    An honoured empty root turns :func:`worker_enabled` off, so ``refusal()`` lets every claim through. An odd
-    TMPDIR (``/``, a home, the account root, a durable dir inside the account) must not let the override move a
-    worker's policy somewhere durable; inside the account only the pruned ``.hermes/cache/scratch`` qualifies.
-    Same intent as ``worker_account_boards._ephemeral_roots``, judged against the passwd account, never the
-    override itself.
+    An honoured empty root turns :func:`worker_enabled` off, so ``refusal()`` lets every claim through. Deny by
+    default: TMPDIR joins only when it sits under a system temp root, is a macOS per-user ``/var/folders/*/*/T``
+    dir, or is inside the account's pruned ``.hermes/cache/scratch``; any other TMPDIR (``/``, a home, the
+    account, ``/srv/data``) leaves only the fixed system roots. A TMPDIR that contains the passwd account or
+    HOME never joins either. Judged against the passwd account, never the override itself.
     """
     import os
     import tempfile
@@ -184,11 +187,15 @@ def _override_temp_roots() -> list[Path]:
     roots = [Path(os.path.realpath(root)) for root in SYSTEM_TEMP_ROOTS]
     account = Path(os.path.realpath(_account_home()))
     home = Path(os.path.realpath(os.path.expanduser('~')))
-    scratch = account / '.hermes' / 'cache' / 'scratch'
     tmp = Path(os.path.realpath(tempfile.gettempdir()))
-    durable = (account.is_relative_to(tmp) or home.is_relative_to(tmp)
-               or (tmp.is_relative_to(account) and not tmp.is_relative_to(scratch)))
-    if not durable:
+    if account.is_relative_to(tmp) or home.is_relative_to(tmp):
+        return roots
+    macos = [Path(os.path.realpath(parent)) for parent in MACOS_USER_TEMP_PARENTS]
+    ephemeral = (any(tmp.is_relative_to(root) for root in roots)
+                 or tmp.is_relative_to(account / '.hermes' / 'cache' / 'scratch')
+                 or any(tmp.is_relative_to(parent) and tmp.relative_to(parent).parts[2:3] == ('T',)
+                        for parent in macos))
+    if ephemeral:
         roots.append(tmp)
     return roots
 

@@ -213,24 +213,79 @@ def _reserved(value):
     return value.get("machine") if value.get("state") == "assigned" else None
 
 
-def _write(previous, value, now_ms):
-    """``(event, comment)`` for an observation that differs from the last transition ``previous``.
+def _write(previous, value, now_ms, commented_ms):
+    """``(event, refresh)`` for an observation that differs from the last transition ``previous``.
 
-    A reservation handed to another worker is an event without a comment: pickup-stall reads the events as "seen
-    not pinned here" sightings (``kanban_pickup_stall._seen_unpinned_here_ms``), and the thread text would only
-    repeat the last comment. For the same reason a different volatile-only picture ``SIGHTING_MS`` after the last
-    event is an event without a comment; the ``REFRESH_MS`` comment clock runs from the last comment
-    (``COMMENTED_KEY``)."""
+    Every meaning change is an event at once. A reservation handed to another worker is an event too: pickup-stall
+    reads the events as "seen not pinned here" sightings (``kanban_pickup_stall._seen_unpinned_here_ms``). For the
+    same reason a different volatile-only picture ``SIGHTING_MS`` after the last event is an event. ``refresh``: a
+    different volatile-only picture ``REFRESH_MS`` after the last comment (``commented_ms``) may be commented.
+    Whether a meaning change is commented is ``_comment_due``'s call."""
     if previous is None or _meaning(previous) != _meaning(value):
-        return True, True
+        return True, False
     if _reserved(previous) != _reserved(value):
         return True, False
     if _signature(previous) == _signature(value):
         return False, False
-    commented = previous.get(COMMENTED_KEY)
-    if now_ms - (float(commented) if _number(commented) else _ms_of(previous)) >= REFRESH_MS:
+    if now_ms - commented_ms >= REFRESH_MS:
         return True, True
     return now_ms - _ms_of(previous) >= SIGHTING_MS, False
+
+
+# A new meaning is commented only once it has held this long (t_01a1d61f47e3f1a0): on 11-13 meanings that reverted
+# within about a minute (all candidates briefly ineligible, a worker draining for its own core update, a 41 s Board
+# blip) still wrote 42 comments on one card, 14 in 10 min. The event is still appended at once.
+HOLD_MS = 120_000
+# Origin-local, never synced (like ``LATEST_TABLE``): the last commented observation, when it was commented, and
+# since when the current meaning has held. A hold is confirmed by a repeat reply, which is no event, so this cannot
+# live in the event log.
+COMMENT_TABLE = "kanban_queue_commented"
+
+
+def _comment_state(conn, task_id, previous):
+    """``{"commented", "commented_at_ms", "since_ms"}``; without a stored row (a card queued before the hold
+    existed), the last transition is taken as commented, as every meaning change then was."""
+    try:
+        row = conn.execute(f"SELECT payload FROM {COMMENT_TABLE} WHERE task_id=?", (task_id,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        row = None
+    state = _loads(row[0]) if row else None
+    if isinstance(state, dict) and isinstance(state.get("commented"), dict) and all(
+            _number(state.get(k)) for k in ("commented_at_ms", "since_ms")):
+        return state
+    if previous is None:
+        return None
+    carried = previous.get(COMMENTED_KEY)
+    return {"commented": previous, "commented_at_ms": float(carried) if _number(carried) else _ms_of(previous),
+            "since_ms": _ms_of(previous)}
+
+
+def _save_comment_state(conn, task_id, state):
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {COMMENT_TABLE} (task_id TEXT PRIMARY KEY "
+                 "REFERENCES tasks(id) ON DELETE CASCADE, payload TEXT NOT NULL)")
+    conn.execute(f"INSERT OR REPLACE INTO {COMMENT_TABLE} (task_id, payload) VALUES (?, ?)",
+                 (task_id, json.dumps(state, ensure_ascii=False)))
+
+
+def _run_count(value):
+    lifecycle = value.get("lifecycle")
+    return lifecycle.get("run_count") if isinstance(lifecycle, dict) else None
+
+
+def _comment_due(previous, value, now_ms, state, refresh):
+    """Whether ``value`` gets a thread comment. At once: the card's first observation, a return to origin and a new
+    run. A meaning equal to the last commented one only on a volatile ``refresh``. Any other meaning once it has
+    held ``HOLD_MS`` (``state["since_ms"]``), checked on repeats too; one that reverts or changes first never."""
+    if previous is None or state is None:
+        return True
+    if _meaning(previous) != _meaning(value) and (
+            value.get("state") == "origin" or _run_count(previous) != _run_count(value)):
+        return True
+    if _meaning(state["commented"]) == _meaning(value):
+        return refresh
+    return now_ms - state["since_ms"] >= HOLD_MS
 
 
 def _stamp(ms):
@@ -313,7 +368,8 @@ def _owned_row(conn, task_id, gateway, fence):
 
 
 def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
-    """Append one change-only observation and its thread comment, or store a volatile-only one (``_write``).
+    """Append one change-only observation, or store a volatile-only one (``_write``); comment it when
+    ``_comment_due`` (a new meaning only once it has held ``HOLD_MS``, confirmed by a later reply or repeat).
 
     ``fence`` (from ``snapshot``) checks the row the Board request was made from instead of the current one: a
     refusal answered against that row stays recorded after a feed pull moved the row on, exactly as it was before
@@ -327,27 +383,35 @@ def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
             return False
         value = {**value, "lifecycle": fence["lifecycle"] if fence is not None else _lifecycle(conn, task_id, row)}
         newest = _newest(conn, task_id)
-        if newest and _signature(newest) == _signature(value):
-            return False
+        # A repeat is no event, but it still confirms a held meaning (``_comment_due``).
+        repeat = bool(newest) and _signature(newest) == _signature(value)
         previous_ms = (newest or {}).get("recorded_at_ms", 0)
         recorded_ms = max(int(time.time() * 1000), int(previous_ms) + 1 if _number(previous_ms) else 0)
         value = {**value, "recorded_at_ms": recorded_ms}
         previous = _stored(conn, task_id)
-        event, commented = _write(previous, value, recorded_ms)
-        if event and not commented and previous is not None:
-            carried = previous.get(COMMENTED_KEY)
-            value = {**value, COMMENTED_KEY: carried if _number(carried) else _ms_of(previous)}
-        if not event:
+        state = _comment_state(conn, task_id, previous)
+        event, refresh = (False, False) if repeat else _write(
+            previous, value, recorded_ms, state["commented_at_ms"] if state else 0)
+        if state is not None and previous is not None and _meaning(previous) != _meaning(value):
+            state = {**state, "since_ms": recorded_ms}  # the hold restarts at every meaning change
+        commented = _comment_due(previous, value, recorded_ms, state, refresh)
+        if event and not commented and state is not None:
+            value = {**value, COMMENTED_KEY: state["commented_at_ms"]}
+        if commented:
+            state = {"commented": value, "commented_at_ms": recorded_ms, "since_ms": recorded_ms}
+        if state is not None and (event or commented):
+            _save_comment_state(conn, task_id, state)
+        if event:
+            kb._append_event(conn, task_id, EVENT, value)
+        elif not repeat:
             conn.execute(f"CREATE TABLE IF NOT EXISTS {LATEST_TABLE} (task_id TEXT PRIMARY KEY "
                          "REFERENCES tasks(id) ON DELETE CASCADE, payload TEXT NOT NULL)")
             conn.execute(f"INSERT OR REPLACE INTO {LATEST_TABLE} (task_id, payload) VALUES (?, ?)",
                          (task_id, json.dumps(value, ensure_ascii=False)))
-            return False
-        kb._append_event(conn, task_id, EVENT, value)
         if comment and commented:  # a card no pool worker can run gets the owner's repin notice as its comment
             kb.add_comment(conn, task_id, "worker-placement", comment if isinstance(comment, str) else describe(value),
                            origin_gateway=gateway)
-        return True
+        return event
 
 
 def mark_refused(value, refused):

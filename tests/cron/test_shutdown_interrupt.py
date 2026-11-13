@@ -847,7 +847,7 @@ class TestOwnerStopWhileDraining:
             # run_job's own stop + failure-log path (_abort_if_fire_claim_lost, run_job's except).
             error = CronShutdownInterrupted if cancel_is_shutdown(cancel_event) else RuntimeError
             exc = error(f"Cron job 'drain-job' was stopped: {reason}")
-            if not sched._log_shutdown_stop("drain-job", str(exc), exc):
+            if not sched._log_expected_stop("drain-job", str(exc), exc):
                 try:
                     raise exc
                 except RuntimeError:
@@ -951,7 +951,7 @@ class TestShutdownStopLogging:
         from cron.cancellation import CronShutdownInterrupted
 
         caplog.set_level(logging.DEBUG, logger="cron.scheduler")
-        assert sched._log_shutdown_stop("job", "stopped", CronShutdownInterrupted("stopped")) is True
+        assert sched._log_expected_stop("job", "stopped", CronShutdownInterrupted("stopped")) is True
         records = [r for r in caplog.records if r.name == "cron.scheduler"]
         assert [(r.levelno, r.exc_info) for r in records] == [(logging.WARNING, None)]
         assert not records[0].getMessage().startswith("Job 'job' failed: ")
@@ -964,5 +964,5 @@ class TestShutdownStopLogging:
 
         caplog.set_level(logging.DEBUG, logger="cron.scheduler")
         exc = RuntimeError("Cron job 'job' was stopped: cron fire ownership was lost")
-        assert sched._log_shutdown_stop("job", str(exc), exc) is False
+        assert sched._log_expected_stop("job", str(exc), exc) is False
         assert [r for r in caplog.records if r.name == "cron.scheduler"] == []

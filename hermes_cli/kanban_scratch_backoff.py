@@ -37,6 +37,7 @@ CAP_S = 24 * 3600
 FORGET_S = 14 * 86400
 MAX_COUNT = 64  # count saturates here: CAP_S is reached at 4, and 2 ** count must stay cheap
 DEFAULT_BUDGET_S = 1200  # the worker/Mac GC wrappers kill a board's pass at 1800 s
+MAX_EPOCH_S = 3.2e10  # loaded timestamps stay below Windows' gmtime limit (~3.25e10, year 3000)
 
 
 class Budget:
@@ -75,9 +76,18 @@ def fingerprint(path: Path, completed_at) -> Optional[list]:
 
 
 def _finite(value) -> bool:
-    """A real epoch-seconds number ``time.gmtime`` can format (no bool, NaN, inf or year > 5000)."""
+    """A real epoch-seconds number ``time.gmtime`` can format on every host (no bool, NaN, inf or
+    year > ~2984: Windows' gmtime raises past 3000-12-31, about 3.25e10)."""
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and abs(value) < 1e11)
+            and math.isfinite(value) and abs(value) < MAX_EPOCH_S)
+
+
+def _utc(epoch) -> str:
+    """ISO UTC for a log line; the raw number when the platform cannot format it (never raises)."""
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+    except (OverflowError, OSError, ValueError):
+        return f"{epoch:.0f}"
 
 
 def _well_formed(entry) -> bool:
@@ -157,5 +167,5 @@ def skip_logged(refusals: Refusals, key: str, path: Path, completed_at, task_id:
         return False
     log.info("Keeping aged scratch workspace for task %s: %s (archive refused %d time(s), "
              "next retry after %s; last: %s)", task_id, path, entry["count"],
-             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry["retry_at"])), entry.get("reason"))
+             _utc(entry["retry_at"]), entry.get("reason"))
     return True

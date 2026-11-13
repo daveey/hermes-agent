@@ -146,7 +146,16 @@ class MetricsSender:
                       worker_run, worker_wait)
 
     def tick(self) -> Optional[bool]:
-        """One anchored tick: True sent, False the report failed, None nothing sent (off or skipped)."""
+        """One anchored tick: True sent, False the report failed, None nothing sent (off or skipped). One
+        ``machine_metrics.tick`` pass (loop_accounting); a tick that sends nothing is a skip."""
+        from hermes_cli import loop_accounting
+        with loop_accounting.pass_("machine_metrics.tick") as acct:
+            sent = self._tick()
+            if sent is None:
+                acct.skip()
+            return sent
+
+    def _tick(self) -> Optional[bool]:
         from hermes_cli import machine_cpu_metrics as cpu
         self.ticks += 1
         self.tick_started_at = self.clock()

@@ -800,6 +800,24 @@ class AIAgent(
                                      review_skills: bool = False, focus: Optional[str] = None,
                                      task_cfg: Optional[dict[str, Any]] = None, _requeue_attempts: int = 0,
                                      explicit: bool = False) -> None:
+        """Reserve local work BEFORE any preparation, then spawn; the review thread's finally (after its
+        requeue) releases, every earlier exit releases here. A requeue enqueues before the predecessor
+        releases, so a rescheduled review never shows a zero gap."""
+        from agent import local_work_agent
+
+        custody = [local_work_agent.reserve("background_review", "run_agent._spawn_background_review_now")]
+        try:
+            __class__._spawn_background_review_run(  # defining class: stand-in agents drive this method
+                self, messages_snapshot, review_memory, review_skills, focus, task_cfg, _requeue_attempts, explicit,
+                _work=custody)
+        finally:
+            for held in custody:  # the thread took custody (list cleared) or nothing started
+                local_work_agent.release(held)
+
+    def _spawn_background_review_run(self, messages_snapshot: list[dict], review_memory: bool = False,
+                                     review_skills: bool = False, focus: Optional[str] = None,
+                                     task_cfg: Optional[dict[str, Any]] = None, _requeue_attempts: int = 0,
+                                     explicit: bool = False, _work: Optional[list] = None) -> None:
         """Spawn the background memory/skill review thread.
 
         ``threading.Thread`` is constructed here so tests patching ``run_agent.threading.Thread`` keep working.
@@ -832,24 +850,33 @@ class AIAgent(
                 focus=focus, task_cfg=task_cfg, review_run=review_run, explicit=explicit,
             )
 
+            work_held = _work[0] if _work else None
+
             def _target_with_requeue() -> None:
                 try:
-                    target()
+                    try:
+                        target()
+                    finally:
+                        retirement.end_background_review(hold)
+                    requeue = dict(
+                        messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
+                        focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1,
+                        explicit=explicit)
+                    # [daveey] A review a core-update pause stopped runs again after the update (bounded).
+                    from agent.review_idle_queue import requeue_update_paused_review
+                    if not requeue_update_paused_review(self, hold, _review_queue_key(self), requeue,
+                                                        self._REVIEW_REQUEUE_MAX_ATTEMPTS):
+                        self._maybe_requeue_preempted_review(review_run, requeue)
                 finally:
-                    retirement.end_background_review(hold)
-                requeue = dict(
-                    messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
-                    focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1,
-                    explicit=explicit)
-                # [daveey] A review a core-update pause stopped runs again after the update (bounded).
-                from agent.review_idle_queue import requeue_update_paused_review
-                if not requeue_update_paused_review(self, hold, _review_queue_key(self), requeue,
-                                                    self._REVIEW_REQUEUE_MAX_ATTEMPTS):
-                    self._maybe_requeue_preempted_review(review_run, requeue)
+                    # Outermost: only after the requeue (which holds its own continuation) is done.
+                    if work_held is not None:
+                        work_held.release()
 
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.
-            threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review").start()
+            threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review").start()  # health: allow HX012 -- target already wrapped by propagate_context_to_thread
+            if _work:
+                _work.clear()  # started: the thread's finally owns the token
         except Exception:
             retirement.end_background_review(hold)
             finish_background_review_run(self, review_run)

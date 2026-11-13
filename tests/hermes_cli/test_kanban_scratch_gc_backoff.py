@@ -7,6 +7,7 @@ refused trees every hour (one partial clone cost ~78 s per pass) and ran past th
 import argparse
 import json
 import logging
+import os
 
 import pytest
 
@@ -106,6 +107,33 @@ def test_backoff_doubles_to_a_cap(tmp_path):
     assert bo.Refusals("default", now=lambda: clock[0]).entries == {}
 
 
+@pytest.mark.parametrize("change", ["mtime", "completed_at"])
+def test_refusal_count_resets_when_the_refused_tree_changes(tmp_path, change):
+    """A changed tree refused again starts over at count 1 and BASE_S, not the old tree's doubled wait."""
+    clock = [1_000_000.0]
+    refusals = bo.Refusals("default", now=lambda: clock[0])
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    refusals.record("t", tree, 5, "refused")
+    clock[0] += 60
+    refusals.record("t", tree, 5, "refused")
+    assert refusals.entries["t"]["count"] == 2
+    old_fp = refusals.entries["t"]["fingerprint"]
+    completed_at = 5
+    if change == "mtime":
+        st = tree.stat()
+        os.utime(tree, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    else:
+        completed_at = 6
+    assert bo.fingerprint(tree, completed_at) != old_fp
+    clock[0] += 60
+    refusals.record("t", tree, completed_at, "refused again")
+    entry = refusals.entries["t"]
+    assert entry["count"] == 1
+    assert entry["retry_at"] - entry["last_at"] == bo.BASE_S
+    assert entry["fingerprint"] == bo.fingerprint(tree, completed_at)
+
+
 def test_unreadable_state_is_empty_and_never_blocks(remote, archives):
     bo._path("default").parent.mkdir(parents=True, exist_ok=True)
     bo._path("default").write_text("{not json")
@@ -145,6 +173,8 @@ def test_malformed_memo_entry_is_dropped_and_the_aged_pass_completes(remote, arc
     {"retry_at": "x"}, {"count": None}, {"count": "2"}, {"count": True}, {"count": 0},
     {"last_at": "y"}, {"retry_at": float("inf")}, {"retry_at": 1e300}, {"retry_at": None},
     {"fingerprint": "p"}, {"reason": 5}, {"count": 10**10},
+    {"retry_at": 9.9e10},  # below 1e11 but past Windows' gmtime limit (~year 3000)
+    {"retry_at": True}, {"last_at": True},  # bool is an int subclass, never an epoch
 ])
 def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     tree = tmp_path / "tree"
@@ -159,6 +189,25 @@ def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     assert set(refusals.entries) == {"ok"}
     assert bo.skip_logged(refusals, "bad", tree, 5, "t") is False
     assert bo.skip_logged(refusals, "ok", tree, 5, "t") is True
+
+
+@pytest.mark.parametrize("exc", [OSError, OverflowError, ValueError])
+def test_skip_logged_keeps_the_tree_when_retry_at_cannot_be_formatted(tmp_path, monkeypatch, caplog, exc):
+    """Windows ``time.gmtime`` raises past ~year 3000; the INFO line must never abort the GC pass."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    now = 1_000_000.0
+    refusals = bo.Refusals("default", now=lambda: now)
+    refusals.entries["t"] = {"fingerprint": bo.fingerprint(tree, 5), "count": 1, "last_at": now,
+                             "retry_at": now + 60, "reason": "r"}
+
+    def boom(*_a):
+        raise exc("timestamp out of range for platform time_t")
+
+    monkeypatch.setattr(bo.time, "gmtime", boom)
+    caplog.set_level(logging.INFO, logger="hermes_cli.kanban_scratch_backoff")
+    assert bo.skip_logged(refusals, "t", tree, 5, "t") is True
+    assert "next retry after 1000060" in caplog.text
 
 
 def test_record_saturates_count_so_the_backoff_exponent_stays_small(tmp_path):
@@ -207,9 +256,11 @@ def test_cli_budget_flag_and_default(monkeypatch):
         kanban_ops._cmd_gc(argparse.Namespace(event_retention_days=0, log_retention_days=0,
                                               worktree_retention_days=7, scratch_budget_seconds=value))
     default, unlimited, short = seen
-    assert default.deadline - default.started == bo.DEFAULT_BUDGET_S
+    # Compare against the sum the Budget computes: (s + n) - s is not exactly n for
+    # every monotonic() float s (e.g. s=486.992705996, n=30).
+    assert default.deadline == default.started + bo.DEFAULT_BUDGET_S
     assert unlimited.deadline is None and not unlimited.exhausted()
-    assert short.deadline - short.started == 30
+    assert short.deadline == short.started + 30
 
 
 def test_default_budget_leaves_headroom_below_the_wrapper_kill():

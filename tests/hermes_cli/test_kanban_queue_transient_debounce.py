@@ -23,7 +23,12 @@ from hermes_cli import kanban_queue_reason as qr
 from hermes_cli import kanban_sync_client as client
 from hermes_cli import kanban_worker_placement as wp
 from tests.hermes_cli import test_kanban_worker_reserve_client as fixtures
+from tests.hermes_cli import test_kanban_queue_reason_hold as hold
 
+# These pin which failures are commented, not when (the hold: test_kanban_queue_reason_hold).
+pytestmark = pytest.mark.usefixtures("no_comment_hold")
+
+no_comment_hold = hold.no_comment_hold
 conn = fixtures.conn
 CFG = {"worker_pools": {"hub": ["worker-1"]}}
 TIMEOUT_S = 0.8  # scaled-down dispatch budget (a good pass = reserve + feed pull must fit)

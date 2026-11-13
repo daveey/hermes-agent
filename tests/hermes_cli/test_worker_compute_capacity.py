@@ -74,26 +74,54 @@ def test_test_policy_root_is_honoured_only_under_a_temp_root(raw, honoured):
     ('/', '/srv/policy/.hermes', False),  # TMPDIR=/ would admit anything
     ('{account}/.hermes', '{account}/.hermes/x/.hermes', False),  # durable dirs inside the account
     ('{account}/.hermes/cache/scratch', '{account}/.hermes/cache/scratch/t1/.hermes', True),  # the worker default
-    ('{other}', '{other}/shard-1/account-policy/.hermes', True),  # an ordinary harness TMPDIR
+    ('{sys}/harness', '{sys}/harness/shard-1/account-policy/.hermes', True),  # a harness TMPDIR under /tmp
+    ('{folders}/ab/xyz/T', '{folders}/ab/xyz/T/shard-1/.hermes', True),  # macOS per-user temp (Mac CI)
+    # Deny by default (PR #2493 review, t_01a1d61e71d44a0a): a durable TMPDIR outside account and HOME.
+    ('{other}', '{other}/x/.hermes', False),  # TMPDIR=/srv/data
+    ('{folders}/ab/xyz', '{folders}/ab/xyz/x/.hermes', False),  # /var/folders but not its per-user T
+    ('{folders}/ab/xyz/C', '{folders}/ab/xyz/C/x/.hermes', False),  # the per-user cache dir is durable
+    ('{sys}', '{sys}/x/.hermes', True),  # a system root itself stays a root
 ])
 def test_an_odd_tmpdir_never_admits_a_durable_policy_root(tmp_path, monkeypatch, tmpdir, raw, honoured):
     """PR #2454 review nit 2 (t_01a1d602f93945f1): TMPDIR=/home/ubuntu honoured /home/ubuntu/x/.hermes. An honoured
-    empty root turns worker_enabled() off, so refusal() fails open; TMPDIR joins the roots only when ephemeral."""
+    empty root turns worker_enabled() off, so refusal() fails open. PR #2493 review (t_01a1d61e71d44a0a): TMPDIR=/srv/data
+    still honoured /srv/data/x/.hermes; TMPDIR now joins only under a system temp root, a macOS per-user T dir or
+    the account's cache/scratch."""
     import os
     import tempfile
     from pathlib import Path
     from hermes_cli import worker_compute_capacity as capacity
-    account, home, other = tmp_path / 'account', tmp_path / 'home', tmp_path / 'harness-tmp'
-    for path in (account / '.hermes' / 'cache' / 'scratch', home, other):
+    account, home, other = tmp_path / 'account', tmp_path / 'home', tmp_path / 'srv-data'
+    system, folders = tmp_path / 'sys', tmp_path / 'folders'
+    for path in (account / '.hermes' / 'cache' / 'scratch', home, other, system / 'harness',
+                 *(folders / 'ab' / 'xyz' / name for name in ('T', 'C'))):
         path.mkdir(parents=True)
-    names = {'account': str(account), 'home': str(home), 'other': str(other)}
+    names = {'account': str(account), 'home': str(home), 'other': str(other), 'sys': str(system),
+             'folders': str(folders)}
     monkeypatch.setattr('hermes_constants._account_home', lambda: account)
-    monkeypatch.setattr(capacity, 'SYSTEM_TEMP_ROOTS', ())  # tmp_path itself sits under /tmp
+    # tmp_path itself sits under /tmp (or the real scratch): stand-in system and macOS roots
+    monkeypatch.setattr(capacity, 'SYSTEM_TEMP_ROOTS', (str(system),))
+    monkeypatch.setattr(capacity, 'MACOS_USER_TEMP_PARENTS', (str(folders),))
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.setattr(tempfile, 'tempdir', tmpdir.format(**names))
     raw = raw.format(**names)
     got = capacity._test_policy_override({'HERMES_TEST_POLICY_ROOT': raw})
     assert got == (Path(os.path.realpath(raw)) if honoured else None)
+
+
+def test_a_relative_policy_root_is_refused_even_when_the_cwd_is_a_temp_root(tmp_path, monkeypatch):
+    """#2454 post-merge mutant C2 (t_01a1d62f12ab6265): realpath resolves a relative value against the cwd, so
+    without the isabs check a process whose cwd sits under a temp root would honour ``relative/.hermes``."""
+    import os
+    from pathlib import Path
+    from hermes_cli import worker_compute_capacity as capacity
+    cwd = tmp_path / 'cwd'
+    cwd.mkdir()
+    monkeypatch.setattr(capacity, 'SYSTEM_TEMP_ROOTS', (str(tmp_path),))
+    monkeypatch.chdir(cwd)
+    resolved = Path(os.path.realpath('relative/.hermes'))
+    assert capacity._test_policy_override({'HERMES_TEST_POLICY_ROOT': str(resolved)}) == resolved  # cwd: a temp root
+    assert capacity._test_policy_override({'HERMES_TEST_POLICY_ROOT': 'relative/.hermes'}) is None
 
 
 def test_policy_root_follows_the_override_in_a_child(tmp_path):

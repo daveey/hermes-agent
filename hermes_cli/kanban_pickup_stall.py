@@ -467,7 +467,7 @@ def expected_hold(entry: Optional[Mapping[str, Any]], *, now_ms: int, stall_s: i
     Expected: a hold with a known start (``hold_at``, Board epoch ms) whose reason states ``release by HH:MMZ``,
     or whose owner is the core rollout (implied release: start + :data:`ROLLOUT_MAX_SECONDS`), until that release
     plus ``stall_s``. An unknown start, no release and no rollout owner, or a passed window fail toward alerting."""
-    if not isinstance(entry, Mapping) or entry.get("hold") is not True:
+    if not isinstance(entry, Mapping) or not entry.get("hold"):
         return None
     at = entry.get("hold_at")
     if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at <= 0:

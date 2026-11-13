@@ -149,7 +149,7 @@ def _links_diff(args: argparse.Namespace) -> int:
     else:
         for k in ("clean", "chats", "ledger_links", "replica_links", "machine_links", "profile_board_links"):
             print(f"{k:>16}: {report[k]}")
-        for k in ("only_in_ledger", "only_in_replica"):
+        for k in ("profile_board", "only_in_ledger", "only_in_replica"):
             items = [(s, c) for s, cards in report[k].items() for c in cards]
             print(f"{k:>16}: {len(items)} {items[:8]}")
     return 0 if report["clean"] else 1

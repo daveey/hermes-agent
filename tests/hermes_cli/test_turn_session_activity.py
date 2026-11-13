@@ -153,3 +153,85 @@ def test_api_profiles_sidebar_rows_carry_turn_live(rest):
     rows = _by_id(body["recents"]["sessions"])
     assert rows["busy_chat"].get("turn_live") is True
     assert "turn_live" not in rows["idle_chat"]
+
+
+# ── a turn a core update paused keeps the row live (t_01a1d6354e5847dd) ─────────────────────────
+
+
+def _checkpointed_db(home, sid, *, status="started", message_age=30.0, receipt_ok=True):
+    """A real state.db with one admission for ``sid`` parked on a gateway update checkpoint."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        db.create_session(sid, source="desktop")
+        db.append_message(sid, role="user", content="go")
+        db.append_message(sid, role="assistant", content="working")
+    finally:
+        db.close()
+    conn = sqlite3.connect(home / "state.db")
+    mid = conn.execute("SELECT max(id) FROM messages WHERE session_id=?", (sid,)).fetchone()[0]
+    conn.execute("UPDATE messages SET timestamp=? WHERE id=?", (time.time() - message_age, mid))
+    conn.execute(
+        "INSERT INTO session_admissions(admission_id, request_id, principal_id, target_session_id, lineage_json,"
+        " payload_json, payload_digest, intent, status, owner_epoch, generation)"
+        " VALUES ('adm1', 'r1', 'p', ?, '[]', '{}', 'd', 'queue', ?, 1, 1)", (sid, status))
+    receipt = {"max_message_id": mid} if receipt_ok else {"other": 1}
+    import json
+    conn.execute("INSERT INTO state_meta(key, value) VALUES (?, ?)",
+                 ("gateway.update_checkpoint.v1.adm1", json.dumps(receipt)))
+    conn.commit()
+    conn.close()
+
+
+def test_gateway_update_paused_turn_counts_as_live(home):
+    _checkpointed_db(home, "paused_chat")
+    rows = tsa.annotate_turn_activity([{"id": "paused_chat"}, {"id": "tip", "_lineage_root_id": "paused_chat"},
+                                       {"id": "other"}])
+    assert [r.get("turn_live") for r in rows] == [True, True, None]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"message_age": 2 * 3600.0},   # nobody will auto-continue a pause this old
+    {"status": "terminal"},        # settled: the checkpoint's admission is no longer the started head
+    {"receipt_ok": False},         # unreadable receipt: no proof of the pause
+])
+def test_gateway_checkpoint_that_cannot_continue_does_not_count(home, kwargs):
+    _checkpointed_db(home, "paused_chat", **kwargs)
+    assert "turn_live" not in tsa.annotate_turn_activity([{"id": "paused_chat"}])[0]
+
+
+def _marker(home, key, **entry):
+    import json
+    (home / "desktop").mkdir(parents=True, exist_ok=True)
+    (home / "desktop" / "interrupted_turns.json").write_text(json.dumps({key: entry}), encoding="utf-8")
+
+
+def test_tui_update_pause_marker_counts_as_live(home):
+    now = time.time()
+    _leases(home / "state.db", [])
+    _marker(home, "tui_chat", reason="core_update_pause", auto_continue=True, attempts=0,
+            started_at=now - 7200, paused_at=now - 60)  # a long turn paused a minute ago is fresh
+    assert tsa.annotate_turn_activity([{"id": "tui_chat"}])[0].get("turn_live") is True
+
+
+@pytest.mark.parametrize("entry", [
+    {"reason": "core_update_pause", "auto_continue": True, "attempts": 0, "paused_at": -3600},  # stale
+    {"reason": "core_update_pause", "auto_continue": False, "attempts": 0, "paused_at": -60},
+    {"reason": "core_update_pause", "auto_continue": True, "attempts": 2, "paused_at": -60},  # exhausted
+    {"reason": "backend_exit", "auto_continue": True, "attempts": 0, "paused_at": -60},  # crash marker
+])
+def test_tui_marker_that_is_not_a_live_pause_does_not_count(home, entry):
+    now = time.time()
+    _leases(home / "state.db", [])
+    _marker(home, "tui_chat", **{**entry, "started_at": now - 7200, "paused_at": now + entry["paused_at"]})
+    assert "turn_live" not in tsa.annotate_turn_activity([{"id": "tui_chat"}])[0]
+
+
+def test_profile_tui_marker_is_read(home):
+    now = time.time()
+    _leases(home / "state.db", [])
+    _leases(home / "profiles" / "work" / "state.db", [])
+    _marker(home / "profiles" / "work", "w_chat", reason="core_update_pause", auto_continue=True, attempts=0,
+            started_at=now - 30)
+    assert tsa.annotate_turn_activity([{"id": "w_chat"}])[0].get("turn_live") is True

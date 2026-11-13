@@ -14,7 +14,9 @@ import os
 import sys
 import threading
 import time
+import weakref
 from typing import Any, Coroutine, Optional
+from tools import code_kernel_scope as _local_work
 from tools.mcp_tool_common import _core
 from tools import mcp_tool_lifecycle as _lifecycle
 
@@ -150,6 +152,29 @@ def _running_loop() -> Optional[asyncio.AbstractEventLoop]:
     return loop if loop is not None and loop.is_running() else None
 
 
+def _release_after(coro, handle):
+    """Wrap *coro* so *handle* is released when the coroutine physically finishes.
+
+    ``weakref.finalize`` covers a task canceled before its first step (the body, and thus the
+    ``finally``, never runs); ``Handle.finish`` is idempotent so both paths are safe.
+    """
+    async def _custodian():
+        try:
+            return await coro
+        finally:
+            handle.finish()
+
+    wrapper = _custodian()
+
+    def _finalize():
+        handle.finish()
+        if asyncio.iscoroutine(coro):
+            coro.close()  # an unstarted inner coroutine must not leak "never awaited"
+
+    weakref.finalize(wrapper, _finalize)
+    return wrapper
+
+
 def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
     """Schedule a coroutine (or zero-arg factory — avoids leaking a never-awaited coroutine when the
     loop is down) on the MCP loop and block until done, polling so user interrupts are honored."""
@@ -165,8 +190,14 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
     # would vanish here; re-establish it inside the task's own context.
     coro = _wrap_with_dashboard_oauth_flow(_wrap_with_home_override(
         coro_or_factory() if callable(coro_or_factory) else coro_or_factory))
+    # Local-work seam: reserve BEFORE scheduling; custody belongs to the wrapper coroutine's
+    # finally on the MCP loop (after awaited children), never to future.cancel()/timeout here.
+    handle = _local_work.reserve("mcp_call", "mcp-run-on-loop")
+    if handle is not None:
+        coro = _release_after(coro, handle)
     future = safe_schedule_threadsafe(coro, loop, logger=logger, log_message="MCP scheduling failed")
     if future is None:
+        _local_work.finish(handle)
         raise RuntimeError("MCP event loop unavailable (failed to schedule)")
     start_time = time.monotonic()
     deadline = None if timeout is None else start_time + timeout

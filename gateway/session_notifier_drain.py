@@ -59,8 +59,16 @@ def last_held_at():
         return None
 
 
+def quiet_active():
+    """A verified claim-quiet lease (``agent.claim_quiet``, read-only; every uncertain outcome is open)."""
+    from agent.claim_quiet import read_active
+    return read_active() is not None
+
+
 def eligible(row):
-    return not notifier_wake(row) or not held()
+    # Only a classified Kanban wake EXECUTION waits, for the updater hold or a verified claim-quiet lease;
+    # ``held`` itself stays updater-only. The receipt stays queued under its identity; humans never wait.
+    return not notifier_wake(row) or (not held() and not quiet_active())
 
 
 def queued_head(pending):

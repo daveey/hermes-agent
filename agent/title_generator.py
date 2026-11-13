@@ -838,15 +838,19 @@ def maybe_auto_title(
                           runtime_validator=runtime_validator)
     if isinstance(title_preview, str) and title_preview.strip():
         upgrade_kwargs["title_preview"] = title_preview
-    upgrade = spawn_context_thread(
-        auto_title_session, name="auto-title",
-        args=(session_db, session_id, user_message),
-        kwargs=upgrade_kwargs,
-    )
-    if title_upgrade_must_wait_for_turn(main_runtime):
-        logger.debug("Auto-title upgrade deferred past the turn: shares the self-hosted endpoint with the main request")
-        return upgrade
-    start_title_upgrade(upgrade)
+    from agent import local_work_agent
+    # The explicit scope makes the upgrade a TrackedThread even when called outside a turn scope (it reserves at
+    # start, so a deferred-until-turn-end start stays covered); it also spans an immediate start.
+    with local_work_agent.scope("title_generation", "agent.title_generator.maybe_auto_title"):
+        upgrade = spawn_context_thread(
+            auto_title_session, name="auto-title",
+            args=(session_db, session_id, user_message),
+            kwargs=upgrade_kwargs,
+        )
+        if title_upgrade_must_wait_for_turn(main_runtime):
+            logger.debug("Auto-title upgrade deferred past the turn: shares the self-hosted endpoint with the main request")
+            return upgrade
+        start_title_upgrade(upgrade)
     return upgrade
 
 

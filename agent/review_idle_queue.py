@@ -66,6 +66,7 @@ class _PendingReview:
     kwargs: dict[str, Any]
     enqueued_at: float
     context: contextvars.Context
+    work: Any = None  # dispatch custody, reserved atomically with the pop (never held while merely queued)
 
 
 class ReviewIdleQueue:
@@ -152,7 +153,14 @@ class ReviewIdleQueue:
                 if not self._pending:
                     return None
                 candidate = min(self._pending.values(), key=lambda p: p.enqueued_at)
-            return self._pending.pop(candidate.session_key, None)
+            item = self._pending.pop(candidate.session_key, None)
+            if item is not None:
+                # Reserve in the same critical section as the pop: a selected item is never untracked, while
+                # an empty/not-yet-idle poll (returned None above) reserves nothing.
+                from agent import local_work_agent
+                item.work = item.context.run(
+                    local_work_agent.reserve, "background_review", "agent.review_idle_queue._dispatch")
+            return item
 
     def _run(self) -> None:
         while True:
@@ -170,6 +178,10 @@ class ReviewIdleQueue:
                     item.context.run(self._dispatch, item)
             except Exception:
                 logger.warning("Deferred review dispatch failed", exc_info=True)
+            finally:
+                if item is not None and item.work is not None:
+                    # After _spawn_background_review_now reserved its own token (or failed).
+                    item.work.release()
             if item is None:
                 time.sleep(_POLL_INTERVAL_S)
 

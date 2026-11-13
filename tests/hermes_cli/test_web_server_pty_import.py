@@ -27,6 +27,7 @@ def test_web_server_uses_posix_pty_bridge_on_posix():
     from hermes_cli.pty_bridge import PtyBridge as PosixBridge
     from hermes_cli.pty_bridge import PtyUnavailableError as PosixErr
 
-    assert _web_server_chat.PtyBridge is PosixBridge
+    # custody subclass (quiet-v3 F6): the POSIX bridge plus local-work reservation of the child
+    assert issubclass(_web_server_chat.PtyBridge, PosixBridge)
     assert _web_server_chat._PTY_BRIDGE_AVAILABLE is True
     assert _web_server_chat.PtyUnavailableError is PosixErr

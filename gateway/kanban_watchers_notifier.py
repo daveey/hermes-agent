@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 from agent.i18n import t
 
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
+from hermes_cli import loop_accounting as _la
 from gateway.wake import session_owned_by_profile
 from hermes_cli.kanban_block_notice import coalesce_superseded_blocks
 
@@ -303,7 +304,10 @@ class _Collector:
                     logger.debug("kanban notifier: skipping duplicate board slug %s for DB %s", slug, resolved_db_path)
                     continue
                 seen_db_paths.add(resolved_db_path)
-                self.collect_board(slug)
+                with _la.pass_(f"notifier.collect_board/{slug}") as acct:  # rows = deliveries claimed [daveey]
+                    before = len(self.deliveries)
+                    self.collect_board(slug)
+                    acct.rows(len(self.deliveries) - before)
         return self.deliveries
 
     def _board_has_subs(self, slug: str) -> bool:
@@ -401,6 +405,7 @@ class _Collector:
             conn.close()
 
 
+@_la.accounted("notifier.collect", rows=True)
 def _notifier_collect(runner: Any, kb: Any, *, notifier_profile: Optional[str], gc_due: bool, gc_retention_days: int) -> list[dict]:
     """Claim unseen terminal events for every owned subscription on every board.
 

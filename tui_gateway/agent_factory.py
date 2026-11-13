@@ -532,7 +532,28 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
         raise
 
 
-def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str, dict]:
+def _resolve_runtime_or_defer_wall(resolve_kwargs, model, provider, overrides, session_id) -> _RuntimeFallbackResolution:
+    """[daveey] The primary runtime, or a deferral when the session's router-picked model is behind a far
+    subscription quota wall.
+
+    Desktop chats 20261031_222913_405ade and 20261031_064851_d0f106 (hub, 11-13): the router had put both on
+    openai-codex/gpt-6-astra; when the Codex subscription walled until 11-17 every turn failed at agent build
+    ("Subscription quota unavailable ... gpt-6-astra", 187 times) although claude-opus-5-5 and claude-fable-5-2
+    in the same class were available. The reroute for that case (agent/model_routing_walls.py) was wired into
+    the messaging gateway's pre-build lookup only; this resolver has no session identity, so the wall was
+    final here. A session's own override of endpoint or key is never deferred, like the gateway's."""
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    try:
+        return _resolve_runtime_with_fallback(resolve_kwargs)
+    except SubscriptionQuotaUnavailable as wall:
+        from tui_gateway.class_routing import walled_pin_deferral
+        deferred = None if any(overrides.values()) else walled_pin_deferral(wall, model, provider, session_id)
+        if deferred is None:
+            raise
+        return _RuntimeFallbackResolution(deferred, None, False)
+
+
+def _resolve_agent_model_runtime(model_override, provider_override, routing_session_id=None) -> tuple[str, dict]:
     """(model, runtime) for a new agent; a per-session override (/model switch or a resumed row's persisted
     runtime) wins over global config/env. Older rows stored the resolved provider "custom" (no named entry
     matches) — recover the identity from the persisted base_url or the rebuild fails "No LLM provider
@@ -570,7 +591,7 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
     from tui_gateway.class_routing import deferred_runtime
     if (deferred := deferred_runtime(model, requested_provider, _load_cfg())) is not None:
         return model, deferred
-    resolution = _resolve_runtime_with_fallback(resolve_kwargs)
+    resolution = _resolve_runtime_or_defer_wall(resolve_kwargs, model, requested_provider, overrides, routing_session_id)
     if resolution.used_fallback:
         if not resolution.selected_model:
             raise RuntimeError("Auth fallback resolved without a model")
@@ -656,7 +677,7 @@ def _make_agent(
     from agent.shell_hooks import register_from_config
     register_from_config(cfg)
     system_prompt = _startup_system_prompt(cfg, session_id or key)
-    model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
+    model, runtime = _resolve_agent_model_runtime(model_override, provider_override, session_id or key)
     fallback_notice = runtime.pop("_fallback_notice", None)
     _pr = _load_provider_routing()
     platform = _resolve_agent_platform(platform_override)

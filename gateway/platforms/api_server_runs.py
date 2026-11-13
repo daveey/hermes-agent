@@ -86,7 +86,16 @@ def api_worker_live_count() -> int:
 async def on_turn_executor(fn, /, *args, **kwargs):
     """``asyncio.to_thread`` (context copied the same way) on the API turn executor."""
     call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
-    return await asyncio.get_running_loop().run_in_executor(api_turn_executor(), call)
+    # Reserve BEFORE the executor queue; a cancelled awaiter never releases a thread still running.
+    from agent import local_work_agent
+    return await asyncio.wrap_future(local_work_agent.submit(
+        api_turn_executor(), call, kind="api", source="api_server.on_turn_executor"))
+
+
+def _drop_unstarted_count() -> None:
+    global _API_WORKER_LIVE
+    with _API_WORKER_LOCK:
+        _API_WORKER_LIVE -= 1
 
 
 def _submit_api_worker(loop, fn):
@@ -111,7 +120,16 @@ def _submit_api_worker(loop, fn):
                 _API_WORKER_LIVE -= 1
 
     try:
-        return loop.run_in_executor(api_turn_executor(), _counted)
+        # Reserved before the queue wait; released by the worker's own finalization (never by a
+        # cancelled awaiter) or when the pool proves the job never started.
+        from agent import local_work_agent
+        if local_work_agent.registry() is None:  # no registry installed: the plain executor hop, unchanged
+            return loop.run_in_executor(api_turn_executor(), _counted)
+        future = local_work_agent.submit(
+            api_turn_executor(), _counted, kind="api", source="api_server._submit_api_worker")
+        # A job cancelled while queued never runs ``_counted``: drop its live count here.
+        future.add_done_callback(lambda f: _drop_unstarted_count() if f.cancelled() else None)
+        return asyncio.wrap_future(future, loop=loop)
     except BaseException:
         with _API_WORKER_LOCK:
             _API_WORKER_LIVE -= 1
@@ -1137,14 +1155,19 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             served_runtime = ((usage or {}).get("runtime") if isinstance(usage, dict) else None) or (
                 result.get("runtime") if isinstance(result, dict) else None) or {}
         else:
-            with self._profile_scope(run.request_profile):
-                agent = self._create_agent(
-                    stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
-                    interim_assistant_callback=_interim_cb, **run.agent_kwargs)
-            self._active_run_agents[run_id] = agent
-            approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
-            result, usage, served_runtime = await _submit_api_worker(
-                loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+            from agent import local_work_agent
+            # Held from agent build until the worker submission owns its own reservation (no await between).
+            with local_work_agent.scope("api", "api_server_runs.create_agent"):
+                with self._profile_scope(run.request_profile):
+                    agent = self._create_agent(
+                        stream_delta_callback=_text_cb,
+                        tool_progress_callback=self._make_run_event_callback(run_id, loop),
+                        interim_assistant_callback=_interim_cb, **run.agent_kwargs)
+                self._active_run_agents[run_id] = agent
+                approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
+                worker = _submit_api_worker(
+                    loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+            result, usage, served_runtime = await worker
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
         self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
         if not isinstance(result, dict):

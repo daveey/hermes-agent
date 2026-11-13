@@ -97,6 +97,33 @@ def test_an_enrolled_card_every_pickup_gate_refuses_is_repinned_to_its_origin_on
     assert svc.board(BOARD)["leases"][tid]["holder"] == HUB
 
 
+def test_an_enrolled_card_with_malformed_requires_is_repinned_to_its_origin_once(gws, svc, monkeypatch):
+    """A malformed ``requires`` (a wire row that bypassed creator validation) refuses on every worker too: the tick
+    acts on INVALID_REQUIRES exactly as on a home-only action, instead of reserving it every tick."""
+    origin, _worker = gws
+    monkeypatch.setattr(wp, "local_admission", lambda conn_: True)
+    tid = _enrolled(origin, "Fix the off-by-one in the parser and add a test.")
+    malformed = json.dumps("terminal")  # valid JSON, but not a list
+    origin.enter()
+    origin.conn.execute("UPDATE tasks SET requires=? WHERE id=?", (malformed, tid))
+    origin.conn.commit()
+    origin.round()  # the edit is acknowledged, so the tick selects the card again
+    row = dict(origin.conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    assert (row["status"], row["started_at"], row["placement_policy"]) == ("ready", None, wp.POLICY)
+    assert coord.claim_refusal(row, WORKER) == coord.INVALID_REQUIRES
+
+    hub = PlacementHub(svc, HUB)
+    _ticks(origin, hub)
+    assert hub.reserves == [], f"reserved {len(hub.reserves)} times in {TICKS} ticks; no worker can claim it"
+    assert [r["runs_on"] for r in hub.repins] == [[f"machine:{HUB}"]]
+    local = origin.conn.execute("SELECT placement_policy, runs_on FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert (local["placement_policy"], json.loads(local["runs_on"])) == (None, [f"machine:{HUB}"])
+    [event] = _mismatch_events(origin.conn, tid)
+    assert event["pickup_gate"] == {"reason": coord.INVALID_REQUIRES, "quote": malformed}
+    [comment] = _placement_comments(origin.conn, tid)
+    assert coord.INVALID_REQUIRES in comment and f"`{malformed}`" in comment and f"machine:{HUB}" in comment
+
+
 def test_a_started_card_every_gate_refuses_is_never_reserved_and_noted_once(gws, svc, monkeypatch):
     """The origin repin covers only unstarted cards; a started one stays put without reserves or a comment loop."""
     origin, _worker = gws

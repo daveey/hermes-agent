@@ -17,6 +17,7 @@ from typing import Any, Optional
 from gateway.kanban_watchers_common import (
     _auto_decompose_min_age_seconds, _board_slugs, _positive_int_setting, logger,
 )
+from hermes_cli import loop_accounting as _la
 
 
 def _kbc():
@@ -298,6 +299,7 @@ class _KanbanDispatcher:
         self._rr_offset += 1
         return slugs[start:] + slugs[:start]
 
+    @_la.accounted("dispatcher.tick")
     def tick_once(self, *, suppress_spawn: bool = False) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs.
 
@@ -311,9 +313,18 @@ class _KanbanDispatcher:
                 order = self._fair_board_order()
                 quotas = share.shares(order, self.live_max_in_progress())
                 if quotas is not None:
-                    return share.run(order, quotas, self.tick_once_for_board)
-                return [(slug, self.tick_once_for_board(slug)) for slug in order]
-            return [(slug, self.tick_once_for_board(slug, suppress_spawn=True)) for slug in self._board_slugs()]
+                    return share.run(order, quotas, self._board_pass)
+                return [(slug, self._board_pass(slug)) for slug in order]
+            return [(slug, self._board_pass(slug, suppress_spawn=True)) for slug in self._board_slugs()]
+
+    def _board_pass(self, slug: str, **kwargs: Any) -> Optional[object]:
+        """``tick_once_for_board`` as one ``dispatcher.board/<slug>`` pass (``hermes_cli.loop_accounting``): a
+        quarantined or lock-skipped board counts as a skip. [daveey]"""
+        with _la.pass_(f"dispatcher.board/{slug}") as acct:
+            result = self.tick_once_for_board(slug, **kwargs)
+            if result is None or getattr(result, "skipped_locked", False):
+                acct.skip()
+            return result
 
     @staticmethod
     def _receipt_scope() -> tuple[set, set]:
@@ -375,6 +386,7 @@ class _KanbanDispatcher:
                     logger.exception("kanban dispatcher: health probe failed on board %s", slug)
         return False
 
+    @_la.accounted("dispatcher.auto_decompose", rows=True)
     def auto_decompose_tick(self, auto_decompose_per_tick: int, min_age_seconds: Optional[int] = None) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
@@ -434,6 +446,17 @@ class _KanbanDispatcher:
     @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
         """Decompose one triage task; returns 1 on success, 0 otherwise."""
+        # The autonomous agent/auxiliary call starts here: recheck the claim-quiet lease immediately before it
+        # and skip only this attempt (the triage card stays as it was). Read-only; uncertain reads are open.
+        try:
+            from agent.claim_quiet import read_active
+            lease = read_active()
+        except Exception:  # health: allow BLE001 -- a failed quiet read must fail open, never block decomposition
+            lease = None
+        if lease is not None:
+            logger.info("kanban auto-decompose [%s]: %s skipped: claim-quiet episode %s (deferred to a later tick)",
+                        slug, tid, lease.episode_id)
+            return 0
         try:
             outcome = _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:

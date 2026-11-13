@@ -11,7 +11,25 @@ def handle_request(req: dict) -> dict | None:
     with retirement.work() as admitted:
         if not admitted:
             return _err(req.get("id"), 5035, "backend is retiring; reconnect to continue")
-        return _handle_admitted_request(req)
+        with _activity_scope(req):
+            return _handle_admitted_request(req)
+
+
+def _method_is_work(req) -> bool:
+    from tui_gateway.contracts import activity
+
+    return activity.is_work(req.get("method") if isinstance(req, dict) else None)
+
+
+def _activity_scope(req):
+    """Inline work scope, entered BEFORE validation/handler invocation. Passive polling
+    (contracts.activity.PASSIVE_METHODS) never reserves; unclassified/unknown => work."""
+    from hermes_cli.local_work_threads import _Nothing, work_scope
+
+    if not _method_is_work(req):
+        return _Nothing()
+    method = req.get("method") if isinstance(req, dict) else None
+    return work_scope("rpc", f"rpc:{method}" if isinstance(method, str) and method else "rpc:invalid")
 
 
 def _handle_admitted_request(req: dict) -> dict | None:
@@ -28,11 +46,13 @@ def _handle_admitted_request(req: dict) -> dict | None:
         params, problem = _contracts.validate_params(contract, params)
         if problem is not None:
             return _err(rid, 4000, problem)
+    from hermes_cli import loop_accounting  # one ``rpc/<method>`` pass per handled request
     from hermes_cli.config_backend import ConfigBackendUnavailable
 
     token = _current_rpc_method.set(method)
     try:
-        response = fn(rid, params)
+        with loop_accounting.pass_(f"rpc/{method}"):
+            response = fn(rid, params)
     except ProfileUnavailableError as exc:
         return _err(rid, 4064, str(exc))
     except ConfigBackendUnavailable as exc:
@@ -71,6 +91,12 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
         # Reserve BEFORE enqueueing: a queued handler has accepted work even though no worker runs yet.
         if not retirement.acquire():
             return _err(req.get("id"), 5035, "backend is retiring; reconnect to continue")
+        from hermes_cli.local_work import ACTIVE_SCOPE
+        from hermes_cli.local_work_threads import begin_work, end_work
+
+        # Activity reservation precedes submit too (queued handler = accepted work); the physical
+        # worker releases in its own finally, a cancelled-before-start future via the done callback.
+        work = begin_work("rpc", f"rpc:{normalized[1]}") if _method_is_work(req) else None
         try:
             ctx = contextvars.copy_context()  # the pool worker must see the bound transport
             owner = normalized[2].get("owner")
@@ -78,19 +104,26 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
                 ctx.run(_capture_connector_rpc_owner, normalized[2])
 
             def run():
+                scope_token = ACTIVE_SCOPE.set(work.owner) if work is not None else None
                 try:
-                    resp = _handle_admitted_request(req)
-                except Exception as exc:
-                    logger.exception("pool RPC handler failed for method=%r id=%r", normalized[1], req.get("id"))
-                    resp = _err(req.get("id"), -32000, f"handler error: {exc}")
-                if resp is not None:
-                    t.write(resp)
+                    try:
+                        resp = _handle_admitted_request(req)
+                    except Exception as exc:
+                        logger.exception("pool RPC handler failed for method=%r id=%r", normalized[1], req.get("id"))
+                        resp = _err(req.get("id"), -32000, f"handler error: {exc}")
+                    if resp is not None:
+                        t.write(resp)
+                finally:
+                    if scope_token is not None:
+                        ACTIVE_SCOPE.reset(scope_token)
+                    end_work(work)
             future = _pool.submit(lambda: ctx.run(run))
         except BaseException:
+            end_work(work)
             retirement.release()
             raise
         # Also releases cancelled queued futures; the worker's own finally would never execute.
-        future.add_done_callback(lambda _: retirement.release())
+        future.add_done_callback(lambda _: (end_work(work), retirement.release()))
         return None
     finally:
         reset_transport(token)

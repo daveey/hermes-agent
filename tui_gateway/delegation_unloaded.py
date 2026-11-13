@@ -138,8 +138,11 @@ def held_elsewhere(holders: Callable[[], list[dict]], ids: set[str]) -> Optional
 
 
 def _spawn_thread(job: Callable[[], Any]) -> str:
+    from agent.local_work_agent import scope as work_scope
     from agent.memory_provider import spawn_context_thread
-    spawn_context_thread(job, name=LABEL).start()  # keeps the pass's profile home binding
+    # Reserve BEFORE the thread exists: spawn_context_thread then returns a TrackedThread that keeps custody.
+    with work_scope("sweep", "delegation_unloaded.spawn"):
+        spawn_context_thread(job, name=LABEL).start()  # keeps the pass's profile home binding
     return "dispatched"
 
 

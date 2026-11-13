@@ -19,6 +19,7 @@ from hermes_cli import kanban_queue_reason as qr
 from hermes_cli import kanban_sync_client as client
 from hermes_cli import kanban_worker_placement as wp
 from tests.hermes_cli import test_kanban_worker_reserve_client as fixtures
+from tests.hermes_cli import test_kanban_queue_reason_hold as hold
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +31,7 @@ def _confirm_on_first_pass(monkeypatch):
     monkeypatch.setattr(kanban_queue_reason, "CONFIRM_PASSES", 1)
 
 
+no_comment_hold = hold.no_comment_hold
 conn = fixtures.conn
 CFG = {"worker_pools": {"hub": ["worker-1"]}}
 SECRET = "https://user:hunter2-SECRET@hub.invalid/api?token=SECRET"
@@ -246,6 +248,7 @@ def test_timing_is_measured_from_the_failing_call_not_the_tick(conn, monkeypatch
     assert value.get("budget_ms") == 1000 and value.get("elapsed_ms") == 250
 
 
+@pytest.mark.usefixtures("no_comment_hold")
 def test_real_http_reserve_after_slow_local_pull_records_starved_budget_timeout(conn, monkeypatch):
     """End to end through ``dispatch_tick``: a slow local pull spends most of the shared 2 s tick deadline, so the
     real reserve POST reaches a Board that never answers with only the remainder and times out. The record must show

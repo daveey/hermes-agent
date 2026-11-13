@@ -30,6 +30,15 @@ from hermes_state_runtime import (
 
 # Capped backoff for a claim refused by transient storage (writer lock, full disk).
 _CLAIM_RETRY_MIN_S, _CLAIM_RETRY_MAX_S = 0.25, 5.0
+
+
+class _Attempt(list):
+    """The attempted-row list ``_claim_next`` fills, plus the selected attempt's local-work custody: a
+    successful claim appends its token to ``work`` for the drain to hold through execution and settlement."""
+
+    def __init__(self):
+        super().__init__()
+        self.work = []
 # Longest a settled turn's adapter may hold its adopted crash marker before the follower is claimed.
 _MARKER_RELEASE_WAIT_S = 60.0
 # True in the admitting task once ``admit_native``'s shielded ledger write began: a caller cancelled
@@ -1107,89 +1116,112 @@ class SessionAuthority:
                 attempted[:] = [first]
             if checkpoint is None and first is None and any(row['status'] == 'queued' for row in pending):
                 return 'notifier_held', None
-            expected_status = 'started' if checkpoint else 'queued'
-            from gateway.config import Platform
-            if live.source.platform == Platform.LOCAL:
-                # A reasoning command or a model pick made while the previous turn ran lands here, at the
-                # turn boundary.
-                from gateway.session_deferred_pick import apply_deferred_pick
-                from gateway.session_setting_commands import apply_pending_reasoning
-                await apply_pending_reasoning(self, ref, live)
-                await apply_deferred_pick(self, ref, live)
-            if first is not None and live.source.platform == Platform.LOCAL:
-                from gateway.session_local_recovery import restore_local_session
-                restore_local_session(self, ref.session_id)
-                if first['request_id'].startswith('hosted:'):
-                    from gateway.session_hosted_transport import check_remote_hosted_admission
-                    if not await asyncio.to_thread(check_remote_hosted_admission, self, ref, first):
-                        service = getattr(self, 'hosted_room_service', None)
-                        if service is None:
-                            raise RuntimeStoreError('permission_denied')
-                        await asyncio.to_thread(service.check_admission, ref, first)
-                    # Cancellation may advance the FIFO while the source owner is awaited;
-                    # the successor must earn its own reauthorization, not inherit this one.
-                    current = get_session_admission(self.db, admission_id=first['admission_id'])
-                    if current is None or current['status'] != expected_status:
-                        return False, first
-                if 'local_automation_v1' in first['payload']:
-                    from gateway.session_automation import check_local_automation
-                    check_local_automation(self, ref, first)
-                else:
-                    from gateway.session_operator import check_local_input
-                    check_local_input(self, ref, first)
-                # Editor MCP schema drift re-freezes here, at this admission's start (a turn boundary),
-                # once the head is authorized: a refused head spawns no server and commits no change.
-                from gateway.session_local_mcp import refreeze_editor_mcp
-                await refreeze_editor_mcp(self, ref, live)
-                # The first real turn reopens a finalized row (#85303): mounts are reads, and
-                # SessionStore would route a stamped row as stale onto a FRESH session. A write: off-loop,
-                # tracked so retirement and the shutdown close gate count it.
-                from gateway.session_local_recovery import reopen_local_session
-                from gateway.session_runtime_workers import tracked_write
-                from gateway.session_completion_notes import noted_completion
-                if not noted_completion(first):  # a note leaves a closed row closed (session_completion_notes)
-                    await tracked_write(self, partial(reopen_local_session, self, ref))
-            if first is not None and 'native_text_v1' in first['payload']:
-                from gateway.session_envelope import check_native_route
-                await check_native_route(self.runner, first['payload'], self.physical_target(ref), live.source,
-                                   self.runner._adapter_for_source(live.source))
-                # Cancellation may advance FIFO while the connector is awaited.
-                # Never let the successor inherit this row's fresh verdict.
+            if first is None:
+                # Empty / held polls never reserve (a held wake leaves the epoch unchanged).
+                return await self._claim_selected(ref, live, checkpoint, first)
+            # A row is selected: reserve BEFORE any local preflight (pending-setting application, MCP
+            # refreeze, tracked reopen) can run real work. On success the token transfers to the drain via
+            # ``work`` (execution + settlement); every other outcome releases it here. A failed attempt's
+            # off-loop continuations hold their own tracked reservations, taken before this one is released.
+            from agent import local_work_agent
+            held = local_work_agent.reserve('session_authority_attempt', 'gateway.session_authority._claim_next')
+            try:
+                result = await self._claim_selected(ref, live, checkpoint, first)
+            except BaseException:
+                local_work_agent.release(held)
+                raise
+            if held is not None and isinstance(result[0], dict) and getattr(attempted, 'work', None) is not None:
+                attempted.work.append(held)
+            else:
+                local_work_agent.release(held)
+            return result
+
+    async def _claim_selected(self, ref, live, checkpoint, first):
+        """Selected-attempt half of ``_claim_next``: preflight and the claim write (gates held by the caller)."""
+        expected_status = 'started' if checkpoint else 'queued'
+        from gateway.session_notifier_drain import eligible
+        from gateway.config import Platform
+        if live.source.platform == Platform.LOCAL:
+            # A reasoning command or a model pick made while the previous turn ran lands here, at the
+            # turn boundary.
+            from gateway.session_deferred_pick import apply_deferred_pick
+            from gateway.session_setting_commands import apply_pending_reasoning
+            await apply_pending_reasoning(self, ref, live)
+            await apply_deferred_pick(self, ref, live)
+        if first is not None and live.source.platform == Platform.LOCAL:
+            from gateway.session_local_recovery import restore_local_session
+            restore_local_session(self, ref.session_id)
+            if first['request_id'].startswith('hosted:'):
+                from gateway.session_hosted_transport import check_remote_hosted_admission
+                if not await asyncio.to_thread(check_remote_hosted_admission, self, ref, first):
+                    service = getattr(self, 'hosted_room_service', None)
+                    if service is None:
+                        raise RuntimeStoreError('permission_denied')
+                    await asyncio.to_thread(service.check_admission, ref, first)
+                # Cancellation may advance the FIFO while the source owner is awaited;
+                # the successor must earn its own reauthorization, not inherit this one.
                 current = get_session_admission(self.db, admission_id=first['admission_id'])
                 if current is None or current['status'] != expected_status:
                     return False, first
-            if first is not None and live.source.platform == Platform.API_SERVER:
-                from gateway.session_api import reopen_api_session
-                from gateway.session_api_turn import check_api_turn
-                from gateway.session_runtime_workers import tracked_write
-                check_api_turn(self, ref, first['payload'])
-                await tracked_write(self, partial(reopen_api_session, self, ref))
-            elif first is not None and live.detached:
-                # The chat's /new ended its row; the app's turn makes it live again, as an API row's
-                # does. A note leaves it closed, as a local one's does (session_completion_notes).
-                from gateway.session_completion_notes import noted_completion, reopen_for_turn
-                if not noted_completion(first):
-                    await reopen_for_turn(self, ref)
-            if first is not None and self._classic_turn_holds(live.route):
-                # A classic turn (fallback wake, CLI handoff, legacy resume) holds the route's slot:
-                # a claim now would hand this row to its busy path and settle it unrun. The head
-                # waits queued, as main's pending slot did; /stop and /new still cancel it.
-                return 'classic_busy', first
-            self._require_admission_open()
+            if 'local_automation_v1' in first['payload']:
+                from gateway.session_automation import check_local_automation
+                check_local_automation(self, ref, first)
+            else:
+                from gateway.session_operator import check_local_input
+                check_local_input(self, ref, first)
+            # Editor MCP schema drift re-freezes here, at this admission's start (a turn boundary),
+            # once the head is authorized: a refused head spawns no server and commits no change.
+            from gateway.session_local_mcp import refreeze_editor_mcp
+            await refreeze_editor_mcp(self, ref, live)
+            # The first real turn reopens a finalized row (#85303): mounts are reads, and
+            # SessionStore would route a stamped row as stale onto a FRESH session. A write: off-loop,
+            # tracked so retirement and the shutdown close gate count it.
+            from gateway.session_local_recovery import reopen_local_session
             from gateway.session_runtime_workers import tracked_write
-            live.rescan = False  # a _schedule from here on may not be visible to this claim's read
-            # The row these checks validated, never whichever is first when the write runs: a
-            # cancellation commits from a worker thread and can advance the FIFO at any point.
-            if checkpoint is not None:
-                from gateway.session_update_pause import resume_checkpoint
-                return await resume_checkpoint(self, ref, live, first), first
-            row = await tracked_write(self, partial(claim_session_input, self.db, epoch=self.epoch,
-                                                    session_id=ref.session_id, _guard=self._admission_gate(), _eligible=eligible,
-                                                    head=first['admission_id'] if first is not None else None),
-                                      then=partial(self._stamp_claim, ref, live))
-            # Input scheduled while this claim's transaction ran may postdate its read: re-read
-            # instead of letting the drain exit idle over a committed admission.
-            return (False if row is None and live.rescan else row), first
+            from gateway.session_completion_notes import noted_completion
+            if not noted_completion(first):  # a note leaves a closed row closed (session_completion_notes)
+                await tracked_write(self, partial(reopen_local_session, self, ref))
+        if first is not None and 'native_text_v1' in first['payload']:
+            from gateway.session_envelope import check_native_route
+            await check_native_route(self.runner, first['payload'], self.physical_target(ref), live.source,
+                               self.runner._adapter_for_source(live.source))
+            # Cancellation may advance FIFO while the connector is awaited.
+            # Never let the successor inherit this row's fresh verdict.
+            current = get_session_admission(self.db, admission_id=first['admission_id'])
+            if current is None or current['status'] != expected_status:
+                return False, first
+        if first is not None and live.source.platform == Platform.API_SERVER:
+            from gateway.session_api import reopen_api_session
+            from gateway.session_api_turn import check_api_turn
+            from gateway.session_runtime_workers import tracked_write
+            check_api_turn(self, ref, first['payload'])
+            await tracked_write(self, partial(reopen_api_session, self, ref))
+        elif first is not None and live.detached:
+            # The chat's /new ended its row; the app's turn makes it live again, as an API row's
+            # does. A note leaves it closed, as a local one's does (session_completion_notes).
+            from gateway.session_completion_notes import noted_completion, reopen_for_turn
+            if not noted_completion(first):
+                await reopen_for_turn(self, ref)
+        if first is not None and self._classic_turn_holds(live.route):
+            # A classic turn (fallback wake, CLI handoff, legacy resume) holds the route's slot:
+            # a claim now would hand this row to its busy path and settle it unrun. The head
+            # waits queued, as main's pending slot did; /stop and /new still cancel it.
+            return 'classic_busy', first
+        self._require_admission_open()
+        from gateway.session_runtime_workers import tracked_write
+        live.rescan = False  # a _schedule from here on may not be visible to this claim's read
+        # The row these checks validated, never whichever is first when the write runs: a
+        # cancellation commits from a worker thread and can advance the FIFO at any point.
+        if checkpoint is not None:
+            from gateway.session_update_pause import resume_checkpoint
+            return await resume_checkpoint(self, ref, live, first), first
+        row = await tracked_write(self, partial(claim_session_input, self.db, epoch=self.epoch,
+                                                session_id=ref.session_id, _guard=self._admission_gate(), _eligible=eligible,
+                                                head=first['admission_id'] if first is not None else None),
+                                  then=partial(self._stamp_claim, ref, live))
+        # Input scheduled while this claim's transaction ran may postdate its read: re-read
+        # instead of letting the drain exit idle over a committed admission.
+        return (False if row is None and live.rescan else row), first
 
     def _stamp_claim(self, ref, live, row):
         """The claim's execution stamp, in the same tracked task as its commit: no observer (or
@@ -1259,7 +1291,8 @@ class SessionAuthority:
                 attempted = next(iter(list_session_admissions(self.db, session_id=ref.session_id)), None)
                 # The row the claim actually validated: a held notifier wake is skipped, so the
                 # queued FIFO front is not necessarily the attempted queued identity.
-                selected = []
+                selected = _Attempt()
+                work = selected.work
                 try:
                     row, first = await self._claim_next(ref, live, selected)
                 except RuntimeStoreError as exc:
@@ -1320,6 +1353,9 @@ class SessionAuthority:
                 continue
             backoff = 0.0
             if row not in ('update_paused', 'notifier_held', 'classic_busy'):
+                if work:
+                    # Successful claim: the selected attempt's token now belongs to the drain.
+                    self.__dict__.setdefault('_attempt_work', {})[ref.session_id] = work[0]
                 return row, first
             if not await self._wait_claim_state(ref, live, row):
                 return None
@@ -1390,12 +1426,30 @@ class SessionAuthority:
             return 'The admitted turn failed.', 'failed'
 
     async def _drain(self, ref):
+        """Drain the FIFO. A claimed row's selected-attempt token is held through execution and settlement
+        and released when that row's iteration ends (next loop, return or raise)."""
+        from agent import local_work_agent
+        attempts = []
+        try:
+            return await self._drain_rows(ref, attempts)
+        finally:
+            for held in attempts:
+                local_work_agent.release(held)
+
+    async def _drain_rows(self, ref, attempts):
+        from agent import local_work_agent
         from gateway.session_managed_worker import ManagedExecutionUnknown
         live = self.sessions[ref.session_id]
         while True:
+            for held in attempts:  # previous row fully settled (or abandoned) before the next selection
+                local_work_agent.release(held)
+            attempts.clear()
             claimed = await self._claim_with_retry(ref, live)
             if claimed is None:
                 return
+            taken = getattr(self, '_attempt_work', {}).pop(ref.session_id, None)
+            if taken is not None:
+                attempts.append(taken)
             row, first = claimed
             if row is False:
                 continue

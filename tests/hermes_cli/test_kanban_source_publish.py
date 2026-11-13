@@ -528,11 +528,24 @@ def test_unpublished_park_refusal_names_the_publish_refusal(card, monkeypatch):
     text = str(refused.value)
     assert text.startswith("unpublished_workspace:")
     assert "workspace_source publish refused: source_clone_unregistered:" in text
-    assert f"its clone is {card.world.homes['hub'].clone}" in text
+    # The exact clone root (the value to register), closed by the detail's paren: not ``<clone>/.git``.
+    assert f"(its clone is {card.world.homes['hub'].clone})" in text
     assert "kanban.workspace_source.clones" in text
     task = kb.get_task(card.conn, card.id)
     assert task is not None and task.status == "running"  # refused: run ownership intact
     assert card.remote() is None
+
+
+def test_unregistered_refusal_names_a_bare_repo_itself(world, tmp_path):
+    """A worktree of a bare repository: its git common dir is the repository itself (not named ``.git``), so the
+    refusal names that directory, not its parent."""
+    path = tmp_path / "bare-wt"
+    git(world.origin, "worktree", "add", "-q", "--detach", str(path), "main")
+    cfg = kws.Settings(**{**use_home(world, "hub")[1].__dict__, "clones": {}})
+    with pytest.raises(pub.PublishRefused) as refused:
+        pub.prove_origin(str(path), cfg)
+    assert refused.value.code == "source_clone_unregistered"
+    assert refused.value.detail.endswith(f"(its clone is {world.origin})")
 
 
 def test_publish_refusal_hint_is_scoped_to_the_preflighted_run():

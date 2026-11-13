@@ -155,47 +155,53 @@ jobs:
       # raw os.getenv of a platform credential, HOME-only RPC binding, bare-PID liveness). One
       # process serves many profiles; every pattern leaked the launch profile at least once. Printed
       # into the log for the reviewer; never fails the job (root AGENTS.md § Rules that apply everywhere).
+      #
+      # Both advisory steps get the PR head's and the base's history from fetch-merge-base.sh, not
+      # from their own `git fetch --deepen`: "Fetch the merge base" above has already made the
+      # checkout a partial clone, and on git 2.55.0 any later fetch from that promisor remote can
+      # die in index-pack ("BUG: builtin/pack-objects.c:5004: should_include_obj ..." / "fatal:
+      # index-pack failed", exit 128). The plain deepen fetches hit it in 11 of ~44 Python-lints
+      # jobs on 2026-11-13 (e.g. run 43455124649) and both checks silently never ran. The script
+      # retries once without promisor mode and restores the partial-clone config (see its header).
+      # When even that fails, the step prints one ::warning:: and skips its check, still green.
       - name: Profile-scope patterns on added lines (advisory)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && inputs.python && github.event_name == 'pull_request' }}
         continue-on-error: true
         timeout-minutes: 3
         env:
-          PR_HEAD: "+refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/origin/pr-head"
+          BASE_REF: ${{ github.base_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags --deepen=200 origin "${{ github.base_ref }}" "$PR_HEAD"
-          for i in 1 2 3; do
-            git merge-base "origin/${{ github.base_ref }}" origin/pr-head >/dev/null 2>&1 && break
-            git fetch --no-tags --deepen=1000 origin "${{ github.base_ref }}" "$PR_HEAD"
-          done
-          python scripts/check_profile_scope_patterns.py --base "origin/${{ github.base_ref }}" --head origin/pr-head
+          if ! .github/actions/fetch-merge-base/fetch-merge-base.sh "$BASE_REF" "$PR_HEAD_SHA" >/dev/null; then
+            echo "::warning title=Profile-scope advisory skipped::could not fetch ${BASE_REF} and PR head ${PR_HEAD_SHA} history (see the fetch-merge-base lines above)"
+            exit 0
+          fi
+          python scripts/check_profile_scope_patterns.py --base "origin/${BASE_REF}" --head "$PR_HEAD_SHA"
 
       # Advisory: dropped public names / methods / test defs vs the PR base, printed into the log.
       # A refactor that silently removes a public symbol breaks plugins that import it; the Sep 2026
       # decomposition opened with 1,703 such drops that reviewers had to find by hand.
-      # Advisory: it never fails the job. The checkout above is depth-1, so deepen both sides until
-      # a merge-base exists (the script refuses to report a clean diff without one, by design).
-      # Diff the PR head ref, not the checked-out refs/pull/N/merge commit: that synthetic commit
-      # is recomputed server-side whenever main moves, and once it is unreachable no amount of
-      # deepening ever reaches its parents (run 34285107265: 4 fetches, 4m15s, "no merge-base").
+      # Advisory: it never fails the job. The full commit history of both sides is fetched (see
+      # above), so a merge-base exists unless the histories are unrelated (the script refuses to
+      # report a clean diff without one, by design).
+      # Diff the PR head commit, not the checked-out refs/pull/N/merge commit: that synthetic commit
+      # is recomputed server-side whenever main moves (run 34285107265: "no merge-base").
       - name: Public-surface diff vs base (advisory)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && inputs.python && github.event_name == 'pull_request' }}
         continue-on-error: true
-        # Bound the advisory step so a long deepen/fetch (e.g. a distant or missing
-        # merge-base) can't consume the blocking job's 5-minute budget and cancel it.
-        # continue-on-error already keeps a step *failure* off the job; a step-level
+        # Bound the advisory step so a slow fetch can't consume the blocking job's budget and
+        # cancel it. continue-on-error already keeps a step *failure* off the job; a step-level
         # timeout keeps a step *overrun* off the job-level timeout the same way.
-        # Sizing: a --deepen=200 fetch took ~56s and a --deepen=1000 ~67s on the runner, and
-        # main gains ~170 commits/day, so a day-old branch legitimately needs both (~2 min).
         timeout-minutes: 3
         env:
-          PR_HEAD: "+refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/origin/pr-head"
+          BASE_REF: ${{ github.base_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags --deepen=200 origin "${{ github.base_ref }}" "$PR_HEAD"
-          for i in 1 2 3; do
-            git merge-base "origin/${{ github.base_ref }}" origin/pr-head >/dev/null 2>&1 && break
-            git fetch --no-tags --deepen=1000 origin "${{ github.base_ref }}" "$PR_HEAD"
-          done
-          python scripts/ci/check_public_surface.py --base "origin/${{ github.base_ref }}" --head origin/pr-head
+          if ! .github/actions/fetch-merge-base/fetch-merge-base.sh "$BASE_REF" "$PR_HEAD_SHA" >/dev/null; then
+            echo "::warning title=Public-surface advisory skipped::could not fetch ${BASE_REF} and PR head ${PR_HEAD_SHA} history (see the fetch-merge-base lines above)"
+            exit 0
+          fi
+          python scripts/ci/check_public_surface.py --base "origin/${BASE_REF}" --head "$PR_HEAD_SHA"
 
       # ── Pinned ruff (+ ty for the advisory diff) ──────────────────────────────────────────
 

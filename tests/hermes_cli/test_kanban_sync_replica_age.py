@@ -7,6 +7,7 @@ round outcomes are fed through ``outbox_age.after_round`` exactly as ``run_forev
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -426,6 +427,64 @@ def test_a_detached_board_forgets_the_remembered_clock(live, kanban_home):
     _restart()
     host.run(15 * MIN, each=lambda: host.round(behind=True))
     assert host.cards == []
+
+
+def test_a_board_detached_after_a_restart_forgets_the_clock_kept_only_on_disk(live, kanban_home):
+    """The restarted gateway has no in-memory observation: the detach must still drop the board's record from
+    ``.replica-age.json``, or a re-attach within 20 min resumes the old clock."""
+    host = Host(kanban_home, _pt("2026-11-12 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    host.run(15 * MIN, each=lambda: host.round(behind=True))
+    assert BOARD in replica_age._load_memo()
+    _restart()  # the record now lives only on disk
+    sync.set_mode(live, "off")
+    host.run(1 * MIN)
+    assert BOARD not in replica_age._load_memo()
+    sync.set_mode(live, "primary")
+    host.run(6 * MIN, each=lambda: host.round(behind=True))  # 22 min since the first check; 6 since re-attach
+    assert host.cards == []
+
+
+@pytest.mark.parametrize("offset, resumed", [(+60.0, False), (-60.0, True)])
+def test_a_remembered_observation_from_the_future_starts_the_clock_afresh(live, kanban_home, monkeypatch, offset,
+                                                                          resumed):
+    """A record of this boot whose ``seen_at`` is later than now cannot come from an earlier process (monotonic time
+    never runs backwards): discard it. The same record seen a minute ago resumes (and is 30 awake min old)."""
+    monkeypatch.setattr(replica_age, "_boot_id", lambda: "boot-1")
+    host = Host(kanban_home, _pt("2026-11-12 08:00:00"))
+    host.mono = 10_000.0
+    _stamp(host.wall - 3600)
+    stamp = replica_age._stamp(BOARD)
+    assert stamp is not None
+    since = host.mono - 30 * MIN
+    replica_age._memo_path().parent.mkdir(parents=True, exist_ok=True)
+    replica_age._memo_path().write_text(json.dumps({BOARD: {"stamp": stamp, "since": since, "open": False,
+                                                            "seen_at": host.mono + offset, "boot": "boot-1"}}))
+    host.check()
+    seen = replica_age._SEEN[BOARD]
+    if resumed:
+        assert (seen.since, seen.open, len(host.cards)) == (since, True, 1)
+    else:
+        assert (seen.since, seen.open, host.cards) == (host.mono, False, [])
+        assert replica_age._load_memo()[BOARD]["since"] == host.mono
+
+
+def test_an_hour_long_stall_across_restarts_every_4_min_keeps_one_clock_and_one_card(live, kanban_home):
+    """Past the 20-min bound each restart must still resume: the record's ``seen_at`` is the last observation, not
+    the incident's start, or the unwatched-gap rule drops the open incident and a second card follows."""
+    host = Host(kanban_home, _pt("2026-11-13 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    since = replica_age._load_memo()[BOARD]["since"]
+    for _ in range(16):  # 64 awake minutes
+        host.run(4 * MIN, each=lambda: host.round(behind=True))
+        _restart()
+        host.check()
+        assert replica_age._load_memo()[BOARD]["seen_at"] == host.mono
+    assert _fired(host) == ["08:20 PT"]
+    rec = replica_age._load_memo()[BOARD]
+    assert (rec["since"], rec["open"]) == (since, True)
 
 
 # --- replays of the 2026-11-12 incidents ---------------------------------------------------------------------------

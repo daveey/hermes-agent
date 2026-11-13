@@ -534,9 +534,10 @@ from cron.executions import (
     recover_interrupted_executions, settle_unstarted_execution, terminalize_dead_owner)
 from cron.scheduler_liveness import ExecutionProgressStamper, _inactivity_watchdog_loop
 from cron.scheduler_bookkeeping import _classify_delivery_outcome
-from cron.cancellation import (CancelRequest, CronShutdownInterrupted, ShutdownAwareCancel,
-                               _CancelEventLike, _CombinedCancelEvent, cancel_is_shutdown,
-                               cancel_reason, clear_cancel, finish_lost_execution,
+from cron.cancellation import (CancelRequest, CronRunCancelled, CronShutdownInterrupted,
+                               ShutdownAwareCancel, _CancelEventLike, _CombinedCancelEvent,
+                               cancel_is_shutdown, cancel_reason, clear_cancel,
+                               finish_lost_execution, requested_cancel,
                                run_job_unless_cancelled as _run_job_unless_cancelled)
 
 # Response marker that suppresses delivery (output is still saved locally for audit).
@@ -2056,11 +2057,18 @@ def _run_agent_with_watchdog(
     def _abort_if_fire_claim_lost() -> None:
         if cancel_event is None or not cancel_event.is_set():
             return
-        reason = cancel_reason(cancel_event)
+        # A cancel marker wins over whichever latch fired first: remove_job writes the marker AND
+        # drops the claim, so the claim latch can read "ownership was lost" for a requested stop.
+        request = requested_cancel(cancel_event)
+        reason = request.reason if request is not None else cancel_reason(cancel_event)
         if agent is not None and hasattr(agent, "interrupt"):
             agent.interrupt(f"Cron run stopped: {reason}")
-        # This gateway's own shutdown is an expected stop, not a lost claim (cron-7c04faf754).
-        error = CronShutdownInterrupted if cancel_is_shutdown(cancel_event) else RuntimeError
+        # Shutdown and a requested stop are expected stops; only a real takeover stays a plain
+        # RuntimeError that run_job logs as a failed job (cron-7c04faf754).
+        if cancel_is_shutdown(cancel_event):
+            error = CronShutdownInterrupted
+        else:
+            error = CronRunCancelled if request is not None else RuntimeError
         raise error(f"Cron job '{job_name}' was stopped: {reason}")
 
     def _heartbeat_run_claim_if_due():
@@ -2081,8 +2089,11 @@ def _run_agent_with_watchdog(
     _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     # Carry scheduler-scoped ContextVar state (e.g. env passthrough) into the worker thread.
     _cron_context = contextvars.copy_context()
-    _cron_future = _cron_pool.submit(
-        _cron_context.run, agent.run_conversation, prompt, task_id=task_id)
+    from agent import local_work_agent
+    from functools import partial
+    _cron_future = local_work_agent.submit(
+        _cron_pool, partial(_cron_context.run, agent.run_conversation, prompt, task_id=task_id),
+        kind="cron_agent", source="cron.scheduler.run_job")
     if worker_state is not None:
         worker_state["future"] = _cron_future
     _inactivity_timeout = False
@@ -2868,7 +2879,7 @@ def run_job(
 
     except (Exception, ConfigBackendUnavailable) as e:  # the plane being down fails THIS fire only
         error_msg = _job_error_message(e)
-        if not _log_shutdown_stop(job_name, error_msg, e):
+        if not _log_expected_stop(job_name, error_msg, e):
             logger.exception("Job '%s' failed: %s", job_name, error_msg)
         # Cowork-style unreachable-model re-run (cron/unreachable_retry.py): flag failures where
         # the model was never reached (transient network/DNS, zero API calls) so the bookkeeping
@@ -2957,15 +2968,19 @@ def _teardown_cron_agent(
         timeout_seconds=timeout_seconds)
 
 
-def _log_shutdown_stop(job_name: str, error_msg: str, exc: BaseException) -> bool:
-    """``run_job``'s failure log for a stop by this gateway's own shutdown: expected (shutdown already
-    wrote the interrupted ``last_status``), so one WARNING without traceback and not the coach's
-    "Job '<name>' failed:" defect line. False for everything else, real ownership loss included,
-    which ``run_job`` keeps logging at ERROR with its traceback (cron-7c04faf754)."""
-    if not isinstance(exc, CronShutdownInterrupted):
-        return False
-    logger.warning("Job '%s' stopped by gateway shutdown: %s", job_name, error_msg)
-    return True
+def _log_expected_stop(job_name: str, error_msg: str, exc: BaseException) -> bool:
+    """``run_job``'s failure log for an expected stop: this gateway's own shutdown (which already
+    wrote the interrupted ``last_status``) or a stop someone asked for (``hermes cron cancel``,
+    Desktop Stop, ``remove_job``; booked ``cancelled``). One WARNING without traceback, never the
+    coach's "Job '<name>' failed:" defect line. False for everything else, real ownership loss
+    included, which ``run_job`` keeps logging at ERROR with its traceback (cron-7c04faf754)."""
+    if isinstance(exc, CronShutdownInterrupted):
+        logger.warning("Job '%s' stopped by gateway shutdown: %s", job_name, error_msg)
+        return True
+    if isinstance(exc, CronRunCancelled):
+        logger.warning("Job '%s' stopped on request: %s", job_name, error_msg)
+        return True
+    return False
 
 
 def _run_with_fire_claim_heartbeat(job: dict, run, *, execution_token: Optional[object] = None) -> bool:
@@ -3062,7 +3077,15 @@ def _run_with_fire_claim_heartbeat(job: dict, run, *, execution_token: Optional[
         heartbeat_thread.join(timeout=1.0)
 
 
-def run_one_job(
+def run_one_job(job: dict, **kwargs) -> bool:
+    """Run ONE due job (see ``_run_one_job_unscoped``). Reserves at entry so claim/setup before the agent
+    reservation (``run_job``) is covered; cron itself is never gated by quiet."""
+    from agent import local_work_agent
+    with local_work_agent.scope("cron_fire", "cron.scheduler.run_one_job"):
+        return _run_one_job_unscoped(job, **kwargs)
+
+
+def _run_one_job_unscoped(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, cancel_event: Optional[_CancelEventLike] = None,
 ) -> bool:
@@ -4591,7 +4614,12 @@ def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, p
             release_running_job(j["id"], home=home, owner=registration_owner)
 
     try:
-        fut = pool.submit(_run_and_release)
+        from agent import local_work_agent
+        # Reserve before the pool can start the fire; the worker's outermost finally (after the claim release)
+        # releases. Home is the job's claim home (cron-only homes stay known to the registry).
+        fut = local_work_agent.submit(
+            pool, _run_and_release, kind="cron_fire", source="cron.scheduler._submit_with_guard",
+            home=str(_claim_home))
     except Exception as submit_err:
         release_running_job(job_id, home=_claim_home, owner=registration_owner)
         _clear_run_claim_best_effort()

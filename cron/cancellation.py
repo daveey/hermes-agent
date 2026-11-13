@@ -144,6 +144,15 @@ class _CombinedCancelEvent:
                 return cancel_is_shutdown(event)
         return False
 
+    @property
+    def cancel_request(self) -> Optional[CancelRequest]:
+        """The execution's cancel marker when one was written, whichever source latched first:
+        ``remove_job`` writes the marker AND drops the claim, so the claim latch can fire first."""
+        for event in self._events:
+            if (request := requested_cancel(event)) is not None:
+                return request
+        return None
+
 
 class CancelRequest:
     """``_CancelEventLike`` view of one execution's cancel marker.
@@ -185,6 +194,19 @@ class CronShutdownInterrupted(RuntimeError):
 def cancel_is_shutdown(cancel_event: Any) -> bool:
     """True when the source that fired is this gateway's shutdown interrupt (cron-7c04faf754)."""
     return bool(getattr(cancel_event, "shutdown_interrupted", False))
+
+
+class CronRunCancelled(RuntimeError):
+    """A run stopped because someone asked (``hermes cron cancel``, Desktop Stop, ``remove_job``):
+    the execution's cancel marker exists. An expected stop booked ``cancelled``, not a failed job;
+    ``run_job`` logs it without a traceback (cron-7c04faf754)."""
+
+
+def requested_cancel(cancel_event: Any) -> Optional[CancelRequest]:
+    """The cancel request behind ``cancel_event`` when its execution's marker exists, else None."""
+    if isinstance(cancel_event, CancelRequest):
+        return cancel_event if cancel_event.is_set() else None
+    return getattr(cancel_event, "cancel_request", None)
 
 
 class ShutdownAwareCancel:

@@ -561,6 +561,27 @@ def _record_boot_revision() -> None:
 _record_boot_revision()
 
 
+def _install_code_attestation() -> None:
+    """Install the executed-code attestation and the single local-work registry at the
+    reviewed boundary: right after the boot revision is read, before dependency activation
+    and CLI plugin discovery. Both modules are stdlib-only seed modules; ``install`` derives
+    the launch route itself from argv and the ``__main__`` frame chain (nothing is passed in
+    but the checkout root and boot SHA). A failure leaves no registry/attestation installed,
+    which readiness consumers refuse; it never fails a launch."""
+    try:
+        from hermes_cli import code_attestation, git_fingerprint, local_work
+
+        fingerprint = git_fingerprint.process_boot_fingerprint(_root)
+        boot_sha = fingerprint.rsplit(":", 1)[-1] if fingerprint else None
+        local_work.install()
+        code_attestation.install(_root, boot_sha)
+    except Exception:  # health: allow BLE001 -- observation must never fail a launch; a missing installation is refused downstream
+        return
+
+
+_install_code_attestation()
+
+
 def _pin_launcher_home() -> None:
     """A minted launcher (``hermes_cli._launchers``) pins ``HERMES_HOME`` to the install's default
     root. That needs ``hermes_constants`` from the checkout, so the launcher asks for it here, after

@@ -7,6 +7,8 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 import base64
 import binascii
 import contextlib
+import contextvars
+import functools
 import logging
 import queue
 import tempfile
@@ -64,7 +66,51 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
-async def _run_config_scoped(profile: Optional[str], fn):
+async def _run_reserved(source: str, fn, *, copy_context: bool = True):
+    """Run ``fn()`` on the default executor holding a local-work reservation.
+
+    The reservation is taken BEFORE the thread is scheduled and released only by the worker's own
+    ``finally`` (physical completion), never by a cancelled/abandoned waiter. A submit that raises
+    never scheduled the thread, so only then is it released here. No registry installed: plain hop.
+    """
+    from tools import code_kernel_scope
+
+    handle = code_kernel_scope.reserve("audio", source)
+    custody = threading.Lock()
+    state = ["pending"]  # pending -> running (worker owns release) | abandoned (never ran)
+
+    def _held():
+        with custody:
+            if state[0] != "pending":
+                return None  # the awaiting request was cancelled while queued: already released
+            state[0] = "running"
+        try:
+            return fn()
+        finally:
+            code_kernel_scope.finish(handle)
+
+    def _abandoned(fut):
+        # A cancelled waiter cancels a still-queued job: it will never run _held, so release here.
+        # A job that already started keeps custody until its own finally.
+        if fut.cancelled():
+            with custody:
+                if state[0] == "pending":
+                    state[0] = "abandoned"
+                    code_kernel_scope.finish(handle)
+
+    target = _held
+    if copy_context:  # what asyncio.to_thread does: the request context reaches the worker
+        target = functools.partial(contextvars.copy_context().run, _held)
+    try:
+        future = asyncio.get_running_loop().run_in_executor(None, target)
+    except BaseException:
+        code_kernel_scope.finish(handle)
+        raise
+    future.add_done_callback(_abandoned)
+    return await future
+
+
+async def _run_config_scoped(profile: Optional[str], fn, *, source: str = "audio.provider_call"):
     """Run ``fn()`` on a worker thread under the config-only profile scope.
 
     Home-only contextvar scope, NOT ``_profile_scope``: these calls block for a
@@ -75,10 +121,10 @@ async def _run_config_scoped(profile: Optional[str], fn):
         with _config_profile_scope(profile):
             return fn()
 
-    # to_thread copies the request context: a secondary-profile native ticket's implicit
+    # The request context is copied: a secondary-profile native ticket's implicit
     # scope (native_profile_scope's home override) must reach the worker, which
-    # run_in_executor drops, silently resolving the LAUNCH profile's config and keys.
-    return await asyncio.to_thread(_scoped)
+    # a bare run_in_executor drops, silently resolving the LAUNCH profile's config and keys.
+    return await _run_reserved(source, _scoped)
 
 
 def _audio_extension_for_mime(mime_type: str) -> str:
@@ -129,7 +175,8 @@ async def transcribe_audio_upload(
             # and re-listens instead of surfacing a 400 on every quiet turn.
             from tools.voice_mode import transcribe_recording
 
-            result = await _run_config_scoped(profile, lambda: transcribe_recording(temp_path))
+            result = await _run_config_scoped(
+                profile, lambda: transcribe_recording(temp_path), source="audio.transcribe")
     finally:
         if temp_path:
             _unlink_quietly(temp_path)
@@ -312,7 +359,7 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     with http_failure("Desktop voice TTS failed", 500, "Speech synthesis failed"):
         from tools.tts_tool import text_to_speech_tool
 
-        result_json = await _run_config_scoped(profile, lambda: text_to_speech_tool(text))
+        result_json = await _run_config_scoped(profile, lambda: text_to_speech_tool(text), source="audio.speak")
 
     try:
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
@@ -542,7 +589,14 @@ async def transcribe_stream_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
     await ws.accept(subprotocol=getattr(ws, "_hermes_ws_subprotocol", None))
+    # The live STT session (provider stream) holds a reservation for the whole socket, opened
+    # before the provider is touched and released when the handler (and so the session) ends.
+    from tools import code_kernel_scope
+    with code_kernel_scope.scope("audio", "audio.transcribe_stream"):
+        await _transcribe_stream_session(ws)
 
+
+async def _transcribe_stream_session(ws: WebSocket) -> None:
     profile = (ws.query_params.get("profile") or "").strip() or None
     grant = getattr(ws, "_hermes_native_grant", None)
     loop = asyncio.get_running_loop()
@@ -555,7 +609,7 @@ async def transcribe_stream_ws(ws: WebSocket) -> None:
 
     session = None
     with contextlib.suppress(Exception):
-        session = await loop.run_in_executor(None, _open)
+        session = await _run_reserved("audio.transcribe_stream.open", _open, copy_context=False)
     if session is None:
         with contextlib.suppress(Exception):
             await ws.send_json({"type": "error", "message": "no live STT for the configured provider"})
@@ -593,7 +647,7 @@ async def transcribe_stream_ws(ws: WebSocket) -> None:
         with grant_home_scope(grant), _config_profile_scope(profile):
             return session.finalize()
 
-    result = await loop.run_in_executor(None, _finalize)
+    result = await _run_reserved("audio.transcribe_stream.finalize", _finalize, copy_context=False)
     await asyncio.sleep(0)  # let the last partial flush before the final frame
     forwarder.cancel()
     with contextlib.suppress(Exception):
@@ -634,7 +688,12 @@ async def speak_stream_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
     await ws.accept(subprotocol=getattr(ws, "_hermes_ws_subprotocol", None))
+    from tools import code_kernel_scope
+    with code_kernel_scope.scope("audio", "audio.speak_stream"):
+        await _speak_stream_session(ws)
 
+
+async def _speak_stream_session(ws: WebSocket) -> None:
     # Profile via query param, like /api/pty and /api/console: the provider
     # chain + API keys must resolve from the requesting profile's config, not
     # the dashboard's own — at resolve time AND in the synthesis thread. A
@@ -654,8 +713,8 @@ async def speak_stream_ws(ws: WebSocket) -> None:
         return streamer, cap, cfg
 
     try:
-        streamer, cap, cfg = await asyncio.to_thread(_resolve)
-    except Exception:
+        streamer, cap, cfg = await _run_reserved("audio.speak_stream.resolve", _resolve)
+    except Exception:  # health: allow BLE001 -- unchanged logged boundary (_log.exception); resolve failure falls back to per-sentence synthesis
         _log.exception("speak-stream provider resolution failed")
         streamer, cap, cfg = None, 0, {}
     if streamer is None:
@@ -744,7 +803,10 @@ async def speak_stream_ws(ws: WebSocket) -> None:
         finally:
             loop.call_soon_threadsafe(chunks.put_nowait, None)
 
-    threading.Thread(target=_produce, daemon=True).start()
+    # Reserved at construction-start, released by the thread's own exit: a barge-in/disconnect that
+    # leaves the provider call running keeps the reservation until the thread truly ends.
+    from tools import code_kernel_scope
+    code_kernel_scope.tracked_thread("audio", "audio.speak_stream.produce", target=_produce, daemon=True).start()
 
     async def _pump_client():
         # Text frames feed synthesis; done ends the text; stop/disconnect

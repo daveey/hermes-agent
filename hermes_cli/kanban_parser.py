@@ -215,6 +215,12 @@ _SPECS = [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
         _arg("--json", action="store_true", help="Return structured receipt (always JSON)"),
     ], help="Accept a courier origin obligation and read back its durable receipt"),
+    _cmd("quiet-hold", [
+        _arg("--max-s", type=int, required=True, metavar="N", help="Lease length in seconds (1..480, no renewal)"),
+        _arg("--reason", required=True, help="Why local automatic claims should pause (nonempty text)"),
+        _arg("observer_argv", nargs=argparse.REMAINDER, metavar="-- OBSERVER_COMMAND",
+             help="Observer argv, after a literal '--'; run without a shell in its own process group"),
+    ], help="Pause local automatic claims for a bounded, non-renewable observer run (root-scoped)"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
          description=(
@@ -769,6 +775,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                     "via `hermes kanban boards switch <slug>` or the "
                                     "HERMES_KANBAN_BOARD env var). Use `hermes kanban boards "
                                     "list` to see all boards.")
-    _add_commands(kanban_parser.add_subparsers(dest="kanban_action"), _SPECS)
+    actions = kanban_parser.add_subparsers(dest="kanban_action")
+    _add_commands(actions, _SPECS)
+    # Root-scoped: bypasses ``kanban_command`` (board override / auto-init) via the subparser default.
+    actions.choices["quiet-hold"].set_defaults(func=lambda a: __import__("hermes_cli.kanban_quiet", fromlist=["entry"]).entry(a))
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser

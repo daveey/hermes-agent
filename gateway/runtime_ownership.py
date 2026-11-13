@@ -147,8 +147,23 @@ def _still_names(path: Path, fd: int) -> bool:
         return False
 
 
+def _membership_registry():
+    """The bootstrap-installed local-work registry, or None (CLI, tests, older trees)."""
+    try:
+        from hermes_cli import local_work
+    except Exception:  # health: allow BLE001 -- membership bookkeeping must never fail an ownership change
+        return None
+    return local_work._registry
+
+
 class ProfileOwnership:
-    def __init__(self):
+    """``track_membership``: the process reservation (``process_ownership``) is the authority on
+    which homes this process serves, so it seeds the local-work registry membership: a home joins
+    (``add`` -> ``ready``) around its lock acquisition and leaves (``retire`` -> ``removed``) around
+    its release. Maintenance reservations are separate instances and never touch membership."""
+
+    def __init__(self, *, track_membership: bool = False):
+        self._track_membership = track_membership
         self._handles: dict[Path, object] = {}
         self._writers: list[threading.Thread] = []
         self._mutex = threading.RLock()
@@ -168,26 +183,32 @@ class ProfileOwnership:
                 for home in sorted({canonical_home(p) for p in homes}):
                     if home in self._handles:
                         continue
-                    make_user_dir(home, mode=0o700, parents=True, exist_ok=True)
-                    path = home / 'gateway.lock'
-                    fd = _open_lock(path)
-                    handle = os.fdopen(fd, 'r+', encoding='utf-8')  # windows-footgun: ok — write-only
+                    transition = self._membership_begin(home, 'add')
                     try:
-                        if not _try_acquire_file_lock(handle) or not _still_names(path, handle.fileno()):
-                            raise OwnershipConflict(f'Gateway runtime already owns profile {home}')
-                        record = {**_build_pid_record(), 'hermes_home': str(home)}
-                        if purpose:
-                            record['purpose'] = purpose
-                        handle.seek(0)
-                        handle.truncate()
-                        json.dump(record, handle)
-                        handle.flush()
-                        os.fsync(handle.fileno())
+                        make_user_dir(home, mode=0o700, parents=True, exist_ok=True)
+                        path = home / 'gateway.lock'
+                        fd = _open_lock(path)
+                        handle = os.fdopen(fd, 'r+', encoding='utf-8')  # windows-footgun: ok — write-only
+                        try:
+                            if not _try_acquire_file_lock(handle) or not _still_names(path, handle.fileno()):
+                                raise OwnershipConflict(f'Gateway runtime already owns profile {home}')
+                            record = {**_build_pid_record(), 'hermes_home': str(home)}
+                            if purpose:
+                                record['purpose'] = purpose
+                            handle.seek(0)
+                            handle.truncate()
+                            json.dump(record, handle)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        except BaseException:
+                            handle.close()
+                            raise
                     except BaseException:
-                        handle.close()
+                        self._membership_commit(transition, 'removed')
                         raise
                     self._handles[home] = handle
                     added.append(home)
+                    self._membership_commit(transition, 'ready')
             except BaseException:
                 for home in reversed(added):
                     # Unpublish before letting go: a rolled-back attempt's record would otherwise
@@ -216,10 +237,36 @@ class ProfileOwnership:
     def release(self, home: Path) -> None:
         from gateway.status import _release_file_lock
         with self._mutex:
-            handle = self._handles.pop(canonical_home(home), None)
+            home = canonical_home(home)
+            handle: Any = self._handles.pop(home, None)
             if handle is not None:
-                _release_file_lock(handle)
-                handle.close()
+                transition = self._membership_begin(home, 'retire')
+                try:
+                    _release_file_lock(handle)
+                    handle.close()
+                finally:
+                    self._membership_commit(transition, 'removed')
+
+    def _membership_begin(self, home: Path, transition: str):
+        """Open a registry membership transition BEFORE the ownership change; None when untracked."""
+        registry = _membership_registry() if self._track_membership else None
+        if registry is None:
+            return None
+        try:
+            return registry, registry.membership_begin(str(home), role='owned', transition=transition)
+        except Exception:  # health: allow BLE001 -- a bookkeeping failure latches unknown coverage, never blocks ownership
+            registry.mark_unknown('membership-seed-failed')
+            return None
+
+    @staticmethod
+    def _membership_commit(transition, state: str) -> None:
+        if transition is None:
+            return
+        registry, token = transition
+        try:
+            registry.membership_commit(token, state=state)
+        except Exception:  # health: allow BLE001 -- a bookkeeping failure latches unknown coverage, never blocks ownership
+            registry.mark_unknown('membership-seed-failed')
 
     def start_writer(self, thread: threading.Thread) -> None:
         """Register before starting so partial startup cannot forget a live writer."""
@@ -238,7 +285,7 @@ class ProfileOwnership:
                 self.release(home)
 
 
-process_ownership = ProfileOwnership()
+process_ownership = ProfileOwnership(track_membership=True)
 _maintenance = threading.local()
 
 
