@@ -264,3 +264,69 @@ def test_busy_board_priority_change_before_its_page_is_read_is_the_fixed_head_va
         board = BusyBoard(seed, inject=1, ahead=True)
         manifest = prepare.capture(board, board_id='board', exceptions=[])
         assert board.injected is not None and _rows(manifest) == board.truth
+
+
+# ---- review follow-ups (PR #2025 nits 1-3) ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize('terminal', TERMINAL)
+def test_card_created_and_finished_in_window_resolves_an_exception_like_a_later_page(terminal):
+    # Nit 2: a create-then-finish card was dropped from the rows, so an
+    # exceptions entry naming it refused ('unresolved exception') only when its
+    # page was read before the creation. It is now a terminal row either way.
+    changes = [_new(2, 'n'), _task(4, 'n', status=terminal)]
+    early = prepare.capture(Window([_row('a')], changes), board_id='board', exceptions=['n'])
+    late = prepare.capture(Window([_row('a'), {**_row('n', priority=500), 'status': terminal}], changes),
+                           board_id='board', exceptions=['n'])
+    assert early == late
+    assert early['exceptions'] == [{'id': 'n', 'status': terminal, 'origin': 'one', 'old': 500}]
+    assert _rows(early) == [('a', 10000)]
+
+
+def test_terminal_arrival_joins_the_rows_in_id_order():
+    rows = [_row('b')]
+    check_interval(Window(rows, [_new(2, 'a'), _task(3, 'a', status='done')]), 'board', rows, 1, 5)
+    assert [(row['id'], row['status']) for row in rows] == [('a', 'done'), ('b', 'ready')]
+
+
+@pytest.mark.parametrize('seed', SEEDS)
+def test_busy_board_inventory_rows_are_every_card_at_the_final_head(seed):
+    # The fixed-head invariant over ALL statuses, not just the open manifest
+    # rows: create-then-finish ("flash") cards are terminal rows, as a later
+    # page would show them.
+    board = BusyBoard(seed)
+    rows = prepare._inventory(board, 'board')
+    assert [(r['id'], r['status'], r['priority']) for r in rows] == [
+        (u, r['status'], r['priority']) for u, r in sorted(board.tasks.items())]
+
+
+@pytest.mark.parametrize('earlier', [
+    pytest.param(lambda: _task(2, 'b', **{**_row('b'), 'title': 'edited'}), id='full-row-edit-with-old-priority'),
+    pytest.param(lambda: _task(2, 'b', priority=10000), id='patch-with-old-priority'),
+])
+def test_priority_change_after_an_earlier_in_window_old_value_refuses_even_paged_late(earlier):
+    # Nit 1: "exact" holds for a row's ONLY in-window priority change. An
+    # earlier in-window change still carrying the old priority disagrees with
+    # the late-paged row (which already holds the new value), so capture
+    # fails closed rather than replaying priority.
+    hub = Window([_row('a'), _row('b', priority=7)], [earlier(), _task(3, 'b', priority=7)])
+    with pytest.raises(ValueError, match='changed'):
+        prepare.capture(hub, board_id='board', exceptions=[])
+
+
+def test_only_in_window_priority_change_paged_late_is_exact():
+    hub = Window([_row('a'), _row('b', priority=7)], [_task(3, 'b', priority=7)])
+    assert _rows(prepare.capture(hub, board_id='board', exceptions=[])) == [('a', 10000), ('b', 7)]
+
+
+def test_above_cap_card_paged_before_the_window_is_planned_but_an_above_cap_arrival_refuses():
+    # Nit 3: deliberate asymmetry. A paged above-cap card is in the snapshot
+    # and normalized; one created in the window is an arrival and refuses, as
+    # kanban_priority_inventory.classify refuses it at apply time.
+    paged = prepare.capture(Window([_row('a'), _row('n', priority=PRIORITY_CAP + 1)], []),
+                            board_id='board', exceptions=[])
+    assert [row['id'] for row in paged['rows']] == ['a', 'n']
+    assert all(row['new'] <= paged['ceiling'] for row in paged['rows'])
+    with pytest.raises(ValueError, match='exceeds cap'):
+        prepare.capture(Window([_row('a')], [_new(2, 'n', priority=PRIORITY_CAP + 1)]),
+                        board_id='board', exceptions=[])
