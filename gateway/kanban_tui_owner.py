@@ -72,21 +72,23 @@ def _gateway_holds_work(authority: Any, ids: set) -> bool:
     """Whether the gateway's ledger holds work that ends on its own for ``ids``, or this process holds
     the turn lease. This is when the legacy backend refuses the chat. A read error answers False and
     leaves the row to the legacy backend. The ledger is read by the legacy hand-back's own rule
-    (``kanban_leg_custody.lineage_ledger_status``): an ``unknown`` row on either id owns nothing."""
-    from tui_gateway.kanban_leg_custody import lineage_ledger_status
+    (``kanban_leg_custody.lineage_ledger_status``) over the same ids, ``ids`` plus their compaction parents
+    (``with_parents``): an ``unknown`` row on any of them owns nothing."""
+    from tui_gateway.kanban_leg_custody import lineage_ledger_status, with_parents
     db = getattr(authority, "db", None)
     read_ctx = getattr(db, "_read_ctx", None)
     if read_ctx is None:
         return False
     try:
         with read_ctx() as conn:
-            status = lineage_ledger_status(conn, ids)
+            lineage = with_parents(conn, ids)
+            status = lineage_ledger_status(conn, lineage)
             if status is not None:
                 return status in _FORWARDABLE_LEDGER_STATES
         owner_of = getattr(db, "session_turn_lease_owner", None)
         if owner_of is not None:
             mine = f"pid={os.getpid()}:"
-            for sid in sorted(filter(None, ids)):
+            for sid in sorted(lineage):
                 owner = owner_of(sid)
                 if owner and str(owner.get("holder") or "").startswith(mine):
                     return True

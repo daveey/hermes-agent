@@ -136,25 +136,52 @@ def legacy_gateway_owns(session: dict, session_lineage, session_db, now: Optiona
     return all(claims_row(owner, c) for c in claims if not c.get("remote"))
 
 
+# Every non-terminal ledger row of one id: ``session_lifecycle._CANONICAL_PENDING_SQL`` without its ``LIMIT 1``. That
+# answers with one arbitrary row, so a ``queued`` row could mask an ``unknown`` admission on the same id (review
+# 5889497938 nit 1).
+_LINEAGE_PENDING_SQL = """SELECT status FROM session_admissions WHERE target_session_id=? AND status!='terminal'
+    UNION ALL SELECT status FROM worker_executions WHERE session_id=? AND status!='terminal'"""
+
+# Parent hops of a chat's lineage: ``session_notifications._session_lineage``'s default ``limit`` (the legacy ids).
+LINEAGE_LIMIT = 8
+
+
+def with_parents(conn, ids) -> tuple:
+    """``ids`` plus each one's ``sessions.parent_session_id`` chain (up to ``LINEAGE_LIMIT`` hops): the compaction
+    parents the legacy leg reads (``session_notifications._session_lineage``), so the gateway's claim reads the
+    same ids, intermediate parents included (review 5889497938 nit 3). A read error keeps ``ids``."""
+    import sqlite3
+    out = list(dict.fromkeys(str(s) for s in ids if s))
+    try:
+        for sid in list(out):
+            for _ in range(LINEAGE_LIMIT):
+                row = conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (sid,)).fetchone()
+                if not row or not row[0] or str(row[0]) in out:
+                    break
+                sid = str(row[0])
+                out.append(sid)
+    except sqlite3.Error:
+        logger.debug("kanban notices: lineage parent read failed; reading the ids given", exc_info=True)
+    return tuple(out)
+
+
 def lineage_ledger_status(conn, ids) -> Optional[str]:
     """The gateway ledger's answer for a chat's lineage ``ids``: the one rule this backend's hand-back and the
     gateway's claim (``gateway.kanban_tui_owner._gateway_holds_work``) both read, so the two cannot disagree on
     which row counts (review 5888998970 nit 1: the tip ``queued`` and the root ``unknown`` answered ``queued``
-    key-first here and ``unknown`` sorted there). Order-independent: any non-terminal row outside
-    ``owner_forward.FORWARDABLE_LEDGER_STATES`` (an ``unknown`` admission) answers with its status, which owns
-    nothing, so this backend keeps the chat; else the first forwardable status in sorted id order; None when no
-    id has a non-terminal row. The legacy ids may add compaction parents between the tip and the root the gateway
-    reads; one of them holding forwardable work alone is rare (admissions sit on the root), and only delays."""
+    key-first here and ``unknown`` sorted there). Order-independent: every non-terminal row of every id is read,
+    and any one outside ``owner_forward.FORWARDABLE_LEDGER_STATES`` (an ``unknown`` admission, even beside a
+    ``queued`` row on the same id) answers with its status, which owns nothing, so this backend keeps the chat;
+    else the least forwardable status of the first id in sorted order that has one; None when no id has a
+    non-terminal row. The gateway passes its ids through :func:`with_parents`, so both legs read the same lineage."""
     from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
-    from tui_gateway.session_lifecycle import _CANONICAL_PENDING_SQL
     first = None
     for sid in sorted({str(s) for s in ids if s}):
-        row = conn.execute(_CANONICAL_PENDING_SQL, (sid, sid)).fetchone()
-        if row is None:
-            continue
-        if str(row[0]) not in FORWARDABLE_LEDGER_STATES:
-            return str(row[0])
-        first = first or str(row[0])
+        statuses = sorted(str(row[0]) for row in conn.execute(_LINEAGE_PENDING_SQL, (sid, sid)))
+        blocked = [s for s in statuses if s not in FORWARDABLE_LEDGER_STATES]
+        if blocked:
+            return blocked[0]
+        first = first or (statuses[0] if statuses else None)
     return first
 
 

@@ -39,6 +39,7 @@ class _Ledger:
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         self.conn.execute("CREATE TABLE session_admissions (target_session_id TEXT, status TEXT)")
         self.conn.execute("CREATE TABLE worker_executions (session_id TEXT, status TEXT)")
+        self.conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
 
     @contextlib.contextmanager
     def _read_ctx(self):
@@ -46,6 +47,11 @@ class _Ledger:
 
     def work(self, session_id, status="started"):
         self.conn.execute("INSERT INTO session_admissions VALUES (?, ?)", (session_id, status))
+
+    def chain(self, *ids):
+        """A compaction chain, tip first: each id's parent is the next (``sessions.parent_session_id``)."""
+        for child, parent in zip(ids, (*ids[1:], None)):
+            self.conn.execute("INSERT INTO sessions VALUES (?, ?)", (child, parent))
 
     def status(self, session_id):
         row = self.conn.execute("SELECT status FROM session_admissions WHERE target_session_id = ?",
@@ -607,10 +613,30 @@ def _clock(monkeypatch):
     return clock
 
 
-def test_nit1_tip_queued_and_root_unknown_answer_one_rule_on_both_legs(env, monkeypatch):
-    """The tip holds ``queued`` work and the lineage root an ``unknown`` admission. Key-first the legacy leg read
-    ``queued`` and handed the chat back; sorted, the gateway read the older root's ``unknown`` and never claimed
-    (review 5888998970 nit 1). One rule over the ids: neither owns, so the legacy leg keeps the chat."""
+def _remote_collected(runner, authority, monkeypatch, tmp_path, logical):
+    """The chats the remote-owner pass (``kanban_remote_owner._collect``) collects notices for, with ``logical``'s
+    live session as this gateway's only owned chat: it gates each chat on ``_gateway_holds_work``."""
+    from gateway import kanban_remote_owner as kro
+    from tui_gateway import kanban_remote_notices as krn
+    hub = tmp_path / "hub.db"
+    hub.touch()
+    monkeypatch.setattr(krn, "hub_db_path", lambda: hub)
+    monkeypatch.setattr(kro, "_reconcile", lambda db: None)
+    collected = []
+    monkeypatch.setattr(krn, "collect", lambda chat, profile, **kw: collected.append(chat) or [])
+    assert kro._collect(runner, authority, [(logical, authority.sessions[logical])]) == []
+    return collected
+
+
+@pytest.mark.parametrize("tip_status,root_status", [("queued", "unknown"), ("unknown", "queued")],
+                         ids=["tip_queued_root_unknown", "tip_unknown_root_queued"])
+def test_nit1_one_unknown_on_tip_or_root_answers_one_rule_on_both_legs(env, monkeypatch, tmp_path, tip_status,
+                                                                         root_status):
+    """One id holds ``queued`` work and the other an ``unknown`` admission, in either layout. Key-first the legacy
+    leg read the tip and sorted the gateway read the older root, so one layout handed the chat back to a gateway
+    that never claimed (review 5888998970 nit 1); the swapped layout pins the rule in the other direction (review
+    5889497938 nit 2). One rule over the ids: neither owns, so the legacy leg keeps the chat, and the remote-owner
+    pass collects nothing for it either."""
     from gateway.kanban_tui_owner import _gateway_holds_work, owned_live_session
     from tui_gateway import kanban_leg_custody as custody
     runner, authority, adapter, admitted = env
@@ -618,19 +644,118 @@ def test_nit1_tip_queued_and_root_unknown_answer_one_rule_on_both_legs(env, monk
     monkeypatch.setattr(server, "_session_lineage", lambda key, limit=8: (root,) if key == CHAT else ())
     monkeypatch.setattr(authority, "logical_owner", lambda chat: root)
     authority.sessions[root] = _Live(CHAT)
-    authority.db.work(CHAT, "queued")
-    authority.db.work(root, "unknown")
+    authority.db.work(CHAT, tip_status)
+    authority.db.work(root, root_status)
     with authority.db._read_ctx() as conn:
         answers = {custody.lineage_ledger_status(conn, ids) for ids in ((CHAT, root), (root, CHAT), {CHAT, root})}
     assert answers == {"unknown"}
     assert not _gateway_holds_work(authority, {CHAT, root})
     assert not server._kb_gateway_owns(_session())
+    assert _remote_collected(runner, authority, monkeypatch, tmp_path, root) == []
     tid = _card(local=False)
     assert owned_live_session(runner, {"chat_id": CHAT, "notifier_profile": "default", "task_id": tid}) is None
     session = _session()
     session["running"] = True
     _complete(tid)
     _keeps_the_chat_and_holds_it_once(runner, authority, adapter, admitted, tid, session)
+
+
+def test_remote_owner_collects_for_a_chat_both_legs_hand_to_the_gateway(env, monkeypatch, tmp_path):
+    """The remote-owner pass's control: forwardable work on the root alone, so both legs agree the gateway owns
+    the chat, and ``_collect`` collects its remote notices."""
+    from gateway.kanban_tui_owner import _gateway_holds_work
+    runner, authority, _adapter, _admitted = env
+    root = "20261020_101500_a1b2c3"
+    monkeypatch.setattr(server, "_session_lineage", lambda key, limit=8: (root,) if key == CHAT else ())
+    monkeypatch.setattr(authority, "logical_owner", lambda chat: root)
+    authority.sessions[root] = _Live(CHAT)
+    authority.db.work(root, "queued")
+    assert _gateway_holds_work(authority, {CHAT, root}) and server._kb_gateway_owns(_session())
+    assert _remote_collected(runner, authority, monkeypatch, tmp_path, root) == [CHAT]
+
+
+@pytest.mark.parametrize("first", ["queued", "unknown"])
+def test_an_unknown_beside_a_queued_row_on_one_id_is_never_masked(env, first):
+    """One id with a ``queued`` and an ``unknown`` row, in either insertion order: the per-id read is not one
+    arbitrary row (``_CANONICAL_PENDING_SQL``'s ``LIMIT 1``), so the ``unknown`` admission always answers and
+    neither leg owns (review 5889497938 nit 1)."""
+    from gateway.kanban_tui_owner import _gateway_holds_work
+    from tui_gateway import kanban_leg_custody as custody
+    _runner, authority, _adapter, _admitted = env
+    for status in (first, ({"queued", "unknown"} - {first}).pop()):
+        authority.db.work(CHAT, status)
+    with authority.db._read_ctx() as conn:
+        assert custody.lineage_ledger_status(conn, (CHAT,)) == "unknown"
+    assert not _gateway_holds_work(authority, {CHAT})
+    assert not server._kb_gateway_owns(_session())
+
+
+def _three_deep(monkeypatch, authority):
+    """Tip CHAT, an intermediate compaction parent, and the lineage root the authority keys the live session by."""
+    mid, root = "20261023_090000_d4e5f6", "20261020_101500_a1b2c3"
+    authority.db.chain(CHAT, mid, root)
+    monkeypatch.setattr(server, "_session_lineage", lambda key, limit=8: (mid, root) if key == CHAT else ())
+    monkeypatch.setattr(authority, "logical_owner", lambda chat: root)
+    authority.sessions[root] = _Live(CHAT)
+    return mid, root
+
+
+def test_nit3_an_unknown_on_an_intermediate_parent_keeps_the_chat_on_both_legs(env, monkeypatch, tmp_path):
+    """An ``unknown`` admission on a compaction parent between the tip and the root, ``queued`` work on the root.
+    The gateway read only {tip, root} and claimed while the legacy leg (which reads every parent) kept and claimed
+    the chat too (review 5889497938 nit 3). The gateway now reads the same parents: neither owns, the legacy leg
+    delivers the notice once, and the remote-owner pass stands aside."""
+    from gateway.kanban_tui_owner import _gateway_holds_work, owned_live_session
+    runner, authority, adapter, admitted = env
+    mid, root = _three_deep(monkeypatch, authority)
+    authority.db.work(mid, "unknown")
+    authority.db.work(root, "queued")
+    assert not server._kb_gateway_owns(_session())
+    assert not _gateway_holds_work(authority, {CHAT, root})
+    assert _remote_collected(runner, authority, monkeypatch, tmp_path, root) == []
+    tid = _card(local=False)
+    assert owned_live_session(runner, {"chat_id": CHAT, "notifier_profile": "default", "task_id": tid}) is None
+    session = _session()
+    session["running"] = True
+    _complete(tid)
+    _keeps_the_chat_and_holds_it_once(runner, authority, adapter, admitted, tid, session)
+
+
+def test_nit3_forwardable_work_on_an_intermediate_parent_alone_is_claimed_by_the_gateway_once(env, monkeypatch):
+    """The other direction: ``queued`` work only on the intermediate parent. The legacy leg handed the chat back
+    and the gateway, reading {tip, root}, claimed nothing until that work ended. Both legs now read it: the hand-back
+    reaches a gateway that admits the notice within one tick, exactly once."""
+    runner, authority, adapter, admitted = env
+    mid, _root = _three_deep(monkeypatch, authority)
+    authority.db.work(mid, "queued")
+    tid = _card(local=False)
+    session = _session()
+    session["running"] = True
+    _complete(tid)
+    assert server._kb_gateway_owns(session)
+    assert _legacy_collect(session) == []  # handed to the gateway
+    _gateway_tick(runner)
+    assert [a["chat"] for a in admitted] == [CHAT]
+    _gateway_tick(runner)
+    _next_poll(session)
+    assert _legacy_collect(session) == []
+    assert _notices(adapter, admitted, tid) == 1
+
+
+def test_the_gateway_walks_as_many_parents_as_the_legacy_lineage(env):
+    import inspect
+
+    from tui_gateway import kanban_leg_custody as custody
+    from tui_gateway import session_notifications
+    assert inspect.signature(session_notifications._session_lineage).parameters["limit"].default == \
+        custody.LINEAGE_LIMIT
+    _runner, authority, _adapter, _admitted = env
+    authority.db.chain(*(f"s{i}" for i in range(custody.LINEAGE_LIMIT + 3)))
+    with authority.db._read_ctx() as conn:
+        assert custody.with_parents(conn, {"s0"}) == tuple(f"s{i}" for i in range(custody.LINEAGE_LIMIT + 1))
+        assert custody.with_parents(conn, {"unknown-id"}) == ("unknown-id",)
+        conn.execute("ALTER TABLE sessions RENAME TO sessions_gone")
+        assert custody.with_parents(conn, ("s0", "s1")) == ("s0", "s1")  # a read error keeps the ids given
 
 
 def test_restore_gap_unrestored_gateway_chat_is_back_within_one_ttl_once_its_work_ends(env, monkeypatch):
