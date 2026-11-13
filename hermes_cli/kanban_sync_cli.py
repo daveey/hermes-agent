@@ -87,12 +87,13 @@ def _import(args: argparse.Namespace) -> int:
 def _diff(args: argparse.Namespace) -> int:
     slug = _board(args)
     ident = ksc.load_identity()
-    # Refresh first, before opening the replica: a rebuild replaces its file. Only when no sync round holds the
-    # board (one replica puller per board per host); a busy round's replica is compared as it stands.
+    # Refresh first, before opening the replica. Only when no sync round holds the board (one replica puller per
+    # board per host); a busy round's replica is compared as it stands. A diagnostic: it never rebuilds the replica
+    # (a Resync is reported as refresh_error) and never transfers attachments (t_01a1d41c2612ebc0).
     refresh_error = None
     pulled = ksc.Pulled()
     try:
-        pulled = ksc._pull_replica(slug, ksc.Hub(ident), ident.gateway, _path(slug))
+        pulled = ksc._pull_replica(slug, ksc.Hub(ident), ident.gateway, _path(slug), diagnostic=True)
     except (ksc.HubError, ksc.Resync, OSError) as exc:
         refresh_error = str(exc)
     else:

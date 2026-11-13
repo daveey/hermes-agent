@@ -20,8 +20,9 @@ Scope (everything else refuses and writes nothing):
 * the board is a Board primary, its ``sync_version`` is acknowledged and no task edit is pending in the outbox;
 * the Hub identity used is this board's own gateway.
 
-The local row is never edited here. After the Board answers, the authoritative feed is pulled; until that readback
-lands the local policy stays as it was. Refusals leave this local copy intact; a lost reply has unknown Board outcome. A pull failure
+The local row is never edited here. After the Board answers, the authoritative feed is pulled (bounded, plus a targeted
+read of the card when a backlog stops the pull short of it), only while no sync round holds the board (a round that
+does applies it instead); until that readback lands the local policy stays as it was. Refusals leave this local copy intact; a lost reply has unknown Board outcome. A pull failure
 after a successful repin is reported as committed with readback pending (the normal sync loop applies it), not as a
 failed move. No network call runs inside a DB transaction, and nothing here runs on a timer.
 """
@@ -151,6 +152,35 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
             "labels": labels, "matches": matches, "status": row["status"]}
 
 
+def _refresh(conn: sqlite3.Connection, hub: Any, board: str, me: str, task_id: str) -> bool:
+    """Read the Board's newest copy of the card into this file: one bounded feed pull, then, when the pull stopped
+    at its page budget with the head not reached, the card's own row by targeted read (``row_evidence``), applied
+    like a push's merged row (the cursor stays). Only while no sync round holds the board: one live puller per board
+    per host (t_01a1d41c2612ebc0). False = a round holds it and nothing was read (that round pulls the file)."""
+    from contextlib import ExitStack
+    from pathlib import Path
+
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy, board_sync_lock
+    path = sync._db_key(conn)
+    with ExitStack() as stack:
+        if path is not None:  # an in-memory board: nothing else pulls it
+            try:
+                stack.enter_context(board_sync_lock(Path(path)))
+            except SyncRoundBusy:
+                return False
+        pulled = client.pull(conn, hub, board, observers=True, partition=me)
+        reader = getattr(hub, "row_evidence", None)
+        if getattr(pulled, "more", False) and reader is not None:
+            row = (reader(board, "tasks", task_id) or {}).get("row")
+            if isinstance(row, dict) and row.get("uid") == task_id:
+                cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
+                sync.apply_remote_changes(conn, [client._row_change("tasks", row)], new_cursor=cursor, board=board,
+                                          local_pending_wins=True)
+    return True
+
+
 def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], reason: str, *,
                     hub: Any = None, event_extra: Optional[dict] = None) -> dict[str, Any]:
     """Board CAS repin + authoritative pull. Result keys match ``move_queued`` plus ``repinned``,
@@ -193,14 +223,18 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
                 return conflict
             # A queued policy card's Board row is rewritten by every reservation reply, so the local revision is
             # often a step behind. Read the newest row, re-check every precondition on it, and CAS again: never a
-            # blind write over an edit this copy has not seen.
+            # blind write over an edit this copy has not seen. A sync round holding the board pulls this file
+            # itself: re-check what it has read so far, and CAS again only at a newer revision.
             try:
-                client.pull(conn, hub, board, observers=True, partition=me)
-            except (client.HubError, client.Resync, client.SyncUnavailable, OSError):
+                refreshed = _refresh(conn, hub, board, me, task_id)
+            except (client.HubError, client.Resync, client.SyncUnavailable, OSError, ValueError):
                 return conflict
+            revision = pre["revision"]
             pre = eligibility(conn, task_id, labels)
             if not pre.get("ok"):
                 return pre
+            if not refreshed and pre["revision"] == revision:
+                return conflict
         except (OSError, client.Resync) as exc:
             return _unknown(type(exc).__name__)
     version = reply.get("version") if isinstance(reply, dict) else None
@@ -219,21 +253,34 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
 
     out = {"ok": True, "runs_on": pre["labels"], "matches": pre["matches"], "move_no": move_no, "status": pre["status"],
            REPINNED_EVENT_FLAG: True, "board_version": version, "readback": "pending"}
+    return _read_back(conn, hub, board, me, task_id, pre["labels"], out)
+
+
+def _read_back(conn: sqlite3.Connection, hub: Any, board: str, me: str, task_id: str, labels: list[str],
+               out: dict[str, Any]) -> dict[str, Any]:
+    """After the Board committed: read its row back (``_refresh``) and mark ``readback`` confirmed when the local
+    copy shows the pin with the policy cleared."""
+    from hermes_cli import kanban_sync_client as client
+    version = out["board_version"]
     try:
-        client.pull(conn, hub, board, observers=True, partition=me)
-    except (client.HubError, client.Resync, client.SyncUnavailable, OSError) as exc:
+        refreshed = _refresh(conn, hub, board, me, task_id)
+    except (client.HubError, client.Resync, client.SyncUnavailable, OSError, ValueError) as exc:
         out["note"] = (f"the Board committed the repin (revision {version}); reading it back failed "
                        f"({type(exc).__name__}), so the local copy still shows the policy until the next sync")
         return out
+    if not refreshed:
+        out["note"] = (f"the Board committed the repin (revision {version}); a sync round holds the board and "
+                       "applies it to the local copy")
     row = conn.execute("SELECT status, placement_policy, runs_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
     try:
         local = json.loads(row["runs_on"]) if row and row["runs_on"] else None
     except (TypeError, ValueError):
         local = None
-    if row is not None and row["placement_policy"] is None and local == pre["labels"]:
+    if row is not None and row["placement_policy"] is None and local == labels:
         out["readback"] = "confirmed"
         out["status"] = row["status"]
-    else:
+        out.pop("note", None)
+    elif refreshed:
         out["note"] = (f"the Board committed the repin (revision {version}); the local copy has not caught up yet "
                        "and updates on the next sync")
     return out

@@ -26,8 +26,9 @@ def sendable_before_head(conn: Any, hub: Any, board: str, rows: list[dict], seen
     """The outbox rows a push may send while this file has not pulled to the feed head (``push(before_head=True)``),
     and whether it stopped: the first run row ends the batch (FIFO kept: a run row is sent whole and the Board keeps
     the last write, so it waits for any end in an unread page). A task row with a live ``status`` whose Board row is
-    done/archived (``kanban_terminal_guard.board_may_hold_terminal``) is skipped with every later row of that card;
-    other cards' rows still go, so one stale wake holds back no one else's edits."""
+    done/archived (``kanban_terminal_guard.board_may_hold_terminal``) is skipped with that card's later ``tasks``
+    rows (the key is the table and row uid); other rows still go, so one stale wake holds back no one else's edits.
+    The outbox-age alarm applies this same rule (``kanban_sync_outbox_age``), so it never ages a row held here."""
     from hermes_cli.kanban_terminal_guard import board_may_hold_terminal
     out: list[dict] = []
     skipped: set[tuple[str, str]] = set()
@@ -44,6 +45,22 @@ def sendable_before_head(conn: Any, hub: Any, board: str, rows: list[dict], seen
 
 _LOCK = threading.Lock()
 _BEHIND: set[str] = set()  # live board paths whose last round stopped before the feed head
+_EVIDENCE: dict[str, dict] = {}  # live board path -> its latest round's Board reads ({card id: may hold terminal})
+
+
+def round_evidence(path: Path) -> dict:
+    """A fresh Board-read cache for this round, shared by its sends before and after the pulls, so a card is read
+    at most once per round (``board_may_hold_terminal``). The outbox-age alarm reads the latest one back."""
+    seen: dict = {}
+    with _LOCK:
+        _EVIDENCE[str(path)] = seen
+    return seen
+
+
+def evidence(path: Path) -> dict:
+    """A copy of the latest round's Board reads for this board (empty before any round)."""
+    with _LOCK:
+        return dict(_EVIDENCE.get(str(path)) or {})
 
 
 class Pulled(int):
@@ -104,3 +121,4 @@ def reset() -> None:
     """Tests: forget every board."""
     with _LOCK:
         _BEHIND.clear()
+        _EVIDENCE.clear()

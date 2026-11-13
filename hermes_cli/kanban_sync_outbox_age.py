@@ -43,18 +43,40 @@ _FILED: set[str] = set()
 _NEXT_CHECK: list[float] = [0.0]
 
 
-def oldest_pending_age_s(conn: sqlite3.Connection, *, unanswered: bool = False, held_runs: bool = False,
+def oldest_pending_age_s(conn: sqlite3.Connection, *, unanswered: bool = False,
                          now: Optional[float] = None) -> Optional[float]:
     """Seconds since the oldest pending outbox op was queued (None: no pending op). ``unanswered`` counts only ops
-    the Board never deferred; ``held_runs`` leaves out run rows, which a round behind the feed head holds back on
-    purpose (``push(before_head=...)``)."""
+    the Board never deferred."""
     sql = "SELECT MIN(created_at) FROM kanban_sync_outbox WHERE state = 'pending'"
     sql += " AND retry_after IS NULL" if unanswered else ""
-    sql += " AND table_name != 'task_runs'" if held_runs else ""
     row = conn.execute(sql).fetchone()
-    if not row or row[0] is None:
-        return None
-    return max(0.0, (time.time() if now is None else now) - float(row[0]) / 1000)  # created_at is in ms
+    return None if not row or row[0] is None else _since(row[0], now)
+
+
+def _since(created_ms: Any, now: Optional[float] = None) -> float:
+    return max(0.0, (time.time() if now is None else now) - float(created_ms) / 1000)  # created_at is in ms
+
+
+class _NoBoardReads:
+    """The alarm never calls the Board: a card the round did not read counts as sendable (``row_evidence`` -> {})."""
+
+    def row_evidence(self, *_a: Any) -> dict:
+        return {}
+
+
+def sendable_age_s(conn: sqlite3.Connection, path: Path, now: Optional[float] = None) -> Optional[float]:
+    """While a board is behind the feed head: the age of the oldest unanswered op among exactly the ops the push
+    before the head would send (``kanban_sync_backlog.sendable_before_head``, with the latest round's Board reads).
+    Held ops (from the first pending run row on, a stale wake on a card the Board completed) wait on purpose for the
+    head, possibly over a long catch-up: they age the alarm again once the board reaches it. (t_01a1d41c2612ebc0)"""
+    from hermes_cli import kanban_sync_backlog as backlog
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' AND (retry_after IS NULL OR retry_after <= ?) "
+        "ORDER BY created_at, rowid", (int(time.time()),))]  # push's own selection and order
+    sendable, _ = backlog.sendable_before_head(conn, _NoBoardReads(), "", rows, backlog.evidence(path))
+    ages = [r["created_at"] for r in sendable if r["retry_after"] is None]
+    return _since(min(ages), now) if ages else None
 
 
 def _age(path: Path) -> Optional[float]:
@@ -64,7 +86,9 @@ def _age(path: Path) -> Optional[float]:
         return None  # never create a board file just to read its outbox
     try:
         with kbc.connect_closing(path) as conn:
-            return oldest_pending_age_s(conn, unanswered=True, held_runs=backlog.behind(path))
+            if backlog.behind(path):
+                return sendable_age_s(conn, path)
+            return oldest_pending_age_s(conn, unanswered=True)
     except (sqlite3.Error, OSError):
         return None
 
