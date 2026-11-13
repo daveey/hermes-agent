@@ -892,6 +892,13 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
     session = [case for case in cases if case.s_position == "session"]
     assert len(session) == (len(corpus.SESSIONS) * len(corpus.SESSION_FORMS)
                             * len(corpus.SESSION_PAYLOADS))
+    # Nit 3: every sink x nesting x consumer x printed line, and every wrapper under each.
+    sink = [case for case in cases if case.s_position == "sink"]
+    assert {(case.sink, case.nesting, case.payload) for case in sink} == {
+        (s, n, f"{c}-{line}") for s in corpus.SINKS for n in corpus.SINK_NESTINGS
+        for c in corpus.SINK_CONSUMERS for line in corpus.SINK_LINES}
+    assert {(case.sink, case.wrapper, case.nesting) for case in sink} == {
+        (s, w, n) for s in corpus.SINKS for w in corpus.WRAPPERS for n in corpus.SINK_NESTINGS}
 
     started = time.monotonic()
     results = corpus.evaluate(tmp_path, cases)
@@ -905,6 +912,7 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
     assert all(case.key in ran for case in review if case.payload == "history")
     assert all(case.key in ran for case in session
                if case.session == "time" and case.payload == "alias-subshell")
+    assert all(case.key in ran for case in sink)  # bash runs every printed line
     # Startup-file rows need a shell that sources the test's `$HOME` files (see
     # corpus.startup_shell_prefix): every one of them must run when there is one.
     prefix, how = corpus.startup_shell_prefix()

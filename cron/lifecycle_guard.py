@@ -9,6 +9,7 @@ anchored on concrete command identifiers — so they cannot fire on prose. Defen
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import re
@@ -1186,6 +1187,29 @@ def _iter_shell_command_payloads(command: str) -> Iterator[str]:
                 break
 
 
+# Quoted string literals (shell or interpreter quoting alike), each kind on its own; a literal may
+# span lines (`eval "$( cat <<'PY'` … `)"`).
+_QUOTED_LITERAL_RES = (re.compile(r"'([^']+)'"), re.compile(r"\"([^\"]+)\""))
+
+
+def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
+    """When some output in *command* is run as shell code (``python3 - <<'PY' | bash``,
+    ``eval "$(…)"``, ``bash <(…)``), yield every quoted string literal in it: the producer may
+    print one as the shell's command (``print('bash /x/big.sh')``), so its paths are executed,
+    not mentions. Single and double quotes are matched independently, so a literal nested in the
+    other kind (``python3 -c "print('bash x')"``) is yielded too."""
+    from tools.shell_heredoc import output_reaches_shell
+
+    if not output_reaches_shell(command):
+        return
+    seen: set[str] = set()
+    for pattern in _QUOTED_LITERAL_RES:
+        for match in pattern.finditer(command):
+            if match[1] not in seen:
+                seen.add(match[1])
+                yield match[1]
+
+
 # --- referenced-script reading ----------------------------------------------------------------
 
 def _has_binary_magic(data: bytes) -> bool:
@@ -1414,8 +1438,10 @@ def _contains_unsafe_gateway_action(
     walk_command = (strip_inert_heredoc_bodies(command, nested=True) if budget.mask_heredocs
                     else command)
 
-    for payload in _iter_shell_command_payloads(walk_command):
-        # An `sh -c` payload is text of the same file (or command) it appears in.
+    for payload in itertools.chain(_iter_shell_command_payloads(walk_command),
+                                   _iter_printed_shell_payloads(walk_command)):
+        # An `sh -c` payload is text of the same file (or command) it appears in; so is a string
+        # an interpreter prints when its output is fed to a shell.
         if recurse(payload, cwd, executed, source):
             return True
 

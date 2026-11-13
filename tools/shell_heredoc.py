@@ -480,6 +480,28 @@ def _owner_runs_inert_consumer(
 
 # Anything that could hand a function's OUTPUT to a shell (`f | bash`, `eval "$(f)"`, `. <(f)`).
 _OUTPUT_EXECUTOR_RE = re.compile(r"\||\$\(|`|<\(|>\(|\beval\b|\bsource\b|(?:^|[\s;&(])\.\s")
+# Programs that run text they receive as shell code (a remote login shell for bare `ssh h`).
+_SINK_SHELLS = r"(?:(?:ba|da|z|k|mk|tc|c|fi|a)?sh|busybox|ssh|su|sudo\s+-[A-Za-z]*[si])"
+_WORD_START, _WORD_END = r"(?<![\w.-])", r"(?![\w.-])"
+# Shapes that hand some command's OUTPUT to a shell as code, so a data consumer's body (or a
+# string its interpreter prints) may be shell text after all: `… | [wrappers] bash`, `| ssh h`,
+# `eval`, `. <(…)`/`source /dev/stdin`, `bash <(…)`/`<<<`, `sh -c "$(…)"`, `$(…)` as a command.
+_SHELL_SINK_RE = re.compile(
+    rf"(?<!\|)\|&?(?!\|)[^|;&\n]*?{_WORD_START}(?:{_SINK_SHELLS}|eval){_WORD_END}"
+    rf"|{_WORD_START}eval{_WORD_END}"
+    r"|(?:^|[\s;&|({])(?:source|\.)\s+(?:<\s*\(|/dev/(?:stdin|fd/)|/proc/self/fd/)"
+    rf"|{_WORD_START}{_SINK_SHELLS}{_WORD_END}[^|;&\n]*?(?:<\(|<<<)"
+    rf"|{_WORD_START}(?:ba|da|z|k|mk|a)?sh\s+(?:[-+][A-Za-z]+\s+)*-[A-Za-z]*c\s*\"?(?:\$\(|`)"
+    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b)\s*\"?(?:\$\((?!\()|`)",
+    re.MULTILINE)
+
+
+def output_reaches_shell(command: str) -> bool:
+    """Whether some command's output in *command* may be run as shell code (see
+    ``_SHELL_SINK_RE``). Deliberately broad: a match only stops treating consumer heredoc bodies
+    and printed string literals as data (the lifecycle walk then scans them as commands); it never
+    refuses on its own."""
+    return _SHELL_SINK_RE.search(command) is not None
 
 
 def _nonreading_shell_unit(unit: str, functions: set[str]) -> bool:
@@ -643,6 +665,10 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
             stdin.intact = False
         command_start = body_cursor
     result = _apply_replacements(command, replacements)
+    if replacements and output_reaches_shell(result):
+        # Some output here may be run as shell code (`( python3 - <<'PY' … ) | bash`, `f | bash`,
+        # `eval "$(…)"`): a consumer's body may be the shell's program, so mask nothing.
+        return command
     if function_masks and not nested and _OUTPUT_EXECUTOR_RE.search(_mask_simple_quotes(result)):
         # A function's output may reach a shell here: its consumer bodies stay visible to text scans.
         result = _apply_replacements(

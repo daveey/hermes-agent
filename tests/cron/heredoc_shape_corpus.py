@@ -18,9 +18,14 @@ keyword-prefix aliases (``alias t='time '``) turn ``t ( bash ./big.sh )`` into a
 runs an unscannable script, and ``alias python3=bash`` runs a "Python" heredoc body as shell. The
 guard is told the session's alias names (``scan_gateway_lifecycle(session_aliases=…)``).
 
+A third family (``s_position == "sink"``) hands a data consumer's OUTPUT to a shell (``python3 -
+<<'PY' | bash``, ``f | sudo bash``, ``eval "$(…)"``, ``. <(…)``, …) under every stdin wrapper and
+nesting form: the printed ``bash ./big.sh`` (over the scan cap) or restart is shell code there.
+
 Real bash runs every case with a fake ``hermes`` that writes a marker. The property the test
 asserts: when bash ran the payload and origin/main refuses the command, the tree under test
-refuses it too. origin/main's verdicts are checked in (``main_verdicts.json``) with its sha.
+refuses it too; a sink case must be refused whenever bash ran it. origin/main's verdicts are
+checked in (``main_verdicts.json``) with its sha.
 
 Startup-file payloads need bash to source the test's ``$HOME`` files; ``startup_shell_prefix``
 finds an argv prefix that makes it do so on this host (none, or bubblewrap masking the system
@@ -99,6 +104,25 @@ SESSION_PAYLOADS = {
     "consumer-wrapped": "timeout 5 env A=1 " + _INNER,
 }
 SESSION_FORMS = ("plain", "function", "subshell")
+# Third family (``s_position == "sink"``, review 5888336995 nit 3): a data consumer's OUTPUT is
+# handed to a shell, so the line it prints is shell code. Consumers print one line; sinks pipe,
+# ``eval``, process-substitute or source that output; nestings wrap the consumer. ``big`` prints
+# ``bash ./big.sh`` (over the scan cap: the walk must fail closed); ``direct`` prints the restart.
+SINK_CONSUMERS = {
+    "python": ("python3 - <<'PY'", "print('{line}')\n"),
+    "cat": ("cat <<'PY'", "{line}\n"),
+}
+SINK_LINES = {"big": "bash ./big.sh", "direct": 'hermes gateway "restart"'}
+SINKS = {
+    "| bash": ("pipe", "bash"),
+    "| sh -s": ("pipe", "sh -s"),
+    "| sudo bash": ("pipe", "sudo bash"),
+    "| ssh h bash": ("pipe", "ssh h bash"),
+    'eval "$(…)"': ("wrap", 'eval "$( ', ' )"'),
+    "bash <(…)": ("wrap", "bash <( ", " )"),
+    ". <(…)": ("wrap", ". <( ", " )"),
+}
+SINK_NESTINGS = ("plain", "function", "subshell", "group", "outer", "ssh")
 # Over the 1 MiB scan cap, so a walk that executes it fails closed; bash runs it to the end.
 BIG_SCRIPT = "# padding\n" * 130000 + 'hermes gateway "restart"\n'
 # Startup file: record that it ran, keep the fake bin on PATH, then rewrite the rest of stdin.
@@ -126,6 +150,30 @@ class Case:
     nesting: str
     payload: str
     session: str = ""  # a SESSIONS key (session cases only): aliases the shell already holds
+    sink: str = ""  # a SINKS key (sink cases only): what runs the consumer's output
+
+
+def build_sink_command(sink: str, wrapper: str, nesting: str, consumer: str, line: str) -> str:
+    """A consumer heredoc (behind *wrapper*) printing *line*, nested per *nesting*, whose output
+    *sink* hands to a shell."""
+    if nesting in ("outer", "ssh"):
+        inner = build_sink_command(sink, wrapper, "plain", consumer, line)
+        opener = "bash -s <<'OUTER'" if nesting == "outer" else "ssh h 'bash -s' <<'OUTER'"
+        return f"{opener}\n{inner}OUTER\n"
+    opener, body = SINK_CONSUMERS[consumer]
+    opener, body = wrapper + opener, body.format(line=SINK_LINES[line]) + "PY\n"
+    prelude = ""
+    if nesting == "function":
+        prelude, head, tail = f"f() {{\n{opener}\n{body}}}\n", "f", "\n"
+    elif nesting in ("subshell", "group"):
+        start, end = ("(", ")") if nesting == "subshell" else ("{", "}")
+        head, tail = f"{start}\n{opener}\n{body}{end}", "\n"
+    else:
+        head, tail = opener, "\n" + body
+    kind, *parts = SINKS[sink]
+    if kind == "pipe":
+        return f"{prelude}{head} | {parts[0]}{tail}"
+    return f"{prelude}{parts[0]}{head}{tail}{parts[1]}\n"
 
 
 def session_alias_names(session: str) -> frozenset[str]:
@@ -193,11 +241,21 @@ def generate_full_corpus() -> list[Case]:
         # Old keys stay command-only; a session case's key also names its session.
         key = hashlib.sha1(f"session {session}\n{command}".encode()).hexdigest()[:16]
         cases.setdefault(key, Case(key, command, "bash", (), "session", "", form, payload, session))
+    for sink, wrapper, nesting, consumer, line in itertools.product(
+            SINKS, WRAPPERS, SINK_NESTINGS, SINK_CONSUMERS, SINK_LINES):
+        command = build_sink_command(sink, wrapper, nesting, consumer, line)
+        key = hashlib.sha1(command.encode()).hexdigest()[:16]
+        cases.setdefault(key, Case(key, command, "bash", (), "sink", wrapper, nesting,
+                                   f"{consumer}-{line}", sink=sink))
     return list(cases.values())
 
 
 def _cover_keys(case: Case) -> set[tuple]:
-    """Dimension values a case exercises, each with its ``-s`` placement and nesting form."""
+    """Dimension values a case exercises, each with its ``-s`` placement and nesting form (a sink
+    case: every sink x nesting x consumer x line, and every wrapper under each sink and nesting)."""
+    if case.s_position == "sink":
+        return {("sink", case.sink, case.nesting, case.payload),
+                ("sink-wrapper", case.sink, case.wrapper, case.nesting)}
     where = (case.s_position, case.nesting)
     words = [word for word in case.words if word != "-s"]
     return ({("option", word, *where) for word in words} | {("wrapper", case.wrapper, *where)}
@@ -245,7 +303,9 @@ def prepare(root: Path) -> dict[str, str]:
     ssh = root / "ssh"
     # Local SSH transport control; no network access.
     ssh.write_text('#!/bin/sh\nshift\nexec /bin/sh -c "$*"\n')
-    for tool in (hermes, ssh, evil_python):
+    sudo = root / "sudo"
+    sudo.write_text('#!/bin/sh\nexec "$@"\n')  # no privilege change: runs its operand
+    for tool in (hermes, ssh, sudo, evil_python):
         tool.chmod(0o755)
     return {"PATH": f"{root}:/usr/bin:/bin", "FAKE_BIN": str(root), "HOME": str(home),
             "BASH_ENV": "", "ENV": str(home / ".profile"), "LANG": "C.UTF-8"}
@@ -353,9 +413,10 @@ def evaluate(root: Path, cases: list[Case]) -> list[tuple[Case, bool, bool]]:
 
 
 def violations(results, main_refuses) -> list[Case]:
-    """Cases bash ran, main refuses, and the guard under test allows."""
+    """Cases bash ran, main refuses, and the guard under test allows. A sink case must be refused
+    whenever bash ran it, whatever main says: main allows most of them (the nit-3 gap)."""
     return [case for case, executed, refused in results
-            if executed and main_refuses(case) and not refused]
+            if executed and (case.s_position == "sink" or main_refuses(case)) and not refused]
 
 
 def corpus_digest(cases: list[Case]) -> str:
