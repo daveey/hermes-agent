@@ -1262,13 +1262,17 @@ def test_job_lists_of_a_scan_are_read_concurrently(kanban_home, monkeypatch) -> 
 
 def test_scan_lists_more_than_ten_in_progress_runs(kanban_home, monkeypatch) -> None:
     """On 2026-11-13 the run holding the one ``hermes-state`` runner sat at index 23 of 24 in-progress runs: a
-    run list read with ``per_page=10`` never sees it and answers ``not_starting`` for a busy pool."""
-    def jobs_for(run_id: int) -> list:
-        return [_taken(run_id=run_id, started_age=60, status="in_progress")] if run_id == 921 else []
+    run list read with ``per_page=10`` never sees it and answers ``not_starting`` for a busy pool. The match sits
+    at the last index the scan reads, so a run list read with any page size below ``IN_PROGRESS_RUNS_MAX`` misses
+    it."""
+    last = 900 + kcp.IN_PROGRESS_RUNS_MAX - 1
 
-    _scan_api(monkeypatch, 23, jobs_for)
+    def jobs_for(run_id: int) -> list:
+        return [_taken(run_id=run_id, started_age=60, status="in_progress")] if run_id == last else []
+
+    _scan_api(monkeypatch, kcp.IN_PROGRESS_RUNS_MAX, jobs_for)
     p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
-    assert p.state == kcp.BUSY and "took job 9210" in p.detail, p
+    assert p.state == kcp.BUSY and f"took job {last * 10}" in p.detail, p
 
 
 @pytest.mark.parametrize("match,state", [(True, kcp.BUSY), (False, kcp.NOT_STARTING)], ids=["match", "no-match"])
@@ -1320,3 +1324,43 @@ def test_unreadable_job_list_does_not_skip_the_completed_runs(kanban_home, monke
     monkeypatch.setattr(kcp, "_gh_api", api)
     p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
     assert p.state == kcp.BUSY and "took job 9500" in p.detail, p
+
+
+@pytest.mark.parametrize("match,state", [(True, kcp.BUSY), (False, kcp.NOT_STARTING)], ids=["match", "no-match"])
+def test_unreadable_in_progress_run_list_does_not_skip_the_completed_runs(kanban_home, monkeypatch, match,
+                                                                          state) -> None:
+    """PR #2380: a 502 on the in-progress run list does not end the scan: the completed list is still read, and
+    its recent run's job shows the pool alive. With no match there the answer is not remembered."""
+    reads: list[str] = []
+
+    def api(path: str) -> dict:
+        reads.append(path)
+        if "actions/runs?" in path:
+            if "status=completed" in path:
+                return {"workflow_runs": [{"id": 950, "status": "completed", "updated_at": _iso(60)}]}
+            raise RuntimeError("gh api exit 1: HTTP 502")
+        labels = LABELS if match else ("self-hosted", "ci-slow")
+        return {"jobs": [_taken(run_id=950, started_age=60, status="completed", labels=labels)]}
+
+    monkeypatch.setattr(kcp, "_gh_api", api)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
+    assert p.state == state, p
+    assert match is ("took job 9500" in p.detail), p
+    assert any("/runs/950/jobs" in path for path in reads), reads
+    assert bool(kcp._POOL_SCANS) is match  # a match is remembered; "none" with an unread list is not
+
+
+@pytest.mark.parametrize("exc", [KeyError("jobs"), TypeError("bad payload")], ids=["KeyError", "TypeError"])
+def test_unexpected_job_read_error_propagates_out_of_the_scan(kanban_home, monkeypatch, exc) -> None:
+    """PR #2380: only I/O failures (OSError, RuntimeError, ValueError, TimeoutExpired) are noted and skipped. A bug
+    in a job read is not swallowed as "unreadable": ``ci_run_progress`` catches no such error from the pool scan,
+    so it reaches the sweep's own handler instead of reading ``not_starting``."""
+    def jobs_for(run_id: int) -> list:
+        if run_id == 901:
+            raise exc
+        return []
+
+    _scan_api(monkeypatch, 4, jobs_for)
+    with pytest.raises(type(exc)):
+        kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
+    assert kcp._POOL_SCANS == {}
