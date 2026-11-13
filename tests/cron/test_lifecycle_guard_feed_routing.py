@@ -74,6 +74,16 @@ def files(tmp_path) -> dict[str, str]:
         # The program reader's own `&>`/`>&` redirections leave it reading the pipe.
         "cat {py} | python3 &>{out}",
         "cat {py} | python3 2>&1",
+        # A `&>` glued to the word before it is still a redirection, not part of that word.
+        "bash {sh}&>/dev/null",
+        "bash {sh}&>/dev/null &",
+        "bash {sh}&>>{out}",
+        ". {sh}&>/dev/null",
+        "python3 {py}&>/dev/null",
+        "python3 {py}&>{out}",
+        "python3 <{py}&>/dev/null",
+        "python3&>/dev/null <{py}",
+        "cat {py}|python3&>/dev/null",
         # A `cat` reading the pipe inside `<(…)`, and beside a file.
         "cat {sh} | bash <(cat)",
         "cat {py} | cat {clean} - | python3",
@@ -131,3 +141,15 @@ def test_redirection_ampersands_survive_tokenizing():
     assert words("echo '2>&1' \"&>\" 'a&'>x") == ["echo", "2>&1", "&>", "a&>x"]
     assert words("echo \\>&1") == ["echo", ">", "&", "1"]
     assert words("echo '>'&1") == ["echo", ">", "&", "1"]
+
+
+def test_glued_ampersand_redirection_splits_from_its_word():
+    from cron.lifecycle_guard_groups import split_glued_redirections as split
+
+    assert split("python3 f.py&>x") == "python3 f.py &>x"
+    assert split("a 'b'&>>y") == "a 'b' &>>y"
+    # `>&`, `&&>`, `|&>`, a quoted `&` and a lone `&` are left as written; an escaped `&` is
+    # part of the word, so only the `>` after it splits off.
+    assert split("a 2>&1 >&2") == "a 2>&1 >&2"
+    assert split("a&&>x a|&>x a & b") == "a&&>x a|&>x a & b"
+    assert split("echo 'a&>x' a\\&>x") == "echo 'a&>x' a\\& >x"

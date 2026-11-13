@@ -61,6 +61,7 @@ def split_glued_redirections(line: str) -> str:
     (before a ``#`` comment), or at its start when the line ends in a control operator (``|``,
     ``&&``, ...), so no operand is added and no pipe is cut. A head with no such tail is an
     ordinary word and changes nothing (``bash -s {a[x < f.sh`` keeps its stdin)."""
+
     out: list[str] = []
     word = ""
     word_out = 0  # where *word* starts in *out*
@@ -84,6 +85,8 @@ def split_glued_redirections(line: str) -> str:
                 out.append("\\" + ch)
                 word += ch
                 continue
+            if ch == "&" and word and word[-1] not in "<>" and line[index + 1: index + 2] == ">":
+                out.append(" ")
             if ch.isspace() or ch in CONTROL_CHARS:
                 if ch in CONTROL_CHARS:
                     head_out = None
