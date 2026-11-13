@@ -391,3 +391,39 @@ def test_a_cursor_inside_a_write_transaction_sees_its_own_writes(board):
         board.execute("UPDATE tasks SET title = 'mine' WHERE id = ?", (tid,))
         changed, _ = tc.changed_since(board, cursor)
     assert changed == {tid}
+
+
+# [daveey] Review 5898003274 (B1/B2): a trigger's own conflict policy is overridden by the outer statement's. A mark
+# written as ``INSERT OR REPLACE`` became ``OR IGNORE`` under ``INSERT OR IGNORE INTO task_links`` (the bump stayed, the
+# mark was dropped: a non-FULL miss once a later write re-aligned MAX(rev)), and ``OR ABORT``/``FAIL``/``ROLLBACK`` made
+# the content write raise UNIQUE on kanban_task_change. The mark is an ``ON CONFLICT DO UPDATE`` upsert, which no outer
+# policy overrides.
+def test_link_tasks_or_ignore_marks_the_already_marked_parent(board):
+    parent = kb.create_task(board, title="parent", assignee="w")
+    child = kb.create_task(board, title="child", assignee="w")
+    other = kb.create_task(board, title="other", assignee="w")
+    cursor = _armed(board)
+    kb.link_tasks(board, parent, child)  # INSERT OR IGNORE INTO task_links (parent already has a mark row)
+    _write(board, "UPDATE tasks SET title = 'later' WHERE id = ?", (other,))
+    changed, _ = tc.changed_since(board, cursor)
+    assert changed == {parent, child, other}
+
+
+@pytest.mark.parametrize("policy", ["OR IGNORE", "OR ABORT", "OR FAIL", "OR ROLLBACK", "OR REPLACE", ""])
+def test_every_outer_conflict_policy_marks_and_never_raises(board, policy):
+    tid = kb.create_task(board, title="a", assignee="w")
+    cursor = _armed(board)
+    _write(board, f"INSERT {policy} INTO task_comments (task_id, author, body, created_at) VALUES (?, 'me', 'hi', 1)",
+           (tid,))
+    changed, _ = tc.changed_since(board, cursor)
+    assert changed == {tid}
+
+
+def test_update_or_ignore_marks_the_already_marked_task(board):
+    tid = kb.create_task(board, title="a", assignee="w")
+    _write(board, "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, created_at) VALUES (?, 'p', 'c1', 1)",
+           (tid,))
+    cursor = _armed(board)
+    _write(board, "UPDATE OR IGNORE kanban_notify_subs SET chat_id = 'c2' WHERE task_id = ?", (tid,))
+    changed, _ = tc.changed_since(board, cursor)
+    assert changed == {tid}

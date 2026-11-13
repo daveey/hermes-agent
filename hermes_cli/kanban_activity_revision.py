@@ -88,9 +88,14 @@ _CHANGE_DDL = (f"CREATE TABLE IF NOT EXISTS {CHANGE_TABLE} (task_id TEXT PRIMARY
 
 
 def _mark(ref: str, when: str = "") -> str:
-    """Upsert the task ``ref`` (``NEW.x``/``OLD.x``, NULL = ``FULL_MARK``) at the revision just bumped."""
-    return (f"INSERT OR REPLACE INTO {CHANGE_TABLE} (task_id, rev) SELECT COALESCE({ref}, '{FULL_MARK}'), revision "
-            f"FROM {REVISION_TABLE} WHERE id = 1{when};")
+    """Upsert the task ``ref`` (``NEW.x``/``OLD.x``, NULL = ``FULL_MARK``) at the revision just bumped.
+
+    An ``ON CONFLICT DO UPDATE`` upsert, never ``INSERT OR REPLACE``: an outer statement's conflict policy overrides a
+    trigger body's ``OR`` policy, so ``INSERT OR IGNORE INTO task_links`` silently dropped the mark (while the bump
+    stayed) and ``INSERT OR ABORT`` raised UNIQUE on this table. No outer policy overrides an upsert clause. (The
+    ``WHERE`` is required: it keeps SQLite from parsing ``ON CONFLICT`` as a join constraint.)"""
+    return (f"INSERT INTO {CHANGE_TABLE} (task_id, rev) SELECT COALESCE({ref}, '{FULL_MARK}'), revision "
+            f"FROM {REVISION_TABLE} WHERE id = 1{when} ON CONFLICT(task_id) DO UPDATE SET rev = excluded.rev;")
 
 
 def _marks(op: str, keys: tuple[str, ...]) -> str:
