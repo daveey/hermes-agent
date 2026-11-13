@@ -125,6 +125,7 @@ _CLI_LINES = [
     ("reclaim", "reclaim {tid}"),
     ("move", "move {tid} --pool --reason x --reclaim"),
     ("reassign", "reassign {tid} other --reclaim"),
+    ("assign", "assign {tid} other"),  # not a status write, but it changes who owns the holder's live run
     ("promote", "promote {tid}"),
     ("reopen", "reopen {tid} --reason x"),
     ("edit", "edit {tid} --result x"),
@@ -211,3 +212,26 @@ def test_cli_complete_when_this_gateway_holds_the_lease_completes_as_before(gws,
     rc, out = _cli(f"complete {tid} --summary x")
     assert rc == 0 and f"Completed {tid}" in out, out
     assert kb.get_task(hub.conn, tid).status == "done"
+
+
+def test_cli_assign_after_the_remote_lease_expired_assigns_as_before(gws, svc, kills):
+    hub, worker = gws
+    tid = _running_on_worker(hub, worker, svc)
+    hub.enter()
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET lease_expires = ? WHERE id = ?", (int(time.time() * 1000) - 1000, tid))
+    rc, out = _cli(f"assign {tid} other")
+    assert rc == 0 and f"Assigned {tid} to other" in out, out
+    assert kb.get_task(hub.conn, tid).assignee == "other"
+
+
+def test_cli_assign_when_this_gateway_holds_the_lease_assigns_as_before(gws, svc, kills):
+    hub, worker = gws
+    tid = _running_on_worker(hub, worker, svc)
+    hub.enter()
+    own = str(sync._state(hub.conn)["gateway_id"])
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET lease_holder = ? WHERE id = ?", (own, tid))
+    rc, out = _cli(f"assign {tid} other")
+    assert rc == 0 and f"Assigned {tid} to other" in out, out
+    assert kb.get_task(hub.conn, tid).assignee == "other"

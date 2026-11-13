@@ -72,6 +72,9 @@ def refusal(verb: str, task_id: str, holder: str) -> str:
 CLI_FENCED_VERBS = frozenset({
     "complete", "block", "schedule", "unblock", "request-review", "request-changes", "reopen-review", "reclaim",
     "move", "reassign", "promote", "reopen",
+    # Not a status write, and the Board accepts it, but it changes who owns the holder's live run
+    # (``assign_task`` refuses only a local claim_lock).
+    "assign",
 })
 
 
