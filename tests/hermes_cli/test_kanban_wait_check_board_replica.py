@@ -140,3 +140,60 @@ def test_a_live_owner_read_stands(home, monkeypatch):
     monkeypatch.setattr(kanban_wait_live, "read_task", lambda *a, **k: {"status": "running"})
     rc, text = probe()
     assert rc == 1 and "(live owner)" in text, text
+
+
+def cli(*args, capsys):
+    """``hermes kanban wait-check ...`` through the real kanban parser: ``(rc, stdout, stderr)``."""
+    import argparse
+    from hermes_cli import kanban
+    from hermes_cli.kanban_parser import build_parser
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers())
+    rc = kanban.kanban_command(parser.parse_args(["kanban", "wait-check", *args]))
+    out = capsys.readouterr()
+    return rc, out.out.strip(), out.err.strip()
+
+
+SSH_FAILURES = {
+    "connect timeout": lambda argv: subprocess.TimeoutExpired(argv, 15),
+    "no route": lambda argv: OSError(113, "No route to host"),
+}
+
+
+@pytest.fixture(params=sorted(SSH_FAILURES))
+def unreachable(request, home, monkeypatch):
+    """The owner box is down or its tailnet route is gone: the ssh probe raises instead of exiting."""
+    calls = []
+
+    def ssh(argv, **kwargs):
+        calls.append(argv)
+        raise SSH_FAILURES[request.param](argv)
+
+    monkeypatch.setattr(wait.subprocess, "run", ssh)
+    return calls
+
+
+@pytest.mark.parametrize("registry_age", [120, 5000], ids=["registry-not-yet", "registry-stale"])
+def test_an_unreachable_owner_wakes_on_a_fresh_board_met(home, unreachable, capsys, registry_age):
+    """#2370: the commonest unreachable owner is an ssh that never connects (timeout / OSError), not rc 255.
+    The fresh Board replica's done must still turn it into met, whatever the registry replica says."""
+    registry(home, "running", age=registry_age)
+    board(home, "done", age=5)
+    rc, out, err = cli("task", TID, "--gateway", GW, "--until", "done", capsys=capsys)
+    assert unreachable and unreachable[0][0] == "ssh", unreachable
+    assert rc == 0 and out.split()[:2] == [TID, "done"] and "(board replica)" in out, (rc, out, err)
+
+
+def test_an_unreachable_owner_without_board_evidence_keeps_the_registry_answer(home, unreachable, capsys):
+    registry(home, "running", age=120)
+    rc, out, err = cli("task", TID, "--gateway", GW, "--until", "done", capsys=capsys)
+    assert unreachable
+    assert rc == 1 and "(replica)" in out and "(board replica)" not in out, (rc, out, err)
+
+
+def test_an_unreachable_gateway_is_an_error_for_a_non_task_probe(home, unreachable, capsys):
+    """Only a task has a replica to fall back on: a board-empty probe that cannot reach ssh cannot tell."""
+    board(home, "done", age=5)
+    rc, out, err = cli("board-empty", "default", "--gateway", GW, capsys=capsys)
+    assert unreachable
+    assert rc == 2 and err.startswith(f"error: ssh {GW}: ") and not out, (rc, out, err)
