@@ -525,6 +525,16 @@ class _Server:
     should_exit = False
 
 
+# No keep-alive drain wait: these tests cover the fence and poll cadence (test_always_on_drain covers the drain).
+_DRAINED = {"drain_min_s": 0.0, "http_connections": lambda: 0}
+
+
+@pytest.fixture(autouse=True)
+def _not_draining():
+    yield
+    skew._DRAINING.clear()
+
+
 class _Fence:
     def __init__(self, idle=True):
         self.idle, self.committed = idle, False
@@ -540,7 +550,7 @@ class _Fence:
 def test_superseded_backend_retires_through_the_idle_fence():
     server, fence = _Server(), _Fence()
     thread = skew.start_superseded_watchdog(server, port=9148, superseded=lambda p: True, fence=fence,
-                                            poll_s=0.01, max_polls=5)
+                                            poll_s=0.01, max_polls=5, **_DRAINED)
     assert thread in skew._SKEW_WATCHDOGS
     thread.join(5)
     assert server.should_exit is True and fence.committed is True
@@ -553,7 +563,7 @@ def test_active_or_busy_backend_stays_up():
     assert server.should_exit is False
     server = _Server()
     skew.start_superseded_watchdog(server, port=9148, superseded=lambda p: True, fence=_Fence(idle=False),
-                                   poll_s=0.01, max_polls=4).join(5)
+                                   poll_s=0.01, max_polls=4, **_DRAINED).join(5)
     assert server.should_exit is False  # a live turn holds it
 
 
@@ -567,7 +577,7 @@ def test_superseded_watchdog_polls_fast_and_reports_its_successor(monkeypatch):
     state = {"pending": True}
     busy = skew.start_superseded_watchdog(_Server(), port=9148, superseded=lambda p: True,
                                           pending=lambda p: state["pending"], fence=_Fence(idle=False),
-                                          max_polls=4)
+                                          max_polls=4, **_DRAINED)
     busy.join(5)
     # a busy superseded backend re-tries the fence at the slower busy cadence, not every 2 s
     assert sleeps == [skew.SUPERSEDED_POLL_S, skew.SUPERSEDED_BUSY_POLL_S, skew.SUPERSEDED_BUSY_POLL_S,
