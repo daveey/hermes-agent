@@ -274,6 +274,22 @@ def test_global_rewrite_of_origin_refused(world, key):
     assert (err.code, err.scope) == ("origin_rewritten", "host")
 
 
+def test_global_fetch_only_rewrite_of_origin_refused(world):
+    """A global insteadOf to a fork plus a pushInsteadOf back to origin moves only the FETCH URL: push still
+    equals origin and the clone has no local url.* rule, so only the fetch-URL compare refuses it. The fork is a
+    real, reachable repository: without that compare the clone would prove while fetching from it."""
+    conn, cfg = use_home(world, "worker-2")
+    clone = world.homes["worker-2"].clone
+    fork = str(world.tmp / "fork.git")
+    git(world.tmp, "clone", "-q", "--bare", str(world.origin), fork)
+    git(world.tmp, "config", "--global", f"url.{fork}.insteadOf", str(world.origin))
+    git(world.tmp, "config", "--global", f"url.{world.origin}.pushInsteadOf", str(world.origin))
+    assert git(clone, "ls-remote", "--get-url", "origin") == fork
+    assert git(clone, "remote", "get-url", "--push", "origin") == str(world.origin)
+    err = refusal(lambda: resolve(world, conn, cfg, snap(world)))
+    assert (err.code, err.scope) == ("origin_rewritten", "host")
+
+
 def test_github_repo_uses_dispatcher_gh_argv(monkeypatch):
     """The id lookup runs under the home's gh_command_prefix (the hub's gh has no login or GH_TOKEN)."""
     from hermes_cli import kanban_gh_argv
