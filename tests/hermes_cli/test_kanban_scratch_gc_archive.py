@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import time
 from pathlib import Path
@@ -738,7 +739,17 @@ def test_root_replaced_after_scan_is_never_removed(board, monkeypatch, when):
 
 
 def _fd_path(fd):
-    return os.readlink(f"/proc/self/fd/{fd}")
+    """Resolved path of an open descriptor: /proc on Linux, F_GETPATH on macOS (which has no /proc)."""
+    if sys.platform == "darwin":
+        import fcntl
+
+        return os.path.realpath(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).rstrip(b"\0").decode())
+    return os.path.realpath(os.readlink(f"/proc/self/fd/{fd}"))
+
+
+def _real(path):
+    """Expected path in _fd_path's resolved form (macOS reports /private/var for /var)."""
+    return os.path.realpath(str(path))
 
 
 def test_archive_fsyncs_all_artifacts_bottom_up_before_publication_and_detach(board, monkeypatch):
@@ -772,9 +783,9 @@ def test_archive_fsyncs_all_artifacts_bottom_up_before_publication_and_detach(bo
     before = [p for k, p in events[:pub] if k == "fsync"]
     tree = next(i for i, p in enumerate(before) if p.endswith("tree.tar.gz"))
     manifest = next(i for i, p in enumerate(before) if p.endswith("manifest.json"))
-    payload_dir = before.index(str(Path(partial) / sa.PAYLOAD_DIR))
-    assert max(tree, manifest) < payload_dir < before.index(partial)  # files, then dir, then parent dir
-    assert str(_archive(tid).parent) in [p for k, p in events[pub:det] if k == "fsync"]
+    payload_dir = before.index(_real(Path(partial) / sa.PAYLOAD_DIR))
+    assert max(tree, manifest) < payload_dir < before.index(_real(partial))  # files, then dir, then parent dir
+    assert _real(_archive(tid).parent) in [p for k, p in events[pub:det] if k == "fsync"]
 
 
 @pytest.mark.parametrize("existing", [False, True], ids=["absent_root", "retry_existing_chain"])
@@ -833,7 +844,7 @@ def test_fsync_failure_fails_closed_without_publication(board, monkeypatch, targ
     def flaky(fd):
         link = _fd_path(fd)
         hit = {"file": link.endswith("manifest.json"), "directory": link.endswith(sa.PAYLOAD_DIR),
-               "publication_parent": link == str(_archive(tid).parent)}[target]
+               "publication_parent": link == _real(_archive(tid).parent)}[target]
         if hit:
             raise OSError(5, "EIO")
         return real_fsync(fd)
