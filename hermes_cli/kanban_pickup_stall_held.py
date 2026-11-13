@@ -67,7 +67,7 @@ def stranded(conn, own: str, machines: Optional[Mapping[str, Mapping[str, Any]]]
     from hermes_cli import kanban_pickup_held as kph
     from hermes_cli import kanban_pickup_stall as kps
     entry = (machines or {}).get(own)
-    if machines is None or not entry or entry.get("hold") is not True:
+    if machines is None or not entry or not entry.get("hold"):
         return []
     held_ms = _hold_ms(entry)
     out = []

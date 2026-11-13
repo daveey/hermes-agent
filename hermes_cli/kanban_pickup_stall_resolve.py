@@ -84,7 +84,7 @@ def _hold_lifted(own: str) -> Optional[str]:
     unreadable: fail toward keeping the alarm)."""
     from hermes_cli import kanban_worker_node as wn
     entry = ((wn.registry() or {}).get("machines") or {}).get(own)
-    if not entry or entry.get("hold") is True:
+    if not entry or entry.get("hold"):
         return None
     return f"state={entry.get('state')!r}, hold={entry.get('hold')!r}, hold_owner={entry.get('hold_owner')!r}"
 
