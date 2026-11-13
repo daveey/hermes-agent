@@ -43,15 +43,18 @@ def _inventory(hub, board_id: str) -> list[dict]:
     """Read raw pages and validate their finite feed interval without clipping."""
     rows = []
     after = ""
-    head = None
+    head = last = None
     for _ in range(10000):
         page = hub.snapshot_page(board_id, "tasks", after=after)
         if page.get("table") != "tasks" or type(page.get("head")) is not int:
             raise ValueError("invalid canonical snapshot page")
         if head is None:
             head = page["head"]
-        if page["head"] < head:
+        # Heads never decrease: the final check below then bounds every page
+        # head, so check_interval's replay covers each page's read.
+        if last is not None and page["head"] < last:
             raise ValueError("canonical inventory changed; capture a new manifest")
+        last = page["head"]
         batch = page.get("rows")
         if not isinstance(batch, list) or type(page.get("more")) is not bool:
             raise ValueError("invalid canonical inventory")
