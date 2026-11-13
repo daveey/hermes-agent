@@ -85,6 +85,28 @@ def _log_requeue(conn, kb, tid: str, env_tid: str, via: str, source: Optional[st
             })
 
 
+def _forward_missing_parent_unblock(env_tid: str, tid: str) -> Optional[str]:
+    """A missing-parent repair card whose child lives on another gateway: forward the unblock as an operator call.
+
+    The child's home applies it only when its newest parent_missing block names this repair card
+    (``kanban_operator_call._agent_block``), and records the call's caller on the ``unblocked`` event. [daveey]
+    """
+    from tools import kanban_tools as kt
+    if not kt._is_dispatcher_owned_worker():
+        return None
+    with kt._board(None) as (kb, conn):
+        from hermes_cli import kanban_foreign_card as kfc
+        from hermes_cli import kanban_requeue as kr
+        if not kr.is_missing_parent_repair_card(kb.get_task(conn, env_tid)):
+            return None
+        if kr._creator_task_id(conn, env_tid) not in (None, tid) or not kfc.refusal(conn, tid):
+            return None
+    from tools.kanban_tools_graph import handle_supervisor_request
+    return handle_supervisor_request({"ops": [{
+        "op": "operator", "action": "unblock", "task_id": tid,
+        "reason": f"missing-parent repair card {env_tid} recovered the child's dependencies"}]})
+
+
 def handle_unblock(args: dict, **kw) -> str:
     """Transition a blocked/triage/scheduled task, or a card this worker holds a requeue grant for."""
     from tools import kanban_tools as kt
@@ -95,7 +117,11 @@ def handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     if env_tid and tid != env_tid:
+        forwarded = _forward_missing_parent_unblock(env_tid, tid)
+        if forwarded is not None:
+            return forwarded
         with granted_board(args.get("board"), tid) as (kb, conn, grant):
+            from hermes_cli import kanban_requeue as kr
             from hermes_cli.kanban_requeue import OWNER_WAKE_REQUEUE_STATUSES, requeue_grant
             owner, target_board = grant if grant else (None, None)
             via, source = (("owner-wake-requeue", owner) if owner else
@@ -104,6 +130,8 @@ def handle_unblock(args: dict, **kw) -> str:
             if via:
                 def precondition(current):
                     task = kb.get_task(current, tid)
+                    if via == kr.MISSING_PARENT_VIA and kr.missing_parent_repair_grant(current, env_tid, tid) is None:
+                        return "missing-parent repair grant was revoked (the child's newest block changed)"
                     if via == "owner-wake-requeue" and (
                             task is None or task.status not in (*OWNER_WAKE_REQUEUE_STATUSES, "ready")):
                         return "owner-wake target must be triage or blocked"
@@ -124,6 +152,12 @@ def handle_unblock(args: dict, **kw) -> str:
                     release(conn, tid, supervisor=owner, supervisor_board=kb.get_current_board(),
                             precondition=precondition)
                     return kt._ok(task_id=tid, via="owner-wake-hold-release", status="ready")
+                if via == kr.MISSING_PARENT_VIA:  # attributed to the repair card's task, never to David
+                    from hermes_cli.kanban_cli_actor import tool_actor
+                    ok = kb.unblock_task(conn, tid, precondition=precondition, event_extra={
+                        "actor": tool_actor(worker_task=env_tid), "repair_task_id": source, "via": via})
+                    kt._check(ok, f"could not unblock {tid} (missing-parent repair grant no longer holds)")
+                    return kt._ok(task_id=tid, via=via, **kt._fields(kb.get_task(conn, tid), ("status",)))
                 ok = kb.unblock_task(conn, tid, precondition=precondition)
                 kt._check(ok, f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
                 _log_requeue(conn, kb, tid, env_tid, via, source)

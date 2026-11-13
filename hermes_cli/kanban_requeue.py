@@ -7,9 +7,12 @@ Moved out of ``hermes_cli/kanban.py`` (at its line cap); ``kanban`` re-exports e
 - An owner-wake supervisor card (chat-closeout ``supervise_on_board``: ``created_by='owner-wake'``, title
   ``Owner wake: supervise ...``) may unblock exactly the local ``- <board>/<id>`` card lines of its body,
   only while each is in triage or blocked (``requeue_grant``); the tool resolves cross-board grants.
+- A missing-parent repair card may unblock exactly the child whose newest ``parent_missing`` block names it
+  (``missing_parent_repair_grant``); the operator call's home check uses the same rule across gateways.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 
@@ -74,6 +77,45 @@ def self_heal_requeue_grant(conn, worker_task_id: str) -> tuple[Optional[str], O
     return (target, fix.id) if target else (None, None)
 
 
+MISSING_PARENT_DETECTOR = "missing-parent-detector"
+MISSING_PARENT_VIA = "missing-parent-repair"
+
+
+def is_missing_parent_repair_card(task) -> bool:
+    """A repair card the dispatcher's missing-parent detector filed (``kanban_db_graph.missing_parent_repair``)."""
+    return task is not None and (task.created_by or "") == MISSING_PARENT_DETECTOR
+
+
+def missing_parent_repair_grant(conn, worker_task_id: Optional[str], target_id: str) -> Optional[str]:
+    """The repair card id when ``worker_task_id`` may unblock ``target_id``, else None.
+
+    The dispatcher's parent_missing block carries no agent actor, yet it names a repair card as the owner of
+    recovery. That repair card (``created_by='missing-parent-detector'``) may unblock exactly the child that
+    created it (``creator_task_id``), and only while the child is blocked, has no human request, and its NEWEST
+    ``blocked`` event is ``source: parent_missing`` naming this very card as ``repair_task_id``. A later hand
+    block, or a block naming another repair card, revokes it. Both entry paths use it: the ``kanban_unblock``
+    tool (same gateway) and the operator call's home check (another gateway). [daveey]
+    """
+    if not worker_task_id or not target_id or worker_task_id == target_id:
+        return None
+    if not is_missing_parent_repair_card(kb.get_task(conn, worker_task_id)):
+        return None
+    if _creator_task_id(conn, worker_task_id) != target_id:
+        return None
+    row = conn.execute("SELECT status, human_request FROM tasks WHERE id = ?", (target_id,)).fetchone()
+    if row is None or row[0] != "blocked" or row[1]:
+        return None
+    ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                      "ORDER BY id DESC LIMIT 1", (target_id,)).fetchone()
+    try:
+        payload = json.loads(ev[0] or "{}") if ev else {}
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("source") != "parent_missing":
+        return None
+    return worker_task_id if payload.get("repair_task_id") == worker_task_id else None
+
+
 _OWNER_WAKE_TITLE = "Owner wake: supervise"
 # One chat-closeout ``owner_wake.card_line`` of a local card: ``- <board>/<id> "<title>": ...`` or ``- <board>/<id>:``.
 # A remote card's line names its gateway (`` on <gw>``) or a longer key, so it never matches.
@@ -107,6 +149,8 @@ def requeue_grant(conn, worker_task_id: str, target_id: str, *,
     """``(via, source_card)`` when this worker may unblock ``target_id``, else ``(None, None)``.
 
     - ``self-heal-requeue``: the self-heal grant (``self_heal_requeue_grant``), unchanged.
+    - ``missing-parent-repair``: a missing-parent repair card on its parent_missing child
+      (``missing_parent_repair_grant``).
     - ``owner-wake-requeue``: an owner-wake supervisor card (``created_by='owner-wake'``, title
       ``Owner wake: supervise ...``) may unblock exactly the cards its body lists on this board,
       and only while the target is in triage or blocked.
@@ -117,6 +161,9 @@ def requeue_grant(conn, worker_task_id: str, target_id: str, *,
     target, fix_id = self_heal_requeue_grant(conn, worker_task_id)
     if target is not None and target == target_id:
         return "self-heal-requeue", fix_id
+    repair = missing_parent_repair_grant(conn, worker_task_id, target_id)
+    if repair is not None:
+        return MISSING_PARENT_VIA, repair
     worker = kb.get_task(conn, worker_task_id)
     if not _is_owner_wake_supervisor(worker):
         return None, None
@@ -134,4 +181,6 @@ def has_requeue_grant(conn, worker_task_id: str, *, board: Optional[str] = None)
     if self_heal_requeue_grant(conn, worker_task_id)[0] is not None:
         return True
     worker = kb.get_task(conn, worker_task_id)
-    return bool(owner_wake_listed_refs(worker))
+    # A missing-parent repair card gets the tool even when its child lives on another gateway: the tool then
+    # forwards the unblock as an operator call, and the child's home re-checks the grant.
+    return bool(owner_wake_listed_refs(worker)) or is_missing_parent_repair_card(worker)

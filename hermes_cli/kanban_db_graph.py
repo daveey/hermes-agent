@@ -120,7 +120,11 @@ def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[
               + ", ".join(missing) + ".\n\n"
               "Inspect the owning gateway, full Board replica and authoritative Board row evidence. "
               "A missing local row is not proof of Board loss; check sync freshness and pickup eligibility. "
-              "Recover missing publication or dependency state, then unblock the child. "
+              "Recover missing publication or dependency state, then unblock the child with the kanban_unblock "
+              "tool: it works across gateways (when the child lives on another gateway it forwards the unblock "
+              "as an operator call, which the child's home applies) and records the unblock as this card's. "
+              "Never run the hermes CLI over ssh on the child's home gateway: that unblock is recorded as "
+              "David's. "
               "Do not unlink a required dependency merely to make it run. Record evidence and verify "
               "the child resumes. This is agent-owned repair, not a human decision."),
         assignee=_supervisor_profile(), created_by="missing-parent-detector",

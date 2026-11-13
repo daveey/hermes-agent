@@ -609,8 +609,11 @@ def _marker(conn: sqlite3.Connection, target: str, kind: str, uid: str) -> bool:
         "json_extract(payload, '$.operator_request_uid') = ? LIMIT 1", (target, kind, uid)).fetchone() is not None
 
 
-def _agent_block(conn: sqlite3.Connection, target: str) -> Optional[str]:
-    """None when the current block is an agent's (a hold David placed by hand is his to release)."""
+def _agent_block(conn: sqlite3.Connection, target: str, caller_task: Optional[str] = None) -> Optional[str]:
+    """None when the current block is an agent's (a hold David placed by hand is his to release).
+
+    ``caller_task`` is the Board-proven calling card: a missing-parent repair card may release the dispatcher's
+    parent_missing block that names it (``kanban_requeue.missing_parent_repair_grant``), and only that block."""
     row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
     if row is None:
         return f"no such task {target}"
@@ -630,6 +633,9 @@ def _agent_block(conn: sqlite3.Connection, target: str) -> Optional[str]:
     # Desktop or dashboard (no actor), a chat agent or the breaker (no blocked event) is a hold placed by hand or
     # by policy, and only its owner or a human releases it.
     if str(payload.get("actor") or "").strip() != f"agent (task {target})":
+        from hermes_cli.kanban_requeue import missing_parent_repair_grant
+        if caller_task and missing_parent_repair_grant(conn, caller_task, target) == caller_task:
+            return None
         return (f"{target} was not blocked by its own agent run (a hand, Desktop or policy hold); only its owner "
                 "or a human releases it")
     return None
@@ -662,12 +668,16 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
     if action == "unblock":
         if _marker(conn, target, "unblocked", uid):
             return "already_applied", None
-        refusal = _agent_block(conn, target)
+        refusal = _agent_block(conn, target, caller.get("task_id"))
         if refusal:
             return "refused", refusal
         reason = str(args.get("reason") or "").strip()
+        from hermes_cli.kanban_requeue import MISSING_PARENT_VIA, missing_parent_repair_grant
+        if missing_parent_repair_grant(conn, caller.get("task_id"), target):
+            extra = {**extra, "repair_task_id": caller.get("task_id"), "via": MISSING_PARENT_VIA}
         ok = kb.unblock_task(conn, target, comment=(author, f"Unblocked through an operator call: {reason}"),
-                             event_extra=extra, precondition=lambda c: _agent_block(c, target))
+                             event_extra=extra,
+                             precondition=lambda c: _agent_block(c, target, caller.get("task_id")))
         return ("applied", None) if ok else ("refused", f"cannot unblock {target} (state changed)")
     if action == "move":
         if _marker(conn, target, km.MOVED_EVENT, uid) or _marker(conn, target, MOVE_MARK, uid):

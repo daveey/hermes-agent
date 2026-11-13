@@ -1053,8 +1053,10 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
         "its defect (`kanban card t_...`), and a card that finished fix card "
         "created may do the same; an owner-wake supervisor card (\"Owner wake: "
         "supervise ...\") may unblock the cards its body lists while they are "
-        "in triage or blocked. Any other worker call is refused, and the "
-        "worker shell stays fenced."
+        "in triage or blocked; a missing-parent repair card may unblock the child "
+        "whose newest parent_missing block names it (on another gateway the call "
+        "is forwarded to the child's home as an operator call). Any other worker "
+        "call is refused, and the worker shell stays fenced."
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
