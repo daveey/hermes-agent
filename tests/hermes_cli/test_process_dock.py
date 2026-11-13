@@ -14,12 +14,25 @@ def _wait(predicate, timeout=5.0):
         time.sleep(0.05)
 
 
+def _quiet_shell(monkeypatch):
+    """Spawn through bash without rc files. ``spawn_local`` runs ``$SHELL -lic``, so the host's startup output
+    becomes a job's first output: under an empty HOME (no ``~/.sudo_as_admin_successful``) Ubuntu's
+    /etc/bash.bashrc prints its sudo hint and the idle row read ``last: See "man sudo_root" for details.``
+    instead of ``starting`` (t_01a1d6822cd87a47). The dock, not the host's rc files, is under test here."""
+    import tools.process_registry as process_registry_module
+    from tools.environments.local import _find_bash
+
+    monkeypatch.setattr(process_registry_module, 'bg_login_argv',
+                        lambda command: [_find_bash(), '--noprofile', '--norc', '-c', command])
+
+
 def test_dock_paints_processes_under_agents_and_retires_finished_rows(monkeypatch):
     from hermes_cli import cli_process_dock
     from hermes_cli.cli_subagent_monitor import SubagentMonitor
     from tools import delegate_tool_registry as registry
     from tools.process_registry import process_registry
 
+    _quiet_shell(monkeypatch)
     monkeypatch.setattr(registry, '_active_subagents', {})
     owner = SimpleNamespace(session_id='owner')
     registry._register_subagent(dict(subagent_id='a1', owner_agent_session_id='owner',
@@ -40,7 +53,7 @@ def test_dock_paints_processes_under_agents_and_retires_finished_rows(monkeypatc
         procs_at = next(i for i, line in enumerate(lines)
                         if t('cli.subagents.processes_heading', summary=summary, controls='') in line)
         assert agents_at < procs_at
-        assert any('⚙ sleep 30' in line and t('cli.dock.starting') in line for line in lines)
+        assert any('⚙ sleep 30' in line and t('cli.dock.starting') in line for line in lines), text
         assert any(f"✘ echo hello-dock; exit 3 · {t('cli.dock.exit_code', code=3)}" in line for line in lines)
         assert all(get_cwidth(line) <= 100 for line in lines)
         # Every viewport keeps at least one row of each block.
