@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import sqlite3
+import time
 from functools import partial
 from pathlib import Path
 import weakref
@@ -281,6 +283,7 @@ class _Collector:
         from gateway.kanban_tui_owner import TUI
         self.claim_platforms = (self.active_platforms | {TUI}
                                 if "local" in _platform_names(runner.adapters) else self.active_platforms)
+        self.serving_key = _serving_key(runner, self)
 
     def collect(self) -> list[dict]:
         if not self.active_platforms:
@@ -306,24 +309,26 @@ class _Collector:
                 seen_db_paths.add(resolved_db_path)
                 with _la.pass_(f"notifier.collect_board/{slug}") as acct:  # rows = deliveries claimed [daveey]
                     before = len(self.deliveries)
-                    self.collect_board(slug)
+                    if self.collect_board(slug) is _SKIPPED:
+                        acct.skip()
                     acct.rows(len(self.deliveries) - before)
         return self.deliveries
 
-    def _board_has_subs(self, slug: str) -> bool:
-        """Cheap read-only probe before the writable connect() (schema init, WAL
-        sidecars, checkpoints); a probe failure falls back to the writable open."""
+    def _probe_board(self, slug: str) -> tuple[bool, int, Optional[tuple]]:
+        """``(has owned subs, in-flight rows, gate key)`` from one cheap read-only probe before the writable
+        connect() (schema init, WAL sidecars, checkpoints). A probe failure falls back to the writable open with
+        no key, so the pass runs."""
         try:
-            count = _kbn().count_notify_subs(
+            count, inflight, key = _kbn().notify_gate_probe(
                 board=slug, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
-        except Exception as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:  # unreadable DB / bad slug: the writable open decides
             logger.debug("kanban notifier: read-only subscription probe failed "
                          "for board %s (%s); falling back to writable open", slug, exc)
-            return True
+            return True, 0, None
         if count == 0:
             logger.debug("kanban notifier: board %s has no subscriptions owned by %s; skipping open",
                          slug, sorted(self.notifier_profiles))
-        return count != 0
+        return count != 0, inflight, key
 
     def _gc_stale_subs(self, conn: Any, slug: str) -> None:
         """Best-effort stale-sub sweep: a failed sweep never blocks delivery; the next hourly gate retries."""
@@ -366,15 +371,24 @@ class _Collector:
         return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug,
                 "tui_notice": tui_floor is not None, "tui_floor": tui_floor}
 
-    def collect_board(self, slug: str) -> None:
-        """Claim events on one board, appending delivery dicts to ``deliveries``."""
-        if not self._board_has_subs(slug):
-            return
+    def collect_board(self, slug: str) -> Any:
+        """Claim events on one board, appending delivery dicts to ``deliveries``. Returns :data:`_SKIPPED` when
+        the board's gate key proves the pass would claim, recover and sweep nothing (:func:`_gate_skips`)."""
+        has_subs, inflight, board_key = self._probe_board(slug)
+        gate = _gate_state(self.runner)
+        if not has_subs:
+            gate.pop(slug, None)
+            return None
+        key = None if board_key is None else (board_key, self.serving_key)
+        now = time.monotonic()
+        if _gate_skips(gate.get(slug), key, inflight=inflight, gc_due=self.gc_due, now=now):
+            return _SKIPPED
+        gate.pop(slug, None)
         try:
             conn = _kbc().connect(board=slug)
         except Exception as exc:
             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
-            return
+            return None
         try:
             if self.gc_due:
                 self._gc_stale_subs(conn, slug)
@@ -388,10 +402,15 @@ class _Collector:
             # the first.
             subs = _kbn().list_notify_subs(
                 conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned,
-                platforms=self.claim_platforms, pending_only=True,
+                platforms=self.claim_platforms, pending_only=True, pending_kinds=self._pending_kinds(),
             )
             if not subs:
                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
+                # Nothing pending, in flight or unclaimed: the next pass is due only when the key moves (C10: a
+                # pass that left a pending sub unclaimed, for want of an adapter, an anchor or a TUI owner, is
+                # never recorded, so the next tick runs it again).
+                if key is not None and inflight == 0:
+                    gate[slug] = (key, now)
             for sub in subs:
                 try:
                     claimed = self._claim_for_sub(conn, slug, sub)
@@ -403,6 +422,61 @@ class _Collector:
                                    sub.get("task_id"), slug, sub_exc)
         finally:
             conn.close()
+        return None
+
+    def _pending_kinds(self) -> dict:
+        """The kinds each listed row's claim reads (:func:`list_notify_subs` ``pending_kinds``): a row whose only
+        unseen events are kinds its claim never takes would be listed every tick to claim nothing."""
+        from gateway import kanban_tui_owner
+        kinds = {"": TERMINAL_KINDS}
+        if kanban_tui_owner.TUI in self.claim_platforms:
+            kinds[kanban_tui_owner.TUI] = tuple(kanban_tui_owner.notify_kinds())
+        return kinds
+
+
+# --- Per-board skip gate (card H1, t_01a1d563324d7e8e design §3 / review R4, C10) [daveey] ---
+# A board's pass is skipped only when its key matches the key read before the last FULL pass, that pass listed no
+# pending subscription (so it left nothing unclaimed), and nothing is due: no in-flight claim on the board (orphan
+# and stale-claim recovery are due on time, NOTIFY_CLAIM_STALE_S, not on a write), no hourly GC, and the last full
+# pass is younger than _GATE_FLOOR_S. The key is the board's activity revision, a digest of the subscription
+# bookkeeping columns the revision ignores (kanban_db_notify.notify_gate_probe), and what this gateway serves
+# (_serving_key): an adapter (re)connecting or a route appearing re-runs every board.
+_SKIPPED = object()
+_GATE_FLOOR_S = 60.0
+
+
+def _gate_state(runner: Any) -> dict:
+    """slug -> ``(key, monotonic time of the full pass it was read before)``, kept on the runner across ticks."""
+    state = getattr(runner, "_kanban_notifier_gate", None)
+    if state is None:
+        state = {}
+        with contextlib.suppress(Exception):
+            runner._kanban_notifier_gate = state
+    return state
+
+
+def _gate_skips(recorded: Optional[tuple], key: Optional[tuple], *, inflight: int, gc_due: bool, now: float) -> bool:
+    if recorded is None or key is None or inflight or gc_due:
+        return False
+    return recorded[0] == key and now - recorded[1] < _GATE_FLOOR_S
+
+
+def _serving_key(runner: Any, collector: _Collector) -> tuple:
+    """What decides which rows this gateway lists and can claim: the platforms and profiles it serves, the
+    dispatcher-lock legacy-row ownership, each adapter object (a reconnect that swaps it re-runs) and the routes
+    that anchor a subscription to a profile."""
+    def adapters(mapping: Any) -> tuple:
+        return tuple(sorted((getattr(p, "value", str(p)).lower(), id(a)) for p, a in (mapping or {}).items()))
+    config = getattr(runner, "config", None)
+    profile_adapters = getattr(runner, "_profile_adapters", {}) or {}
+    return (
+        tuple(sorted(collector.active_platforms)), tuple(sorted(collector.claim_platforms)),
+        tuple(sorted(str(p) for p in collector.notifier_profiles)), bool(collector.include_unowned),
+        adapters(getattr(runner, "adapters", None)),
+        tuple(sorted((str(name), adapters(m)) for name, m in profile_adapters.items())),
+        bool(getattr(config, "multiplex_profiles", False)),
+        tuple(repr(route) for route in (getattr(config, "profile_routes", None) or [])),
+    )
 
 
 @_la.accounted("notifier.collect", rows=True)

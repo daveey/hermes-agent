@@ -216,6 +216,7 @@ def list_notify_subs(
     chat_id: Optional[str] = None,
     platforms: Optional[Iterable[str]] = None,
     pending_only: bool = False,
+    pending_kinds: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> list[dict]:
     """List subscriptions, optionally restricted to notifier profile owners.
 
@@ -226,6 +227,11 @@ def list_notify_subs(
     :func:`count_notify_subs` does: a per-chat poller that fetched every row and
     filtered in Python stepped thousands of rows each poll, re-taking the GIL per
     row, from every open chat at once. [daveey]
+
+    ``pending_kinds`` (with ``pending_only``) narrows "an unseen event" to the kinds the caller's claim reads:
+    lower-cased platform -> kinds, ``""`` for every other platform. A claim with ``kinds`` never moves the cursor
+    past other events, so without it every row of a running card stays pending on its heartbeats and lifecycle
+    events and the gateway notifier walked ~1,440 such rows a tick on the hub board to claim nothing. [daveey]
     """
     owner_where, owner_params = _notify_profile_filter(
         notifier_profiles, include_unowned=include_unowned,
@@ -249,8 +255,23 @@ def list_notify_subs(
     if pending_only:
         # A durable claim advanced the cursor, but a live holder can expire
         # without another event. Keep it eligible for claim-path recovery.
-        where.append("(inflight_from IS NOT NULL OR EXISTS (SELECT 1 FROM task_events e "
-                     "WHERE e.task_id = kanban_notify_subs.task_id AND e.id > kanban_notify_subs.last_event_id))")
+        unseen = ("EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = kanban_notify_subs.task_id "
+                  "AND e.id > kanban_notify_subs.last_event_id{})")
+        if pending_kinds is None:
+            where.append("inflight_from IS NOT NULL OR " + unseen.format(""))
+        else:
+            arms = ["inflight_from IS NOT NULL"]
+            overrides = sorted({str(p).lower() for p in pending_kinds if p})
+            for plat, kinds in sorted((str(p).lower(), tuple(k)) for p, k in pending_kinds.items()):
+                if plat:
+                    arms.append("LOWER(platform) = ? AND " + unseen.format(_kinds_clause(kinds)))
+                    params.extend((plat, *kinds))
+                else:
+                    guard = (f"LOWER(platform) NOT IN ({','.join('?' * len(overrides))}) AND "
+                             if overrides else "")
+                    arms.append(guard + unseen.format(_kinds_clause(kinds)))
+                    params.extend((*overrides, *kinds))
+            where.append(" OR ".join(f"({arm})" for arm in arms))
     sql = "SELECT * FROM kanban_notify_subs"
     if where:
         sql += " WHERE " + " AND ".join(f"({clause})" for clause in where)
@@ -315,6 +336,58 @@ def count_notify_subs(
                 return 0
             raise
         return int(row[0]) if row else 0
+
+
+def _kinds_clause(kinds: tuple) -> str:
+    """`` AND e.kind IN (?, ...)`` for an unseen-event probe (no kinds: nothing qualifies)."""
+    return " AND e.kind IN (" + ",".join("?" * len(kinds)) + ")" if kinds else " AND 0"
+
+
+# [daveey] The gateway notifier's per-board skip key (gateway/kanban_watchers_notifier.py, card H1). The activity
+# revision (kanban_activity_revision) moves on every row a pass reads EXCEPT the notifier's own bookkeeping columns
+# (``inflight_*``, ``last_ping_event_id``), so those enter here. ``last_event_id`` is read (it moves the revision) and
+# is summed anyway. ``last_ping_event_id`` only grows (``record_notify_ping``: MAX), so its plain sum is exact; the
+# rowid-weighted sums and the in-flight aggregates catch a claim, rewind or ack between two probes. A board with any
+# in-flight row is never skipped (its recovery is due on time, not on a write), so a collision there cannot hide one.
+_GATE_DIGEST_SQL = (
+    "SELECT COUNT(*), COUNT(inflight_from), TOTAL(last_event_id), TOTAL(last_ping_event_id), "
+    "TOTAL(last_event_id * rowid), TOTAL(last_ping_event_id * rowid), MAX(rowid), MIN(inflight_at), "
+    "TOTAL(inflight_from), TOTAL(inflight_pid), TOTAL(inflight_at) FROM kanban_notify_subs")
+
+
+def notify_gate_probe(
+    db_path: Optional[Path] = None,
+    *,
+    board: Optional[str] = None,
+    notifier_profiles: Optional[Iterable[str]] = None,
+    include_unowned: bool = False,
+) -> tuple[int, int, Optional[tuple]]:
+    """``(owned subscription count, in-flight rows on the board, gate key)`` from shared query-only readers, like
+    :func:`count_notify_subs` (never creates the file or migrates). The key is the board's activity revision
+    (``kanban_activity_revision.content_key``: a never-equal stat fallback when the counter cannot vouch for the
+    tables) plus :data:`_GATE_DIGEST_SQL` over every subscription row, read BEFORE the pass it gates: any write
+    after it moves the next probe. ``None`` key = unknown (the caller runs the pass). Raises ``sqlite3.Error`` like
+    :func:`count_notify_subs`. [daveey]"""
+    from hermes_cli import kanban_activity_revision as revision
+    from hermes_cli import kanban_reader_retention as retention
+    from hermes_cli.kanban_session_activity import cached_ro
+    path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    if not path.exists():
+        retention.prune(missing=str(path.resolve()))
+        return 0, 0, None
+    path = path.resolve()
+    content = revision.content_key(path, revision.LOCAL_TABLES, lambda p: cached_ro(p, busy_budget=0))
+    owner_where, owner_params = _notify_profile_filter(notifier_profiles, include_unowned=include_unowned)
+    count_sql = "SELECT COUNT(*) FROM kanban_notify_subs" + (f" WHERE {owner_where}" if owner_where else "")
+    with retention.reader(path) as conn:
+        try:
+            owned = int(conn.execute(count_sql, owner_params).fetchone()[0])
+            digest = tuple(conn.execute(_GATE_DIGEST_SQL).fetchone())
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return 0, 0, None
+            raise
+    return owned, int(digest[1] or 0), (content, digest) if revision.is_revision(content) else None
 
 
 def remove_notify_sub(
