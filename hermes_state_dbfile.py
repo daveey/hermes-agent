@@ -344,6 +344,11 @@ _DARWIN_FD_CLEAN_TTL_SECONDS = 30.0
 _DARWIN_FD_STALE_CLEAN_MAX_SECONDS = 300.0
 # ``base -> (valid until, key, recorded at)``, all monotonic seconds except the key.
 _darwin_clean_until: dict[str, tuple[float, tuple, float]] = {}
+# [daveey] A refresh-only pass (no caller blocked on it) that ends expired or with an error logs one
+# warning per base per this many seconds, so up to the 300 s stale window of failing background
+# refreshes is not silent. ``base -> monotonic time of the last such warning``.
+_DARWIN_FD_REFRESH_WARN_INTERVAL_SECONDS = 60.0
+_darwin_refresh_warned: dict[str, float] = {}
 
 
 def _darwin_libproc():
@@ -541,8 +546,20 @@ def _darwin_clean_servable_stale(base: str, key: tuple) -> bool:
     """[daveey] Whether an expired clean verdict for *base* may still be served: same key, and the
     pass that produced it is younger than ``_DARWIN_FD_STALE_CLEAN_MAX_SECONDS``."""
     cached = _darwin_clean_until.get(base)
-    return (cached is not None and cached[1] == key and len(cached) > 2
+    return (cached is not None and cached[1] == key
             and time.monotonic() - cached[2] < _DARWIN_FD_STALE_CLEAN_MAX_SECONDS)
+
+
+def _due_refresh_warnings(bases: list[str]) -> list[str]:
+    """[daveey] The *bases* not warned about in the last ``_DARWIN_FD_REFRESH_WARN_INTERVAL_SECONDS``,
+    marked as warned now. Caller holds ``_DARWIN_SCAN_LOCK``."""
+    now = time.monotonic()
+    due = [base for base in bases
+           if base not in _darwin_refresh_warned
+           or now - _darwin_refresh_warned[base] >= _DARWIN_FD_REFRESH_WARN_INTERVAL_SECONDS]
+    for base in due:
+        _darwin_refresh_warned[base] = now
+    return due
 
 
 class _DarwinFdScan:
@@ -559,6 +576,9 @@ class _DarwinFdScan:
         self.error: BaseException | None = None
         self.expired = False
         self.waiters = 0
+        # [daveey] Whether any caller ever blocked on this pass: such a caller logs the timeout or
+        # re-raises the error itself, even if it gave up before the pass ended.
+        self.blocked_on = False
         # ``base -> (key, watched)`` of every caller that joined; a clean verdict for each is
         # recorded before this pass stops being in flight (see :meth:`run`). ``taken`` is the
         # wall clock each caller read just before taking its key (:func:`_clean_key_settled`).
@@ -582,6 +602,16 @@ class _DarwinFdScan:
             with _DARWIN_SCAN_LOCK:
                 if _DARWIN_SCAN_IN_FLIGHT is self:
                     _DARWIN_SCAN_IN_FLIGHT = None
+                warn = (not self.blocked_on and (self.expired or self.error is not None)
+                        and _due_refresh_warnings(list(self.watchers)))
+            for base in warn or ():  # before ``done``: a waiter that wakes sees the line logged
+                logger.warning(
+                    "background deleted-WAL holder refresh for %s %s; still serving its stale "
+                    "clean verdict",
+                    base,
+                    f"failed: {self.error!r}" if self.error is not None
+                    else f"timed out after {_DARWIN_FD_SCAN_TIMEOUT_SECONDS:.1f}s",
+                )
             self.done.set()
 
     def _judge_watchers(self) -> None:
@@ -678,6 +708,7 @@ def _join_darwin_fd_scan(base: str | None = None, key: tuple | None = None,
         if scan is None or scan is _DARWIN_SCAN_CACHED:
             return scan
         scan.waiters += 1
+        scan.blocked_on = True
     try:
         # ponytail: a kernel-blocked proc_pidfdinfo cannot be interrupted, so that one thread
         # may outlive us; it is the only one, and it dies with the process.

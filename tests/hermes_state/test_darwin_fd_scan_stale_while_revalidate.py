@@ -11,6 +11,7 @@ libproc is faked with a slow pass, so these run on every platform.
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import struct
 import threading
@@ -182,3 +183,71 @@ def test_no_prior_verdict_blocks(monkeypatch, tmp_path):
 
     assert result == []
     assert elapsed >= SLOW_PASS * 0.9
+
+
+def _refresh_failure_warnings(caplog):
+    return [r for r in caplog.records
+            if r.levelno == logging.WARNING and "background deleted-WAL holder refresh" in r.getMessage()]
+
+
+def test_no_waiter_pass_that_expires_logs_one_rate_limited_warning(monkeypatch, tmp_path, caplog):
+    """(e) A refresh-only pass (no blocking waiter) that outruns its budget leaves one warning per
+    base per ``_DARWIN_FD_REFRESH_WARN_INTERVAL_SECONDS``, so failing background refreshes over the
+    300 s stale window are not silent; a second failing pass inside the interval adds none."""
+    db, base = _db_with_sidecars(tmp_path)
+    monkeypatch.setattr(dbfile, "_DARWIN_FD_SCAN_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(dbfile, "_darwin_refresh_warned", {})
+    lib = _SlowLibproc(0.3)  # longer than the budget: the pass ends expired
+    monkeypatch.setattr(dbfile, "_darwin_libproc", lambda: lib)
+    _plant_clean_verdict(base, age=60)
+    caplog.set_level(logging.WARNING, logger="hermes_state")
+
+    for _ in range(2):
+        assert _iter_darwin_sidecar_holders(db) == []  # served stale, never blocked
+        scan = dbfile._DARWIN_SCAN_IN_FLIGHT
+        assert scan is not None, "no refresh pass was started"
+        assert scan.done.wait(GUARD)
+        assert scan.expired and scan.waiters == 0
+
+    assert lib.passes == 2
+    warnings = _refresh_failure_warnings(caplog)
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert base in warnings[0].getMessage()
+
+
+def test_no_waiter_pass_that_errors_logs_a_warning(monkeypatch, tmp_path, caplog):
+    """(f) A refresh-only pass whose scan raises logs the error instead of dropping it."""
+    db, base = _db_with_sidecars(tmp_path)
+    monkeypatch.setattr(dbfile, "_darwin_refresh_warned", {})
+
+    def _boom():
+        raise OSError("libproc unavailable")
+
+    monkeypatch.setattr(dbfile, "_darwin_libproc", _boom)
+    _plant_clean_verdict(base, age=60)
+    caplog.set_level(logging.WARNING, logger="hermes_state")
+
+    assert _iter_darwin_sidecar_holders(db) == []
+    _wait_refresh()
+
+    warnings = _refresh_failure_warnings(caplog)
+    assert len(warnings) == 1
+    assert "libproc unavailable" in warnings[0].getMessage()
+
+
+def test_blocking_waiter_pass_does_not_log_the_refresh_warning(monkeypatch, tmp_path, caplog):
+    """A pass a caller blocked on already logged its timeout (or raised) at that caller, even when
+    the caller gave up before the pass ended."""
+    db, _base = _db_with_sidecars(tmp_path)
+    monkeypatch.setattr(dbfile, "_DARWIN_FD_SCAN_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(dbfile, "_darwin_refresh_warned", {})
+    lib = _SlowLibproc(0.3)
+    monkeypatch.setattr(dbfile, "_darwin_libproc", lambda: lib)
+    caplog.set_level(logging.WARNING, logger="hermes_state")
+
+    assert _iter_darwin_sidecar_holders(db) == []  # no prior verdict: blocks, then times out
+    scan = dbfile._DARWIN_SCAN_IN_FLIGHT
+    if scan is not None:
+        assert scan.done.wait(GUARD)
+
+    assert _refresh_failure_warnings(caplog) == []
