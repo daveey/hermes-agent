@@ -19,6 +19,9 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+# How `uv [global options] run [options] <command>` reads its argv.
+from cron.lifecycle_guard_uv import _uv_run_command_indices
+
 logger = logging.getLogger(__name__)
 
 
@@ -355,17 +358,6 @@ _TRANSPARENT_PREFIX_OPERANDS = {"timeout": 1}
 
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
-# `uv [global options] run [options] <command>` runs <command> (a `.py` file through Python).
-_UV_VALUE_OPTIONS = frozenset({
-    "--directory", "--project", "--config-file", "--cache-dir", "--color", "-p", "--python",
-    "--with", "--with-editable", "--with-requirements", "--env-file", "--package", "--extra",
-    "--group", "--no-group", "--only-group", "--index", "--default-index", "-i", "--index-url",
-    "--extra-index-url", "-f", "--find-links", "--index-strategy", "--keyring-provider",
-    "--resolution", "--prerelease", "--fork-strategy", "--exclude-newer", "-C",
-    "--config-setting", "--link-mode", "-P", "--upgrade-package", "--reinstall-package",
-    "--refresh-package", "--no-binary-package", "--no-build-package", "--python-platform",
-    "--allow-insecure-host", "--no-extra",
-})
 # Python program runners whose file operand (or stdin) is scanned as Python source.
 _PYTHON_RUNNER_RE = re.compile(r"^(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?$|^py(?:\.exe)?$")
 _PYTHON_SOURCE_SUFFIXES = (".py", ".pyw")
@@ -843,28 +835,47 @@ def _session_aliases_shadow_consumers(session_aliases: Optional[frozenset[str]])
                for name in session_aliases)
 
 
+_CONTROL_OPERATOR = re.compile(r"\|\||&&|\|&|;;|[;&|()]")
+
+
 def _iter_segment_contexts(command: str) -> Iterator[tuple[list[str], bool, list[str]]]:
     """``(segment, call_argument, piped_files)``: whether the segment is the argument list of a
     call (the segment right after a ``(`` that follows an ordinary word), and the files a ``cat``
-    pipes into its stdin (``cat f.sh | bash``)."""
+    pipes into its stdin (``cat f.sh | bash``). A group a pipe feeds (``cat f | (true; bash)``,
+    ``| { …; }``) passes the feed to every command in it, as the shell does."""
     for tokens in _iter_command_token_lists(command):
         segment: list[str] = []
         call_argument = False
         previous: Optional[list[str]] = None
-        piped = False
+        feed: list[str] = []
+        # The feed each open `(`/`{` group inherited: every command in it reads that stdin.
+        groups: list[list[str]] = []
         for token in tokens:
             if token and set(token) <= _CONTROL_CHARS:
                 next_is_call = token == "(" and bool(segment) and _opens_call_arguments(segment)
                 if segment:
-                    yield segment, call_argument, _cat_operands(previous) if piped else []
+                    yield segment, call_argument, feed
+                    if segment[0] == "{":
+                        groups.append(feed)
                     previous = segment
                     segment = []
-                piped = token in ("|", "|&")
+                for operator in _CONTROL_OPERATOR.findall(token):
+                    if operator in ("|", "|&"):
+                        feed = _cat_operands(previous)
+                    elif operator == "(":
+                        groups.append(feed)
+                    else:
+                        if operator == ")" and groups:
+                            groups.pop()
+                        feed = groups[-1] if groups else []
                 call_argument = next_is_call
                 continue
+            if not segment and token == "}" and groups:
+                groups.pop()
+                feed = groups[-1] if groups else []
             segment.append(token)
         if segment:
-            yield segment, call_argument, _cat_operands(previous) if piped else []
+            yield segment, call_argument, feed
 
 
 def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
@@ -933,20 +944,22 @@ def _executed_command_index(segment: list[str]) -> Optional[int]:
 def _peel_uv_run(segment: list[str], index: int) -> Optional[int]:
     """Index of the command ``uv [opts] run [opts] <command>`` runs (may be ``len(segment)``);
     ``None`` when *index* is not such a ``uv`` (``uv pip ...``, ``uv tool run``)."""
-    index += 1
-    seen_run = False
-    while index < len(segment):
-        token = segment[index]
-        if token.startswith("-"):
-            index += 2 if token in _UV_VALUE_OPTIONS else 1
-        elif seen_run:
-            return index
-        elif token == "run":
-            seen_run = True
-            index += 1
-        else:
-            return None
-    return index if seen_run else None
+    indices = _uv_run_command_indices(segment, index)
+    return indices[0] if indices else None
+
+
+def _uv_alternate_command_indices(segment: list[str]) -> list[int]:
+    """Commands a ``uv run`` in *segment* may run besides the one ``_peel_uv_run`` picks (an
+    unknown option read as taking a value), each peeled through further wrappers."""
+    alternates: list[int] = []
+    for position, token in enumerate(segment):
+        if _executable_name(token) != "uv":
+            continue
+        for candidate in _uv_run_command_indices(segment, position)[1:]:
+            peeled = _peel_transparent_prefixes(segment, candidate)
+            if peeled < len(segment) and peeled not in alternates:
+                alternates.append(peeled)
+    return alternates
 
 
 def _runs_under_uv(segment: list[str], index: int) -> bool:
@@ -977,12 +990,13 @@ def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
 
 
 def _cat_operands(segment: Optional[list[str]]) -> list[str]:
-    """Files a ``cat`` segment writes to its stdout (its stdout piped on to a program reader)."""
+    """Files a ``cat`` segment writes to its stdout (its stdout piped on to a program reader),
+    its own stdin included (``cat < f.py | python3``, ``cat - < f.py``)."""
     for view in _command_segment_views(segment) if segment else []:
         index = _executed_command_index(view)
         if index is not None and _executable_name(view[index]) == "cat":
-            arguments, _ = _split_redirections(view[index + 1 :])
-            return [argument for argument in arguments if not argument.startswith("-")]
+            arguments, stdin = _split_redirections(view[index + 1 :])
+            return [argument for argument in arguments if not argument.startswith("-")] + stdin
     return []
 
 
@@ -1035,12 +1049,59 @@ def _peel_external_time(segment: list[str], index: int) -> int:
 
 
 def _command_segment_views(segment: list[str]) -> list[list[str]]:
-    """*segment* as written, then without its leading reserved words when it has any. Callers
-    read every view, so peeling only ever ADDS a reference. Without the peeled view `time ./x.sh`,
-    `if true; then ./x.sh; fi` and `{ ./x.sh; }` read the keyword as the command and never open
-    ``./x.sh``."""
+    """*segment* as written, then without its leading reserved words when it has any, then each
+    of those with its command-position redirections moved to the end (see
+    ``_hoist_command_redirections``). Callers read every view, so peeling only ever ADDS a
+    reference. Without the peeled view `time ./x.sh`, `if true; then ./x.sh; fi` and
+    `{ ./x.sh; }` read the keyword as the command and never open ``./x.sh``; without the hoisted
+    one `< f.sh bash` and `bash<f.sh` read the redirection as the command.
+    """
     peeled = segment[_peel_reserved_words(segment):]
-    return [segment, peeled] if peeled and len(peeled) != len(segment) else [segment]
+    views = [segment, peeled] if peeled and len(peeled) != len(segment) else [segment]
+    for view in list(views):
+        hoisted = _hoist_command_redirections(view)
+        if hoisted != view and hoisted not in views:
+            views.append(hoisted)
+    return views
+
+
+def _hoist_command_redirections(segment: list[str]) -> list[str]:
+    """*segment* with each redirection that sits where the command word is read (before it, or
+    glued to it: `< f.py python3`, `sudo < f.sh bash`, `python3<f.py`) moved to the end, where the
+    stdin scan reads it. A shell applies a simple command's redirections wherever they appear,
+    so this is the same command. Only the command position is split: an argument such as
+    ``bash -c 'python3<f.py'`` may be quoted program text, and its payload is re-scanned whole."""
+    tokens = list(segment)
+    moved: list[str] = []
+    for _ in range(len(segment)):
+        index = _command_token_index(tokens)
+        if index is None:
+            break
+        index = _peel_transparent_prefixes(tokens, index)
+        if index >= len(tokens):
+            break
+        word = tokens[index]
+        width = _redirection_width(word)
+        if not width:
+            # `python3<f.py`: a word is the command up to its first `<`/`>`.
+            glued = min((p for p in (word.find("<"), word.find(">")) if p >= 0), default=-1)
+            if glued < 0:
+                break
+            tokens[index: index + 1] = [word[:glued], word[glued:]]
+            index += 1
+            width = _redirection_width(tokens[index])
+        moved.extend(tokens[index: index + width])
+        del tokens[index: index + width]
+    return tokens + moved
+
+
+def _redirection_width(word: str) -> int:
+    """Words a redirection starting at *word* spans: 1 with a glued target (``<f``), 2 when the
+    target is the next word (``< f``), 0 when *word* is not a redirection."""
+    match = _REDIRECTION.match(word)
+    if match is None:
+        return 0
+    return 1 if match.group(3) else 2
 
 
 def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
@@ -1341,10 +1402,11 @@ def _iter_referenced_shell_scripts(
             yield from _references_at(view, index, cwd, piped)
             peeled = _peel_transparent_prefixes(view, index)
             # `uv run x.py` runs Python: the interpreter scan reads it, never the shell walk (#77131).
-            if peeled != index and not (
-                    peeled < len(view) and view[peeled].endswith(_PYTHON_SOURCE_SUFFIXES)
-                    and _runs_under_uv(view, peeled)):
-                yield from _references_at(view, peeled, cwd, piped)
+            for target in [peeled, *_uv_alternate_command_indices(view)]:
+                if target != index and not (
+                        target < len(view) and view[target].endswith(_PYTHON_SOURCE_SUFFIXES)
+                        and _runs_under_uv(view, target)):
+                    yield from _references_at(view, target, cwd, piped)
 
 
 # CPython short options that take a value (glued `-Wignore` or the next token), and the ones after
@@ -1387,18 +1449,23 @@ def _iter_python_interpreter_scripts(command: str, *, cwd: Optional[str] = None)
     interpreter is never itself a wrapper, so only the executed command is read."""
     for raw_segment, _, piped in _iter_segment_contexts(command):
         for segment in _command_segment_views(raw_segment):
-            index = _executed_command_index(segment)
-            if index is None:
+            primary = _executed_command_index(segment)
+            if primary is None:
                 continue
-            if segment[index].endswith(_PYTHON_SOURCE_SUFFIXES) and _runs_under_uv(segment, index):
-                yield from _resolved_or_nothing(segment[index], cwd)
-                continue
-            if not _PYTHON_RUNNER_RE.match(_executable_name(segment[index]).lower()):
-                continue
-            arguments, stdin = _split_redirections(segment[index + 1 :])
-            operand = _python_script_operand(arguments)
-            for source in (stdin or piped) if operand == "-" else [operand] if operand else []:
-                yield from _resolved_or_nothing(source, cwd)
+            for index in [primary, *_uv_alternate_command_indices(segment)]:
+                under_uv = _runs_under_uv(segment, index)
+                if segment[index].endswith(_PYTHON_SOURCE_SUFFIXES) and under_uv:
+                    yield from _resolved_or_nothing(segment[index], cwd)
+                    continue
+                # `uv run -` runs the Python program on its stdin.
+                stdin_program = segment[index] == "-" and under_uv
+                if not stdin_program and not _PYTHON_RUNNER_RE.match(
+                        _executable_name(segment[index]).lower()):
+                    continue
+                arguments, stdin = _split_redirections(segment[index + 1 :])
+                operand = "-" if stdin_program else _python_script_operand(arguments)
+                for source in (stdin or piped) if operand == "-" else [operand] if operand else []:
+                    yield from _resolved_or_nothing(source, cwd)
 
 
 def _python_source_is_unsafe(text: str, budget: _LifecycleScanBudget) -> bool:
