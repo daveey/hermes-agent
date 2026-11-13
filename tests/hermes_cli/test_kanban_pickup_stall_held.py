@@ -54,9 +54,15 @@ def pair(tmp_path, monkeypatch):
     held = support.Gateway(tmp_path, HELD, svc, monkeypatch, pickup="explicit")
     free = support.Gateway(tmp_path, FREE, svc, monkeypatch, pickup="explicit")
 
-    def registry(machines):
+    def registry(machines, *, seen_ms=None):
+        """Serve ``machines``, stamped seen now (or at ``seen_ms``: a sweep at a simulated time sees the registry
+        as fresh only when ``last_seen`` is near that time)."""
         monkeypatch.setattr(support, "MACHINES", machines)
-        wn.set_registry_fetch(lambda: {"me": None, "machines": support.seen_now(machines.values())})
+        if seen_ms is None:
+            wn.set_registry_fetch(lambda: {"me": None, "machines": support.seen_now(machines.values())})
+        else:
+            wn.set_registry_fetch(lambda: {"me": None, "machines": [{"last_seen": seen_ms, **m}
+                                                                    for m in machines.values()]})
 
     yield held, free, t0, registry
     for g in (held, free):
@@ -138,13 +144,35 @@ def test_t3_one_alarm_after_the_threshold_for_a_default_card_only_the_held_creat
 
 def test_t3_no_alarm_when_another_machine_can_claim_the_card(pair):
     held, _free, t0, registry = pair
+    from hermes_cli import kanban_pickup_stall as kps
+    later = t0 + kps.stall_seconds() + 60
     registry(_machines(t0, free_pickup="all"))  # worker-1 copies default-placement cards: not stranded
     _own_card(held)
     held.enter()
-    registry(_machines(t0, free_pickup="all"))
-    from hermes_cli import kanban_pickup_stall as kps
-    assert kps.sweep(held.conn, now=t0 + kps.stall_seconds() + 60) == []
+    registry(_machines(t0, free_pickup="all"), seen_ms=int(later * 1000))  # fresh at the sweep, not draining
+    assert kps.sweep(held.conn, now=later) == []
     assert not _repairs(held.conn)
+
+
+@pytest.mark.parametrize("dead", ["stale", "draining"])
+def test_a_stale_or_draining_default_taker_does_not_silence_the_alarm(pair, dead):
+    """PR #2264 review 5892044674: a non-explicit machine that claims nothing (last_seen older than
+    ``kanban_pickup_stall.FRESH_SECONDS``, or ``metrics.drain_active``) is not a taker, as ``alarm_placement``
+    judges it; counting it left a card no one could claim without an alarm."""
+    held, _free, t0, registry = pair
+    from hermes_cli import kanban_pickup_stall as kps
+    later = t0 + kps.stall_seconds() + 60
+    tid = _own_card(held)
+    held.enter()
+    machines = _machines(t0, free_pickup="all")
+    if dead == "stale":
+        machines[FREE]["last_seen"] = int((later - kps.FRESH_SECONDS - 60) * 1000)
+    else:
+        machines[FREE]["metrics"] = {**machines[FREE]["metrics"], "drain_active": True}
+    registry(machines, seen_ms=int(later * 1000))
+    [alarm_id] = kps.sweep(held.conn, now=later)
+    [alarm] = _repairs(held.conn)
+    assert alarm["id"] == alarm_id and f"- {tid} (" in alarm["body"]
 
 
 def test_no_alarm_once_the_card_left_default_placement_or_the_hold_ended(pair):

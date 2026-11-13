@@ -287,12 +287,18 @@ def _can_host(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set
                                                     or HUB_ACCESS in wn.effective_labels(entry, name))
 
 
-def _ready_now(entry: Mapping[str, Any], now_ms: int) -> bool:
-    """Not draining, seen recently and (when the registry says) a free card slot."""
+def _live(entry: Mapping[str, Any], now_ms: int) -> bool:
+    """Not draining and seen within :data:`FRESH_SECONDS` (also the held-default taker test:
+    :func:`hermes_cli.kanban_pickup_stall_held.others_take_default`)."""
     if (entry.get("metrics") or {}).get("drain_active"):
         return False
     seen = entry.get("last_seen")
-    if isinstance(seen, (int, float)) and not isinstance(seen, bool) and now_ms - seen > FRESH_SECONDS * 1000:
+    return not (isinstance(seen, (int, float)) and not isinstance(seen, bool) and now_ms - seen > FRESH_SECONDS * 1000)
+
+
+def _ready_now(entry: Mapping[str, Any], now_ms: int) -> bool:
+    """:func:`_live` and (when the registry says) a free card slot."""
+    if not _live(entry, now_ms):
         return False
     free = _free_slots(entry)
     return free is None or free > 0
