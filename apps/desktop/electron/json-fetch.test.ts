@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net'
 
 import { afterAll, describe, expect, it } from 'vitest'
 
-import { destroyKeepaliveAgents, requestDeadlineBudgetMs } from './api-transport'
+import { destroyKeepaliveAgents, PROBE_POOL_MAX_SOCKETS, requestDeadlineBudgetMs } from './api-transport'
 import { fetchJsonWith, fetchPublicJsonWith, type JsonFetchDeps } from './json-fetch'
 
 /**
@@ -24,6 +24,24 @@ const SMALL = { blob: 'x' }
 // The server stays busy this long after reading the body: longer than TIMEOUT_MS, shorter than the scaled budget.
 const BUSY_MS = 600
 
+/** A loopback server on an ephemeral port: `listen()` resolves its base URL, `close()` drops every open connection. */
+function loopbackServer(handler: http.RequestListener) {
+  const server = http.createServer(handler)
+
+  return {
+    async listen(): Promise<string> {
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+
+      return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    },
+    close: () =>
+      new Promise<void>(resolve => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      })
+  }
+}
+
 /**
  * /busy reads the body, then keeps the connection active for BUSY_MS (a byte every 20 ms, so the idle timer never
  * fires) before answering with the byte count. /drop reads the body and destroys the socket without answering.
@@ -31,7 +49,7 @@ const BUSY_MS = 600
 function testServer() {
   const hits = { busy: 0, drop: 0 }
 
-  const server = http.createServer((req, res) => {
+  const server = loopbackServer((req, res) => {
     let bytes = 0
     req.on('data', chunk => (bytes += chunk.length))
     req.on('end', () => {
@@ -52,19 +70,7 @@ function testServer() {
     })
   })
 
-  return {
-    hits,
-    async listen(): Promise<string> {
-      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-
-      return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-    },
-    close: () =>
-      new Promise<void>(resolve => {
-        server.closeAllConnections()
-        server.close(() => resolve())
-      })
-  }
+  return { hits, ...server }
 }
 
 afterAll(() => destroyKeepaliveAgents())
@@ -74,30 +80,25 @@ describe('fetchJson request pools', () => {
   function holdingServer() {
     const held: http.ServerResponse[] = []
 
-    const server = http.createServer((_req, res) => {
+    const server = loopbackServer((_req, res) => {
       held.push(res)
     })
 
     return {
       held,
-      async listen(): Promise<string> {
-        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-
-        return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-      },
+      ...server,
       release() {
         for (const res of held.splice(0)) {
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end('{"ok":true}')
         }
-      },
-      close: () =>
-        new Promise<void>(resolve => {
-          server.closeAllConnections()
-          server.close(() => resolve())
-        })
+      }
     }
   }
+
+  // One more concurrent call than the probe pool has sockets.
+  const OVER_PROBE_LIMIT = PROBE_POOL_MAX_SOCKETS + 1
+  const allOk = Array.from({ length: OVER_PROBE_LIMIT }, () => ({ ok: true }))
 
   const reached = async (srv: { held: unknown[] }, count: number) => {
     const until = Date.now() + 2_000
@@ -112,18 +113,18 @@ describe('fetchJson request pools', () => {
     return srv.held.length
   }
 
-  it("pool: 'probe' rides the small probe pool, so a third concurrent probe queues", async () => {
+  it("pool: 'probe' rides the small probe pool, so one probe past its socket limit queues", async () => {
     const srv = holdingServer()
     const base = await srv.listen()
 
     try {
-      const calls = [1, 2, 3].map(() => fetchJsonWith(deps, `${base}/api/health`, 'token', { pool: 'probe' }))
+      const calls = allOk.map(() => fetchJsonWith(deps, `${base}/api/health`, 'token', { pool: 'probe' }))
 
-      expect(await reached(srv, 2)).toBe(2)
+      expect(await reached(srv, PROBE_POOL_MAX_SOCKETS)).toBe(PROBE_POOL_MAX_SOCKETS)
       srv.release()
       expect(await reached(srv, 1)).toBe(1)
       srv.release()
-      await expect(Promise.all(calls)).resolves.toEqual([{ ok: true }, { ok: true }, { ok: true }])
+      await expect(Promise.all(calls)).resolves.toEqual(allOk)
     } finally {
       await srv.close()
     }
@@ -134,11 +135,11 @@ describe('fetchJson request pools', () => {
     const base = await srv.listen()
 
     try {
-      const calls = [1, 2, 3].map(() => fetchJsonWith(deps, `${base}/api/health`, 'token'))
+      const calls = allOk.map(() => fetchJsonWith(deps, `${base}/api/health`, 'token'))
 
-      expect(await reached(srv, 3)).toBe(3)
+      expect(await reached(srv, OVER_PROBE_LIMIT)).toBe(OVER_PROBE_LIMIT)
       srv.release()
-      await expect(Promise.all(calls)).resolves.toEqual([{ ok: true }, { ok: true }, { ok: true }])
+      await expect(Promise.all(calls)).resolves.toEqual(allOk)
     } finally {
       await srv.close()
     }

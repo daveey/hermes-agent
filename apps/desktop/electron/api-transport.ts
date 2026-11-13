@@ -52,7 +52,7 @@ const HTTPS_DOWNLOAD_AGENT = new https.Agent({ keepAlive: true, maxSockets: 8 })
 // it for minutes, failed, and tore down a tunnel that was answering fine.
 // Its own tiny pool keeps the health verdict about the remote, not about our
 // local socket queue.
-const PROBE_POOL_MAX_SOCKETS = 2
+export const PROBE_POOL_MAX_SOCKETS = 2
 const HTTP_PROBE_AGENT = new http.Agent({ keepAlive: true, maxSockets: PROBE_POOL_MAX_SOCKETS })
 const HTTPS_PROBE_AGENT = new https.Agent({ keepAlive: true, maxSockets: PROBE_POOL_MAX_SOCKETS })
 
