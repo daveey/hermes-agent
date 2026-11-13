@@ -145,6 +145,7 @@ def test_malformed_memo_entry_is_dropped_and_the_aged_pass_completes(remote, arc
     {"retry_at": "x"}, {"count": None}, {"count": "2"}, {"count": True}, {"count": 0},
     {"last_at": "y"}, {"retry_at": float("inf")}, {"retry_at": 1e300}, {"retry_at": None},
     {"fingerprint": "p"}, {"reason": 5}, {"count": 10**10},
+    {"retry_at": 9.9e10},  # below 1e11 but past Windows' gmtime limit (~year 3000)
 ])
 def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     tree = tmp_path / "tree"
@@ -159,6 +160,25 @@ def test_memo_loader_drops_each_malformed_field(tmp_path, bad):
     assert set(refusals.entries) == {"ok"}
     assert bo.skip_logged(refusals, "bad", tree, 5, "t") is False
     assert bo.skip_logged(refusals, "ok", tree, 5, "t") is True
+
+
+@pytest.mark.parametrize("exc", [OSError, OverflowError, ValueError])
+def test_skip_logged_keeps_the_tree_when_retry_at_cannot_be_formatted(tmp_path, monkeypatch, caplog, exc):
+    """Windows ``time.gmtime`` raises past ~year 3000; the INFO line must never abort the GC pass."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    now = 1_000_000.0
+    refusals = bo.Refusals("default", now=lambda: now)
+    refusals.entries["t"] = {"fingerprint": bo.fingerprint(tree, 5), "count": 1, "last_at": now,
+                             "retry_at": now + 60, "reason": "r"}
+
+    def boom(*_a):
+        raise exc("timestamp out of range for platform time_t")
+
+    monkeypatch.setattr(bo.time, "gmtime", boom)
+    caplog.set_level(logging.INFO, logger="hermes_cli.kanban_scratch_backoff")
+    assert bo.skip_logged(refusals, "t", tree, 5, "t") is True
+    assert "next retry after 1000060" in caplog.text
 
 
 def test_record_saturates_count_so_the_backoff_exponent_stays_small(tmp_path):
