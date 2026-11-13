@@ -149,6 +149,25 @@ def unblock_held(conn: sqlite3.Connection, task_id: str) -> bool:
     return row is not None and row[0] in _UNBLOCKABLE and skip_wake(conn, task_id, "unblocked")
 
 
+def stale_hold(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """Read-only: the terminal hold of a row that still reads blocked/scheduled/triage (a stale copy), else None."""
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return terminal_hold(conn, task_id) if row is not None and row[0] in _UNBLOCKABLE else None
+
+
+def unblock_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """The user-facing text for an unblock ``unblock_held`` refused (CLI, dashboard, operator call), else None:
+    the row does read blocked/scheduled, so a bare "not blocked/scheduled?" would mislead. A held-done copy is
+    revived by ``reopen`` (``kanban_db_operator.reopen_done_task`` accepts it); nothing revives an archived card."""
+    hold = stale_hold(conn, task_id)
+    if hold is None:
+        return None
+    head = f"cannot unblock {task_id}: its {hold['kind']} event holds it {hold['status']} (this row is a stale copy)"
+    if hold["status"] == "done":
+        return f"{head}; use `hermes kanban reopen {task_id} --reason <why>` to revive it"
+    return f"{head}; an archived card is not revived by unblock or reopen"
+
+
 def push_status_is_stale(conn: sqlite3.Connection, task_id: str, status: Any) -> Optional[dict]:
     """The push: the terminal event a task row's live ``status`` must lose to, or None to send it.
 

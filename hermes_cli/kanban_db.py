@@ -3355,41 +3355,39 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tu
     from hermes_cli.kanban_reason_comment import reason_comment
     from hermes_cli.kanban_terminal_guard import unblock_held
     now = int(time.time())
-    # ``held`` is decided before the comment's savepoint opens: a rollback to it would drop the note.
-    with write_txn(conn), reason_comment(conn, task_id, None if (held := unblock_held(conn, task_id)) else comment) \
-            as noted:
-        if held or precondition is not None and precondition(conn):
-            return False
-        resume_status = (_resume_status_from_events(conn, task_id)
-                         if _task_status(conn, task_id) in ("blocked", "triage") else "ready")
-        _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
-            note="invariant recovery on unblock",
-        )
-        # Re-gate on parent completion before restoring the source phase.
-        landing_status = _landing_status_after_parents(conn, task_id)
-        new_status = "review" if landing_status == "ready" and resume_status == "review" else landing_status
-        # ``block_kind``/``block_recurrences`` deliberately survive the unblock:
-        # resetting them is the amnesia that let cron-unblock <-> re-block loop
-        # unbounded; only complete_task clears them. ``consecutive_failures``
-        # (the dispatcher's spawn/crash counter) IS reset — a deliberate unblock
-        # is a fresh start for the retry budget.
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL, human_request = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage')", (new_status, task_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        payload = (
-            {"status": new_status, "resume_status": resume_status}
-            if new_status != "ready" or resume_status != "ready"
-            else None
-        )
-        if event_extra:
-            payload = {**(payload or {}), **event_extra}
-        _append_event(conn, task_id, "unblocked", payload)
-        return noted.keep(True)
+    # ``held`` is decided in the write txn, before ``precondition`` and the comment savepoint (its rollback drops notes).
+    with write_txn(conn):
+        held = unblock_held(conn, task_id)
+        with reason_comment(conn, task_id, None if held else comment) as noted:
+            if held or precondition is not None and precondition(conn):
+                return False
+            resume_status = (_resume_status_from_events(conn, task_id)
+                             if _task_status(conn, task_id) in ("blocked", "triage") else "ready")
+            _reclaim_dangling_run(
+                conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
+                note="invariant recovery on unblock",
+            )
+            # Re-gate on parent completion before restoring the source phase.
+            landing_status = _landing_status_after_parents(conn, task_id)
+            new_status = "review" if landing_status == "ready" and resume_status == "review" else landing_status
+            # ``block_kind``/``block_recurrences`` deliberately survive the unblock:
+            # resetting them is the amnesia that let cron-unblock <-> re-block loop
+            # unbounded; only complete_task clears them. ``consecutive_failures``
+            # (the dispatcher's spawn/crash counter) IS reset — a deliberate unblock
+            # is a fresh start for the retry budget.
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, current_run_id = NULL, "
+                "consecutive_failures = 0, last_failure_error = NULL, human_request = NULL "
+                "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage')", (new_status, task_id),
+            )
+            if cur.rowcount != 1:
+                return False
+            payload = ({"status": new_status, "resume_status": resume_status}
+                       if new_status != "ready" or resume_status != "ready" else None)
+            if event_extra:
+                payload = {**(payload or {}), **event_extra}
+            _append_event(conn, task_id, "unblocked", payload)
+            return noted.keep(True)
 
 
 def invalidate_descendants_for_parent_reopen(

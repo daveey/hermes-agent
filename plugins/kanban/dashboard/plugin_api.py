@@ -31,7 +31,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from hermes_cli import kanban_db
+from hermes_cli import kanban_db, kanban_terminal_guard as ktg
 from hermes_cli import kanban_review_contract as _review_contract  # a dashboard "done" is never a worker run
 from hermes_cli import kanban_workflow
 from hermes_cli.web_read_coalescing import coalesced_read
@@ -758,15 +758,15 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
     if blockers:
         names = ", ".join(f"{p['title']!r} ({p['id']}, status={p['status']})" for p in blockers)
         raise _conflict(f"Cannot move to 'ready': blocked by parent(s) not done — {names}")
-    raise _conflict(_open_parent_refusal(conn, task_id, s) or f"status transition to {s!r} not valid from current state")
+    raise _conflict(_refusal_detail(conn, task_id, s) or f"status transition to {s!r} not valid from current state")
 
 
-def _open_parent_refusal(conn, task_id: str, s: str) -> Optional[str]:
-    """complete_task/request_review return bare False for a dependency refusal too;
-    for a refused ``done``/``review`` name the open parents instead of the generic text."""
-    if s not in ("done", "review"):
-        return None
-    blockers = kanban_db.unsatisfied_parents(conn, task_id)
+def _refusal_detail(conn, task_id: str, s: str) -> Optional[str]:
+    """Why a move was refused, past the generic text: a drag to ``ready`` ``unblock_task`` refused for a stale copy of
+    a done/archived card (``kanban_terminal_guard``), or a ``done``/``review`` with open parents (bare False too)."""
+    if s == "ready":
+        return ktg.unblock_refusal(conn, task_id)
+    blockers = kanban_db.unsatisfied_parents(conn, task_id) if s in ("done", "review") else []
     if not blockers:
         return None
     detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
@@ -972,7 +972,7 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
     if payload.status is not None and not payload.archive:
         s = payload.status
         if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):
-            entry.update(ok=False, error=_open_parent_refusal(conn, tid, s) or f"transition to {s!r} refused")
+            entry.update(ok=False, error=_refusal_detail(conn, tid, s) or f"transition to {s!r} refused")
     if payload.assignee is not None:
         try:
             ok = (kanban_db.reassign_task(conn, tid, payload.assignee or None, reclaim_first=True) if payload.reclaim_first

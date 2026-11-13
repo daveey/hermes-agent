@@ -128,7 +128,8 @@ def reopen_done_task(
 ) -> Optional[str]:
     """Operator reopen: ``done`` -> ``ready`` (``todo`` while a parent is open,
     the same re-gate unblock uses), ``completed_at`` cleared, the breaker reset.
-    Refuses (returns ``None``) any other status or an unknown id. Appends a
+    Refuses (returns ``None``) any other status or an unknown id, except a
+    blocked/scheduled/triage row the event log holds done (``kanban_terminal_guard.stale_hold``). Appends a
     ``reopened`` event with ``reason`` and ``actor`` plus a ``REOPENED:`` comment,
     and invalidates done/ready/running descendants through
     :func:`invalidate_descendants_for_parent_reopen` (every done-reopen surface
@@ -137,20 +138,25 @@ def reopen_done_task(
     actor = (actor or "").strip() or "operator"
     if not reason:
         raise KanbanEditRefused("reopen requires a reason")
+    from hermes_cli.kanban_terminal_guard import stale_hold
     with _kb.write_txn(conn):
-        if _kb._task_status(conn, task_id) != "done":
+        # A blocked/scheduled/triage row held done by its event log (a stale copy; ``unblock_task`` refuses it and
+        # points here) is reopened too: otherwise no verb revives it.
+        previous = _kb._task_status(conn, task_id)
+        if previous != "done" and (stale_hold(conn, task_id) or {}).get("status") != "done":
             return None
         new_status = _kb._landing_status_after_parents(conn, task_id)
         cur = conn.execute(
             "UPDATE tasks SET status = ?, completed_at = NULL, current_run_id = NULL, "
             "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-            "consecutive_failures = 0, human_request = NULL WHERE id = ? AND status = 'done'",
-            (new_status, task_id),
+            "consecutive_failures = 0, human_request = NULL WHERE id = ? AND status = ?",
+            (new_status, task_id, previous),
         )
         if cur.rowcount != 1:
             return None
         _kb._append_event(conn, task_id, "reopened", {
             "reason": reason[:2000], "actor": actor, "previous_status": "done", "status": new_status,
+            **({"stale_row_status": previous} if previous != "done" else {}),
         })
         # add_comment (nested) stamps the ``commented`` provenance: an operator note naming the PR is FYI to
         # active_pr, not a fresh publication that would hold the reopen it records. [daveey]

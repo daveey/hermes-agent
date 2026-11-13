@@ -564,3 +564,55 @@ def test_unblock_of_a_done_row_is_refused_without_a_note(board):
     assert kb.unblock_task(board, tid) is False
     assert _status(board, tid) == "done"
     assert _ignored(board, tid) == []
+
+
+# PR #2186 review 5891019707 nit 1: the human paths printed "cannot unblock <id> (not blocked/scheduled?)" for a row
+# that does read blocked/scheduled, and ``reopen`` refused the stale row ("status is 'scheduled', not 'done'").
+
+def _cli(*args):
+    import argparse
+    from hermes_cli import kanban
+    from hermes_cli.kanban_parser import build_parser
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers())
+    return kanban.kanban_command(parser.parse_args(["kanban", *args]))
+
+
+@pytest.fixture
+def human(monkeypatch):
+    from hermes_cli import kanban
+    for key in (*kanban._AGENT_ENV_MARKERS, "HERMES_KANBAN_WORKER_TASK", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_cli_unblock_of_a_stale_copy_points_at_reopen_and_reopen_revives_it(board, human, capsys):
+    tid = _parked(board)
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    assert _cli("unblock", tid) == 1
+    err = capsys.readouterr().err
+    assert f"cannot unblock {tid}: its completed event holds it done" in err
+    assert f"hermes kanban reopen {tid} --reason" in err
+    assert "not blocked/scheduled?" not in err
+    assert _cli("reopen", tid, "--reason", "more work") == 0
+    assert _status(board, tid) == "ready"
+    assert ktg.terminal_hold(board, tid) is None
+    reopened = [e for e in kb.list_events(board, tid) if e.kind == "reopened"][-1].payload
+    assert (reopened["previous_status"], reopened["stale_row_status"]) == ("done", "scheduled")
+
+
+def test_cli_unblock_of_a_card_that_is_not_held_keeps_the_generic_message(board, human, capsys):
+    tid = kb.create_task(board, title="t", assignee="worker")                      # ready: nothing to unblock
+    assert _cli("unblock", tid) == 1
+    assert f"cannot unblock {tid} (not blocked/scheduled?)" in capsys.readouterr().err
+    assert _cli("reopen", tid, "--reason", "x") == 1                              # reopen still refuses a live row
+
+
+def test_unblock_refusal_of_an_archived_copy_names_no_reopen_and_the_dashboard_echoes_it(board):
+    from plugins.kanban.dashboard import plugin_api
+    tid = _parked(board)
+    with kb.write_txn(board):
+        kb._append_event(board, tid, "archived", {})
+    text = ktg.unblock_refusal(board, tid)
+    assert text.startswith(f"cannot unblock {tid}: its archived event holds it archived")
+    assert "reopen `" not in text and "not revived" in text
+    assert plugin_api._refusal_detail(board, tid, "ready") == text

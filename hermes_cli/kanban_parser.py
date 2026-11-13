@@ -524,7 +524,8 @@ _SPECS = [
     _cmd("reopen", [
         _TASK_ID,
         _arg("--reason", required=True, help="Why the done task is reopened (event + comment)"),
-    ], help="Reopen a done task: done -> ready (todo while a parent is open); refuses other states"),
+    ], help="Reopen a done task: done -> ready (todo while a parent is open); refuses other states, "
+            "except a stale blocked/scheduled copy of a done card"),
     _cmd("block", [
         _HUMAN_REQUEST,
         _arg("--metadata-only", action="store_true",
