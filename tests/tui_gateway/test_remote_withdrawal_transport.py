@@ -65,6 +65,9 @@ def test_malformed_origin_does_not_prevent_archive(raw):
             conn.execute("UPDATE tasks SET status='blocked',human_request=? WHERE id=?", ('{"action":"private"}', tid))
             conn.execute("UPDATE origin_creation_intents SET binding_json=? WHERE task_id=?", (raw, tid))
             conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=?", (tid,))
+            # The owner also writes the origin chat's created link (_link_origin); drop it so only the malformed
+            # binding is left as a recipient source.
+            conn.execute("DELETE FROM task_chat_links WHERE task_id=?", (tid,))
         assert kb.archive_task(conn, tid)
         from hermes_cli.kanban_withdrawal_recipients import snapshot
         assert snapshot(conn, tid) == []

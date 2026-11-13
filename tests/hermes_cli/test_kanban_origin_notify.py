@@ -34,6 +34,17 @@ def _subs(task_id, platform=None):
 
 @pytest.fixture
 def owner(tmp_path, monkeypatch):
+    return _owner(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def synced_owner(tmp_path, monkeypatch):
+    """The owner with its Board sync on (``task_chat_links`` exists only on a synced board)."""
+    (tmp_path / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n")
+    return _owner(tmp_path, monkeypatch)
+
+
+def _owner(tmp_path, monkeypatch):
     for name in ("HERMES_KANBAN_DB", "HERMES_KANBAN_TASK", "HERMES_ORIGIN_SESSION"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -68,6 +79,50 @@ def test_courier_adoption_subscribes_the_bound_origin(owner):
                   "owner": {**owner["owner"], "task_id": tid}}
         assert adopt_with_origin(conn, intent, board="default") == tid
     assert ("hub", f"macbook/default/{CHAT}") in _subs(tid)
+
+
+def test_courier_adoption_writes_the_origin_chats_created_link(synced_owner):
+    from hermes_cli.kanban_origin_creation import adopt_with_origin
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Existing", assignee="default")
+        intent = {"request_id": "adopt:0123456789", "origin": synced_owner["origin"],
+                  "owner": {**synced_owner["owner"], "task_id": tid}}
+        assert adopt_with_origin(conn, intent, board="default") == tid
+    assert _links(tid) == [("macbook", "default", CHAT, "created", 0)]
+
+
+def _links(task_id):
+    with kbc.connect_closing() as conn:
+        return [tuple(r) for r in conn.execute(
+            "SELECT chat_gateway, chat_profile, chat_session, kind, released FROM task_chat_links WHERE task_id = ?",
+            (task_id,))]
+
+
+def test_courier_create_writes_the_origin_chats_created_link_once(synced_owner):
+    """[daveey] 2026-11-13 01:09 PT: placed cards had no ``task_chat_links`` row for the chat that placed them, so
+    the link waited on the origin's own Board sync (given up). The owner writes it with the subscription."""
+    from hermes_cli.kanban_chat_links import link_uid
+    args = {"title": "Build", "assignee": "default", "session_id": "kanban-placement-macbook"}
+    tid = json.loads(str(registry.dispatch("kanban_create", args, origin_intent=synced_owner)))["task_id"]
+    assert _links(tid) == [("macbook", "default", CHAT, "created", 0)]
+    with kbc.connect_closing() as conn:  # the uid the origin's ledger reconcile writes: one Board row, not two
+        assert conn.execute("SELECT uid FROM task_chat_links WHERE task_id = ?", (tid,)).fetchone()[0] == link_uid(
+            tid, "macbook", "default", CHAT, "created")
+    registry.dispatch("kanban_create", args, origin_intent=synced_owner)  # an exact retry adds nothing
+    assert _links(tid) == [("macbook", "default", CHAT, "created", 0)]
+
+
+@pytest.mark.parametrize("origin", [
+    {"gateway": "hub", "profile": "default", "session": CHAT},  # a chat on the owner: its own reconcile links it
+    {"gateway": "macbook", "profile": "default", "session": "kanban-placement-macbook"},  # attribution, no chat
+    # a receipt-shaped hash: maybe a worker's own $HERMES_SESSION_ID; only macbook can prove it is a Desktop chat
+    {"gateway": "macbook", "profile": "default", "session": "local-" + "9c" * 32},
+])
+def test_courier_create_writes_no_link_for_a_chat_on_the_owner_or_a_placeholder(synced_owner, origin):
+    args = {"title": "Build", "assignee": "default"}
+    res = json.loads(str(registry.dispatch("kanban_create", args, origin_intent={**synced_owner, "origin": origin})))
+    assert res.get("created") is True, res
+    assert _links(res["task_id"]) == []
 
 
 # --- origin side: kanban_create auto placement and the deferred forward ----------------------------------------

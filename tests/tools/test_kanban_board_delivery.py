@@ -306,16 +306,16 @@ CHAT = "20261026_235722_bef6c6"
 SHOWS_PROMISE = "shows in this chat's tasks."
 
 
-def _place_on_worker(home, monkeypatch, *, task_id):
+def _place_on_worker(home, monkeypatch, *, task_id, chat=CHAT):
     """kanban_create from a chat, placed on worker-4 (01:09 PT: t_01a1d42acdce8e23 and three more). ``task_id``
     None = the target has not answered yet (the queued-request note)."""
     from hermes_cli import kanban_capability_registry as reg
     from hermes_cli import kanban_placement as kp
     from hermes_state import SessionDB
     db = SessionDB(db_path=home / "state.db")
-    db.create_session(session_id=CHAT, source="desktop")
+    db.create_session(session_id=chat, source="desktop")
     db.close()
-    monkeypatch.setenv("HERMES_SESSION_ID", CHAT)
+    monkeypatch.setenv("HERMES_SESSION_ID", chat)
     monkeypatch.setattr(reg, "self_gateway", lambda: ME)
     monkeypatch.setattr(runstate, "placement_runs_on", lambda conn, placement: None)  # worker-4: a gateway pin
     monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "worker-4", "why": "explicit placement"})
@@ -326,55 +326,79 @@ def _place_on_worker(home, monkeypatch, *, task_id):
                                          "body": "runs on worker-4", "requires": []}))
 
 
-def test_create_placed_elsewhere_while_the_sync_role_is_given_up_says_the_chat_link_is_queued(home, monkeypatch):
+def test_create_placed_elsewhere_while_the_sync_role_is_given_up_says_only_this_gateways_copy_lags(home, monkeypatch):
+    """The owner writes this chat's link to the Board (``_link_origin``), so the link does not wait in this
+    gateway's outbox; only this gateway's replica, which the chat's task list reads, may lag."""
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
     out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23")
     assert out["ok"] is True and out["task_id"] == "t_01a1d42acdce8e23" and out["runs_where"] == "worker-4", out
     assert out["placed"]["origin_session"] == CHAT
-    assert out["chat_link"] == "queued_local" and "board_delivery" not in out  # the card itself is on worker-4
+    assert out["chat_link"] == "owner_written" and "board_delivery" not in out  # the card itself is on worker-4
+    assert "queued locally" not in json.dumps(out)
     assert SHOWS_PROMISE not in out["note"]
-    assert "shows in this chat's tasks once this gateway's Board sync recovers" in out["note"]
-    assert "queued locally: this gateway's Board sync has been stopped since " in out["note"]
-    assert "gave up the sync role" in out["board_sync"]
+    assert "shows in this chat's tasks once this gateway's copy of the Board refreshes" in out["note"]
+    assert "Worker-4 writes this chat's link to the Board; this gateway's Board sync has been stopped since " in out[
+        "note"]
+    assert out["board_sync"].startswith("worker-4 writes this chat's link to the Board")
+    assert "gave up the sync role" in out["board_sync"] and "may not refresh until it recovers" in out["board_sync"]
 
 
-def test_create_queued_on_a_target_while_stopped_says_the_chat_link_waits(home, monkeypatch):
+def test_create_queued_on_a_target_while_stopped_says_this_gateways_copy_lags(home, monkeypatch):
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
     out = _place_on_worker(path, monkeypatch, task_id=None)
-    assert out["ok"] is True and out["status"] == "queued" and out["chat_link"] == "queued_local", out
-    assert "(this chat's tasks once this gateway's Board sync recovers, " in out["note"]
+    assert out["ok"] is True and out["status"] == "queued" and out["chat_link"] == "owner_written", out
+    assert "(this chat's tasks once this gateway's copy of the Board refreshes, " in out["note"]
+
+
+def test_create_placed_from_a_desktop_hash_chat_while_stopped_says_the_link_waits_here(home, monkeypatch):
+    """The owner writes no link for a ``local-<sha256>`` chat (it cannot tell it from a worker's hash), so that
+    link still waits for this gateway's sync: #2033's ``queued_local`` note stays true for it."""
+    path, _conn = home
+    _give_up_the_sync_role(path, monkeypatch)
+    out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23", chat="local-" + "9c" * 32)
+    assert out["chat_link"] == "queued_local", out
+    assert "shows in this chat's tasks once this gateway's Board sync recovers" in out["note"]
+    assert "queued locally: this gateway's Board sync has been stopped since " in out["note"]
 
 
 @pytest.mark.parametrize("task_id", ["t_01a1d42acdce8e23", None], ids=["created", "queued"])
-def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home, monkeypatch, task_id):
+@pytest.mark.parametrize(("chat", "chat_link", "later"), [
+    (CHAT, "owner_written", "once this gateway's copy of the Board refreshes"),
+    ("local-" + "9c" * 32, "queued_local", "once this gateway's Board sync recovers"),
+], ids=["owner-written", "hash-chat"])
+def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home, monkeypatch, task_id, chat,
+                                                                           chat_link, later):
     """Review 5888858852: the rewrite anchored on literals kanban_tools also spelled out, so rewording the note
-    there made it silently do nothing. Reworded at the one source, the rewrite still lands."""
+    there made it silently do nothing. Reworded at the one source, both rewrites (owner-written and queued) land."""
     from tools import kanban_tools_board_delivery as kbd
     monkeypatch.setattr(kbd, "CHAT_TASKS_SHOWS", " and is listed under this chat")
     monkeypatch.setattr(kbd, "CHAT_TASKS_HEAD", "(listed under this chat")
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
-    out = _place_on_worker(path, monkeypatch, task_id=task_id)
-    assert out["chat_link"] == "queued_local", out
-    later = "once this gateway's Board sync recovers"
+    out = _place_on_worker(path, monkeypatch, task_id=task_id, chat=chat)
+    assert out["chat_link"] == chat_link, out
     expected = (f" and is listed under this chat {later}." if task_id else f"(listed under this chat {later}, ")
     assert expected in out["note"], out["note"]
     assert "this chat's tasks" not in out["note"]
 
 
-def test_queued_rewrite_lands_after_the_exact_head_for_any_separator(home, monkeypatch):
+@pytest.mark.parametrize(("chat", "chat_link", "later"), [
+    (CHAT, "owner_written", "once this gateway's copy of the Board refreshes"),
+    ("local-" + "9c" * 32, "queued_local", "once this gateway's Board sync recovers"),
+], ids=["owner-written", "hash-chat"])
+def test_queued_rewrite_lands_after_the_exact_head_for_any_separator(home, monkeypatch, chat, chat_link, later):
     """Review 5889250891: the anchor was the queued wording .rstrip(", "), a character set, so wording ending in
-    ": " kept its colon before the inserted text. The rewrite now goes right after the exact head constant."""
+    ": " kept its colon before the inserted text. The rewrite now goes right after the exact head constant (both the
+    owner-written and the queued rewrite)."""
     from tools import kanban_tools_board_delivery as kbd
     monkeypatch.setattr(kbd, "CHAT_TASKS_HEAD", "(see this chat's tasks")
     monkeypatch.setattr(kbd, "CHAT_TASKS_SEP", ": ")
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
-    out = _place_on_worker(path, monkeypatch, task_id=None)
-    assert out["chat_link"] == "queued_local", out
-    later = "once this gateway's Board sync recovers"
+    out = _place_on_worker(path, monkeypatch, task_id=None, chat=chat)
+    assert out["chat_link"] == chat_link, out
     assert f"(see this chat's tasks {later}: `hermes-hub requests`)" in out["note"], out["note"]
     assert f": {later}" not in out["note"]
 
@@ -393,3 +417,89 @@ def test_a_finished_remote_card_has_no_live_run_host(home):
     assert remote_runner(conn, tid) == RUNNER
     conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
     assert remote_runner(conn, tid) is None
+
+
+# --- The placed card's chat link comes from its owner, not this gateway's stopped sync ---------------------------
+# 01:20 PT (David-MBP): the Board held t_01a1d42acdce8e23 (worker-4) and three more placed cards with 0
+# task_chat_links rows. The owner's courier create (create_with_origin) wrote only a hub subscription, so the
+# chat's link came only from this gateway's ledger reconcile, pushed by the sync that had given up its role.
+
+OWNER = "worker-4"
+
+
+def _owner_creates_placed_card(tmp_path, board):
+    """worker-4 makes the card a macbook chat placed (the courier's origin intent) and its sync pushes it."""
+    from hermes_cli.kanban_sync_client import push
+    conn = kbc.connect(tmp_path / "owner" / "kanban.db")
+    try:
+        ksc.ensure_identity(conn, BOARD, OWNER)
+        sync.set_mode(conn, "primary")
+        tid = kb.create_task(conn, title="core update", assignee="default", origin_intent={
+            "request_id": "placement:macbook:1866c148153415f35121c325",
+            "owner": {"gateway": OWNER, "profile": "default", "board": BOARD},
+            "origin": {"gateway": ME, "profile": "default", "session": CHAT}})
+        push(conn, board.hub(OWNER), BOARD, OWNER, primary=True)
+    finally:
+        conn.close()
+    return tid
+
+
+def _board_links(board, tid):
+    return [(r["chat_gateway"], r["chat_profile"], r["chat_session"], r["kind"], r["released"])
+            for r in board.board(BOARD)["rows"].get("task_chat_links", {}).values()
+            if r["task_id"] == tid and not r.get("deleted_at")]
+
+
+def _stopped_origin(home, monkeypatch):
+    """This gateway's sync gives up its role, then (the stop already recorded) this process declares the current
+    columns again so the owner's push and the later recovery speak the real schema."""
+    from hermes_cli import kanban_session_activity as ksa
+    path, conn = home
+    columns = sync.SYNCED_COLUMNS["tasks"]
+    _give_up_the_sync_role(path, monkeypatch)
+    monkeypatch.setitem(sync.SYNCED_COLUMNS, "tasks", columns)
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [])  # the ledger has no binding yet
+    (path / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n    links_reader: replica\n")
+    ksa._reset_cache_for_tests()
+    from hermes_cli import kanban_chat_links
+    kanban_chat_links._reset_for_tests()
+    return path, conn
+
+
+def test_a_card_placed_while_this_gateways_sync_is_stopped_shows_in_the_chat_after_one_replica_pull(
+        home, monkeypatch, tmp_path):
+    from hermes_cli import kanban_session_activity as ksa
+    _path, _conn = _stopped_origin(home, monkeypatch)
+    board = FakeService()
+    tid = _owner_creates_placed_card(tmp_path, board)
+    assert runstate.down()  # still stopped: nothing of this gateway's reached the Board
+    # Before the fix: [] (the link waited for this gateway's ledger reconcile and push).
+    assert _board_links(board, tid) == [(ME, "default", CHAT, "created", 0)]
+    ksc._pull_replica(BOARD, board.hub(ME), ME)
+    listed = ksa.session_tasks([CHAT])
+    assert [(t["id"], t["gateway"], t["via"]) for t in listed] == [(tid, OWNER, "origin")], listed
+
+
+def test_when_this_gateways_sync_recovers_its_reconcile_keeps_the_one_link(home, monkeypatch, tmp_path):
+    from hermes_cli import kanban_chat_links as links
+    from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli.kanban_sync_client import push
+    _path, conn = _stopped_origin(home, monkeypatch)
+    board = FakeService()
+    tid = _owner_creates_placed_card(tmp_path, board)
+    runstate.clear()  # recovered: a current core's loop runs a round again
+    ksc._pull_replica(BOARD, board.hub(ME), ME)
+    links.reconcile(conn, BOARD, ME)  # binding not accepted yet: the ledger has no row, the owner's link stays
+    push(conn, board.hub(ME), BOARD, ME, primary=True)
+    assert _board_links(board, tid) == [(ME, "default", CHAT, "created", 0)]
+    # The binding is accepted: the ledger names the card, and reconcile writes the SAME uid (one Board row).
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [{
+        "id": tid, "board": BOARD, "gateway": OWNER, "key": f"{OWNER}/default/{BOARD}/{tid}", "session": CHAT,
+        "via": "origin", "origin_gateway": ME, "origin_profile": "default", "released": False,
+        "status": "ready", "unfinished": True, "title": "core update"}])
+    assert links.reconcile(conn, BOARD, ME)["released"] == 0
+    push(conn, board.hub(ME), BOARD, ME, primary=True)
+    assert _board_links(board, tid) == [(ME, "default", CHAT, "created", 0)]
+    ksc._pull_replica(BOARD, board.hub(ME), ME)
+    assert [t["id"] for t in ksa.session_tasks([CHAT])] == [tid]
+    assert links.reconcile(conn, BOARD, ME) == {"added": 0, "changed": 0, "released": 0, "retired": 0}

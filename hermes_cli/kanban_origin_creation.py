@@ -36,6 +36,42 @@ def _subscribe_origin(conn, task_id: str, origin: dict) -> None:
         (task_id, chat_id, origin["profile"], int(time.time()), task_id))
 
 
+def _link_origin(conn, task_id: str, origin: dict, owner_gateway: str) -> None:
+    """Write the origin chat's ``created`` chat link on the owner, in the caller's transaction. [daveey]
+
+    01:09 PT 2026-11-13: four cards placed from a MacBook chat on workers had no ``task_chat_links`` row on the
+    Board. This path wrote only the hub subscription, so the link came only from the origin's ledger reconcile,
+    which travels through the ORIGIN's Board sync; that sync had given up its role (SchemaAhead), so the chat never
+    saw the cards it placed. The owner's capture triggers push this row through the owner's sync. The uid is the one
+    the origin's ledger reconcile writes (``kanban_chat_links.link_uid``), so when that sync recovers it upserts the
+    same Board row rather than adding one; the owner's reconcile manages only its own chats' rows and never releases
+    it, and the origin releases it when the card closes (``_owner_written_releases``). A chat on the owner itself
+    gets none: there the owner's reconcile is the chat's gateway and keeps only links it derives itself.
+
+    A receipt-shaped origin (``local-<sha256>``, ``is_headless_session``) gets none either, unless an ancestor
+    already proves it, as in ``kanban_creator_chats.initialize_ownership``: an unreleased ``created`` link proves a
+    foreign chat (``proven_foreign_chats``), only the chat's gateway can tell a Desktop chat from a worker's own
+    hash, and ``hermes-hub create-task`` defaults the origin to a worker's ``$HERMES_SESSION_ID``. That link still
+    comes from the origin's ledger reconcile."""
+    import time
+
+    from hermes_cli.kanban_chat_links import link_uid
+    from hermes_cli.kanban_placement import is_placeholder_session
+    from hermes_cli.kanban_session_provenance import is_headless_session, proven_foreign_chats
+    if origin["gateway"] == owner_gateway or is_placeholder_session(origin["session"]):
+        return
+    chat_id = f"{origin['gateway']}/{origin['profile']}/{origin['session']}"
+    if is_headless_session(chat_id) and chat_id not in proven_foreign_chats(conn, (task_id,)):
+        return
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+        "released, created_at) VALUES (?, ?, ?, ?, ?, 'created', 0, ?)",
+        (link_uid(task_id, origin["gateway"], origin["profile"], origin["session"], "created"), task_id,
+         origin["gateway"], origin["profile"], origin["session"], int(time.time())))
+
+
 def _insert_intent(conn, row: tuple) -> None:
     """Store the intent row and its synced copy in one transaction. The row is machine-local and its binding id is a
     random secret, so only the copy lets an owner restored from the Board rebuild it (``kanban_origin_intent_carry``)."""
@@ -118,6 +154,7 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
         _insert_intent(conn, (intent["request_id"], immutable, task_id, _json(marker),
                               "origin-bind-" + secrets.token_hex(16)))
         _subscribe_origin(conn, task_id, intent["origin"])
+        _link_origin(conn, task_id, intent["origin"], intent["owner"]["gateway"])
         return task_id
 
 
@@ -178,4 +215,5 @@ def adopt_with_origin(conn, intent: dict, *, board: str) -> str:
         _insert_intent(conn, (intent["request_id"], immutable, task_id, _json(marker),
                               "origin-bind-" + secrets.token_hex(16)))
         _subscribe_origin(conn, task_id, intent["origin"])
+        _link_origin(conn, task_id, intent["origin"], intent["owner"]["gateway"])
         return task_id
