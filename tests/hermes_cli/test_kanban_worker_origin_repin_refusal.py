@@ -12,14 +12,20 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hermes_cli import kanban_placement_coordination as coord
 from hermes_cli import kanban_queue_reason as queue
 from hermes_cli import kanban_worker_placement as wp
 from tests.hermes_cli import test_kanban_pool_deny_runs_on as deny
+from tests.hermes_cli import test_kanban_queue_reason_hold as hold
 
 hub = deny.hub
 hub_judge = deny.hub_judge
 no_pull = deny.no_pull
+no_comment_hold = hold.no_comment_hold
+# These tests pin WHICH wait reasons are commented (one pickup-gate comment), not when: comment each change at once.
+pytestmark = pytest.mark.usefixtures("no_comment_hold")
 ORIGIN = [f"machine:{deny.ME}"]
 
 
