@@ -279,10 +279,12 @@ class ProcessForegroundHoldMixin:
         holds that lock across its read-decide-write, so it sees either the held entry (ours, skipped) or
         no entry, never an on-disk entry that no table of ours owns any more (it adopted that). [daveey]"""
         with ExitStack() as stack:
-            self._enter_checkpoint_lock(stack)
+            locked = self._enter_checkpoint_lock(stack)
             with self._lock:
                 dropped = self._holds().pop(session_id, None)
-            if dropped is not None:
+            # Without the lock a read-merge-write could clobber a concurrent writer's entries; the
+            # cross-profile drop below (under each file's own lock) removes the entry instead. [daveey]
+            if dropped is not None and locked:
                 try:
                     # drop_ids: the entry's child is still alive, so without it the merge keeps it as
                     # another writer's live entry until drop_from_every_checkpoint, the same window.
@@ -307,9 +309,12 @@ class ProcessForegroundHoldMixin:
                 self._holds().pop(session.id, None)
             self._track_started(session, self._log_reader_loop, f"proc-log-reader-{session.id}")
 
-    def _enter_checkpoint_lock(self, stack: ExitStack) -> None:
-        """The processes.json lock when it can be had; a release or handoff never fails for want of it."""
+    def _enter_checkpoint_lock(self, stack: ExitStack) -> bool:
+        """The processes.json lock when it can be had (True); a release or handoff never fails for want of
+        it, but a caller must not rewrite processes.json unlocked when this returns False."""
         try:
             stack.enter_context(self._checkpoint_file_lock())
         except Exception:
             logger.debug("Checkpoint file lock unavailable; settling the hold without it", exc_info=True)
+            return False
+        return True
