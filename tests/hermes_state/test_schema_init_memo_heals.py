@@ -3,7 +3,7 @@
 Before the memo every open ran the NULL-``active`` heal and retried a failed unique-title repair. With the
 memo, a settled store's later opens skip the full init, so: the NULL-active heal runs from the throttled
 per-store heal, a failed title repair is not memoized, and a heal that fails rolls back whole and leaves
-the interval unclaimed so the next open retries it.
+the interval due again after a short backoff (warning once per failure streak) so a later open retries it.
 """
 
 from __future__ import annotations
@@ -178,8 +178,79 @@ def test_a_heal_that_fails_mid_way_rolls_back_and_is_retried_by_the_next_open(
         con.close()
 
     monkeypatch.setattr(hermes_state_schema.SessionSchemaMixin, "_index_healed_rows_for_trigram", real_index)
-    SessionDB(db_path=path).close()  # same clock: the failed claim was released
+    _advance(monkeypatch, _memo().HEAL_RETRY_S + 1)  # the failed claim was rewound to the short backoff
+    SessionDB(db_path=path).close()
     assert reconciles["n"] == 1
+    con = sqlite3.connect(path)
+    try:
+        assert _marker(con) is None
+        assert _trigram_indexed(con) == 1
+    finally:
+        con.close()
+
+
+def _memo():
+    import hermes_state_schema_memo
+
+    return hermes_state_schema_memo
+
+
+def _advance(monkeypatch, seconds):
+    """Move the memo's monotonic clock *seconds* past wherever it reads now."""
+    memo = _memo()
+    now = memo.time.monotonic()
+    monkeypatch.setattr(memo.time, "monotonic", lambda: now + seconds)
+
+
+def _heal_warnings(caplog):
+    return [r for r in caplog.records if r.levelno == logging.WARNING and "heal did not complete" in r.getMessage()]
+
+
+def test_a_persistently_failing_heal_backs_off_and_warns_once(tmp_path, reconciles, monkeypatch, caplog):
+    path = tmp_path / "state.db"
+    _polluted_store_with_an_unindexed_message(path)
+    _after_interval(monkeypatch)
+    scans = {"n": 0}
+
+    def locked(self, cursor, ids):
+        scans["n"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(hermes_state_schema.SessionSchemaMixin, "_index_healed_rows_for_trigram", locked)
+    with caplog.at_level(logging.DEBUG, logger="hermes_state"):
+        SessionDB(db_path=path).close()
+        SessionDB(db_path=path).close()  # inside the backoff: no rescan, no log line
+        assert scans["n"] == 1
+        assert len(_heal_warnings(caplog)) == 1
+        _advance(monkeypatch, _memo().HEAL_RETRY_S + 1)
+        SessionDB(db_path=path).close()  # retried, still failing: debug, not a second warning
+    assert reconciles["n"] == 1
+    assert scans["n"] == 2
+    assert len(_heal_warnings(caplog)) == 1
+    assert any(r.levelno == logging.DEBUG and "heal did not complete" in r.getMessage() for r in caplog.records)
+
+
+def test_a_full_init_heal_failure_overrides_an_earlier_keys_interval_claim(tmp_path, reconciles, monkeypatch, caplog):
+    path = tmp_path / "state.db"
+    _polluted_store_with_an_unindexed_message(path)  # its last open claimed the store's heal interval
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE unrelated_ddl (x)")  # a new PRAGMA schema_version: a new memo key, a full init
+    con.commit()
+    con.close()
+    real_index = hermes_state_schema.SessionSchemaMixin._index_healed_rows_for_trigram
+
+    def locked(self, cursor, ids):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(hermes_state_schema.SessionSchemaMixin, "_index_healed_rows_for_trigram", locked)
+    with caplog.at_level(logging.WARNING, logger="hermes_state"):
+        SessionDB(db_path=path).close()
+    assert reconciles["n"] == 2  # the full init ran and its heal failed
+    assert len(_heal_warnings(caplog)) == 1
+    monkeypatch.setattr(hermes_state_schema.SessionSchemaMixin, "_index_healed_rows_for_trigram", real_index)
+    _advance(monkeypatch, _memo().HEAL_RETRY_S + 1)  # far inside the earlier key's interval
+    SessionDB(db_path=path).close()
+    assert reconciles["n"] == 2  # a memo hit
     con = sqlite3.connect(path)
     try:
         assert _marker(con) is None

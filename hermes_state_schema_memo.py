@@ -19,8 +19,9 @@ memoized and the next open retries the repair, as every open did before the memo
 The data heals (stray delegate markers, and NULL ``active`` rows an older-build writer on the same store
 can still produce) are repair, not schema: they run with the full init (the first open per key per
 process) and otherwise at most once per ``HEAL_INTERVAL_S`` per store, from a memo-hit open. A heal that
-does not complete (a lock, page damage) is logged at warning and releases its interval claim, so the next
-open retries it.
+does not complete (a lock, page damage) is retried after ``HEAL_RETRY_S`` rather than a full interval,
+whichever open (full init or memo hit) it failed in. It is logged at warning on the first failure per
+store and at debug while it keeps failing, so persistent damage costs one scan per backoff, not per open.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from typing import Any, Optional
 logger = logging.getLogger("hermes_state")
 
 HEAL_INTERVAL_S = 600.0
+HEAL_RETRY_S = 30.0  # backoff after a heal that did not complete
 # Always restored on a hit, whatever the first init left them at; other changed scalars are found by diff.
 _ALWAYS_RESTORED = ("_fts_enabled", "_trigram_available", "_fts_stale")
 _SIMPLE = (bool, int, float, str, bytes, type(None))
@@ -42,6 +44,7 @@ _TITLE_INDEX = "idx_sessions_title_unique"
 _lock = threading.Lock()
 _memo: dict[tuple, dict[str, Any]] = {}  # key -> attributes the full init set on self
 _last_heal: dict[str, float] = {}  # realpath -> monotonic start of the last completed (or running) data heal
+_heal_failing: set[str] = set()  # realpaths whose last heal did not complete (already warned once)
 
 
 def clear() -> None:
@@ -49,6 +52,7 @@ def clear() -> None:
     with _lock:
         _memo.clear()
         _last_heal.clear()
+        _heal_failing.clear()
 
 
 def _settled_meta_keys() -> tuple[str, ...]:
@@ -100,7 +104,8 @@ def snapshot(db) -> dict[str, Any]:
 
 def record(db, before: dict[str, Any], *, healed: bool = True) -> None:
     """Remember a successful full init when it left the store settled at this build's schema. With
-    *healed* False (a data heal did not complete) the heal interval stays unclaimed: the next open retries."""
+    *healed* False (a data heal did not complete) the store's heal is due again ``HEAL_RETRY_S`` from now,
+    also when an earlier open (another memo key on the same file) had claimed the interval."""
     probed = _probe(db.db_path, db._conn)
     if probed is None:
         return
@@ -118,6 +123,9 @@ def record(db, before: dict[str, Any], *, healed: bool = True) -> None:
         _memo[key] = changed
         if healed:
             _last_heal[key[0]] = time.monotonic()  # the full init just ran the heals
+            _heal_failing.discard(key[0])
+            return
+    _heal_failed(key[0], None, None)
 
 
 _MISSING = object()
@@ -166,12 +174,23 @@ def _maybe_heal(db, real: str) -> None:
     except sqlite3.Error as exc:  # a data repair must never fail an open
         ok, error = False, exc
     if ok:
+        with _lock:
+            _heal_failing.discard(real)
         return
-    with _lock:  # release the claim (unless a later heal took it) so the next open retries
-        if _last_heal.get(real) == now:
-            if last is None:
-                _last_heal.pop(real, None)
-            else:
-                _last_heal[real] = last
-    logger.warning("state.db data heal did not complete on %s (%s); the next open retries it",
-                   real, error if error is not None else "locked or damaged, rolled back")
+    _heal_failed(real, now, error)
+
+
+def _heal_failed(real: str, claim: Optional[float], error: Optional[sqlite3.Error]) -> None:
+    """Make the store's heal due again ``HEAL_RETRY_S`` from now. *claim* is the interval claim the
+    failed heal took (left alone if a later heal replaced it); None (the full init) overrides any claim,
+    such as one an earlier open of another memo key on the same file took. Warns on the first failure
+    after a success; later failures in the same streak log at debug."""
+    now = time.monotonic()
+    with _lock:
+        if claim is None or _last_heal.get(real) == claim:
+            _last_heal[real] = now - HEAL_INTERVAL_S + HEAL_RETRY_S
+        repeated = real in _heal_failing
+        _heal_failing.add(real)
+    (logger.debug if repeated else logger.warning)(
+        "state.db data heal did not complete on %s (%s); retrying in %.0fs",
+        real, error if error is not None else "locked or damaged", HEAL_RETRY_S)
