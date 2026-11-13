@@ -828,19 +828,13 @@ def _ledger_obligation(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:
 
 def _unlinked_chats(gateway: str, profiles: dict[str, set[Any]]) -> set[str]:
     """The chats (``session -> origin profiles``) the link writer never links: a placeholder id, or a machine
-    session of this gateway (``_ledger_links`` skips them, ``reconcile`` releases them). Classified once per
-    profile, as ``_ledger_links`` does."""
-    from hermes_cli.kanban_db_notify import machine_sessions
+    session of this gateway under any of its origin profiles (``_ledger_links`` skips them, ``reconcile``
+    releases them), classified through :func:`_machine_by_profile` as ``_ledger_links`` does."""
     from hermes_cli.kanban_placement import is_placeholder_session
     out = {s for s in profiles if is_placeholder_session(s)}
-    groups: dict[tuple, tuple[Any, list[str]]] = {}
-    for session, names in profiles.items():
-        if session not in out:
-            for name in names:
-                groups.setdefault((type(name), name), (name, []))[1].append(session)
-    for name, refs in groups.values():
-        out |= {str(s) for s in machine_sessions(gateway, refs, local_gateway=gateway, profile=name)}
-    return out
+    rows = [(name, s) for s, names in profiles.items() if s not in out for name in names]
+    machine = _machine_by_profile(gateway, rows)
+    return out | {str(s) for name, s in rows if str(s or "") in machine[(type(name), name)]}
 
 
 def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
@@ -877,6 +871,9 @@ def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[
         if card.get("source") == PROFILE_BOARD_SOURCE:
             profile_board.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
     skipped = _unlinked_chats(gateway, profiles)
+    # Popped before ``ledger_boards`` on purpose (the writer never links these chats): a missing replica whose
+    # only ledger cards are unlinked chats leaves the diff clean, and a session that is machine under any one of
+    # its origin profiles is dropped as a whole.
     machine_links = sum(len(side.pop(s, ())) for side in (ledger, replica) for s in skipped)
     for s in skipped:
         profile_board.pop(s, None)

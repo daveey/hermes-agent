@@ -336,6 +336,20 @@ def test_links_diff_leaves_out_chats_the_link_writer_never_links(env):
     assert not report["clean"] and report["chats"] == 1
 
 
+def test_links_diff_a_missing_replica_with_only_machine_ledger_cards_stays_clean(env):
+    """[daveey] Machine chats are popped before ``ledger_boards``: a missing replica whose only ledger cards are
+    machine chats has nothing the writer would compare, so it never keeps the diff unclean. A human chat's card
+    on that board still does (review 5890421655)."""
+    replica(env, [], [])
+    env["replicas"]["runners"] = True  # listed by board_paths, its shadow never pulled
+    env["ledger"].append({**_unknown_row("t_cron", "cron_job_1", "shepherd"), "board": "runners"})
+    report = links.links_diff(ME)
+    assert (report["clean"], report["unreadable"], report["machine_links"]) == (True, [], 1), report
+    env["ledger"].append({**_unknown_row("t_human", "s_human"), "board": "runners"})
+    report = links.links_diff(ME)
+    assert not report["clean"] and report["unreadable"] == ["runners"]
+
+
 _ASK = {"action": "Name the build host or say wait", "why_human": "new runner registrations are approval-gated",
         "interaction": "reply", "scope": "one runner registration", "evidence": "runners API lists no canary"}
 
