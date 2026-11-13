@@ -13,11 +13,13 @@ import signal
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
 
 from agent import claim_quiet as cq
+from hermes_cli import kanban_deploy_window as window
 from hermes_cli import kanban_quiet as kq
 from tests.waiting import wait_until
 
@@ -31,8 +33,18 @@ def home(tmp_path, monkeypatch):
     root = tmp_path / ".hermes"
     root.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(root))
+    _write_window("idle")  # the gateway's quiet start (and so the preflight) needs a fresh idle window
     yield root
     assert cq._CUSTODY == set() and cq._OWNERS == {}, "lease descriptors left in custody"
+
+
+def _write_window(state: str, *, age: int = 0) -> None:
+    path = window.window_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+    path.write_text(json.dumps({"version": 1, "host": window.host_identity(), "observed_at": now - age,
+                                "window_at": now + 600, "state": state, "state_since": now - age - 1,
+                                "drain_bound_s": 60}))
 
 
 def _script(tmp_path: Path, name: str, body: str) -> str:
@@ -152,6 +164,44 @@ def test_cooldown_refuses_a_second_hold_and_never_starts_the_observer(home, tmp_
     code, _out, err = _run(*_hold_argv(30, sys.executable, observer, str(marker)))
     assert code == kq.EXIT_COOLDOWN and "cooldown" in err
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("state, age, reason", [
+    ("idle", 295, "update_window_stale"),  # worker-2's live record: fresh for read_window, not for start
+    ("batching", 0, "update:update_window_batching"),
+    ("draining", 0, "update:update_window_draining"),
+])
+def test_preflight_refuses_a_doomed_start_without_taking_the_lease_or_spending_the_cooldown(
+        home, tmp_path, state, age, reason):
+    _write_window(state, age=age)
+    marker = tmp_path / "ran"
+    observer = _script(tmp_path, "mark.py", "import sys; open(sys.argv[1], 'w').write('x')")
+    code, _out, err = _run(*_hold_argv(30, sys.executable, observer, str(marker)))
+    assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists(), "cooldown was committed"
+    assert not marker.exists(), "the observer must never start"
+    assert code == kq.EXIT_PREFLIGHT and reason in err and "no cooldown spent" in err, err
+    _write_window("idle")  # once the window is fresh and idle the same host can hold at once
+    assert _run(*_hold_argv(30, sys.executable, observer, str(marker)))[0] == 0 and marker.exists()
+
+
+def test_preflight_refuses_a_missing_window_and_a_window_about_to_go_stale(home):
+    window.window_path().unlink()
+    assert kq.hold(30, "r", ["true"]) == kq.EXIT_PREFLIGHT
+    _write_window("idle", age=100)  # inside the gateway's 120 s, but not with the start margin left
+    assert kq.hold(30, "r", ["true"]) == kq.EXIT_PREFLIGHT
+    assert cq.inspect().state == "inactive"
+    assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists()
+
+
+def test_an_unreadable_preflight_refuses_rather_than_passing(home, monkeypatch):
+    from gateway import quiet_control
+
+    def broken(**_kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(quiet_control, "start_preflight_reasons", broken)
+    assert kq.hold(30, "r", ["true"]) == kq.EXIT_PREFLIGHT
+    assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists()
 
 
 @pytest.mark.live_system_guard_bypass  # we SIGKILL our own orphaned observer group

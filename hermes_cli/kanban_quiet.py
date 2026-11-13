@@ -21,8 +21,22 @@ Lease identity is passed to the observer through the environment:
 
 Exit codes: 0 observer succeeded; 2 usage; 69 lease unavailable (platform/filesystem/clock/record);
 70 observer failed (spawn failure or non-zero exit; the observer's own status is on stderr);
-71 lease release failed; 75 busy (another lease is active); 76 cooldown; 124 deadline reached and the
-observer was terminated; 125 observer group death could not be verified; 130 cancelled by signal.
+71 lease release failed; 75 busy (another lease is active); 76 cooldown; 78 preflight refused;
+124 deadline reached and the observer was terminated; 125 observer group death could not be
+verified; 130 cancelled by signal.
+
+Preflight (exit 78): before the lease is taken, so before the cooldown is committed, the host
+files the gateway's ``quiet-observe-start`` refuses on are read (``gateway.quiet_control.
+start_preflight_reasons``): a core-update drain/admission hold, and the deploy window, which must
+be this host's, ``idle`` and at most ``UPDATE_WINDOW_MAX_AGE_S - START_PREFLIGHT_MARGIN_S`` old.
+Nothing is written; retry when the window is fresh and idle. Runner-only refusals (attestation,
+coverage pending, unknowns) have no read-only control verb, so they still surface only from the
+gateway's start, after the lease. Once a start is attempted, lease and cooldown are unchanged.
+
+Proof targets: Board pool workers republish ``window.json`` only from the 10-minute
+``hermes-core-update.timer`` and batch updates, so their window is usually stale or ``batching``
+for the gateway's 120 s bound. Workers are not quiet-proof targets (the live quiet proof is owned on
+the Macs); on a worker this command normally exits 78 at no cost instead of spending a 2 h cooldown.
 """
 
 from __future__ import annotations
@@ -42,6 +56,7 @@ EXIT_OBSERVER_FAILED = 70
 EXIT_RELEASE_FAILED = 71
 EXIT_BUSY = 75
 EXIT_COOLDOWN = 76
+EXIT_PREFLIGHT = 78
 EXIT_DEADLINE = 124
 EXIT_UNRESOLVED = 125
 EXIT_CANCELLED = 130
@@ -134,11 +149,25 @@ def _release(owner) -> bool:
     return True
 
 
+def _preflight() -> list[str]:
+    """Lease-free reasons the gateway's ``quiet-observe-start`` would refuse; never raises."""
+    try:
+        from gateway.quiet_control import start_preflight_reasons
+        return start_preflight_reasons()
+    except Exception as exc:  # health: allow BLE001 -- an unreadable preflight refuses, never passes
+        return [f"preflight_unreadable:{type(exc).__name__}"]
+
+
 def hold(max_s: int, reason: str, argv: Sequence[str], *, clock=None) -> int:
     """Acquire the lease, run ``argv`` under it, release in ``finally``; returns the exit code."""
     from agent import claim_quiet as cq
     from agent.claim_quiet_records import SystemClock
 
+    refused = _preflight()
+    if refused:
+        _err("gateway quiet start would refuse (no lease taken, no cooldown spent): "
+             + ", ".join(refused))
+        return EXIT_PREFLIGHT
     clock = clock or SystemClock()
     try:
         owner = cq.acquire(max_s=max_s, reason=reason, clock=clock)

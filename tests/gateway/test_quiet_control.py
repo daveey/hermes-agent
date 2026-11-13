@@ -212,6 +212,26 @@ def test_start_refused_on_update_markers(env):
     assert "update:update_window_unavailable" in ok(env, "quiet-observe-start", start_params(env))["reasons"]
 
 
+@pytest.mark.parametrize("state, age", [("draining", 0), ("batching", 0), ("idle", 500), ("idle", 0), (None, 0)])
+def test_start_preflight_matches_the_start_refusal_from_host_files(env, state, age):
+    """quiet-hold's lease-free preflight reads the same files, with the same spellings, as start."""
+    attest(env)
+    if state is None:
+        os.unlink(window.window_path())
+    else:
+        write_window(env.root, state, age=age)
+    result = ok(env, "quiet-observe-start", start_params(env))
+    refused = result["reasons"] if result["phase"] != "started" else []
+    assert quiet_control.start_preflight_reasons(margin_s=0) == refused
+    assert (result["phase"] == "started") == (state == "idle" and age == 0)
+
+
+def test_start_preflight_margin_refuses_a_window_about_to_go_stale(env):
+    write_window(env.root, "idle", age=quiet_control.UPDATE_WINDOW_MAX_AGE_S - 5)
+    assert quiet_control.start_preflight_reasons(margin_s=0) == []
+    assert quiet_control.start_preflight_reasons() == ["update_window_stale"]
+
+
 # ---- schema / authentication ---------------------------------------------------------------
 
 @pytest.mark.parametrize("mutate", [
