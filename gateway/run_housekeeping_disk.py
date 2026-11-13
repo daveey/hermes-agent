@@ -17,6 +17,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def housekeeping_gone_board_handles() -> None:
+    """Close kept board readers whose board file was removed: they pin its deleted db, -wal and -shm on disk."""
+    from hermes_cli.kanban_gone_board_handles import sweep
+
+    sweep()
+
+
 def housekeeping_media_caches() -> None:
     """Hourly media-cache prune (24h max age); spillover (None) keeps the session retention window."""
     from gateway.platforms.base import (

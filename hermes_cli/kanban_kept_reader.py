@@ -293,4 +293,29 @@ def close_all() -> int:
     return closed
 
 
-__all__ = ["MAX_PER_THREAD", "close_all", "reading", "stats"]
+def release_gone() -> int:
+    """Close every idle kept connection, on any thread, whose board file no longer exists; returns how many.
+
+    A borrow revalidates only the board it is asked for, so a board whose directory was removed is never borrowed
+    again and its kept connection pinned the deleted db, -wal and -shm until the process exited (hermes-hub
+    2026-11-13). The owning thread's map keeps the closed entry until it is evicted or that key is borrowed (which
+    reopens: ``_still_live`` refuses a closed entry). A borrowed entry is left to its borrower."""
+    from hermes_cli.kanban_sync_board_watch import path_gone
+
+    _drain_orphans()
+    with _registry_lock:
+        entries = [e for e in _registry if not e.closed]
+    closed = 0
+    for entry in entries:
+        if not path_gone(entry.key) or not entry.lock.acquire(blocking=False):
+            continue
+        try:
+            if not entry.closed:
+                _close(entry)
+                closed += 1
+        finally:
+            entry.lock.release()
+    return closed
+
+
+__all__ = ["MAX_PER_THREAD", "close_all", "reading", "release_gone", "stats"]

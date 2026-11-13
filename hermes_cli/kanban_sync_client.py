@@ -22,7 +22,6 @@ gateway's hub enrollment (``~/.config/hermes-mail/{config.json,gateway.key}``), 
 
 from __future__ import annotations
 
-from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import logging
 import os
@@ -1343,79 +1342,8 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
         _log.info("kanban sync: chat links pass over %d board(s) took %.1fs", len(boards), took)
 
 
-class _BoardWatch:
-    """One long-lived read-only connection per board file, for the sync loop's cheap questions.
-
-    ``outbox_pending`` runs every 0.5 s on every synced board. Opening a connection per call re-read the schema
-    each time (about 13 ms of CPU per pass over 10 boards, 2.5% of a core in the gateway, 2026-10-31). A kept
-    connection answers the same indexed query in microseconds. Repair scans use a transactional
-    input-table revision rather than data_version: dispatcher-clock commits must not invalidate them.
-    A file replaced on disk (new inode) is reopened with a new generation, so a restored revision
-    never equals a cached key for the old file. [daveey]"""
-
-    MAX = 64
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._conns: dict[str, tuple[tuple[int, int], sqlite3.Connection, int]] = {}
-        self._gen = 0
-        self._answers: dict[str, tuple[int, str, Any]] = {}
-
-    def _conn(self, path: Path) -> Optional[tuple[sqlite3.Connection, int]]:
-        key = os.path.realpath(path)
-        try:
-            st = os.stat(key)
-        except OSError:
-            self._drop(key)
-            return None
-        ent = self._conns.get(key)
-        if ent is not None and ent[0] == (st.st_dev, st.st_ino):
-            return ent[1], ent[2]
-        self._drop(key)
-        if len(self._conns) >= self.MAX:
-            self._drop(next(iter(self._conns)))
-        conn = _kanban_lockguard.connect(f"{Path(key).as_uri()}?mode=ro", uri=True, timeout=1,
-                                         check_same_thread=False)
-        self._gen += 1
-        self._conns[key] = ((st.st_dev, st.st_ino), conn, self._gen)
-        return conn, self._gen
-
-    def _drop(self, key: str) -> None:
-        self._answers.pop(key, None)
-        ent = self._conns.pop(key, None)
-        if ent is not None:
-            try:
-                ent[1].close()
-            except sqlite3.Error:
-                pass
-
-    def query(self, path: Path, sql: str, *, unchanged_ok: bool = False) -> Optional[tuple[int, Any]]:
-        """(generation, first row) or None when the file cannot be read."""
-        with self._lock:
-            try:
-                got = self._conn(path)
-                if got is None:
-                    return None
-                conn, gen = got
-                key = os.path.realpath(path)
-                version = conn.execute("PRAGMA data_version").fetchone()[0] if unchanged_ok else None
-                cached = self._answers.get(key)
-                if unchanged_ok and cached is not None and cached[:2] == (version, sql):
-                    return gen, cached[2]
-                answer = conn.execute(sql).fetchone()
-                if unchanged_ok:
-                    # Version is read BEFORE the query: a concurrent commit may cause
-                    # one extra read, but cannot publish a stale answer as current.
-                    self._answers[key] = (version, sql, answer)
-                return gen, answer
-            except sqlite3.Error:
-                self._drop(os.path.realpath(path))
-                return None
-
-    def reset(self) -> None:
-        with self._lock:
-            for key in list(self._conns):
-                self._drop(key)
+from hermes_cli.kanban_sync_board_watch import BoardWatch as _BoardWatch  # moved out, re-exported
+from hermes_cli.kanban_gone_board_handles import sweep as sweep_gone_board_handles
 
 
 _WATCH = _BoardWatch()
@@ -1547,6 +1475,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     try:
         while keep_running():
             boards = board_paths()
+            sweep_gone_board_handles()  # a removed board is never read again: close what it pins (2026-11-13)
             for slug, _path in boards:
                 if slug not in watchers or not watchers[slug].is_alive():
                     watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
