@@ -68,6 +68,8 @@ export interface PrefetchDeps {
   listHubSessions: () => Promise<HubSessionRecord[] | null>
   log?: (line: string) => void
   now?: () => number
+  /** [daveey] True while this connection's link is slow (slow-link.ts): bulk prefetch waits, opens still fetch. */
+  paused?: (connectionId: string) => boolean
   store: PrefetchStore
 }
 
@@ -467,7 +469,10 @@ export class TranscriptPrefetcher {
       [...queues].map(async ([connectionId, queue]) => {
         const worker = async () => {
           while (queue.length > 0) {
-            if ((this.downUntil.get(connectionId) ?? 0) > (this.deps.now?.() ?? Date.now())) {
+            if (
+              (this.downUntil.get(connectionId) ?? 0) > (this.deps.now?.() ?? Date.now()) ||
+              this.deps.paused?.(connectionId)
+            ) {
               result.skipped += queue.length
               queue.length = 0
 

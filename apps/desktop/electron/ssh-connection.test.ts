@@ -164,6 +164,8 @@ test('baseSshOptions carries the house ControlMaster/BatchMode/accept-new policy
   assert.match(joined, /ServerAliveInterval=15/)
   assert.match(joined, /ServerAliveCountMax=3/)
   assert.match(joined, /TCPKeepAlive=yes/)
+  // [daveey] Tunnel traffic is JSON: compression is what keeps polls inside their timeouts on a slow link.
+  assert.match(joined, /Compression=yes/)
   assert.ok(!joined.includes('StrictHostKeyChecking=no'), 'never disables host-key checking')
 })
 

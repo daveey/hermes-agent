@@ -123,7 +123,15 @@ interface EnsureHealthyPooledRemoteBackendForDispatchOptions<TConnection extends
   // Skip the probe when the backend answered within skipWindowMs (0 forces it, e.g. the prewarm keepalive).
   answers?: RemoteAnswerLedger
   skipWindowMs?: number
-  onProbe?: (outcome: 'ran' | 'skipped', elapsedMs: number) => void
+  onProbe?: (outcome: 'ran' | 'skipped' | 'slow', elapsedMs: number) => void
+  // [daveey] Slow-link tolerance (slow-link.ts). A probe that TIMES OUT while the transport is still alive means
+  // the link is slow, not that the backend is gone: retiring it only makes the reconnect refetch everything over
+  // the same slow link. Such a descriptor is kept until noteTimeout reports giveUp.
+  slowLink?: {
+    isTimeout: (error: unknown) => boolean
+    transportAlive: () => Promise<boolean>
+    noteTimeout: (connection: TConnection) => { giveUp: boolean }
+  }
 }
 
 /**
@@ -142,7 +150,8 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
   retire,
   answers,
   skipWindowMs = DISPATCH_PROBE_SKIP_WINDOW_MS,
-  onProbe
+  onProbe,
+  slowLink
 }: EnsureHealthyPooledRemoteBackendForDispatchOptions<TConnection>): Promise<TConnection> {
   let connection: TConnection | undefined
   const startedAt = Date.now()
@@ -177,6 +186,24 @@ export async function ensureHealthyPooledRemoteBackendForDispatch<TConnection ex
       })
     }
   } catch (error) {
+    if (
+      slowLink &&
+      connection &&
+      currentConnectionPromise() === connectionPromise &&
+      slowLink.isTimeout(error) &&
+      (await slowLink.transportAlive().catch(() => false)) &&
+      currentConnectionPromise() === connectionPromise &&
+      !slowLink.noteTimeout(connection).giveUp
+    ) {
+      // Slow, not down: keep the descriptor and let the request go out with its stretched timeout. The answer
+      // mark is set so the dispatches queued behind this one do not each pay another probe timeout; a request
+      // that times out forgets it again (remote-down-gate.ts), and the next dispatch probes and counts a strike.
+      answers?.recordAnswer(connection.baseUrl)
+      onProbe?.('slow', Date.now() - startedAt)
+
+      return connection
+    }
+
     answers?.forget(connection?.baseUrl)
 
     if (currentConnectionPromise() === connectionPromise) {

@@ -101,6 +101,32 @@ describe('prefetch selection', () => {
   })
 })
 
+describe('[daveey] prefetch pauses for a connection on a slow link', () => {
+  it('skips the paused connection, still fetches the others, and resumes when the pause lifts', async () => {
+    const clock = 1_000_000
+    const store = new TranscriptCacheStore(':memory:', { now: () => clock })
+    const fetchLatest = vi.fn(async (key: TranscriptCacheKey) => [{ content: key.sessionId, id: 1 }])
+    let slow = true
+
+    const prefetcher = new TranscriptPrefetcher({
+      connectionForGateway: gateway => CONNECTIONS[gateway],
+      fetchLatest,
+      listHubSessions: async () => [record('hub', 'a', 1), record('hub', 'b', 2), record('mini', 'c', 3)],
+      now: () => clock,
+      paused: connectionId => slow && connectionId === 'hermes-hub',
+      store
+    })
+
+    expect(await prefetcher.tick()).toMatchObject({ fetched: 1, skipped: 2, targets: 3 })
+    expect(fetchLatest.mock.calls.map(([key]) => key.sessionId)).toEqual(['c'])
+
+    slow = false
+    fetchLatest.mockClear()
+    expect(await prefetcher.tick()).toMatchObject({ fetched: 2 })
+    expect(fetchLatest.mock.calls.map(([key]) => key.sessionId).sort()).toEqual(['a', 'b'])
+  })
+})
+
 describe('prefetch refresh on activity change', () => {
   function harness(records: HubSessionRecord[]) {
     let clock = 1_000_000

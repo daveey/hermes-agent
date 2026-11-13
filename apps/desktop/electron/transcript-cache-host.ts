@@ -39,6 +39,8 @@ export interface TranscriptCacheHostDeps {
   getJson: (descriptor: unknown, requestPath: string, opts: { timeoutMs: number }) => Promise<any>
   ipcMain: IpcMain
   log: (line: string) => void
+  /** True while a connection's link is slow: the background prefetch pass skips it (slow-link.ts). */
+  prefetchPaused?: (connectionId: string) => boolean
   /** Registry snapshot: the primary id ('' connection ids mean it) and every connection id. */
   registry: () => { connectionIds: string[]; primary: string }
   /** Tests: start the store worker themselves. The app passes `workerFile` instead. */
@@ -288,6 +290,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
 
   const prefetcher = new TranscriptPrefetcher({
     connectionForGateway,
+    paused: deps.prefetchPaused,
     fetchLatest: async (key, limit) => {
       const descriptor = await deps.backendFor(key.connectionId, dialOptions(key.connectionId))
 

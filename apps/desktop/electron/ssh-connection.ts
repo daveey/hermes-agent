@@ -267,7 +267,11 @@ function baseSshOptions(controlPath, connectTimeoutMs?) {
     '-o',
     'ServerAliveCountMax=3',
     '-o',
-    'TCPKeepAlive=yes'
+    'TCPKeepAlive=yes',
+    // [daveey] Tunnel traffic is almost all JSON, which compresses several-fold: on a slow link (2026-11-12,
+    // ~60-175 KB/s) that is the difference between a poll fitting its timeout and not. Cheap on a fast one.
+    '-o',
+    'Compression=yes'
   ]
 }
 

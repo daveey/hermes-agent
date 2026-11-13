@@ -8,6 +8,7 @@ import {
   REMOTE_LIVENESS_FAILURE_WINDOW_MS,
   REMOTE_LIVENESS_TIMEOUT_MS,
   REMOTE_POOLED_LIVENESS_FAILURE_WINDOW_MS,
+  RemoteAnswerLedger,
   RemoteLivenessTracker,
   RemoteRevalidationCoordinator,
   revalidatePooledRemoteBackends,
@@ -290,6 +291,92 @@ describe('ensureHealthyPooledRemoteBackendForDispatch', () => {
     })
     expect(retire).not.toHaveBeenCalled()
     expect(reconnect).not.toHaveBeenCalled()
+  })
+
+  describe('[daveey] slow link: a probe timeout with the transport alive keeps the descriptor', () => {
+    const timeout = () => new Error(`Timed out connecting to Hermes backend after ${POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS}ms`)
+    const isTimeout = (error: unknown) => /Timed out connecting/.test(String((error as Error)?.message))
+
+    function harness(over: { alive?: boolean; giveUp?: boolean; probeError?: Error } = {}) {
+      const slow = { baseUrl: 'http://127.0.0.1:49882', mode: 'remote' }
+      const replacement = { baseUrl: 'http://127.0.0.1:53968', mode: 'remote' }
+      const connectionPromise = Promise.resolve(slow)
+      const retire = vi.fn()
+      const reconnect = vi.fn(async () => replacement)
+      const probe = vi.fn().mockRejectedValue(over.probeError ?? timeout())
+      const noteTimeout = vi.fn(() => ({ giveUp: over.giveUp === true }))
+      const transportAlive = vi.fn(async () => over.alive !== false)
+      const onProbe = vi.fn()
+      const answers = new RemoteAnswerLedger()
+
+      const run = () =>
+        ensureHealthyPooledRemoteBackendForDispatch({
+          answers,
+          connectionPromise,
+          currentConnectionPromise: () => connectionPromise,
+          onProbe,
+          probe,
+          reconnect,
+          retire,
+          slowLink: { isTimeout, noteTimeout, transportAlive }
+        })
+
+      return { answers, noteTimeout, onProbe, reconnect, replacement, retire, run, slow, transportAlive }
+    }
+
+    it('returns the same descriptor without retiring or reconnecting, and skips the next probe', async () => {
+      const h = harness()
+
+      await expect(h.run()).resolves.toBe(h.slow)
+
+      expect(h.noteTimeout).toHaveBeenCalledWith(h.slow)
+      expect(h.retire).not.toHaveBeenCalled()
+      expect(h.reconnect).not.toHaveBeenCalled()
+      expect(h.onProbe).toHaveBeenCalledWith('slow', expect.any(Number))
+      expect(h.answers.answeredWithin(h.slow.baseUrl, 30_000)).toBe(true)
+    })
+
+    it('still retires when the transport is dead', async () => {
+      const h = harness({ alive: false })
+
+      await expect(h.run()).resolves.toBe(h.replacement)
+
+      expect(h.noteTimeout).not.toHaveBeenCalled()
+      expect(h.retire).toHaveBeenCalledOnce()
+      expect(h.answers.answeredWithin(h.slow.baseUrl, 30_000)).toBe(false)
+    })
+
+    it.each(['connect ECONNREFUSED 127.0.0.1:49882', 'read ECONNRESET', 'socket hang up'])(
+      'still retires on "%s", without asking about the transport',
+      async message => {
+        const h = harness({ probeError: new Error(message) })
+
+        await expect(h.run()).resolves.toBe(h.replacement)
+
+        expect(h.transportAlive).not.toHaveBeenCalled()
+        expect(h.retire).toHaveBeenCalledOnce()
+      }
+    )
+
+    it('still retires when the transport check itself throws', async () => {
+      const h = harness()
+
+      h.transportAlive.mockRejectedValue(new Error('ssh -O check failed'))
+
+      await expect(h.run()).resolves.toBe(h.replacement)
+
+      expect(h.noteTimeout).not.toHaveBeenCalled()
+      expect(h.retire).toHaveBeenCalledOnce()
+    })
+
+    it('still retires once the slow-link tracker gives up on a backend that never answers', async () => {
+      const h = harness({ giveUp: true })
+
+      await expect(h.run()).resolves.toBe(h.replacement)
+
+      expect(h.noteTimeout).toHaveBeenCalledOnce()
+      expect(h.retire).toHaveBeenCalledOnce()
+    })
   })
 
   it('retires a dead cached descriptor and gives dispatch the replacement', async () => {

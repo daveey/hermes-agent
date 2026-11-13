@@ -590,6 +590,7 @@ import {
 import { ensureLoginShellPath } from './shell-path'
 import { installSidebarBootSnapshot } from './sidebar-boot-snapshot'
 import { removeStaleSingletonLock } from './singleton-lock'
+import { dispatchSlowLink, noteRemoteAnswer, noteRemoteConnect, slowLinkTracker, thinnedPoll } from './slow-link'
 import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
 import { resolveSourcePython } from './source-python'
 import { registerSpellcheckDictionaryIpc } from './spellcheck-dictionary-ipc'
@@ -9651,7 +9652,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
     `[remote-timing] ${scope} ${result.alwaysOn ? 'reuse always-on' : result.reused ? 'reuse owned' : 'spawn'} ` +
       `pid=${result.pid} ssh=${created ? 'dialed' : 'master reused'} +${Date.now() - timingStartedAt} ms`
   )
-  remoteFirstRequestPending.set(result.baseUrl, { scope, startedAt: timingStartedAt })
+  noteRemoteConnect(result.baseUrl, scope, timingStartedAt)
   sshRememberLog(
     `[ssh] connection ${result.reused ? 'REUSED' : 'spawned'} dashboard: ` +
       `${result.hermesVersion || 'hermes (version unknown)'} at ${result.hermesPath || '?'}`
@@ -10603,6 +10604,8 @@ async function ensureRegistryBackend(
           }
         },
         reconnect: () => ensureRegistryBackend(id, profile, '', { passive }),
+        // [daveey] An SSH tunnel whose probe times out while its master is alive is slow, not down (slow-link.ts).
+        slowLink: source.kind === 'ssh' ? dispatchSlowLink(key, () => sshConnections.get(key)?.ssh?.isAlive()) : undefined,
         retire: async (error: any) => {
           // A late failure from an old descriptor must never tear down a newer
           // entry that another caller has already installed.
@@ -11390,6 +11393,7 @@ async function restartAttachedLocalGateway(profile: string): Promise<void> {
 function stopPoolBackend(profile: string, _reason?: SshTeardownReason): Promise<void> {
   registryReconnectService.assertCanStop(profile)
   backendPool.delete(profile)
+  slowLinkTracker.forgetScope(profile) // every drop of a pooled descriptor: the rebuilt tunnel starts clean
 
   return Promise.resolve()
 }
@@ -15087,6 +15091,10 @@ async function fetchJsonForBackend(
     }
   }
 
+  // [daveey] slow-link.ts: a slow link gets a stretched timeout, and every answer's time is how slow mode ends.
+  const timeoutMs = slowLinkTracker.scaleTimeout(descriptor.baseUrl, resolveTimeoutMs(opts.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS))
+  const startedAt = Date.now()
+
   if (descriptor.authMode === 'oauth') {
     // The OAuth cookie path rides electron.net with JSON headers; multipart
     // isn't wired there. Fail loudly rather than corrupting the upload.
@@ -15097,7 +15105,7 @@ async function fetchJsonForBackend(
     const options = {
       method: opts.method,
       body: opts.body,
-      timeoutMs: opts.timeoutMs,
+      timeoutMs,
       headers: descriptor.headers
     }
 
@@ -15107,7 +15115,7 @@ async function fetchJsonForBackend(
       requestWithCookie: () => fetchJsonViaOauthSession(url, options)
     })
 
-    noteRemoteAnswer(descriptor.baseUrl, path)
+    noteRemoteAnswer(descriptor.baseUrl, path, Date.now() - startedAt, rememberLog)
 
     return answer
   }
@@ -15116,28 +15124,14 @@ async function fetchJsonForBackend(
     method: opts.method,
     body: opts.body,
     upload: opts.upload,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs,
     headers: descriptor.headers,
     gatewayDescriptor: descriptor.gatewayEndpoint ? descriptor : undefined
   })
 
-  noteRemoteAnswer(descriptor.baseUrl, path)
+  noteRemoteAnswer(descriptor.baseUrl, path, Date.now() - startedAt, rememberLog)
 
   return answer
-}
-
-// Remote connection timing (part B, instant session loads): connect-start, reuse/spawn and the first request a
-// new descriptor serves, per scope, as `[remote-timing]` lines in desktop.log.
-const remoteFirstRequestPending = new Map<string, { scope: string; startedAt: number }>()
-
-function noteRemoteAnswer(baseUrl: string, path: string) {
-  remoteAnswerLedger.recordAnswer(baseUrl)
-  const pending = remoteFirstRequestPending.get(baseUrl)
-
-  if (pending) {
-    remoteFirstRequestPending.delete(baseUrl)
-    rememberLog(`[remote-timing] ${pending.scope} first-request ${path} served +${Date.now() - pending.startedAt} ms`)
-  }
 }
 
 ipcMain.handle('hermes:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl))
@@ -15901,9 +15895,13 @@ async function dispatchRegistryApiRequest(
 
   let requestPath = ''
   let connection: any = null
+  const gateKey = remoteDownGateKey(registryConnectionId, routeProfile)
+  // [daveey] On a slow link a timer poll runs one per scope and path every 30 s; the rest are skipped (slow-link.ts).
+  const poll = thinnedPoll(gateKey, request)
 
   const send = (descriptor: any) => {
     connection = descriptor
+    poll.sent(descriptor.baseUrl)
     requestPath = pathForRegistryBackendRequest(request.path, requestProfile, descriptor, request?.method || 'GET')
 
     return fetchJsonForBackend(descriptor, requestPath, {
@@ -15916,18 +15914,18 @@ async function dispatchRegistryApiRequest(
 
   // [daveey] Remote (non-local) connections go through the down gate: while the pooled backend is known down
   // (reset, refused, failed dispatch probe) its requests reject at once instead of each burning a 4-10 s timeout.
-  const gateKey = remoteDownGateKey(registryConnectionId, routeProfile)
-
-  const response = gateKey
-    ? await dispatchThroughRemoteDownGate({
-        gate: remoteDownGate,
-        key: gateKey,
-        connect,
-        request: send,
-        forgetAnswer: baseUrl => remoteAnswerLedger.forget(baseUrl),
-        log: rememberLog
-      })
-    : await send(await connect())
+  const response = await poll.run(async () =>
+    gateKey
+      ? dispatchThroughRemoteDownGate({
+          gate: remoteDownGate,
+          key: gateKey,
+          connect,
+          request: send,
+          forgetAnswer: baseUrl => remoteAnswerLedger.forget(baseUrl),
+          log: rememberLog
+        })
+      : send(await connect())
+  )
 
   desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response, connection.mode)
 
@@ -17824,6 +17822,7 @@ app.whenReady().then(() => {
   // first window: the renderer's cache read is a sync IPC. Prefetch waits out boot.
   try {
     transcriptCacheHost = installTranscriptCache({
+      prefetchPaused: connectionId => slowLinkTracker.isConnectionSlow(connectionId),
       backendFor: (connectionId, { passive }) =>
         backendDialClaims.run(backendDialClaimKey(connectionId, null), () =>
           ensureRegistryBackend(connectionId, null, '', { passive })
