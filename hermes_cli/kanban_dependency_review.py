@@ -312,10 +312,11 @@ def _historical_parent_history(conn, parent_id, parked_at):
     if ended is None or ended >= parked_at:
         return False
     events = conn.execute(
-        # Archival, late process-exit receipts and the wake-episode snapshot a comment on a
-        # finished card appends (kanban_wake_episode.EVIDENCE_EVENT) do not reopen it.
+        # Card/workspace archival, late process-exit receipts and comment wake snapshots
+        # do not reopen finished work. Keep this explicit: unknown events fail closed.
         "SELECT created_at FROM task_events WHERE task_id = ? "
-        "AND kind NOT IN ('commented', 'archived', 'worker_result', 'wake_episode_evidence')",
+        "AND kind NOT IN ('commented', 'archived', 'workspace_archived', "
+        "'worker_result', 'wake_episode_evidence')",
         (parent_id,),
     )
     return all((kb._to_epoch(e["created_at"]) or float("inf")) < parked_at for e in events)
