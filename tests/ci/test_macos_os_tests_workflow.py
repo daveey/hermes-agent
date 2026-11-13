@@ -132,6 +132,36 @@ def test_a_mini_job_waiting_only_in_a_later_page_of_runs_still_skips_the_slot():
     assert not any("status=in_progress" in c and "&page=3" in c for c in calls)
 
 
+@pytest.mark.parametrize("final_job", [None, "in_progress", "queued"])
+def test_final_supported_page_is_read_before_deciding_saturation(final_job):
+    gate = _gate()
+    calls: list[str] = []
+    pages = [
+        [{"id": p * gate.PAGE_SIZE + i + 1} for i in range(gate.PAGE_SIZE)]
+        for p in range(gate.MAX_RUN_PAGES - 1)
+    ]
+    final_id = gate.MAX_RUN_PAGES * gate.PAGE_SIZE + 1
+    pages.append([] if final_job is None else [{"id": final_id}])
+    jobs = {} if final_job is None else {final_id: [_job(final_job)]}
+    api = _paged_api({"queued": pages}, jobs, calls)
+
+    run, reason = gate.decide("schedule", api, REPO, own_run_id=0)
+
+    prefix = f"repos/{REPO}/actions/runs?status=queued&per_page={gate.PAGE_SIZE}&page="
+    assert [c for c in calls if c.startswith(prefix)] == [
+        f"{prefix}{page}" for page in range(1, gate.MAX_RUN_PAGES + 1)
+    ]
+    if final_job == "queued":
+        assert run is False
+        assert "1 job(s) already waiting for the mini" in reason
+    else:
+        assert (run, reason) == (True, "no job waiting for the mini")
+    if final_job is not None:
+        assert calls.count(
+            f"repos/{REPO}/actions/runs/{final_id}/jobs?filter=latest&per_page=100"
+        ) == 1
+
+
 def test_a_state_with_more_full_pages_than_the_cap_is_treated_as_busy():
     gate = _gate()
     calls: list[str] = []
