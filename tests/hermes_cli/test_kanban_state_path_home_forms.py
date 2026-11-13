@@ -181,3 +181,14 @@ def test_each_cd_home_span_names_its_own_relative_state_path(tmp_path, monkeypat
     got = [v[:3] for v in hm._state_path(kp.HERMES_STATE_PATH, _hit(body), "worker-2", hm._Probe())]
     assert got == [("queue", "b", "~/.hermes/logs/x.log"),
                    ("queue", "artifact-not-here", "~/.hermes/kanban/workspaces/t_x/f")]
+
+
+@pytest.mark.parametrize("operand, expected", [("", "home gateway marker"), (" repo", None)])
+@pytest.mark.parametrize("redirect", ["2>'x y'", "2>'x y' 3>'z w'"])
+def test_single_quoted_redirect_target_preserves_cd_home_placement(attested, redirect, operand, expected):
+    # Quotes keep each spaced target one redirect word. Only a real cd operand changes the destination.
+    cfg, _, _ = attested
+    body = f"cd {redirect}{operand} && cat .hermes/.env"
+    assert bool(_hit(body)) == (expected is not None)
+    assert roots.reason(body, cfg) == expected
+    assert roots.reason(body, cfg, requires=()) == expected
