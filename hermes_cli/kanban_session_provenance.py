@@ -114,14 +114,43 @@ def scoped_sources(gateway: Any, sessions: Iterable[Any], *, local_gateway=None,
     return out
 
 
-def prefetch_sources(refs: Iterable[Any]) -> None:
+def prefetch_sources(refs: Iterable[Any], *, local_gateway=None) -> None:
     """Read every local home's state.db ONCE for the bare session ids of ``refs`` (``sid`` or ``gw/profile/sid``),
     filling the source cache so the classifications that follow in the same pass are cache hits, whatever profile
-    they scope to. Verdicts are unchanged: an entry that expires before use only costs a read. [daveey]"""
-    sids = [p[-1] for r in dict.fromkeys(str(r or "") for r in refs) if len(p := r.split("/")) in (1, 3) and p[-1]]
+    they scope to. Verdicts are unchanged: an entry that expires before use only costs a read. A qualified ref of
+    another gateway is skipped: :func:`scoped_sources` never looks it up locally. [daveey]"""
+    from hermes_cli.kanban_origin import gateway_names
+    me = local_gateway if local_gateway is not None else gateway_names()[0]
+    sids = [p[-1] for r in dict.fromkeys(str(r or "") for r in refs)
+            if (len(p := r.split("/")) == 1 or (len(p) == 3 and me and p[0] == me)) and p[-1]]
     if sids:
         for home in _local_homes(None):
             _local_session_sources(sids, home=home)
+
+
+def reads_local_store(gateway: Any, session: Any, *, local_gateway: Any) -> bool:
+    """Whether :func:`scoped_sources` may open a state.db for ``session`` scoped to ``gateway`` (the same rule it
+    applies): only another gateway's ref is answered unknown without a read. [daveey]"""
+    parts = str(session or "").split("/")
+    gw = parts[0] if len(parts) == 3 else gateway
+    return len(parts) in (1, 3) and (gw is None or bool(local_gateway and gw == local_gateway))
+
+
+def machine_verdicts(keys: Iterable[tuple[Any, Any, Any]], *, local_gateway) -> dict[tuple, bool]:
+    """``is_machine_session(gateway, session, profile=profile)`` for every ``(gateway, profile, session)`` key, with
+    each home read once (one :func:`prefetch_sources`) and one :func:`machine_sessions` call per (gateway, profile).
+    Keys are ``(gateway, profile, str(session or ""))``. A caller computes this BEFORE taking a lock, so the
+    per-row path under the lock looks verdicts up instead of reading state.db (t_01a1d2f6289c3fe7). [daveey]"""
+    groups: dict[tuple, list[str]] = {}
+    for gw, prof, session in keys:
+        groups.setdefault((gw, prof), []).append(str(session or ""))
+    prefetch_sources([s for (gw, _p), refs in groups.items() for s in refs
+                      if reads_local_store(gw, s, local_gateway=local_gateway)], local_gateway=local_gateway)
+    out: dict[tuple, bool] = {}
+    for (gw, prof), refs in groups.items():
+        machine = machine_sessions(gw, refs, local_gateway=local_gateway, profile=prof)
+        out.update({(gw, prof, s): s in machine for s in refs})
+    return out
 
 
 def headless_sessions(chat_ids: Iterable[Any], *, gateway=None, profile=None, local_gateway=None) -> set[str]:
