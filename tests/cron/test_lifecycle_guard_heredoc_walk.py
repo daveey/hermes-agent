@@ -77,7 +77,7 @@ def test_mentioned_data_file_that_cannot_be_scanned_is_not_a_verdict(tmp_path, m
             assert guard(command, cwd=str(tmp_path), read_remote_script=remote) is False, data.name
         assert remote_misses  # the notes table was walked and its misses were bounded, not fatal
         unsafe, refusal = lifecycle_guard.scan_gateway_lifecycle(f"bash {minified}")
-        assert unsafe is True and "budget" in refusal
+        assert unsafe is True and "over the 65536-character per-line scan cap" in refusal
         unsafe, refusal = lifecycle_guard.scan_gateway_lifecycle(f"bash {db}")
         assert unsafe is True and "SQLite" in refusal
     finally:
