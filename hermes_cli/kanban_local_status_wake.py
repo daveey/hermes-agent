@@ -58,7 +58,7 @@ def flush(conn: sqlite3.Connection) -> list[str]:
         return []
     try:
         changed = dict(conn.execute(f"SELECT task_id, status FROM temp.{_TABLE}").fetchall())
-    except sqlite3.Error:  # recorder not installed on this connection
+    except Exception:  # health: allow BLE001 -- no recorder here, or a non-sqlite stand-in: never raise into the commit
         return []
     if not changed:
         return []
