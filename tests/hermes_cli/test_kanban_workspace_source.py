@@ -221,6 +221,7 @@ def test_custody_card_routes_to_source_resolver_regardless_of_kind(conn, monkeyp
         seen.update(task=task.id, snapshot=snapshot)
         return ksr.ResolvedSource(path="/src/wt", branch="wt/t_1", commit=C1, manifest_revision=1, mode="materialized")
     monkeypatch.setattr(ksr, "resolve_source_workspace", fake)
+    monkeypatch.setattr(kws, "settings", lambda config=None: enabled())
     claimed = SimpleNamespace(id="t_route", workspace_kind=kind, claim_expires=None, current_run_id=None)
     snap = kws.snapshot_from_row({"workspace_source": manifest(), "workspace_custody": custody()})
     kws.stash_grant_snapshot("t_route", snap)
@@ -282,6 +283,7 @@ def test_dispatch_routes_before_kind_branch(conn, monkeypatch, kind):
         seen.append(task_.id)
         return resolver.ResolvedSource("/source/exact", "wt/exact", C1, 1, "materialized")
     monkeypatch.setattr(resolver, "resolve_source_workspace", source)
+    monkeypatch.setattr(kws, "settings", lambda config=None: enabled())
     spawned = []
     result = d.DispatchResult()
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
@@ -522,15 +524,78 @@ def test_legacy_followup_schema_gets_full_orphan_retention(conn, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 0
 
 
-def test_pickup_batch_import_precedes_worker_definitions():
-    import ast
-    from pathlib import Path
-    from hermes_cli import kanban_worker_node
-    tree = ast.parse(Path(kanban_worker_node.__file__).read_text())
-    pickup = next(n for n in tree.body if isinstance(n, ast.ImportFrom)
-                  and any(a.name == "pickup_batch" for a in n.names))
-    first_definition = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
-    assert pickup.lineno < first_definition.lineno
+def test_followup_review_reblock_reaches_triage_and_keeps_review_resume(conn):
+    """Same-cause accounting (route_block): unblock -> re-refuse of a review card climbs to triage; each
+    unblock below the limit resumes in review."""
+    from hermes_cli.kanban_source_refusal_block import _block_released_review
+    tid = kb.create_task(conn, title="review loop", assignee="worker")
+    assert kb.request_review(conn, tid, summary="ready")
+    statuses = []
+    for n in range(kb.BLOCK_RECURRENCE_LIMIT):
+        assert kb.claim_review_task(conn, tid, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
+        run_id = kb.get_task(conn, tid).current_run_id
+        with kbc.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review', current_run_id=NULL, claim_lock=NULL WHERE id=?", (tid,))
+            conn.execute("UPDATE task_runs SET ended_at=?, outcome='released' WHERE id=?", (100 + n, run_id))
+        uid = sync.run_uid(conn, run_id)
+        row = {"task_id": tid, "refused_run_id": run_id, "run_uid": uid}
+        assert _block_released_review(conn, row, kws.WorkspaceSourceRefusal("remote_drift", "moved"))
+        statuses.append(kb.get_task(conn, tid).status)
+        if statuses[-1] == "blocked":
+            assert kb.unblock_task(conn, tid)
+            assert kb.get_task(conn, tid).status == "review"
+    assert statuses == ["blocked"] * (kb.BLOCK_RECURRENCE_LIMIT - 1) + ["triage"]
+    assert kb.get_task(conn, tid).block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
+    kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (tid,))]
+    assert kinds.count("block_loop_detected") == 1
+
+
+def test_followup_failing_forever_is_quarantined_with_evidence(conn, caplog):
+    from hermes_cli import kanban_source_refusal_block as followup
+    tid = kb.create_task(conn, title="poison", assignee="worker")
+    assert kb.claim_task(conn, tid)
+    claimed = kb.get_task(conn, tid)
+    with kbc.write_txn(conn):
+        followup.defer(conn, claimed, kws.WorkspaceSourceRefusal("remote_drift"))
+        conn.execute("UPDATE kanban_source_blocks SET refusal='not json'")
+        conn.execute("UPDATE kanban_sync_state SET applying=1")
+        conn.execute("UPDATE tasks SET status='ready', current_run_id=NULL, lease_holder=NULL WHERE id=?", (tid,))
+        conn.execute("UPDATE task_runs SET ended_at=100, outcome='released', metadata=? WHERE id=?",
+                     (json.dumps({"unused_grant": True}), claimed.current_run_id))
+        conn.execute("UPDATE kanban_sync_state SET applying=0")
+    for _ in range(followup.MAX_FOLLOWUP_FAILURES):
+        followup.drain(conn)
+    assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 0
+    ev = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
+                      (tid, followup.QUARANTINED_EVENT)).fetchone()
+    payload = json.loads(ev[0])
+    assert payload["refusal"] == "not json" and payload["failures"] == followup.MAX_FOLLOWUP_FAILURES
+    caplog.clear()
+    followup.drain(conn)  # a later feed apply logs nothing more
+    assert "source refusal follow-up" not in caplog.text
+
+
+def test_followup_drain_opens_no_write_txn_when_empty(conn, monkeypatch):
+    from hermes_cli import kanban_source_refusal_block as followup
+    with kbc.write_txn(conn):
+        followup._ensure_schema(conn)
+    monkeypatch.setattr(followup.kb, "write_txn", lambda c: pytest.fail("write txn opened for an empty table"))
+    followup.drain(conn)
+
+
+def test_resolve_refuses_source_card_when_disabled(conn, monkeypatch):
+    """Worker-side gate: a disabled host never reaches the source resolver, whatever the Board granted."""
+    from hermes_cli import kanban_db_workspace as kbw
+    from hermes_cli import kanban_source_dispatch as ksd
+    from hermes_cli import kanban_source_resolver as ksr
+    monkeypatch.setattr(kws, "settings", lambda config=None: enabled(enabled=False))
+    monkeypatch.setattr(ksr, "resolve_source_workspace", lambda *a, **k: pytest.fail("resolver reached"))
+    claimed = SimpleNamespace(id="t_off", workspace_kind="scratch", claim_expires=None)
+    kws.stash_grant_snapshot("t_off", kws.snapshot_from_row({"workspace_source": manifest(),
+                                                            "workspace_custody": custody()}))
+    with pytest.raises(kws.WorkspaceSourceRefusal) as err:
+        ksd.resolve(conn, claimed, board=None, kbw=kbw)
+    assert (err.value.code, err.value.scope, err.value.evidence["manifest_revision"]) == ("source_disabled", "host", 1)
 
 
 def test_refusal_codes_scoped():

@@ -33,6 +33,10 @@ def resolve(conn: sqlite3.Connection, claimed: Any, *, board: Optional[str], kbw
         from hermes_cli.kanban_source_resolver import resolve_source_workspace
         ttl = (claimed.claim_expires - time.time()) if getattr(claimed, "claim_expires", None) else None
         try:
+            if not ws.settings().enabled:
+                # Worker-side gate (the Board's source_protocol gate is the other half): a disabled host never
+                # materializes, whatever the Board granted it.
+                raise WorkspaceSourceRefusal("source_disabled", "kanban.workspace_source is disabled on this host")
             source = resolve_source_workspace(conn, claimed, snapshot, me=_me(conn) or "", ttl_s=ttl)
         except WorkspaceSourceRefusal as exc:
             # The replica may lag or have no manifest. Bind refusal identity to this grant, not that replica.

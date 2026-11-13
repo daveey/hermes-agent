@@ -80,6 +80,8 @@ def use_home(world, name):
     world.open_conns.append(conn_gen)  # keep the generator alive: GC would close the connection
     cfg = kws.Settings(enabled=True, requested=True, clones={"acme/widget": str(h.clone)}, publish_on_park=True,
                        push_timeout_s=30, preflight_timeout_s=60, materialize_timeout_s=60)
+    real = kws.settings
+    world.monkeypatch.setattr(kws, "settings", lambda config=None: cfg if config is None else real(config))
     return conn, cfg
 
 
