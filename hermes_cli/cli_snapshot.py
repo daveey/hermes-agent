@@ -135,7 +135,7 @@ def _restore_gateway_snapshot(cli, store, snap_id):
                 print(f"  Profile '{home.name}' is not served again yet: {ack_failure(ack)}. "
                       "The host retries on its next rescan (within 30s).")
         store.snapshots.clear()
-        store.current = None
+        store.set_current(None)
         # The restore's own result or error decides the reply; a failed rejoin must not replace it.
         try:
             drained, store.connection = store.connection, GatewayConnection.shared()

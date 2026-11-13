@@ -67,6 +67,9 @@ def test_restore_reply_follows_the_restore_not_the_rejoin(tmp_path, monkeypatch,
     store = GatewaySessionStore(old)
     cli = SimpleNamespace(_session_db=store, _gateway_session_open=True, session_id="kept",
                           agent=object(), conversation_history=[])
+    switched = []  # a wait on the open session's late frame (``_await_gateway_inventory``) ends with it
+    store.current = {"stored_session_id": "kept", "info": {}}
+    store.switch_listeners.append(lambda: switched.append(True))
     satellite = case.startswith("satellite-")
     marker = parked_marker_path(home)
     if case == "satellite-pre-parked":
@@ -107,9 +110,11 @@ def test_restore_reply_follows_the_restore_not_the_rejoin(tmp_path, monkeypatch,
     if case in {"supervised", "invalid-id", "remote"}:
         assert not paused and not old.final  # refused before tearing down the viewer
         assert store.connection is old  # a remote chat keeps its connection too
+        assert switched == []
     else:
         assert "Reconnecting to the gateway failed: permission_denied" in out
         assert store.connection is not old and store.connection.launch_api_key == "launch-only-key"
+        assert switched == [True]
     if satellite:
         assert parked_at.pop("unserve") is True  # parked before the teardown, so no rescan re-serves it
         assert parked_at == ({} if case in {"satellite-unserve-error", "satellite-pre-parked"} else {"serve": False})
