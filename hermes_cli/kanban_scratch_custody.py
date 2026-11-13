@@ -219,8 +219,10 @@ def _pressure_candidate(receipt):
             return None
         ended = max(r["ended_at"] for r in json.loads(receipt["evidence"])["runs"])
         path = Path(receipt["workspace_path"])
+        # removal_guard (_safe) always refuses a tree outside managed scratch storage: never list one,
+        # or a pressure reclaimer builds a full archive before finding out.
         if (type(ended) not in (int, float) or ended <= 0 or not path.is_absolute()
-                or path.is_symlink() or not path.is_dir()):
+                or path.is_symlink() or not path.is_dir() or not ws._is_managed_scratch_path(path)):
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -253,9 +255,13 @@ def pressure_candidate(conn, task_id):
 def terminal_owner(hub, board, receipt):
     """Fresh Board terminal evidence for an evicted owner, or None; gc_custody's own rule (runs ended, _terminal).
 
-    Network: never call inside a DB transaction. Transport errors propagate (the caller keeps the tree).
+    Network: never call inside a DB transaction. A malformed receipt (unreadable evidence or runs) is None,
+    checked before any Board read; Board transport errors propagate (the caller keeps the tree either way).
     """
-    if not _runs_ended(receipt):
+    try:
+        if not _runs_ended(receipt):
+            return None
+    except (ValueError, KeyError, TypeError):
         return None
     return _terminal(hub, board, receipt["task_id"])
 

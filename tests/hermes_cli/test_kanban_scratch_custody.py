@@ -1058,6 +1058,29 @@ def test_pressure_terminal_owner_refuses_unverified_owner(env, control):
     assert custody.terminal_owner(_hub(), "default", dict(_receipt(env, tid))) is None
 
 
+@pytest.mark.parametrize("evidence", ["not json", "{}", '{"runs": [{"id": 1}]}', '{"runs": 3}'])
+def test_pressure_terminal_owner_malformed_receipt_is_none_before_board(env, evidence):
+    tid, path, _ = evicted(env)
+    receipt = dict(_receipt(env, tid), evidence=evidence)
+    assert custody.terminal_owner(_hub(), "default", receipt) is None
+    assert env.calls == 0 and (path / "notes").read_text() == "keep me"
+
+
+def test_pressure_candidates_skip_tree_outside_managed_scratch(env):
+    kept, kept_path, _ = evicted(env)
+    tid, _path, _ = evicted(env)
+    outside = env.home / "source"
+    outside.mkdir()
+    (outside / "user").write_text("data")
+    with kb.write_txn(env.conn):
+        env.conn.execute("UPDATE kanban_scratch_custody SET workspace_path=? WHERE task_id=?", (str(outside), tid))
+    # removal_guard always refuses it, so it is never offered for archiving.
+    assert custody.removal_guard(env.conn, dict(_receipt(env, tid)))(outside) is False
+    assert [c["task_id"] for c in custody.pressure_candidates(env.conn)] == [kept]
+    assert custody.pressure_candidate(env.conn, tid) is None
+    assert (outside / "user").exists() and kept_path.exists()
+
+
 def test_pressure_terminal_owner_requires_ended_runs_before_board(env):
     tid, _path, _ = evicted(env, ended=None)
     assert custody.terminal_owner(_hub(), "default", dict(_receipt(env, tid))) is None
