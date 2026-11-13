@@ -496,3 +496,25 @@ def test_declared_hub_access_is_board_placeable(fleet, requires):
         assert coord.claim_refusal(card, "worker") == coord.REASON
         entry["labels"].append(label)
     assert coord.attested(["held", "worker"], labels) is True
+
+
+@pytest.mark.parametrize("text", [
+    "Read it with `hub-admin 'hermes-hub outcomes --id t_x-v1'`",
+    'hub-admin "hermes-hub requests --json"',
+    "run hub-admin 'cd ~ && hermes-hub request tasks k comment'",
+])
+def test_hub_admin_wrapped_action_needs_hub_write(text):
+    """hub-admin runs the action on the hub with its own identity: the hub-admin attestation, not a refusal."""
+    from hermes_cli import kanban_placement_coordination as coord
+    assert coord.requirements(text) == ({"capability:hub-write"}, None)
+
+
+@pytest.mark.parametrize("text", [
+    "hub-admin 'uptime'; hermes-hub outcomes --id t_x",  # closed quote: the action runs on this worker
+    "hub-admin 'uptime'\n`hermes-hub outcomes --id t_x`",
+    "`hermes-hub outcomes --id t_x` (a worker reads only its own sent requests)",
+    "ssh hermes-hub 'hermes-hub outcomes --id t_x'",
+])
+def test_bare_or_unwrapped_action_still_stays_home(text):
+    from hermes_cli import kanban_placement_coordination as coord
+    assert coord.requirements(text)[1] == coord.ACTION_REASON

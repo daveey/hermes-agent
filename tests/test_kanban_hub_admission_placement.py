@@ -241,3 +241,61 @@ def test_assignee_keep_remedy_tracks_structural_reason():
     assert placement.structural_reason({"assignee": "mac-ops"}, cfg) == hap.ASSIGNEE_KEEP
     text = hap.hub_stay_remedy(hap.ASSIGNEE_KEEP, None, assignee="mac-ops", pool_profiles={"default", "bb-tuner"})
     assert "'mac-ops'" in text and "pool profiles: bb-tuner, default" in text and "assignee='default'" in text
+
+
+# hermes-hub's claim-stall incident template as it shipped on 11-13 (hermes_hub.py ``alert_claim_stalls``), and
+# the same step spelled through hub-admin. t_01a1d267a7e60bc2 (the first) was enrolled worker-first and every
+# pool worker's claim gate refused it ("needs home coordination action"), so it sat ready for 40 minutes.
+CLAIM_STALL_STEPS = (
+    "Requests (exact original ids; keep them, do not mint replacements):\n"
+    "- t_x-macbook-comment-v1  coll=tasks key=default/default/t_y action=comment claims=0 age=4304s\n\n"
+    "What to do:\n"
+    "1. Read each request's exact state with {read} (`hermes-hub requests` is a bounded recent window and can "
+    "omit old ids).\n"
+    "2. Try to read macbook (tailnet SSH, cross_task). If it cannot be reached, park this card with a wake_check.\n"
+)
+CLAIM_STALL_BARE = CLAIM_STALL_STEPS.format(read="`hermes-hub outcomes --id <id>`")
+CLAIM_STALL_HUB_ADMIN = CLAIM_STALL_STEPS.format(read="`hub-admin 'hermes-hub outcomes --id <id>'`").replace(
+    "(`hermes-hub requests` is", "(`hub-admin 'hermes-hub requests'` is")
+HUB_CFG = {**QUEUE_CFG, "worker_pools": {"hub": ["worker-1"]}}
+
+
+def _claim_stall(body):
+    return {"title": "Hub requests to macbook unclaimed: claim-stall incident (1 request)", "body": body,
+            "assignee": "default"}
+
+
+@pytest.mark.parametrize("queue_live", [True, False])
+def test_claim_stall_template_no_worker_can_claim_stays_home(gate, queue_live):
+    """A denied card whose text the pickup claim gate refuses on every worker is not enrolled anywhere."""
+    from hermes_cli import kanban_placement_coordination as coord
+    result = placement.decide(_claim_stall(CLAIM_STALL_BARE), self_gw="hub", cfg=HUB_CFG, live=lambda _: None,
+                              carries=True, machine_ok=lambda label: queue_live and label == "pool:worker")
+    assert result["where"] == "local"
+    assert "runs_on" not in result and "placement_policy" not in result
+    assert "requires" not in result  # the deny route's hub:write is a worker label; home keeps the declaration
+    assert result["hub_admission"]["admit"] is False
+    assert result["hub_admission"]["home"] == coord.ACTION_REASON
+    # Exactly what the claim gate says for the row the old route produced.
+    row = {"placement_policy": "worker-first-v1", "requires": '["hub:write"]', **_claim_stall(CLAIM_STALL_BARE)}
+    assert coord.claim_refusal(row, "worker-1") == coord.ACTION_REASON
+
+
+def test_claim_stall_template_via_hub_admin_queues_for_hub_write_workers(gate, monkeypatch):
+    """The hub-admin spelling runs on the hub with its write access: hub-write workers can claim it."""
+    import time
+    from hermes_cli import kanban_placement_coordination as coord
+    from hermes_cli import kanban_worker_node as wn
+    result = placement.decide(_claim_stall(CLAIM_STALL_HUB_ADMIN), self_gw="hub", cfg=HUB_CFG,
+                              live=lambda _: None, carries=True, machine_ok=lambda label: label == "pool:worker")
+    assert result["runs_on"][0] == "pool:worker"
+    assert "capability:hub-write" in result["runs_on"]
+    assert "capability:coordination-read" not in result["runs_on"]
+    assert "hub:write" in result["requires"]
+    entry = {"state": "active", "pickup": "explicit", "last_seen": time.time() * 1000,
+             "labels": ["capability:hub-write"]}
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": {"worker-1": entry}})
+    row = {"placement_policy": "worker-first-v1", "requires": '["hub:write"]', **_claim_stall(CLAIM_STALL_HUB_ADMIN)}
+    assert coord.claim_refusal(row, "worker-1") is None
+    entry["labels"] = ["capability:coordination-read"]
+    assert coord.claim_refusal(row, "worker-1") == coord.REASON

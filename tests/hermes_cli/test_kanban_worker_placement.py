@@ -176,6 +176,14 @@ def test_host_specific_state_and_identity_stay_local(title, hub_judge):
     hub_judge.admit_next = False
     denied = placement.decide({"title": title, "requires": ["terminal", "file", "git"]},
                               cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
+    from hermes_cli import kanban_placement_coordination as coord
+    if coord.requirements(title)[1]:
+        # Every pool worker's claim gate refuses a hermes-hub action it is not attested for (it would act with
+        # the worker's own key and replica): enrolling it would strand it ready, so a deny keeps it home.
+        assert "placement_policy" not in denied and "runs_on" not in denied
+        assert denied["requires"] == ["terminal", "file", "git"]
+        assert denied["hub_admission"]["home"] == coord.ACTION_REASON
+        return
     assert denied["placement_policy"] == "worker-first-v1"
     assert denied["requires"] == ["terminal", "file", "git", "hub:write"]
 

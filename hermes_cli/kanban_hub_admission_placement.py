@@ -536,8 +536,19 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
     from hermes_cli.kanban_worker_placement import POLICY, QUEUED_WHY, WAITING
 
     label = kp._Cfg(cfg).queue_label(gateway) if queue else None
-    extra = coordination.required_labels({**args, "requires": requires}, cfg) if label else None
-    if label and extra is not None and (machine_ok or kp._machine_picks_up)(label):
+    extra = coordination.required_labels({**args, "requires": requires}, cfg)
+    if extra is None:
+        # The pickup claim gate (coordination.claim_refusal) refuses this text on EVERY pool worker, so neither
+        # the queue nor worker-first can run it: enrolling it only stranded it ready. t_01a1d267a7e60bc2, a
+        # claim-stall incident whose body says `hermes-hub outcomes --id`, sat 40 min skipped by six workers.
+        # It stays home; ``requires`` stays as declared (the hub:write the deny route adds is for workers).
+        out = {"where": "local", "why": f"hub admission denied, but the text {coordination.ACTION_REASON} "
+                                        "no pool worker is attested for, so it stays here",
+               "hub_admission": {**audit, "home": coordination.ACTION_REASON}}
+        if args.get("requires"):
+            out["requires"] = args["requires"]
+        return out
+    if label and (machine_ok or kp._machine_picks_up)(label):
         out = {"where": "local", "runs_on": [label, *sorted(extra - {label})],
                "why": QUEUED_WHY.format(label=label), "hub_admission": audit}
     elif why := worker_first_refusal(args):

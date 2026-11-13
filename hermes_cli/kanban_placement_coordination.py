@@ -21,6 +21,12 @@ _HUB_ACTIONS = set(("status pull sync sessions inbox tasks where links request r
                     "inspect-legacy reconcile-legacy inspect-alias retire-alias adopt-task "
                     "create-task depend outcomes install-watch watch diff-shared").split())
 _EXECUTION = re.compile(r"(?:\b(?:run|execute|invoke|call|use|via|with)\s+`?|`|[;$|&]\s*)$", re.IGNORECASE)
+# ``hub-admin '<command>'`` runs the command ON the hub with its write access: a hermes-hub action inside the
+# still-open quote acts with the hub's identity and replica, so it needs ``capability:hub-write`` (the hub-admin
+# attestation), not this worker's own hermes-hub install. A worker's ``hermes-hub outcomes --id`` reads only its
+# OWN sent requests (the hub's request read back as ``state: null`` on worker-1, 11-13), so bare spellings stay home.
+_HUB_ADMIN = re.compile(r"\bhub-admin\s+(['\"])(?:(?!\1).)*$", re.IGNORECASE)
+HUB_WRITE = "capability:hub-write"
 
 
 def _actions(text, tool, known):
@@ -92,7 +98,10 @@ def requirements(text):
                  r"\bcreate board replicas\b|\battach primary/pickup subscriptions\b",
                  text, re.IGNORECASE):
         return labels, ACTION_REASON
-    for _, _, action in _actions(text, _HUB, _HUB_ACTIONS):
+    for start, _, action in _actions(text, _HUB, _HUB_ACTIONS):
+        if _HUB_ADMIN.search(text[:start].rsplit("\n", 1)[-1]):
+            labels.add(HUB_WRITE)
+            continue
         if action not in ("status", "pull"):
             return labels, ACTION_REASON
         labels.add("capability:coordination-read")
