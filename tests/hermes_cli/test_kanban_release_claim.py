@@ -115,3 +115,49 @@ def test_still_running_on_the_feed_keeps_the_claim(live, monkeypatch):
     tid, _ = _crash_rc0(live, monkeypatch)
     _feed(live, tid, "running")
     assert _claim(live, tid)[0] is not None
+
+
+def test_release_queued_for_another_card_keeps_the_claim(live, monkeypatch):
+    """The commands table exists (another card's release), but none names this run: the leftover sweep's grace applies."""
+    _crash_rc0(live, monkeypatch)
+    tid, _ = _running(live)
+    lock = kb._host_prefix() + "1"
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET worker_pid=?, claim_lock=? WHERE id=?", (DEAD_PID, lock, tid))
+    _feed(live, tid, "ready")
+    assert live.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == "ready"
+    assert _claim(live, tid)[0] == lock
+
+
+def test_foreign_host_claim_keeps_the_claim(live, monkeypatch):
+    """Another host's claim is never judged by a local pid lookup, even with our release queued."""
+    tid, _ = _crash_rc0(live, monkeypatch)
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET claim_lock='other-host:4242' WHERE id=?", (tid,))
+    _feed(live, tid, "ready")
+    assert _claim(live, tid)[0] == "other-host:4242"
+    assert _claim(live, tid)[2] == DEAD_PID
+
+
+def test_claim_taken_since_the_read_is_untouched(live, monkeypatch):
+    """The CAS matches the claim values read: a newer claim between the read and the update survives."""
+    from hermes_cli.kanban_release_claim import release_on_feed
+    tid, _ = _crash_rc0(live, monkeypatch)
+    old = live.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+    newer = kb._host_prefix() + "777"
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET status='ready', claim_lock=?, worker_pid=?, claim_expires=? WHERE id=?",
+                     (newer, DEAD_PID - 1, 4102444800, tid))
+        assert release_on_feed(live, tid, old, "ready") is False
+    assert _claim(live, tid)[:3] == (newer, 4102444800, DEAD_PID - 1)
+
+
+@pytest.mark.parametrize(("local", "fed"), [("blocked", "ready"), ("ready", "triage")])
+def test_card_not_running_locally_keeps_the_claim(live, monkeypatch, local, fed):
+    """Only a move off ``running`` releases: a card already off running locally is not this release's to clear."""
+    tid, _ = _crash_rc0(live, monkeypatch)
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET status=? WHERE id=?", (local, tid))
+    _feed(live, tid, fed)
+    assert live.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == fed
+    assert _claim(live, tid)[0] == kb._host_prefix() + "2256394"
