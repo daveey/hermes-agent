@@ -27,9 +27,13 @@ Guards:
 * a card leaving this host (no match is this host) while a tree of it here is dirty or has commits on no remote is
   refused ``unpushed_state_here`` unless ``force`` (then the event carries ``left_unpushed_state``). Its trees are
   :func:`hermes_cli.kanban_move_pool.card_trees`: the workspace, owner-marked linked worktrees (``~/code/_wt/<slug>``)
-  and linked worktrees named in the body, the newest comment or the newest checkpoint. On 11-11 a hub card whose
-  ``~/code/_wt`` trees held unpushed commits was moved to worker-2, which could not reach them and moved it back.
-  Limitation: only the host holding the trees can see them, so a move issued from another host is blind to them.
+  and linked worktrees named in the body, the newest comment, the newest checkpoint or the move's own checkpoint
+  (a text-named tree whose owner marker names another card is that card's work, not this one's). On 11-11 a hub
+  card whose ``~/code/_wt`` trees held unpushed commits was moved to worker-2, which could not reach them and moved
+  it back. A worker-first card's Board repin to the worker queue takes the same guard. Limitations: only the host
+  holding the trees can see them, so a move issued from another host is blind to them; and a move whose matches
+  still include this host (``pool:worker`` issued on a pool worker, ``linux``) is not "leaving" and is not
+  guarded, though another matching host may claim the card (intentional: this host may still run it).
 
 Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reason, move_no, forced}``: the audit log.
 """
@@ -120,10 +124,11 @@ def _requirement_matches(matches, machines, requires, skills, *, me=None, assign
 def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool = False,
           machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
           cfg: Optional[dict] = None, host_reason: Optional[str] = None,
-          reason: Optional[str] = None) -> dict[str, Any]:
+          reason: Optional[str] = None, checkpoint: Optional[str] = None) -> dict[str, Any]:
     """Validate a move; returns ``{runs_on, previous, matches, move_no, forced, me, host}`` or raises
     :class:`MoveRefused`. ``host`` holds the event fields of a pin to one pool worker (:mod:`kanban_move_pool`).
-    A ``reason`` claiming ship custody needs ``host_reason`` (:mod:`kanban_move_ship`)."""
+    A ``reason`` claiming ship custody needs ``host_reason`` (:mod:`kanban_move_ship`). ``checkpoint`` is the
+    move's own, not yet written checkpoint: scanned for tree paths with the card's stored text."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_move_ship as kms
     from hermes_cli import kanban_worker_node as wn
@@ -191,20 +196,29 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     if back and len(back) == len(matches) and not force:
         raise MoveRefused("ping_pong", f"the card already left {', '.join(back)}; pass force to move it back")
     if me not in matches:  # git reads: check() runs before every caller's write transaction
-        _trees, state = kmp.card_trees_state(task_id, row["workspace_path"], _card_text(conn, task_id),
-                                             linked_text_only=True)
-        if state and not force:
-            raise MoveRefused(UNPUSHED_HERE, (
-                f"{state} on {me}: another machine cannot resume it. Push the branch (or let the card's run publish "
-                "it) and move again, or pass force to leave it"))
-        if state:
+        if state := unpushed_here(conn, task_id, row["workspace_path"], me=me, force=force, checkpoint=checkpoint):
             host = {**host, "left_unpushed_state": state}
     return {"runs_on": labels, "previous": wn._parse(row["runs_on"]), "matches": matches, "move_no": len(past) + 1,
             "forced": bool(back and force), "me": me, "host": host}
 
 
-def _card_text(conn: sqlite3.Connection, task_id: str) -> str:
-    """Body, newest comment and newest checkpoint: where a card names its ``~/code/_wt/<slug>`` trees."""
+def unpushed_here(conn: sqlite3.Connection, task_id: str, workspace_path: Optional[str], *, me: str, force: bool,
+                  checkpoint: Optional[str] = None) -> Optional[str]:
+    """The card's unpushed state on this host (to record as ``left_unpushed_state`` under ``force``) or None;
+    without ``force`` a state raises ``unpushed_state_here``. Runs git: call it outside any write transaction."""
+    from hermes_cli import kanban_move_pool as kmp
+    _trees, state = kmp.card_trees_state(task_id, workspace_path, _card_text(conn, task_id, checkpoint),
+                                         linked_text_only=True)
+    if state and not force:
+        raise MoveRefused(UNPUSHED_HERE, (
+            f"{state} on {me}: another machine cannot resume it. Push the branch (or let the card's run publish "
+            "it) and move again, or pass force to leave it"))
+    return state
+
+
+def _card_text(conn: sqlite3.Connection, task_id: str, checkpoint: Optional[str] = None) -> str:
+    """Body, newest comment, newest checkpoint and the move's own ``checkpoint``: where a card names its
+    ``~/code/_wt/<slug>`` trees."""
     parts = []
     for sql in ("SELECT body FROM tasks WHERE id = ?",
                 "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id DESC LIMIT 1"):
@@ -224,6 +238,7 @@ def _card_text(conn: sqlite3.Connection, task_id: str) -> str:
         except ValueError:
             meta = {}
         parts.append(str((meta.get("checkpoint") if isinstance(meta, dict) else None) or row[1] or ""))
+    parts.append(checkpoint or "")
     return "\n".join(parts)
 
 
@@ -244,7 +259,7 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
         return refused  # a hub target must convince the admission judge first [daveey]
     try:
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
-                     reason=reason)
+                     reason=reason, checkpoint=checkpoint)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
 
@@ -285,6 +300,7 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
     A worker-first policy card instead takes the explicit Board repin path (``hub`` is for tests).
     ``event_extra`` is merged into the ``moved`` event (audit provenance, e.g. an operator call's uid)."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_worker_node as wn
     reason = (reason or "").strip()
     if not reason:
@@ -300,10 +316,20 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
             labels = wn.normalize_runs_on(runs_on)
         except ValueError as exc:
             return {"ok": False, "reason_code": "invalid_runs_on", "error": str(exc)}
-        return repin.repin_to_origin(conn, task_id, list(labels or []), reason, hub=hub)
+        extra: dict[str, Any] = {}  # operator provenance rides a marker (kanban_operator_call), not this event
+        origin = (sync.sync_state(conn) or {}).get("gateway_id")
+        if origin and list(labels or []) != [f"machine:{origin}"]:  # a repin to the worker queue leaves the origin
+            row = conn.execute("SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            try:
+                if state := unpushed_here(conn, task_id, row["workspace_path"] if row else None, me=str(origin),
+                                          force=force, checkpoint=checkpoint):
+                    extra["event_extra"] = {"left_unpushed_state": state}
+            except MoveRefused as exc:
+                return {"ok": False, "reason_code": exc.code, "error": str(exc)}
+        return repin.repin_to_origin(conn, task_id, list(labels or []), reason, hub=hub, **extra)
     try:
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
-                     reason=reason)
+                     reason=reason, checkpoint=checkpoint)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
     with kb.write_txn(conn):

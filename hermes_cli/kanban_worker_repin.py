@@ -152,9 +152,10 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
 
 
 def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], reason: str, *,
-                    hub: Any = None) -> dict[str, Any]:
+                    hub: Any = None, event_extra: Optional[dict] = None) -> dict[str, Any]:
     """Board CAS repin + authoritative pull. Result keys match ``move_queued`` plus ``repinned``,
-    ``board_version`` and ``readback`` (``confirmed`` | ``pending``)."""
+    ``board_version`` and ``readback`` (``confirmed`` | ``pending``). ``event_extra`` joins the ``moved`` event
+    (``left_unpushed_state`` from ``move_queued``'s unpushed-state guard on a forced queue repin)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_move as km
     from hermes_cli import kanban_sync_client as client
@@ -212,7 +213,7 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
                 "from_machine": me, "runs_on": pre["labels"], "previous_runs_on": pre["previous"],
                 "reason": reason[:500],
                 "move_no": move_no, "forced": False, "matches": pre["matches"], "queued": True, REPINNED_EVENT_FLAG: True,
-                "board_version": version})
+                "board_version": version, **(event_extra or {})})
     except sqlite3.Error:
         pass  # the Board's own placement_repinned event still records the change
 

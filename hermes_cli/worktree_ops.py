@@ -472,7 +472,7 @@ def _worktree_merge_base_ref(path: str, timeout: float = 5) -> Optional[str]:
     return None
 
 
-def _worktree_has_unpushed_commits(worktree_path: str, timeout: int = 10) -> bool:
+def _worktree_has_unpushed_commits(worktree_path: str, timeout: float = 10) -> bool:
     """Whether a worktree has commits unreachable from any remote branch. Fails SAFE toward True.
 
     No remote-tracking refs = nothing was ever pushed, so the tree is compared against the local
@@ -517,7 +517,7 @@ def _include_symlink_paths(worktree_path: str, repo_root) -> set:
     return paths
 
 
-def _worktree_is_dirty(worktree_path: str, repo_root, timeout: int = 10) -> bool:
+def _worktree_is_dirty(worktree_path: str, repo_root, timeout: float = 10) -> bool:
     """Whether a worktree has staged/unstaged/untracked changes. Fails SAFE toward True.
 
     Untracked ``.worktreeinclude`` directory symlinks back to the main checkout *repo_root* are
