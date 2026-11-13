@@ -41,6 +41,9 @@ class UpdatePauseScope:
     resuming: bool = False
     # Omitted only by deliberate direct unit usage; production always supplies an event id.
     message_id: Any = _MISSING
+    # [daveey] t_01a1d49d50e4c656: True while the claim would now hold this admission (``claim_hold_gate``);
+    # None for a row the claim never holds (a human, a resumed checkpoint).
+    claim_held: Callable[[], bool] | None = None
 
 
 _scope: contextvars.ContextVar[UpdatePauseScope | None] = contextvars.ContextVar(
@@ -57,8 +60,9 @@ def current_scope(message_id: Any = _MISSING) -> UpdatePauseScope | None:
 
 @contextmanager
 def bind_scope(home: str | Path, *, eligible: bool, resuming: bool = False,
-               message_id: Any = _MISSING) -> Iterator[UpdatePauseScope]:
-    scope = UpdatePauseScope(Path(home), bool(eligible), bool(resuming), message_id)
+               message_id: Any = _MISSING, claim_held: Callable[[], bool] | None = None) -> Iterator[UpdatePauseScope]:
+    scope = UpdatePauseScope(Path(home), bool(eligible), bool(resuming), message_id,
+                             None if resuming else claim_held)
     token = _scope.set(scope)
     try:
         yield scope
@@ -88,6 +92,17 @@ def boundary_hook(agent: Any, root: Path) -> Callable[[], str | None]:
             return None
         return PAUSE_REASON
     return hook
+
+
+def before_turn_gate(agent: Any, claim_held: Callable[[], bool]) -> Callable[[], str | None]:
+    """[daveey] t_01a1d49d50e4c656: the turn-start gate (``agent.update_pause_cancel.BEFORE_TURN_ATTR``) of a fresh
+    claim the claim would now hold. A user Stop or steer pending wins, as at a boundary."""
+    def gate() -> str | None:
+        from tui_gateway.update_pause import PAUSE_REASON
+        if not claim_held() or stop_or_steer_pending(agent):
+            return None
+        return PAUSE_REASON
+    return gate
 
 
 def mid_tool_cancel_step(agent: Any, root: Path, state: dict) -> list[str] | None:
@@ -148,15 +163,19 @@ def installed(agent: Any, scope: UpdatePauseScope | None = None, *,
     if scope is None or not scope.eligible:
         yield False
         return
+    from agent.update_pause_cancel import BEFORE_TURN_ATTR
     prior = vars(agent).get(_HOOK_ATTR, _MISSING)
     root = fence_root(scope.home)
     setattr(agent, _HOOK_ATTR, boundary_hook(agent, root))
     vars(agent)[_PAUSABLE_ATTR] = True
+    if scope.claim_held is not None:
+        vars(agent)[BEFORE_TURN_ATTR] = before_turn_gate(agent, scope.claim_held)
     stop_watcher = start_mid_tool_cancel(agent, root)
     try:
         yield True
     finally:
         stop_watcher()
+        vars(agent).pop(BEFORE_TURN_ATTR, None)
         vars(agent).pop(_PAUSABLE_ATTR, None)
         if prior is _MISSING:
             vars(agent).pop(_HOOK_ATTR, None)

@@ -127,6 +127,10 @@ async def park_or_interrupt(authority, live, ref, row):
         remember_claim(authority, ref.session_id, row)
         if stopped(authority, row):
             return await settle_interrupted(authority, live, ref, row)
+        if unstarted_result(authority, row):
+            requeued = await requeue_unstarted(authority, live, ref, row)
+            if requeued is not None:
+                return requeued
         try:
             receipt = await tracked_write(authority, partial(checkpoint_session_input, authority.db,
                 epoch=authority.epoch, admission_id=row['admission_id'], generation=row['generation'],
@@ -146,6 +150,41 @@ async def park_or_interrupt(authority, live, ref, row):
         authority._publish_pending(ref)
         persist_work_count(authority)
         return True
+
+
+def unstarted_result(authority, row):
+    """[daveey] t_01a1d49d50e4c656: the paused result of a turn that yielded before it started (no boundary)."""
+    from agent.update_pause_cancel import UNSTARTED_KEY
+    result = (authority.pending_results.get(row['admission_id']) or {}).get('result')
+    return isinstance(result, dict) and result.get(UNSTARTED_KEY) is True
+
+
+async def requeue_unstarted(authority, live, ref, row):
+    """Hand an unstarted claim back to its FIFO place (caller holds the claim gate and mutation lock); the
+    waiter and media stay with the queued row. None when the store refuses: the caller's checkpoint path
+    then decides (and settles it interrupted, as any unparkable pause)."""
+    from gateway.session_runtime_workers import tracked_write, persist_work_count
+    from hermes_state_runtime import RuntimeStoreError
+    from hermes_state_update_pause import requeue_unstarted_input
+    try:
+        await tracked_write(authority, partial(requeue_unstarted_input, authority.db, epoch=authority.epoch,
+            admission_id=row['admission_id'], generation=row['generation'], transcript_mark=row['transcript_mark']))
+    except RuntimeStoreError as exc:
+        logging.getLogger(__name__).warning('Unstarted gateway turn could not be re-queued for update: session=%s '
+                                            'admission=%s (%s)', ref.session_id, row['admission_id'], exc)
+        return None
+    authority.pending_results.pop(row['admission_id'], None)
+    previous = authority.update_claims.pop(ref.session_id, None)
+    if previous is not None:
+        authority.update_stops.discard(previous[0])
+    with live.event_stream.lock:
+        live.event_stream.execution = {}
+        authority.adopted.pop(ref.session_id, None)
+    logging.getLogger(__name__).info('Re-queued unstarted gateway turn for update hold: session=%s admission=%s '
+                                     'generation=%s', ref.session_id, row['admission_id'], row['generation'])
+    authority._publish_pending(ref)
+    persist_work_count(authority)
+    return True
 
 
 def stopped(authority, row):

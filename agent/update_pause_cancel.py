@@ -205,21 +205,44 @@ def first_request_can_pause(agent: Any) -> bool:
     return getattr(agent, FIRST_REQUEST_ATTR, False) is True
 
 
-def pause_before_turn(agent: Any, conversation_history: Any) -> dict | None:
-    """The result of a continuation that yields to an already-pending pause before its turn starts: no request,
-    nothing persisted, the transcript unchanged (the next continuation sends the same note). None otherwise."""
-    hook = getattr(agent, "step_boundary_pause", None)
-    if not first_request_can_pause(agent) or not callable(hook):
-        return None
+# [daveey] t_01a1d49d50e4c656: a per-run gate the gateway installs (``vars(agent)``, never a class attribute) for a
+# fresh claim whose admission class the claim itself would now hold (a notifier wake under a core-update claim hold).
+# The claim checked the hold once, but its turn may begin much later: it waits on the cross-process session turn
+# lease first (David-MBP incident 31763: claimed 02:54, started 03:07:12 inside the drain window, right after the
+# Desktop backend's turn holding the lease parked). Asked once the lease is held and before anything of the turn
+# runs; a truthy reason ends it unstarted and the result carries ``UNSTARTED_KEY`` so the gateway re-queues the
+# admission in its FIFO place instead of checkpointing a boundary that does not exist.
+BEFORE_TURN_ATTR = "update_yield_before_turn"
+UNSTARTED_KEY = "update_pause_unstarted"
+
+
+def _ask(hook: Any) -> Any:
     try:
-        reason = hook() or None
+        return hook() or None
     except Exception:  # health: allow BLE001 -- a failing pause hook never pauses (as _step_boundary_pause)
         return None
+
+
+def pause_before_turn(agent: Any, conversation_history: Any) -> dict | None:
+    """The result of a turn that yields to an already-pending pause before it starts: no request, nothing persisted,
+    the transcript unchanged (the next continuation sends the same note; a re-queued admission runs as it was).
+    None otherwise. Runs before the turn-start compression preflight: that compression has no step boundary to
+    land on (``compression_can_yield``), so a turn whose pause predates it must never enter it."""
+    hook = getattr(agent, "step_boundary_pause", None)
+    reason = _ask(hook) if first_request_can_pause(agent) and callable(hook) else None
+    unstarted = False
+    if not reason:
+        try:
+            gate = vars(agent).get(BEFORE_TURN_ATTR)
+        except TypeError:
+            gate = None
+        reason = _ask(gate) if callable(gate) else None
+        unstarted = bool(reason)
     if not reason:
         return None
     return {"final_response": "", "messages": list(conversation_history or []), "api_calls": 0,
             "completed": False, "interrupted": True, "paused_for_update": reason,
-            "turn_exit_reason": f"paused_for_update({reason})"}
+            "turn_exit_reason": f"paused_for_update({reason})", **({UNSTARTED_KEY: True} if unstarted else {})}
 
 
 def model_yield_requested(agent: Any) -> bool:

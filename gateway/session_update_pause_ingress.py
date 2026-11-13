@@ -50,8 +50,20 @@ def pause_scope(authority, row, event, live, *, is_api):
                  if key != 'api_text'}
     cli = cli_turn_scope(event.message_id, committed) if row.get('update_resume') else nullcontext()
     with display, cli, bind_scope(_profile_home(authority), eligible=supported(authority, row, event, live, is_api=is_api),
-                             resuming=bool(row.get('update_resume')), message_id=event.message_id):
+                             resuming=bool(row.get('update_resume')), message_id=event.message_id,
+                             claim_held=claim_hold_gate(row)):
         yield
+
+
+def claim_hold_gate(row):
+    """[daveey] t_01a1d49d50e4c656: the claim's own hold test for this row's class, re-asked at turn start (None:
+    the claim never holds the row). A notifier wake waits queued under a core-update claim hold
+    (``session_notifier_drain.eligible``); one claimed before the hold may start long after it (a session turn
+    lease wait), so its turn re-asks and, held, the admission goes back to its FIFO place (``requeue_unstarted``)."""
+    from gateway import session_notifier_drain
+    if row.get('update_resume') or not session_notifier_drain.notifier_wake(row):
+        return None
+    return lambda: session_notifier_drain.held_noted()
 
 
 def retain_pause(authority, row, result, captured, *, native):
