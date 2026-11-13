@@ -670,7 +670,7 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 if verdict == "offer":
                     out.append(_notice_item(card, claim_session, me, profile, now))
                     offered.add((ref, state))
-                    _note_wait(claim_session, ref, state, f"{_POLLER_CLAIM}{os.getpid()}")  # after the claim is out
+                    _note_poller_claim(sid, claim_session, ref, state)  # after the claim is out; never raises
         finally:
             conn.close()
         from tui_gateway.kanban_remote_late import collect_groups, release_undelivered
@@ -757,6 +757,8 @@ _waits: dict[tuple, str] = {}
 _waits_lock = threading.Lock()
 _WAITS_MAX = 5000
 _POLLER_CLAIM = "claimed by the live poller of backend pid "
+_poller_claims: dict[tuple, str] = {}  # (link session, ref, state) -> session the poller's ledger row is keyed by
+_CLAIM_DELIVERED = "\0delivered"  # _poller_claims value once the row read back delivered
 
 
 def _note_wait(session: str, ref: str, state: str, why: str) -> None:
@@ -777,17 +779,61 @@ def _note_wait(session: str, ref: str, state: str, why: str) -> None:
             logger.debug("remote kanban: wait log failed", exc_info=True)
 
 
-def _note_open_chat(sid: str, ref: str, state: str, waker, observed_at, now) -> None:
+def _note_poller_claim(link_sid: str, claim_session: str, ref: str, state: str) -> None:
+    """Log the live poller's claim and remember which ledger row holds it, keyed by the LINK's session: the sweep
+    looks it up by the link, while the claim may sit under the live session key of a compacted chat (PR #2158
+    review). Never raises."""
+    try:
+        with _waits_lock:
+            _poller_claims.pop((link_sid, ref, state), None)
+            _poller_claims[(link_sid, ref, state)] = claim_session
+            while len(_poller_claims) > _WAITS_MAX:
+                _poller_claims.pop(next(iter(_poller_claims)), None)
+    except Exception:  # diagnostics only
+        with contextlib.suppress(Exception):
+            logger.debug("remote kanban: poller claim marker failed", exc_info=True)
+    _note_wait(claim_session, ref, state, f"{_POLLER_CLAIM}{os.getpid()}")
+
+
+def _poller_claim_state(claim_session: str, ref: str, state: str, ledger) -> str:
+    """``delivered`` (final), ``held`` (in flight under a live backend, or the ledger is unreadable: this only
+    picks a log level) or ``stuck``: released undelivered (``release_undelivered``) or held by a dead pid."""
+    try:
+        with contextlib.closing(_ledger(ledger)) as conn:
+            row = conn.execute("SELECT delivered, holder_pid, holder_start FROM notices "
+                               "WHERE session=? AND ref=? AND state=?", (claim_session, ref, state)).fetchone()
+    except Exception:
+        logger.debug("remote kanban: poller claim readback failed", exc_info=True)
+        return "held"
+    if row is None:
+        return "stuck"
+    if row["delivered"]:
+        return "delivered"
+    return "held" if _holder_alive(row["holder_pid"], row["holder_start"]) else "stuck"
+
+
+def _note_open_chat(sid: str, ref: str, state: str, waker, observed_at, now, ledger=None) -> None:
     """The healthy path: this backend's live poller claims the notice within seconds and logs that claim. Only a
-    notice still unclaimed past the waker's grace window logs the open-chat skip at INFO (PR #2116 review)."""
-    with _waits_lock:
-        last = _waits.get((sid, ref, state), "")
+    notice past the waker's grace window whose poller claim is missing, released undelivered or held by a dead
+    backend logs the open-chat skip at INFO (PR #2116, #2158 reviews)."""
     grace = waker.grace_s if waker is not None else 0.0
-    if observed_at is not None and now is not None and now - observed_at >= grace and not last.startswith(
-            _POLLER_CLAIM):
-        _note_wait(sid, ref, state, "chat is open in this backend; its live poller claims it")
-    else:
-        logger.debug("remote Kanban notice %s %s for chat %s: chat is open in this backend", ref, state, sid)
+    if observed_at is not None and now is not None and now - observed_at >= grace:
+        with _waits_lock:
+            claim_session = _poller_claims.get((sid, ref, state))
+        if claim_session is None:
+            verdict = "stuck"
+        elif claim_session == _CLAIM_DELIVERED:
+            verdict = "delivered"
+        else:
+            verdict = _poller_claim_state(claim_session, ref, state, ledger)
+        if verdict == "stuck":
+            _note_wait(sid, ref, state, "chat is open in this backend; its live poller claims it")
+            return
+        if verdict == "delivered" and claim_session != _CLAIM_DELIVERED:
+            with _waits_lock:  # final: later passes skip the ledger read
+                if _poller_claims.get((sid, ref, state)) == claim_session:
+                    _poller_claims[(sid, ref, state)] = _CLAIM_DELIVERED
+    logger.debug("remote Kanban notice %s %s for chat %s: chat is open in this backend", ref, state, sid)
 
 
 def _wait_reason(conn, session: str, ref: str, state: str) -> Optional[str]:
@@ -892,6 +938,7 @@ def _reset_for_tests() -> None:
     _swept_loaded.clear()
     _last_stale.clear()
     _waits.clear()
+    _poller_claims.clear()
     with _woken_lock:
         _woken.clear()
 
@@ -1181,7 +1228,7 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         if memo_key in _delivered:
             return
         if sid in live:
-            _note_open_chat(sid, ref, state, waker, observed_at, now)
+            _note_open_chat(sid, ref, state, waker, observed_at, now, ledger)
             return
         if waker is not None and observed_at is not None and now is not None and now - observed_at < waker.grace_s:
             return  # a live poller (any backend) claims within seconds; it owns the chat's turn

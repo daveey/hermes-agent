@@ -969,3 +969,61 @@ def test_sweep_names_its_own_in_flight_claim_and_the_gateway_fifo_once(tmp_path,
         assert _wait_lines(caplog) == [
             f"remote Kanban notice {ref} {state} for chat {CHAT} waits: left to the gateway's FIFO (the gateway "
             "runs this chat's turns)"]
+
+
+def test_open_chat_skip_logs_info_once_a_poller_claim_is_released_undelivered(tmp_path, caplog):
+    """PR #2158 review: a stored "claimed by the live poller" marker counted as healthy forever, so a notice whose
+    claim was later released undelivered (release_undelivered, or a crashed turn's claim) only logged DEBUG past
+    the grace window. The sweep now reads the claim's ledger row: no row, or a dead holder, is stuck."""
+    import logging
+    from tui_gateway import kanban_remote_late
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_card("t_released", CHAT, status="done", at=now - 40)])
+    ref = "hub/default/default/t_released"
+    caplog.set_level(logging.DEBUG, logger=krn.__name__)
+    with _chat_db(tmp_path) as opener:
+        for case in ("released", "crashed"):
+            caplog.clear()
+            krn._reset_for_tests()
+            ledger = tmp_path / f"{case}.db"
+            sweep = dict(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger,
+                         waker=_GraceWaker(60.0), live_ids={CHAT})
+            claims = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + 1)
+            assert claims
+            if case == "released":
+                kanban_remote_late.release_undelivered(claims, ledger)
+                assert _ledger_row(ledger, CHAT, ref) is None
+            else:
+                _orphan_holder(ledger, CHAT, ref)
+            sweep_remote_notices(now=now + 120, **sweep)
+            stuck = [line for line in _wait_lines(caplog, logging.INFO) if "claimed by the live poller" not in line]
+            assert [line.split(" waits: ")[1] for line in stuck] == [
+                "chat is open in this backend; its live poller claims it"], (case, stuck)
+
+
+def test_open_chat_skip_finds_the_poller_claim_of_a_card_linked_to_a_lineage_ancestor(tmp_path, caplog):
+    """PR #2158 review: collect recorded its claim under the live session key while the sweep looked it up by the
+    link's session, so a card linked to a compacted ancestor still logged one INFO line past grace."""
+    import logging
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_card("t_ancestor", OTHER, status="done", at=now - 40)])
+    caplog.set_level(logging.DEBUG, logger=krn.__name__)
+    with _chat_db(tmp_path) as opener:
+        krn._reset_for_tests()
+        ledger = tmp_path / "ancestor.db"
+        claims = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + 1, lineage=(OTHER,))
+        assert [c["session"] for c in claims] == [CHAT]  # claimed under the live session key, not the link's
+        sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger,
+                             waker=_GraceWaker(60.0), live_ids={CHAT, OTHER}, now=now + 120)
+        info = _wait_lines(caplog, logging.INFO)
+        assert len(info) == 1 and "claimed by the live poller" in info[0], info
+        assert all(krn.ack(c, ledger=ledger) for c in claims)  # delivered: final, and still no open-chat INFO
+        for later in (180, 240):
+            sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger,
+                                 waker=_GraceWaker(60.0), live_ids={CHAT, OTHER}, now=now + later)
+        assert _wait_lines(caplog, logging.INFO) == info
+        assert krn._poller_claims[(OTHER, claims[0]["ref"], claims[0]["state"])] == krn._CLAIM_DELIVERED
