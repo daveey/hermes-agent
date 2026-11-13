@@ -37,7 +37,12 @@ def _json_or_null(obj: Any) -> Optional[str]:
 
 
 def error_fingerprint(error_text: str) -> str:
-    """Normalize an error message (strip PIDs, timestamps) so same-root-cause errors group."""
-    fp = re.sub(r'\bpid \d+\b', 'pid N', error_text[:80])
+    """Normalize an error message (strip PIDs, timestamps) so same-root-cause errors group.
+
+    Normalize BEFORE keeping 80 chars: truncating first let the PID's digit count move the cut, so
+    ``pid 99999`` and ``pid 100000`` dying of the same error kept different tails of the worker's
+    output and never reached the systemic same-fingerprint count. [daveey]
+    """
+    fp = re.sub(r'\bpid \d+\b', 'pid N', error_text)
     fp = re.sub(r'\b\d{10,}\b', '<TS>', fp)
-    return fp.lower().strip()
+    return fp[:80].lower().strip()
