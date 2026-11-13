@@ -1459,10 +1459,10 @@ def _run_admitted_prompt(
                 _emit("message.complete", sid, payload)
                 if paused_for_update:
                     update_pause.start_in_place_watcher(sid, session, st.marker_key)
-            from tui_gateway.turn_outcome import _turn_sid, concluding_turn_identity
+            from tui_gateway.turn_outcome import turn_sid, concluding_turn_identity
             concluding = concluding_turn_identity(st.agent, st.own_marker)
             _schedule_refused_turn_retry(sid, session, st.marker_key, concluding,
-                outcome_sid=_turn_sid(session, st.agent))
+                outcome_sid=turn_sid(session, st.agent))
             if status == "complete":
                 # [daveey] This turn's context carried any failed delivery already in the transcript.
                 automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))
@@ -1481,10 +1481,10 @@ def _run_admitted_prompt(
             automation_replay.schedule_for_turn(session, st)
         finally:
             # Capture before admission reopens: the reused agent may then hold the next turn's lease.
-            from tui_gateway.turn_outcome import _turn_sid, concluding_turn_identity
+            from tui_gateway.turn_outcome import turn_sid, concluding_turn_identity
             if concluding is None:
                 concluding = concluding_turn_identity(st.agent, st.own_marker)
-            outcome_sid = _turn_sid(session, st.agent)
+            outcome_sid = turn_sid(session, st.agent)
             automation_replay.remove_failure_copy(st)
             _release_turn_scopes(sid, session, st)
             try:  # a raising settle step must not skip the trim / HERMES_HOME reset

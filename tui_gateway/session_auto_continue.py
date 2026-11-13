@@ -130,8 +130,8 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str,
         return
 
     if outcome_sid is None:
-        from tui_gateway.turn_outcome import _turn_sid
-        outcome_sid = _turn_sid(session, session.get("agent"))
+        from tui_gateway.turn_outcome import turn_sid
+        outcome_sid = turn_sid(session, session.get("agent"))
 
     def fire() -> None:
         from tui_gateway.update_pause import _detect_skew
