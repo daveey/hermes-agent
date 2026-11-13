@@ -1566,7 +1566,7 @@ def test_pool_note_keeps_non_ordering_dispatcher_skip():
     assert "score 1100 (priority 1000" in note, note
     assert "regular pool full (7/7), a normal card waits for it" in note, note
     assert "class normal" in note, note
-    assert note.endswith(skips.advice(skip)), note
+    assert note.endswith(skips.sentence_advice(skip)), note  # its own sentence after '. ' (PR #1846 review)
     assert "check class/placement" not in note, note
 
 

@@ -106,7 +106,7 @@ def test_kanban_show_keeps_the_recorded_skip_with_a_pool_hint_without_the_census
     skip = {"reason": "owner_down", "detail": "default:inactive"}
     place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
     from hermes_cli import kanban_dispatch_skip as skips
-    tail = kqp.pool_words(place, advice=False) + ". " + skips.advice(skip)
+    tail = kqp.pool_words(place, advice=False) + ". " + skips.sentence_advice(skip)
     words = kqp.local_words(place)
     assert words.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), words
     assert "(waiting for a local slot: ~16 ahead, 7/7 running)" in words, words
@@ -119,7 +119,7 @@ def test_kanban_show_keeps_the_recorded_skip_with_a_pool_hint_without_the_census
     unskipped = kqp.local_words({**place, "skip": None})
     assert unskipped.startswith("waiting for a local slot") and unskipped.endswith(kqp.pool_words(place))
     unpooled = kqp.local_words({**place, "pool_could_run": None})
-    assert unpooled.endswith(skips.advice(skip)) and "--runs-on" not in unpooled
+    assert unpooled.endswith(skips.sentence_advice(skip)) and "--runs-on" not in unpooled
 
 
 _UNRECORDED_CLAUSE = "before changing anything"
@@ -181,8 +181,8 @@ def test_recorded_skip_with_a_pool_hint_keeps_both_on_every_surface(home, pool):
     place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
     for shown in (kqp.local_words(place), kqp.local_words({**place, **_CENSUS})):
         assert shown.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), shown
-        assert kqp.pool_words(place, advice=False) + ". " + tail in shown, shown
-        assert shown.endswith(tail) and shown.count("outside the dispatcher") == 1, shown
+        assert kqp.pool_words(place, advice=False) + ". " + skips.sentence_advice(skip) in shown, shown
+        assert shown.endswith(skips.sentence_advice(skip)) and shown.count("outside the dispatcher") == 1, shown
     with kbc.connect_closing() as conn:
         tid = _waiting_card(conn)
         _record_skip(conn, tid, "owner_down", "default:inactive")
@@ -205,7 +205,7 @@ def test_pinned_quota_wall_skip_keeps_its_advice_and_drops_the_pool_re_place(hom
     place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
     for shown in (kqp.local_words(place), kqp.local_words({**place, **_CENSUS})):
         assert shown.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), shown
-        assert shown.endswith(skips.advice(skip)), shown
+        assert shown.endswith(skips.sentence_advice(skip)), shown
         assert "--runs-on" not in shown and "pool worker(s)" not in shown, shown
     assert pu._pool_sentence(place) == ""
     with kbc.connect_closing() as conn:
@@ -288,3 +288,59 @@ def test_notices_without_pool_name_no_worker(home):
         assert cw.sweep(conn) == 1
         text = cw.notice_text(_notice(conn, tid, cw.NOTICE_KIND))
     assert "--runs-on machine:" not in text and "pool worker(s)" not in text
+
+
+@pytest.mark.parametrize("reason,detail,starts", [
+    ("owner_down", "default:inactive", "Resolve that dispatcher skip reason; "),
+    ("pinned_quota_wall", "claude-opus-5-5 (anthropic)", "It starts on its own when that wall resets. "),
+])
+@pytest.mark.parametrize("pooled", [True, False])
+@pytest.mark.parametrize("census", [True, False])
+def test_kanban_show_sentence_cases_the_skip_advice_after_a_full_stop(reason, detail, starts, pooled, census):
+    """PR #1846 review nit: ``local_words`` joins the preceding sentence and ``advice(skip)`` with '. ', and
+    ``advice`` starts lowercase, so ``kanban show`` read '... instead of waiting for a local slot. resolve that ...'
+    (and '... 7/7 running). it starts on its own ...' without a pool). The notices keep the lowercase clause after
+    their ``NO_FIX: `` prefix."""
+    until = time.time() + 3600 if reason == "pinned_quota_wall" else None
+    skip = {"reason": reason, "detail": detail, "until": until}
+    place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"] if pooled else None, "task_id": "t_x",
+             **(_CENSUS if census else {})}
+    shown = kqp.local_words(place)
+    assert ". " + starts in shown, shown
+    assert ". resolve that" not in shown and ". it starts" not in shown, shown
+    from hermes_cli import kanban_dispatch_skip as skips
+    assert skips.advice(skip)[0].islower()  # the notices' clause after "NO_FIX: " is unchanged
+
+
+@pytest.mark.parametrize("until,helps", [
+    (-60, True),  # the reset passed and no later tick replaced the skip yet: a pool re-place may run it now
+    (3600, False),
+    (None, False),  # no reset recorded: keep suppressing (conservative)
+    ("soon", False),  # unparseable: keep suppressing
+])
+def test_pool_replace_is_suppressed_only_while_the_quota_wall_lasts(until, helps):
+    """PR #1846 review nit: ``pool_replace_helps`` dropped the pool re-place for any ``pinned_quota_wall`` skip
+    returned by ``skips.latest``, including one whose ``until`` had already passed."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    now = 1_800_000_000.0
+    at = now + until if isinstance(until, int) else until
+    skip = {"reason": skips.PINNED_QUOTA_WALL, "detail": "claude-opus-5-5 (anthropic)", "until": at}
+    assert skips.pool_replace_helps(skip, now=now) is helps
+    assert skips.pool_replace_helps({**skip, "reason": "owner_down"}, now=now) is True
+    assert skips.pool_replace_helps(None, now=now) is True
+
+
+def test_an_expired_quota_wall_skip_offers_the_pool_re_place_on_every_surface(home, pool):
+    """The default clock is ``time.time()``: an expired wall re-offers the re-place in ``kanban show`` and notices."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = {"reason": skips.PINNED_QUOTA_WALL, "detail": "claude-opus-5-5 (anthropic)", "until": time.time() - 60}
+    place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
+    for shown in (kqp.local_words(place), kqp.local_words({**place, **_CENSUS})):
+        _assert_pool_hint(shown, "t_x")
+    assert pu._pool_sentence(place)
+    with kbc.connect_closing() as conn:
+        tid = _waiting_card(conn)
+        _record_skip(conn, tid, skips.PINNED_QUOTA_WALL, "claude-opus-5-5 (anthropic)", until=time.time() - 60)
+        hint = pu.ready_hint(conn, kb.get_task(conn, tid))
+    assert hint is not None
+    _assert_pool_hint(hint, tid)

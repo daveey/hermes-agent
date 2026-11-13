@@ -371,7 +371,7 @@ def _skip_advice(place: dict[str, Any], skip: dict[str, Any], ordering_advice: s
     from hermes_cli import kanban_dispatch_skip as skips
     if skips.is_ordering(skip):
         return ordering_advice
-    return (pool_words(place, advice=False) + ". " if pooled else "") + skips.advice(skip)
+    return (pool_words(place, advice=False) + ". " if pooled else "") + skips.sentence_advice(skip)
 
 
 def pool_words(place: dict[str, Any], *, advice: bool = True) -> str:
