@@ -11,7 +11,8 @@ class CronExecutionUnknown(RuntimeError):
 
 class CronFireNotAdmitted(RuntimeError):
     """[daveey] No ready owner was reached and nothing was submitted (the gateway is draining for an
-    update, starting, or absent): a scheduled fire is held and stays due, never booked as a failed
+    update, starting, absent, or its socket could not be opened): a scheduled fire is held and stays
+    due, never booked as a failed
     run. Raised only before admission; a refusal after submit stays a definite failure."""
 
     def __init__(self, message, state, reason_code=None):
@@ -21,6 +22,24 @@ class CronFireNotAdmitted(RuntimeError):
 
 # GatewayUnavailableError states that mean "not ready yet", not "this owner refuses the job".
 _NOT_READY_STATES = frozenset({'draining', 'starting', 'absent'})
+# Consecutive dial-failure holds of one job before the next one is booked FAILED.
+CONNECT_HOLD_LIMIT = 3
+
+
+def _dial_failed(exc):
+    """The gateway socket could not be opened: a plain client error raised from a socket
+    error/timeout. Owner refusals (``GatewayRPCError``), not-ready verdicts
+    (``GatewayUnavailableError``) and local client refusals (bad URL, protocol mismatch) are not."""
+    from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError, GatewayUnavailableError
+    return (isinstance(exc, GatewayClientError)
+            and not isinstance(exc, (GatewayRPCError, GatewayUnavailableError))
+            and isinstance(exc.__cause__, (OSError, TimeoutError)))
+
+
+def _connect_holds_left(job_id):
+    from cron.jobs import get_job
+    from cron.unadmitted_fire import connect_holds
+    return connect_holds(get_job(job_id)) < CONNECT_HOLD_LIMIT
 
 
 def settle_unbooked_fire(job, exc, fire_owner, execution_id):
@@ -41,9 +60,10 @@ def settle_unbooked_fire(job, exc, fire_owner, execution_id):
         return True
     if isinstance(exc, CronFireNotAdmitted) and job.get('_scheduled_instant'):
         from cron.executions import finish_execution
-        from cron.jobs import release_unadmitted_fire
+        from cron.unadmitted_fire import release_unadmitted_fire
         released = release_unadmitted_fire(
-            job['id'], job['_scheduled_instant'], str(exc), expected_fire_owner=fire_owner or None)
+            job['id'], job['_scheduled_instant'], str(exc), expected_fire_owner=fire_owner or None,
+            reason_code=exc.reason_code)
         finish_execution(execution_id, success=False, error=str(exc), delivery_outcome='suppressed')
         log.warning('Cron %s held (%s): %s', job['id'],
                     'slot stays due' if released else 'claim moved on', exc)
@@ -320,6 +340,14 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
             raise CronFireNotAdmitted(
                 f'Not admitted: the gateway is {reason}; the fire stays due: {exc}',
                 exc.state, exc.reason_code) from exc
+        if _dial_failed(exc) and _connect_holds_left(job['id']):
+            # The socket never opened (a stalled or restarting owner loop): nothing was submitted,
+            # so the fire is held like a not-ready gateway. After CONNECT_HOLD_LIMIT consecutive
+            # holds it is booked FAILED below, so a gateway that stays unreachable still alerts.
+            from cron.unadmitted_fire import CONNECT_FAILED
+            raise CronFireNotAdmitted(
+                f'Not admitted: the gateway could not be reached ({CONNECT_FAILED}); the fire stays due: {exc}',
+                'unreachable', CONNECT_FAILED) from exc
         error = f'{type(exc).__name__}: {exc}'
         job['_fire_error'] = True  # nothing was submitted: a fire/infra failure, not an agent verdict
         return False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error
