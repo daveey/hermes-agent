@@ -160,7 +160,8 @@ def _same_lifecycle(conn, task_id, row, value):
 def _signature(value):
     # stage/transport/timing are provenance only: they never make an otherwise-identical observation a new event.
     signature = {k: v for k, v in value.items()
-                 if k not in ("observed_at_ms", "recorded_at_ms", "current", "stage", "transport", *TIMING_KEYS)}
+                 if k not in ("observed_at_ms", "recorded_at_ms", "current", "stage", "transport", COMMENTED_KEY,
+                              *TIMING_KEYS)}
     if value.get("state") == "assigned" and value.get("machine") and "lifecycle" in value:
         # Reading back the assignment promised by this reply is not a transition.
         signature["lifecycle"] = {**value["lifecycle"], "runs_on": value["machine"]}
@@ -175,8 +176,17 @@ def _signature(value):
 # unknown reason) is structural and still a transition.
 VOLATILE_REASONS = frozenset({"load_threshold", "memory_threshold", "max_card_runs_reached",
                               "reserved_capacity_held", "last_seen_invalid"})
-# At most one volatile-only event + comment per card per this window, and only for a different picture.
+# At most one volatile-only comment per card per this window (since the last comment), and only for a different
+# picture.
 REFRESH_MS = 600_000
+# A different volatile-only picture this long after the last event is an event without a comment. pickup-stall
+# restarts a worker's clock at the newest event whose lifecycle is not pinned there
+# (``kanban_pickup_stall._seen_unpinned_here_ms``): a card the Board re-reserves to one worker for seconds at a time
+# must be seen unpinned well inside that worker's threshold (default 600 s), or it files "waiting 10 min" for a
+# card it held for seconds (t_01a1d5a79bd2a70d; the t_01a1cfdfb6f3f7ea false-alarm class).
+SIGHTING_MS = REFRESH_MS // 2
+# Carried on an event written without a comment: when the thread last got one, so sightings never delay a refresh.
+COMMENTED_KEY = "commented_at_ms"
 
 
 def _meaning(value):
@@ -205,14 +215,19 @@ def _write(previous, value, now_ms):
 
     A reservation handed to another worker is an event without a comment: pickup-stall reads the events as "seen
     not pinned here" sightings (``kanban_pickup_stall._seen_unpinned_here_ms``), and the thread text would only
-    repeat the last comment."""
+    repeat the last comment. For the same reason a different volatile-only picture ``SIGHTING_MS`` after the last
+    event is an event without a comment; the ``REFRESH_MS`` comment clock runs from the last comment
+    (``COMMENTED_KEY``)."""
     if previous is None or _meaning(previous) != _meaning(value):
         return True, True
     if _reserved(previous) != _reserved(value):
         return True, False
-    if now_ms - _ms_of(previous) >= REFRESH_MS and _signature(previous) != _signature(value):
+    if _signature(previous) == _signature(value):
+        return False, False
+    commented = previous.get(COMMENTED_KEY)
+    if now_ms - (float(commented) if _number(commented) else _ms_of(previous)) >= REFRESH_MS:
         return True, True
-    return False, False
+    return now_ms - _ms_of(previous) >= SIGHTING_MS, False
 
 
 def _stamp(ms):
@@ -311,7 +326,11 @@ def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
         previous_ms = (newest or {}).get("recorded_at_ms", 0)
         recorded_ms = max(int(time.time() * 1000), int(previous_ms) + 1 if _number(previous_ms) else 0)
         value = {**value, "recorded_at_ms": recorded_ms}
-        event, commented = _write(_stored(conn, task_id), value, recorded_ms)
+        previous = _stored(conn, task_id)
+        event, commented = _write(previous, value, recorded_ms)
+        if event and not commented and previous is not None:
+            carried = previous.get(COMMENTED_KEY)
+            value = {**value, COMMENTED_KEY: carried if _number(carried) else _ms_of(previous)}
         if not event:
             conn.execute(f"CREATE TABLE IF NOT EXISTS {LATEST_TABLE} (task_id TEXT PRIMARY KEY "
                          "REFERENCES tasks(id) ON DELETE CASCADE, payload TEXT NOT NULL)")

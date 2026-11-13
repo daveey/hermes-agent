@@ -63,8 +63,8 @@ def test_volatile_flaps_every_10s_for_20_min_write_at_most_one_per_10_min(conn, 
         qr.record_reply(conn, tid, "hub", last)
     comments, events = counts(conn, tid)
     print(f"20 min of 10 s volatile flaps: {comments} comments, {events} events")
-    assert comments <= 3 and events <= 3
-    assert comments == events  # every written event has its comment
+    assert comments <= 3
+    assert events <= 5  # plus at most one uncommented pickup-stall sighting per SIGHTING_MS (t_01a1d5a79bd2a70d)
     newest = qr.latest(conn, tid)
     assert newest["observed_at_ms"] == last["observation"]["observed_at_ms"]
     assert newest["candidates"] == qr.normalize(last)["candidates"]
