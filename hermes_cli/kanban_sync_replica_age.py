@@ -138,7 +138,9 @@ def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], f
     stamp = _stamp(slug)
     with _LOCK:
         seen = _SEEN.get(slug)
-        if seen is None or (stamp is not None and (seen.stamp is None or stamp > seen.stamp)):
+        # Any change counts: ``pulled_at`` is wall time, and a wall clock stepped back (NTP, a manual fix) writes
+        # stamps below the remembered one on healthy rounds.
+        if seen is None or (stamp is not None and (seen.stamp is None or stamp != seen.stamp)):
             if seen is not None and seen.open:
                 log.info("kanban sync: %s replica reached the feed head again at %s after %.0f awake min; "
                          "incident over", slug, _pt(stamp), (now - seen.since) / 60)

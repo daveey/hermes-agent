@@ -175,6 +175,22 @@ def test_sleep_never_counts(live, kanban_home):
     assert host.cards == []
 
 
+def test_a_wall_clock_step_backwards_is_still_an_advance(live, kanban_home):
+    """The wall clock steps back 30 min (an NTP or manual fix): healthy rounds stamp T-29m, T-28m, ..., each one
+    below the remembered T for all 21 awake minutes.
+
+    ``pulled_at`` is wall time, so any change of the stamp is a pull that reached the feed head."""
+    host = Host(kanban_home, _pt("2026-11-12 18:00:00"))
+    stamp_at = host.wall
+    _stamp(stamp_at)
+    host.check()
+    host.wall -= 30 * MIN
+    host.run(21 * MIN, each=lambda: host.round(head=True))
+    last = replica_age._stamp(BOARD)
+    assert last is not None and last < stamp_at  # every stamp the rounds wrote stayed behind T
+    assert host.cards == []
+
+
 def test_the_stamp_advancing_ends_the_incident_then_the_next_comments_or_opens_a_new_card(live, kanban_home, caplog):
     host = Host(kanban_home, _pt("2026-11-12 18:00:00"), file_fn=replica_age.report)
     _stamp(host.wall)
