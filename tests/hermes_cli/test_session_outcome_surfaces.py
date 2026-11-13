@@ -145,7 +145,7 @@ def test_stripe_report_is_kept_and_read_back_by_the_cli(client, homes, capsys):
 
     run_cli("outcome", "chat")
     out = capsys.readouterr().out
-    assert "Desktop stripe stuck since" in out and "needs-input:prompt runtime=old1" in out
+    assert "Desktop stripe stuck as of" in out and "needs-input:prompt runtime=old1" in out
     run_cli("outcome", "chat", "--json")
     assert json.loads(capsys.readouterr().out)["desktop_stripe"]["previous"] == "done"
 

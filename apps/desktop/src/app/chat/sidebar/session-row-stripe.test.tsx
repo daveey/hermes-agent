@@ -1,9 +1,12 @@
-import { cleanup, render, renderHook } from '@testing-library/react'
+import { act, cleanup, render, renderHook } from '@testing-library/react'
 import { afterEach, expect, it } from 'vitest'
 
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { $queuedPromptsBySession } from '@/store/composer-queue'
 import { reconcilePendingSubmissions } from '@/store/pending-submissions'
 import { $sessions, setSessions } from '@/store/session'
+import { resetStripeTransitionLog, setStripeReasonReporter } from '@/store/session-dot-state'
+import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
 import { SessionRowStatusStripe, useSessionRowStripe } from './session-row-stripe'
@@ -18,6 +21,8 @@ afterEach(() => {
   window.localStorage.clear()
   $queuedPromptsBySession.set({})
   $sessions.set([])
+  clearAllSessionStates()
+  resetStripeTransitionLog()
 })
 
 // [daveey] The red of a queue card a restart may have lost is this app's own: the backend's status shows nothing,
@@ -76,9 +81,14 @@ it('a red decision stripe on a chat whose card is running still names the questi
   expect(stripe(container)?.getAttribute('aria-label')).toBe('Build A, B and C?')
 })
 
-it('the chat\'s own live turn still beats the outcome, for the stripe and its tooltip alike', () => {
+it("the chat's own live turn still beats the outcome, for the stripe and its tooltip alike", () => {
   const session = row('working-chat', {
-    outcome: { at: 1, items: [{ choices: [], id: 'req-2', question: 'Q?', state: 'open' }], kind: 'decision', source: 'derived' }
+    outcome: {
+      at: 1,
+      items: [{ choices: [], id: 'req-2', question: 'Q?', state: 'open' }],
+      kind: 'decision',
+      source: 'derived'
+    }
   } as Partial<SessionInfo>)
 
   setSessions([session])
@@ -87,4 +97,39 @@ it('the chat\'s own live turn still beats the outcome, for the stripe and its to
 
   expect(result.current.outcomePainted).toBe(false)
   expect(result.current.statusStripe).not.toBe('stuck')
+})
+
+// [daveey] PR #1878 review: the red reasons of a `needs-input` row read $sessionStates / $pausedQueueSessionIds, which
+// no row prop carries. When the prompt moves to another runtime the stripe and dot stay `stuck` / `needs-input`, and
+// that new red must still be reported with its new runtime.
+it('a red row whose prompt moved to another runtime is re-reported with the new runtime', () => {
+  const reports: string[][] = []
+
+  const prompt = (needsInput: boolean) => ({
+    ...createClientSessionState(null),
+    needsInput,
+    storedSessionId: 'red-chat'
+  })
+
+  const session = row('red-chat')
+
+  setSessions([session])
+  setStripeReasonReporter((_row, _stripe, _previous, reasons) => {
+    reports.push([...reasons])
+  })
+
+  try {
+    publishSessionState('rt-a', prompt(true))
+    renderHook(() => useSessionRowStripe(session, 'needs-input', true))
+    expect(reports).toEqual([['needs-input:prompt runtime=rt-a']]) // first sighting of a red row
+
+    act(() => {
+      publishSessionState('rt-a', prompt(false))
+      publishSessionState('rt-b', prompt(true))
+    })
+
+    expect(reports).toEqual([['needs-input:prompt runtime=rt-a'], ['needs-input:prompt runtime=rt-b']])
+  } finally {
+    setStripeReasonReporter(null)
+  }
 })

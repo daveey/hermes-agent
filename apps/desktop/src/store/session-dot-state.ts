@@ -823,6 +823,19 @@ export function stuckReasons(
   return reasons
 }
 
+/** [daveey] The inputs `stuckReasons` reads for a `needs-input` row that no row prop carries: which runtimes hold a
+ *  prompt (for which stored session) and which sessions have a paused queue card. A string, so a row subscribed to it
+ *  re-renders only when that set changes (a prompt moving to another runtime), not on every session-state publish. */
+export const $stuckPromptInputsKey = computed([$sessionStates, $pausedQueueSessionIds], (states, paused) =>
+  [
+    Object.entries(states)
+      .filter(([, s]) => s?.needsInput)
+      .map(([runtimeId, s]) => `${runtimeId}=${s?.storedSessionId ?? ''}`)
+      .join(','),
+    paused.join(',')
+  ].join('|')
+)
+
 /** Where a red edge goes besides desktop.log: the session's own gateway (`POST /api/sessions/<id>/stripe-report`),
  *  which keeps it for `hermes sessions outcome <id>`. Set by the sidebar; a no-op until then (tests, early boot). */
 export type StripeReasonReporter = (

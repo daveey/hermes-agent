@@ -7,7 +7,8 @@ import type { ClientSessionState } from '@/app/types'
  *  runtimes, so a clarify open when a REMOTE backend restarted kept its stored session in `$attentionSessionIds`
  *  forever: a `needs-input` dot and a red `stuck` stripe with no question anywhere (selfheal desktop-54ae373894).
  *  Only a sibling no longer running is retired (reconnect already downgraded its busy claim); a sibling still
- *  busy is left to its own terminal events. Returns the runtime ids whose prompt `publishSessionState` clears. */
+ *  busy, turn-live or awaiting a response is left to its own terminal events. Returns the runtime ids whose
+ *  prompt `publishSessionState` clears. */
 export function supersededPromptRuntimes(
   states: Readonly<Record<string, ClientSessionState | undefined>>,
   runtimeId: string,
@@ -25,6 +26,7 @@ export function supersededPromptRuntimes(
         otherId !== runtimeId &&
         other?.needsInput &&
         !other.busy &&
+        !other.turnLive &&
         !other.awaitingResponse &&
         other.storedSessionId === storedId
     )

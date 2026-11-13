@@ -14,6 +14,7 @@ import { stuckOnPausedQueue } from '@/store/owner-queue-landed'
 import { $pausedQueueSessionIds } from '@/store/owner-queue-reconcile'
 import { $sessions } from '@/store/session'
 import {
+  $stuckPromptInputsKey,
   kanbanStripeCounts,
   outcomePaintsStripe,
   recordStripeTransition,
@@ -66,10 +67,14 @@ export function useSessionRowStripe(
     : null
 
   // [daveey] desktop.log trace of every stripe change with the row inputs that fed it (`stripe-transition <sid>`),
-  // so the next "green while work is queued" report has the payload. Change-only and capped inside.
+  // so the next "green while work is queued" report has the payload. Change-only and capped inside. A red row whose
+  // prompt moved to another runtime (or whose paused queue card changed) has new reasons with the same stripe and
+  // dot, so the prompt inputs are a dependency too: otherwise that new red is never re-reported.
+  const promptInputsKey = useStore($stuckPromptInputsKey)
+
   useEffect(() => {
     recordStripeTransition(session, statusStripe, dotState)
-  }, [session, statusStripe, dotState])
+  }, [session, statusStripe, dotState, promptInputsKey])
 
   return { outcomePainted: outcomePaintsStripe(dotState, userBlocked), statusStripe, userBlocked }
 }

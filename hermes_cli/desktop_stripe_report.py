@@ -108,4 +108,6 @@ def describe(entry: Optional[dict[str, Any]], *, now: Optional[float] = None) ->
     age = max(0.0, (now if now is not None else time.time()) - float(entry.get("at") or 0))
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(entry.get("at") or 0)))
     reasons = ", ".join(entry.get("reasons") or ()) or "-"
-    return f"Desktop stripe {entry.get('stripe')} since {when} ({age / 60:.0f} min ago): {reasons}"
+    # `at` is when the latest report arrived (a red edge, a cause change or a first sighting after a restart),
+    # not when the stripe turned that colour.
+    return f"Desktop stripe {entry.get('stripe')} as of {when} ({age / 60:.0f} min ago): {reasons}"

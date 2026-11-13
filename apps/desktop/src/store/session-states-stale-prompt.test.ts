@@ -66,7 +66,7 @@ describe('a blocking prompt on a runtime the backend replaced', () => {
     expect($attentionSessionIds.get()).toEqual([])
   })
 
-  it("keeps the prompt when the new runtime belongs to another stored session", () => {
+  it('keeps the prompt when the new runtime belongs to another stored session', () => {
     publishSessionState('rt-old', state({ needsInput: true })) // as reconnect leaves it
     publishSessionState('rt-other', state({ busy: true, storedSessionId: 's2' }))
 
@@ -95,6 +95,15 @@ describe('a blocking prompt on a runtime the backend replaced', () => {
 
     expect($sessionStates.get()['rt-busy']?.needsInput).toBe(true)
     expect($sessionStates.get()['rt-awaiting']?.needsInput).toBe(true)
+    expect($attentionSessionIds.get()).toEqual(['s1'])
+  })
+
+  // PR #1878 review: a sibling whose turn is live (turnLive without a busy claim) is still running.
+  it('leaves a sibling whose turn is live to its own terminal events', () => {
+    publishSessionState('rt-live', state({ needsInput: true, turnLive: true }))
+    publishSessionState('rt-new', state({ busy: true }))
+
+    expect($sessionStates.get()['rt-live']?.needsInput).toBe(true)
     expect($attentionSessionIds.get()).toEqual(['s1'])
   })
 
