@@ -1359,6 +1359,10 @@ _RUN_PARTIAL_INDEXES = (
 
 
 def _ensure_run_partial_indexes(conn: sqlite3.Connection) -> None:
+    # A legacy TEXT-PK task_runs can lack base columns (``ended_at``) that the additive pass never adds; the
+    # rebuild (``_REBUILD_SPECS``) recreates the table with these indexes, so skip them here until then.
+    if not {"ended_at", "worker_pid", "outcome", "metadata"} <= _column_names(conn, "task_runs"):
+        return
     for ddl in _RUN_PARTIAL_INDEXES:
         conn.execute(ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
 
