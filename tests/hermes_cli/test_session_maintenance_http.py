@@ -4,6 +4,7 @@ import pytest
 from fastapi import FastAPI
 
 from gateway.runtime_ownership import ProfileOwnership
+from hermes_cli.session_owner_discovery import STARTING_DETAIL
 from hermes_cli.web_routers.sessions import manage_router
 from hermes_state import SessionDB
 
@@ -12,6 +13,8 @@ from hermes_state import SessionDB
 async def test_maintenance_routes_refuse_live_owner_without_changing_rows(tmp_path, monkeypatch):
     monkeypatch.setattr('hermes_state._default_db_path', lambda: tmp_path / 'state.db')
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    # The reservation below has no control socket, which reads as a gateway still starting.
+    monkeypatch.setattr('hermes_cli.session_owner_discovery.OWNER_STARTING_BUDGET_S', 0.3)
     app = FastAPI()
     app.include_router(manage_router)
     with SessionDB(db_path=tmp_path / 'state.db') as db:
@@ -30,7 +33,11 @@ async def test_maintenance_routes_refuse_live_owner_without_changing_rows(tmp_pa
                     # naming discovery's state (as session.mutate does), never the bare offline 409.
                     expected = 503 if path == 'owner-backfill' else 409
                     assert response.status_code == expected, (path, response.text)
-                    assert 'maintenance' in response.json()['detail'].lower()
+                    detail = response.json()['detail']
+                    if path == 'owner-backfill':
+                        assert detail == STARTING_DETAIL
+                    else:
+                        assert 'maintenance' in detail.lower()
                     assert db.get_session('ended-empty') == before
         finally:
             owner.close()

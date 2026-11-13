@@ -109,12 +109,15 @@ async def test_an_owner_discovery_cannot_identify_is_not_owner_less(tmp_path, mo
     """#144141: over SSH ``serve --isolated`` discovery of a running gateway came back without an
     endpoint, and the offline reservation that owner wins answered a bare 409: pins and renames
     looked applied, then vanished. A lost reservation behind any verdict but ``absent`` answers a
-    retryable 503 that names discovery's reason and keeps the reservation's remedy."""
+    retryable 503 that names discovery's reason and keeps the reservation's remedy. A verdict that
+    only needs time (a missed identify deadline, a gateway still starting) asks for a retry instead."""
     from contextlib import contextmanager
     from gateway.runtime_ownership import OwnershipConflict
     from hermes_cli import web_server_sessions
     from hermes_cli.gateway_runtime import GatewayDiscovery
+    from hermes_cli import session_owner_discovery
 
+    monkeypatch.setattr(session_owner_discovery, 'OWNER_STARTING_BUDGET_S', 0.3)  # not the real 24 s
     request = _standalone_request(monkeypatch, tmp_path)
     monkeypatch.setattr('hermes_cli.gateway_runtime.discover_gateway_endpoint',
                         lambda home, timeout=2.0: GatewayDiscovery(state, reason_code=reason_code))
@@ -131,8 +134,9 @@ async def test_an_owner_discovery_cannot_identify_is_not_owner_less(tmp_path, mo
             operation='sidebar', payload={'pinned': True})
     assert exc.value.status_code == 503
     assert exc.value.detail.startswith(f'owner_unavailable: {reason_code or state}: ')
-    if reason_code == 'control_timeout':
-        # A live owner that only missed its identify deadlines: retry, never drain or stop it.
+    if reason_code == 'control_timeout' or state == 'starting':
+        # A live owner that only missed its identify deadlines, or one still starting: retry,
+        # never drain or stop it.
         assert 'Drain and stop the gateway' not in exc.value.detail
         assert exc.value.detail.endswith('retry')
     else:
