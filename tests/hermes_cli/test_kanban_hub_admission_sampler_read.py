@@ -89,8 +89,8 @@ def test_sample_accepted_before_the_lease_is_still_fresh_after_a_slow_lease(boar
     assert kb.claim_task(conn, t) is not None
 
 
-@pytest.mark.parametrize("change,reason", [("stale", "hub_cpu_unknown"), ("missing", "hub_cpu_unknown"),
-                                           ("busy", "hub_cpu_at_or_above_limit"), ("window", "hub_cpu_unknown")])
+@pytest.mark.parametrize("change,reason", [("stale", "hub_cpu_sample_stale"), ("missing", "hub_cpu_sample_stale"),
+                                           ("busy", "hub_cpu_at_or_above_limit"), ("window", "hub_cpu_sample_stale")])
 def test_sample_that_changes_after_the_advisory_is_rechecked_under_the_lock(board, monkeypatch, change, reason):
     conn, home = board
     configure(home)

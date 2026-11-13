@@ -848,7 +848,7 @@ def test_below_limit_admits_and_claimed_event_carries_consumed_sample(board, mon
 
 @pytest.mark.parametrize("review", [False, True])
 @pytest.mark.parametrize("pct,reason", [(50.0, "hub_cpu_at_or_above_limit"), (50.001, "hub_cpu_at_or_above_limit"),
-                                        (None, "hub_cpu_unknown")])
+                                        (None, "hub_cpu_sample_stale")])
 def test_at_or_above_limit_or_unknown_refuses_with_no_local_run(board, monkeypatch, review, pct, reason):
     conn, home = board
     configure(home)
@@ -866,7 +866,7 @@ def test_invalid_root_limit_refuses_without_sampling(board, monkeypatch, review)
     locked(monkeypatch, lambda *a, **k: pytest.fail("invalid limit: refuse before sampling"))
     t = task(conn, review)
     assert claim(conn, t, review) is None
-    refused(conn, t, review, "hub_cpu_unknown")
+    refused(conn, t, review, "hub_cpu_limit_unknown")
 
 
 def test_profile_override_cannot_disable_root_gate(board, monkeypatch, tmp_path):
@@ -961,7 +961,7 @@ def test_lease_expiring_during_sample_cannot_start(board, monkeypatch):
         ka, "_now", lambda: real_time() + 10 ** 7)))
     t = task(conn)
     assert kb.claim_task(conn, t) is None
-    refused(conn, t, False, "hub_cpu_unknown")
+    refused(conn, t, False, "hub_cpu_gate_expired_counting")
 
 
 def test_simultaneous_claimers_at_6_of_7_start_at_most_one(board, monkeypatch):
@@ -1054,7 +1054,7 @@ def test_deadline_already_passed_refuses_before_the_sample(board, monkeypatch):
     locked(monkeypatch, lambda *a, **k: pytest.fail("deadline passed: refuse before sampling"))
     t = task(conn)
     assert kb.claim_task(conn, t) is None
-    refused(conn, t, False, "hub_cpu_unknown")
+    refused(conn, t, False, "hub_cpu_gate_expired")
 
 
 def _shrink_hold_budget(monkeypatch, budget_s):

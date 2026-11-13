@@ -101,6 +101,18 @@ def _running_rows(db) -> Optional[tuple[bool, Any, list]]:
     return None
 
 
+def table_columns(db, table: str) -> set:
+    """Column names of ``table`` in ONE result row (empty set when absent).
+
+    [daveey] Runs under admission.lock in the gateway. CPython's sqlite3 drops the GIL around every row step, and
+    in a process with a GIL-bound thread each re-acquire waits out the switch interval (~5 ms). ``PRAGMA
+    table_info`` returns one row per column (~70 for ``tasks``), so per-column steps on every board cost seconds
+    (hub 2026-11-13: ~840 handoffs per census; a probe beside one busy thread took 4.2 s instead of 20 ms, and every
+    hub claim overran its hold). ``table`` is a fixed identifier from our own code, never user input."""
+    row = db.execute("SELECT group_concat(name, char(31)) FROM pragma_table_info(?)", (table,)).fetchone()
+    return set(row[0].split("\x1f")) if row and row[0] else set()
+
+
 def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_output=None, extra_paths=()) -> Optional[int]:
     """All profiles share the kanban root. Count its execution boards, not replicas.
 
@@ -149,7 +161,7 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_outpu
                     ids = {row[0] for row in rows}
                     total += len(rows)
                     receipts = [row[1:] for row in rows]
-                elif "lease_holder" in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
+                elif "lease_holder" in table_columns(db, "tasks"):
                     own = db.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
                     if own is None or not own[0]:
                         return None

@@ -17,7 +17,8 @@ def select_pool(admission_class, *, regular, priority, regular_cap, priority_cap
 
 def board_pools(conn, *, own=None, excluded=(), origins=None):
     """Count local running rows by claim-time receipt; legacy NULL is regular."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(task_runs)")}
+    from hermes_cli.machine_metrics import table_columns
+    cols = table_columns(conn, "task_runs")  # one row step, not one per column (GIL convoy under the lock)
     receipt = "r.admission_pool" if "admission_pool" in cols else "NULL"
     where, params = "t.status='running'", ()
     if own is not None:
