@@ -801,13 +801,34 @@ class ClaimGate:
             _log.info("kanban sync: release of unused lease for %s failed: %s", task_id, err)
 
 
-# task_id -> why the Board did not grant its lease, set by :func:`claim_gate` and read once by the dispatcher
-# (:func:`pop_claim_deferral`), so a tick can tell a deferred claim from a lost CAS and the "dispatcher stuck"
-# warning can name it.
-_CLAIM_DEFERRALS: dict[str, str] = {}
+ORIGIN_LOCAL = "local"  # this host refused: its admission gate (kanban_admission), placement or worker capacity
+ORIGIN_BOARD = "board"  # the Board service refused the lease, or could not be reached
 
 
-def pop_claim_deferral(task_id: str) -> Optional[str]:
+class ClaimDeferral(str):
+    """A claim deferral reason that knows who set it (``origin``: :data:`ORIGIN_LOCAL` / :data:`ORIGIN_BOARD`).
+    A ``str``, so every consumer that compares, logs or serialises the reason is unchanged; the dispatch skip
+    words read ``origin`` instead of guessing from the reason's name (PR #2003 review). [daveey]"""
+
+    origin: str
+
+    def __new__(cls, reason: str, origin: str) -> ClaimDeferral:
+        self = super().__new__(cls, reason)
+        self.origin = origin
+        return self
+
+
+# task_id -> why the claim was not granted (a :class:`ClaimDeferral`), set by :func:`claim_gate` and this host's
+# admission gate and read once by the dispatcher (:func:`pop_claim_deferral`), so a tick can tell a deferred claim
+# from a lost CAS and the "dispatcher stuck" warning can name it.
+_CLAIM_DEFERRALS: dict[str, ClaimDeferral] = {}
+
+
+def defer_claim(task_id: str, reason: str, origin: str) -> None:
+    _CLAIM_DEFERRALS[task_id] = ClaimDeferral(reason, origin)
+
+
+def pop_claim_deferral(task_id: str) -> Optional[ClaimDeferral]:
     return _CLAIM_DEFERRALS.pop(task_id, None)
 
 
@@ -833,7 +854,7 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     from hermes_cli.kanban_sync_diagnostics import record_claim
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is not None and (reason := execution_refusal(conn, row) or _source_skip(conn, row)):
-        _CLAIM_DEFERRALS[task_id] = reason
+        defer_claim(task_id, reason, ORIGIN_LOCAL)
         return ClaimGate(expires, deferred=True)
     if board_mode(conn) != "primary":
         return ClaimGate(expires)
@@ -845,12 +866,12 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
                                   ttl_s=max(expires - int(time.time()), 1), lane=lane)
     except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
         _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
-        _CLAIM_DEFERRALS[task_id] = "offline"
+        defer_claim(task_id, "offline", ORIGIN_BOARD)
         record_claim(conn, task_id, "offline")
         return ClaimGate(expires, deferred=True)
     if not lease.granted:
         _log.info("claim_deferred: %s task=%s holder=%s", lease.reason or "denied", task_id, lease.holder)
-        _CLAIM_DEFERRALS[task_id] = lease.reason or "denied"
+        defer_claim(task_id, lease.reason or "denied", ORIGIN_BOARD)
         record_claim(conn, task_id, lease.reason or "denied")
         return ClaimGate(expires, deferred=True)
     record_claim(conn, task_id, "granted")
@@ -864,7 +885,7 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
         if not local_admission(conn):
             with gate:
                 pass  # release the unused grant; no local task/run was started
-            _CLAIM_DEFERRALS[task_id] = "waiting_for_worker_capacity"
+            defer_claim(task_id, "waiting_for_worker_capacity", ORIGIN_LOCAL)
             return ClaimGate(expires, deferred=True)
     return gate
 

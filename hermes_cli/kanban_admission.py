@@ -40,7 +40,7 @@ def _defer(task_id, reason):
     if task_id is None:
         return
     from hermes_cli import kanban_db_sync as sync
-    sync._CLAIM_DEFERRALS[task_id] = reason
+    sync.defer_claim(task_id, reason, sync.ORIGIN_LOCAL)  # this host's gate, never the Board
 
 
 def hub_cpu_advisory(task_id=None, *, conn=None):

@@ -296,7 +296,11 @@ FLAP = ("capacity", "hub_cpu_at_or_above_limit")
 
 def _deferred(tid, detail):
     from types import SimpleNamespace
-    return SimpleNamespace(claim_deferred=[(tid, detail)])
+
+    from hermes_cli import kanban_db_sync as sync
+    # The hub CPU gate is this host's; ``capacity`` is the Board's lease refusal (the producers stamp the origin).
+    origin = sync.ORIGIN_BOARD if detail == "capacity" else sync.ORIGIN_LOCAL
+    return SimpleNamespace(claim_deferred=[(tid, sync.ClaimDeferral(detail, origin))])
 
 
 def test_flapping_detail_over_40_ticks_keeps_two_rows_and_latest_tracks_the_current_one(board, monkeypatch):
@@ -315,13 +319,16 @@ def test_flapping_detail_over_40_ticks_keeps_two_rows_and_latest_tracks_the_curr
         assert [(p["reason"], p["detail"]) for p in _skips(conn, tid)] == [("claim_deferred", d) for d in FLAP]
 
 
-@pytest.mark.parametrize("detail,who", [
-    ("capacity", "the Board"), ("hub_cpu_unknown", "this host's admission gate"),
-    ("hub_cpu_sample_stale", "this host's admission gate"), ("hub_admission_overrun", "this host's admission gate"),
-    ("hub_capacity_full", "this host's admission gate"),
+@pytest.mark.parametrize("detail,origin,who", [
+    ("capacity", "board", "the Board"), ("hub_cpu_unknown", "local", "this host's admission gate"),
+    ("hub_cpu_sample_stale", "local", "this host's admission gate"),
+    ("hub_admission_overrun", "local", "this host's admission gate"),
+    ("hub_capacity_full", "local", "this host's admission gate"),
+    ("update_admission_hold", "local", "this host's admission gate"),
 ])
-def test_claim_deferred_words_name_who_deferred_it(detail, who):
-    assert skips.words({"reason": "claim_deferred", "detail": detail}) == f"skipped: {who} deferred its claim ({detail})"
+def test_claim_deferred_words_name_who_deferred_it(detail, origin, who):
+    skip = {"reason": "claim_deferred", "detail": detail, "origin": origin}
+    assert skips.words(skip) == f"skipped: {who} deferred its claim ({detail})"
 
 
 def test_latest_tracks_the_current_skip_after_the_episode_cap(board, monkeypatch):

@@ -348,7 +348,9 @@ def test_materialize_timeout_uses_grant_revision_then_defers_next_claim(world, r
         conn.execute("UPDATE tasks SET workspace_source=? WHERE id=?", (json.dumps(manifest(world, manifest_revision=7)), claimed.id))
     runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
     assert sync.claim_gate(conn, claimed.id, 900).deferred
-    assert sync.pop_claim_deferral(claimed.id) == "workspace_source_refused_here:materialize_timeout"
+    deferral = sync.pop_claim_deferral(claimed.id)
+    assert deferral == "workspace_source_refused_here:materialize_timeout"
+    assert deferral.origin == sync.ORIGIN_LOCAL  # this host's skip memo, not a Board refusal
     assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == runs
 
 
