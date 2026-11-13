@@ -38,7 +38,7 @@ def _claim_in_flight(conn: sqlite3.Connection, task_id: str, now: int) -> bool:
     return _kb()._sync.held_by_us_live(conn, task_id, now)
 
 
-_LEFTOVER_CLAIM_STATUSES = ("ready", "todo", "review", "blocked", "scheduled", "done")
+_LEFTOVER_CLAIM_STATUSES = ("ready", "todo", "review", "blocked", "scheduled", "done", "triage")
 
 
 def release_leftover_local_claims(conn: sqlite3.Connection) -> list[str]:

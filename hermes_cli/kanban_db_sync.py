@@ -1408,6 +1408,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         assignments = ", ".join(f"{c} = ?" for c in cols)
         conn.execute(f"UPDATE tasks SET {assignments}{', ' if cols else ''}sync_version = ? WHERE id = ?",
                      (*cols.values(), ch.version, ch.uid))
+        from hermes_cli.kanban_release_claim import release_on_feed
+        release_on_feed(conn, ch.uid, old, cols.get("status"))  # our queued failure release landed [daveey]
     if "lease_holder" in ch.fields:  # the service's full row carries its lease mirror
         _mirror_lease(conn, ch.uid, ch.fields.get("lease_holder"), ch.fields.get("lease_expires"),
                       ch.version, own, result)
