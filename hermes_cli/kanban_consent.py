@@ -3,6 +3,14 @@
 The approval decision is durable in the existing state DB; created events carry
 its snapshot to workers. This is authorization state, not a delivery receipt.
 Ordinary user turns and elapsed time never remove a stop.
+
+Where stops are enforced: at submission (the requester card's created snapshot
+plus the submitting session's own host-local stops) and again at the home
+executor (the created snapshot, read from the replica; an unsynced created event
+is retried, then refused). Cards created by a session inherit its stops even when
+they carry another origin session_id. Known limit: a stop recorded in a session
+after a card was created does not reach that card, and the home cannot see a
+submitting session's host-local stops (only the submitting host checks them).
 """
 from __future__ import annotations
 
@@ -110,26 +118,85 @@ def session_stops(session):
         db.close()
 
 
-def creation_stops(conn, task_id):
+def _created_stops(conn, task_id):
+    """The stops stamped on *task_id*'s created event; None when that event is absent."""
     if not task_id:
         return []
     row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' ORDER BY id LIMIT 1",
                        (task_id,)).fetchone()
-    return json.loads(row[0] or "{}").get("consent_stops", []) if row else []
+    return None if row is None else json.loads(row[0] or "{}").get("consent_stops", [])
+
+
+def creation_stops(conn, task_id):
+    """Local-board read: a card with no created event here carries no stops (the home fails closed)."""
+    return _created_stops(conn, task_id) or []
+
+
+def current_session():
+    """The request-scoped session (what ``_create_session_id`` binds), never another chat's process env."""
+    from gateway.session_context import get_session_env
+    return get_session_env("HERMES_SESSION_ID") or None
 
 
 def snapshot(conn, task_id, creator_task_id):
+    """Creator stops + the card's origin session + the creating session (a worker run's own stops).
+
+    Children of a worker card inherit the parent's origin-chat session_id, so the
+    worker run's session is added explicitly: a stop it recorded binds them too.
+    """
     row = conn.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
-    session = (row[0] if row else None) or os.environ.get("HERMES_SESSION_ID")
-    stops = creation_stops(conn, creator_task_id) + session_stops(session)
+    current = current_session()
+    sessions = dict.fromkeys(s for s in ((row[0] if row else None) or current, current) if s)
+    stops = list(creation_stops(conn, creator_task_id))
+    for session in sessions:
+        stops += session_stops(session)
     return list({json.dumps(s, sort_keys=True): s for s in stops}.values())
 
 
-def enforce(conn, requester, ops):
+def _check(stops, ops):
     from hermes_cli.kanban_supervisor_requests import SupervisorRequestError
-    for stop in creation_stops(conn, requester):
+    for stop in stops:
         for op in ops:
             if (op.get("op") == "operator" and op.get("action") == "comment"
                     and op.get("task_id") in stop.get("targets", [])):
                 raise SupervisorRequestError("consent_stop", "the originating approval did not consent to this "
                                              "target; delegation does not authorize it")
+
+
+def enforce(conn, requester, ops, session=None):
+    """Submission check: the requester's creation stops plus the submitting session's own stops.
+
+    The home re-checks the creation stops (``home_refusal``) and fails closed when
+    it cannot read them; this local check reads the caller's own board.
+    """
+    _check(list(creation_stops(conn, requester)) + session_stops(session), ops)
+
+
+# How long the home waits for a caller's created event to reach its replica before refusing.
+CREATION_SYNC_GRACE_S = 600
+
+
+def home_refusal(rep, payload, target):
+    """``(refusal, retry)`` for the home executor, from the caller's created event in the replica.
+
+    A missing created event (sync lag) is retried like an unreachable Board, then
+    refused after ``CREATION_SYNC_GRACE_S``: the stops cannot be checked, so the
+    call is never applied on an empty read. Known limit: the submitting session's
+    host-local stops are checked only at submission (``enforce``), never here.
+    """
+    from hermes_cli.kanban_supervisor_requests import SupervisorRequestError
+    if payload.get("action") != "comment":
+        return None, False  # stops only bind comments; other actions need no provenance read
+    caller = (payload.get("caller") or {}).get("task_id")
+    stops = _created_stops(rep, caller)
+    if stops is None:
+        at = payload.get("requested_at")
+        if isinstance(at, (int, float)) and time.time() - at <= CREATION_SYNC_GRACE_S:
+            return None, True
+        return (f"consent_unproven: the created event of {caller} never reached this replica, so its "
+                "approval stops cannot be checked"), False
+    try:
+        _check(stops, [{"op": "operator", "action": payload.get("action"), "task_id": target}])
+    except SupervisorRequestError as exc:
+        return str(exc), False
+    return None, False

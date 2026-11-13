@@ -7,19 +7,42 @@ import re
 import sqlite3
 
 
-_CLAIM = re.compile(r"\b(?:posted|sent|delivered|commented|relayed)\b", re.IGNORECASE)
-# A clause that reports a non-delivery, a queue or an intent is never a claim:
-# pending stays queued wording and must not need (or fake) a delivery proof.
-_NOT_CLAIM = re.compile(r"(?:n't|n’t)\b|\b(?:not|never|no|queued|pending|failed|refused|rejected|unable|will|"
-                        r"would|could|should|may|might|if|once|until|awaiting|waiting)\b", re.IGNORECASE)
+_CLAIM = frozenset({"posted", "sent", "delivered", "commented", "relayed"})
+# A negation, queue or intent word governs a claim verb only from just before it
+# ("was not posted", "queued and will be sent", "once delivered"): pending stays
+# queued wording and must not need (or fake) a delivery proof. The same word
+# elsewhere in the clause ("Delivered to t_X with no errors") does not undo the
+# claim, so it still needs the exact receipt (fail closed).
+_NOT_CLAIM = frozenset({"not", "never", "no", "nothing", "none", "neither", "nor", "without", "queued", "pending",
+                        "failed", "refused", "rejected", "unable", "will", "would", "could", "should", "may",
+                        "might", "if", "once", "until", "awaiting", "waiting", "yet"})
+_GOVERN_WINDOW = 3  # words before the verb: "has not yet been posted", "will later be sent"
+# A comma or conjunction ends the governing span: "filed no card, so I posted ..." is a claim.
+_BOUNDARY = frozenset({",", "so", "and", "but", "then", "after", "before", "because", "which", "while", "that"})
+_WORD = re.compile(r"[\w’']+|,")
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{8}(?:[0-9a-f]{8})?\b")
 
 
+def _governed(words, i):
+    for w in reversed(words[max(0, i - _GOVERN_WINDOW):i]):
+        if w in _BOUNDARY:
+            return False
+        if w in _NOT_CLAIM or w.endswith(("n't", "n’t")):
+            return True
+    return False
+
+
 def claimed_targets(text):
-    """Explicit affirmative past-tense delivery claims, one clause at a time."""
+    """Explicit affirmative past-tense delivery claims, one clause at a time.
+
+    A clause claims delivery when one of its claim verbs is not governed by a
+    negation/intent word in the few words before it; every card id in that
+    clause is then claimed.
+    """
     targets = set()
     for clause in re.split(r"[.!?;\n]", text if isinstance(text, str) else ""):
-        if _CLAIM.search(clause) and not _NOT_CLAIM.search(clause):
+        words = [w.lower() for w in _WORD.findall(clause)]
+        if any(w in _CLAIM and not _governed(words, i) for i, w in enumerate(words)):
             targets.update(_TASK_ID.findall(clause))
     return targets
 

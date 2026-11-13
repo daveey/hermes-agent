@@ -746,13 +746,8 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             event = {"id": eid, "uid": euid, "task_id": etask}
             refusal, retry = _caller_refusal(rep, board, event, payload)
             if refusal is None and not retry:
-                from hermes_cli.kanban_consent import enforce
-                from hermes_cli.kanban_supervisor_requests import SupervisorRequestError
-                try:
-                    enforce(rep, (payload.get("caller") or {}).get("task_id"), [{
-                        "op": "operator", "action": payload.get("action"), "task_id": target}])
-                except SupervisorRequestError as exc:
-                    refusal = str(exc)
+                from hermes_cli.kanban_consent import home_refusal
+                refusal, retry = home_refusal(rep, payload, target)  # unsynced created event: retry, then refuse
             if retry:
                 hi = eid - 1
                 break
