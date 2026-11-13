@@ -414,6 +414,62 @@ def test_release_during_pending_handoff_lets_held_compete_again(spawn, home):
         gateway.release()
 
 
+def test_waiter_keeps_its_want_live_without_held_calls(spawn, home):
+    """PR #2161 review nit 1: a waiter whose caller never calls ``held()`` again must keep its
+    ``.want`` live past ``3 × interval``: the hand-off waiter refreshes it on its own timer."""
+    dash = spawn("dashboard")
+    wait_until(lambda: dash.state() == "HELD", timeout=20, what="dashboard holds")
+    gateway = hll.HostLoopLease("test-loop", "gateway", interval=INTERVAL, home=home)
+    observer = hll.HostLoopLease("test-loop", "serve", interval=INTERVAL, home=home)
+    try:
+        dash_pid = dash.proc.pid
+        dash.proc.send_signal(signal.SIGSTOP)  # no beat(), so no hand-off: the gateway keeps waiting
+        try:
+            assert gateway.held() is False  # publishes .want and waits; held() is never called again
+            assert (_want_of(home, "test-loop") or {}).get("pid") == os.getpid()
+            first = (_want_of(home, "test-loop") or {}).get("at", 0.0)
+            # the first record expires 3 intervals in: wait for a refresh made past that point
+            wait_until(lambda: (_want_of(home, "test-loop") or {}).get("at", 0.0)
+                       > first + hll.WATCHDOG_FACTOR * INTERVAL, timeout=10,
+                       what="the waiter refreshes its .want with no held() call")
+            assert gateway._waiting is True
+            want = observer._live_want()
+            assert want is not None and want.get("pid") == os.getpid(), _want_of(home, "test-loop")
+        finally:
+            os.kill(dash_pid, signal.SIGCONT)
+        wait_until(lambda: gateway._held, timeout=10, what="gateway gets the hand-off")
+    finally:
+        gateway.release()
+
+
+def test_refresher_spawn_failure_keeps_waiting_and_held_refreshes(home, monkeypatch, caplog):
+    """The hand-off wait does not depend on the refresher: when only that thread fails to start, the
+    waiter keeps waiting and ``held()`` refreshes ``.want`` as before."""
+    dash = hll.HostLoopLease("rf", "dashboard", interval=60, home=home)
+    assert dash.held() is True
+    gateway = hll.HostLoopLease("rf", "gateway", interval=60, home=home)
+    real = hll._spawn
+
+    def no_refresher(target, name):
+        if name.startswith("host-loop-want-refresh-"):
+            raise RuntimeError("can't start new thread")
+        real(target, name)
+
+    monkeypatch.setattr(hll, "_spawn", no_refresher)
+    with caplog.at_level(logging.WARNING, logger=hll.__name__):
+        assert gateway.held() is False
+    assert gateway._waiting is True and gateway._want_stop is None
+    assert any("cannot start the .want refresher" in r.getMessage() for r in caplog.records)
+    before = (_want_of(home, "rf") or {})["at"]
+    gateway._next_probe = 0.0
+    assert gateway.held() is False
+    assert (_want_of(home, "rf") or {})["at"] > before
+    monkeypatch.undo()
+    dash.release()  # (same pid, so beat() would not hand off) the waiting gateway gets the lock
+    wait_until(lambda: gateway._held, timeout=10, what="gateway gets the lock")
+    gateway.release()
+
+
 def test_meta_is_fixed_length_so_rewrites_never_leave_a_tail(home):
     """Nit 4: a lock-free reader must never see the old record's tail after a shorter rewrite."""
     lease = hll.HostLoopLease("fl", "serve", interval=1, home=home)

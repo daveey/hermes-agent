@@ -32,8 +32,10 @@ home, so profile processes of one install share one owner.
   gets the lock the moment it is released (no polling gap). The holder reads ``.want`` in ``beat()`` at
   the end of each pass and releases. Any other standby that wins the lock in that release window drops
   it again while a live ``.want`` of priority >= its own exists. ``.want`` is one slot: while it waits,
-  the wanter rewrites it once per interval from ``held()`` (refreshing ``at``, or republishing it when
-  another wanter's record replaced it), so a replaced record cannot starve it. A ``.want`` whose ``at``
+  a second daemon thread of the wanter rewrites it once per interval (refreshing ``at``, or republishing
+  it when another wanter's record replaced it), so a replaced record cannot starve it and the refresh
+  does not depend on how often the caller calls ``held()`` (``held()`` refreshes it too, the fallback
+  when that thread could not start). A ``.want`` whose ``at``
   is older than ``3 × interval`` is expired (one WARNING per wanter): a wanter that is alive but never
   takes the lock (SIGSTOPped, its waiting thread failed to start) cannot make every process defer.
 * **Torn metadata.** The holder rewrites the record in place (``pwrite``), padded with spaces to a
@@ -208,6 +210,7 @@ class HostLoopLease:
         self._writable = False
         self._held = False
         self._waiting = False        # a daemon thread blocks on LOCK_EX on self._fd for a .want hand-off
+        self._want_stop: threading.Event | None = None  # stops the current wait's .want refresher
         self._stop: threading.Event | None = None  # the current holding's watchdog stop flag
         self._last_beat = 0.0
         self._acquired_at = 0.0
@@ -274,6 +277,7 @@ class HostLoopLease:
             if self._held:
                 self._drop()
             self._clear_own_want()
+            self._stop_want_refresher()
             if self._waiting:
                 # The hand-off thread is blocked in flock() on self._fd and cannot be interrupted: leave
                 # that fd to it (it unlocks and closes it on wake-up) and start this object afresh.
@@ -441,6 +445,28 @@ class HostLoopLease:
             logger.warning("host loop %s: cannot start the hand-off thread (%s); not waiting", self.name, exc)
             self._waiting = False
             self._clear_own_want()
+            return
+        stop = self._want_stop = threading.Event()
+        try:
+            _spawn(lambda: self._refresh_want_while_waiting(fd, stop), f"host-loop-want-refresh-{self.name}")
+        except RuntimeError as exc:  # held() still refreshes .want once per interval
+            logger.warning("host loop %s: cannot start the .want refresher (%s); held() refreshes it", self.name,
+                           exc)
+            self._want_stop = None
+
+    def _stop_want_refresher(self) -> None:
+        if self._want_stop is not None:
+            self._want_stop.set()
+            self._want_stop = None
+
+    def _refresh_want_while_waiting(self, fd: int, stop: threading.Event) -> None:
+        """Refresh ``.want`` once per interval for as long as this hand-off wait lasts, whatever the
+        caller's ``held()`` cadence (``_live_want`` expires a record older than ``3 × interval``)."""
+        while not stop.wait(self.interval):
+            with self._mu:
+                if stop.is_set() or not self._waiting or self._fd != fd:
+                    return
+                self._keep_want()
 
     def _keep_want(self) -> None:
         """While waiting, once per interval (caller holds ``_mu``): refresh our ``.want``, or publish it
@@ -463,6 +489,7 @@ class HostLoopLease:
                     os.close(fd)
                     return
                 self._waiting = False
+                self._stop_want_refresher()
                 self._clear_own_want()  # a live .want nobody waits on would hold every standby off
             return
         with self._mu:
@@ -471,6 +498,7 @@ class HostLoopLease:
                 os.close(fd)
                 return
             self._waiting = False
+            self._stop_want_refresher()
             self._become_holder()
             self._clear_own_want()
 
@@ -499,7 +527,7 @@ def _after_fork_child() -> None:
                 os.close(lease._fd)
             except OSError:
                 pass
-        lease._fd, lease._held, lease._waiting, lease._stop = None, False, False, None
+        lease._fd, lease._held, lease._waiting, lease._stop, lease._want_stop = None, False, False, None, None
         lease._mu = threading.RLock()
 
 
