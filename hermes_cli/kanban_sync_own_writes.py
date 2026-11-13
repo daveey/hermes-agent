@@ -10,7 +10,7 @@ deletes, ``sync_version``), the remote-parent mirror, and pool reservations with
 ``conn`` while the block runs. The recorder is a TEMP trigger: it fires only for statements run on the connection
 that created it, and its rows live in that connection's temp schema, so they commit and roll back with the write
 that made them (a rolled-back step is never credited). When the block ends outside a transaction its rows move to a
-per-file list, so a later round on another connection to the same file still sees them; ``take(path)`` returns
+per-file list, so a later round on another connection to the same file still sees them; ``take(conn)`` returns
 them in order and clears them, and ``kanban_sync_repair_window.decide`` chains them from the credited revision.
 Anything the recorder misses (another thread or process, a failed install, a block that ends mid-transaction)
 leaves a gap in that chain, which repairs at once.

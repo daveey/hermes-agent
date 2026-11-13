@@ -832,11 +832,10 @@ def _child_task(conn: sqlite3.Connection, table: str, uid: str) -> Optional[str]
 
 
 def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
-         partition: Optional[str] = None, revisions: Optional[list] = None) -> int:
+         partition: Optional[str] = None) -> int:
     """Apply every feed page after this file's cursor. Returns the number of changes read. On a board with an
     outbox (primary), fields with an unanswered local edit are not overwritten; ``partition`` (a gateway name)
-    keeps only that gateway's cards. ``revisions`` gets each apply's (before, after) repair revision, in order
-    (callers credit a live change made only by these applies). [daveey]"""
+    keeps only that gateway's cards. [daveey]"""
     from hermes_cli.kanban_sync_stop import checkpoint
     total = 0
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
@@ -856,10 +855,8 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             return total
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
-        applied = sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
-                                            local_pending_wins=True)
-        if revisions is not None:
-            revisions.append((applied.revision_before, applied.revision_after))
+        sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
+                                  local_pending_wins=True)
         total += len(page.get("changes", []))
         cursor = nxt
         if not page.get("more"):

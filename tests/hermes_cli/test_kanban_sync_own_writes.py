@@ -108,7 +108,7 @@ def test_a_reservation_write_by_the_sync_thread_is_credited(live, svc, kanban_ho
     assert not any(calls.values()), calls
 
 
-def test_another_threads_write_during_the_round_still_repairs(live, svc, kanban_home, monkeypatch, clock):
+def test_another_connections_write_during_the_round_still_repairs(live, svc, kanban_home, monkeypatch, clock):
     """A dispatcher/heartbeat write on another connection while the sync thread is inside a credited block is
     not the sync thread's: a gap, so the next round repairs and finds it."""
     parent, child = credit._settle(live, svc, kanban_home)
