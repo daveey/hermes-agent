@@ -1195,10 +1195,10 @@ def _links_clock() -> float:
 # A board's links pass logs its duration with its counts (``kanban sync: <board> chat links {...} in <s>s``); a pass
 # with no changes logs only when it took this long, so a slow pass is visible even when it changed nothing; a whole
 # pass this slow (ledger read included) also logs ``kanban sync: chat links pass over N board(s) took <s>s``. A board
-# skipped as unchanged this slowly logs ``<board> chat links unchanged, skipped in <s>s``, and a failed board's warning
-# carries ``failed after <s>s``. Each board's time runs from before its connection is borrowed, so it counts the
-# connect (any lock wait on it included), ``board_mode`` and the inputs read: lock waits are what it is meant to
-# expose. The hub pass ran ~10 min on 2026-11-13 and the line carried no duration to measure it by
+# skipped as unchanged after LINKS_SLOW_LOG_S or more logs ``<board> chat links unchanged, skipped in <s>s``, and a
+# failed board's warning carries ``failed after <s>s``. Each board's time runs from before its connection is borrowed,
+# so it counts the connect (any lock wait on it included), ``board_mode`` and the inputs read: lock waits are what it is
+# meant to expose. The hub pass ran ~10 min on 2026-11-13 and the line carried no duration to measure it by
 # (t_01a1d35d8d7e22a7). [daveey]
 LINKS_SLOW_LOG_S = 10.0
 
@@ -1214,8 +1214,9 @@ _LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop r
 def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float) -> tuple[bool, float]:
     """(whether a board's links-pass inputs equal its last completed pass's, under ``LINKS_MAX_AGE_S`` ago, so the
     pass is skipped; the pass start to record). Not a pure predicate: it pops ``_LINKS_DONE[key]`` and puts it back
-    only on a skip, so a non-skip drops the stale entry and the caller re-records it after reconcile succeeds. A skip
-    ``LINKS_SLOW_LOG_S`` or more after ``began`` names its board; ``began`` is taken before the board's connection is
+    only on a skip, so a non-skip drops the stale entry and the caller re-records it when inputs were readable and
+    reconcile succeeded (unreadable inputs or a raising reconcile leave it dropped). A skip ``LINKS_SLOW_LOG_S`` or
+    more after ``began`` names its board; ``began`` is taken before the board's connection is
     borrowed, so that time counts the connect (a lock wait included), ``board_mode`` and the inputs read."""
     done = _LINKS_DONE.pop(key, None)
     started = _links_clock()
