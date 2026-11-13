@@ -97,6 +97,39 @@ def test_default_probe_retires_once_the_checkout_moves_past_the_boot_revision(tm
     assert moved.should_exit is True
 
 
+def test_default_probe_keeps_a_backend_whose_checkout_moved_by_tests_only(tmp_path, monkeypatch):
+    """[daveey] A move over tests/docs/CI commits only is no code change: no retirement (t_01a1d471b754e5bc)."""
+    from gateway import code_skew
+
+    repo = tmp_path / "repo"
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "run.py").write_text("x = 1\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "one"], check=True)
+    monkeypatch.setattr(code_skew, "_PROJECT_ROOT", repo)
+    monkeypatch.setattr(code_skew, "_boot_fingerprint", None)
+    monkeypatch.setattr(code_skew, "_restart_free_verdicts", {})
+    code_skew.record_boot_fingerprint()
+
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_run.py").write_text("def test(): pass\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "tests only"], check=True)
+    fence = _Fence(idle=True)
+    tests_only = _Server()
+    start_code_skew_watchdog(tests_only, update_probe=lambda: False, fence=fence,
+                             poll_s=0.01, max_polls=4).join(timeout=5)
+    assert tests_only.should_exit is False
+
+    (repo / "run.py").write_text("x = 2\n")
+    subprocess.run([*git, "commit", "-q", "-am", "code"], check=True)
+    moved = _Server()
+    start_code_skew_watchdog(moved, update_probe=lambda: False, fence=fence,
+                             poll_s=0.01, max_polls=4).join(timeout=5)
+    assert moved.should_exit is True
+
+
 def _run_runtime(fence, intact, *, update=False, **kw):
     server = _Server()
     seq = iter(intact)
