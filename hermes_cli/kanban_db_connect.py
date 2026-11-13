@@ -1206,6 +1206,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)")
+    # [daveey] G2: partial indexes over the rows the every-tick, process-liveness reclaim sweeps start from
+    # (``release_leftover_local_claims``, ``reap_terminal_workers``, ``rate_limit_storm``). Liveness can't be
+    # gated on a revision, so the empty case must be cheap: an index holding only the candidates (almost always
+    # none), instead of a scan of every task or run per tick. Each sweep's WHERE repeats the index's WHERE.
+    # The task_runs ones (``_RUN_PARTIAL_INDEXES``) are made with that table's columns below.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim_lock ON tasks(status) WHERE claim_lock IS NOT NULL")
 
     # [daveey] task_comments.origin_gateway: which gateway a comment came from (relay sender), so wake
     # probes match the gateway, not a free-text author. Back-filled from ``hub:gw:<x>`` / ``<x>/t_...``.
@@ -1244,6 +1250,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         for name, ddl in _TASK_RUN_COLUMNS:
             if name not in run_cols:
                 _add_column_if_missing(conn, "task_runs", name, ddl)
+        _ensure_run_partial_indexes(conn)
         _backfill_legacy_inflight_runs(conn)
 
     # One-shot event-kind rename: old names still worked but were awkward on
@@ -1340,6 +1347,22 @@ def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
 # down with it (including ``idx_events_run``, added by the additive pass above). To guard against this list
 # drifting from SCHEMA_SQL, ``test_rebuilt_schema_matches_fresh`` asserts a rebuilt legacy DB is
 # byte-identical to a fresh one.
+# [daveey] G2: partial indexes over task_runs for the every-tick reclaim sweeps (see ``idx_tasks_claim_lock``):
+# ``reap_terminal_workers`` (worker_pid) and the rate-limit storm. ``idx_runs_blocker_assert`` serves the
+# shared-blocker lanes' assertion scan (``blocker_states``), which reread every run's metadata on each pass the
+# board revision forces (~21 ms on the hub board); only ~100 runs carry a blocker id.
+_RUN_PARTIAL_INDEXES = (
+    "CREATE INDEX idx_runs_worker_pid ON task_runs(ended_at) WHERE worker_pid IS NOT NULL",
+    "CREATE INDEX idx_runs_rate_limited ON task_runs(ended_at) WHERE outcome = 'rate_limited'",
+    "CREATE INDEX idx_runs_blocker_assert ON task_runs(ended_at) WHERE metadata LIKE '%\"blocker_id\"%'",
+)
+
+
+def _ensure_run_partial_indexes(conn: sqlite3.Connection) -> None:
+    for ddl in _RUN_PARTIAL_INDEXES:
+        conn.execute(ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
+
+
 _REBUILD_SPECS = {
     "task_events": (
         "CREATE TABLE task_events ("
@@ -1371,6 +1394,7 @@ _REBUILD_SPECS = {
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
+            *_RUN_PARTIAL_INDEXES,
         ),
     ),
     "kanban_notify_subs": (

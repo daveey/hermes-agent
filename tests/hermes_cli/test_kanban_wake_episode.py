@@ -210,7 +210,7 @@ def test_eviction_deletes_episode(parked):
 @pytest.mark.parametrize("value", [0, -1, "invalid", float("nan"), float("inf"), None])
 def test_invalid_config_uses_default(monkeypatch, value):
     from hermes_cli import config
-    monkeypatch.setattr(config, "load_config", lambda: {"kanban": {"wake_check_stale_hours": value}})
+    monkeypatch.setattr(config, "load_config_readonly", lambda: {"kanban": {"wake_check_stale_hours": value}})
     assert wc.episode.stale_seconds() == 48 * HOUR
 
 
@@ -221,9 +221,9 @@ def test_config_backend_outage_keeps_default(monkeypatch):
     def unavailable():
         raise ConfigBackendUnavailable("unavailable")
 
-    monkeypatch.setattr(config, "load_config", unavailable)
+    monkeypatch.setattr(config, "load_config_readonly", unavailable)
     assert wc.episode.stale_seconds() == 48 * HOUR
-    monkeypatch.setattr(config, "load_config", lambda: {"kanban": None})
+    monkeypatch.setattr(config, "load_config_readonly", lambda: {"kanban": None})
     assert wc.episode.stale_seconds() == 48 * HOUR
 
 

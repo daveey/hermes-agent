@@ -286,14 +286,25 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
     time) are left for a human/cron unblock. Counters are untouched (``unblock_task`` would
     reset ``consecutive_failures``).
     """
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_wake_check import run_due_wake_checks
+    from hermes_cli.kanban_wake_check import own_gateway, run_due_wake_checks
 
     run_due_wake_checks(conn)  # condition wakes: start due probes off-thread, never waits [daveey]
     from hermes_cli.kanban_capability_registry import maybe_refresh_async
     maybe_refresh_async()  # live-check this gateway's capabilities off-thread, throttled [daveey]
+    from hermes_cli.kanban_sweep_gate import gated
+    # [daveey] G2: the park scan reads only content rows (the parking events, statuses), so it reruns when they
+    # move or when the earliest wake it found arrives; condition probes above keep their own next_at clock.
+    return gated("dispatch.continuation_parks", conn, _wake_parks, conn, now, skipped=([], None), now=now,
+                 extra=own_gateway, run_due=lambda out: out[1])[0]
+
+
+def _wake_parks(conn: sqlite3.Connection, now: Optional[int]) -> tuple[list[str], Optional[int]]:
+    """Wake the due parks; returns ``(woken, earliest wake still pending)`` (None when no park can come due)."""
+    from hermes_cli import kanban_db as kb
+
     now = int(time.time()) if now is None else int(now)
     woken: list[str] = []
+    pending: list[int] = []
     from hermes_cli.kanban_wake_check import foreign_ids
     copies = foreign_ids(conn)  # [daveey] a worker node's copy: its home board owns the clock wake
     for row in conn.execute("SELECT id, block_kind FROM tasks WHERE status = 'scheduled'").fetchall():
@@ -303,9 +314,12 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
         payload = pending_wake(conn, tid)
         if payload is None:
             # Invariant: every scheduled card has a wake or becomes blocked. [daveey]
-            _enforce_wake_invariant(conn, tid, row[1], now, woken)
+            if not _enforce_wake_invariant(conn, tid, row[1], now, woken):
+                info = missing_wake(conn, tid)
+                pending.append(int(info["wake_at"]) if info and info.get("wake_at") is not None else now)
             continue
         wake_at = payload["wake_at"]
+        pending.append(int(wake_at))  # a skipped or stale wake stays due: the next tick retries it
         if wake_at > now:
             continue
         resume = payload.get("resume_status") if payload.get("resume_status") in ("ready", "review") else "ready"
@@ -323,7 +337,7 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
                 kb._append_event(conn, tid, CONTINUATION_WOKEN_EVENT,
                                  {"status": new_status, "wake_at": wake_at})
                 woken.append(tid)
-    return woken
+    return woken, min(pending, default=None)
 
 
 HUMAN_BLOCK_KINDS = ("needs_input", "capability")

@@ -320,9 +320,16 @@ def foreign_ids(conn: sqlite3.Connection, own: Optional[str] = None) -> set[str]
     own = own or own_gateway(conn)
     if not own:
         return set()
+
+    def scan(c: sqlite3.Connection) -> frozenset[str]:
+        rows = c.execute("SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ?", (own,))
+        return frozenset(r[0] for r in rows.fetchall())
+
+    # [daveey] Structural (``created_on`` is a content column, so any change moves the task-table revision):
+    # reuse the scan while the revision holds. It ran ~7 times a tick, a full ``tasks`` scan each (G2).
+    from hermes_cli.kanban_sweep_gate import memo
     try:
-        rows = conn.execute("SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ?", (own,))
-        return {r[0] for r in rows.fetchall()}
+        return memo(f"foreign_ids:{own}", conn, scan)
     except sqlite3.OperationalError:
         return set()
 
