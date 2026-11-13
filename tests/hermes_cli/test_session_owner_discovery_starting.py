@@ -105,8 +105,24 @@ def test_the_detail_names_starting_only_for_starting():
     assert sod.owner_unavailable_detail(refused, DRAIN_ADVICE) == f'owner_unavailable: authorization: {DRAIN_ADVICE}'
 
 
+def _desktop_request_timeout_s():
+    """Desktop's default request deadline, read from its source: a renamed or re-spelled constant
+    fails here instead of silently unpinning the budget below."""
+    import re
+
+    source = Path(__file__).resolve().parents[2] / 'apps' / 'desktop' / 'electron' / 'hardening.ts'
+    found = re.search(r'^const DEFAULT_FETCH_TIMEOUT_MS = ([0-9_]+)$', source.read_text(), re.MULTILINE)
+    assert found, f'DEFAULT_FETCH_TIMEOUT_MS literal not found in {source}'
+    return int(found.group(1).replace('_', '')) / 1000
+
+
 def test_the_starting_budget_fits_under_the_desktop_request_deadline():
-    assert sod.OWNER_DISCOVERY_BUDGET_S < sod.OWNER_STARTING_BUDGET_S <= 25.0  # Desktop cuts at 30 s
+    """A write waits at most the starting budget plus one read that began just before it ran out;
+    the forward still needs its own seconds before Desktop cuts the request."""
+    desktop = _desktop_request_timeout_s()
+    assert desktop >= 1.0  # a sanity floor on the parse, not on Desktop's choice
+    assert sod.OWNER_STARTING_BUDGET_S + sod.OWNER_DISCOVERY_ATTEMPT_S < desktop
+    assert sod.OWNER_DISCOVERY_BUDGET_S < sod.OWNER_STARTING_BUDGET_S
     assert 0 < sod.OWNER_STARTING_POLL_S <= 1.0
 
 
@@ -241,6 +257,146 @@ def test_live_owner_forward_answers_the_starting_detail(tmp_path, monkeypatch):
     assert refused.status_code == 503, refused.text
     assert refused.json()['detail'] == sod.STARTING_DETAIL
     assert len(seen) > sod.OWNER_DISCOVERY_ATTEMPTS
+
+
+# --- Concurrent writes share the starting re-reads of one home. ---
+
+N_WRITES = 20
+
+
+def _counted_reads(monkeypatch, verdict_for):
+    """Discovery answers ``verdict_for(n)`` for the n-th read (1-based), counted across callers."""
+    import threading
+
+    lock, seen = threading.Lock(), []
+
+    def fake(home, timeout=2.0):
+        with lock:
+            seen.append(timeout)
+            n = len(seen)
+        return verdict_for(n)
+    monkeypatch.setattr('hermes_cli.gateway_runtime.discover_gateway_endpoint', fake)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_concurrent_writes_during_starting_share_reads_and_each_sends_one_mutation(tmp_path, monkeypatch):
+    """A bulk archive sent while the gateway starts: reads do not grow with the number of writes,
+    every write lands once the gateway is live, and each sends exactly one mutation."""
+    import asyncio
+    from hermes_cli import web_server_sessions
+
+    _no_backoff(monkeypatch)
+    monkeypatch.setattr(sod, 'OWNER_STARTING_POLL_S', 0.02)
+    request = _standalone_request(monkeypatch, tmp_path)
+    seen = _counted_reads(monkeypatch, lambda n: STARTING if n <= 4 else READY)
+    rpcs, offline = [], []
+
+    class Client:
+        async def rpc(self, method, **params):
+            rpcs.append(params['request_id'])
+            return {'session_id': params['session_id'], 'operation': 'sidebar', 'revision': 1}
+
+    @asynccontextmanager
+    async def connect(endpoint=None, subject=None):
+        assert endpoint == 'owner-endpoint'
+        yield Client()
+    monkeypatch.setattr('hermes_cli.gateway_client.connect_gateway', connect)
+    monkeypatch.setattr(web_server_sessions, '_mutate_offline_store',
+                        lambda profile, actor, params: offline.append(params))
+    results = await asyncio.gather(*(web_server_sessions._mutate_session_request(
+        request, None, f's{i}', request_id=f'req-{i}', expected_revision=0,
+        operation='sidebar', payload={'archived': True}, expected_generation=0) for i in range(N_WRITES)))
+    assert [result['ok'] for result in results] == [True] * N_WRITES
+    assert sorted(rpcs) == sorted(f'req-{i}' for i in range(N_WRITES))  # one mutation each
+    assert offline == []
+    # Four starting reads, then the one that saw it live: a constant, not one poll per write.
+    assert 5 <= len(seen) <= 8, len(seen)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_writes_behind_a_persisting_start_each_answer_the_starting_503(tmp_path, monkeypatch):
+    import asyncio
+    from hermes_cli import web_server_sessions
+
+    _no_backoff(monkeypatch)
+    budget, poll = 0.3, 0.05
+    monkeypatch.setattr(sod, 'OWNER_STARTING_BUDGET_S', budget)
+    monkeypatch.setattr(sod, 'OWNER_STARTING_POLL_S', poll)
+    request = _standalone_request(monkeypatch, tmp_path)
+    seen = _counted_reads(monkeypatch, lambda _n: STARTING)
+    attempts, connects = [], []
+    monkeypatch.setattr('hermes_cli.gateway_client.connect_gateway', lambda **kw: connects.append(kw))
+    with _held(attempts) as held:
+        monkeypatch.setattr('gateway.runtime_ownership.exclusive_maintenance', held)
+        results = await asyncio.gather(*(web_server_sessions._mutate_session_request(
+            request, None, f's{i}', request_id=f'req-{i}', expected_revision=0,
+            operation='sidebar', payload={'archived': True}) for i in range(N_WRITES)),
+            return_exceptions=True)
+    refusals = [exc for exc in results if isinstance(exc, HTTPException)]
+    assert len(refusals) == N_WRITES, results
+    assert {(exc.status_code, exc.detail) for exc in refusals} == {(503, sod.STARTING_DETAIL)}
+    assert len(attempts) == N_WRITES and connects == []  # each tried the lock once; none forwarded
+    # Reads are spaced by the poll interval across all writes, so they fit the budget's polls.
+    assert sod.OWNER_DISCOVERY_ATTEMPTS < len(seen) <= budget / poll + 4, len(seen)
+
+
+@pytest.mark.asyncio
+async def test_a_late_caller_keeps_its_own_budget(tmp_path, monkeypatch):
+    """A write that joins a starting wait already under way waits its own budget from its own first
+    read: it is neither cut at the earlier write's deadline nor kept past its own."""
+    import asyncio
+
+    budget, poll = 0.6, 0.05
+    monkeypatch.setattr(sod, 'OWNER_STARTING_BUDGET_S', budget)
+    monkeypatch.setattr(sod, 'OWNER_STARTING_POLL_S', poll)
+    loop, fourth = asyncio.get_running_loop(), asyncio.Event()
+
+    def verdict(n):
+        if n == 4:
+            loop.call_soon_threadsafe(fourth.set)
+        return STARTING
+    seen = _counted_reads(monkeypatch, verdict)
+
+    async def timed():
+        began = time.monotonic()
+        result = await sod.discover_session_owner(tmp_path)
+        return result, began, time.monotonic()
+
+    first = asyncio.ensure_future(timed())
+    await fourth.wait()
+    late = await timed()
+    early = await first
+    assert early[0] is STARTING and late[0] is STARTING
+    assert late[1] > early[1]
+    for _verdict, began, ended in (early, late):
+        assert budget - poll - sod._MIN_ATTEMPT_S - 0.05 < ended - began <= budget + 1.0, (began, ended)
+    assert late[2] > early[2]  # the late write was not cut at the first write's deadline
+    assert len(seen) <= (late[2] - early[1]) / poll + 3, len(seen)
+
+
+@pytest.mark.asyncio
+async def test_a_shared_read_is_joined_only_within_one_poll_interval(tmp_path, monkeypatch):
+    """A caller never takes a verdict that began more than one poll before it asked, nor its own
+    previous read again; a first read never reuses a read that already answered."""
+    from hermes_cli import gateway_runtime
+
+    monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint', lambda home, timeout=2.0: STARTING)
+    poll = sod.OWNER_STARTING_POLL_S
+    read = sod._shared_read(tmp_path, 1.5, asked=10.0, after=None, settled_ok=False)
+    assert sod._shared_read(tmp_path, 1.5, asked=10.0 + poll / 2, after=None, settled_ok=False) is read
+    assert await read.verdict is STARTING
+    assert sod._shared_read(tmp_path, 1.5, asked=10.0 + poll / 2, after=9.0, settled_ok=True) is read
+    newer = sod._shared_read(tmp_path, 1.5, asked=10.0 + poll / 2, after=None, settled_ok=False)
+    assert newer is not read and await newer.verdict is STARTING  # first reads: in flight only
+    stale = sod._shared_read(tmp_path, 1.5, asked=newer.began + poll + 0.01, after=None, settled_ok=True)
+    assert stale is not newer
+    own = sod._shared_read(tmp_path, 1.5, asked=stale.began, after=stale.began, settled_ok=True)
+    assert own is not stale
+    other = sod._shared_read(tmp_path / 'other', 1.5, asked=own.began, after=None, settled_ok=True)
+    assert other is not own
+    for pending in (stale, own, other):
+        await pending.verdict
 
 
 # --- A real reservation, and a real gateway caught while it starts (never a live one). ---

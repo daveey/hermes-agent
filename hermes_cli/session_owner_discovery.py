@@ -21,12 +21,22 @@ Every other verdict is final on its first read: ``absent`` keeps the offline pat
 about authorization, protocol, permissions or profile identity are never retried. Discovery never
 starts a gateway, and the mutation itself is never retried here: the caller sends it at most
 once, and a client retry replays its own request_id.
+
+Reads of one home are shared. A Desktop bulk archive sent during a restart is many writes at
+once, and each used to poll the starting gateway's control socket on its own (one executor
+thread per read, every ``OWNER_STARTING_POLL_S``, for up to ``OWNER_STARTING_BUDGET_S``). A
+caller now awaits the newest read of its home when that read began no more than one poll
+interval before the caller asked, and starts a read only when there is none, so the reads of N
+concurrent writes do not grow with N. Each caller keeps its own deadline and attempt count.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+import weakref
+from dataclasses import dataclass
 from pathlib import Path
 
 # Total wall-clock spent discovering one write's owner, from the request's point of view.
@@ -39,7 +49,8 @@ OWNER_DISCOVERY_BACKOFF_S = 0.25
 _MIN_ATTEMPT_S = 0.1
 
 # One write's whole wait for a gateway seen ``starting``, measured from the first read. Desktop
-# cuts a request at 30 s (DEFAULT_FETCH_TIMEOUT_MS), so this leaves the forward its own seconds.
+# cuts a request at 30 s (DEFAULT_FETCH_TIMEOUT_MS in apps/desktop/electron/hardening.ts; the
+# starting tests read it from there), so this leaves the forward its own seconds.
 OWNER_STARTING_BUDGET_S = 24.0
 # A ``starting`` read answers at once (lock probe or identify), so it is polled, not backed off.
 OWNER_STARTING_POLL_S = 0.5
@@ -81,6 +92,45 @@ def _timed_out():
     return GatewayDiscovery("inaccessible", reason_code=CONTROL_TIMEOUT)
 
 
+@dataclass(frozen=True)
+class _Read:
+    """One identify of a home: when it began (the caller's clock) and its pending verdict."""
+    began: float
+    verdict: asyncio.Future
+
+
+# The newest read of each home, per event loop (a future belongs to one loop).
+_NEWEST: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _retrieve(future):
+    if not future.cancelled():
+        future.exception()  # every waiter may have left on its own deadline: never "never retrieved"
+
+
+def _shared_read(home: Path, timeout: float, *, asked: float, after: float | None, settled_ok: bool) -> _Read:
+    """The read a caller asking at *asked* awaits: the home's newest, or a new one.
+
+    The newest read is joined when it began no earlier than one poll interval before *asked*
+    (the verdict is never staler than a poll the caller would have made itself) and after the
+    caller's own previous read (*after*), so a re-read is always a newer observation. A read that
+    already answered is joined only on a re-read of a gateway seen starting (*settled_ok*); a
+    caller's first read never reuses an earlier request's verdict."""
+    from hermes_cli import gateway_runtime
+
+    reads = _NEWEST.setdefault(asyncio.get_running_loop(), {})
+    key = os.fspath(home)
+    newest = reads.get(key)
+    if (newest is not None and newest.began >= asked - OWNER_STARTING_POLL_S
+            and (after is None or newest.began > after) and (settled_ok or not newest.verdict.done())):
+        return newest
+    verdict = asyncio.ensure_future(asyncio.to_thread(gateway_runtime.discover_gateway_endpoint, home,
+                                                      timeout=timeout))
+    verdict.add_done_callback(_retrieve)
+    reads[key] = read = _Read(asked, verdict)
+    return read
+
+
 async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyncio.sleep):
     """Discovery's verdict for *home*, re-reading ``control_timeout`` and ``starting`` in budget.
 
@@ -92,12 +142,13 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
     Until a read says ``starting`` the budget is ``OWNER_DISCOVERY_BUDGET_S`` and at most
     ``OWNER_DISCOVERY_ATTEMPTS`` reads. The first ``starting`` moves the deadline to
     ``OWNER_STARTING_BUDGET_S`` after the first read began and lifts the read cap: from then on
-    both transient verdicts are re-read until another verdict or that deadline."""
-    from hermes_cli import gateway_runtime
+    both transient verdicts are re-read until another verdict or that deadline.
 
+    Reads are shared with concurrent callers for the same home (``_shared_read``); the shared
+    read is shielded, so a caller that leaves on its own deadline never cancels it for others."""
     began = clock()
     deadline = began + OWNER_DISCOVERY_BUDGET_S
-    discovery, starting, attempt = None, False, 0
+    discovery, starting, attempt, last = None, False, 0, None
     while starting or attempt < OWNER_DISCOVERY_ATTEMPTS:
         pause = OWNER_STARTING_POLL_S if is_starting(discovery) else OWNER_DISCOVERY_BACKOFF_S
         remaining = deadline - clock()
@@ -107,10 +158,11 @@ async def discover_session_owner(home: Path, *, clock=time.monotonic, sleep=asyn
             await sleep(pause)
             remaining = deadline - clock()
         attempt += 1
-        read = asyncio.to_thread(gateway_runtime.discover_gateway_endpoint, home,
-                                 timeout=min(OWNER_DISCOVERY_ATTEMPT_S, remaining))
+        read = _shared_read(home, min(OWNER_DISCOVERY_ATTEMPT_S, remaining), asked=clock(), after=last,
+                            settled_ok=starting)
+        last = read.began
         try:
-            discovery = await asyncio.wait_for(read, timeout=remaining)
+            discovery = await asyncio.wait_for(asyncio.shield(read.verdict), timeout=remaining)
         except TimeoutError:
             discovery = _timed_out()
         if is_starting(discovery):
