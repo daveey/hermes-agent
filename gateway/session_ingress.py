@@ -326,6 +326,9 @@ async def execute_admission(authority, ref, row):
     # claimed: it is in-flight work the restart drain waits for, not new work its gate refuses.
     # Without this a drain that flips between the claim and the turn settles it 'completed' unrun.
     event._admitted_before_drain = True
+    # Only an adapter task awaiting a native waiter drains the adapter's pending slot after this turn;
+    # a relay or restart-recovered row has none, so nothing may be parked there for it (#137565).
+    event._adapter_drains_after = native
     if event.internal and 'gateway_session_id' in event.metadata:
         # Main's ownership proof (802fd5782f3): the session the pre-claim check just validated, so the
         # turn's resolver never re-reads (and on a transient failure drops) an admitted completion.

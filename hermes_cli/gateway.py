@@ -1181,9 +1181,8 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
     devnull = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     # The watcher copies os.environ into the gateway child, so the child's env is the watcher's: a
     # host respawn gets the default root's secrets, a sibling profile's its own (never the launcher's).
-    watcher_env = restart_watcher_env(
-        run_argv, host=_restart_argv_is_host_gateway(run_argv) if host is None else host, home=home)
-    popen_env = {"env": watcher_env} if watcher_env is not None else {}
+    popen_env = {"env": restart_watcher_env(
+        run_argv, host=_restart_argv_is_host_gateway(run_argv) if host is None else host, home=home)}
     # Same detach for the watcher itself, so closing the terminal doesn't kill it.
     try:
         subprocess.Popen(watcher_argv, **devnull, **popen_env, **windows_detach_popen_kwargs())  # detached-spawn: ok — restart watcher, must outlive the process that asked for the restart
@@ -3165,7 +3164,7 @@ def _systemd_command(argv: list[str]) -> str:
 
 def _prepare_service_launcher(*, system: bool = False, run_as_user: str | None = None) -> None:
     """Publish the source command before a service definition references it."""
-    from hermes_cli._launchers import ENTRY_POINTS, ensure_install_launchers, resolve_store_python
+    from hermes_cli._launchers import ENTRY_POINTS, ensure_install_launchers, publishes_service_launcher
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
     root, home = PROJECT_ROOT, get_hermes_home()
@@ -3179,8 +3178,8 @@ def _prepare_service_launcher(*, system: bool = False, run_as_user: str | None =
     try:
         # Publication gate: ask what stage_launcher will bind, so an inherited
         # HERMES_RUNTIME_DIR cannot stand in for this install's store (#131745).
-        if resolve_store_python(root, publication=True) is None:
-            return  # Externally owned Nix/developer runtime.
+        if not publishes_service_launcher(root):
+            return  # Externally owned Nix/developer runtime, or a macOS app's own signed launcher.
         local = root / ".hermes" / "bin"
         paths = ensure_install_launchers(root, local)
         if len(paths) != len(ENTRY_POINTS):
