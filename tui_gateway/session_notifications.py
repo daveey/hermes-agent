@@ -749,7 +749,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
     except Exception:
         return []
     texts: list = []
-    from tui_gateway.kanban_leg_custody import chat_lineage
+    from tui_gateway.kanban_leg_custody import chat_lineage, gateway_claims
     chats = chat_lineage(session_key, _session_lineage)  # its local rows may sit on the lineage root
     with contextlib.closing(conn):
         try:
@@ -763,7 +763,8 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
         for sub in subs:
             if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
                 continue
-            sub = {**sub, "sibling_chats": chats}
+            if gateway_claims(session_key, sub := {**sub, "sibling_chats": chats}):
+                continue  # the live gateway owns the chat and claims this row within one tick (kanban_leg_custody)
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
             from gateway.kanban_wake_sibling import tui_defer
@@ -785,7 +786,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             claim = None
             if claims is not None:  # so a refused turn can hand the range back (_kb_rewind_refused) [daveey]
                 claim = {"board": slug, **sub_ident, "old": _old, "new": _new, "texts": [],
-                         "claimed_mono": time.monotonic()}
+                         "notifier_profile": sub.get("notifier_profile"), "claimed_mono": time.monotonic()}
                 claims.append(claim)
             task = _kb.get_task(conn, sub["task_id"])
             from gateway.kanban_wake_sibling import tui_formatter
@@ -855,8 +856,7 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
         unique.setdefault(resolved, slug)
     seen = session.setdefault("_kb_board_seen", {})
     stray, unreclaimed = _kb_stray_delegate_keys(session, session_key), []
-    if _kb_gateway_owns(session):  # its collector admits these rows to the chat's FIFO in one tick (kanban_leg_custody)
-        return _collect_remote_kanban_notifications(session_key, claims)
+    _kb_gateway_owns(session)  # the live gateway's collector admits the rows it claims in one tick: skipped below
     texts = [t for slug in unique.values() for t in _kb_poll_board(
         _kb, slug, session_key, claims, seen, stray=stray, unreclaimed=unreclaimed)]
     if stray and not unreclaimed:
@@ -1243,7 +1243,7 @@ def _notif_collect_kanban(session: dict) -> tuple:
 
 def _kb_gateway_owns(session: dict) -> bool:  # the gateway's collector admits this chat's tui rows [daveey]
     from tui_gateway.kanban_leg_custody import legacy_gateway_owns
-    return legacy_gateway_owns(session, _canonical_ledger_refusal, _session_lineage, _session_db)
+    return legacy_gateway_owns(session, _session_lineage, _session_db)
 
 
 def _kb_settle_held(session: dict) -> None:  # a buffered claim the chat's wake delivered meanwhile [daveey]

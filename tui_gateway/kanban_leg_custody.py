@@ -8,42 +8,80 @@ waited 45 min, held in flight by a backend whose turns the gateway-owned chat re
 import contextlib
 import logging
 import os
+import time
+from typing import NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
+# How long one chat's gateway-owner answer is reused: no longer than the legacy poll (``_KANBAN_POLL_SECONDS``),
+# so a poll sees an answer at most one poll old. Each answer opens state.db once; every live chat's poller asked
+# for it up to twice per 5 s poll, once per lineage id (review 5887848770 nit 2, the cost t_01a1cee98b798343 took
+# out of ``_session_lineage``). No hook tells this process when the gateway's ledger or lease changes.
+OWNER_TTL_S = 5.0
 
-def gateway_owns(session: dict, ledger_refusal, lineage: tuple = (), lease_holder=None) -> bool:
-    """The canonical gateway runs this chat now: its durable ledger holds work for it that ends on its own
-    (``owner_forward.FORWARDABLE_LEDGER_STATES``), or the live gateway process holds the chat's turn lease. Those
-    are the conditions under which ``gateway.kanban_tui_owner`` claims the chat's tui rows and admits them to its
-    FIFO within one notifier tick (``_gateway_holds_work``), checked over the same ids: the chat and its compaction
-    parents (``lineage``; admissions and leases are keyed by the lineage root, tui rows by the tip — review
-    t_01a1d1543b9d13cf). ``ledger_refusal`` is ``session_lifecycle._canonical_ledger_refusal``; ``lease_holder``
-    maps a session id to its turn-lease holder string (``pid=<pid>:…``) or None. An ``unknown`` admission, no
-    ledger row, a lease held by this or any non-gateway process, or an unreadable answer: False, and this backend
-    keeps the rows as before (a legacy-only chat buffers while busy)."""
+_owners: dict = {}  # session key -> the GatewayOwner its last answer named (the per-row check in the board poll)
+
+
+class GatewayOwner(NamedTuple):
+    """The live gateway that will claim this chat's tui rows: its pid, its launch profile, and why."""
+    pid: int
+    profile: str
+    reason: str
+
+
+def gateway_owner(ids: tuple, ledger_status: Optional[str], lease_holders: tuple, gateway_pid=None,
+                  launch_profile=None) -> Optional[GatewayOwner]:
+    """The live gateway whose collector claims this chat's tui rows and admits them to its FIFO within one
+    notifier tick (``gateway.kanban_tui_owner.owned_live_session``), else None.
+
+    The chat-level half of that predicate, as this process can see it: the verified live default gateway
+    (``gateway_pid``) holds work for the chat that ends on its own, i.e. the first ledger row over ``ids`` (the
+    chat and its compaction parents: admissions and leases sit on the lineage root, tui rows on the tip, review
+    t_01a1d1543b9d13cf) is in ``owner_forward.FORWARDABLE_LEDGER_STATES``, or its process holds the chat's turn
+    lease (``_gateway_holds_work``). The row-level half is :func:`claims_row`. No live gateway (its LOCAL
+    adapter is what claims), an ``unknown`` admission, no ledger row, a lease held by any other process, or an
+    unreadable answer: None, and this backend keeps the rows as before (a legacy-only chat buffers while busy)."""
     from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
-    key = str(session.get("session_key") or "")
-    ids = tuple(dict.fromkeys(s for s in (key, *lineage) if s))
-    for sid in ids:
-        try:
-            refusal = ledger_refusal(session if sid == key else {**session, "session_key": sid})
-        except Exception:  # health: allow BLE001 -- an unprovable owner keeps the legacy path
-            return False
-        if refusal is not None:
-            return getattr(refusal, "ledger_status", None) in FORWARDABLE_LEDGER_STATES
-    if lease_holder is None:
-        return False
-    try:
+    if ledger_status is not None:
+        reason = f"ledger {ledger_status}" if ledger_status in FORWARDABLE_LEDGER_STATES else None
+    else:
         mine = f"pid={os.getpid()}:"
-        others = [h for h in (str(lease_holder(sid) or "") for sid in ids) if h.startswith("pid=")
-                  and not h.startswith(mine)]
-        if not others:  # the common case: no lease, or this backend's own turn (no gateway probe)
-            return False
-        gateway = _live_gateway_pid()
-        return gateway is not None and any(h.startswith(f"pid={gateway}:") for h in others)
-    except Exception:  # health: allow BLE001 -- an unprovable owner keeps the legacy path
+        others = [h for h in lease_holders if h.startswith("pid=") and not h.startswith(mine)]
+        reason = "turn lease" if others else None  # the common case: no lease (no gateway probe)
+    if reason is None:
+        return None
+    pid = _live_gateway_pid() if gateway_pid is None else gateway_pid
+    if pid is None or (reason == "turn lease" and not any(h.startswith(f"pid={pid}:") for h in lease_holders)):
+        return None
+    profile = _gateway_launch_profile(pid) if launch_profile is None else launch_profile
+    return GatewayOwner(int(pid), str(profile or ""), reason)
+
+
+def claims_row(owner: Optional[GatewayOwner], sub: dict) -> bool:
+    """Whether ``owner``'s collector claims this tui row: ``_launch_authority`` serves only the gateway's launch
+    profile (an unstamped row goes to it), and ``owned_live_session`` skips threaded rows. A row it would skip
+    stays with this backend, which delivers it once the chat is back here (review 5887848770 nit 1)."""
+    if owner is None or sub.get("thread_id"):
         return False
+    profile = str(sub.get("notifier_profile") or "")
+    return not profile or profile == owner.profile
+
+
+def gateway_claims(session_key: str, sub: dict) -> bool:
+    """:func:`claims_row` against the chat's last :func:`legacy_gateway_owns` answer (the board poll's check)."""
+    return claims_row(_owners.get(session_key), sub)
+
+
+def _gateway_launch_profile(pid: int) -> str:
+    """The live gateway's launch profile: the first ``served_profiles`` entry its runtime record names
+    (``run_adapters._record_served_profiles``). Unknown: "", which matches only unstamped rows."""
+    from gateway.status import read_runtime_status
+    from hermes_constants import get_default_hermes_root
+    runtime = read_runtime_status(get_default_hermes_root() / "gateway_state.json") or {}
+    served = runtime.get("served_profiles")
+    if runtime.get("pid") not in (None, pid) or not isinstance(served, list) or not served:
+        return ""
+    return str(served[0] or "")
 
 
 def _lineage(session: dict, session_lineage) -> tuple:
@@ -59,15 +97,60 @@ def chat_lineage(session_key: str, session_lineage) -> tuple:
     return (session_key, *_lineage({"session_key": session_key}, session_lineage))
 
 
-def legacy_gateway_owns(session: dict, ledger_refusal, session_lineage, session_db) -> bool:
-    """:func:`gateway_owns` for a legacy backend's session: its compaction parents (``session_lineage``) and the
-    turn-lease holder read through the session's own store (``session_db``)."""
-    def lease_holder(sid: str):
-        with session_db(session) as db:
-            owner_of = getattr(db, "session_turn_lease_owner", None)
-            owner = owner_of(sid) if owner_of is not None else None
-        return (owner or {}).get("holder")
-    return gateway_owns(session, ledger_refusal, _lineage(session, session_lineage), lease_holder)
+def legacy_gateway_owns(session: dict, session_lineage, session_db, now: Optional[float] = None) -> bool:
+    """Whether the live gateway claims every tui notice this backend buffers for the chat, so handing them back
+    reaches a leg that delivers them: :func:`gateway_owner` for the chat, :func:`claims_row` for each claim.
+
+    The chat's answer is reused for ``OWNER_TTL_S``. A fresh one reads the ledger and the turn leases over the
+    chat and its compaction parents (``session_lineage``) in ONE open of the session's store (``session_db``).
+    A changed answer starts a new episode, logged once at INFO, so a long hand-back is visible in agent.log."""
+    now = time.monotonic() if now is None else now
+    key = str(session.get("session_key") or "")
+    memo = session.get("_kb_gateway_owner")
+    if memo is not None and now - memo[0] < OWNER_TTL_S:
+        owner = memo[1]
+    else:
+        ids = tuple(dict.fromkeys(s for s in (key, *_lineage(session, session_lineage)) if s))
+        try:
+            owner = gateway_owner(ids, *_ledger_and_leases(session, ids, session_db))
+        except Exception:  # health: allow BLE001 -- an unprovable owner keeps the legacy path
+            owner = None
+        session["_kb_gateway_owner"] = (now, owner)
+        if owner != (memo[1] if memo is not None else None) and owner is not None:
+            logger.info("kanban notices: chat %s goes to gateway pid %s (profile %s, %s); this backend hands it "
+                        "the chat's tui notices for that profile", key, owner.pid, owner.profile or "?", owner.reason)
+        elif owner is None and memo is not None and memo[1] is not None:
+            logger.info("kanban notices: chat %s is back with this backend (gateway pid %s no longer holds it)",
+                        key, memo[1].pid)
+    if owner is None:
+        _owners.pop(key, None)
+        return False
+    _owners[key] = owner
+    claims = session.get("_kanban_claims") or []
+    return all(claims_row(owner, c) for c in claims if not c.get("remote"))
+
+
+def _ledger_and_leases(session: dict, ids: tuple, session_db) -> tuple:
+    """(first ledger status over ``ids``, their turn-lease holders), read in one open of the session's store.
+    The lease is read only when no ledger row answers (the common no-work case reads no lease)."""
+    from tui_gateway.session_lifecycle import _CANONICAL_PENDING_SQL
+    with session_db(session) as db:
+        if db is None:
+            raise RuntimeError("session store unavailable")
+        status = None
+        read_ctx = getattr(db, "_read_ctx", None)
+        if read_ctx is not None:
+            with read_ctx() as conn:
+                for sid in ids:
+                    row = conn.execute(_CANONICAL_PENDING_SQL, (sid, sid)).fetchone()
+                    if row is not None:
+                        status = str(row[0])
+                        break
+        if status is not None:
+            return status, ()
+        owner_of = getattr(db, "session_turn_lease_owner", None)
+        holders = (str((owner_of(sid) or {}).get("holder") or "") for sid in ids) if owner_of else ()
+        return None, tuple(h for h in holders if h)
 
 
 def legacy_settle_held(session: dict, session_lineage, log_failure) -> None:
