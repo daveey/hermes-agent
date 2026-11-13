@@ -310,7 +310,7 @@ async def test_forwarded_cancel_during_owner_restart_stays_a_restart_cut_after_t
         seen['shutdown'] = cancel_is_shutdown(cancel_event)
         error = CronShutdownInterrupted if seen['shutdown'] else RuntimeError
         exc = error(f"Cron job 'job' was stopped: {reason}")
-        if not scheduler._log_shutdown_stop('job', str(exc), exc):
+        if not scheduler._log_expected_stop('job', str(exc), exc):
             scheduler.logger.error("Job '%s' failed: %s", 'job', str(exc))
         return (False, 'doc', '', str(exc))
     monkeypatch.setattr(scheduler, 'run_job', run_job)
