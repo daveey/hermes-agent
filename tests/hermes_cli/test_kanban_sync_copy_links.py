@@ -14,12 +14,16 @@ The next sync round restores edges already lost that way (``repair_partition_lin
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import kanban_sync_repair_window as win
 from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli.test_kanban_cross_gateway_parents import (
     BOARD, ME, OTHER, _other, _round, kanban_home, live, svc,
 )
 
 __all__ = ["kanban_home", "live", "svc"]
+
+# Read at import, before the conftest fixture pins it to 0 for this module.
+PRODUCTION_LOCAL_WRITE_WINDOW = win.LOCAL_WRITE_REPAIR_MIN_S
 
 
 def _import(live, *ids):
@@ -87,6 +91,23 @@ def test_a_round_restores_a_lost_edge_from_a_present_foreign_parent_to_our_child
     _round(kanban_home, svc)
     assert _edges(live, child) == [("t_copy", child)]
     assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name = 'task_links'").fetchone()
+    assert _diff(live)["child_mismatch"] == {}
+
+
+def test_a_lost_edge_is_restored_when_the_production_repair_window_ends(live, svc, kanban_home, monkeypatch):
+    """conftest pins ``LOCAL_WRITE_REPAIR_MIN_S`` to 0 here; this one test keeps the production window. The edge is
+    dropped by another connection (a gap), so the restoring pass waits until the window after the last pass ends."""
+    monkeypatch.setattr(win, "LOCAL_WRITE_REPAIR_MIN_S", PRODUCTION_LOCAL_WRITE_WINDOW)
+    now = [1000.0]
+    monkeypatch.setattr(ksc, "_repair_clock", lambda: now[0])
+    child = _foreign_parent_with_own_child(live, svc, kanban_home)
+    _drop_uncaptured(live, "t_copy", child)
+    now[0] += 1
+    assert _round(kanban_home, svc).repair_deferred
+    assert _edges(live, child) == []  # repair_partition_links waits for the window
+    now[0] = 1000.0 + PRODUCTION_LOCAL_WRITE_WINDOW
+    assert not _round(kanban_home, svc).repair_deferred
+    assert _edges(live, child) == [("t_copy", child)]
     assert _diff(live)["child_mismatch"] == {}
 
 
