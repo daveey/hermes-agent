@@ -801,6 +801,39 @@ def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candi
     return _runtime_state_matches(fact, stamp, project_root=root)
 
 
+def borrowed_venv_is_current(*, project_root: Path | None = None) -> bool:
+    """Does the owner's committed generation serve a borrowing root that has none of its own?
+
+    A borrowing launch (``pm.environments.owning_home_root``) with no selection recorded asks for
+    what any first sync asks for (``first_generation_selection`` plus a pre-PM venv's extras). The
+    owner's generation serves it when its recorded extras already include that request and the
+    stamp recomputed here -- the checkout's lock, layout and Python, the plugin members THIS root
+    enables -- equals the owner's recorded stamp. A borrower enabling other plugins, or with a
+    selection of its own, keeps its own environment. Read-only: the owner's facts are only read.
+    """
+    from pm.environments import borrowed_venv, install_key, owning_home_root, runtime_facts_path
+    from pm.extras import first_generation_selection, pre_pm_baseline
+    from pm.packages import Venv
+
+    root = paths.repo_root() if project_root is None else Path(project_root).absolute()
+    owner = owning_home_root(root)
+    environment = borrowed_venv(root)
+    if owner is None or environment is None or Facts(runtime_facts_path(root), strict=True).get("venv") is not None:
+        return False
+    try:
+        fact = Facts(owner / "installs" / install_key(root) / "facts.json", strict=True).get("venv")
+    except (OSError, ValueError):
+        return False
+    if (not isinstance(fact, dict) or not isinstance(fact.get("stamp"), str) or not fact["stamp"]
+            or not isinstance(fact.get("extras"), list)
+            or any(not isinstance(extra, str) for extra in fact["extras"])):
+        return False
+    package = Venv(root)
+    requested = set(first_generation_selection(root) or []) | set(pre_pm_baseline(root))
+    enabled = sorted(set(_still_declared(package, fact["extras"])) | requested)
+    return package.expected_stamp(enabled) == fact["stamp"]
+
+
 def _feature_policy(extras: Optional[list[str]], *, repair: bool) -> tuple[list[str] | None, list[str] | None]:
     """Refuse extras this platform or a frozen bundle cannot carry; return (shipped, frozen)."""
     from pm.features import read_features

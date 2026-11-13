@@ -110,6 +110,32 @@ def owning_home_root(project_root: Path) -> Path | None:
     return owner
 
 
+def borrowed_venv(project_root: Path) -> Path | None:
+    """The environment the owning root committed for *project_root*, when the active root borrows it.
+
+    ``None`` for the owner itself, for a root with no owner, and for an owner record that does not
+    name a generation of its own state. Read-only: the owner's facts and input stamps are the
+    owner's. A borrower with nothing committed runs this generation (``activate_dependencies``)
+    instead of refusing, and a launch whose request it serves skips building one of its own
+    (``pm.install.borrowed_venv_is_current``).
+    """
+    owner = owning_home_root(project_root)
+    if owner is None:
+        return None
+    state = owner / "installs" / install_key(project_root)
+    try:
+        value = json.loads((state / "facts.json").read_text(encoding="utf-8-sig"))["packages"]["venv"]["environment"]
+        if not isinstance(value, str):
+            return None
+        environment = Path(value).resolve()
+        if (not environment.is_relative_to((state / "environments").resolve())
+                or not (environment / "pyvenv.cfg").is_file()):
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return environment
+
+
 def _launcher_bound_root(project_root: Path, candidates: list[Path]) -> Path | None:
     """The candidate whose ``tools/`` holds the live interpreter the checkout's launcher execs."""
     from hermes_cli._launchers import _launcher_python
@@ -485,18 +511,41 @@ class NoCommittedEnvironment(RuntimeError):
     """PM's store Python with no committed generation: no retry fixes it, only `hermes pm repair`."""
 
 
-def _require_own_dependencies(project_root: Path) -> None:
+def _require_own_dependencies(project_root: Path) -> Path | None:
     """With nothing committed, an interpreter keeps the packages it booted with.
 
-    PM's store Python boots with none, so for it there is nothing to keep: refuse instead of
-    running on whatever PYTHONPATH it inherited (historically the pre-PM in-tree venv).
+    PM's store Python boots with none, so for it there is nothing to keep. A root that borrows
+    the checkout runs the owner's committed generation instead (``borrowed_venv``); with no such
+    generation it refuses rather than running on whatever PYTHONPATH it inherited (historically
+    the pre-PM in-tree venv). Any other interpreter (a developer .venv, a test env) gets ``None``
+    and keeps its own packages.
+
+    The borrowed generation is leased as the owner's own processes and profiles lease it: a
+    per-process lock file in the owner's ``<generation>/.leases``, so the owner's collector never
+    removes it under a running borrower. Nothing else of the owner's state is written and its lock
+    is not taken: the selection is re-read after leasing, as an unlocked reader does. A lease
+    directory this user cannot write leaves the refusal in place.
     """
     import sys
 
     if sys.prefix != sys.base_prefix:
-        return  # a venv interpreter (developer .venv, test env) carries its own packages
-    if Path(sys.base_prefix).resolve().is_relative_to(store_root(project_root).resolve()):
+        return None
+    if not Path(sys.base_prefix).resolve().is_relative_to(store_root(project_root).resolve()):
+        return None
+    environment = borrowed_venv(project_root)
+    if environment is not None:
+        from hermes_cli.runtime_state import lease_generation
+
+        try:
+            release = lease_generation(environment)
+            while (current := borrowed_venv(project_root)) not in (None, environment):
+                release()
+                environment, release = current, lease_generation(current)
+        except OSError:
+            environment = None
+    if environment is None:
         raise NoCommittedEnvironment("no dependency environment is committed for this install")
+    return environment
 
 
 def activate_dependencies(project_root: Path) -> None:
@@ -517,26 +566,26 @@ def activate_dependencies(project_root: Path) -> None:
             if held:
                 recover_publication(project_root)
             environment = committed_venv(project_root)
-            if environment is None:
-                return _require_own_dependencies(project_root)
-            release = lease_generation(environment)
-            # Without the lock, an installer may commit a new generation between the
-            # read and the lease, leaving the leased one unselected and collectable.
-            while not held and (current := committed_venv(project_root)) not in (None, environment):
-                release()
-                environment, release = current, lease_generation(current)
-            selected = site_packages(environment)
-            if not selected.is_dir() and not runtime_facts_path(project_root).is_file():
-                return
+            if environment is not None:
+                release = lease_generation(environment)
+                # Without the lock, an installer may commit a new generation between the
+                # read and the lease, leaving the leased one unselected and collectable.
+                while not held and (current := committed_venv(project_root)) not in (None, environment):
+                    release()
+                    environment, release = current, lease_generation(current)
+                if not site_packages(environment).is_dir() and not runtime_facts_path(project_root).is_file():
+                    return
     else:
         # Sealed payloads still select once, before imports.
         # Never consult VIRTUAL_ENV: it can describe the invoking shell's Python.
         environment = payload_venv(project_root)
-        if environment is None:
-            return _require_own_dependencies(project_root)
-        selected = site_packages(environment)
-        if not selected.is_dir():
+        if environment is not None and not site_packages(environment).is_dir():
             return  # External/Nix interpreter owns its original sys.path.
+    if environment is None:
+        environment = _require_own_dependencies(project_root)
+        if environment is None:
+            return
+    selected = site_packages(environment)
     if not selected.is_dir():
         raise RuntimeError(f"dependency environment has no site-packages: {selected}")
     import site
