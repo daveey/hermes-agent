@@ -19,6 +19,21 @@ DOORS = [
 ]
 
 
+async def set_writer_trace(db, callback):
+    """Swap the writer connection's trace callback only while no thread is inside a statement on it.
+
+    ``set_trace_callback`` takes SQLite's connection mutex while holding the GIL, and a statement
+    running in a worker thread holds that mutex while it calls the Python trace (which needs the
+    GIL): swapping it mid-statement deadlocks the whole process. Writes still run after the HTTP
+    response (the chat door's post-turn transaction), so take ``db._lock`` (every writer-connection
+    user holds it) in a worker thread, never the loop, bounded by ``WAIT_S``.
+    """
+    def swap():
+        with db._lock:
+            db._conn.set_trace_callback(callback)
+    await asyncio.wait_for(asyncio.to_thread(swap), WAIT_S)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('name,path,body,headers,expected', DOORS, ids=[d[0] for d in DOORS])
 async def test_admission_waits_for_the_writer_off_the_owner_loop(api, owner, monkeypatch, name, path, body,
@@ -58,7 +73,7 @@ async def test_admission_waits_for_the_writer_off_the_owner_loop(api, owner, mon
                     holder.rollback()
                 loop.call_soon_threadsafe(writer_started.set)
 
-        owner.db._conn.set_trace_callback(trace)
+        await set_writer_trace(owner.db, trace)
         request = asyncio.create_task(client.post(path, json=body, headers={**AUTH, **headers}))
         try:
             await asyncio.wait_for(writer_started.wait(), WAIT_S)
@@ -73,5 +88,5 @@ async def test_admission_waits_for_the_writer_off_the_owner_loop(api, owner, mon
             try:
                 response = await asyncio.wait_for(request, WAIT_S)
             finally:
-                owner.db._conn.set_trace_callback(None)
+                await set_writer_trace(owner.db, None)
         assert response.status == expected, await response.text()
