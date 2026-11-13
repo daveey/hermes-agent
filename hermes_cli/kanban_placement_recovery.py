@@ -174,5 +174,5 @@ def hub_keep_reason(conn, row, cfg, *, board="default"):
     from hermes_cli.kanban_hub_admission_pickup import card_fields
     try:
         return keep_reason(conn, row, card_fields(row, board), cfg)
-    except (KeyError, TypeError, ValueError):
+    except (LookupError, TypeError, ValueError):  # LookupError: KeyError (dict row) or IndexError (sqlite3.Row)
         return "card fields unreadable"

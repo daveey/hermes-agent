@@ -70,7 +70,8 @@ def _labels(raw: Any) -> Optional[list[str]]:
 def card_fields(card: Mapping[str, Any], board: str) -> dict:
     """The admission view of a ``tasks`` row, shared by the claim screen and placement-recovery promotion.
 
-    A non-list ``requires``/``skills`` reads as None; a missing column raises KeyError."""
+    A non-list ``requires``/``skills`` reads as None. A missing column raises LookupError: KeyError for a dict row
+    (placement recovery), IndexError for a sqlite3.Row (the claim and pickup screens)."""
     from hermes_cli.kanban_placement import without_placement_note
 
     def _list(raw):

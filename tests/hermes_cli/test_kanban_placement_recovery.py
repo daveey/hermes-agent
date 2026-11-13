@@ -96,7 +96,8 @@ def test_unreadable_card_fields_keep_the_card_on_the_hub(setup, monkeypatch):
     assert recovery.promotion_mode(conn, row, cfg) == "promote"  # readable: promoted
     del row["title"]
     assert recovery.hub_keep_reason(conn, row, cfg) == "card fields unreadable"
-    for error in (KeyError("title"), TypeError("requires"), ValueError("requires")):
+    for error in (KeyError("title"), IndexError("No item with that key"), TypeError("requires"),
+                  ValueError("requires")):
         def unreadable(_card, _board, error=error):
             raise error
         monkeypatch.setattr(pickup, "card_fields", unreadable)
@@ -113,9 +114,11 @@ def test_promotion_reads_the_keep_reasons_on_the_reevaluated_board(setup, monkey
     real = pickup.card_fields
     monkeypatch.setattr(pickup, "card_fields", lambda card, board: seen.append(board) or real(card, board))
     assert recovery.available_mode(conn, row, placement.config(), object(), "default", "hub") == "promote"
-    # A non-default board is a structural keep reason, so the threaded board is what the screen judged.
+    # A non-default board is a structural keep reason, so the threaded board is what the screen judged. "other"
+    # differs from every keyword default, so the available_mode -> recovery_mode -> promotion_mode hops are pinned.
+    assert recovery.available_mode(conn, row, placement.config(), object(), "other", "hub") is None
     assert recovery.promotion_mode(conn, row, placement.config(), board="other") is None
-    assert seen == ["default", "other"]
+    assert seen == ["default", "other", "other"]
 
 
 def test_promotion_preserves_explicit_local_intent(setup):
