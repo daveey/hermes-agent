@@ -273,6 +273,16 @@ def _is_ancestor(pid: int, start: Optional[int] = None) -> bool:
     return False
 
 
+def descends_from_live_pid(pid) -> bool:
+    """Whether this process descends from ``pid`` while it is alive. pid 0/1 (and a non-integer) never
+    count: every process descends from init, so it vouches for nothing. [daveey]"""
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    return pid > 1 and _pid_alive(pid) and _is_ancestor(pid)
+
+
 def _descends_from_live_agent(env: Mapping[str, str], bound_pid: Optional[int]) -> bool:
     """Whether this process descends from a live agent of the lineage other than the spawn pid:
     the run's ``worker_bound`` interpreter, or the ``HERMES_DELEGATED_CHILD_OWNER`` process that
@@ -281,7 +291,7 @@ def _descends_from_live_agent(env: Mapping[str, str], bound_pid: Optional[int]) 
 
     owner = (env.get(DELEGATED_CHILD_OWNER_ENV) or "").strip().partition(":")[0]
     candidates = [bound_pid] + ([int(owner)] if owner.isdigit() else [])
-    return any(pid and pid > 1 and _pid_alive(pid) and _is_ancestor(pid) for pid in candidates)
+    return any(descends_from_live_pid(pid) for pid in candidates)
 
 
 def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
@@ -308,8 +318,7 @@ def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> 
     if not status:
         reason = f"its worker card {tid} is not on the board"
     elif status in _TERMINAL_STATUSES:
-        if _descends_from_live_agent(env, bound_pid) or (
-                worker_pid and worker_pid > 1 and _pid_alive(worker_pid) and _is_ancestor(worker_pid)):
+        if _descends_from_live_agent(env, bound_pid) or descends_from_live_pid(worker_pid):
             # The worker's own shell after kanban_complete: the env is legitimately its own, the card
             # is just finished. No Desktop is involved (t_01a198dc526bff6e). [daveey]
             return (f"your Kanban card {tid} is {status}: board writes from its worker shell are fenced. "

@@ -43,18 +43,12 @@ def _payloads(conn, task_id: str, run_id: int, kind: str) -> list[dict]:
     return out
 
 
-def _descends_from(pid) -> bool:
-    from hermes_cli.top_level_env import _is_ancestor, _pid_alive
-    try:
-        pid = int(pid or 0)
-    except (TypeError, ValueError):
-        return False
-    return pid > 1 and _pid_alive(pid) and _is_ancestor(pid)
-
-
 def run_for(conn, task_id: str, env: Optional[Mapping[str, str]] = None) -> tuple[Optional[int], Optional[str]]:
     """``(run_id, None)`` when this process is proven to be ``task_id``'s worker shell; ``(None, why)`` when the env
-    names the card but the proof fails; ``(None, None)`` when the env does not name the card at all."""
+    names the card but the proof fails; ``(None, None)`` when the env does not name the card at all.
+
+    The proof is card-agnostic: any card's proven worker shell (not only a review card's) gets its run id, which the
+    CLI passes as ``expected_run_id``, so a no-``--force`` completion fenced to that run succeeds."""
     env = os.environ if env is None else env
     if not names_card(task_id, env):
         return None, None
@@ -71,7 +65,8 @@ def run_for(conn, task_id: str, env: Optional[Mapping[str, str]] = None) -> tupl
     from hermes_cli.kanban_db_dispatch import _worker_alive
     spawned = task["worker_pid"] if task["worker_pid"] and _worker_alive(task["worker_pid"],
                                                                          task["worker_started_at"]) else None
-    if not any(_descends_from(pid) for pid in [*bound, spawned]):
+    from hermes_cli.top_level_env import descends_from_live_pid
+    if not any(descends_from_live_pid(pid) for pid in [*bound, spawned]):
         return None, f"pid {os.getpid()} does not descend from run {run_id}'s live worker"
     sessions = {p.get("session_id") for p in _payloads(conn, task_id, run_id, "owner_admitted")}
     if len(sessions) != 1 or not isinstance(next(iter(sessions)), str) or not next(iter(sessions)):

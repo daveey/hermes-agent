@@ -430,7 +430,10 @@ def kb_status(kb, conn, tid):
 WORKER_SESSION = "local-reviewer-session"
 
 
-def _worker_shell_card(kb, monkeypatch, body, *, bound_pid=None, session=WORKER_SESSION, env_session=WORKER_SESSION):
+def _worker_shell_card(kb, monkeypatch, body, *, bound_pid=None, session=WORKER_SESSION, env_session=WORKER_SESSION,
+                       bound=True, spawn=None):
+    """``spawn=(pid, fingerprint)`` records the claim's spawned worker (``tasks.worker_pid``); ``bound=False`` leaves
+    the run without a ``worker_bound`` event, so only that spawn pid can prove the shell."""
     import os
     from hermes_cli import kanban_db_connect as kbc
     with kbc.connect() as conn:
@@ -440,7 +443,10 @@ def _worker_shell_card(kb, monkeypatch, body, *, bound_pid=None, session=WORKER_
         with kb.write_txn(conn):
             if session:
                 kb._append_event(conn, tid, "owner_admitted", {"session_id": session, "pid": 1}, run_id=run_id)
-            kb._append_event(conn, tid, "worker_bound", {"pid": bound_pid or os.getppid()}, run_id=run_id)
+            if bound:
+                kb._append_event(conn, tid, "worker_bound", {"pid": bound_pid or os.getppid()}, run_id=run_id)
+            if spawn:
+                conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?", (*spawn, tid))
     for var in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("HERMES_KANBAN_WORKER_TASK", tid)
@@ -491,6 +497,42 @@ def test_cli_worker_env_alone_is_not_trusted(board, monkeypatch, capsys, case):
     assert "review_independence" in err
     assert "CLI fallback cannot record a review ship accepts" in err and "kanban_block" in err
     assert "Leave the card for a worker" not in err  # wrong advice for the card's own worker
+    assert _status(board, tid) == "running"
+
+
+# No worker_bound event (the bind never landed): the claim's spawned worker_pid proves the shell, but only while its
+# start-time fingerprint still matches (a recycled pid is a stranger) and never as pid 1 (every process descends
+# from init).
+
+def _fingerprint(pid):
+    from hermes_cli.kanban_db_dispatch import _process_fingerprint
+    return _process_fingerprint(pid)
+
+
+def test_cli_worker_shell_proven_by_the_fingerprinted_spawn_pid(board, monkeypatch):
+    import os
+    tid, run_id = _worker_shell_card(board, monkeypatch, SHIP_BODY, bound=False,
+                                     spawn=(os.getppid(), _fingerprint(os.getppid())))
+    assert _cli_complete(tid, dict(GOOD), force=False) == 0  # fenced to the proven run, no --force needed
+    assert _status(board, tid) == "done"
+    row = _closing_run(board, tid)
+    assert (row["id"], row["outcome"], row["status"]) == (run_id, "completed", "done")
+    assert _runs(board, tid) == 1
+
+
+@pytest.mark.parametrize("case", ["fingerprint_mismatch", "init_pid"])
+def test_cli_worker_shell_spawn_pid_fallback_refuses(board, monkeypatch, capsys, case):
+    import os
+    if case == "fingerprint_mismatch":
+        fp = _fingerprint(os.getppid())
+        assert fp and "|" in fp
+        spawn = (os.getppid(), "another-boot|" + fp.partition("|")[2])  # same pid number, foreign instantiation
+    else:
+        spawn = (1, _fingerprint(1))
+    tid, _ = _worker_shell_card(board, monkeypatch, SHIP_BODY, bound=False, spawn=spawn)
+    assert _cli_complete(tid, dict(GOOD), force=True) != 0
+    err = capsys.readouterr().err
+    assert "review_independence" in err and "CLI fallback cannot record a review ship accepts" in err
     assert _status(board, tid) == "running"
 
 
