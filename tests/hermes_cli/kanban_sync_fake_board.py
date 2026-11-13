@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 import time
 from decimal import Decimal
 from typing import Any, Optional
@@ -57,6 +58,29 @@ def _js_stringify(value: object) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(_js_stringify(v) for v in value) + "]"
     return json.dumps(value, ensure_ascii=False)
+
+
+_JS_DECIMAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|[+-]?Infinity")
+
+
+def _js_to_number(value: object) -> float:
+    """ECMAScript ``Number(value)`` for a wire JSON value: null -> 0, booleans -> 0/1, numbers as themselves (an
+    int past the double range -> Infinity), a string trimmed (empty -> 0) and read as a decimal literal or
+    ``Infinity``, anything else NaN. Out of scope: hex/octal/binary strings and arrays (JS coerces ``[]`` to 0 and
+    ``[x]`` through ``String(x)``)."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (bool, int, float)):
+        try:
+            return float(value)
+        except OverflowError:
+            return math.inf if value > 0 else -math.inf
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0.0
+        return float(text.replace("Infinity", "inf")) if _JS_DECIMAL.fullmatch(text) else math.nan
+    return math.nan
 
 
 class FakeService:
@@ -178,6 +202,9 @@ class FakeService:
     # transitions.ts MAX_DIAGNOSTIC_CHARS: a larger holder diagnostic is replaced by ``{diagnostic_truncated: true}``.
     MAX_DIAGNOSTIC_CHARS = 8000
     CANONICAL = frozenset({"crashed", "timed_out", "terminal_provider"})
+    # releaseTask's policy checks: ``block_kind`` values and Number.MAX_SAFE_INTEGER for ``failure_limit``.
+    BLOCK_KINDS = frozenset({"transient", "assignment", "capability"})
+    MAX_SAFE_INTEGER = 2**53 - 1
 
     @classmethod
     def release_diagnostic(cls, value: object) -> Optional[dict]:
@@ -195,12 +222,20 @@ class FakeService:
 
     @classmethod
     def release_inputs(cls, op: dict) -> Optional[dict]:
-        """Part of releaseTask's post-fence validation, before any write. The real order is ``failure_limit``
-        (a positive safe integer when present), ``block_kind`` (transient | assignment | capability), ``op.extra ??
-        {}``, then releaseDiagnostic. The fake models neither ``failure_limit`` nor ``block_kind`` validation (a bad
-        value is not refused here); of the rest, in that order: an ``extra`` that is not an object is ``invalid``
-        ("failure extra must be an object"), then :meth:`release_diagnostic`. Returns the diagnostic, or None when
-        the caller refuses the release ``invalid``."""
+        """releaseTask's post-fence validation, before any write. releaseTask's full order is the outcome
+        (RELEASE_OUTCOMES), ``run_uid`` presence (``invalid`` when absent or null), fence(), then these, each
+        ``invalid`` on failure: ``failure_limit`` when present (``Number(op.failure_limit)`` a positive safe
+        integer, so an explicit null is 0 and refused: :func:`_js_to_number`), ``block_kind`` (``op.block_kind ??
+        "transient"`` one of BLOCK_KINDS), ``op.extra ?? {}`` an object ("failure extra must be an object"), then
+        :meth:`release_diagnostic`. The callers check the outcome, ``run_uid`` and the fence. Returns the
+        diagnostic, or None when the caller refuses the release ``invalid``."""
+        if "failure_limit" in op:
+            limit = _js_to_number(op["failure_limit"])
+            if not (math.isfinite(limit) and limit.is_integer() and 1 <= limit <= cls.MAX_SAFE_INTEGER):
+                return None
+        if op.get("block_kind") is not None and not (isinstance(op["block_kind"], str)
+                                                     and op["block_kind"] in cls.BLOCK_KINDS):
+            return None
         extra = op.get("extra")
         if extra is not None and not isinstance(extra, dict):
             return None
@@ -223,17 +258,19 @@ class FakeService:
         """As transitions.ts releaseTask: only the lease holder's run is released; the Board ends that run, emits
         its one outcome event (carrying :meth:`release_evidence`) and books a charged outcome exactly once.
         Not modelled: the protocol-violation streak (a ``protocol_violation`` crash is charged like any crash), and
-        ``spawn_failed`` (endCustody + recordTaskFailure(releaseClaim, endRun)). As in releaseTask, a spawn_failed
-        release is fenced and its inputs validated first (a stale lease is ``lease_lost``, a non-object extra or
-        diagnostic ``invalid``, nothing changed); one that passes both raises NotImplementedError, as on the leases
+        ``spawn_failed`` (endCustody + recordTaskFailure(releaseClaim, endRun)). As in releaseTask, every release is
+        checked first in releaseTask's order: the outcome and ``run_uid`` presence (``invalid``), fence() (a
+        missing, other-holder or stale lease is ``lease_lost``), then :meth:`release_inputs` (``invalid``), all
+        before any write; a spawn_failed release that passes them raises NotImplementedError, as on the leases
         route."""
-        task, run = op["task"], op["run_uid"]
-        if op.get("outcome", "released") not in self.RELEASE_OUTCOMES:
+        task, run = op["task"], op.get("run_uid")
+        if op.get("outcome", "released") not in self.RELEASE_OUTCOMES or run is None:
             return {"status": "rejected", "reason": "invalid"}
         lease = b["leases"].get(task)
         if not lease or lease["holder"] != gw or lease["run_uid"] != run:
             return {"status": "rejected", "reason": "lease_lost"}
-        # releaseTask's extra check and releaseDiagnostic run after fence(), before any write, for every outcome.
+        # releaseTask's policy, extra and releaseDiagnostic checks run after fence(), before any write, for every
+        # outcome.
         diagnostic = self.release_inputs(op)
         if diagnostic is None:
             return {"status": "rejected", "reason": "invalid"}
@@ -361,7 +398,9 @@ class FakeHub:
     def leases(self, board: str, body: dict) -> dict:
         self._check()
         b = self.svc.board(board)
-        task, run = body["task"], body["run_uid"]
+        task, release = body["task"], body["action"] == "release"
+        # releaseTask refuses a release with no run_uid ``invalid`` (below); grant and renew need one.
+        run: Any = body.get("run_uid") if release else body["run_uid"]
         cur = b["leases"].get(task)
         op_id, hlc, gw = body.get("client_op_id"), f"{9_999_999_999_998:013d}-0000-board", self.gateway
         version = None
@@ -394,15 +433,17 @@ class FakeHub:
             if not cur or cur["holder"] != self.gateway or cur["run_uid"] != run:
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
         else:
-            if str(body.get("outcome") or "released") not in self.svc.RELEASE_OUTCOMES:
-                # releaseTask checks the outcome before its fence: an unknown one (a test typo) is ``invalid``.
+            if str(body.get("outcome") or "released") not in self.svc.RELEASE_OUTCOMES or run is None:
+                # releaseTask checks the outcome, then run_uid presence, before its fence: an unknown outcome (a
+                # test typo) or a missing/null run_uid is ``invalid``.
                 return {"status": "rejected", "reason": "invalid", "lease": cur}
             if self.svc.lease_runs and (not cur or cur["holder"] != gw or cur["run_uid"] != run):
                 # releaseTask's fence(): a release that does not name this gateway's live lease run is refused and
                 # changes nothing (the card keeps its lease and mirror).
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
-            # releaseTask's extra check and releaseDiagnostic run after fence(), before any write: a non-object
-            # extra or diagnostic is ``invalid`` for every outcome and changes nothing.
+            # releaseTask's policy, extra and releaseDiagnostic checks run after fence(), before any write: a bad
+            # failure_limit or block_kind, or a non-object extra or diagnostic, is ``invalid`` for every outcome
+            # and changes nothing.
             diagnostic = self.svc.release_inputs(body)
             if diagnostic is None:
                 return {"status": "rejected", "reason": "invalid", "lease": cur}

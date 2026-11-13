@@ -566,14 +566,22 @@ def test_fake_release_spawn_failed_is_not_modelled(live, kanban_home, route, lea
 
 
 @pytest.mark.parametrize("route", ["leases", "ops"])
-def test_fake_release_spawn_failed_is_fenced_first(live, kanban_home, route):
-    """releaseTask runs fence() before the spawn_failed branch: a stale-lease spawn_failed is ``lease_lost``
-    (not the fake's NotImplementedError) and changes nothing."""
+@pytest.mark.parametrize("fence_arm", ["missing", "other_holder", "stale"])
+@pytest.mark.parametrize("bad", [{}, {"failure_limit": 0}, {"block_kind": "blocked"}, {"extra": "host"}],
+                         ids=["valid", "failure_limit", "block_kind", "extra"])
+def test_fake_release_spawn_failed_is_fenced_first(live, kanban_home, route, fence_arm, bad):
+    """releaseTask runs fence() before its input checks and the spawn_failed branch: with no lease
+    (``not lease``), another gateway's lease (``holder != gw``) or a newer run's lease, a spawn_failed release is
+    ``lease_lost`` (not ``invalid`` for a bad input, nor the fake's NotImplementedError) and changes nothing."""
     svc = FakeService(lease_runs=True)
     hub, tid = _leased(live, svc)
-    svc.board(BOARD)["leases"][tid]["run_uid"] = "run-newer"
+    leases = svc.board(BOARD)["leases"]
+    if fence_arm == "missing":
+        del leases[tid]
+    else:
+        leases[tid].update({"holder": OTHER} if fence_arm == "other_holder" else {"run_uid": "run-newer"})
     before = copy.deepcopy(svc.board(BOARD))
-    res = _release(route, svc, hub, tid, outcome="spawn_failed")
+    res = _release(route, svc, hub, tid, outcome="spawn_failed", **bad)
     assert (res["status"], res["reason"]) == ("rejected", "lease_lost")
     assert svc.board(BOARD) == before
 
@@ -587,6 +595,57 @@ def test_fake_release_spawn_failed_validates_inputs_first(live, kanban_home, rou
     hub, tid = _leased(live, svc)
     before = copy.deepcopy(svc.board(BOARD))
     res = _release(route, svc, hub, tid, outcome="spawn_failed", **bad)
+    assert (res["status"], res["reason"]) == ("rejected", "invalid")
+    assert svc.board(BOARD) == before
+
+
+@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("leases", False), ("ops", True)])
+@pytest.mark.parametrize("outcome", ["released", "crashed", "timed_out", "owner_down", "spawn_failed"])
+@pytest.mark.parametrize("bad", [
+    # failure_limit: Number(value) must be a positive safe integer when present (an explicit null is 0).
+    {"failure_limit": 0}, {"failure_limit": -1}, {"failure_limit": 1.5}, {"failure_limit": None},
+    {"failure_limit": "abc"}, {"failure_limit": 2**53}, {"failure_limit": float("nan")},
+    {"failure_limit": float("inf")}, {"failure_limit": {}},
+    # block_kind: String(op.block_kind ?? "transient") must be transient | assignment | capability.
+    {"block_kind": "blocked"}, {"block_kind": ""}, {"block_kind": "Transient"}, {"block_kind": 0},
+    {"block_kind": False},
+], ids=lambda v: repr(v)[:32])
+def test_fake_release_rejects_bad_failure_policy(live, kanban_home, route, lease_runs, outcome, bad):
+    """As releaseTask's post-fence policy checks (before extra and the diagnostic): a bad ``failure_limit`` or
+    ``block_kind`` is ``invalid`` for every outcome, spawn_failed included (not the fake's NotImplementedError),
+    and changes nothing."""
+    svc = FakeService(lease_runs=lease_runs)
+    hub, tid = _leased(live, svc)
+    before = copy.deepcopy(svc.board(BOARD))
+    res = _release(route, svc, hub, tid, outcome=outcome, **bad)
+    assert (res["status"], res["reason"]) == ("rejected", "invalid")
+    assert svc.board(BOARD) == before
+
+
+@pytest.mark.parametrize("policy", [
+    {}, {"failure_limit": 1}, {"failure_limit": 3.0}, {"failure_limit": "3"}, {"failure_limit": " 2 "},
+    {"failure_limit": True}, {"failure_limit": 2**53 - 1}, {"block_kind": None}, {"block_kind": "transient"},
+    {"block_kind": "assignment"}, {"block_kind": "capability"},
+], ids=lambda v: repr(v)[:32])
+def test_fake_release_accepts_valid_failure_policy(policy):
+    """What releaseTask accepts: ``Number(failure_limit)`` a positive safe integer (JS coerces ``"3"`` and
+    ``true``), ``block_kind`` absent, null (``?? "transient"``) or one of the three kinds."""
+    assert FakeService.release_inputs(policy) == {}
+
+
+@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("leases", False), ("ops", True)])
+@pytest.mark.parametrize("outcome", ["released", "crashed", "owner_down", "spawn_failed"])
+@pytest.mark.parametrize("run_uid", ["absent", None])
+def test_fake_release_without_run_uid_is_invalid(live, kanban_home, route, lease_runs, outcome, run_uid):
+    """releaseTask refuses a release with no (or a null) ``run_uid`` ``invalid`` before its fence (so not
+    ``lease_lost``, nor a KeyError or NotImplementedError in the fake), and nothing changes."""
+    svc = FakeService(lease_runs=lease_runs)
+    hub, tid = _leased(live, svc)
+    before = copy.deepcopy(svc.board(BOARD))
+    body = {"task": tid, "client_op_id": "r", "outcome": outcome,
+            **({} if run_uid == "absent" else {"run_uid": run_uid})}
+    res = (hub.leases(BOARD, {"action": "release", **body}) if route == "leases"
+           else svc.release_op(svc.board(BOARD), {"op": "release", **body}, ME))
     assert (res["status"], res["reason"]) == ("rejected", "invalid")
     assert svc.board(BOARD) == before
 
