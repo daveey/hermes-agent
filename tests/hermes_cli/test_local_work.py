@@ -31,6 +31,24 @@ print('stdlib seed import: OK')
     assert result.stdout.strip() == "stdlib seed import: OK"
 
 
+def test_canonical_home_relative_spelling_follows_the_current_directory(tmp_path, monkeypatch):
+    """The same relative spelling names a different home after a chdir; a cache keyed on the raw
+    spelling kept answering with the first directory. RED on dd75da236b."""
+    import hermes_cli.local_work as module
+    monkeypatch.setattr(module, "_HOME_KEYS", {})
+    first, second = tmp_path / "a", tmp_path / "b"
+    (first / "home").mkdir(parents=True)
+    (second / "home").mkdir(parents=True)
+    monkeypatch.chdir(first)
+    assert module.canonical_home("home") == os.path.normcase(os.path.realpath(first / "home"))
+    monkeypatch.chdir(second)
+    assert module.canonical_home("home") == os.path.normcase(os.path.realpath(second / "home"))
+    # Absolute spellings are still cached, keyed on the absolute path.
+    absolute = str(first / "home")
+    assert module.canonical_home(absolute) == os.path.normcase(os.path.realpath(absolute))
+    assert os.path.abspath(absolute) in module._HOME_KEYS
+
+
 def test_install_is_explicit_and_snapshot_is_detached(tmp_path, monkeypatch):
     import hermes_cli.local_work as module
     monkeypatch.setattr(module, "_registry", None)

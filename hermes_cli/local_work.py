@@ -26,19 +26,20 @@ def canonical_home(home):
 
     Mirrors ``hermes_constants.hermes_home_key`` without importing it (stdlib-only seed module):
     expanduser + realpath + normcase. Only an existing directory's answer is cached, because a
-    path that does not exist yet can resolve differently once created.
+    path that does not exist yet can resolve differently once created. The cache is keyed on the
+    absolute spelling, so a relative spelling is resolved against the current directory every time.
     """
     if home is None:
         return None
-    raw = os.fspath(home)
-    cached = _HOME_KEYS.get(raw)
+    spelling = os.path.abspath(os.path.expanduser(os.fspath(home)))
+    cached = _HOME_KEYS.get(spelling)
     if cached is not None:
         return cached
-    key = os.path.normcase(os.path.realpath(os.path.expanduser(raw)))
+    key = os.path.normcase(os.path.realpath(spelling))
     if os.path.isdir(key):
         if len(_HOME_KEYS) >= _HOME_KEYS_MAX:
             _HOME_KEYS.clear()
-        _HOME_KEYS[raw] = key
+        _HOME_KEYS[spelling] = key
     return key
 
 
