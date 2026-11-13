@@ -62,9 +62,9 @@ def _env(cwd, index: Optional[str] = None, *, budget=None) -> dict:
     env = noninteractive_repo_git_env(cwd, budget=budget)
     if env is None:
         if budget is not None:  # a budgeted scan reports the tree unchecked (hermes_cli.git_budget)
-            from hermes_cli.git_budget import GitUnchecked, ensure_left
+            from hermes_cli.git_budget import NO_FILTER_ENV, GitUnchecked, ensure_left
             ensure_left(budget)
-            raise GitUnchecked("git config probe gave no answer")
+            raise GitUnchecked(NO_FILTER_ENV)
         raise ArchiveError("git filter discovery failed")
     env.update(_IDENTITY)
     start = int(env["GIT_CONFIG_COUNT"])

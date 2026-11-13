@@ -121,6 +121,19 @@ def test_a_git_status_timeout_reads_unchecked_not_dirty(tmp_path, monkeypatch):
     assert worktree_ops._worktree_is_dirty(str(tree), str(tree)) is True  # unbudgeted callers keep failing safe
 
 
+def test_a_refused_filter_discovery_answer_reads_unchecked_with_an_accurate_cause(tmp_path):
+    # git answers the config probe, but with more filter keys than discovery accepts: an answer it refuses,
+    # not "no answer". The cause names both cases; the tree still reads unchecked, never clean.
+    tree = _clean_pushed_tree(tmp_path, "refused-answer")
+    path = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "config"], cwd=tree,
+                          check=True, capture_output=True, text=True).stdout.strip()
+    with open(path, "a") as fh:
+        fh.writelines(f'[filter "f{i}"]\n\tclean = cat\n' for i in range(_subprocess_compat._MAX_FILTER_KEYS + 1))
+    assert _subprocess_compat.noninteractive_repo_git_env(str(tree)) is None  # refused, though git answered rc 0
+    assert kmp.tree_state([str(tree)]) == f"unchecked worktree {tree} (git filter discovery gave no usable answer)"
+    assert worktree_ops._worktree_is_dirty(str(tree), str(tree)) is True  # unbudgeted callers keep failing safe
+
+
 def test_unbudgeted_unpushed_check_still_fails_safe_on_a_timeout(tmp_path, monkeypatch):
     tree = _clean_pushed_tree(tmp_path, "unbudgeted")
 

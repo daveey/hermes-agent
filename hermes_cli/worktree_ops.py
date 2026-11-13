@@ -541,17 +541,17 @@ def _worktree_is_dirty(worktree_path: str, repo_root, timeout: float = 10, *, bu
 
     With ``budget`` (:mod:`hermes_cli.git_budget`) every git call, the hardening probes and the
     hidden-edit scan included, draws its timeout from it; a spent budget, a git timeout or a probe
-    with no answer raises ``GitUnchecked`` instead of reading as dirty.
+    with no usable answer raises ``GitUnchecked`` instead of reading as dirty.
     """
     from hermes_cli._subprocess_compat import noninteractive_repo_git_env
-    from hermes_cli.git_budget import GitUnchecked, ensure_left, timed_out, timeout_for
+    from hermes_cli.git_budget import NO_FILTER_ENV, GitUnchecked, ensure_left, timed_out, timeout_for
     try:
         # Reclaimers run this unattended; status reads the index (core.fsmonitor, clean filters).
         env = noninteractive_repo_git_env(worktree_path, budget=budget)
         if env is None:
             if budget is not None:
                 ensure_left(budget)
-                raise GitUnchecked("git config probe gave no answer")
+                raise GitUnchecked(NO_FILTER_ENV)
             return True
         result = _git(["status", "--porcelain", "-z", "--untracked-files=normal"], worktree_path,
                       timeout=timeout_for(budget, timeout), stdin=subprocess.DEVNULL, env=env)

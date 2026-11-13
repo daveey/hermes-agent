@@ -7,7 +7,7 @@ returns the timeout that call may use (the cap, or less when the deadline is nea
 the deadline, whatever their number.
 
 With a budget, a helper reports a check it could not finish (time spent, git timed out, a hardening probe that
-gave no answer) by raising :class:`GitUnchecked` instead of turning it into a verdict ("dirty", "unpushed"): the
+gave no usable answer) by raising :class:`GitUnchecked` instead of turning it into a verdict ("dirty", "unpushed"): the
 caller then says the tree is unchecked, which it still treats as state (fail safe). Without one, helpers keep
 their own fail-safe verdicts.
 """
@@ -20,6 +20,9 @@ GitBudget = Callable[[float], float]
 
 BUDGET_SPENT = "git budget spent"
 GIT_TIMED_OUT = "git timed out"
+# noninteractive_repo_git_env returned None: its probe gave no answer, or an answer it refuses (non-file include
+# origin, FIFO/directory include target, too many include targets or filter keys). No hardened env, no verdict.
+NO_FILTER_ENV = "git filter discovery gave no usable answer"
 
 
 class GitUnchecked(Exception):
