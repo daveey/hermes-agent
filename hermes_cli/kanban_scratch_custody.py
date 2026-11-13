@@ -2,6 +2,11 @@
 
 Custody establishes a path, not deletion authority. Fresh Board terminal evidence
 supplies retention, while local pickup and the receipt are fenced at rename.
+
+Two removers share the same guards: the scheduled gc_custody (retention age, in-process
+archive) and a worker's disk-pressure adapter through pressure_candidates /
+terminal_owner / removal_guard / release (no retention age; the adapter bounds and
+isolates archive creation and always removes through remove_archived).
 """
 from __future__ import annotations
 
@@ -202,6 +207,76 @@ class _DetachUncommitted(Exception):
     """The tree was renamed aside but the receipt DELETE did not cleanly commit: stop the pass."""
 
 
+def _runs_ended(receipt):
+    runs = json.loads(receipt["evidence"])["runs"]
+    return bool(runs) and all(r["ended_at"] for r in runs)
+
+
+def _pressure_candidate(receipt):
+    """Local-only scheduling view of one receipt, or None when gc_custody would skip it before the Board."""
+    try:
+        if not _runs_ended(receipt):
+            return None
+        ended = max(r["ended_at"] for r in json.loads(receipt["evidence"])["runs"])
+        path = Path(receipt["workspace_path"])
+        if (type(ended) not in (int, float) or ended <= 0 or not path.is_absolute()
+                or path.is_symlink() or not path.is_dir()):
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return {"task_id": receipt["task_id"], "workspace_path": receipt["workspace_path"],
+            "finished_at": ended, "receipt": dict(receipt)}
+
+
+def pressure_candidates(conn, limit=1000):
+    """Evicted-owner trees a disk-pressure reclaimer may try: local reads only, no Board call, no write.
+
+    One dict per receipt whose tree is a directory and whose recorded runs all ended:
+    ``{task_id, workspace_path, finished_at, receipt}``, oldest ``finished_at`` (latest recorded run end,
+    scheduling only) first, at most ``limit``. Listing grants nothing: a caller needs ``terminal_owner()``
+    evidence, a verified complete archive and ``kanban_scratch_archive.remove_archived(conn, path, archive,
+    removal_guard(conn, receipt), release(conn, receipt))``; gc_custody's retention age does not apply.
+    """
+    out = [c for c in map(_pressure_candidate, receipts(conn)) if c is not None]
+    out.sort(key=lambda c: (c["finished_at"], c["task_id"]))
+    return out[:limit]
+
+
+def pressure_candidate(conn, task_id):
+    """The current pressure_candidates() entry for task_id, or None (receipt gone, run live, tree missing)."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name=? AND type='table'", (_TABLE,)).fetchone():
+        return None
+    row = conn.execute(f"SELECT * FROM {_TABLE} WHERE task_id=?", (task_id,)).fetchone()
+    return _pressure_candidate(dict(row)) if row is not None else None
+
+
+def terminal_owner(hub, board, receipt):
+    """Fresh Board terminal evidence for an evicted owner, or None; gc_custody's own rule (runs ended, _terminal).
+
+    Network: never call inside a DB transaction. Transport errors propagate (the caller keeps the tree).
+    """
+    if not _runs_ended(receipt):
+        return None
+    return _terminal(hub, board, receipt["task_id"])
+
+
+def removal_guard(conn, receipt):
+    """remove_archived guard(tree): gc_custody's _safe for exactly this receipt (unchanged, no local row, idle)."""
+    path = Path(receipt["workspace_path"])
+    return lambda tree: _safe(conn, receipt, path, tree=tree)
+
+
+def release(conn, receipt):
+    """remove_archived finalize: consume exactly this receipt inside the detach fence, else raise (rolls back)."""
+    def finalize():
+        from hermes_cli.kanban_scratch_archive import ArchiveRefused
+        cur = conn.execute(f"DELETE FROM {_TABLE} WHERE task_id=? AND workspace_path=? AND evidence=?",
+                           (receipt["task_id"], receipt["workspace_path"], receipt["evidence"]))
+        if cur.rowcount != 1:
+            raise ArchiveRefused("custody receipt changed before release")
+    return finalize
+
+
 def _restore_detached(conn, tid, path, trash, exc):
     """After a failed commit, put the tree back unless something now occupies the path. Never deletes."""
     try:
@@ -241,13 +316,7 @@ def _remove(conn, receipt, owner, days, board):
     if archive is not None:
         ws.release_lsp_clients(str(path))
 
-        def guard(tree):
-            return _safe(conn, receipt, path, tree=tree)
-
-        def finalize():
-            conn.execute(f"DELETE FROM {_TABLE} WHERE task_id=?", (tid,))
-
-        return sa.remove_archived(conn, path, archive, guard, finalize)
+        return sa.remove_archived(conn, path, archive, removal_guard(conn, receipt), release(conn, receipt))
     # Remote resumption does not use this tree. Local pickup does, and shares this lock.
     trash = path.with_name(f".{path.name}.gc-{os.getpid()}")
     renamed = False
@@ -303,8 +372,7 @@ def gc_custody(conn, days):
                     log.info("Scratch custody skipped: task=%s path=%s reason=path_unavailable",
                              receipt["task_id"], receipt["workspace_path"])
                     continue
-                runs = json.loads(receipt["evidence"])["runs"]
-                if not runs or any(not r["ended_at"] for r in runs):
+                if not _runs_ended(receipt):
                     log.warning("Scratch custody preserved: task=%s path=%s reason=run_unverified "
                                 "eligible_at=None", receipt["task_id"], receipt["workspace_path"])
                     continue

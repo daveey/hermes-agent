@@ -990,3 +990,110 @@ def test_custody_archive_unlocked_scans_and_final_fence(env, remote, monkeypatch
             assert (Path(intent["detached"]) / "repo" / "tracked.txt").exists()
         else:
             assert (path / "repo" / "tracked.txt").exists()
+
+
+# -- pressure API: the worker disk-pressure adapter's view of evicted trees (no retention age) --
+
+def _hub():
+    return client.Hub(client.load_identity())
+
+
+def _pressure_reclaim(env, tid):
+    """The adapter's sequence: candidate -> Board evidence -> complete archive -> fenced detach + release."""
+    cand = custody.pressure_candidate(env.conn, tid)
+    receipt, path = cand["receipt"], Path(cand["workspace_path"])
+    owner = custody.terminal_owner(_hub(), "default", receipt)
+    assert owner is not None
+    dest = env.home / "archive" / "scratch" / "default" / tid
+    built = archive.archive_workspace(path, dest, task_id=tid, completed_at=owner["completed_at"])
+    return archive.remove_archived(env.conn, path, built, custody.removal_guard(env.conn, receipt),
+                                   custody.release(env.conn, receipt)), path, built
+
+
+def test_pressure_candidates_are_local_oldest_first_and_bounded(env):
+    newer, newer_path, _ = evicted(env, ended=OLD + 50)
+    older, older_path, _ = evicted(env, ended=OLD)
+    live, live_path, _ = evicted(env, ended=None)
+    gone, gone_path, _ = evicted(env)
+    gone_path.rename(gone_path.with_name("moved"))
+    cands = custody.pressure_candidates(env.conn)
+    assert env.calls == 0  # listing never reads the Board
+    assert [(c["task_id"], c["finished_at"]) for c in cands] == [(older, OLD), (newer, OLD + 50)]
+    assert cands[0]["workspace_path"] == str(older_path)
+    assert cands[0]["receipt"] == dict(_receipt(env, older))
+    assert [c["task_id"] for c in custody.pressure_candidates(env.conn, limit=1)] == [older]
+    assert custody.pressure_candidate(env.conn, newer)["workspace_path"] == str(newer_path)
+    assert custody.pressure_candidate(env.conn, live) is None and custody.pressure_candidate(env.conn, gone) is None
+    assert custody.pressure_candidate(env.conn, "t_missing") is None
+    assert live_path.exists()
+
+
+def test_pressure_candidates_without_custody_table(tmp_path):
+    conn = kbc.connect(tmp_path / "fresh.db")
+    try:
+        assert custody.pressure_candidates(conn) == [] and custody.pressure_candidate(conn, "t_x") is None
+    finally:
+        conn.close()
+
+
+def test_pressure_reclaim_inside_retention_archives_then_releases_receipt(env):
+    env.owner["completed_at"] = env.now - 3600  # an hour old: gc_custody's 7-day retention keeps it
+    tid, path, _ = evicted(env)
+    assert custody.gc_custody(env.conn, 7) == 0 and path.exists()
+    removed, path, built = _pressure_reclaim(env, tid)
+    assert removed == 1 and not path.exists() and _receipt(env, tid) is None
+    archive.verify_complete_archive(built)
+    assert (built / archive.PAYLOAD_DIR / "manifest.json").is_file()
+
+
+@pytest.mark.parametrize("control", ["running", "leased", "deleted"])
+def test_pressure_terminal_owner_refuses_unverified_owner(env, control):
+    tid, _path, _ = evicted(env)
+    if control == "running":
+        env.owner["status"] = "running"
+    elif control == "leased":
+        env.owner.update(lease_holder="worker-9", lease_expires=(env.now + 60) * 1000)
+    else:
+        env.evidence_state = "deleted"
+    assert custody.terminal_owner(_hub(), "default", dict(_receipt(env, tid))) is None
+
+
+def test_pressure_terminal_owner_requires_ended_runs_before_board(env):
+    tid, _path, _ = evicted(env, ended=None)
+    assert custody.terminal_owner(_hub(), "default", dict(_receipt(env, tid))) is None
+    assert env.calls == 0
+
+
+@pytest.mark.parametrize("race", ["receipt", "pickup", "session"])
+def test_pressure_guard_and_release_keep_tree_on_race(env, race):
+    tid, path, _ = evicted(env)
+    receipt = custody.pressure_candidate(env.conn, tid)["receipt"]
+    built = archive.archive_workspace(path, env.home / "archive" / "scratch" / "default" / tid,
+                                      task_id=tid, completed_at=OLD)
+    if race == "receipt":
+        # Changes only after the guard's last read: release() itself must refuse.
+        real_guard = custody.removal_guard(env.conn, receipt)
+        calls = []
+
+        def guard(tree):
+            ok = real_guard(tree)
+            calls.append(tree)
+            if len(calls) == 3:
+                env.conn.execute("UPDATE kanban_scratch_custody SET evidence=json_set(evidence, '$.x', 1) "
+                                 "WHERE task_id=?", (tid,))
+            return ok
+        with pytest.raises(archive.ArchiveRefused):
+            archive.remove_archived(env.conn, path, built, guard, custody.release(env.conn, receipt))
+    else:
+        if race == "pickup":
+            sync.apply_remote_changes(env.conn, [sync.RemoteChange(
+                1, "tasks", tid, "upsert", {"title": "picked up", "status": "ready", "created_on": "other",
+                                            "created_at": OLD, "workspace_kind": "scratch", "workspace_path": None},
+                1, "", "")], new_cursor=1, observers=False)
+        else:
+            env.state.execute("INSERT INTO sessions VALUES ('live',?,?,NULL,NULL)", ("kanban", str(path / "x")))
+            env.state.commit()
+        assert archive.remove_archived(env.conn, path, built, custody.removal_guard(env.conn, receipt),
+                                       custody.release(env.conn, receipt)) == 0
+    assert (path / "notes").read_text() == "keep me"
+    assert env.conn.execute("SELECT 1 FROM kanban_scratch_custody WHERE task_id=?", (tid,)).fetchone()
