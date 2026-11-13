@@ -22,8 +22,8 @@ from typing import Callable, Iterator, Optional
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import (
-    iter_line_segment_contexts, join_continued_lines, protect_redirection_ampersands,
-    restore_redirection_ampersands, split_glued_redirections)
+    heredoc_scripts, iter_script_segment_contexts, join_continued_lines,
+    protect_redirection_ampersands, restore_redirection_ampersands, split_glued_redirections)
 from cron.lifecycle_guard_lines import (  # newlines outside quotes, word-start `#` comments
     _split_logical_lines, join_line_continuations, strip_shell_comments,
 )
@@ -818,16 +818,16 @@ def _iter_segment_contexts(
     """``(segment, call_argument, piped_files)``: whether the segment is the argument list of a
     call (the segment right after a ``(`` that follows an ordinary word), and the files a ``cat``
     pipes into its stdin (``cat f.sh | bash``), through groups, compound commands and process
-    substitution too (``{ cat f; } | bash``, ``cat f | if …; fi``, ``bash <(cat f)``), across a
-    line ending in a pipe. A ``(`` whose opener holds any word in *alias_names* is never a call:
-    the alias may expand to a keyword prefix (``alias t='time '``)."""
+    substitution too (``{ cat f; } | bash``, ``cat f | if …; fi``, ``bash <(cat f)``), across
+    lines; each heredoc body is walked alone. A ``(`` whose opener holds any word in
+    *alias_names* is never a call: the alias may expand to a keyword (``alias t='time '``)."""
     def opens_call(segment: list[str]) -> bool:
         return _opens_call_arguments(segment) and alias_names.isdisjoint(segment)
-    for tokens in join_continued_lines(_iter_command_token_lists(command)):
-        yield from iter_line_segment_contexts(
-            tokens, cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
-            opens_call_arguments=opens_call,
-            peel_reserved_words=_peel_reserved_words,
+    for script in heredoc_scripts(command):
+        yield from iter_script_segment_contexts(
+            join_continued_lines(_iter_command_token_lists(script)),
+            cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
+            opens_call_arguments=opens_call, peel_reserved_words=_peel_reserved_words,
             stdin_redirections=lambda words: _split_redirections(words)[1])
 
 

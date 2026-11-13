@@ -620,6 +620,26 @@ def _heredoc_bodies(command: str, start: int, specs: list) -> list[tuple[int, in
     return bodies
 
 
+def heredoc_body_spans(command: str) -> list[tuple[int, int, int]]:
+    """``(body_start, terminator_line_start, end)`` of each heredoc body in *command*, in order
+    (bodies nested in a body are part of it). Stops at the first opener it cannot parse or whose
+    body has no terminator line, leaving the rest of *command* outside every span.
+    """
+    spans: list[tuple[int, int, int]] = []
+    last_opener_index = command.rfind("<<")
+    command_start = 0
+    while command_start <= last_opener_index:
+        command_end, specs, unknown_operator, _, _ = _scan_heredoc_command_unit(command, command_start)
+        if unknown_operator or (specs and command_end >= len(command)):
+            break
+        bodies = _heredoc_bodies(command, command_end + 1, specs) if specs else []
+        if bodies is None:
+            break
+        spans += bodies
+        command_start = bodies[-1][2] if bodies else command_end + 1
+    return spans
+
+
 def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: int = 0) -> str:
     """Mask heredoc bodies that are provably inert data (see module docstring).
 

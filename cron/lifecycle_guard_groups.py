@@ -10,6 +10,7 @@ and ``cat f.py > >(python3)`` feeds the ``>(…)`` body. A ``cat`` or ``tee`` re
 passes the feed on (``cat f.py | cat | python3``), and a pipe ending a line continues on the
 next. Shell words come from the caller's tokenizer; this module only walks
 them, so it never imports ``cron.lifecycle_guard``.
+A group spanning lines keeps its feed; newlines separate commands rather than walks.
 """
 
 from __future__ import annotations
@@ -218,7 +219,7 @@ def _substituted_variants(segment: list[str], subs: _Subs) -> list[list[str]]:
 
 
 class _LineWalk:
-    """State of one line's walk; ``contexts`` yields ``(segment, call_argument, piped_files)``."""
+    """State of one script's walk; ``contexts`` yields ``(segment, call_argument, piped_files)``."""
 
     def __init__(self, cat_operands, cat_relays_stdin, opens_call_arguments, peel_reserved_words,
                  stdin_redirections, redirected: Optional[dict[int, list[str]]] = None,
@@ -404,6 +405,40 @@ class _LineWalk:
             group = self.groups[index]
             del self.groups[index:]
             self.resume(group)
+
+
+def heredoc_scripts(command: str) -> Iterator[str]:
+    """*command* without its heredoc bodies, then each body (a shell's body is a script of its
+    own; any other body walked as one only fails closed), so a ``{``/``}`` line in a body never
+    opens or closes a group of the command around it."""
+    from tools.shell_heredoc import heredoc_body_spans
+
+    pending = [command]
+    while pending:
+        script = pending.pop()
+        outside: list[str] = []
+        previous = 0
+        for start, terminator, end in heredoc_body_spans(script) if "<<" in script else []:
+            outside.append(script[previous:start])
+            pending.append(script[start:terminator])
+            previous = end
+        yield "".join(outside) + script[previous:]
+
+
+def iter_script_segment_contexts(
+    lines: Iterable[list[str]], *,
+    cat_operands: Callable[[Optional[list[str]]], list[str]],
+    cat_relays_stdin: Callable[[list[str]], bool],
+    opens_call_arguments: Callable[[list[str]], bool],
+    peel_reserved_words: Callable[[list[str]], int],
+    stdin_redirections: Callable[[list[str]], list[str]],
+) -> Iterator[Context]:
+    """Walk a script with newlines as separators, retaining compound-command feeds."""
+    tokens = [token for line in lines for token in (*line, ";")]
+    yield from iter_line_segment_contexts(
+        tokens, cat_operands=cat_operands, cat_relays_stdin=cat_relays_stdin,
+        opens_call_arguments=opens_call_arguments, peel_reserved_words=peel_reserved_words,
+        stdin_redirections=stdin_redirections)
 
 
 def iter_line_segment_contexts(
