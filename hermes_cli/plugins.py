@@ -913,6 +913,7 @@ def discover_plugins(force: bool = False) -> None:
 
 _background_discovery_thread: Optional[threading.Thread] = None
 _background_discovery_lock = threading.Lock()
+_nowait_empty_logged: set[str] = set()  # [daveey] fields whose empty on-loop *_nowait fallback was logged
 
 
 def start_background_plugin_discovery() -> None:
@@ -960,7 +961,12 @@ def _nowait_plugin_set(cache_field: str, live: Callable[[PluginManager], set[str
 
     [daveey] A sweep another thread holds (a force reload unloads first, so ``_discovered`` is False
     meanwhile) is never waited on: that parked the gateway loop 36 s (kanban_run -> build_policy).
-    Blocking stays only for a process with no known set, off the event loop."""
+    While a sweep is busy the probe serves this process's last live set, else last launch's persisted
+    ``plugin_toolset_keys.json``, else ``set()`` on the event loop (logged once per field; off the loop
+    it blocks on ``discover_plugins()``). With the lock free and nothing discovered it still runs
+    ``discover_plugins()`` inline, ON the loop too, when this process has no remembered set (a first
+    sweep; the persisted cache is not consulted then); only a retry after a failed sweep with a
+    remembered set is skipped on the loop."""
     snapshot = plugins_snapshot.active()
     if snapshot is not None:
         return set(snapshot.toolset_keys if cache_field == "toolset_keys" else snapshot.portable_mcp)
@@ -992,7 +998,17 @@ def _nowait_plugin_set(cache_field: str, live: Callable[[PluginManager], set[str
         if isinstance(values, list) and all(isinstance(v, str) for v in values):
             return set(values)
     if _on_event_loop():
-        return set()  # nothing known yet; the next probe after the sweep reads the live set
+        # Nothing known yet; the next probe after the sweep reads the live set. Not a harmless hint:
+        # tools_config._get_platform_tools INCLUDES default-on plugin toolsets from these keys, so a
+        # session built now lacks them (explicitly listed ones still pass through by name). No better
+        # answer exists without blocking the loop, so say so once.
+        if cache_field not in _nowait_empty_logged:
+            _nowait_empty_logged.add(cache_field)
+            logger.warning(
+                "plugins: %s unknown while another thread sweeps and no %s exists; serving an empty set "
+                "on the event loop (a session built now lacks default-on plugin toolsets)",
+                cache_field, plugins_snapshot._cache_path(get_hermes_home()).name)
+        return set()
     discover_plugins()
     return live(manager)
 
@@ -1006,9 +1022,12 @@ def _on_event_loop() -> bool:
 
 
 def get_plugin_toolset_keys_nowait() -> set[str]:
-    """Plugin toolset keys without blocking on in-flight discovery: live registry when done, last
-    launch's persisted set while a background scan runs (callers only EXCLUDE these keys, so a stale
-    set is harmless and self-heals), else block via discover_plugins()."""
+    """Plugin toolset keys without blocking on in-flight discovery (see :func:`_nowait_plugin_set`):
+    live registry when done, else the last live / last launch's persisted set while a sweep runs, else
+    ``set()`` on the event loop (off it, block via discover_plugins()). Callers use these keys to
+    EXCLUDE (validation) and to INCLUDE (``tools_config._get_platform_tools`` enables default-on plugin
+    toolsets from them), so a stale set self-heals on the next probe, but the empty fallback drops
+    default-on plugin toolsets from a session built in that window; it is logged once."""
     return _nowait_plugin_set("toolset_keys", lambda _m: {ts_key for ts_key, _, _ in get_plugin_toolsets()})
 
 
