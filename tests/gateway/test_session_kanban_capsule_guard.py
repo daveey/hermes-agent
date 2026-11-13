@@ -106,6 +106,23 @@ def test_unreadable_backend_policy_fails_closed(tmp_path, monkeypatch):
         require_capsule_transport(policy)
 
 
+def test_unreadable_policy_warning_names_the_exception(tmp_path, monkeypatch, caplog):
+    """The fail-closed warning carries the exception type and message, not only a traceback."""
+    import logging
+    from gateway.session_kanban_capsule import REQUIRED, capsule_requirement
+    from hermes_cli import kanban_capabilities
+
+    def boom(assignee, required=None):
+        raise RuntimeError('policy exploded')
+
+    monkeypatch.setattr(kanban_capabilities, '_profile_capabilities', boom)
+    task = SimpleNamespace(assignee='default', workspace_kind='dir', requires=['host_repo'])
+    monkeypatch.setattr('hermes_cli.kanban_capsule_admission._requires_host_repo', lambda task: True)
+    with caplog.at_level(logging.WARNING, logger='gateway.session_kanban_capsule'):
+        assert capsule_requirement(task) == REQUIRED
+    assert 'default policy unreadable (RuntimeError: policy exploded)' in caplog.text
+
+
 def test_no_config_or_param_grant_accepted(tmp_path, monkeypatch):
     """Caller params/config cannot flip the derived requirement (exact param set still enforced)."""
     from gateway.session_kanban import build_kanban_policy

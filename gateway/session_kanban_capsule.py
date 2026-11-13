@@ -41,9 +41,10 @@ def capsule_requirement(task) -> dict:
     # when the assignee's own policy does not grant host_repo (non-local backend).
     try:
         granted = 'host_repo' in kanban_capabilities._profile_capabilities(task.assignee, ['host_repo'])
-    except Exception:  # an unreadable policy cannot prove the grant: require
-        logging.getLogger(__name__).warning('capsule requirement: %s policy unreadable; requiring a capsule',
-                                            task.assignee, exc_info=True)
+    except Exception as exc:  # an unreadable policy cannot prove the grant: require
+        logging.getLogger(__name__).warning(
+            'capsule requirement: %s policy unreadable (%s: %s); requiring a capsule',
+            task.assignee, type(exc).__name__, exc, exc_info=True)
         granted = False
     return dict(NOT_REQUIRED) if granted else dict(REQUIRED)
 
