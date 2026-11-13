@@ -23,7 +23,9 @@ from hermes_cli import kanban_db_connect as kbc
 def fenced_missing_board(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
-    home = root / "cache" / "scratch" / "kanban-home"  # missing: never created
+    # Missing: never created. Not under <root>/cache/scratch: entries there are exempt from the fence
+    # since t_01a1d3b5bfc898e7 (auto-pruned probe homes; t_01a19f60a4e241d2's tmp_path sat there).
+    home = root / "sub" / "kanban-home"
     for var in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK",
                 "HERMES_KANBAN_WORKSPACES_ROOT", DELEGATED_CHILD_OWNER_ENV):
         monkeypatch.delenv(var, raising=False)

@@ -6,7 +6,8 @@ re-exports both names, so callers and patches keep working. [daveey]
 The tool fence mirrors the DB fence (``kanban_path_is_fenced``): a worker's terminal/execute_code
 subprocess (fenced only by the inherited ``HERMES_DELEGATED_CHILD_CONTEXT=<root>`` marker) is refused
 board-local writes to the pinned board and boards under that root, but may drive the real tool logic
-on a throwaway ``HERMES_HOME`` outside it (defect agent-cbb2687c75: a worker asked for a live refusal
+on a throwaway ``HERMES_HOME`` outside it or in its auto-pruned scratch dir (``$TMPDIR``, t_01a1d3b5bfc898e7)
+(defect agent-cbb2687c75: a worker asked for a live refusal
 had no route and handed an ssh command back to the user).
 """
 from __future__ import annotations

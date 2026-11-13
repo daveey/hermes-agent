@@ -17,11 +17,14 @@ from pathlib import Path
 _CHILD_REFUSAL = "delegate_task child contexts cannot mutate Kanban tasks or boards"
 _DESCENDANT_HEAD = "Kanban worker and delegate_task descendant processes cannot mutate Kanban tasks or boards"
 # A worker asked for a live tool call (a refusal, a block) on a throwaway board had no route and handed the
-# command back to the user (defect agent-cbb2687c75). The fence covers the lineage's board root only. [daveey]
+# command back to the user (defect agent-cbb2687c75). The fence covers the lineage's board root only, minus
+# its auto-pruned scratch dir (TMPDIR): a probe home in ~ needed an `rm -rf` unattended runs may not do, and
+# leaked 0.1-2.3 GB per probe on pool workers (t_01a1d3b5bfc898e7). [daveey]
 SCRATCH_HOME_HINT = (
-    "For a live probe of kanban_* tools or board writes, use a throwaway HERMES_HOME outside the fenced "
-    "root (not TMPDIR, which is under ~/.hermes): H=$(mktemp -d ~/kanban-probe.XXXX); unset HERMES_KANBAN_DB "
-    "HERMES_KANBAN_BOARD HERMES_KANBAN_HOME; HERMES_HOME=$H python3 <probe>; then rm -rf \"$H\"."
+    "For a live probe of kanban_* tools or board writes, use a throwaway HERMES_HOME in the scratch dir: "
+    "H=$(mktemp -d \"$TMPDIR/kanban-probe.XXXX\"); unset HERMES_KANBAN_DB HERMES_KANBAN_BOARD "
+    "HERMES_KANBAN_HOME; HERMES_HOME=$H python3 <probe>. The scratch pruner removes it after 24 h idle "
+    "(rm -rf \"$H\" is optional where allowed); never make it in ~, where nothing cleans it up."
 )
 
 
