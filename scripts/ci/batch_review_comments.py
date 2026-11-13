@@ -35,16 +35,22 @@ Safety / behaviour:
     on that head is still running write nothing: CI's own completion
     refreshes the PR with both results.
   - A failed review-status artifact download is retried with bounded backoff
-    (about 90 s in total on a targeted refresh, 15 s per PR on the sweep).
+    (90 s of sleeps on a targeted refresh, 15 s per PR on the sweep), and
+    every run is bounded by wall clock (RUN_BUDGET_S from its start, counting
+    each attempt's API and blob timeouts, not only the sleeps): retries stop,
+    and the sweep stops starting PRs, while the job can still finish inside
+    its timeout.
     When a targeted refresh still cannot build the snapshot, it marks the
     comment "refresh failed on <head> at <time>" (state line ``failed=``),
     so the ship probe and readers do not take a stale "running on" for a
-    live one, and a CI-triggered refresh queues exactly one delayed
-    re-refresh of that head (a ``workflow_dispatch`` with ``head_sha``). The
-    re-refresh itself never queues another; after it, the hourly sweep is
-    next. Why: PR1661's CI-completion refresh (run 43279407344, 2026-11-12
-    18:24Z) failed one download, went red, and nothing retried; the approved,
-    green PR waited 45 min on a "running on" comment.
+    live one, and a CI- or Docker-triggered refresh queues one delayed
+    re-refresh of that head (a ``workflow_dispatch`` with ``head_sha``) unless
+    one is already queued for it (state line ``requeued=``) or the comment
+    keeps that head's completed ("ran on") snapshot. The re-refresh itself
+    never queues another; after it, the hourly sweep is next. Why: PR1661's
+    CI-completion refresh (run 43279407344, 2026-11-12 18:24Z) failed one
+    download, went red, and nothing retried; the approved, green PR waited
+    45 min on a "running on" comment.
 """
 
 from __future__ import annotations
@@ -72,7 +78,17 @@ BATCH_DOWNLOAD_RETRY_DELAYS = (5, 10)
 # The one delayed re-refresh a failed CI-triggered refresh queues, and the cap on any requested delay (job timeout 15m).
 RE_REFRESH_DELAY_S = 300
 MAX_REFRESH_DELAY_S = 600
+# Wall-clock budget of one run, from the start of main() (a re-refresh's delay included): the job's timeout-minutes
+# less headroom for checkout/setup and the last in-flight write. Download retries stop, and the sweep stops starting
+# PRs, once a full attempt (lc.DOWNLOAD_ATTEMPT_MAX_S: its API and blob timeouts) would not finish inside it, so a
+# delayed re-refresh or a sweep during an artifact outage ends red with a log line instead of being cancelled.
+JOB_TIMEOUT_S = 15 * 60
+RUN_HEADROOM_S = 180
+RUN_BUDGET_S = JOB_TIMEOUT_S - RUN_HEADROOM_S
+# What a PR needs beyond one download attempt (its run/job reads, the head re-read and the comment write).
+PR_MIN_BUDGET_S = 30
 _sleep = time.sleep
+_clock = time.monotonic
 
 
 class SnapshotError(RuntimeError):
@@ -144,7 +160,8 @@ _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"  # fixed width, so stamps order as strings
 _STATE_RE = re.compile(
     r"<!-- hermes-ci-review-bot:state head=([0-9a-f]{40}) "
     r"started=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z) run=(\S*?)"
-    r"(?: failed=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z))? -->"
+    r"(?: failed=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z))?"
+    r"(?: requeued=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z))? -->"
 )
 # The snapshot footer (snapshot_commit_info) or a failed-refresh footer (failed_footer): one line each.
 _FOOTER_RE = re.compile(r"<sub>(?:running on|ran on|refresh failed on) [^\n]*</sub>")
@@ -154,21 +171,33 @@ def _stamp(started: datetime) -> str:
     return started.astimezone(UTC).strftime(_STAMP)
 
 
-def state_line(head_sha: str, started: datetime, run_id: str = "", failed: datetime | None = None) -> str:
+def state_line(head_sha: str, started: datetime, run_id: str = "", failed: datetime | None = None,
+               requeued: datetime | None = None) -> str:
     """The hidden line recording which head this snapshot is of and when the writing run started.
 
     ``failed``: this run's refresh of that head failed at that time (failed_refresh_body), the rest is older data.
+    ``requeued``: a re-refresh of that head was dispatched at that time; no later failure of it queues another.
     """
     tail = f" failed={_stamp(failed)}" if failed else ""
+    tail += f" requeued={_stamp(requeued)}" if requeued else ""
     return f"{STATE_PREFIX}head={head_sha} started={_stamp(started)} run={run_id}{tail} -->"
 
 
-def with_state(body: str, head_sha: str, started: datetime, run_id: str = "", failed: datetime | None = None) -> str:
+def with_state(body: str, head_sha: str, started: datetime, run_id: str = "", failed: datetime | None = None,
+               requeued: datetime | None = None) -> str:
     """``body`` with the state line right after the marker line (the marker must stay first: find_comment_id)."""
     first, _, rest = body.partition("\n")
     if _STATE_RE.match(rest):  # replace an existing state line, never stack a second one
         rest = rest.partition("\n")[2]
-    return f"{first}\n{state_line(head_sha, started, run_id, failed)}\n{rest}"
+    return f"{first}\n{state_line(head_sha, started, run_id, failed, requeued)}\n{rest}"
+
+
+def requeued_at(existing_body: str, head_sha: str) -> datetime | None:
+    """When a re-refresh of ``head_sha`` was queued, per the comment's state line (None: none for this head)."""
+    m = _STATE_RE.search(existing_body or "")
+    if not m or m.group(1) != head_sha or not m.group(5):
+        return None
+    return datetime.strptime(m.group(5), _STAMP).replace(tzinfo=UTC)
 
 
 def stale_write_reason(existing_body: str, head_sha: str, started: datetime) -> str:
@@ -198,13 +227,15 @@ def find_bot_comment(token: str, repo: str, number: int) -> tuple[int | None, st
 
 
 def build_snapshot(token: str, repo: str, pr: dict, run: dict, now: datetime,
-                   retry_delays: tuple[float, ...] = BATCH_DOWNLOAD_RETRY_DELAYS) -> str:
+                   retry_delays: tuple[float, ...] = BATCH_DOWNLOAD_RETRY_DELAYS,
+                   deadline: float | None = None) -> str:
     watch = lc.parse_watch_workflows(os.environ.get("WATCH_WORKFLOWS", "")) or DEFAULT_WATCH_WORKFLOWS
     jobs, runs_completed = lc.collect_run_jobs(token, repo, str(run["id"]), watch, strict=True)
     completed, pending, job_urls = lc.classify_jobs(jobs)
     by_check, check_urls = lc.split_failed_steps(jobs, completed, job_urls)
     statuses = lc.fetch_all_review_statuses(token, repo, str(run["id"]), strict=True,
-                                            retry_delays=retry_delays, sleep=_sleep)
+                                            retry_delays=retry_delays, sleep=_sleep,
+                                            deadline=deadline, clock=_clock)
     return lc.build_comment_body(
         lc._import_assembler(),
         by_check,
@@ -218,7 +249,7 @@ def build_snapshot(token: str, repo: str, pr: dict, run: dict, now: datetime,
 
 
 def process_pr(token: str, repo: str, pr: dict, now: datetime, *, trigger_workflow: str = "",
-               retry_delays: tuple[float, ...] = BATCH_DOWNLOAD_RETRY_DELAYS) -> str:
+               retry_delays: tuple[float, ...] = BATCH_DOWNLOAD_RETRY_DELAYS, deadline: float | None = None) -> str:
     """Returns 'posted' or 'skipped:<why>'. Raises on API/write failure (SnapshotError when the snapshot itself
     could not be built, so nothing was written).
 
@@ -241,7 +272,7 @@ def process_pr(token: str, repo: str, pr: dict, now: datetime, *, trigger_workfl
         # A watched sibling (Docker) finished first; CI's own completion on this head refreshes the PR.
         return f"skipped:{trigger_workflow} completed but CI is still {run.get('status') or 'unknown'}"
     try:
-        body = build_snapshot(token, repo, pr, run, now, retry_delays)
+        body = build_snapshot(token, repo, pr, run, now, retry_delays, deadline)
     except (OSError, ValueError, RuntimeError) as e:
         raise SnapshotError(str(e)) from e
 
@@ -264,32 +295,45 @@ def process_pr(token: str, repo: str, pr: dict, now: datetime, *, trigger_workfl
 
 
 def failed_footer(pr: dict, sha: str, repo: str, failed_at: datetime, error: str, next_refresh: str) -> str:
-    """The footer a failed refresh leaves: names the head (for readers) but not as "running"/"ran" (ship's parser)."""
+    """The footer a failed refresh leaves: names the head (for readers) but not as "running"/"ran". Ship
+    (hermes-core-wt-land BOT_HEAD) reads "refresh failed on <sha>" as naming that head for judging kept warning
+    tables, never as the final "ran on" it waits for, so keep the wording."""
     url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}/pull/{pr['number']}/commits/{sha}"
     err = " ".join(str(error).split())[:160]
     return (f"<sub>refresh failed on [{sha[:7]}]({url}) at {failed_at:%Y-%m-%d %H:%M:%S} UTC ({err}); "
             f"{next_refresh}; the snapshot above is older</sub>")
 
 
+def keeps_completed_snapshot(existing: str, sha: str) -> bool:
+    """``existing`` is a completed ("ran on") snapshot of ``sha`` with no failed mark: a failed refresh leaves it."""
+    m = _STATE_RE.search(existing or "")
+    if not m or m.group(1) != sha or m.group(4):
+        return False
+    found = _FOOTER_RE.search(existing)
+    return bool(found and found.group(0).startswith("<sub>ran on "))
+
+
 def failed_refresh_body(existing: str, pr: dict, sha: str, repo: str, started: datetime, run_id: str,
-                        failed_at: datetime, error: str, next_refresh: str) -> str | None:
+                        failed_at: datetime, error: str, next_refresh: str,
+                        requeued: datetime | None = None) -> str | None:
     """The comment after this run's refresh of ``sha`` failed, or None to leave ``existing`` as it is.
 
     A completed ("ran on") snapshot of the same head is kept: it is still that head's latest result. A running or
     failed snapshot of the same head keeps its tables and gets the failed footer. Anything else (another head, no
-    comment) is replaced by a short failed note, since its tables describe another head.
+    comment) is replaced by a short failed note, since its tables describe another head. ``requeued``: when a
+    re-refresh of ``sha`` was queued (recorded in the state line, see mark_refresh_failed).
     """
+    if keeps_completed_snapshot(existing, sha):
+        return None
     footer = failed_footer(pr, sha, repo, failed_at, error, next_refresh)
     m = _STATE_RE.search(existing or "")
     if m and m.group(1) == sha:
         found = _FOOTER_RE.search(existing)
-        if found and found.group(0).startswith("<sub>ran on ") and not m.group(4):
-            return None
         body = (existing[:found.start()] + footer + existing[found.end():]) if found else f"{existing.rstrip()}\n\n{footer}\n"
     else:
         body = (f"{BOT_MARKER}\n## CI review summary\n\nThe CI review snapshot for this head could not be built.\n\n"
                 f"{footer}\n")
-    return with_state(body, sha, started, run_id, failed=failed_at)
+    return with_state(body, sha, started, run_id, failed=failed_at, requeued=requeued)
 
 
 def queue_re_refresh(token: str, repo: str, sha: str, run_id: str) -> datetime:
@@ -314,29 +358,45 @@ def _api_post(url: str, token: str, payload: dict) -> None:
 
 
 def mark_refresh_failed(token: str, repo: str, pr: dict, now: datetime, error: str, *, re_refresh: bool) -> str:
-    """After a targeted refresh could not build ``pr``'s snapshot: queue at most one delayed re-refresh (only when
-    ``re_refresh``: a CI-triggered run, never the re-refresh itself) and mark the comment failed. Returns a log line."""
+    """After a targeted refresh could not build ``pr``'s snapshot: mark the comment failed and queue at most one
+    delayed re-refresh per head. Returns a log line.
+
+    ``re_refresh``: this is a CI- or Docker-triggered run, never the re-refresh itself. Nothing is queued when the
+    marker is skipped (PR closed, head moved, a newer snapshot of the head, or a completed "ran on" snapshot of the
+    head kept: that head already has its result), nor when the comment records a re-refresh already queued for this
+    head (``requeued=``; CI and Docker each trigger a refresh, PR #1699 review). A successful snapshot drops the mark.
+    """
     owner, name = repo.split("/")
     number, sha = pr["number"], pr["head"]["sha"]
     run_id = os.environ.get("GITHUB_RUN_ID", "")
-    notes = []
-    next_refresh = "next refresh: hourly sweep"
-    if re_refresh:
-        try:
-            at = queue_re_refresh(token, repo, sha, run_id)
-            next_refresh = f"one re-refresh queued for about {at:%H:%M} UTC, then hourly"
-            notes.append(f"re-refresh queued for {at:%H:%M:%S}Z")
-        except (OSError, ValueError, RuntimeError) as e:
-            notes.append(f"ERROR queueing re-refresh: {e}")
     fresh = lc._api_request(f"{lc.API_BASE}/repos/{owner}/{name}/pulls/{number}", token)
     if fresh.get("state") != "open" or (fresh.get("head") or {}).get("sha") != sha:
-        return "; ".join([*notes, "marker skipped: PR closed or head moved"])
+        return "marker skipped: PR closed or head moved; no re-refresh queued"
     comment_id, existing = find_bot_comment(token, repo, number)
     why = stale_write_reason(existing, sha, now)
     if why:
-        return "; ".join([*notes, f"marker skipped: newer snapshot present ({why})"])
-    body = failed_refresh_body(existing, pr, sha, repo, now, run_id, datetime.now(UTC), error, next_refresh)
-    if body is None:
+        return f"marker skipped: newer snapshot present ({why}); no re-refresh queued"
+    if keeps_completed_snapshot(existing, sha):
+        return "marker skipped: completed snapshot of this head kept; no re-refresh queued"
+    notes = []
+    requeued = requeued_at(existing, sha)
+    if requeued:
+        next_refresh = f"a re-refresh already queued at {requeued:%H:%M} UTC, then hourly"
+        notes.append(f"re-refresh already queued at {requeued:%H:%M:%S}Z; not queued again")
+    elif re_refresh:
+        try:
+            at = queue_re_refresh(token, repo, sha, run_id)
+            requeued = datetime.now(UTC)
+            next_refresh = f"one re-refresh queued for about {at:%H:%M} UTC, then hourly"
+            notes.append(f"re-refresh queued for {at:%H:%M:%S}Z")
+        except (OSError, ValueError, RuntimeError) as e:
+            next_refresh = "next refresh: hourly sweep"
+            notes.append(f"ERROR queueing re-refresh: {e}")
+    else:
+        next_refresh = "next refresh: hourly sweep"
+    body = failed_refresh_body(existing, pr, sha, repo, now, run_id, datetime.now(UTC), error, next_refresh,
+                               requeued=requeued)
+    if body is None:  # unreachable: keeps_completed_snapshot was checked above
         return "; ".join([*notes, "marker skipped: completed snapshot of this head kept"])
     if not lc.upsert_comment(token, repo, str(number), body, comment_id):
         return "; ".join([*notes, "ERROR marker write failed"])
@@ -344,13 +404,14 @@ def mark_refresh_failed(token: str, repo: str, pr: dict, now: datetime, error: s
 
 
 def run_batch(token: str, repo: str, now: datetime | None = None, *, head_sha: str = "",
-              trigger_workflow: str = "") -> int:
+              trigger_workflow: str = "", deadline: float | None = None) -> int:
     """Snapshot every eligible open PR, or only those whose head is exactly ``head_sha``.
 
     ``head_sha`` is the targeted mode the workflow uses on ``workflow_run``: the
     CI run on that head just completed, so only its PR's comment is refreshed
     (no other PR's comment is rewritten). ``trigger_workflow`` names the
     workflow whose completion started this run (empty on schedule/dispatch).
+    ``deadline`` (a ``_clock()`` value, see RUN_BUDGET_S): no PR is started, and no download retried, past it.
     """
     now = now or datetime.now(UTC)
     owner, name = repo.split("/")
@@ -369,9 +430,17 @@ def run_batch(token: str, repo: str, now: datetime | None = None, *, head_sha: s
         print(f"targeted at head {head_sha}: {len(targets)} PR(s)")
     delays = TARGETED_DOWNLOAD_RETRY_DELAYS if head_sha else BATCH_DOWNLOAD_RETRY_DELAYS
     failures = 0
-    for pr in targets:
+    for i, pr in enumerate(targets):
+        if deadline is not None and _clock() + lc.DOWNLOAD_ATTEMPT_MAX_S + PR_MIN_BUDGET_S > deadline:
+            left = len(targets) - i
+            failures += left
+            print(f"ERROR run budget ({RUN_BUDGET_S}s) spent: {left} PR(s) not refreshed "
+                  f"(#{', #'.join(str(p['number']) for p in targets[i:])}); the next sweep takes them",
+                  file=sys.stderr)
+            break
         try:
-            result = process_pr(token, repo, pr, now, trigger_workflow=trigger_workflow, retry_delays=delays)
+            result = process_pr(token, repo, pr, now, trigger_workflow=trigger_workflow, retry_delays=delays,
+                                deadline=deadline)
             print(f"  PR #{pr['number']}: {result}")
         except SnapshotError as e:
             failures += 1
@@ -405,6 +474,7 @@ def main() -> int:
         print("GITHUB_TOKEN and GITHUB_REPOSITORY are required", file=sys.stderr)
         return 1
     head_sha = a.head_sha.strip().lower()
+    deadline = _clock() + RUN_BUDGET_S  # from the start: a re-refresh's delay spends the same budget
     if head_sha and not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         print(f"--head-sha must be a full 40-hex commit sha, got {a.head_sha!r}", file=sys.stderr)
         return 1
@@ -421,7 +491,7 @@ def main() -> int:
             print(f"re-refresh of {head_sha[:12]} (retry of run {os.environ.get('RETRY_OF_RUN', '') or '?'}): "
                   f"waiting {wait}s")
             _sleep(wait)
-    return run_batch(token, repo, head_sha=head_sha, trigger_workflow=trigger_workflow)
+    return run_batch(token, repo, head_sha=head_sha, trigger_workflow=trigger_workflow, deadline=deadline)
 
 
 if __name__ == "__main__":

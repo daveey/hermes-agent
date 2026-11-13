@@ -301,7 +301,7 @@ def test_main_targets_the_completed_runs_head_from_the_workflow_env(monkeypatch)
     monkeypatch.setenv("TARGET_HEAD_SHA", head.upper())
     monkeypatch.delenv("TRIGGER_WORKFLOW", raising=False)
     monkeypatch.setattr(sys, "argv", ["x"])
-    monkeypatch.setattr(b, "run_batch", lambda token, repo, **kw: seen.update(kw) or 0)
+    monkeypatch.setattr(b, "run_batch", lambda token, repo, deadline=None, **kw: seen.update(kw) or 0)
     assert b.main() == 0
     assert seen == {"head_sha": head, "trigger_workflow": ""}
     # schedule/dispatch: the workflow expression renders empty, so every PR is swept
@@ -439,7 +439,7 @@ def test_main_passes_the_triggering_workflow(monkeypatch):
     monkeypatch.setenv("TARGET_HEAD_SHA", "c" * 40)
     monkeypatch.setenv("TRIGGER_WORKFLOW", f" {DOCKER}\n")
     monkeypatch.setattr(sys, "argv", ["x"])
-    monkeypatch.setattr(b, "run_batch", lambda token, repo, **kw: seen.update(kw) or 0)
+    monkeypatch.setattr(b, "run_batch", lambda token, repo, deadline=None, **kw: seen.update(kw) or 0)
     assert b.main() == 0
     assert seen == {"head_sha": "c" * 40, "trigger_workflow": DOCKER}
 
@@ -449,7 +449,9 @@ def test_main_passes_the_triggering_workflow(monkeypatch):
 # artifact uploaded 26 s earlier, went red, and nothing retried: the "running on 8543d56" comment stood until a hand
 # dispatch at 19:07Z although CI was green at 18:23:53Z and the PR approved.
 _REAL_FETCH = b.lc.fetch_all_review_statuses
-BOT_HEAD = re.compile(r"<sub>(running|ran) on [^\n]*?/commits/([0-9a-f]{40})")  # hermes-core-wt-land's parser
+# hermes-core-wt-land's snapshot phases (ship also reads "refresh failed on <sha>" as naming that head for its
+# warnings check, never as the final "ran on")
+BOT_HEAD = re.compile(r"<sub>(running|ran) on [^\n]*?/commits/([0-9a-f]{40})")
 
 
 class Downloads:
@@ -558,7 +560,7 @@ def test_a_failed_refresh_keeps_a_completed_snapshot_of_that_head(monkeypatch, t
     f = Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=_fresh(prs), comments={1: [done]})
     d = Downloads(monkeypatch, tmp_path, fail=None)
     assert b.run_batch("t", REPO, NOW, head_sha=sha, trigger_workflow=DOCKER) == 1
-    assert f.posted == {} and len(d.dispatches) == 1  # "ran on" stays; one re-refresh still queued
+    assert f.posted == {} and d.dispatches == []  # "ran on" stays and is the head's result: nothing to re-refresh
 
 
 def test_a_failed_refresh_with_no_comment_for_that_head_writes_a_failed_note(monkeypatch, tmp_path):
@@ -605,7 +607,7 @@ def test_main_runs_a_dispatched_re_refresh_after_its_capped_delay(monkeypatch):
     monkeypatch.delenv("TRIGGER_WORKFLOW", raising=False)
     monkeypatch.setattr(sys, "argv", ["x"])
     monkeypatch.setattr(b, "_sleep", sleeps.append)
-    monkeypatch.setattr(b, "run_batch", lambda token, repo, **kw: seen.update(kw) or 0)
+    monkeypatch.setattr(b, "run_batch", lambda token, repo, deadline=None, **kw: seen.update(kw) or 0)
     assert b.main() == 0
     assert seen == {"head_sha": head, "trigger_workflow": ""} and sleeps == [b.MAX_REFRESH_DELAY_S]
     monkeypatch.setenv("REFRESH_DELAY_SECONDS", "5; id")
@@ -631,3 +633,168 @@ def test_workflow_can_queue_one_targeted_re_refresh():
     assert "format('-retry-{0}', inputs.head_sha)" in doc["concurrency"]["group"]
     assert b.WORKFLOW_FILE == "ci-review-comment.yml"
     assert doc["jobs"]["comment"]["timeout-minutes"] * 60 > b.MAX_REFRESH_DELAY_S + sum(b.TARGETED_DOWNLOAD_RETRY_DELAYS)
+
+
+# --- PR1699 review follow-ups (card t_01a1d1827d121b26) -----------------------------------------------------------
+# Review 5880960246 nits 2 and 3: the retry budget counted only sleeps (each attempt can also spend the archive API
+# and blob timeouts, ~90 s), so a delayed re-refresh or a sweep in an artifact outage could run past the job timeout;
+# and a failed refresh queued a re-refresh even when it kept a completed snapshot, and once per failed CI/Docker run.
+
+
+class Clock:
+    """A fake monotonic clock: sleeps and timed-out downloads advance it."""
+
+    def __init__(self, monkeypatch, d: Downloads, attempt_s: float):
+        self.t = 0.0
+        monkeypatch.setattr(b, "_clock", lambda: self.t)
+        monkeypatch.setattr(b, "_sleep", self.sleep)
+        self.sleeps = d.sleeps
+        inner = d.download
+
+        def download(*args):
+            self.t += attempt_s  # a failed attempt that ran into the archive API + blob timeouts
+            return inner(*args)
+
+        monkeypatch.setattr(b.lc, "_download_artifact", download)
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.t += s
+
+
+def _main_env(monkeypatch, head="", delay="", trigger=""):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("TARGET_HEAD_SHA", head if trigger else "")
+    monkeypatch.setenv("DISPATCH_HEAD_SHA", "" if trigger else head)
+    monkeypatch.setenv("REFRESH_DELAY_SECONDS", delay)
+    monkeypatch.setenv("TRIGGER_WORKFLOW", trigger)
+    monkeypatch.setattr(sys, "argv", ["x"])
+
+
+def test_attempt_cost_matches_the_download_timeouts():
+    assert b.lc.DOWNLOAD_ATTEMPT_MAX_S == b.lc.ARCHIVE_API_TIMEOUT_S + b.lc.BLOB_TIMEOUT_S
+    import inspect
+    src = inspect.getsource(b.lc._download_artifact)
+    assert "timeout=ARCHIVE_API_TIMEOUT_S" in src and "timeout=BLOB_TIMEOUT_S" in src
+
+
+def test_a_delayed_re_refresh_stops_retrying_at_the_wall_clock_budget(monkeypatch, tmp_path):
+    """The dispatched re-refresh waits RE_REFRESH_DELAY_S, then every attempt times out (~90 s): retries stop while
+    the run can still finish inside its budget, and the comment is still marked failed."""
+    from datetime import timedelta
+    sha = "a" * 40
+    prs = [_pr(1, sha)]
+    f = Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=_fresh(prs),
+             comments={1: [_running_comment(sha, datetime.now(UTC) - timedelta(minutes=6))]})
+    d = Downloads(monkeypatch, tmp_path, fail=None)
+    c = Clock(monkeypatch, d, b.lc.DOWNLOAD_ATTEMPT_MAX_S)
+    _main_env(monkeypatch, head=sha, delay=str(b.RE_REFRESH_DELAY_S))
+    assert b.main() == 1
+    assert c.sleeps[0] == b.RE_REFRESH_DELAY_S
+    assert c.t <= b.RUN_BUDGET_S  # no attempt was started that could not finish inside the budget
+    assert 1 <= len(c.sleeps) - 1 < len(b.TARGETED_DOWNLOAD_RETRY_DELAYS)  # some retries, not the whole list
+    assert "refresh failed on" in f.posted["1"] and "retry budget" in f.posted["1"]
+    assert d.dispatches == []
+
+
+def test_the_run_budget_leaves_headroom_under_the_job_timeout():
+    doc = _workflow()
+    timeout_s = doc["jobs"]["comment"]["timeout-minutes"] * 60
+    assert b.JOB_TIMEOUT_S == timeout_s
+    # The budget plus one in-flight write and the job's checkout/setup stay inside the timeout.
+    assert b.RUN_BUDGET_S + b.RUN_HEADROOM_S <= timeout_s and b.RUN_HEADROOM_S >= 120
+    # The longest delayed re-refresh still leaves room for at least one full download attempt after its wait.
+    assert b.MAX_REFRESH_DELAY_S + b.lc.DOWNLOAD_ATTEMPT_MAX_S + b.PR_MIN_BUDGET_S <= b.RUN_BUDGET_S
+
+
+def test_a_large_sweep_in_an_artifact_outage_stops_before_the_job_timeout(monkeypatch, tmp_path):
+    """65 open PRs whose downloads all time out: the sweep stops starting PRs once the budget is spent (the next
+    sweep takes them), never runs past the budget, and exits red."""
+    prs = [_pr(n, f"{n:040x}") for n in range(1, 66)]
+    f = Fake(monkeypatch, prs, {p["head"]["sha"]: [_done(p["number"], p["head"]["sha"])] for p in prs},
+             fresh=_fresh(prs))
+    d = Downloads(monkeypatch, tmp_path, fail=None)
+    c = Clock(monkeypatch, d, b.lc.DOWNLOAD_ATTEMPT_MAX_S)
+    _main_env(monkeypatch)
+    assert b.main() == 1
+    assert c.t <= b.RUN_BUDGET_S
+    assert 1 <= len(f.collected) < len(prs)
+    assert f.posted == {} and d.dispatches == []
+
+
+def test_a_healthy_sweep_is_not_cut_short(monkeypatch, tmp_path):
+    prs = [_pr(n, f"{n:040x}") for n in range(1, 66)]
+    f = Fake(monkeypatch, prs, {p["head"]["sha"]: [_done(p["number"], p["head"]["sha"])] for p in prs},
+             fresh=_fresh(prs))
+    d = Downloads(monkeypatch, tmp_path, fail=0)
+    Clock(monkeypatch, d, 1.0)
+    _main_env(monkeypatch)
+    assert b.main() == 0 and len(f.posted) == 65
+
+
+def test_a_failed_refresh_that_keeps_a_completed_snapshot_queues_no_re_refresh(monkeypatch, tmp_path):
+    from datetime import timedelta
+    sha = "a" * 40
+    prs = [_pr(1, sha)]
+    done = _running_comment(sha, NOW - timedelta(minutes=6))
+    done["body"] = done["body"].replace("<sub>running on", "<sub>ran on")
+    for trigger in ("CI", DOCKER):
+        f = Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=_fresh(prs), comments={1: [done]})
+        d = Downloads(monkeypatch, tmp_path, fail=None)
+        assert b.run_batch("t", REPO, NOW, head_sha=sha, trigger_workflow=trigger) == 1
+        assert f.posted == {} and d.dispatches == []
+
+
+def test_ci_and_docker_failures_on_one_head_queue_one_re_refresh(monkeypatch, tmp_path):
+    """CI's refresh fails and queues the re-refresh; Docker's later refresh of the same head fails too and must not
+    queue a second one. The queued mark survives the re-refresh's own failed write."""
+    from datetime import timedelta
+    sha = "a" * 40
+    prs = [_pr(1, sha)]
+    f = Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=_fresh(prs),
+             comments={1: [_running_comment(sha, NOW - timedelta(minutes=6))]})
+    d = Downloads(monkeypatch, tmp_path, fail=None)
+    assert b.run_batch("t", REPO, NOW, head_sha=sha, trigger_workflow="CI") == 1
+    assert len(d.dispatches) == 1
+    f.comments = {1: [{"id": 77, "body": f.posted.pop("1")}]}
+    assert b.run_batch("t", REPO, NOW + timedelta(minutes=1), head_sha=sha, trigger_workflow=DOCKER) == 1
+    assert len(d.dispatches) == 1
+    body = f.posted.pop("1")
+    assert "re-refresh already queued" in body and body.count(b.STATE_PREFIX) == 1
+    # The re-refresh itself fails: still one dispatch, and the queued mark is kept for any later CI/Docker failure.
+    f.comments = {1: [{"id": 77, "body": body}]}
+    assert b.run_batch("t", REPO, NOW + timedelta(minutes=6), head_sha=sha, trigger_workflow="") == 1
+    f.comments = {1: [{"id": 77, "body": f.posted.pop("1")}]}
+    assert b.run_batch("t", REPO, NOW + timedelta(minutes=7), head_sha=sha, trigger_workflow="CI") == 1
+    assert len(d.dispatches) == 1
+
+
+def test_a_new_head_or_a_successful_refresh_clears_the_queued_mark(monkeypatch, tmp_path):
+    from datetime import timedelta
+    old, sha = "1" * 40, "2" * 40
+    prs = [_pr(1, sha)]
+    f = Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=_fresh(prs),
+             comments={1: [_running_comment(old, NOW - timedelta(minutes=6))]})
+    d = Downloads(monkeypatch, tmp_path, fail=None)
+    queued_old = b.with_state(_running_comment(old, NOW)["body"], old, NOW - timedelta(minutes=6), "1",
+                              failed=NOW - timedelta(minutes=5), requeued=NOW - timedelta(minutes=5))
+    f.comments = {1: [{"id": 77, "body": queued_old}]}
+    assert b.run_batch("t", REPO, NOW, head_sha=sha, trigger_workflow="CI") == 1
+    assert len(d.dispatches) == 1  # another head's mark does not count
+    # A successful refresh of the head drops the mark.
+    f.comments = {1: [{"id": 77, "body": f.posted.pop("1")}]}
+    d.fail, d.calls = 0, 0
+    assert b.run_batch("t", REPO, NOW + timedelta(minutes=30), head_sha=sha, trigger_workflow="CI") == 0
+    m = b._STATE_RE.search(f.posted["1"])
+    assert m and not m.group(4) and not m.group(5)
+
+
+def test_a_marker_skipped_for_a_moved_head_queues_nothing(monkeypatch, tmp_path):
+    sha = "a" * 40
+    prs = [_pr(1, sha)]
+    fresh = {1: {"state": "open", "head": {"sha": "b" * 40}}}
+    Fake(monkeypatch, prs, {sha: [_done(5, sha)]}, fresh=fresh)
+    d = Downloads(monkeypatch, tmp_path, fail=None)
+    assert b.run_batch("t", REPO, NOW, head_sha=sha, trigger_workflow="CI") == 1
+    assert d.dispatches == []

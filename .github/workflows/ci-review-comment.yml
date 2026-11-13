@@ -33,9 +33,11 @@ name: CI review comment
 on:
   schedule:
     - cron: "17 * * * *"
-  # Bare dispatch = the full sweep. With head_sha it is a targeted refresh of that head: a failed CI-triggered refresh
-  # queues exactly one (after delay_seconds) so a transient artifact error does not leave "running on" for an hour
-  # (PR1661, 2026-11-12). A dispatched refresh never queues another.
+  # Bare dispatch = the full sweep. With head_sha it is a targeted refresh of that head: a failed CI- or Docker-triggered
+  # refresh queues one per head (after delay_seconds; the comment's state line records it, so a second failure of that
+  # head does not queue another) so a transient artifact error does not leave "running on" for an hour (PR1661,
+  # 2026-11-12). A dispatched refresh never queues another. Every run stops retrying/starting PRs inside
+  # batch_review_comments.RUN_BUDGET_S, which keeps headroom under timeout-minutes (JOB_TIMEOUT_S must match it).
   workflow_dispatch:
     inputs:
       head_sha:
