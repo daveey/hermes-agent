@@ -459,3 +459,34 @@ def test_notice_fanout_state_opens_its_store_once_per_process(monkeypatch, tmp_p
         assert nfs.get_cursor("work") == 1 and len(opened) == 2
     finally:
         nfs.reset_for_tests()
+
+
+@pytest.mark.parametrize("write", ["seed", "ack"])
+def test_notice_fanout_state_a_non_sqlite_error_mid_transaction_leaves_no_open_write(monkeypatch, tmp_path, write):
+    """PR #2227 review: the cached connection outlives the call, so a TypeError between BEGIN IMMEDIATE and COMMIT
+    (``_encode``'s ``sorted()`` on mixed-type cards) kept the write lock, and the next set_cursor landed inside that
+    uncommitted transaction and was lost on the next ack's ROLLBACK."""
+    import sqlite3
+
+    from tui_gateway import notice_fanout_state as nfs
+    where = tmp_path / "kanban" / nfs.FILENAME
+    monkeypatch.setattr(nfs, "path", lambda: where)
+    nfs.reset_for_tests()
+    try:
+        nfs.seed_remote({"chat": frozenset({("k", "running")})})
+        mixed = frozenset({("k", "done"), (1, "done")})
+        with pytest.raises(TypeError):
+            nfs.seed_remote({"chat": mixed}) if write == "seed" else nfs.ack_remote({"chat": mixed})
+
+        nfs.set_cursor("default", 7)
+
+        with contextlib.closing(sqlite3.connect(str(where), timeout=0, isolation_level=None)) as other:
+            assert other.execute("SELECT cursor FROM cursors WHERE ident = 'default'").fetchone() == (7,)
+            other.execute("BEGIN IMMEDIATE")  # no write lock is left behind in this process
+            other.execute("ROLLBACK")
+        nfs.ack_remote({"chat": frozenset({("k", "done")})})
+        nfs.forget_memory_for_tests()
+        assert nfs.get_cursor("default") == 7
+        assert nfs.load_remote() == {"chat": frozenset({("k", "done")})}
+    finally:
+        nfs.reset_for_tests()

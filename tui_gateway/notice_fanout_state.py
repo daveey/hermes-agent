@@ -73,7 +73,16 @@ def _open() -> Iterator[Optional[sqlite3.Connection]]:
             _warn_once(where, exc)
         else:
             _conns[key] = conn
-    yield conn
+    try:
+        yield conn
+    finally:
+        # The connection outlives the call, so a non-sqlite error between BEGIN IMMEDIATE and COMMIT (a TypeError
+        # from ``_encode``) would keep the write lock, and the next write would join that transaction and be lost.
+        if conn is not None and _conns.get(key) is conn and conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error as exc:
+                _failed(exc)
 
 
 def _failed(exc: BaseException) -> None:
