@@ -138,7 +138,7 @@ def test_contended_census_leaves_the_sample_room_inside_the_hold(board, monkeypa
     monkeypatch.setattr(cm, "sample", _sample_taking(clock))
     claimed = claim(conn, t, review)
     assert claimed is not None, (sync.pop_claim_deferral(t), clock.handoffs)
-    # Two censuses (before the sample, recount after it) over 10 boards: a handful of sqlite calls per board each.
+    # One census over 10 boards (the sampler's sample is re-read, not measured): a handful of sqlite calls per board.
     assert clock.handoffs <= 2 * HUB_BOARDS * 8, clock.handoffs
     payload = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='claimed' "
                                       "ORDER BY id DESC", (t,)).fetchone()[0])
@@ -171,25 +171,28 @@ def test_one_read_census_matches_the_long_way(board, monkeypatch, synced):
 
 
 def test_an_overrun_names_its_stage_and_hold_in_the_refusal(board, monkeypatch, caplog):
-    """A hold that still cannot fit (heavier contention) refuses with the stage and the measured hold logged, so a
-    budget overrun is told apart from an invalid sample, an expired lease or an unknown limit."""
+    """A hold that still cannot fit (heavier contention) refuses as ``hub_admission_overrun`` (never as a CPU
+    reading) with the stage and the measured hold logged, and never measures CPU under the lock."""
     conn, home = board
     _hub_boards(conn, home)
     t = task(conn)
     clock = _contended(monkeypatch, 0.2)  # 200 ms per handoff: even a few calls per board overrun 2.25 s
-    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("no room left: refuse before sampling"))
+    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("the locked gate reads the sampler, never samples"))
     with caplog.at_level(logging.INFO, logger="hermes_cli.kanban_admission"):
         assert kb.claim_task(conn, t) is None
-    refused(conn, t, False, "hub_cpu_unknown")
+    refused(conn, t, False, ka.OVERRUN)
     line = next(r.getMessage() for r in caplog.records if "Hub admission refused" in r.getMessage())
-    assert "'stage': 'hold_before_sample'" in line, line
+    assert "'stage': 'hold_after_census'" in line, line
     assert "'hold_ms':" in line and "'budget_ms': 2250" in line, line
     assert clock.handoffs > 0
 
 
 @pytest.mark.parametrize("stage,setup", [
-    ("sample_invalid", lambda mp: mp.setattr(cm, "sample", fake_sample(None))),
-    ("lease_expired_before_sample", lambda mp: mp.setattr(ka, "_expired", lambda gate: True)),
+    # The pre-lease advisory passes a max age; only the locked gate's re-read (no argument) finds the sample gone.
+    ("sample_stale_or_missing", lambda mp: mp.setattr(
+        ka, "sampler_sample", lambda max_age_ms=None, _real=ka.sampler_sample:
+        _real(max_age_ms) if max_age_ms is not None else None)),
+    ("lease_expired_before_census", lambda mp: mp.setattr(ka, "_expired", lambda gate: True)),
 ])
 def test_each_unknown_branch_names_its_stage(board, monkeypatch, caplog, stage, setup):
     conn, home = board

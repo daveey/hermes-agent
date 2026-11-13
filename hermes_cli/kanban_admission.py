@@ -213,7 +213,7 @@ def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=Non
     if _expired(gate):
         return _unknown("lease_expired_after_census", started)  # the deadline passed while counting: never start
     if _over_budget(started):
-        return OVERRUN, None  # the hold overran its budget: refuse rather than outlast waiting turns
+        return OVERRUN, _unknown("hold_after_census", started)[1]  # refuse rather than outlast waiting turns
     counts = getattr(_decision, "counts", None) or {}
     admission = {k: counts[k] for k in ("active_before", "active_after", "excluded_run_uid")} \
         if counts.get("excluded_run_uid") else None
