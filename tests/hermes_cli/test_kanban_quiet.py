@@ -204,6 +204,34 @@ def test_an_unreadable_preflight_refuses_rather_than_passing(home, monkeypatch):
     assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists()
 
 
+def _held_on():
+    return True
+
+
+def _held_unreadable():
+    raise OSError("hold marker unreadable")
+
+
+@pytest.mark.parametrize(("held", "reason"), [
+    (_held_on, "update:update_hold"),
+    (_held_unreadable, "update:update_hold_unreadable"),
+])
+def test_preflight_refuses_under_a_drain_or_admission_hold_even_with_an_idle_window(
+        home, tmp_path, monkeypatch, capsys, held, reason):
+    """A core-update drain/admission hold alone (window fresh and idle) refuses before the lease."""
+    from gateway import session_notifier_drain
+
+    monkeypatch.setattr(session_notifier_drain, "held", held)
+    marker = tmp_path / "ran"
+    observer = _script(tmp_path, "mark.py", "import sys; open(sys.argv[1], 'w').write('x')")
+    assert kq.hold(30, "r", [sys.executable, observer, str(marker)]) == kq.EXIT_PREFLIGHT
+    err = capsys.readouterr().err
+    assert reason in err and "no cooldown spent" in err, err
+    assert cq.inspect().state == "inactive", "the lease was taken"
+    assert not (home / "kanban" / "claim-quiet" / "last-started.json").exists(), "cooldown was committed"
+    assert not marker.exists(), "the observer must never start"
+
+
 @pytest.mark.live_system_guard_bypass  # we SIGKILL our own orphaned observer group
 def test_busy_when_another_process_holds_the_lease(home, tmp_path):
     pidfile = tmp_path / "pids"
