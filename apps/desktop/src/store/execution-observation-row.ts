@@ -1,4 +1,4 @@
-import { computed } from 'nanostores'
+import { computed, type ReadableAtom } from 'nanostores'
 
 import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import type { SessionInfo } from '@/types/hermes'
@@ -134,20 +134,25 @@ const $tileOwnerBindings = computed($sessionTiles, tiles =>
  *  of them (`useStoresSelector`), or its verdict lags until some unrelated store happens to notify.
  *  Not covered (module state, no store): the per-runtime event owner map (session-states.ts), remembered owner hints
  *  (session.ts) and the gateway registry's primary/secondary sockets; those changes repaint on the next 15 s tick. */
-export const ROW_EXECUTION_STORES = [
-  $liveWorkRoster,
-  $backgroundStatusBySession,
-  $subagentsBySession,
-  $runtimeBindings,
-  $sessions,
-  $tileOwnerBindings,
-  $activeGatewayRoute,
-  $gatewayActivationEpoch,
-  $cronSessions,
-  $messagingSessions,
-  $projectTree,
-  $unlistedSessionOwnerRows
-] as const
+let rowExecutionStoreList: null | readonly ReadableAtom<unknown>[] = null
+
+/** Built on first use, not at import: reading these bindings at module load throws in every suite that partially
+ *  mocks `@/store/session` or `@/store/gateway` without them, though it never renders a dot. */
+export const rowExecutionStores = (): readonly ReadableAtom<unknown>[] =>
+  (rowExecutionStoreList ??= [
+    $liveWorkRoster,
+    $backgroundStatusBySession,
+    $subagentsBySession,
+    $runtimeBindings,
+    $sessions,
+    $tileOwnerBindings,
+    $activeGatewayRoute,
+    $gatewayActivationEpoch,
+    $cronSessions,
+    $messagingSessions,
+    $projectTree,
+    $unlistedSessionOwnerRows
+  ])
 
 /** Evidence that keeps a row off done: live/waiting/needs-you work, an outstanding ask, or unresolved uncertainty. */
 export const executionHoldsRow = (e: null | RowExecution): boolean =>

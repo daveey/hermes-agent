@@ -1,6 +1,8 @@
+import type { ReadableAtom } from 'nanostores'
+
 import { useStoreSelector, useStoresSelector } from '@/lib/use-session-slice'
 import { $backgroundRunningSessionIds } from '@/store/composer-status'
-import { ROW_EXECUTION_STORES } from '@/store/execution-observation-row'
+import { rowExecutionStores } from '@/store/execution-observation-row'
 import { $kanbanObservationTick } from '@/store/kanban-observation'
 import { $messagingSessions, $sessions, lineageAliases, sessionMatchesStoredId } from '@/store/session'
 import {
@@ -16,7 +18,9 @@ import type { SessionInfo } from '@/types/hermes'
 /** [daveey] Every store a dot's row verdict reads: the observation tick (time-only expiry) and `rowExecution`'s own
  *  inputs, which include the owner route and the listed `$sessions` / `$messagingSessions` rows a missing caller row
  *  falls back to. Subscribing to fewer left the dot up to one 15 s tick behind a roster, event or owner change. */
-const DOT_ROW_STORES = [$kanbanObservationTick, ...ROW_EXECUTION_STORES] as const
+let dotRowStoreList: null | readonly ReadableAtom<unknown>[] = null
+
+const dotRowStores = () => (dotRowStoreList ??= [$kanbanObservationTick, ...rowExecutionStores()])
 
 const NO_ROW: Partial<SessionInfo> = {}
 
@@ -33,7 +37,7 @@ const dotRow = (id: string, row: null | SessionInfo | undefined): Partial<Sessio
 export function useSessionDotState(id: null | string, row?: null | SessionInfo) {
   const state = useStoreSelector($sessionDotStateById, states => id ? (states[id] ?? 'idle') : 'draft')
 
-  return useStoresSelector(DOT_ROW_STORES, () => id ? withRowActivity(state, dotRow(id, row)) : state)
+  return useStoresSelector(dotRowStores(), () => id ? withRowActivity(state, dotRow(id, row)) : state)
 }
 
 /** Whether any lineage alias of `id` is in `ids` (the store claims every alias the same way). */
@@ -51,7 +55,7 @@ export function useBackgroundDotLabel(
   const processLive = useStoreSelector($backgroundRunningSessionIds, ids => background && litFor(ids, id))
   const delegating = useStoreSelector($delegatingSessionIds, ids => background && litFor(ids, id))
 
-  return useStoresSelector(DOT_ROW_STORES, () =>
+  return useStoresSelector(dotRowStores(), () =>
     background && id !== null ? backgroundDotLabel(dotRow(id, row), processLive || delegating) : 'running'
   )
 }
