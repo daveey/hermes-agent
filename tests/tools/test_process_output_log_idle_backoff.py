@@ -131,11 +131,34 @@ def test_a_finish_request_ends_a_long_idle_wait_at_once(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_detached_host_fate", lambda pid, start: "running")
     done = threading.Event()
     monkeypatch.setattr(registry, "_finish_exited", lambda s, code, **k: done.set())
+    entered_wait = threading.Event()
+    cleanup = threading.Event()
+    finish = session._reader_finish_requested
+    real_wait = finish.wait
+
+    def observed_wait(timeout):
+        entered_wait.set()
+        return real_wait(timeout)
+
+    def uninterruptible_wait(timeout):
+        # A sleep mutant must reach the same rendezvous, but only teardown may
+        # release it early. Avoid leaving a sleeping reader behind on failure.
+        entered_wait.set()
+        cleanup.wait(timeout)
+
+    monkeypatch.setattr(finish, "wait", observed_wait)
+    monkeypatch.setattr(olog, "time", SimpleNamespace(sleep=uninterruptible_wait, time=time.time))
     reader = threading.Thread(target=registry._log_reader_loop, args=(session,), daemon=True)
     reader.start()
-    from tests.waiting import wait_until
-    wait_until(lambda: session.output_buffer == "tail\n", what="the line written before the start")
-    session._reader_finish_requested.set()
-    reader.join(5)
-    assert not reader.is_alive(), "the finish request did not end the 30 s idle wait"
-    assert done.is_set()
+    try:
+        assert entered_wait.wait(5), "reader did not enter the long idle wait"
+        assert session.output_buffer == "tail\n"
+        finish.set()
+        reader.join(5)
+        assert not reader.is_alive(), "the finish request did not end the 30 s idle wait"
+        assert done.is_set()
+    finally:
+        finish.set()
+        cleanup.set()
+        reader.join(5)
+    assert not reader.is_alive(), "reader leaked after cleanup"
