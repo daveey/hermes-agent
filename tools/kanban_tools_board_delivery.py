@@ -17,9 +17,11 @@ BOARD_WRITE_TOOLS = frozenset({
 # A create placed on another gateway for this chat: the card is made there, but this chat's link row reaches the
 # Board only through this gateway's sync (01:09 PT: four cards placed on workers said "shows in this chat's tasks";
 # the Board had no task_chat_links row for any of them).
-# kanban_tools builds its placed-create notes from these two fragments, so the rewrite below always finds them.
+# kanban_tools builds its placed-create notes from these fragments, so the rewrite below always finds them. The
+# queued note is CHAT_TASKS_HEAD + CHAT_TASKS_SEP; the rewrite inserts after the exact head, whatever the separator.
 CHAT_TASKS_SHOWS = " and shows in this chat's tasks"
-CHAT_TASKS_QUEUED = "(this chat's tasks, "
+CHAT_TASKS_HEAD = "(this chat's tasks"
+CHAT_TASKS_SEP = ", "
 _LATER = " once this gateway's Board sync recovers"
 
 
@@ -33,7 +35,7 @@ def _chat_link_queued(payload: dict, board_sync: str) -> None:
     from hermes_cli.kanban_board_delivery import QUEUED_LOCAL
     text = str(payload.get("note") or "")
     text = text.replace(CHAT_TASKS_SHOWS, CHAT_TASKS_SHOWS + _LATER, 1).replace(
-        CHAT_TASKS_QUEUED, CHAT_TASKS_QUEUED.rstrip(", ") + _LATER + ", ", 1)
+        CHAT_TASKS_HEAD + CHAT_TASKS_SEP, CHAT_TASKS_HEAD + _LATER + CHAT_TASKS_SEP, 1)
     payload["note"] = f"{text} This chat's link to the card is {board_sync}."
     payload["chat_link"] = QUEUED_LOCAL
     payload["board_sync"] = board_sync

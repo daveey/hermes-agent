@@ -353,7 +353,7 @@ def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home,
     there made it silently do nothing. Reworded at the one source, the rewrite still lands."""
     from tools import kanban_tools_board_delivery as kbd
     monkeypatch.setattr(kbd, "CHAT_TASKS_SHOWS", " and is listed under this chat")
-    monkeypatch.setattr(kbd, "CHAT_TASKS_QUEUED", "(listed under this chat, ")
+    monkeypatch.setattr(kbd, "CHAT_TASKS_HEAD", "(listed under this chat")
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
     out = _place_on_worker(path, monkeypatch, task_id=task_id)
@@ -362,6 +362,21 @@ def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home,
     expected = (f" and is listed under this chat {later}." if task_id else f"(listed under this chat {later}, ")
     assert expected in out["note"], out["note"]
     assert "this chat's tasks" not in out["note"]
+
+
+def test_queued_rewrite_lands_after_the_exact_head_for_any_separator(home, monkeypatch):
+    """Review 5889250891: the anchor was the queued wording .rstrip(", "), a character set, so wording ending in
+    ": " kept its colon before the inserted text. The rewrite now goes right after the exact head constant."""
+    from tools import kanban_tools_board_delivery as kbd
+    monkeypatch.setattr(kbd, "CHAT_TASKS_HEAD", "(see this chat's tasks")
+    monkeypatch.setattr(kbd, "CHAT_TASKS_SEP", ": ")
+    path, _conn = home
+    _give_up_the_sync_role(path, monkeypatch)
+    out = _place_on_worker(path, monkeypatch, task_id=None)
+    assert out["chat_link"] == "queued_local", out
+    later = "once this gateway's Board sync recovers"
+    assert f"(see this chat's tasks {later}: `hermes-hub requests`)" in out["note"], out["note"]
+    assert f": {later}" not in out["note"]
 
 
 def test_create_placed_elsewhere_while_the_sync_runs_is_unchanged(home, monkeypatch):

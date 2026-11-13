@@ -1530,7 +1530,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request. Changed calls with an explicit "
                 f"creation key are refused; without one they may duplicate. Its task id appears when {target} applies it "
-                + (kbd_words.CHAT_TASKS_QUEUED if session_id else "(")
+                + (kbd_words.CHAT_TASKS_HEAD + kbd_words.CHAT_TASKS_SEP if session_id else "(")
                 + "`hermes-hub requests`).")
         return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
     except Exception as exc:
