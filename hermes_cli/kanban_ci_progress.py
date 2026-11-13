@@ -41,7 +41,13 @@ says only that no runner picked it up; a message says no online runner has the l
   ``FETCH_TIMEOUT_SECONDS`` past it. A run whose runner list the budget cut off is read again first next sweep.
 
 A ref is checked when it is (or contains) ``<owner>/<repo>/actions/runs/<id>``, or is a bare run id whose wake
-check names the repo (``gh run view <id> -R owner/repo``). Anything else (a PR, a release, an unknown repo) is
+check names the repo (``gh run view <id> -R owner/repo``). A ref naming ``<owner>/<repo>/pull/<n>`` (optionally with
+its head sha) is read by :func:`pr_progress`: 2026-11-13, state PR #2495 conflicted with its base, so GitHub started
+no ``pull_request`` workflow for the pushed head, and the card parked on its checks would have slept until its cap.
+A conflicting PR is ``not_starting`` (a park refused; a parked card woken), and so is a head with no workflow run
+``QUEUED_LIMIT_SECONDS`` after the later of the park and the PR's last update. Neither asserts a
+``runners-offline`` blocker: they are one PR's, not a runner pool's. The head's queued runs go through
+:func:`ci_run_progress`, so a PR wait gets the runner checks too. Anything else (a release, an unknown repo) is
 ``untracked``. A GitHub error is logged and fails open: the park is allowed and the next sweep tries again.
 
 GitHub is read through the home's ``kanban.pr_acceptance.gh_command_prefix`` (the credential broker), as the
@@ -89,6 +95,10 @@ AUTHOR = "kanban-dispatcher"
 _SLUG = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
 _RUN_PATH = re.compile(rf"(?:https?://github\.com/)?({_SLUG})/actions/runs/(\d+)")
 _BARE_RUN = re.compile(r"\d{6,}")
+_PR_PATH = re.compile(rf"(?:https?://github\.com/)?({_SLUG})/pull/(\d+)")
+_AT_SHA = re.compile(r"@([0-9a-fA-F]{7,40})(?![0-9a-fA-F])")
+_FULL_SHA = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
+PR_QUEUED_RUNS_MAX = 3  # queued runs of a PR head handed to ci_run_progress per read
 _REPO_FLAG = re.compile(rf"(?:^|\s)(?:-R|--repo)(?:=|\s+)['\"]?({_SLUG})")
 _GENERIC_LABELS = frozenset({"self-hosted", "linux", "macos", "windows", "x64", "arm64"})
 
@@ -122,6 +132,22 @@ class Progress:
     runners_readable: bool = False  # not_starting: both runner lists were read (or one had an online match)
     idle_runner: str = ""  # not_starting: an online runner for the labels is idle, yet took no job
     busy_runner: str = ""  # not_starting: an online runner for the labels is busy, past BUSY_LIMIT_SECONDS
+    pr: int = 0  # the pull request a PR-ref wait names
+    per_pr: bool = False  # not_starting for this PR alone (a conflict, no run created): no runner blocker
+    remedy: str = ""  # per_pr: what the owner does about it
+    settling: bool = False  # unknown only because GitHub has not computed ``mergeable`` yet: no warning
+
+
+def pr_target(ref: str, hint: str = "") -> Optional[tuple[str, int, Optional[str]]]:
+    """``(owner/repo, PR number, head sha or None)`` for a ref naming ``<owner>/<repo>/pull/<n>``, else None. The
+    sha is ``@<7-40 hex>`` in the ref, else a 40-hex sha in the ref or ``hint`` (the park's wake check and reason).
+    A ref that names a run is a run (:func:`run_target`), not a PR."""
+    ref = (ref or "").strip()
+    m = _PR_PATH.search(ref)
+    if m is None or run_target(ref, hint) is not None:
+        return None
+    sha = _AT_SHA.search(ref) or _FULL_SHA.search(f"{ref} {hint or ''}")
+    return m.group(1), int(m.group(2)), sha.group(1).lower() if sha else None
 
 
 def run_target(ref: str, hint: str = "") -> Optional[tuple[str, str]]:
@@ -384,7 +410,77 @@ def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadlin
     return found
 
 
+def pr_progress(repo: str, number: int, sha: Optional[str], parked_at: Optional[float], *,
+                fetch: Optional[Fetch] = None, fetch_runners: Optional[FetchRunners] = None,
+                now: Optional[float] = None, deadline: Optional[float] = None) -> Progress:
+    """Whether a pull request's checks can still start for the head a wait names. Never raises. A closed or merged
+    PR, or a head that moved off ``sha``, is ``ok``: the card's own probe answers those. A PR that conflicts with
+    its base is ``not_starting`` (GitHub starts no ``pull_request`` workflow for it), and so is a head with no
+    workflow run ``QUEUED_LIMIT_SECONDS`` after the later of ``parked_at`` (None: now) and the PR's last update;
+    both are ``per_pr``. Queued runs of the head go through :func:`ci_run_progress`. ``mergeable`` null with runs
+    is ``unknown`` (``settling``): GitHub computes it lazily, so the next sweep reads it again."""
+    now = time.time() if now is None else now
+    try:
+        pr = _gh_api(f"repos/{repo}/pulls/{number}") or {}
+        if pr.get("state") != "open" or pr.get("merged"):
+            return Progress("ok", repo, pr=number)
+        head = str((pr.get("head") or {}).get("sha") or "").lower()
+        if sha and not head.startswith(sha.lower()):
+            return Progress("ok", repo, pr=number)
+        base = str((pr.get("base") or {}).get("ref") or "its base")
+        mergeable = pr.get("mergeable")
+        if mergeable is False or pr.get("mergeable_state") == "dirty":
+            return Progress(NOT_STARTING, repo, pr=number, per_pr=True, detail=(
+                f"PR #{number} conflicts with {base}: pull_request checks cannot start until it is rebased"),
+                remedy=(f"Rebase it onto {base} (or merge {base} into it), push, and park on the new head's CI; "
+                        f"a park on PR #{number} while it conflicts is refused ({CI_RUN_UNSTARTABLE})."))
+        if deadline is not None and time.monotonic() >= deadline:
+            raise OverBudget("sweep budget spent before the head's runs were read")
+        runs = (_gh_api(f"repos/{repo}/actions/runs?head_sha={head}&per_page=100") or {}).get("workflow_runs")
+    except GhMissing as exc:
+        return Progress("unknown", repo, pr=number, detail=str(exc)[-300:], gh_missing=True)
+    except NoCredential as exc:
+        return Progress("unknown", repo, pr=number, detail=str(exc)[-300:], no_credential=True)
+    except OverBudget as exc:
+        return Progress("unknown", repo, pr=number, detail=str(exc), deferred=True)
+    except (OSError, RuntimeError, ValueError, AttributeError, subprocess.TimeoutExpired) as exc:
+        return Progress("unknown", repo, pr=number, detail=str(exc)[-300:])
+    runs = [r for r in runs or [] if isinstance(r, dict) and r.get("id")]
+    if not runs:
+        since = max(parked_at if parked_at is not None else now, _epoch(pr.get("updated_at")) or 0)
+        if now - since >= QUEUED_LIMIT_SECONDS:
+            return Progress(NOT_STARTING, repo, pr=number, per_pr=True, detail=(
+                f"no CI run was created for {head[:10]} in {QUEUED_LIMIT_SECONDS // 60} min "
+                f"(PR #{number} mergeable={mergeable})"),
+                remedy=("Check whether the PR conflicts with its base (rebase it if so), or push a commit that "
+                        "triggers CI, then park on the new head's CI."))
+        return Progress("ok" if mergeable is not None else "unknown", repo, pr=number, settling=True)
+    for run in [r for r in runs if r.get("status") in ("queued", "waiting", "requested", "pending")][
+            :PR_QUEUED_RUNS_MAX]:
+        p = ci_run_progress(f"{repo}/actions/runs/{run['id']}", fetch=fetch, fetch_runners=fetch_runners, now=now,
+                            deadline=deadline)
+        if p.state != "ok":
+            p.pr = number
+            return p
+    if mergeable is None:
+        return Progress("unknown", repo, pr=number, settling=True, detail="GitHub has not computed mergeable yet")
+    return Progress("ok", repo, pr=number)
+
+
+def progress(ref: str, *, hint: str = "", parked_at: Optional[float] = None, fetch: Optional[Fetch] = None,
+             fetch_runners: Optional[FetchRunners] = None, deadline: Optional[float] = None) -> Progress:
+    """:func:`ci_run_progress` for a run ref, :func:`pr_progress` for a PR ref, else ``untracked``."""
+    if run_target(ref, hint) is not None:
+        return ci_run_progress(ref, hint=hint, fetch=fetch, fetch_runners=fetch_runners, deadline=deadline)
+    target = pr_target(ref, hint)
+    if target is None:
+        return Progress("untracked")
+    return pr_progress(*target, parked_at, fetch=fetch, fetch_runners=fetch_runners, deadline=deadline)
+
+
 def describe(p: Progress) -> str:
+    if p.per_pr:
+        return p.detail
     labels = ",".join(p.labels) or "(none)"
     if p.idle_runner:
         seen = (f"runner {p.idle_runner} is online and idle for them yet took no job: a stuck runner, or one in a "
@@ -415,13 +511,18 @@ def confirm(awaiting: Optional[dict], *, hint: str = "", fetch: Optional[Fetch] 
     a started or freshly queued run makes one."""
     if not awaiting or awaiting.get("kind") != "ci":
         return
-    p = ci_run_progress(str(awaiting.get("ref") or ""), hint=hint, fetch=fetch, fetch_runners=fetch_runners)
+    p = progress(str(awaiting.get("ref") or ""), hint=hint, fetch=fetch, fetch_runners=fetch_runners)
     if p.state == "unknown":
-        logger.warning("ci run progress for %s/%s unreadable, allowing the park: %s", p.repo, p.run_id, p.detail)
+        if not p.settling:
+            logger.warning("ci run progress for %s/%s unreadable, allowing the park: %s", p.repo,
+                           p.run_id or f"pull/{p.pr}", p.detail)
         return
     if p.state != NOT_STARTING:
         return
     from hermes_cli.kanban_awaiting import AwaitingError
+    if p.per_pr:
+        raise AwaitingError(CI_RUN_UNSTARTABLE, f"{p.detail}. A wait on its checks would sleep until someone "
+                                                f"notices. {p.remedy}")
     raise AwaitingError(CI_RUN_UNSTARTABLE, (
         f"{describe(p)}. A wait on it would sleep until someone notices. Get a runner with labels "
         f"{','.join(p.labels)} taking jobs, or re-run the job on runners that exist (fix the workflow's runs-on), or "
@@ -470,9 +571,16 @@ def _ci_waits(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
         row = conn.execute("SELECT cmd FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
         hint = " ".join(x for x in (row[0] if row else "", reason) if x)
         ref = str(awaiting.get("ref") or "")
-        if run_target(ref, hint):
+        if run_target(ref, hint) or pr_target(ref, hint):
             found.append((task_id, ref, hint))
     return found
+
+
+def _parked_at(conn: sqlite3.Connection, task_id: str) -> Optional[float]:
+    """When the card's latest park was written (epoch seconds), else None."""
+    row = conn.execute("SELECT created_at FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued') "
+                       "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    return float(row[0]) if row and row[0] is not None else None
 
 
 def _others_behind(conn: sqlite3.Connection, task_id: str, bid: str) -> list[str]:
@@ -494,6 +602,8 @@ def apply(conn: sqlite3.Connection, task_id: str, ref: str, p: Progress) -> Opti
     from hermes_cli.kanban_awaiting import _latest_park
     from hermes_cli.kanban_wake_check import _wake
 
+    if p.per_pr:
+        return _apply_per_pr(conn, task_id, ref, p)
     bid = blocker_id(p.labels)
     with kb.write_txn(conn):
         awaiting, _reason = _latest_park(conn, task_id)
@@ -525,6 +635,28 @@ def apply(conn: sqlite3.Connection, task_id: str, ref: str, p: Progress) -> Opti
     return woke
 
 
+def _apply_per_pr(conn: sqlite3.Connection, task_id: str, ref: str, p: Progress) -> Optional[str]:
+    """Wake a card whose PR's checks cannot start (a conflict, no run created) with one comment. No shared blocker:
+    the cause is this PR's, not a runner pool's, so no other card queues behind it."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_awaiting import _latest_park
+    from hermes_cli.kanban_wake_check import _wake
+
+    with kb.write_txn(conn):
+        awaiting, _reason = _latest_park(conn, task_id)
+        if not isinstance(awaiting, dict) or awaiting.get("kind") != "ci" or str(awaiting.get("ref") or "") != ref:
+            return None  # re-parked on something else since the read
+        note = f"Woken: {p.detail}, so the wait on its checks would sleep until its cap. {p.remedy}"
+        woke = _wake(conn, task_id, CI_RUN_UNSTARTABLE, {"ref": ref, "repo": p.repo, "pr": p.pr, "note": note})
+        if not woke:
+            return None
+        kb.add_comment(conn, task_id, AUTHOR, note)
+        kb._synthesize_ended_run(conn, task_id, outcome=CI_RUN_UNSTARTABLE, summary=p.detail,
+                                 metadata={"ci_pr": ref})
+    logger.info("kanban: woke %s, %s", task_id, p.detail)
+    return woke
+
+
 def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
           fetch_runners: Optional[FetchRunners] = None) -> list[str]:
     """Re-read CI-waiting cards' runs and wake the cards whose run is not starting: each card at most once per
@@ -553,14 +685,15 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
                 break  # the rest are the least recently checked ones next sweep
             with _LOCK:
                 _LAST_CHECK[(db, task_id)] = time.monotonic()
-            p = ci_run_progress(ref, hint=hint, fetch=fetch, fetch_runners=fetch_runners, deadline=deadline)
+            p = progress(ref, hint=hint, parked_at=_parked_at(conn, task_id), fetch=fetch,
+                         fetch_runners=fetch_runners, deadline=deadline)
             if p.deferred:
                 with _LOCK:
                     _LAST_CHECK.pop((db, task_id), None)  # least recently checked: first next sweep
                 continue
             if p.no_credential or p.gh_missing:
                 _warn_disabled(p, warn_key)
-            elif p.state == "unknown":
+            elif p.state == "unknown" and not p.settling:
                 logger.warning("ci run progress for %s (%s) unreadable: %s", task_id, ref, p.detail)
             if p.state == NOT_STARTING and apply(conn, task_id, ref, p):
                 woken.append(task_id)
