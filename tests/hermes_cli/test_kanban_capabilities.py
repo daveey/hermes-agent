@@ -188,6 +188,28 @@ def test_profile_policy_resolves_inside_a_bound_worker_scope(profiles, assignee)
         assert get_terminal_scope() is bound_terminal
 
 
+def test_own_profile_policy_resolves_launch_injected_refs(profiles, monkeypatch):
+    """A managed ``${VAR}`` that only the launch environment supplies (systemd ``Environment=``,
+    ``op run``) resolves when the process checks its OWN profile, as ``_bind_whole_profile`` binds
+    it; another profile still never sees the launch env (t_01a1d3f89c1e13c6). [daveey]"""
+    from agent import secret_scope
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.setenv("WORKER_TERMINAL_BACKEND", "local")
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)  # this test's launch env
+    policy = "platform_toolsets: {cli: [terminal, file]}\nterminal: {backend: '${WORKER_TERMINAL_BACKEND}'}\n"
+    profiles("default", policy)
+    profiles("coder", policy)
+    token = secret_scope.set_multiplex_context(True)  # a multiplexing gateway: a scope miss is a miss
+    try:
+        assert validate_assignment("default", requires=["host_repo"]) == ["host_repo"]
+        with pytest.raises(CapabilityMismatchError) as caught:
+            validate_assignment("coder", requires=["host_repo"])
+        assert caught.value.missing == ["host_repo"]
+    finally:
+        secret_scope.reset_multiplex_context(token)
+
+
 def test_skill_names_are_not_guessed_as_capabilities(profiles):
     # Skill capability metadata has no established convention; do not infer from names/prose.
     assert validate_assignment("legacy", skills=["git", "terminal"]) == []

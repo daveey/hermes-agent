@@ -295,11 +295,12 @@ def _profile_policy(assignee: str):
     ``set_secret_scope`` moved a foreign assignee's scope back to the worker's own home, so every
     ``requires`` check from a worker failed as ``assignee_capability_mismatch`` (t_01a1d3dfcfabae47)."""
     from agent.runtime_scope import bind_state, scope_for_profile
-    from agent.secret_scope import _is_process_home, build_profile_secret_scope
+    from agent.secret_scope import _is_process_home
     from hermes_cli.config_backend import read_config_doc_readonly
     from hermes_cli.config_effective import load_profile_config_effective
     from hermes_cli.profiles import resolve_profile_env
     from tools.terminal_scope import build_profile_terminal_scope
+    from tui_gateway.launch_profile_policy import owner_secret_scope
 
     home = Path(resolve_profile_env(assignee))
     config_path = home / "config.yaml"
@@ -307,7 +308,10 @@ def _profile_policy(assignee: str):
     # shared loader. That is fine for startup, but cannot establish assignment authority.
     _check_policy_shape(read_config_doc_readonly(config_path))
     scope = scope_for_profile(home)
-    secrets = build_profile_secret_scope(home)
+    # The process's own profile reads its launch scope, as ``_bind_whole_profile`` binds it: a
+    # managed ``${VAR}`` that only systemd / ``op run`` injects has no file to rebuild from. Any
+    # other profile gets its own files only (t_01a1d3f89c1e13c6).
+    secrets = owner_secret_scope(home)
     # Unstamped marks the process's own profile, as the legacy setter left it; any other home is routed.
     stamp = not _is_process_home(home)
     with ExitStack() as stack:
