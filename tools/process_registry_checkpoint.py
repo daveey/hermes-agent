@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from agent.redact import redact_sensitive_text
 
@@ -267,18 +267,24 @@ class ProcessCheckpointMixin:
             logger.debug("Checkpoint reassert failed", exc_info=True)
             return False
 
-    def recover_from_checkpoint(self, owner: Optional[str] = None) -> int:
+    def recover_from_checkpoint(self, owner: Optional[str] = None, *,
+                                session_keys: Optional[Iterable[str]] = None) -> int:
         """On startup, probe PIDs from the checkpoint file; returns how many were
         recovered as detached sessions.
 
         ``owner`` limits adoption to one kind of entry (see
         ``tools.process_registry_readopt``): ``"gateway"`` (messaging session keys and
         legacy keyless entries) or ``"tui"`` (Desktop/TUI session ids). ``None`` adopts
-        every orphan. The whole read-decide-write runs under the checkpoint file lock,
-        so two backends starting together adopt an orphan once. [daveey]"""
+        every orphan. ``session_keys`` limits it further to those sessions' jobs and leaves
+        every other entry untouched: a managed worker serves one turn of one session, and
+        adopting another chat's orphan (a Desktop job whose backend had just rolled over)
+        took its exit into a process with no consumer for it (proc_70810e2dae05). The whole
+        read-decide-write runs under the checkpoint file lock, so two backends starting
+        together adopt an orphan once. [daveey]"""
+        keys = None if session_keys is None else frozenset(k for k in session_keys if k)
         try:
             with self._checkpoint_file_lock():
-                recovered, foreign, settled, source = self._recover_from_checkpoint_locked(owner)
+                recovered, foreign, settled, source = self._recover_from_checkpoint_locked(owner, keys)
                 # Completions a stopped gateway still owed (exit settled before its watcher ticked). [daveey]
                 try:
                     recovered += self._recover_owed_completions_locked(owner)
@@ -296,7 +302,7 @@ class ProcessCheckpointMixin:
             logger.warning("Settling other profiles' process checkpoints failed", exc_info=True)
         return recovered
 
-    def _recover_from_checkpoint_locked(self, owner: Optional[str]):
+    def _recover_from_checkpoint_locked(self, owner: Optional[str], session_keys: Optional[frozenset] = None):
         """Returns (recovered count, entries another profile owns, settled ids, this checkpoint's path)."""
         from tools.process_registry import (
             ProcessSession, _CHECKPOINT_FIELDS, _checkpoint_path,
@@ -323,7 +329,7 @@ class ProcessCheckpointMixin:
         scope = scope_profile()
         for entry in entries:
             pid, pid_scope = entry.get("pid"), entry.get("pid_scope", "host")
-            if not pid:
+            if not pid or (session_keys is not None and entry.get("session_key") not in session_keys):
                 continue
             # The registry is process-global, so every profile's checkpoint carries every live
             # process; a multiplexer recovering several homes must adopt each session once.

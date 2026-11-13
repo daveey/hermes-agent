@@ -319,9 +319,9 @@ def test_recovery_racing_a_foreground_release_never_adopts_it(tmp_path, monkeypa
     recovered = []
     real_locked = registry._recover_from_checkpoint_locked
 
-    def locked(owner):
+    def locked(owner, *rest):
         in_recovery.set()
-        return real_locked(owner)
+        return real_locked(owner, *rest)
 
     registry._recover_from_checkpoint_locked = locked
     racer = threading.Thread(target=lambda: recovered.append(registry.recover_from_checkpoint()), daemon=True)
@@ -419,13 +419,13 @@ def test_recovery_racing_a_real_handoff_tracks_the_command_once(tmp_path, monkey
                                 daemon=True, name="recovery")
     real_locked = registry._recover_from_checkpoint_locked
 
-    def locked(owner):  # recovery owns the file lock and is about to decide
+    def locked(owner, *rest):  # recovery owns the file lock and is about to decide
         racing.set()
         if first == "recovery":
             handoff.start()
             popped.wait(0.3)  # fixed: the handoff waits for our lock before it drops the hold
         try:
-            return real_locked(owner)
+            return real_locked(owner, *rest)
         finally:
             decided.set()
 

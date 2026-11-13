@@ -392,7 +392,7 @@ def _managed_turn(authority, db, ref, monkeypatch, rid):
         m.setattr(worker, 'retire_agent', lambda agent: None)
         m.setattr(worker, 'WorkerControls', Controls)
         m.setattr('agent.runtime_session_store.WorkerRPC', rpc_factory)
-        m.setattr('tools.process_registry.process_registry.recover_from_checkpoint', lambda: None)
+        m.setattr('tools.process_registry.process_registry.recover_from_checkpoint', lambda **_k: None)
         m.setattr('run_agent.AIAgent', Agent)
         worker.execute(frame, SimpleNamespace(send=lambda kind, **payload: sent.append(kind)))
     assert len(captured) == 1 and sent[-1] == 'finished', sent
