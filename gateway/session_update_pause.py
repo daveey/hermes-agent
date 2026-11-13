@@ -166,7 +166,12 @@ async def requeue_unstarted(authority, live, ref, row):
 
     [daveey] t_01a1d4a0ecd9bd54: a Stop that ``interrupt_update`` latched while the write ran (it found the claim
     still started and told its caller the turn stops) cancels the re-queued row instead of letting the notice run
-    after the hold (``_stopped_after_requeue``)."""
+    after the hold (``_stopped_after_requeue``).
+
+    [daveey] t_01a1d4cc43b7ac4a: one Stop window is left, between the write's commit and this coroutine resuming.
+    It is benign: ``interrupt_update`` then reads the row queued, not started, and returns False, so its caller is
+    told the turn does not stop and the notice runs once after the hold, as for a Stop after this function returns.
+    No await separates the ``stopped`` read below from clearing the claim, so a latch is never dropped unread."""
     from gateway.session_runtime_workers import tracked_write, persist_work_count
     from gateway.session_settlement_recovery import _transfers
     from hermes_state_runtime import RuntimeStoreError
@@ -214,7 +219,7 @@ async def _stopped_after_requeue(authority, ref, row):
     row queued (not started) and is refused, as for any queued row."""
     from gateway.session_ingress_media import release_admission_media
     from gateway.session_runtime_workers import tracked_write, persist_work_count
-    from hermes_state_runtime import cancel_session_input
+    from hermes_state_runtime import cancel_session_input, get_session_admission
     admission_id, sid = row['admission_id'], ref.session_id
     authority.update_stops.discard(admission_id)
     if authority.pending_stops.get(sid) == row['generation']:
@@ -224,10 +229,19 @@ async def _stopped_after_requeue(authority, ref, row):
         cancelled = await tracked_write(authority, partial(cancel_session_input, authority.db,
                                                            epoch=authority.epoch, admission_id=admission_id))
     except Exception:
-        # Nothing retries this: the row stays queued and runs once after the hold. Fail loud, never silent.
-        logging.getLogger(__name__).exception('Update requeue: cancelling stopped %s failed; it stays queued and '
-                                              'runs after the hold', admission_id)
-        cancelled = None
+        # [daveey] t_01a1d4cc43b7ac4a: no retry here, since the store already retries a locked or busy writer
+        # within its write patience. What reaches this point is not transient, or its commit is unknown (an
+        # IOERR at COMMIT), so read the row back. A cancel that committed settles below. Otherwise the row stays
+        # queued and runs once after the hold. Fail loud, never silent.
+        logging.getLogger(__name__).exception('Update requeue: cancelling stopped %s failed', admission_id)
+        try:
+            cancelled = await asyncio.to_thread(get_session_admission, authority.db, admission_id=admission_id)
+        except Exception:
+            logging.getLogger(__name__).exception('Update requeue: reading stopped %s back failed', admission_id)
+            cancelled = None
+        if cancelled is None or (cancelled['status'], cancelled['outcome']) != ('terminal', 'cancelled'):
+            logging.getLogger(__name__).error('Update requeue: stopped %s stays queued and runs after the hold',
+                                              admission_id)
     if cancelled is not None and (cancelled['status'], cancelled['outcome']) == ('terminal', 'cancelled'):
         authority._settle_cancelled(ref, admission_id)
         await asyncio.to_thread(release_admission_media, authority.db, admission_id)
