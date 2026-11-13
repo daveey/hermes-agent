@@ -351,17 +351,24 @@ def local_words(place: dict[str, Any]) -> str:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:
         words += f", running count unknown (cap {place['limit']})"
-    pool = place.get("pool_could_run")
-    if pool:
-        from hermes_cli.kanban_placement_coordination import REASON
-        return (words + f". Home-only by a stale creation verdict ({REASON}): pool worker(s) "
-                f"{', '.join(pool)} now carry its access labels and have free slots. Re-place it "
-                f"(`hermes kanban move {place.get('task_id') or '<id>'} --runs-on machine:{pool[0]} --reason \"pool attests its labels\"`) "
-                "instead of waiting for a local slot; do not run its work outside the dispatcher")
+    if place.get("pool_could_run"):
+        return words + ". " + pool_words(place)
     if not skip:
         return words + ". " + _NOT_STUCK
     words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
     return words + ". " + (_NOT_STUCK if skips.is_ordering(skip) else skips.advice(skip))
+
+
+def pool_words(place: dict[str, Any]) -> str:
+    """The re-place sentence for a local-lane card that ``pool_could_run`` workers could start now. Shared by
+    :func:`local_words` and the chat-wait notices (``kanban_parent_unclaimed._queue_words``), which dropped it: a chat
+    told David to wait for hub slots while worker-1 could run the card (kanban-e7a33105a4). [daveey]"""
+    from hermes_cli.kanban_placement_coordination import REASON
+    pool = place.get("pool_could_run") or []
+    return (f"Home-only by a stale creation verdict ({REASON}): pool worker(s) {', '.join(pool)} now carry its "
+            "access labels and have free slots. Re-place it (`hermes kanban move "
+            f"{place.get('task_id') or '<id>'} --runs-on machine:{pool[0]} --reason \"pool attests its labels\"`) "
+            "instead of waiting for a local slot; do not run its work outside the dispatcher")
 
 
 def read(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:

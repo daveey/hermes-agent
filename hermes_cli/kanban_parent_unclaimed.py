@@ -68,6 +68,9 @@ def _queue_words(place: dict[str, Any]) -> str:
         words += f", running count unknown (cap {place['limit']})"
     if place.get("skip"):  # the recorded reason comes first: a bare queue place read as an ordering wait [daveey]
         words = f"{skips.words(place['skip'])}; {words}"
+    if place.get("pool_could_run"):  # a pool worker could start it now; dropped here before (kanban-e7a33105a4)
+        from hermes_cli.kanban_queue_position import pool_words
+        words = f"{words}. {pool_words(place)}"
     return words
 
 
