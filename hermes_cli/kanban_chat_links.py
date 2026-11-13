@@ -7,7 +7,9 @@ with one local query.
 - :func:`reconcile` (run by the sync loop, idempotent, so its first run is the backfill) writes this gateway's
   links into a board file: chats that created a card here (``tasks.session_id``), chats that shepherd a card here
   (``tui`` subscriptions), and this gateway's chats' links to other gateways' cards from the origin-ledger
-  projection, with its released state. Links it no longer finds are marked released, never deleted.
+  projection, with its released state. Links it no longer finds are marked released, never deleted. As a card's
+  owner it also publishes, insert-only, the link of each chat on another gateway its ``platform='hub'``
+  subscriptions name (``_owner_hub_links``), so that chat's task list does not wait on that gateway's own sync.
 - :func:`replica_cards` answers a chat lineage's cards on other gateways from the replicas; ``session_tasks`` AND the
   sidebar counts use it instead of the origin ledger when ``kanban.sync.links_reader`` is ``replica``, so the
   count and the task strip are one projection in each mode.
@@ -159,11 +161,12 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
 
 
 def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Released copies of the ``created`` links another gateway (the card's owner) wrote for this gateway's chats,
-    once the replica shows the card closed (``done``/``archived``). [daveey]
+    """Released copies of the ``created`` and ``shepherd`` links another gateway (the card's owner) wrote for this
+    gateway's chats, once the replica shows the card closed (``done``/``archived``). [daveey]
 
     The owner writes them in ``kanban_creator_chats`` (``initialize_ownership`` / ``inherit_chats``) for a remote
-    origin chat. The owner's reconcile manages only its own chats' links, so nothing released them: a done card
+    origin chat, and from its ``platform='hub'`` subscriptions (``_owner_hub_links``, ``created`` or ``shepherd``).
+    The owner's reconcile manages only its own chats' links, so nothing released them: a done card
     whose origin ledger had no row for that chat (no ledger link with the same uid, no released shepherd sibling)
     stayed an ``unknown`` obligation in ``replica_cards`` forever (4 hub cards on macbook chat
     20261027_134353_5ab65c, 2026-11-01). The chat's gateway releases them by writing the same uid (the same row on
@@ -187,8 +190,8 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
             rows = [dict(r) for r in conn.execute(
                 "SELECT l.uid, l.task_id, l.chat_gateway, l.chat_profile, l.chat_session, l.kind, l.created_at, "
                 "t.status FROM task_chat_links l JOIN tasks t ON t.id = l.task_id "
-                "WHERE l.chat_gateway = ? AND l.kind = 'created' AND l.released = 0 AND l.uid IS NOT NULL "
-                "AND t.created_on IS NOT NULL AND t.created_on != ?",
+                "WHERE l.chat_gateway = ? AND l.kind IN ('created', 'shepherd') AND l.released = 0 "
+                "AND l.uid IS NOT NULL AND t.created_on IS NOT NULL AND t.created_on != ?",
                 (gateway, gateway))]
         finally:
             conn.close()
@@ -209,6 +212,99 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
                 (type(r["chat_profile"]), r["chat_profile"])]:
             continue
         out[r["uid"]] = {**r, "released": 1, "created_at": int(r["created_at"] or time.time())}
+    return out
+
+
+def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list[dict[str, Any]]:
+    """Links this gateway (the card's owner) publishes for chats on OTHER gateways: one per counted ``platform='hub'``
+    subscription ``<gw>/<profile>/<session>`` on an open card it owns, the same subscriptions the hermes-hub collector
+    publishes as the card's ``sessions`` (so notices and the task list read one membership). [daveey]
+
+    Before this only the chat's own gateway wrote that link, from its origin ledger, so while its Board sync was down
+    (David-MBP gave up the sync role, SchemaAhead, 2026-11-13) six cards it placed elsewhere had no row on the Board:
+    its task list, sidebar counts and ask-gate missed them although their done notices arrived through hub.db.
+
+    The row is the one the chat's gateway writes for the same link (same uid: ``created`` for a courier-bound origin,
+    whose ledger row is ``via: origin``; ``shepherd`` otherwise), so when that gateway's reconcile comes back it
+    upserts this very row, never a second one. It is written once and never changed here: the chat's gateway owns
+    its release (its ledger, ``_owner_written_releases``). Nothing is written while any row for that card and chat
+    exists in this file or the replica, released included, so a release the chat's gateway already made is never
+    reopened; an unreadable replica writes nothing this pass."""
+    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_lockguard import connect
+    from hermes_cli.kanban_origin import OriginError, parse_origin
+    from hermes_cli.kanban_origin_intent_carry import EVENT_KIND
+    from hermes_cli.kanban_placement import is_placeholder_session
+    from hermes_cli.kanban_session_activity import _counted_sub_clause
+    task_cols = {c[1] for c in conn.execute("PRAGMA table_info(tasks)")}
+    mine = "AND (t.created_on IS NULL OR t.created_on = '' OR t.created_on = ?)" if "created_on" in task_cols else ""
+    try:
+        subs = conn.execute(
+            f"SELECT s.task_id, s.chat_id, s.created_at FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+            f"WHERE s.platform = 'hub' AND s.chat_id != '' AND t.status NOT IN ({', '.join('?' * len(TERMINAL_STATUSES))}) "
+            f"AND {_counted_sub_clause(conn)} {mine} ORDER BY s.task_id, s.chat_id",
+            (*TERMINAL_STATUSES, *((gateway,) if mine else ()))).fetchall()
+    except sqlite3.Error:  # board predates notify subscriptions
+        return []
+    wanted: dict[tuple, dict[str, Any]] = {}
+    for task_id, chat_id, created_at in subs:
+        try:
+            origin = parse_origin(chat_id)
+        except OriginError:
+            continue
+        if origin.gateway == gateway or is_placeholder_session(origin.session):
+            continue  # this gateway's own chats are its ``tui`` subscriptions (``_local_links``)
+        wanted.setdefault((task_id, origin.gateway, origin.profile, origin.session),
+                          {"created_at": int(created_at or time.time())})
+    if not wanted:
+        return []
+    groups: dict[tuple[str, str], list[str]] = {}
+    for _tid, gw, profile, session in wanted:
+        groups.setdefault((gw, profile), []).append(session)
+    headless = {(gw, profile): _worker_shepherds(sessions, gw, profile) for (gw, profile), sessions in groups.items()}
+    wanted = {k: v for k, v in wanted.items() if k[3] not in headless[(k[1], k[2])]}
+    task_ids = sorted({k[0] for k in wanted})
+    have: set[tuple] = set()
+    bound: set[tuple] = set()
+    path = ksc.shadow_path(board)
+    try:
+        replica = connect(f"file:{path}?mode=ro", uri=True, timeout=5) if path.exists() else None
+    except sqlite3.Error as exc:
+        _log.info("kanban chat links: replica %s unreadable for owner hub links (%s)", path, exc)
+        return []
+    try:
+        for db in (conn, replica):
+            if db is None:
+                continue
+            for i in range(0, len(task_ids), 500):
+                chunk = task_ids[i:i + 500]
+                have.update(tuple(r) for r in db.execute(
+                    "SELECT task_id, chat_gateway, COALESCE(chat_profile, 'default'), chat_session FROM task_chat_links "
+                    f"WHERE task_id IN ({', '.join('?' * len(chunk))})", chunk))
+        for i in range(0, len(task_ids), 500):
+            chunk = task_ids[i:i + 500]
+            for task_id, payload in conn.execute(
+                    f"SELECT task_id, payload FROM task_events WHERE kind = ? AND task_id IN "
+                    f"({', '.join('?' * len(chunk))})", (EVENT_KIND, *chunk)):
+                try:
+                    origin = json.loads(json.loads(payload)["binding_json"])["origin"]
+                    bound.add((task_id, origin["gateway"], origin["profile"], origin["session"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except sqlite3.Error as exc:  # nothing is written from a partial read; the next pass retries
+        _log.info("kanban chat links: owner hub links unreadable for %s (%s)", board, exc)
+        return []
+    finally:
+        if replica is not None:
+            replica.close()
+    out = []
+    for key, extra in wanted.items():
+        if key in have:
+            continue
+        task_id, gw, profile, session = key
+        kind = "created" if key in bound else "shepherd"
+        out.append({"uid": link_uid(task_id, gw, profile, session, kind), "task_id": task_id, "chat_gateway": gw,
+                    "chat_profile": profile, "chat_session": session, "kind": kind, "released": 0, **extra})
     return out
 
 
@@ -290,7 +386,17 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or (
         str(r[2] or "") in headless[(type(r[5]), r[5])] and not (r[1] and r[3] == "created"))}
     added = changed = released = retired = 0
+    owner_links = _owner_hub_links(conn, board, gateway)  # read before the write lock, like ``_plan``
     with write_txn(conn):
+        for link in owner_links:
+            # Insert-only, and only while no row for this card and chat exists (a concurrent write, or a pull that
+            # brought the chat gateway's own row in, wins). See ``_owner_hub_links``.
+            added += conn.execute(
+                "INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, released, "
+                "created_at) SELECT :uid, :task_id, :chat_gateway, :chat_profile, :chat_session, :kind, 0, :created_at "
+                "WHERE NOT EXISTS (SELECT 1 FROM task_chat_links WHERE task_id = :task_id AND chat_gateway = "
+                ":chat_gateway AND COALESCE(chat_profile, 'default') = :chat_profile AND chat_session = :chat_session)",
+                link).rowcount
         for uid in placeholders - set(want):
             conn.execute("DELETE FROM task_chat_links WHERE uid = ?", (uid,))
             have.pop(uid)
