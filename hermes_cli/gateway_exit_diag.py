@@ -19,8 +19,9 @@ from datetime import UTC, datetime
 # non-zero return is a warning; only an escaped exception or a failing SystemExit is an error.
 # [daveey] gateway.launchd_budget_missing: a darwin --external-supervisor gateway could not read launchd's live
 # ExitTimeOut and assumed the gui clamp (gateway-cc28b19bca); the coach files it as a defect.
+# gateway.post_tail_bound: shutdown ran past a core update's exit target and the bound took the exit.
 _TAG_LEVELS = {"asyncio.run.exception": "error", "gateway.exit_nonzero": "warning",
-               "gateway.launchd_budget_missing": "warning"}
+               "gateway.launchd_budget_missing": "warning", "gateway.post_tail_bound": "warning"}
 
 
 def _record_level(tag: str, extra: dict[str, object]) -> str:

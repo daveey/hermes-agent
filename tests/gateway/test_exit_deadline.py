@@ -37,6 +37,7 @@ _CHILD = textwrap.dedent(
     from gateway.lifecycle_ledger import record_startup
 
     BLOCK_EXECUTOR = {block_executor!r}
+    EXIT_TARGET_S = {exit_target_s!r}  # a core update checkpoint's exit target, set at the stop
 
     class Runner:
         _signal_initiated_shutdown = False
@@ -77,6 +78,9 @@ _CHILD = textwrap.dedent(
             loop.run_in_executor(None, time.sleep, 60)
         print("READY", flush=True)
         await runner.wait_for_shutdown()
+        if EXIT_TARGET_S is not None:
+            gr.exit_deadline.POST_TAIL_GRACE_S = 0.5
+            gr.exit_deadline.set_exit_target(time.monotonic() + EXIT_TARGET_S, "test checkpoint")
         return await gr._start_gateway_shutdown_tail(
             runner, None, cron_stop, None, cron_thread, housekeeping, pw_stop, pw_thread, sig)
 
@@ -91,11 +95,12 @@ _CHILD = textwrap.dedent(
 )
 
 
-def _spawn(tmp_path: Path, *, block_executor: bool) -> tuple[subprocess.Popen, Path]:
+def _spawn(tmp_path: Path, *, block_executor: bool,
+           exit_target_s: float | None = None) -> tuple[subprocess.Popen, Path]:
     home = tmp_path / "home"
     (home / "logs").mkdir(parents=True)
     script = tmp_path / "child.py"
-    script.write_text(_CHILD.format(repo=str(REPO), block_executor=block_executor))
+    script.write_text(_CHILD.format(repo=str(REPO), block_executor=block_executor, exit_target_s=exit_target_s))
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST")}
     env.pop("INVOCATION_ID", None)  # never read the real unit's TimeoutStopSec
     env.update(HERMES_HOME=str(home), HERMES_GATEWAY_EXIT_BUDGET_S=str(_BUDGET_S),
@@ -167,6 +172,24 @@ def test_slow_cron_wait_is_clamped_and_exit_stays_graceful(tmp_path):
     ledger = _ledger(home)
     assert ledger["exit_reason"] == "graceful_shutdown"
     assert not [r for r in _exit_diag(home) if r.get("tag") == "gateway.exit_deadline"]
+
+
+def test_post_tail_bound_exit_leaves_an_exit_diag_record(tmp_path):
+    """A core update's exit target set, then a wedged executor join after the tail: the post-tail bound
+    takes the exit (graceful, before the hard deadline) and, since that exit skips the caller's own
+    asyncio.run.returned / exit_clean records, writes a gateway.post_tail_bound exit-diag record."""
+    proc, home = _spawn(tmp_path, block_executor=True, exit_target_s=0.2)
+    elapsed = _stop_and_time(proc)
+    assert elapsed < _EXIT_WITHIN_S, f"gateway still alive {elapsed:.1f}s after SIGTERM (budget {_BUDGET_S}s)"
+    assert _ledger(home)["exit_reason"] == "graceful_shutdown"
+    records = _exit_diag(home)
+    assert not [r for r in records if r.get("tag") == "gateway.exit_deadline"]
+    bound = [r for r in records if r.get("tag") == "gateway.post_tail_bound"]
+    assert bound, records
+    assert bound[0]["exit_code"] == proc.returncode
+    assert bound[0]["level"] == "warning"
+    assert bound[0]["target_reason"] == "test checkpoint"
+    assert "tail_done" in bound[0]["phases"]
 
 
 def test_routing_save_uses_short_patience_while_exiting(tmp_path, monkeypatch):
