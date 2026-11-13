@@ -126,3 +126,62 @@ def test_operator_delivery_schema_is_the_validators_strict_shape():
         assert props[key]["type"] == "string" and props[key]["minLength"] == 1 and limit < 2000
         assert _admits({**_DELIVERY, key: "x" * limit}) and not _admits({**_DELIVERY, key: "x" * (limit + 1)})
         assert not _admits({**_DELIVERY, key: ""})
+
+
+def _text_field_schemas():
+    """(path, schema) of every receipt string field whose writer check is ``_text``."""
+    item = _receipt_schema()["properties"]["items"]["items"]["properties"]
+    evidence = _evidence_schema()["properties"]
+    remaining = item["remaining"]["items"]["properties"]
+    delivery = evidence["operator_delivery"]["properties"]
+    fields = {"scope": item["scope"], "superseded_by": item["superseded_by"], "evidence.ref": evidence["ref"],
+              "evidence.observed_at": evidence["observed_at"], "remaining.scope": remaining["scope"],
+              "remaining.owner": remaining["owner"], "remaining.reason": remaining["reason"]}
+    fields.update({f"operator_delivery.{key}": schema for key, schema in delivery.items() if key != "comment_id"})
+    return fields
+
+
+def test_text_fields_advertise_the_writers_nonblank_no_control_rule():
+    # PR #2015 review nit: minLength:1 alone lets a strictly validating client build `board: " "` or a ref with a
+    # control character, which _text refuses at write time. Every _text field must refuse them in the schema too.
+    from jsonschema.validators import Draft202012Validator
+
+    fields = _text_field_schemas()
+    assert len(fields) == 16
+    refused = [" ", "   ", "\t\n", "\u3000", "\u00a0", "ok\x00", "ok\x1b[0m", "a\rb", "\x0b"]
+    for path, schema in fields.items():
+        check = Draft202012Validator(schema)
+        for value in refused:
+            assert not check.is_valid(value), (path, value)
+    for path, schema in fields.items():
+        if path.startswith("operator_delivery.") or path in ("evidence.observed_at", "remaining.owner"):
+            continue  # their own length/format bounds; the shared pattern is still asserted below
+        check = Draft202012Validator(schema)
+        for value in ("x", " padded\tline\none ", "caf\u00e9 \u2014 \U0001f600", "a\x7fb"):
+            assert check.is_valid(value), (path, value)
+    for path, schema in fields.items():
+        assert schema.get("pattern") == (
+            "^[0-9a-f]{64}$" if path == "operator_delivery.content_sha256" else hcr.TEXT_PATTERN), path
+
+
+def test_text_pattern_is_exactly_the_writers_text_rule():
+    # _text reads the same constant; prove it still means "no C0 control but tab/newline, not all str.isspace()"
+    # for every BMP character, alone and padded, so the advertised pattern is the writer's real rule.
+    import re
+
+    rule = re.compile(hcr.TEXT_PATTERN)
+    for code in range(0x10000):
+        c = chr(code)
+        control = code < 32 and c not in "\n\t"
+        assert bool(rule.fullmatch(c)) == (not control and not c.isspace()), hex(code)
+        assert bool(rule.fullmatch(f" {c}\t")) == (not control and not c.isspace()), hex(code)
+        assert bool(rule.fullmatch(f"x{c}")) == (not control), hex(code)
+    for value, why in ((" ", "nonempty text"), ("\u3000", "nonempty text"), ("ok\x01", "control characters"),
+                       ("\n\t", "nonempty text")):
+        try:
+            hcr._text(value, "f")
+        except ValueError as exc:
+            assert why in str(exc), (value, exc)
+            continue
+        raise AssertionError(f"_text admitted {value!r}")
+    assert hcr._text("a\tb\nc", "f") == "a\tb\nc"

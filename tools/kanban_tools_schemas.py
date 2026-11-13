@@ -103,7 +103,8 @@ KANBAN_LIST_SCHEMA = _schema(
 
 def _operator_delivery_schema() -> dict[str, Any]:
     """evidence.operator_delivery as the validator admits it: exactly hcr.OPERATOR_DELIVERY_FIELDS."""
-    text = {"type": "string", "minLength": 1, "maxLength": hcr.OPERATOR_DELIVERY_TEXT_MAX}
+    text = {"type": "string", "minLength": 1, "maxLength": hcr.OPERATOR_DELIVERY_TEXT_MAX,
+            "pattern": hcr.TEXT_PATTERN}
     special = {"comment_id": {"type": "integer", "minimum": 1},
                "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
     return {
@@ -125,8 +126,8 @@ def _completion_receipt_schema() -> dict[str, Any]:
                        "reason": "not in this card's scope"}]}]}
     # No maxLength: llama.cpp's grammar converter rejects any bound >= 2000 (MAX_TEXT, MAX_REF) and refuses the
     # whole request; the card writer enforces the caps, and the description states them.
-    text = {"type": "string", "minLength": 1}
-    ref = {"type": "string", "minLength": 1}
+    text = {"type": "string", "minLength": 1, "pattern": hcr.TEXT_PATTERN}
+    ref = {"type": "string", "minLength": 1, "pattern": hcr.TEXT_PATTERN}
     return {
         "type": "object", "additionalProperties": False, "required": ["version", "items"],
         "description": (
@@ -156,7 +157,8 @@ def _completion_receipt_schema() -> dict[str, Any]:
                         "required": ["ref", "observed_at", "verification"],
                         "properties": {
                             "ref": ref,
-                            "observed_at": {"type": "string", "maxLength": 64, "description": (
+                            "observed_at": {"type": "string", "maxLength": 64, "pattern": hcr.TEXT_PATTERN,
+                                            "description": (
                                 "ISO-8601 with timezone, e.g. 2026-11-13T06:40:00+00:00")},
                             "verification": {"type": "string", "enum": list(hcr.VERIFICATIONS)},
                             "operator_delivery": _operator_delivery_schema(),
@@ -167,7 +169,7 @@ def _completion_receipt_schema() -> dict[str, Any]:
                         "properties": {
                             "scope": text,
                             "state": {"type": "string", "enum": ["pending", "deferred"]},
-                            "owner": {"type": ["string", "null"]},
+                            "owner": {"type": ["string", "null"], "pattern": hcr.TEXT_PATTERN},
                             "reason": text,
                         }}},
                 }}},

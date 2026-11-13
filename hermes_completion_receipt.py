@@ -25,6 +25,14 @@ OPERATOR_DELIVERY_FIELDS: tuple[str, ...] = (
     "request_uid", "target_task_id", "board", "caller_task_id", "caller_run_uid",
     "caller_gateway", "executor_gateway", "comment_id", "content_sha256", "result_event_uid")
 OPERATOR_DELIVERY_TEXT_MAX = 128
+# Every _text field: no C0 control but tab/newline, and not all str.isspace() (what strip() removes). One regex both
+# _text and the advertised JSON-schema `pattern` (tools/kanban_tools_schemas.py) read, so they cannot drift; anchors,
+# character classes and \x/\u escapes only, valid in Python re, ECMA-262 and llama.cpp's grammar converter.
+_CONTROL = "\\x00-\\x08\\x0b-\\x1f"
+_BLANK = "\\t\\n\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"  # isspace() minus _CONTROL
+TEXT_PATTERN = f"^[^{_CONTROL}]*[^{_CONTROL}{_BLANK}][^{_CONTROL}]*$"
+_TEXT = re.compile(TEXT_PATTERN)
+_CONTROL_CHAR = re.compile(f"[{_CONTROL}]")
 _QUALIFIED_OWNER = re.compile(r"@(task|session):[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+/[^\s/@]+\Z")
 
 
@@ -35,11 +43,11 @@ def _object(value: Any, required: set[str], optional: set[str] | None = None) ->
 
 
 def _text(value: Any, name: str, limit: int = MAX_TEXT) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > limit:
-        raise ValueError(f"completion_receipt: {name} needs nonempty text of at most {limit} characters")
-    if any(ord(c) < 32 and c not in "\n\t" for c in value):
+    if isinstance(value, str) and len(value) <= limit and _TEXT.fullmatch(value):
+        return value
+    if isinstance(value, str) and _CONTROL_CHAR.search(value):
         raise ValueError(f"completion_receipt: {name} contains control characters")
-    return value
+    raise ValueError(f"completion_receipt: {name} needs nonempty text of at most {limit} characters")
 
 
 def _enum(value: Any, choices: tuple[str, ...], name: str) -> str:
