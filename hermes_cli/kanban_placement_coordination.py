@@ -119,7 +119,9 @@ def _ends_word(text, start, end) -> bool:
     (both resolve to ``~/.hermes``) keep pinning."""
     q = text[start - 1] if start and text[start - 1] in _QUOTES else ""
     if q and start >= 2 and not text[start - 2].isspace():
-        q = ""
+        # A quote glued to something else (``--file="``, ``x''``) cannot be shown to be a closing one, and as an
+        # opening one its word runs on past whitespace (review 5893721470 nit): keep the path.
+        return False
     i = end
     if q:
         # An opening quote must close right here: whitespace inside the quoted word (``"~/.hermes/logs/a b/../.env"``)
@@ -174,10 +176,17 @@ def without_read_paths(text, cfg, *, target=None, requires=None):
 # A standalone ``..`` path segment anywhere (``cd ~/.hermes/logs && cat ../.env``) can walk out of a root that
 # per-token stripping already cleared, so such text keeps every path (review 5892779312).
 _DOTDOT = re.compile(r"(?<![\w.~-])\.\.(?![\w.~-])")
+# A ``..`` need not be literal (review 5893721470 nit): quotes and backslashes join dots (``.\.``, ``.''.``), and
+# command or parameter expansion computes one (``$(dirname "$PWD")``, ``$(printf "\56\56")``, ``${D%logs/}``). So
+# text with any of these keeps every path, as does a directory change other than into a plain absolute path outside
+# ``~/.hermes`` (``cd ~/.hermes/logs`` then ``cd -``, ``popd`` or a relative path walks out of a root).
+_SPLIT = re.compile(r"[\\'\"`]")
+_EXPANSION = re.compile(r"\$[({'\"]")
+_CHDIR = re.compile(r"(?<![\w.-])(?:cd|pushd|popd)(?![\w.-])(?![ \t]+(?:~|/)(?![^\s;&|]*\.hermes)[\w./-]*(?=$|[\s;&|)]))")
 
 
 def _strip_read_paths(text, roots):
-    if _DOTDOT.search(text):
+    if _DOTDOT.search(text) or _DOTDOT.search(_SPLIT.sub("", text)) or _EXPANSION.search(text) or _CHDIR.search(text):
         return text
     # Keep a separator so surrounding backtick runs cannot merge and hide later markers.
     return _STATE_PATH.sub(

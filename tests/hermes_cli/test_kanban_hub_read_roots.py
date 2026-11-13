@@ -45,6 +45,9 @@ def test_declared_read_step_is_portable(attested):
     'ssh hermes-hub cat "~/.hermes/logs/x.log"',
     "ssh hermes-hub tail '~/.hermes/logs/x.log'.",
     "(evidence: ssh hermes-hub cat ~/.hermes/logs/x.log)",
+    # Guards for review 5893721470 leave plain reads alone: an unquoted option value, a cd outside ~/.hermes.
+    "ssh hermes-hub grep --file=~/.hermes/logs/pat.txt ~/.hermes/logs/x.log",
+    "ssh hermes-hub cat ~/.hermes/logs/x.log, then cd /tmp && ls",
 ])
 def test_other_hub_read_shapes_are_portable(attested, body):
     cfg, _, _ = attested
@@ -131,6 +134,20 @@ def test_malformed_roots_clear_nothing(attested, roots):
     # A relative ``..`` after a cd into a root walks out of it (review 5892779312 nit).
     "cd ~/.hermes/logs && cat ../.env",
     "cd ~/.hermes/logs; chmod -R 777 ../state",
+    # A traversal written without a literal ``..`` (review 5893721470 nit): a quote glued to a non-space before the
+    # prefix may be the opening one, quote/backslash-split dots are still ``..``, and a cd into a root lets any
+    # relative or computed path walk out of it.
+    'cat --file="/home/ubuntu/.hermes/logs/a b/$(printf "\\56\\56")/auth.json"',
+    'cat --file="~/.hermes/logs/a b/$(printf "\\56\\56")/auth.json"',
+    "cat x''/home/ubuntu/.hermes/logs/' b/'.''.'/'.''.'/state.db'",
+    "cd ~/.hermes/logs && cd .\\. && cat auth.json",
+    "cd ~/.hermes/logs && cd .''. && cat auth.json",
+    'cd ~/.hermes/logs && cd "$(dirname "$PWD")" && cat .env',
+    "cd ~/.hermes/logs && cd - && cat .env",
+    "pushd ~/.hermes/logs && popd && cat .env",
+    "echo 'a '/home/ubuntu/.hermes/logs/' b/'.''.'/'.''.'/state.db'",
+    "cat ~/.hermes/logs/x; D=~/.hermes/logs/; cat ${D%logs/}.env",
+    "D=$(dirname ~/.hermes/logs/x); cat $(dirname $D)/.env",
 ])
 def test_controls_still_pin(attested, body):
     cfg, _, _ = attested
