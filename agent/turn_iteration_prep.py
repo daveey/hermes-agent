@@ -352,12 +352,15 @@ class IterationStart:
 
 def _step_boundary_pause(agent: Any, messages: Any, api_call_count: Any) -> Any:
     """The installed pause hook's reason, consulted only at a real step boundary: at least one model
-    call ran this turn and the transcript ends on a tool result. A failing hook never pauses."""
+    call ran this turn and the transcript ends on a tool result. A failing hook never pauses. [daveey]
+    t_01a1d31bf400d56c: a continuation's first iteration counts too, before its first request is spent."""
     hook = getattr(agent, "step_boundary_pause", None)
-    if not callable(hook) or not api_call_count or not messages:
+    if not callable(hook) or not messages:
         return None
-    last = messages[-1]
-    if not isinstance(last, dict) or last.get("role") != "tool":
+    if not api_call_count:
+        if not update_pause_cancel.first_request_can_pause(agent):
+            return None
+    elif not isinstance(messages[-1], dict) or messages[-1].get("role") != "tool":
         return None
     try:
         return hook() or None

@@ -128,6 +128,59 @@ def test_cli_mute_unmute_and_outcome(homes, capsys):
     assert run_cli("mute", "missing") == 1
 
 
+def test_stripe_report_is_kept_and_read_back_by_the_cli(client, homes, capsys):
+    """t_01a1d3142a47913f: the Desktop's reason for a red row reaches the session's gateway, which keeps it
+    (JSONL + log line) where the agent can read it with ``hermes sessions outcome``."""
+    from hermes_cli import desktop_stripe_report
+
+    seed(homes["default"])
+    run_cli("outcome", "chat")
+    assert "Desktop stripe" not in capsys.readouterr().out  # no report yet: the line stays as before
+
+    resp = client.post("/api/sessions/chat/stripe-report",
+                       json={"stripe": "stuck", "previous": "done", "reasons": ["needs-input:prompt runtime=old1"]})
+    assert resp.status_code == 200 and resp.json()["report"]["stripe"] == "stuck"
+    path = desktop_stripe_report.report_path(homes["default"])
+    assert json.loads(path.read_text().splitlines()[-1])["reasons"] == ["needs-input:prompt runtime=old1"]
+
+    run_cli("outcome", "chat")
+    out = capsys.readouterr().out
+    assert "Desktop stripe stuck since" in out and "needs-input:prompt runtime=old1" in out
+    run_cli("outcome", "chat", "--json")
+    assert json.loads(capsys.readouterr().out)["desktop_stripe"]["previous"] == "done"
+
+    client.post("/api/sessions/chat/stripe-report", json={"stripe": None, "previous": "stuck", "reasons": []})
+    run_cli("outcome", "chat", "--json")
+    assert json.loads(capsys.readouterr().out)["desktop_stripe"]["stripe"] == "none"
+
+
+def test_stripe_report_routes_to_the_owning_profile_and_ignores_other_sessions(client, homes):
+    from hermes_cli import desktop_stripe_report
+
+    seed(homes["worker_beta"], "worker-chat")
+    resp = client.post("/api/sessions/worker-chat/stripe-report",
+                       json={"stripe": "stuck", "reasons": ["stalled"], "profile": "worker_beta"})
+    assert resp.status_code == 200
+    assert desktop_stripe_report.latest(homes["worker_beta"], ["worker-chat"])["reasons"] == ["stalled"]
+    assert desktop_stripe_report.latest(homes["default"], ["worker-chat"]) is None
+    assert desktop_stripe_report.latest(homes["worker_beta"], ["other"]) is None
+
+
+def test_stripe_report_file_is_capped_and_reasons_bounded(tmp_path, monkeypatch):
+    from hermes_cli import desktop_stripe_report as dsr
+
+    monkeypatch.setattr(dsr, "MAX_BYTES", 600)
+    for i in range(12):
+        dsr.record(tmp_path, f"s{i}", "stuck", [f"r{i}"] * 40 + ["x" * 999], now=1000.0 + i)
+    path = dsr.report_path(tmp_path)
+    assert path.stat().st_size <= 600 and path.with_name(dsr.FILE_NAME + ".1").exists()
+    last = dsr.latest(tmp_path, ["s11"])
+    assert len(last["reasons"]) == dsr.MAX_REASONS and last["stripe"] == "stuck"
+    assert dsr.latest(tmp_path, ["s10"])["session_id"] == "s10"  # still readable from the rotated file
+    assert dsr.record(tmp_path, "s", "bogus", [])["stripe"] == "unknown"
+    assert dsr.describe(None) == "no Desktop stripe report"
+
+
 def test_cli_outcome_audit_lists_exactly_the_sidebar_rows(homes, capsys):
     (homes["default"] / "config.yaml").write_text("sessions:\n  interactive_sources: [desktop]\n", encoding="utf-8")
     seed(homes["default"], "done-chat")

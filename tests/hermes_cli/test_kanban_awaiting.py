@@ -415,6 +415,52 @@ def test_escalation_goes_to_a_capable_supervisor(kanban_home, monkeypatch) -> No
         assert (card.assignee, card.status) == ("boss", "ready")
 
 
+# PR #1806 (t_01a1d19e0179a093): red CI -> fix -> new head -> park again, three rounds on one PR URL with no
+# per-head ``why``. Each park named its head only in the wake_check, so all three hashed to one premise and
+# the third fix round escalated. The head SHA is part of a ci/deploy premise; a stuck head still escalates.
+CI_PR = "https://github.com/softmax-universe/daveey-hermes/pull/1806"
+CI_HEADS = ("b07a0bd43d" + "1" * 30, "efeeea0fe5" + "2" * 30, "06d1730d94" + "3" * 30)
+
+
+def _ci_parks(conn, monkeypatch, heads, kind="ci"):
+    tid = _running(conn)
+    return [_repark(conn, monkeypatch, tid, "schedule", {
+        "reason": f"waiting for required checks, round {n}",
+        "wake_check": f"gh api repos/softmax-universe/daveey-hermes/commits/{head}/check-runs | grep -q completed",
+        "awaiting": {"kind": kind, "ref": CI_PR}}) for n, head in enumerate(heads)]
+
+
+@pytest.mark.parametrize("kind", ["ci", "deploy"])
+def test_ci_parks_on_new_heads_are_new_premises(kanban_home, monkeypatch, kind) -> None:
+    with kbc.connect_closing() as conn:
+        outs = _ci_parks(conn, monkeypatch, CI_HEADS, kind)
+        assert [o.get("status") for o in outs] == ["scheduled"] * 3, outs
+
+
+@pytest.mark.parametrize("kind", ["ci", "deploy"])
+def test_ci_parks_on_one_head_still_escalate(kanban_home, monkeypatch, kind) -> None:
+    with kbc.connect_closing() as conn:
+        outs = _ci_parks(conn, monkeypatch, (CI_HEADS[0],) * 2 + (CI_HEADS[0].upper(),), kind)
+        assert [o.get("status") for o in outs[:2]] == ["scheduled", "scheduled"], outs
+        assert outs[2].get("code") == kaw.ESCALATED_EVENT and outs[2].get("status") == "todo", outs[2]
+
+
+def test_ci_premise_hashes_heads_only_for_run_kinds() -> None:
+    head = CI_HEADS[0]
+    probe = f"wait_for_ci.py {head} --once"
+    for kind in ("ci", "deploy"):
+        aw = {"kind": kind, "ref": CI_PR}
+        assert kaw.premise_hash(aw, "r", probe) != kaw.premise_hash(aw, "r", probe.replace(head, CI_HEADS[1]))
+        ref_aw = {"kind": kind, "ref": f"run for {head}"}
+        assert kaw.premise_hash(ref_aw, "r") == kaw.premise_hash(ref_aw, "r", f"probe {head.upper()}")
+        assert kaw.premise_hash(ref_aw, "r") != kaw.premise_hash(ref_aw, "r", f"probe {CI_HEADS[1]}")
+        # No full SHA (short ones are not heads): the premise is unchanged from before.
+        assert kaw.premise_hash(aw, "r", "wait_for_ci.py b07a0bd43d") == kaw.premise_hash(aw, "r")
+    for aw in ({"kind": "external", "ref": CI_PR}, {"kind": kaw.RESOURCE, "ref": "pool"},
+               {"kind": "ci", "ref": CI_PR, "inferred": True}):
+        assert kaw.premise_hash(aw, "r", probe) == kaw.premise_hash(aw, "r", probe.replace(head, CI_HEADS[1]))
+
+
 def _repark(conn, monkeypatch, tid, name, args):
     _as_worker(monkeypatch, conn, tid)
     out = _tool(name, args)

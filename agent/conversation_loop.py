@@ -40,7 +40,7 @@ from hermes_cli.observability.shared_metrics_efficiency import record_cache_brea
 from hermes_cli.plugins_dispatch import held_stream_transforms
 from agent.turn_retry_state import TurnRetryState
 from agent.turn_scripted_prelude import Prelude, play_prelude
-from agent.update_pause_cancel import reset as update_pause_cancel_reset
+from agent.update_pause_cancel import pause_before_turn, reset as update_pause_cancel_reset
 # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
 # skewed phase mid-turn.
 from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, perform_api_call
@@ -1846,6 +1846,8 @@ def run_conversation(
     update_pause_cancel_reset(agent)  # [daveey] and its mid-tool cancel (agent/update_pause_cancel.py)
     # Per-provider-response context accounting starts empty every turn (agent/context_usage.py).
     begin_turn_context_usage(agent)
+    if (paused := pause_before_turn(agent, conversation_history)) is not None:  # [daveey] t_01a1d31bf400d56c
+        return paused  # a continuation dispatched under a pending core-update pause never starts
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):

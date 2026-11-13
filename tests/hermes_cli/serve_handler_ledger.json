@@ -323,6 +323,7 @@
   {"current_path": "hermes_cli.web_routers.sessions:prune_sessions_endpoint", "decision": "undecided", "handler": "POST /api/sessions/prune", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.sessions:stop_session_background_process", "decision": "undecided", "handler": "POST /api/sessions/{session_id}/background-processes/{process_id}/stop", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.sessions:mute_session_endpoint", "decision": "undecided", "handler": "POST /api/sessions/{session_id}/mute", "kind": "http", "ref": ""},
+  {"current_path": "hermes_cli.web_routers.sessions:stripe_report_endpoint", "decision": "undecided", "handler": "POST /api/sessions/{session_id}/stripe-report", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.skills:create_skill", "decision": "undecided", "handler": "POST /api/skills", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.skills:install_skill_hub", "decision": "undecided", "handler": "POST /api/skills/hub/install", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.skills:uninstall_skill_hub", "decision": "undecided", "handler": "POST /api/skills/hub/uninstall", "kind": "http", "ref": ""},

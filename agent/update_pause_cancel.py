@@ -131,12 +131,16 @@ def _yield_requested(agent: Any, call_id: str) -> bool:
 MODEL_CALL_ID = "model-request"
 
 
-def model_request_can_yield(messages: Any, *, api_call_count: int) -> bool:
+def model_request_can_yield(messages: Any, *, api_call_count: int, first_request_ok: bool = False) -> bool:
     """The request about to run sits at a step boundary: an earlier model call ran this turn
     (``api_call_count`` already counts this one, begin_iteration reserved it) and the transcript ends on a tool
-    result, so a pause landing here loses nothing but this request (``_step_boundary_pause``'s precondition)."""
-    if api_call_count - 1 <= 0 or not isinstance(messages, list) or not messages:
+    result, so a pause landing here loses nothing but this request (``_step_boundary_pause``'s precondition).
+    [daveey] t_01a1d31bf400d56c: ``first_request_ok`` (a continuation, ``first_request_can_pause``) makes its first
+    request yield too: the refunded iteration then pauses before any request (begin_iteration)."""
+    if not isinstance(messages, list) or not messages:
         return False
+    if api_call_count - 1 <= 0:
+        return first_request_ok and api_call_count == 1
     last = messages[-1]
     return isinstance(last, dict) and last.get("role") == "tool"
 
@@ -147,7 +151,8 @@ def model_request_in_flight(agent: Any, messages: Any, *, api_call_count: int) -
     watcher's cancel reaches it after the same grace. Without this a long request (169 s on the hub) held the
     turn's admission reservation unpublished past the instant update's cap: a pause lands only at a step boundary.
     The turn's first request (no tool result yet) is not tracked: there is no boundary to pause at."""
-    tracked = model_request_can_yield(messages, api_call_count=api_call_count)
+    tracked = model_request_can_yield(messages, api_call_count=api_call_count,
+                                      first_request_ok=first_request_can_pause(agent))
     if tracked:
         started(agent, MODEL_CALL_ID)
     try:
@@ -155,6 +160,35 @@ def model_request_in_flight(agent: Any, messages: Any, *, api_call_count: int) -
     finally:
         if tracked:
             finished(agent, MODEL_CALL_ID)
+
+
+# [daveey] t_01a1d31bf400d56c: set by the Desktop/TUI gateway for the turn of a continuation (kind ``auto_continue``)
+# only. Until its first model request such a turn has done nothing its next continuation would not redo, so a
+# pending pause may end it there too: a step boundary it would otherwise reach only after a whole first step
+# (setup hooks, a first request, a first tool: 203 s on the hub while the update stayed due).
+FIRST_REQUEST_ATTR = "update_pause_first_request"
+
+
+def first_request_can_pause(agent: Any) -> bool:
+    """The gateway marked this turn a continuation (a literal True: a mock's auto-attribute is no mark)."""
+    return getattr(agent, FIRST_REQUEST_ATTR, False) is True
+
+
+def pause_before_turn(agent: Any, conversation_history: Any) -> dict | None:
+    """The result of a continuation that yields to an already-pending pause before its turn starts: no request,
+    nothing persisted, the transcript unchanged (the next continuation sends the same note). None otherwise."""
+    hook = getattr(agent, "step_boundary_pause", None)
+    if not first_request_can_pause(agent) or not callable(hook):
+        return None
+    try:
+        reason = hook() or None
+    except Exception:  # health: allow BLE001 -- a failing pause hook never pauses (as _step_boundary_pause)
+        return None
+    if not reason:
+        return None
+    return {"final_response": "", "messages": list(conversation_history or []), "api_calls": 0,
+            "completed": False, "interrupted": True, "paused_for_update": reason,
+            "turn_exit_reason": f"paused_for_update({reason})"}
 
 
 def model_yield_requested(agent: Any) -> bool:

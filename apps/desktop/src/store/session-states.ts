@@ -95,6 +95,13 @@ import {
   type SessionOwnerScope,
   type SessionProfileRoute
 } from './session-request-router'
+import {
+  liveTurnLastActiveMs,
+  type LiveTurnStatusResponse,
+  type LiveTurnVerdict,
+  liveTurnVerdict
+} from './session-states-live-turn'
+import { supersededPromptRuntimes } from './session-states-superseded-prompts'
 import { orderTilesByTree } from './session-tile-order'
 import { ackStoredSessionId, isMessagingCompletion, markSessionUnreadFinished } from './session-unread'
 import { migrateTranscriptTailsForProfile } from './transcript-tail-cache'
@@ -395,43 +402,7 @@ export function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined):
   return Boolean(state && (state.busy || state.awaitingResponse || state.turnLive) && !state.needsInput)
 }
 
-export type LiveTurnVerdict = 'ended' | 'running' | 'unknown'
-
-interface LiveTurnStatusResponse {
-  sessions?: { id?: string; last_active?: number | null; status?: string }[]
-}
-
-/** What one `session.active_list` snapshot says about `runtimeId`'s turn. A
- *  runtime missing from a well-formed list has been reaped: its turn is over.
- *  `starting` is an agent build for a turn the backend accepted. */
-export function liveTurnVerdict(
-  response: LiveTurnStatusResponse | null | undefined,
-  runtimeId: string
-): LiveTurnVerdict {
-  if (!Array.isArray(response?.sessions)) {
-    return 'unknown'
-  }
-
-  const status = response.sessions.find(session => session.id?.trim() === runtimeId)?.status
-
-  if (status === undefined || status === 'idle') {
-    return 'ended'
-  }
-
-  return status === 'starting' || status === 'waiting' || status === 'working' ? 'running' : 'unknown'
-}
-
-/** [daveey] When `runtimeId`'s turn last did anything, per the backend (ms), or
- *  null when the snapshot doesn't say (older backend, runtime absent). */
-export function liveTurnLastActiveMs(
-  response: LiveTurnStatusResponse | null | undefined,
-  runtimeId: string
-): null | number {
-  const lastActive = response?.sessions?.find(session => session.id?.trim() === runtimeId)?.last_active
-  const ms = Number(lastActive) * 1000
-
-  return lastActive != null && Number.isFinite(ms) && ms > 0 ? ms : null
-}
+export { liveTurnLastActiveMs, type LiveTurnVerdict, liveTurnVerdict } from './session-states-live-turn'
 
 /** [daveey] The backend's activity decides the quiet hint for a running turn.
  *  The renderer watchdog only measures events reaching THIS window, and a turn
@@ -932,6 +903,11 @@ export function publishSessionState(runtimeId: string, state: ClientSessionState
 
   $sessionStates.set({ ...current, [runtimeId]: state })
   handleTransition(prev, state, runtimeId)
+
+  // [daveey] A turn on a new runtime retires a dead runtime's prompt (selfheal desktop-54ae373894).
+  for (const otherId of supersededPromptRuntimes($sessionStates.get(), runtimeId, state)) {
+    publishSessionState(otherId, { ...$sessionStates.get()[otherId], needsInput: false })
+  }
 }
 
 /** Keep the cheap status projection for a cold session while releasing its
