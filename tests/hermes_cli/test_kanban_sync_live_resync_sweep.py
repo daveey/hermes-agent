@@ -119,7 +119,7 @@ def test_the_sweep_skips_rows_held_by_the_outbox_a_tombstone_or_written_after_th
         live.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (int(time.time()) + 60, fresh))
         live.execute("UPDATE kanban_sync_state SET applying = 0")
     assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE row_uid = ?", (fresh,)).fetchone()
-    swept = sweep.sweep_absent(live, {t: set() for t in ksc.IMPORT_ORDER}, BOARD, ME, since=int(time.time()))
+    swept = sweep.sweep_absent(live, {t: set() for t in ksc.IMPORT_ORDER}, BOARD, ME, since=int(time.time()) + 1)
     assert swept.get("tasks") == 1
     assert _ids(live) == {held, stone, fresh}
     assert absent not in _ids(live)
@@ -213,11 +213,13 @@ def test_a_child_row_of_a_card_with_an_outbox_op_is_not_swept(live, svc, state):
 def test_a_child_row_written_after_the_rebuild_began_is_not_swept(live, svc):
     card = _acked_card(live, "card with comments around the rebuild start")
     since = int(time.time()) - 600
-    _acked_child(live, "task_comments", card, "c-before", since)
+    _acked_child(live, "task_comments", card, "c-before", since - 1)
+    _acked_child(live, "task_comments", card, "c-same", since)
     _acked_child(live, "task_comments", card, "c-after", since + 1)
     sweep.sweep_absent(live, _seen_cards(card), BOARD, ME, since=since)
     comments = _ids(live, "task_comments", "uid")
     assert "c-after" in comments  # written after the rebuild began: the snapshot could not hold it
+    assert "c-same" in comments  # the rebuild's first second: it may postdate held_at_start, so it is spared
     assert "c-before" not in comments
 
 
@@ -268,3 +270,63 @@ def test_a_row_whose_outbox_op_is_acked_during_the_rebuild_is_not_swept(live, sv
     assert new in _ids(live)  # RED before: absent from the tasks snapshot, op acked before the sweep: deleted
     assert (parent, child) in {tuple(r) for r in live.execute("SELECT parent_id, child_id FROM task_links")}
     assert not live.execute("SELECT 1 FROM kanban_sync_tombstones").fetchone()
+
+
+class LinkedMidRebuild(FakeHub):
+    """After ``held_at_start`` and after the ``task_links`` snapshot was read to its end, a link is written locally
+    and a concurrent ``reconcile`` (no round lock) pushes it from another connection: the Board acks and holds it."""
+
+    def __init__(self, svc, gateway, path, parent, child):
+        super().__init__(svc, gateway)
+        self._path, self._link, self._done = path, (parent, child), False
+
+    def snapshot_page(self, board, table, after="", limit=1000):
+        if table == "task_runs" and not self._done:
+            self._done = True
+            other = kbc.connect(self._path)
+            try:
+                kb.link_tasks(other, *self._link)
+                ksc.push(other, FakeHub(self.svc, ME), board, ME, primary=True)
+            finally:
+                other.close()
+        return super().snapshot_page(board, table, after, limit)
+
+
+def test_a_link_written_and_acked_after_the_links_snapshot_is_not_swept(live, svc, kanban_home):
+    parent = kb.create_task(live, title="parent on the Board")
+    child = kb.create_task(live, title="child on the Board")
+    assert _round(kanban_home, svc.hub(ME)).error is None
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox").fetchone()  # nothing held at the rebuild's start
+    link = f"{parent}>{child}"
+
+    swept = sweep.resync_live(live, LinkedMidRebuild(svc, ME, kanban_home / "kanban.db", parent, child), BOARD, ME)
+
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox").fetchone()  # the concurrent push acked the link
+    assert link in svc.board(BOARD)["rows"]["task_links"]
+    assert "task_links" not in swept
+    # RED before: no op, no creation time, absent from the links snapshot: deleted and tombstoned
+    assert (parent, child) in {tuple(r) for r in live.execute("SELECT parent_id, child_id FROM task_links")}
+    assert not live.execute("SELECT 1 FROM kanban_sync_tombstones").fetchone()
+
+
+def test_a_link_in_the_file_when_the_rebuild_began_is_still_swept(live, svc):
+    parent = kb.create_task(live, title="parent")
+    child = kb.create_task(live, title="child")
+    kb.link_tasks(live, parent, child)
+    with kbc.write_txn(live):  # the backdate is a local write too: clear the outbox after it
+        live.execute("UPDATE tasks SET created_at = created_at - 60")
+        live.execute("DELETE FROM kanban_sync_outbox")
+    held = sweep.held_at_start(live)
+    assert held.links == {f"{parent}>{child}"}
+    seen = {t: set() for t in ksc.IMPORT_ORDER} | {"tasks": {parent, child}}
+    assert sweep.sweep_absent(live, seen, BOARD, ME, since=int(time.time()), held=held) == {"task_links": 1}
+    assert not live.execute("SELECT 1 FROM task_links").fetchone()
+
+
+def test_a_row_written_in_the_second_the_rebuild_began_is_not_swept(live, svc):
+    same = kb.create_task(live, title="written in the rebuild's first second")
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox")
+    since = int(live.execute("SELECT created_at FROM tasks WHERE id = ?", (same,)).fetchone()[0])
+    assert sweep.sweep_absent(live, {t: set() for t in ksc.IMPORT_ORDER}, BOARD, ME, since=since) == {}
+    assert same in _ids(live)  # RED before: the guard was created_at <= since
