@@ -202,6 +202,8 @@ def continue_task(
             conn, task_id, outcome=CONTINUED_OUTCOME, status=CONTINUED_OUTCOME,
             summary=kb._first_line(checkpoint, 400) or "checkpoint", metadata=meta,
         )
+        from hermes_cli import kanban_run_end_lease
+        kanban_run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
         payload = {"continuation": streak + 1, "status": new_status, "resume_status": source_status}
         # Server-derived ordering proof for PR comments sharing this checkpoint's second.
         # Persist inside the same transaction; caller metadata cannot override it.

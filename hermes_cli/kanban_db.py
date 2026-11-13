@@ -37,6 +37,7 @@ from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
+from hermes_cli import kanban_run_end_lease as _run_end_lease  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
 from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run, hub_cpu_advisory
@@ -1835,6 +1836,7 @@ def _end_or_synthesize_run(
     run — transitions that reassign the task (e.g. review handoff) pass the
     acting profile captured before the rewrite."""
     run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata)
+    _run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
     if run_id is None and synthesize:
         run_id = _synthesize_ended_run(conn, task_id, outcome=outcome, summary=summary, metadata=metadata, profile=profile)
     return run_id
@@ -2554,10 +2556,9 @@ def complete_task(
             return False
         if isinstance(metadata, dict):
             staged.extend(_stage_completion_artifacts(conn, task_id, metadata, now))
-        run_id = _end_run(
-            conn, task_id, outcome="completed", status="done", summary=handoff_summary,
-            metadata=metadata,
-        )
+        run_id = _end_run(conn, task_id, outcome="completed", status="done", summary=handoff_summary,
+                          metadata=metadata)
+        _run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
         # Never-claimed task: synthesize a run so the handoff fields survive.
         if run_id is None and (summary or metadata or result or prior_status == "review"):
             synth_summary, synth_metadata = handoff_summary, metadata
@@ -3252,9 +3253,8 @@ def request_changes(
         ))
         if cur.rowcount != 1:
             return False, "task changed during review handoff"
-        run_id = _end_run(
-            conn, task_id, outcome="changes_requested", status=new_status, summary=reason,
-        )
+        run_id = _end_run(conn, task_id, outcome="changes_requested", status=new_status, summary=reason)
+        _run_end_lease.note(conn, task_id, run_id)  # [daveey] free the Board lease after commit
         _append_event(
             conn,
             task_id,
@@ -3498,10 +3498,9 @@ def invalidate_descendants_for_parent_reopen(
             elif previous_status == "running":
                 resume_status = _retry_status_for_run(conn, row["id"], row["current_run_id"])
                 terminations.append((row["worker_pid"], row["claim_lock"], row["worker_started_at"]))
-                run_id = _end_run(
-                    conn, row["id"], outcome="reclaimed", status="todo",
-                    summary=f"ancestor {task_id} reopened",
-                )
+                run_id = _end_run(conn, row["id"], outcome="reclaimed", status="todo",
+                                  summary=f"ancestor {task_id} reopened")
+                _run_end_lease.note(conn, row["id"], run_id)  # [daveey] free the Board lease after commit
             # consecutive_failures = 0: deliberate operator reset — see
             # docstring for why this diverges from reopen_review_task.
             conn.execute(
