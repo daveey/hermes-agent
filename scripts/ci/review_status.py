@@ -10,7 +10,10 @@ the ``review-status-<artifact>`` artifact.
     python3 scripts/ci/review_status.py merge <artifact> ENV...   # concatenate env-held lists
 
 ``emit`` publishes one ``action_required`` result, carrying the check's report file as its
-detail, when the check's flag variable is ``true``, and ``[]`` otherwise.
+detail, when the check's flag variable is ``true``, and ``[]`` when it is ``false``. Any other
+value, unset or empty included, means the step that judges the PR wrote no verdict (it failed,
+e.g. git could not diff the PR), so ``emit`` publishes an ``action_required`` "did not run"
+result: an empty status would read as a clean check in the live PR comment.
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ class Finding:
     title: str
     summary: str
     how_to_fix: str
+    check: str  # what produced the flag, named in the "did not run" result's title
     compact: bool = False
 
 
@@ -69,36 +73,54 @@ FINDINGS = {
         "Prompt surface changed",
         "This PR changes the system prompt or tool schemas every session sends.",
         "Read the rendered change below (full text under tests/fixtures/prompt_surface/ "
-        "in the Files tab). Merging needs a hermes-agent-core approval."),
+        "in the Files tab). Merging needs a hermes-agent-core approval.",
+        "prompt-surface diff"),
     "lockfile-diff": Finding(
         "CHANGED", "lockfile-diff.md", "lockfile-diff", "lockfile-diff",
         "JS lockfiles",
         "Locked JS dependency versions changed.",
         "Verify the version changes are expected. Lockfile changes need a hermes-agent-core review.",
-        compact=True),
+        "lockfile diff", compact=True),
     # No artifact: the merge subcommand combines these two into the supply-chain artifact.
     "supply-chain-scan": Finding(
         "FOUND", "supply-chain-findings.md", None, "supply chain",
         "Critical supply chain risk",
         "Critical supply chain risk patterns detected in this PR.",
         "Review the flagged code carefully. If it is a false positive, narrow the pattern in "
-        "scripts/ci/scan_supply_chain.py."),
+        "scripts/ci/scan_supply_chain.py.",
+        "supply-chain pattern scan"),
     "dependency-bounds": Finding(
         "FOUND", "supply-chain-unbounded.txt", None, "supply chain",
         "Unbounded PyPI dependencies",
         "This PR adds PyPI dependencies without upper bounds.",
         'Add a `<next_major` upper bound, e.g. `"package>=1.2.0,<2"`. '
-        "See CONTRIBUTING.md dependency pinning policy."),
+        "See CONTRIBUTING.md dependency pinning policy.",
+        "dependency-bounds scan"),
 }
+
+
+def did_not_run(finding: Finding, flag: str | None) -> list[dict]:
+    """The result for a check whose step wrote no ``true``/``false`` verdict."""
+    value = "unset" if flag is None else f"`{flag}`" if flag else "empty"
+    return action_required(
+        finding.source, f"The {finding.check} did not run",
+        f"The step that runs the {finding.check} wrote no verdict ({finding.flag_env} is {value}), "
+        "so this PR was not checked. This is not a clean result.",
+        "See the failing step in the job log (for a supply-chain scan: git could not diff the PR), "
+        "fix the cause and rerun the job.")
 
 
 def emit(check: str) -> None:
     finding = FINDINGS[check]
-    status: list[dict] = []
-    if os.environ.get(finding.flag_env, "") == "true":
+    flag = os.environ.get(finding.flag_env)
+    if flag == "true":
         detail = Path(os.environ["RUNNER_TEMP"], finding.report).read_text(encoding="utf-8-sig")
         status = action_required(finding.source, finding.title, finding.summary,
                                  finding.how_to_fix, detail)
+    elif flag == "false":
+        status = []
+    else:
+        status = did_not_run(finding, flag)
     publish(status, finding.artifact, compact=finding.compact)
 
 

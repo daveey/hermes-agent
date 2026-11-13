@@ -283,6 +283,36 @@ def test_emit_publishes_the_report_only_when_the_flag_is_true(repo, step):
     assert status["results"][0]["detail"] == '"loose>=2.1"\n'
 
 
+@pytest.mark.parametrize(("check", "title"), [
+    ("supply-chain-scan", "The supply-chain pattern scan did not run"),
+    ("dependency-bounds", "The dependency-bounds scan did not run"),
+])
+@pytest.mark.parametrize(("found", "shown"), [(None, "unset"), ("", "empty"), ("TRUE", "`TRUE`")])
+def test_emit_reports_a_check_that_wrote_no_verdict_as_not_run(repo, step, check, title, found, shown):
+    """A failed scan writes no found=, so the workflow hands emit FOUND='': that is no clean scan."""
+    env = {} if found is None else {"FOUND": found}
+    assert step.run(repo, "review_status.py", "emit", check, **env).returncode == 0
+    assert step.review_status() == [{"source": "supply chain", "results": [{
+        "kind": "action_required", "title": title,
+        "summary": f"The step that runs the {title.removeprefix('The ').removesuffix(' did not run')} "
+                   f"wrote no verdict (FOUND is {shown}), so this PR was not checked. "
+                   "This is not a clean result.",
+        "how_to_fix": "See the failing step in the job log (for a supply-chain scan: git could not "
+                      "diff the PR), fix the cause and rerun the job."}]}]
+
+
+def test_a_scan_with_no_verdict_survives_the_supply_chain_merge(repo, step):
+    """Emit then merge, as repo-guards.yml runs them, with the patterns scan's FOUND empty."""
+    step.run(repo, "review_status.py", "emit", "supply-chain-scan", FOUND="")
+    scan_status = step.outputs()["review_status"]
+    step.output.unlink()
+    step.run(repo, "review_status.py", "emit", "dependency-bounds", FOUND="false")
+    step.run(repo, "review_status.py", "merge", "supply-chain", "SCAN", "DEPS",
+             SCAN=scan_status, DEPS=step.outputs()["review_status"])
+    [status] = step.artifact("supply-chain")
+    assert [r["title"] for r in status["results"]] == ["The supply-chain pattern scan did not run"]
+
+
 def test_merge_concatenates_the_supply_chain_statuses_and_skips_malformed_ones(repo, step):
     one = json.dumps([{"source": "supply chain", "results": []}])
     step.run(repo, "review_status.py", "merge", "supply-chain", "SCAN", "DEPS", "BAD",
