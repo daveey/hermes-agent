@@ -113,3 +113,29 @@ def test_a_finish_request_ends_the_tail(tmp_path, monkeypatch):
     reader.join(5)
     assert done.is_set()
     assert not reader.is_alive()
+
+
+def test_a_finish_request_ends_a_long_idle_wait_at_once(tmp_path, monkeypatch):
+    """The backed-off wait is on ``_reader_finish_requested``, not a sleep: with a 30 s wait in progress, a
+    poll()/wait() reconcile's finish request still ends the reader within seconds."""
+    import threading
+
+    monkeypatch.setattr(olog, "_TAIL_SECONDS", 30.0)
+    monkeypatch.setattr(olog, "_IDLE_TAIL_MAX_SECONDS", 30.0)
+    log = tmp_path / "proc_long.log"
+    log.write_bytes(b"tail\n")  # read before the first (30 s) wait
+    registry = ProcessRegistry()
+    session = registry._new_session("c", "t", "t", "k", str(tmp_path), persist_on_release=True)
+    session.output_log = str(log)
+    session.process = None
+    monkeypatch.setattr(registry, "_detached_host_fate", lambda pid, start: "running")
+    done = threading.Event()
+    monkeypatch.setattr(registry, "_finish_exited", lambda s, code, **k: done.set())
+    reader = threading.Thread(target=registry._log_reader_loop, args=(session,), daemon=True)
+    reader.start()
+    from tests.waiting import wait_until
+    wait_until(lambda: session.output_buffer == "tail\n", what="the line written before the start")
+    session._reader_finish_requested.set()
+    reader.join(5)
+    assert not reader.is_alive(), "the finish request did not end the 30 s idle wait"
+    assert done.is_set()
