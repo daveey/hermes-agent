@@ -484,9 +484,10 @@ class _LifecycleScanBudget:
         "paths_remaining",
         "refusal",
         "remote_reads_remaining",
+        "separator_lines",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, separator_lines: int = 0) -> None:
         # Read the module constants at construction so tests/operators can lower them at runtime.
         self.bytes_remaining = _MAX_LIFECYCLE_SCAN_BYTES
         self.lines_remaining = _MAX_LIFECYCLE_SCAN_LINES
@@ -496,6 +497,9 @@ class _LifecycleScanBudget:
         # Message-only: which limit the last refused ``charge_text`` hit, e.g. "has 17340 lines,
         # over the 16384-line scan cap". Never consulted for a verdict.
         self.overrun: Optional[str] = None
+        # Message-only: newlines a caller added when joining the root text (cron's empty-prompt
+        # join). Charged like any line, never reported as the text's own; spent on the first charge.
+        self.separator_lines = separator_lines
 
     def charge_text(self, text: str) -> bool:
         """Charge *text* before tokenization; False when it does not fit (``overrun`` says why)."""
@@ -507,9 +511,15 @@ class _LifecycleScanBudget:
         if encoded > self.bytes_remaining:
             self.overrun = _overrun("is", encoded, "byte", self.bytes_remaining, _MAX_LIFECYCLE_SCAN_BYTES)
             return False
+        separators, self.separator_lines = self.separator_lines, 0
         lines = text.count("\n") + 1
         if lines > self.lines_remaining:
-            self.overrun = _overrun("has", lines, "line", self.lines_remaining, _MAX_LIFECYCLE_SCAN_LINES)
+            # Report the text's own lines (`wc -l` for a newline-terminated file), not the charged
+            # count, which adds one for the last line and one per join separator.
+            own = text.count("\n") - separators + (0 if text.endswith("\n") else 1)
+            self.overrun = _overrun(
+                "has", own, "line", self.lines_remaining, _MAX_LIFECYCLE_SCAN_LINES, charged=lines,
+            )
             return False
         # One huge token is the quadratic shlex case; bound the longest physical line (chars, a
         # lower bound on bytes — tight enough for a DoS bound without a per-line encode).
@@ -576,12 +586,18 @@ def _format_size(size: int) -> str:
     return f"{size} bytes"
 
 
-def _overrun(verb: str, amount: int, unit: str, remaining: int, cap: int) -> str:
+def _overrun(
+    verb: str, amount: int, unit: str, remaining: int, cap: int, *, charged: Optional[int] = None,
+) -> str:
     """``has 17340 lines, over the 16384-line scan cap``, or ``over the N lines left of`` that cap
-    when the text alone would fit but earlier text in the same walk already spent part of it."""
-    if amount > cap:
-        return f"{verb} {amount} {unit}s, over the {cap}-{unit} scan cap"
-    return f"{verb} {amount} {unit}s, over the {remaining} {unit}s left of the {cap}-{unit} scan cap"
+    when the text alone would fit but earlier text in the same walk already spent part of it.
+    *charged* is the budget's own count when it differs from *amount*; it is named only when
+    *amount* alone does not exceed what was left."""
+    charged = amount if charged is None else charged
+    counted = f" ({charged} counted)" if amount <= remaining else ""
+    if charged > cap:
+        return f"{verb} {amount} {unit}s{counted}, over the {cap}-{unit} scan cap"
+    return f"{verb} {amount} {unit}s{counted}, over the {remaining} {unit}s left of the {cap}-{unit} scan cap"
 
 
 def _budget_exhausted(
@@ -1244,11 +1260,13 @@ def scan_gateway_lifecycle(
     command: str, *, cwd: Optional[str] = None,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None,
     source: Optional[str] = None,
+    separator_lines: int = 0,
 ) -> tuple[bool, Optional[str]]:
     """``(unsafe, refusal)``: *refusal* names a non-lifecycle reason the walk failed closed (budget,
     size, device, live SQLite, cloud) so callers can tell the model; ``None`` when the verdict is a
     real lifecycle command or the command is allowed. *source* names the root text in a budget
-    refusal (default "the command").
+    refusal (default "the command"); *separator_lines* counts newlines the caller added to join it,
+    left out of a refusal's reported line count (the budget still charges them).
 
     Total by construction: never raises. Direct scans are pure string ops; the referenced-script
     walk (filesystem, remote backends, shlex on decoded bytes) is best-effort defense-in-depth — an
@@ -1259,7 +1277,7 @@ def scan_gateway_lifecycle(
     every terminal command until the gateway restarts (#77780, #78256), which is strictly worse than either
     verdict.
     """
-    budget = _LifecycleScanBudget()
+    budget = _LifecycleScanBudget(separator_lines=separator_lines)
     try:
         unsafe = _contains_unsafe_gateway_action(
             command, cwd=cwd, depth=0, visited=set(), budget=budget,
@@ -1298,6 +1316,8 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
     python_script = False
     refusal: Optional[str] = None
     source: Optional[str] = None
+    # An empty prompt still gets the join newline below: charged, but not a line of the script.
+    separator_lines = 0
     if script:
         source = f"the job prompt plus `{script}`" if prompt else f"`{script}`"
         resolved_script = _resolve_script_path(script)
@@ -1319,6 +1339,7 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         python_script = resolved_script is not None and resolved_script.suffix == ".py"
         script_text, refusal = _read_script_for_scanning(script)
         if script_text:
+            separator_lines = 0 if combined else 1
             combined = f"{combined}\n{script_text}"
 
     if refusal:
@@ -1330,7 +1351,7 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         # The data-exemption masker tokenizes with shlex, so it is charged against the walk budget.
         # The direct command regex below still scans the full text, so a literal `hermes gateway restart`
         # embedded in a .py script is still blocked. See #77131, #78398.
-        budget = _LifecycleScanBudget()
+        budget = _LifecycleScanBudget(separator_lines=separator_lines)
         if not budget.charge_text(combined):
             unsafe = _budget_exhausted(budget, "text", 0, source=source)
             refusal = budget.refusal
@@ -1339,6 +1360,7 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
     else:
         unsafe, refusal = scan_gateway_lifecycle(
             combined, cwd=_resolve_script_directory(script) if script else None, source=source,
+            separator_lines=separator_lines,
         )
     if unsafe and refusal:
         raise GatewayLifecycleBlocked(
