@@ -116,13 +116,13 @@ def _read_chat_watches(conn: sqlite3.Connection, ids: list[str], counted_sub: st
     for tid, title in conn.execute(
             f"SELECT t.id, t.title FROM tasks t WHERE t.session_id IN ({ph}) AND {watch_park_sql('t')}", ids):
         found[tid] = title
-    try:
+    # A board that predates notify subscriptions has no table. Any other read error (locked, busy) propagates to
+    # the caller's guard, which logs it, instead of silently reading as "no subscriber watches".
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_notify_subs'").fetchone():
         for tid, title in conn.execute(
                 f"SELECT t.id, t.title FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
                 f"WHERE s.platform = 'tui' AND {counted_sub} AND s.chat_id IN ({ph}) AND {watch_park_sql('t')}", ids):
             found.setdefault(tid, title)
-    except sqlite3.Error:  # board predates notify subscriptions
-        pass
     out = []
     for tid, title in found.items():
         wake = (_last_scheduled(conn, tid) or {}).get("wake_at")

@@ -12,13 +12,29 @@ const UNRESOLVED_REASONS: Readonly<Record<string, string>> = {
 }
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const
 const pad2 = (n: number) => String(n).padStart(2, '0')
+// A weekday names one day only within the coming week; past that the label carries the date.
+const WEEKDAY_ONLY_S = 6 * 24 * 3600
 
-/** Local `Wed 09:00` for an epoch-seconds wake time (a watch is often days out, so the weekday matters). */
+/** Local `Wed 09:00` for an epoch-seconds wake time (a watch is often days out, so the weekday matters);
+ *  `Wed Nov 25 09:00` when it is more than 6 days out, where a weekday alone is ambiguous. */
 const wakeLabel = (eta: number): string => {
   const date = new Date(eta * 1000)
+  const day = eta - Date.now() / 1000 > WEEKDAY_ONLY_S ? ` ${MONTHS[date.getMonth()]} ${date.getDate()}` : ''
 
-  return `${WEEKDAYS[date.getDay()]} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  return `${WEEKDAYS[date.getDay()]}${day} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+/** `title (t_…, wakes …)`: the card's title, when it has one, with the id kept for lookup. */
+const watchLabel = (card: { id: string; label?: string; eta?: number }): string => {
+  const wake = card.eta === undefined ? '' : `wakes ${wakeLabel(card.eta)}`
+
+  if (card.label && card.label !== card.id) {
+    return `${card.label} (${wake ? `${card.id}, ${wake}` : card.id})`
+  }
+
+  return wake ? `${card.id} (${wake})` : card.id
 }
 
 // [daveey] Sidebar row status copy (kanban + process badges, outcome stripe tooltips), spread into en.ts.
@@ -35,8 +51,7 @@ export const enSessionRowStatus = {
     `${count} ${count === 1 ? 'card has' : 'cards have'} stalled: waiting over 2 h on something only an agent can do, with nothing producing it`,
   outcomeDone: 'Done',
   outcomeCrons: names => `Keeps running: ${names.join(', ')}`,
-  outcomeWatches: cards =>
-    `Still watching: ${cards.map(card => (card.eta === undefined ? card.id : `${card.id} (wakes ${wakeLabel(card.eta)})`)).join(', ')}`,
+  outcomeWatches: cards => `Still watching: ${cards.map(watchLabel).join(', ')}`,
   outcomeDecision: 'Waiting on your decision',
   outcomeMuted: 'Muted',
   outcomeRunning: 'Running',

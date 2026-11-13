@@ -7,8 +7,8 @@ export interface SessionRowStatusCopy {
   kanbanUnknown: (count: number) => string
   outcomeDone: string
   outcomeCrons: (names: string[]) => string
-  /** [daveey] Cards a done chat still watches; `eta` = wake time in epoch seconds, when known. */
-  outcomeWatches: (cards: { id: string; eta?: number }[]) => string
+  /** [daveey] Cards a done chat still watches; `label` = card title, `eta` = wake time in epoch seconds, when known. */
+  outcomeWatches: (cards: { id: string; label?: string; eta?: number }[]) => string
   outcomeDecision: string
   outcomeMuted: string
   outcomeRunning: string

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TRANSLATIONS } from '@/i18n/catalog'
 import { type SessionDotState, sessionStatusStripe } from '@/store/session-dot-state'
@@ -447,16 +447,35 @@ describe('a finished chat that still watches a card', () => {
     watches: [{ kind: 'card', id: 't_watch1', label: 'verify the re-run limit', state: 'watching', eta }]
   }
 
-  it('stays green and names the pending check with its wake time', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 13, 12, 0) })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stays green and names the pending check (title and id) with its wake time', () => {
     expect(outcomeStripe(outcome)).toBe('done')
     expect(outcomeHasWatches(outcome)).toBe(true)
-    expect(outcomeTooltip(outcome, r)).toBe(`Fix landed.\nStill watching: t_watch1 (wakes Wed 09:00)`)
+    expect(outcomeTooltip(outcome, r)).toBe(
+      `Fix landed.\nStill watching: verify the re-run limit (t_watch1, wakes Wed 09:00)`
+    )
   })
 
   it('names crons and watches together', () => {
     const both: SessionOutcome = { ...outcome, crons: [{ kind: 'cron', id: 'j1', label: 'sweep' }] }
     expect(outcomeTooltip(both, r)).toBe(
-      `Fix landed.\nKeeps running: sweep\nStill watching: t_watch1 (wakes Wed 09:00)`
+      `Fix landed.\nKeeps running: sweep\nStill watching: verify the re-run limit (t_watch1, wakes Wed 09:00)`
+    )
+  })
+
+  // [daveey] PR #2049 review: a weekday alone is ambiguous past a week, so a far wake carries its date.
+  it('dates a wake more than 6 days out', () => {
+    const far = new Date(2026, 10, 25, 9, 0).getTime() / 1000
+    const watches: SessionOutcome['watches'] = [{ kind: 'card', id: 't_watch1', state: 'watching', eta: far }]
+    expect(outcomeTooltip({ ...outcome, watches }, r)).toBe(
+      `Fix landed.\nStill watching: t_watch1 (wakes Wed Nov 25 09:00)`
     )
   })
 

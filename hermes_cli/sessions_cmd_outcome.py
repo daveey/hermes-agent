@@ -115,6 +115,24 @@ def sidebar_rows(db, limit: int = AUDIT_DEFAULT_LIMIT) -> list[dict[str, Any]]:
                                  include_pinned=True, compact_rows=True)
 
 
+def _done_named(ids: list[str], sid: str, cron_items, watch_items) -> list[tuple[str, list[dict]]]:
+    """``[(reason, items)]`` for what a done chat still names: the crons it owns, then the cards it watches. Both
+    read live, so a stored outcome older than the cron or the park shows. [daveey] A watch-parked card is a check
+    still pending on a green chat (self-heal desktop-e6cce5965c)."""
+    out = []
+    crons = cron_items(ids)
+    if crons:
+        out.append(("done_owns_cron", crons))
+    try:
+        watches = watch_items(ids)
+    except (sqlite3.Error, OSError):  # an unreadable board is not a watch; the row keeps its other reasons
+        logging.getLogger(__name__).warning("outcome-audit: watch read failed for %s", sid, exc_info=True)
+        watches = []
+    if watches:
+        out.append(("done_watching", watches))
+    return out
+
+
 def audit_rows(db, *, refresh: bool = False, limit: int = AUDIT_DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """``{id, title, kind, reason, age_h, on, items}`` per sidebar row (``age_h`` = hours since last activity)."""
     from hermes_state_outcome import _cron_items, _lineage_ids, _watch_items, refresh_outcome
@@ -125,20 +143,12 @@ def audit_rows(db, *, refresh: bool = False, limit: int = AUDIT_DEFAULT_LIMIT) -
     for row in sidebar_rows(db, limit):
         outcome = refresh_outcome(row["id"], "manual", db=db) if refresh else row.get("outcome")
         outcome = outcome or {}
-        done = outcome.get("kind") == "done"
-        crons = _cron_items(_lineage_ids(db, row["id"])) if done else []
-        if crons:
-            outcome = {**outcome, "reason": "done_owns_cron", "on": crons}
-        elif done:
-            # [daveey] A done chat whose card is parked as a watch: green, with a check still pending on that card
-            # (self-heal desktop-e6cce5965c). Read live, like the crons, so a stored outcome older than the park shows.
-            try:
-                watches = _watch_items(_lineage_ids(db, row["id"]))
-            except (sqlite3.Error, OSError):  # an unreadable board is not a watch; the row keeps its stored reason
-                logging.getLogger(__name__).warning("outcome-audit: watch read failed for %s", row["id"], exc_info=True)
-                watches = []
-            if watches:
-                outcome = {**outcome, "reason": "done_watching", "on": watches}
+        named = _done_named(_lineage_ids(db, row["id"]), row["id"], _cron_items, _watch_items) \
+            if outcome.get("kind") == "done" else []
+        if named:
+            # [daveey] Every reason that applies, joined (``done_owns_cron+done_watching``), so the audit matches the
+            # tooltip, which names both (PR #2049 review).
+            outcome = {**outcome, "reason": "+".join(r for r, _ in named), "on": [i for _, its in named for i in its]}
         last = row.get("last_active") or row.get("started_at") or now
         out.append({"id": row["id"], "title": row.get("title") or row.get("preview") or "",
                     "kind": outcome.get("kind"), "reason": outcome.get("reason"),

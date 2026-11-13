@@ -1,5 +1,5 @@
 import { act, cleanup, render, renderHook } from '@testing-library/react'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $queuedPromptsBySession } from '@/store/composer-queue'
@@ -166,6 +166,7 @@ it('a row that is not needs-input does not re-render when a prompt moves', () =>
 // [daveey] self-heal desktop-e6cce5965c: a done chat still watching a card drew the same plain green as "all done".
 // It keeps the green, adds the eye glyph and names the pending check on hover.
 it('a done chat that still watches a card draws the eye glyph and names the check', () => {
+  vi.useFakeTimers({ now: new Date(2026, 10, 13, 12, 0), toFake: ['Date'] })
   const eta = new Date(2026, 10, 18, 9, 0).getTime() / 1000
 
   const session = row('watch-chat', {
@@ -178,10 +179,17 @@ it('a done chat that still watches a card draws the eye glyph and names the chec
     }
   } as Partial<SessionInfo>)
 
-  const { container } = render(<SessionRowStatusStripe outcomePainted session={session} statusStripe="done" />)
+  try {
+    const { container } = render(<SessionRowStatusStripe outcomePainted session={session} statusStripe="done" />)
 
-  expect(container.querySelector('[data-testid="stripe-watch"]')).not.toBeNull()
-  expect(stripe(container)?.getAttribute('aria-label')).toBe('Fix landed.\nStill watching: t_watch1 (wakes Wed 09:00)')
+    expect(container.querySelector('[data-testid="stripe-watch"]')).not.toBeNull()
+    // [daveey] PR #2049 review: the card's title leads, with its id kept for lookup.
+    expect(stripe(container)?.getAttribute('aria-label')).toBe(
+      'Fix landed.\nStill watching: verify the re-run limit (t_watch1, wakes Wed 09:00)'
+    )
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 it('a plain done chat draws no watch glyph', () => {

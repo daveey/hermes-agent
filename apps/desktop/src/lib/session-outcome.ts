@@ -120,7 +120,7 @@ const workflowTooltip = (outcome: null | SessionOutcome | undefined, r: RowCopy)
       const names = (outcome.crons ?? []).map(job => job.label || job.id)
 
       const watches = outcomeHasWatches(outcome)
-        ? (outcome.watches ?? []).map(card => ({ id: card.id, eta: validEta(card.eta) }))
+        ? (outcome.watches ?? []).map(card => ({ id: card.id, label: card.label, eta: validEta(card.eta) }))
         : []
 
       const summary = outcome.summary?.trim() || r.outcomeDone

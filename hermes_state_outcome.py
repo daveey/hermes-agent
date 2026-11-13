@@ -753,9 +753,6 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
         "lost subagents", sid, lambda: _lost_subagent_items(db, ids, _lineage_accounted_at(db, ids)), [])
     if lost_subagents:
         return _outcome("unresolved", now, reason="subagent_lost", on=lost_subagents, **carry)
-    crons = _guarded("cron", sid, lambda: _cron_items(ids), [])
-    watches = _guarded("watches", sid, lambda: _watch_items(ids), [])
-    named = {**({"crons": crons} if crons else {}), **({"watches": watches} if watches else {})}
     if holds and declared and declared.get("kind") == "waiting":
         return {k: v for k, v in declared.items() if k not in _NAMED_KEYS}
     if card_read_failed:
@@ -764,6 +761,10 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
         if stored and stored.get("kind") in ("waiting", "decision"):
             return stored
         return _outcome("unresolved", now, reason="card_read_failed", **carry)
+    # [daveey] Read only once a done is possible: both scan every board/cron store, and the returns above drop them.
+    crons = _guarded("cron", sid, lambda: _cron_items(ids), [])
+    watches = _guarded("watches", sid, lambda: _watch_items(ids), [])
+    named = {**({"crons": crons} if crons else {}), **({"watches": watches} if watches else {})}
     if holds and declared and declared.get("kind") == "done":
         return {**{k: v for k, v in declared.items() if k not in _NAMED_KEYS}, **named}
     if not tail:

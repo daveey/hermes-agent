@@ -208,3 +208,77 @@ def test_plain_scheduled_card_is_a_wait_not_a_watch(board, tmp_path):
     db.close()
     assert out["kind"] == "waiting", out
     assert not out.get("watches"), out
+
+
+# [daveey] PR #2049 review nits (t_01a1d487e7253c82).
+def test_audit_names_cron_and_watch_together(board, tmp_path, monkeypatch):
+    """A done chat that owns a cron AND watches a card: the audit names both, like the tooltip does."""
+    import hermes_state_outcome as outcomes
+    tid = _chat_card(board)
+    _schedule(tid, 72, watch=True)
+    cron = {"kind": "cron", "id": "j1", "label": "sweep"}
+    monkeypatch.setattr(outcomes, "_cron_items", lambda ids: [cron])
+    db, _ = _chat_outcome(tmp_path)
+    try:
+        from hermes_cli.sessions_cmd_outcome import audit_rows
+        row = next(r for r in audit_rows(db) if r["id"] == CHAT)
+        assert row["reason"] == "done_owns_cron+done_watching", row
+        assert [i["id"] for i in row["on"]] == ["j1", tid], row
+    finally:
+        db.close()
+
+
+def test_declared_waiting_does_not_scan_boards_for_watches(board, tmp_path, monkeypatch):
+    """A holding waiting declaration returns before ``named`` is used, so the boards are not scanned for it."""
+    import hermes_state_outcome as outcomes
+    from hermes_state import SessionDB
+    calls = []
+    monkeypatch.setattr(outcomes, "_watch_items", lambda ids: calls.append(ids) or [])
+    monkeypatch.setattr(outcomes, "_cron_items", lambda ids: calls.append(ids) or [])
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(CHAT, source="desktop")
+        outcomes.declare_outcome(CHAT, {"kind": "waiting", "on": [{"kind": "time", "id": "14:00"}]}, db=db)
+        out = outcomes.refresh_outcome(CHAT, "manual", db=db)
+        assert out["kind"] == "waiting", out
+        assert calls == [], calls
+    finally:
+        db.close()
+
+
+class _SubsQueryFails:
+    """A board connection whose subscriber query fails with ``error`` (everything else runs for real)."""
+
+    def __init__(self, conn, error):
+        self._conn, self._error = conn, error
+
+    def execute(self, sql, *args):
+        if "kanban_notify_subs" in sql and "JOIN" in sql:
+            raise self._error
+        return self._conn.execute(sql, *args)
+
+
+def test_locked_board_is_not_silently_read_as_no_subscriber_watches(board):
+    """A busy/locked board must surface (the outcome guards and logs it), not read as "no watches"."""
+    import sqlite3
+
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_watch as kw
+    with kbc.connect() as conn:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            kw._read_chat_watches(_SubsQueryFails(conn, sqlite3.OperationalError("database is locked")),
+                                  [CHAT], "1=1")
+
+
+def test_board_without_notify_subs_reads_created_watches(board):
+    """A board that predates notify subscriptions still names the watches the chat created."""
+    import sqlite3
+
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_watch as kw
+    tid = _chat_card(board)
+    _schedule(tid, 72, watch=True)
+    with kbc.connect() as conn:
+        conn.execute("ALTER TABLE kanban_notify_subs RENAME TO legacy_subs_gone")
+        rows = kw._read_chat_watches(_SubsQueryFails(conn, sqlite3.OperationalError("no such table")), [CHAT], "1=1")
+    assert [r["id"] for r in rows] == [tid]
