@@ -5326,7 +5326,7 @@ function fetchJson(url, token, options: any = {}) {
         )
 
         req.on('error', reject)
-        deadline.arm(req, reject)
+        deadline.arm(req, reject, body?.length)
 
         // From here the request goes on the wire: a later transport error can no
         // longer prove the server didn't process it, so non-idempotent verbs must
@@ -5430,7 +5430,7 @@ function fetchPublicJson(url, options: any = {}) {
         )
 
         req.on('error', reject)
-        deadline.arm(req, reject)
+        deadline.arm(req, reject, body?.length)
 
         // Past this point the request is on the wire — see fetchJson.
         requestState.bodySent = true
