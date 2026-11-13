@@ -24,7 +24,8 @@ dead-worker sweep, never a blanket pass for routing errors and never text matchi
   submitter, not a later run). ``kanban_owner_unavailable.note`` then requeues it uncounted despite
   the admission, still bounded by ``NEUTRAL_STREAK_LIMIT``.
 - ``preadmission_proof`` (submitter side, ``kanban_worker_client``) marks a run whose owner kept
-  refusing it with ``storage_unavailable`` before any admission. Such a run is requeued uncounted
+  refusing it with ``storage_unavailable`` or ``capsule_observation_missing`` (both raised before the
+  owner creates a session) before any admission. Such a run is requeued uncounted
   without it; the proof (the run's sole result, from its own submitter pid, nothing bound) only names
   the host fault for the notice, so a restart drain (an owner that is silent) files none.
 - ``notify`` surfaces either host fault as ONE Kanban card per host on the board (agent-fixable, so
@@ -46,9 +47,12 @@ PROOF_KEY = "host_refusal"
 REGISTRY_EMPTY = "managed_registry_empty"
 REGISTRY_INVALID = "managed_registry_invalid"
 OWNER_STORAGE_UNAVAILABLE = "owner_storage_unavailable"
+OWNER_CAPSULE_UNAVAILABLE = "owner_capsule_unavailable"
 STARTUP_KINDS = frozenset({REGISTRY_EMPTY, REGISTRY_INVALID})
-# ``kanban.run`` refusal reasons that name the owner host's own state (``kanban_worker_client``).
-PREADMISSION_KINDS = {"storage_unavailable": OWNER_STORAGE_UNAVAILABLE}
+# ``kanban.run`` refusal reasons that name the owner host's own state (``kanban_worker_client``), each raised
+# before the owner creates a session for the claim.
+PREADMISSION_KINDS = {"storage_unavailable": OWNER_STORAGE_UNAVAILABLE,
+                      "capsule_observation_missing": OWNER_CAPSULE_UNAVAILABLE}
 NOTICE_WINDOW_SECONDS = 15 * 60
 NOTICE_KEY_PREFIX = "host-refusal:"
 NOTICE_EVENT = "host_refusal_notice"
@@ -149,6 +153,10 @@ def _cause(proof: dict, task_id: Optional[str] = None) -> str:
         claim = f"card {task_id}'s claim" if task_id else "the claim"
         return (f"the profile owner kept refusing {claim} with {proof.get('reason') or 'storage_unavailable'} "
                 "(its runtime store or session policy could not be read)")
+    if kind == OWNER_CAPSULE_UNAVAILABLE:
+        claim = f"card {task_id}'s claim" if task_id else "the claim"
+        return (f"the profile owner kept refusing {claim} with capsule_observation_missing (no live run-bound "
+                "capsule transport, or a profile policy it could not read made it require one)")
     pin = "/".join(p for p in (proof.get("provider"), proof.get("model")) if p) or "its pin"
     return f"the host's model-routing registry served no subscription pin when {whose} worker started ({pin})"
 
@@ -195,8 +203,9 @@ def _notify(conn, task_id, proof):
                     kb._append_event(conn, existing, NOTICE_EVENT, marker)
                 return existing
             body = (f"{line}\n\nA host fault refuses Kanban workers on this host before or during a turn: an empty, "
-                    "unreadable or invalid `model_routing` registry when a worker starts, or a profile owner whose "
-                    "runtime store or session policy cannot be read (`storage_unavailable`). The refused cards are "
+                    "unreadable or invalid `model_routing` registry when a worker starts, a profile owner whose "
+                    "runtime store or session policy cannot be read (`storage_unavailable`), or one that refuses "
+                    "the claim without capsule transport (`capsule_observation_missing`). The refused cards are "
                     "requeued uncounted (up to the owner-unavailable streak limit, then they count), and this card "
                     "is commented at most once per 15 minutes while it lasts.\n\n"
                     "Fix: inspect the profile owner's storage health and config.yaml (the `model_routing` "

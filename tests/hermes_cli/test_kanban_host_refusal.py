@@ -428,6 +428,42 @@ def test_preadmission_storage_refusals_file_one_host_notice_per_window(home, mon
         assert "storage_unavailable" in again["body"]
 
 
+def test_preadmission_capsule_refusal_books_its_proof_and_requeues(home, monkeypatch):
+    # worker-3 2026-11-13 07:21-08:25Z (t_01a1d1197fa00599 runs 56160..56810): the owner refused
+    # ``kanban.run`` with capsule_observation_missing before any session; the client booked a plain exit 1
+    # with no proof, so the runs were crashed (triage) and no land gate could tell them from an agent turn.
+    hr = importlib.import_module("hermes_cli.kanban_host_refusal")
+    _fake_clock(monkeypatch)
+    proof = {"kind": "owner_capsule_unavailable", "phase": "preadmission", "reason": "capsule_observation_missing"}
+    with kbc.connect() as conn:
+        tid, rc = _submitted_run(conn, monkeypatch, owner=_owner("capsule_observation_missing"))
+        assert rc == ou.KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+        (result,) = [json.loads(p) for (p,) in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='worker_result'", (tid,))]
+        assert result["submitter"] is True and result["pid"] == os.getpid()
+        assert result[hr.PROOF_KEY] == proof
+        kbd.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready" and task.consecutive_failures == 0
+        (run,) = _runs(conn, tid)
+        assert run["outcome"] == "owner_unavailable" and "capsule" in run["error"]
+        (meta,) = conn.execute("SELECT metadata FROM task_runs WHERE task_id=?", (tid,)).fetchone()
+        assert json.loads(meta)[hr.PROOF_KEY] == proof
+        (notice,) = _notices(conn)
+        assert "capsule_observation_missing" in notice["body"] and tid in notice["body"]
+
+
+def test_an_admitted_capsule_refusal_gets_no_preadmission_proof():
+    from hermes_cli import gateway_client
+    from hermes_cli import kanban_worker_client as wc
+    exc = gateway_client.GatewayRPCError("capsule_observation_missing", 5001, {})
+    assert wc._host_refusal(exc, wc._Claim(answered=0.0))
+    admitted = wc._Claim(answered=0.0)
+    admitted.admission_id = "a1"
+    assert not wc._host_refusal(exc, admitted)
+    assert importlib.import_module("hermes_cli.kanban_host_refusal").preadmission_proof("capsule_unknown") is None
+
+
 def test_startup_and_preadmission_host_faults_share_one_host_card(home, monkeypatch):
     _fake_clock(monkeypatch)
     with kbc.connect() as conn:
