@@ -52,6 +52,7 @@ from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-wi
     next_deferred_repair, note_round, reset as reset_repair_window,
 )
 from hermes_cli.kanban_sync_own_writes import credited, reset as reset_own_writes, take as take_credited
+from hermes_cli.kanban_sync_links_inputs import ledger_slices as _ledger_slices, links_signature as _links_signature
 
 _log = logging.getLogger(__name__)
 
@@ -1192,8 +1193,10 @@ def _links_clock() -> float:
 
 # A board's links pass logs its duration with its counts (``kanban sync: <board> chat links {...} in <s>s``); a pass
 # with no changes logs only when it took this long, so a slow pass is visible even when it changed nothing; a whole
-# pass this slow (ledger read included) also logs ``kanban sync: chat links pass over N board(s) took <s>s``. The hub
-# pass ran ~10 min on 2026-11-13 and the line carried no duration to measure it by (t_01a1d35d8d7e22a7). [daveey]
+# pass this slow (ledger read included) also logs ``kanban sync: chat links pass over N board(s) took <s>s``. A board
+# skipped as unchanged after a slow inputs read logs ``<board> chat links unchanged, skipped in <s>s``, and a failed
+# board's warning carries ``failed after <s>s``. The hub pass ran ~10 min on 2026-11-13 and the line carried no
+# duration to measure it by (t_01a1d35d8d7e22a7). [daveey]
 LINKS_SLOW_LOG_S = 10.0
 
 
@@ -1205,28 +1208,18 @@ def _links_pass_clock() -> float:
 _LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop runs
 
 
-def _ledger_slices(cards: Iterable[Mapping[str, Any]], gateway: str) -> dict[str, frozenset]:
-    """Per board, every field of this gateway's origin-ledger rows that a links pass reads (``ledger_boards``,
-    ``kanban_chat_links._ledger_links``). Compared by value: a re-projection with the same rows is no change."""
-    out: dict[str, set] = {}
-    for c in cards:
-        if not c.get("board") or c.get("origin_gateway") not in (None, gateway):
-            continue
-        out.setdefault(str(c["board"]), set()).add(
-            (c.get("id"), c.get("session"), c.get("via"), c.get("origin_profile"), bool(c.get("released"))))
-    return {board: frozenset(rows) for board, rows in out.items()}
-
-
-def _links_signature(gateway: str, placement: Mapping[str, Any]) -> Optional[tuple]:
-    """The configuration a links pass reads besides its board: gateway names, profile, homes, placement config."""
-    try:
-        from hermes_constants import get_hermes_home
-        from hermes_cli.kanban_origin import gateway_names
-        from hermes_cli.profiles import get_active_profile_name
-        return (gateway, gateway_names()[0], get_active_profile_name(), str(get_hermes_home()),
-                json.dumps(placement, sort_keys=True, default=str))
-    except (OSError, sqlite3.Error, TypeError, ValueError):
-        return None
+def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float) -> tuple[bool, float]:
+    """(whether a board's links-pass inputs equal its last completed pass's, under ``LINKS_MAX_AGE_S`` ago, so the
+    pass is skipped; the pass start to record). A skip whose inputs read took ``LINKS_SLOW_LOG_S`` names its board."""
+    done = _LINKS_DONE.pop(key, None)
+    started = _links_clock()
+    if inputs is None or done is None or done[0] != inputs or started - done[1] >= LINKS_MAX_AGE_S:
+        return False, started
+    _LINKS_DONE[key] = done
+    took = _links_pass_clock() - began
+    if took >= LINKS_SLOW_LOG_S:
+        _log.info("kanban sync: %s chat links unchanged, skipped in %.1fs", slug, took)
+    return True, started
 
 
 def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str, mode: str,
@@ -1295,11 +1288,8 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                     inputs, started = None, 0.0
                     if skip_unchanged:
                         inputs = _links_inputs(conn, path, slug, gateway, mode, ledger, signature)
-                        done = _LINKS_DONE.pop(key, None)
-                        started = _links_clock()
-                        if inputs is not None and done is not None and done[0] == inputs \
-                                and started - done[1] < LINKS_MAX_AGE_S:
-                            _LINKS_DONE[key] = done
+                        skip, started = _links_unchanged(key, inputs, slug, began)
+                        if skip:
                             continue
                     counts = kanban_chat_links.reconcile(conn, slug, gateway)
                     if inputs is not None:
@@ -1308,7 +1298,8 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                 if any(counts.values()) or took >= LINKS_SLOW_LOG_S:
                     _log.info("kanban sync: %s chat links %s in %.1fs", slug, counts, took)
             except Exception as exc:  # health: allow BLE001 -- one board's links must not stop the sync loop
-                _log.warning("kanban sync: chat links for %s failed (%s: %s)", slug, type(exc).__name__, exc)
+                _log.warning("kanban sync: chat links for %s failed after %.1fs (%s: %s)", slug,
+                             _links_pass_clock() - began, type(exc).__name__, exc)
     took = _links_pass_clock() - pass_began
     if took >= LINKS_SLOW_LOG_S:
         _log.info("kanban sync: chat links pass over %d board(s) took %.1fs", len(boards), took)

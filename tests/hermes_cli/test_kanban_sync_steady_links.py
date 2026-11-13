@@ -483,3 +483,43 @@ def test_the_links_log_line_carries_the_pass_duration(live, ledger, kanban_home,
     assert _link_lines(caplog) == [
         f"kanban sync: {BOARD} chat links {{'added': 0, 'changed': 0, 'released': 0, 'retired': 0}} in 12.0s",
         "kanban sync: chat links pass over 1 board(s) took 12.0s"]
+
+
+def test_a_failed_board_logs_how_long_it_ran(live, ledger, kanban_home, scope, slow_reconcile, monkeypatch, caplog):
+    """A slow failure (a lock or busy wait) is what the duration logging is for, so its warning carries it too."""
+    caplog.set_level("INFO", logger="hermes_cli.kanban_sync_client")
+    slow_reconcile[0] = 7.5
+    timed = links.reconcile
+
+    def boom(*a, **k):
+        timed(*a, **k)  # spends the fake 7.5 s
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(links, "reconcile", boom)
+    _pass(kanban_home)
+    assert _link_lines(caplog) == [
+        f"kanban sync: chat links for {BOARD} failed after 7.5s (OperationalError: database is locked)"]
+
+
+def test_a_slow_unchanged_skip_names_its_board(live, ledger, kanban_home, scope, spies, monkeypatch, caplog):
+    """A board whose inputs read is slow but unchanged is skipped; it still logs its name at LINKS_SLOW_LOG_S."""
+    _settled(live, ledger, kanban_home, spies)
+    now, cost = [1000.0], [0.0]
+    real_inputs = ksc._links_inputs
+
+    def slow_inputs(*a, **k):
+        now[0] += cost[0]
+        return real_inputs(*a, **k)
+
+    monkeypatch.setattr(ksc, "_links_pass_clock", lambda: now[0])
+    monkeypatch.setattr(ksc, "_links_inputs", slow_inputs)
+    caplog.set_level("INFO", logger="hermes_cli.kanban_sync_client")
+    caplog.clear()  # the settling passes' own lines
+    cost[0] = 9.9  # under the threshold: silent
+    _pass(kanban_home)
+    assert _link_lines(caplog) == []
+    cost[0] = 11.0
+    _pass(kanban_home)
+    assert spies["reconcile"] == 0, spies  # both passes skipped as unchanged
+    assert _link_lines(caplog) == [f"kanban sync: {BOARD} chat links unchanged, skipped in 11.0s",
+                                   "kanban sync: chat links pass over 1 board(s) took 11.0s"]
