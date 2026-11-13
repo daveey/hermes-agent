@@ -267,6 +267,47 @@ def test_release_retirement_needs_ended_run_off_the_lease(live, svc, monkeypatch
     assert live.execute("SELECT state FROM kanban_sync_outbox WHERE op_id='release-op'").fetchone()[0] == "rejected"
 
 
+def test_live_lease_by_the_run_keeps_release_end_to_end(live, kanban_home):
+    """The ``lease_held`` veto through real Board transitions, not a hand-set row: the grant mirrors the lease
+    onto the card (setLease), the holder then ends its run row and drops ``current_run_uid`` while keeping the
+    lease, so only ``lease_run_uid`` still names the run. Once the holder leaves ``running`` (clearLease), the same
+    release is moot."""
+    svc = FakeService(lease_runs=True)
+    hub = svc.hub(ME)
+    tid = kb.create_task(live, title="leased", assignee="worker")
+    client.push(live, hub, BOARD, ME, primary=False)
+    granted = hub.leases(BOARD, {"action": "grant", "task": tid, "run_uid": RUN, "client_op_id": "grant-op"})
+    assert granted["status"] == "applied"
+    card = svc.board(BOARD)["rows"]["tasks"][tid]
+    assert (card["lease_run_uid"], card["lease_holder"]) == (RUN, ME)
+
+    def holder(op_id, table, uid, fields):
+        res = hub.ops(BOARD, [{"client_op_id": op_id, "table": table, "uid": uid, "op": "upsert", "fields": fields,
+                               "hlc": f"{9_999_999_999_999:013d}-0001-{ME}"}])["results"][0]
+        assert res["status"] == "applied", res
+
+    holder("run-end", "task_runs", RUN, {"ended_at": 1794527437, "status": "crashed", "outcome": "crashed"})
+    holder("drop-current", "tasks", tid, {"current_run_uid": None})
+    card = svc.board(BOARD)["rows"]["tasks"][tid]
+    assert (card["status"], card["current_run_uid"], card["lease_run_uid"]) == ("running", None, RUN)
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at,state,last_error,"
+                     "attempts) VALUES ('release-op','tasks',?,'release',?,'',1,'rejected',?,1)",
+                     (tid, json.dumps({"run_uid": RUN, "outcome": "crashed"}),
+                      "lease_lost: this run no longer holds the lease"))
+    from hermes_cli.kanban_sync_rejections import resolve_rejections
+    report = next(r for r in resolve_rejections(live, hub, BOARD) if r["op_id"] == "release-op")
+    assert (report["classification"], report["action"]) == ("unresolved", "retained")
+    assert report["evidence"]["row"]["lease_run_uid"] == RUN
+    assert client.status(live)["rejected"] == 1
+
+    holder("leave-running", "tasks", tid, {"status": "blocked"})
+    assert svc.board(BOARD)["rows"]["tasks"][tid]["lease_run_uid"] is None
+    report = next(r for r in resolve_rejections(live, hub, BOARD) if r["op_id"] == "release-op")
+    assert (report["classification"], report["action"]) == ("moot", "retired")
+    assert client.status(live)["rejected"] == 0
+
+
 def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):
     lost_release(live, svc)
     hub = svc.hub(ME)

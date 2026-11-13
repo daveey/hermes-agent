@@ -22,8 +22,9 @@ class FakeService:
         self.boards: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str, Any]] = []
         self.offline = False
-        # Like transitions.ts grantLease/releaseTask: a grant writes the card running plus its run row, a release
-        # ends that run and returns the card to ready. Off by default (the older tests count rows).
+        # Like transitions.ts grantLease/releaseTask: a grant writes the card running plus its run row (setLease
+        # mirrors lease_holder/lease_run_uid/lease_expires onto the card), a release ends that run, clears that
+        # mirror (clearLease) and returns the card to ready. Off by default (the older tests count rows).
         self.lease_runs = lease_runs
         # Opt-in placement, like transitions.ts checkPlacement's runs_on rule: a grant needs every runs_on label
         # on the claiming machine ({name: {"labels": [...]}}; machine:<name> is implicit). None = no check.
@@ -97,8 +98,8 @@ class FakeService:
                               {"status": "released", "outcome": "released",
                                "error": f"card left running ({won['status']})", "ended_at": int(time.time())},
                               gw, op["client_op_id"], op["hlc"])
-                row = self._put(b, table, uid, {"lease_holder": None, "lease_expires": None}, gw, op["client_op_id"],
-                                op["hlc"])
+                row = self._put(b, table, uid, {"lease_holder": None, "lease_run_uid": None, "lease_expires": None}, gw,
+                                op["client_op_id"], op["hlc"])
             return {"status": "applied" if len(won) == len(f) else "merged", "row": row}
         if table == "task_links":
             # rows.ts upsertLink: a link needs both of its cards on the Board.
@@ -141,7 +142,8 @@ class FakeService:
         self._put(b, "task_events", f"ev-{op_id}-{kind}", {"task_id": task, "run_uid": run, "kind": kind,
                                                             "payload": json.dumps(payload), "created_at": int(time.time())},
                   "server", op_id, clock)
-        fields: dict = {"status": "ready", "current_run_uid": None, "lease_holder": None, "lease_expires": None}
+        fields: dict = {"status": "ready", "current_run_uid": None, "lease_holder": None, "lease_run_uid": None,
+                        "lease_expires": None}
         if canonical:
             failures = int(card.get("consecutive_failures") or 0) + 1
             limit = card.get("max_retries") or op.get("failure_limit") or 2
@@ -236,8 +238,10 @@ class FakeHub:
             if self.svc.lease_runs and task in b["rows"].get("tasks", {}):
                 self.svc._put(b, "task_runs", run, {"task_id": task, "status": "running", "started_at": 1,
                                                     "ended_at": None, "outcome": None}, gw, op_id, hlc)
+                # setLease mirrors the lease onto the card: lease_holder, lease_run_uid, lease_expires.
                 version = self.svc._put(b, "tasks", task, {"status": "running", "current_run_uid": run,
-                                                           "lease_holder": gw, "lease_expires": 9_999_999_999_999},
+                                                           "lease_holder": gw, "lease_run_uid": run,
+                                                           "lease_expires": 9_999_999_999_999},
                                         gw, op_id, hlc)["version"]
                 # As the Board's grantLease (hermes-hub worker/src/transitions.ts): the claimed event, tagged with
                 # the lane the claim came from, so a reviewer run retries to ``review``.
@@ -269,7 +273,7 @@ class FakeHub:
                                                           "unused_grant": True}, separators=(",", ":")),
                                    "created_at": int(time.time())}, gw, op_id, hlc)
                 self.svc._put(b, "tasks", task, {"status": "ready", "current_run_uid": None, "lease_holder": None,
-                                                 "lease_expires": None}, gw, op_id, hlc)
+                                                 "lease_run_uid": None, "lease_expires": None}, gw, op_id, hlc)
             return {"status": "applied", "lease": None}
         return {"status": "applied", "lease": b["leases"][task], "version": version}
 
