@@ -328,24 +328,27 @@ def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadlin
             raise OverBudget(f"sweep budget spent before {path.split('?', 1)[0]} was read")
         return _gh_api(path) or {}
 
+    unreadable = (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired)
+    errors: list[BaseException] = []  # failed reads, so the scan goes on but an answer with one is not remembered
+
     def batch(paths: list[str]) -> str:
         """Jobs of several runs at once (each read is a broker vend plus a GitHub call, ~3 s): the first match in
-        run order; when none matched, the first read's error is raised."""
+        run order. A failed read is noted in ``errors`` and the rest of the scan goes on, since a later batch
+        can still hold the pool's runner."""
         if deadline is not None and time.monotonic() >= deadline:
             raise OverBudget(f"sweep budget spent before {paths[0].split('?', 1)[0]} was read")
         # Each read runs in a copy of this thread's context: a fresh pool thread would lose the bound home, and
         # ``dispatcher_gh_argv`` would read the launch home's gh_command_prefix (another home's credential).
         with ThreadPoolExecutor(max_workers=len(paths), thread_name_prefix="ci-pool-scan") as ex:
             futures = [ex.submit(contextvars.copy_context().run, _gh_api, p) for p in paths]
-        error: Optional[BaseException] = None
         for fut in futures:
             exc = fut.exception()
             if exc is not None:
-                error = error or exc
+                if not isinstance(exc, unreadable):
+                    raise exc
+                errors.append(exc)
             elif hit := took((fut.result() or {}).get("jobs") or []):
                 return hit
-        if error is not None:
-            raise error
         return ""
 
     found = took(jobs)
@@ -357,23 +360,26 @@ def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadlin
     if seen is not None and time.monotonic() - seen[0] < POOL_SCAN_TTL_SECONDS:
         return seen[1]
     lists = (("in_progress", 100, IN_PROGRESS_RUNS_MAX), ("completed", 10, RECENT_RUNS_MAX))
-    try:
-        for status, per_page, limit in lists:
+    for status, per_page, limit in lists:
+        if found:
+            break
+        try:
+            listed = read(f"repos/{repo}/actions/runs?status={status}&per_page={per_page}").get("workflow_runs")
+        except OverBudget:
+            raise
+        except unreadable as exc:
+            errors.append(exc)  # the other list may still show the pool alive
+            continue
+        runs = [r for r in listed or [] if isinstance(r, dict) and r.get("id") and str(r["id"]) != str(run_id)
+                and (status == "in_progress" or (_epoch(r.get("updated_at")) or 0) >= cutoff)][:limit]
+        paths = [f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100" for run in runs]
+        for i in range(0, len(paths), POOL_SCAN_READERS):
+            found = batch(paths[i:i + POOL_SCAN_READERS])
             if found:
                 break
-            listed = read(f"repos/{repo}/actions/runs?status={status}&per_page={per_page}").get("workflow_runs")
-            runs = [r for r in listed or [] if isinstance(r, dict) and r.get("id") and str(r["id"]) != str(run_id)
-                    and (status == "in_progress" or (_epoch(r.get("updated_at")) or 0) >= cutoff)][:limit]
-            paths = [f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100" for run in runs]
-            for i in range(0, len(paths), POOL_SCAN_READERS):
-                found = batch(paths[i:i + POOL_SCAN_READERS])
-                if found:
-                    break
-    except OverBudget:
-        raise
-    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
-        logger.debug("ci run progress: recent runs of %s unreadable: %s", repo, exc)
-        return found  # an unread list is no evidence either way: not remembered
+    if not found and errors:
+        logger.debug("ci run progress: recent runs of %s unreadable: %s", repo, errors[0])
+        return ""  # an unread list is no evidence either way: not remembered
     _POOL_SCANS[key] = (time.monotonic(), found)
     return found
 

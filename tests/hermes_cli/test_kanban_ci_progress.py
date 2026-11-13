@@ -1268,3 +1268,40 @@ def test_one_unreadable_job_list_in_a_scan(kanban_home, monkeypatch, match, stat
     p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
     assert p.state == state, p
     assert bool(kcp._POOL_SCANS) is match
+
+
+@pytest.mark.parametrize("match,state", [(True, kcp.BUSY), (False, kcp.NOT_STARTING)], ids=["match", "no-match"])
+def test_unreadable_job_list_in_an_earlier_batch_does_not_end_the_scan(kanban_home, monkeypatch, match,
+                                                                        state) -> None:
+    """A 502 on one run's jobs in the first batch, with no match there, must not stop the scan before a later
+    batch's match is read (that read ``not_starting``, the false runners-offline wake); with no match anywhere the
+    scan is still not remembered."""
+    reads: list[int] = []
+
+    def jobs_for(run_id: int) -> list:
+        reads.append(run_id)
+        if run_id == 901:
+            raise RuntimeError("gh api exit 1: HTTP 502")
+        return [_taken(run_id=run_id, started_age=60, status="in_progress")] if match and run_id == 908 else []
+
+    _scan_api(monkeypatch, 10, jobs_for)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
+    assert p.state == state, p
+    assert 908 in reads
+    assert bool(kcp._POOL_SCANS) is match
+
+
+def test_unreadable_job_list_does_not_skip_the_completed_runs(kanban_home, monkeypatch) -> None:
+    """An error reading an in-progress run's jobs still lets a recently completed run's job show the pool alive."""
+    def api(path: str) -> dict:
+        if "actions/runs?" in path:
+            if "status=completed" in path:
+                return {"workflow_runs": [{"id": 950, "status": "completed", "updated_at": _iso(60)}]}
+            return {"workflow_runs": [{"id": 901, "status": "in_progress"}]}
+        if "/runs/901/" in path:
+            raise RuntimeError("gh api exit 1: HTTP 502")
+        return {"jobs": [_taken(run_id=950, started_age=60, status="completed")]}
+
+    monkeypatch.setattr(kcp, "_gh_api", api)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
+    assert p.state == kcp.BUSY and "took job 9500" in p.detail, p
