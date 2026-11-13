@@ -120,12 +120,15 @@ def _completion_receipt_schema() -> dict[str, Any]:
             "Optional v1 per-scope receipt. Include it when this completion claims delivery of a scoped "
             "artifact or ask (a fix, file, PR, reply, setting): one item per scope with its disposition "
             "(delivered, superseded with superseded_by, contained = mitigated not fixed, rejected), evidence "
-            "refs with the ISO8601 time you observed each and verification independently_checked (you re-ran "
-            "or read it back this run) or reported (taken from someone's word), and what remains. Remaining "
+            "refs with the timezone-aware ISO-8601 time you observed each (a naive timestamp is refused) and "
+            "verification independently_checked (you re-ran or read it back this run) or reported (taken from "
+            "someone's word), and what remains. A cross-card operator delivery claim attaches the applied "
+            "result's operator_delivery object to its evidence. Remaining "
             "pending work needs an open owner card you created or linked, as @task:<board>@<gateway>/<id>; "
             "deferred work may have owner null with a reason. Chat close-outs relay this instead of guessing "
             f"from the summary. Text fields hold at most {hcr.MAX_TEXT} characters, refs and owners "
-            f"{hcr.MAX_REF}. Example: " + json.dumps(example, separators=(",", ":"))),
+            f"{hcr.MAX_REF}; the whole receipt's canonical JSON at most {hcr.MAX_BYTES} bytes. Example: "
+            + json.dumps(example, separators=(",", ":"))),
         "properties": {
             "version": {"type": "integer", "enum": [1]},
             "items": {"type": "array", "minItems": 1, "maxItems": hcr.MAX_ITEMS, "items": {
@@ -140,8 +143,11 @@ def _completion_receipt_schema() -> dict[str, Any]:
                         "required": ["ref", "observed_at", "verification"],
                         "properties": {
                             "ref": ref,
-                            "observed_at": {"type": "string", "maxLength": 64},
+                            "observed_at": {"type": "string", "maxLength": 64, "description": (
+                                "ISO-8601 with timezone, e.g. 2026-11-13T06:40:00+00:00")},
                             "verification": {"type": "string", "enum": list(hcr.VERIFICATIONS)},
+                            "operator_delivery": {"type": "object", "description": (
+                                "Optional: the applied operator result's operator_delivery, verbatim")},
                         }}},
                     "remaining": {"type": "array", "maxItems": hcr.MAX_REMAINING, "items": {
                         "type": "object", "additionalProperties": False,

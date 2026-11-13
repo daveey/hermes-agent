@@ -18,6 +18,7 @@ MAX_EVIDENCE = 32
 MAX_REMAINING = 32
 MAX_TEXT = 2000
 MAX_REF = 2048
+MAX_BYTES = 32768  # canonical (compact, ASCII) JSON of the whole receipt
 _QUALIFIED_OWNER = re.compile(r"@(task|session):[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+/[^\s/@]+\Z")
 
 
@@ -134,6 +135,6 @@ def validate_completion_receipt(value: Any) -> dict:
     if type(raw["version"]) is not int or raw["version"] != 1:
         raise ValueError("completion_receipt: version must be integer 1")
     out = {"version": 1, "items": [_item(i) for i in _array(raw["items"], "items", MAX_ITEMS, nonempty=True)]}
-    if len(json.dumps(out, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > 32768:
-        raise ValueError("completion_receipt: canonical JSON must not exceed 32768 bytes")
+    if len(json.dumps(out, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > MAX_BYTES:
+        raise ValueError(f"completion_receipt: canonical JSON must not exceed {MAX_BYTES} bytes")
     return out
