@@ -1023,8 +1023,10 @@ def _cmd_unlink(args: argparse.Namespace) -> int:
         return _err(f"unlink refused: worker {env_tid} may only unlink its own card's edges; use kanban_supervisor_request")
     with kbc.connect_closing() as conn:
         ok = kb.unlink_tasks(conn, args.parent_id, args.child_id)
+        from hermes_cli.kanban_board_delivery import cli_lines
+        queued = cli_lines(conn) if ok else []  # [daveey] the stopped Board sync keeps it here
     return _ok_or_err(ok, f"No such link: {args.parent_id} -> {args.child_id}",
-                      f"Unlinked {args.parent_id} -> {args.child_id}")
+                      "\n".join([f"Unlinked {args.parent_id} -> {args.child_id}", *queued]))
 
 
 def _cmd_supervisor_requests(args: argparse.Namespace) -> int:
@@ -1384,7 +1386,8 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
             current = kb.get_task(conn, args.task_id)
             what = "unknown id" if current is None else f"status is {current.status!r}, not 'done'"
             return _err(f"cannot reopen {args.task_id} ({what}); use unblock/reopen-review for other states")
-    print(f"Reopened {args.task_id} -> {status}")
+        print(f"Reopened {args.task_id} -> {status}")
+        _print_queued_local(conn)
     return 0
 
 
@@ -1526,6 +1529,7 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
         persisted_run = kb.latest_run(conn, tid)
         display_summary = persisted_run.summary if persisted_run else None
         print(f"Requested review for {tid}" + (f": {display_summary}" if display_summary else ""))
+        _print_queued_local(conn)
     return 0
 
 
@@ -1537,7 +1541,15 @@ def _cmd_request_changes(args: argparse.Namespace) -> int:
         if not ok:
             return _err(f"cannot request changes for {tid}: {detail or 'invalid review state'}")
         print(f"Requested changes for {tid}" + (f"; routed to {detail}" if detail else ""))
+        _print_queued_local(conn)
     return 0
+
+
+def _print_queued_local(conn) -> None:
+    """[daveey] A write the stopped Board sync keeps local says so (``kanban_board_delivery``)."""
+    from hermes_cli.kanban_board_delivery import cli_lines
+    for line in cli_lines(conn):
+        print(line)
 
 
 def _cmd_reopen_review(args: argparse.Namespace) -> int:
@@ -1558,7 +1570,7 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
             return True
 
         return _bulk_apply(ids, op, lambda tid: f"Reopened {tid}{suffix}",
-                           lambda tid: f"cannot reopen {tid} (not in review?)")
+                           lambda tid: f"cannot reopen {tid} (not in review?)", conn=conn)
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
@@ -1634,7 +1646,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                         f"was sent and {out['holder']} archives it at its next dispatcher tick")
             return f"Archived {tid}"
 
-        return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}")
+        return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}", conn=conn)
 
 
 def _host_lock_holders() -> dict:

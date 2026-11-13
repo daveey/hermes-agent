@@ -1516,8 +1516,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                  "the same card. " if placed.get("retry") else "")
         fields = {"placed": {"gateway": target, "request_id": rid, "task_id": tid, "origin_session": session_id,
                              "queued_only": bool(placed.get("queued_only")), "retry": bool(placed.get("retry"))}}
+        from tools import kanban_tools_board_delivery as kbd_words  # [daveey] the stopped-sync rewrite's anchors
         if tid:
-            shows = " and shows in this chat's tasks" if session_id else ""
+            shows = kbd_words.CHAT_TASKS_SHOWS if session_id else ""
             note = (f"{retry}Created on {target} as {tid}, not here: {decision['why']} (kanban.placement). It runs "
                     f"there{shows}. Read it with cross_task @task:default@{target}/{tid} or "
                     f"`hermes-hub tasks --gw {target}`.")
@@ -1529,7 +1530,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request. Changed calls with an explicit "
                 f"creation key are refused; without one they may duplicate. Its task id appears when {target} applies it "
-                + ("(this chat's tasks, " if session_id else "(")
+                + (kbd_words.CHAT_TASKS_QUEUED if session_id else "(")
                 + "`hermes-hub requests`).")
         return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
     except Exception as exc:

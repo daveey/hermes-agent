@@ -102,7 +102,8 @@ def down() -> Optional[dict[str, Any]]:
     return record
 
 
-def _when(since: Any) -> str:
+def when(since: Any) -> str:
+    """A down record's ``since`` (epoch seconds) as local time, or ``"an unknown time"``. [daveey]"""
     try:
         return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(float(since)))
     except (TypeError, ValueError, OverflowError):
@@ -114,7 +115,7 @@ def describe(record: Optional[dict[str, Any]] = None) -> str:
     record = down() if record is None else record
     if not record:
         return ""
-    return f"kanban sync not running since {_when(record.get('since'))}: {record.get('reason') or 'unknown reason'}"
+    return f"kanban sync not running since {when(record.get('since'))}: {record.get('reason') or 'unknown reason'}"
 
 
 def placement_runs_on(conn: Any, placement: Any) -> Optional[list[str]]:

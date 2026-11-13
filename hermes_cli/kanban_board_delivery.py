@@ -63,7 +63,7 @@ def queued_local(conn: sqlite3.Connection, task_id: Optional[str] = None) -> Opt
     out: dict[str, Any] = {
         "board_delivery": QUEUED_LOCAL,
         "board_sync": (f"queued locally: this gateway's Board sync has been stopped since "
-                       f"{runstate._when(record.get('since'))} ({record.get('reason') or 'unknown reason'}); "
+                       f"{runstate.when(record.get('since'))} ({record.get('reason') or 'unknown reason'}); "
                        "other hosts and remote runs won't see this until it recovers"),
     }
     runner = remote_runner(conn, task_id) if task_id else None

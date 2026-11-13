@@ -10,6 +10,7 @@ newer core migrated (this process declares an older core's columns) and records 
 """
 from __future__ import annotations
 
+import argparse
 import json
 import time
 
@@ -209,6 +210,89 @@ def test_cli_unblock_while_stopped_prints_the_notice_once(home, monkeypatch, cap
     assert "Queued locally:" not in capsys.readouterr().out
 
 
+def _in_review(conn) -> str:
+    tid = kb.create_task(conn, title="needs review", assignee="default")
+    assert kb.claim_task(conn, tid) is not None
+    run = kb.latest_run(conn, tid)
+    assert run is not None and kb.request_review(conn, tid, expected_run_id=run.id)
+    return tid
+
+
+def _cli_archive(conn):
+    tid = kb.create_task(conn, title="drop me", assignee="default")
+    return "_cmd_archive", argparse.Namespace(task_ids=[tid], purge_ids=None), f"Archived {tid}"
+
+
+def _cli_reopen(conn):
+    tid = kb.create_task(conn, title="done too soon", assignee="default")
+    assert kb.complete_task(conn, tid, summary="first pass")
+    return "_cmd_reopen", argparse.Namespace(task_id=tid, reason="missed a case"), f"Reopened {tid}"
+
+
+def _cli_reopen_review(conn):
+    tid = _in_review(conn)
+    return "_cmd_reopen_review", argparse.Namespace(task_ids=[tid], reason=None), f"Reopened {tid}"
+
+
+def _cli_request_review(conn):
+    tid = kb.create_task(conn, title="implemented", assignee="default")
+    assert kb.claim_task(conn, tid) is not None
+    return ("_cmd_request_review", argparse.Namespace(task_id=tid, summary="tests pass", metadata=None,
+                                                      reviewer=None, force=True), f"Requested review for {tid}")
+
+
+def _cli_request_changes(conn):
+    tid = _in_review(conn)
+    assert kb.claim_review_task(conn, tid) is not None
+    return ("_cmd_request_changes", argparse.Namespace(task_id=tid, reason=["fix", "the", "nit"]),
+            f"Requested changes for {tid}")
+
+
+def _cli_unlink(conn):
+    parent = kb.create_task(conn, title="parent", assignee="default")
+    child = kb.create_task(conn, title="child", assignee="default")
+    kb.link_tasks(conn, parent, child)
+    return "_cmd_unlink", argparse.Namespace(parent_id=parent, child_id=child), f"Unlinked {parent} -> {child}"
+
+
+CLI_WRITES = [_cli_archive, _cli_reopen, _cli_reopen_review, _cli_request_review, _cli_request_changes, _cli_unlink]
+
+
+@pytest.mark.parametrize("setup", CLI_WRITES, ids=lambda f: f.__name__[5:])
+def test_cli_write_while_stopped_prints_the_notice_once(home, monkeypatch, capsys, setup):
+    """CLI parity with the tools (review 5888858852): every CLI write the stopped sync keeps local says so."""
+    from hermes_cli import kanban as kcli
+    path, conn = home
+    command, args, done = setup(conn)
+    _give_up_the_sync_role(path, monkeypatch)
+    assert getattr(kcli, command)(args) == 0
+    printed = capsys.readouterr().out
+    assert done in printed, printed
+    assert printed.count("Queued locally: this gateway's Board sync has been stopped since ") == 1, printed
+    assert "gave up the sync role" in printed
+
+
+@pytest.mark.parametrize("setup", CLI_WRITES, ids=lambda f: f.__name__[5:])
+def test_cli_write_while_the_sync_runs_prints_no_notice(home, capsys, setup):
+    from hermes_cli import kanban as kcli
+    _path, conn = home
+    command, args, done = setup(conn)
+    assert getattr(kcli, command)(args) == 0
+    printed = capsys.readouterr().out
+    assert done in printed and "Queued locally" not in printed, printed
+
+
+def test_cli_unlink_of_no_link_while_stopped_prints_no_notice(home, monkeypatch, capsys):
+    """Nothing was written, so nothing is queued."""
+    from hermes_cli import kanban as kcli
+    path, conn = home
+    parent = kb.create_task(conn, title="parent", assignee="default")
+    child = kb.create_task(conn, title="child", assignee="default")
+    _give_up_the_sync_role(path, monkeypatch)
+    assert kcli._cmd_unlink(argparse.Namespace(parent_id=parent, child_id=child)) == 1
+    assert "Queued locally" not in capsys.readouterr().out
+
+
 def test_reads_and_refusals_while_stopped_are_unchanged(home, monkeypatch):
     path, conn = home
     tid = _remote_running(conn)
@@ -261,6 +345,23 @@ def test_create_queued_on_a_target_while_stopped_says_the_chat_link_waits(home, 
     out = _place_on_worker(path, monkeypatch, task_id=None)
     assert out["ok"] is True and out["status"] == "queued" and out["chat_link"] == "queued_local", out
     assert "(this chat's tasks once this gateway's Board sync recovers, " in out["note"]
+
+
+@pytest.mark.parametrize("task_id", ["t_01a1d42acdce8e23", None], ids=["created", "queued"])
+def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home, monkeypatch, task_id):
+    """Review 5888858852: the rewrite anchored on literals kanban_tools also spelled out, so rewording the note
+    there made it silently do nothing. Reworded at the one source, the rewrite still lands."""
+    from tools import kanban_tools_board_delivery as kbd
+    monkeypatch.setattr(kbd, "CHAT_TASKS_SHOWS", " and is listed under this chat")
+    monkeypatch.setattr(kbd, "CHAT_TASKS_QUEUED", "(listed under this chat, ")
+    path, _conn = home
+    _give_up_the_sync_role(path, monkeypatch)
+    out = _place_on_worker(path, monkeypatch, task_id=task_id)
+    assert out["chat_link"] == "queued_local", out
+    later = "once this gateway's Board sync recovers"
+    expected = (f" and is listed under this chat {later}." if task_id else f"(listed under this chat {later}, ")
+    assert expected in out["note"], out["note"]
+    assert "this chat's tasks" not in out["note"]
 
 
 def test_create_placed_elsewhere_while_the_sync_runs_is_unchanged(home, monkeypatch):
