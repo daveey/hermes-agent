@@ -105,6 +105,28 @@ def test_survivable_command_masking_its_own_oom_kill_is_still_named(tmp_path, mo
     assert watch.note(None) is None and len(kernel.calls) == 1  # no exit status: nothing is read
 
 
+@pytest.mark.parametrize("rc", [1, 2, -2])
+def test_survivable_non_kill_exit_gets_the_pipeline_wording(tmp_path, monkeypatch, kernel, rc):
+    """``cmd | grep`` exiting 1 after the kill is no proof the command died: same split as the run scope."""
+    _scope(tmp_path, monkeypatch)
+    unit = "hermes-worker-proc_ef56.scope"
+    watch = terminal_oom.OomWatch(SimpleNamespace(session=SimpleNamespace(systemd_unit=unit)))
+    kernel.records[unit] = {"pid": 79, "task": "sort", "limit_bytes": 268435456}
+    note = watch.note(rc) or ""
+    assert note.startswith("a process was killed by the OOM killer at its scope's memory cap (256 MiB; ")
+    assert "a pipeline may hide its exit status" in note
+
+
+@pytest.mark.parametrize("rc", [137, -9, 143, -15])
+def test_survivable_kill_exit_keeps_the_firm_wording(tmp_path, monkeypatch, kernel, rc):
+    """SIGKILL, or the SIGTERM systemd sends when OOMPolicy=stop stops the scope."""
+    _scope(tmp_path, monkeypatch)
+    unit = "hermes-worker-proc_ef57.scope"
+    watch = terminal_oom.OomWatch(SimpleNamespace(session=SimpleNamespace(systemd_unit=unit)))
+    kernel.records[unit] = {"pid": 80, "task": "cc1plus", "limit_bytes": 268435456}
+    assert (watch.note(rc) or "").startswith("killed by the OOM killer at its scope's memory cap (256 MiB; ")
+
+
 def test_sigkill_without_an_oom_kill_keeps_the_generic_note(tmp_path, monkeypatch, kernel):
     _scope(tmp_path, monkeypatch, oom_kill=2)
     watch = terminal_oom.OomWatch()

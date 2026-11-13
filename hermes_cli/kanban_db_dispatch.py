@@ -330,16 +330,16 @@ _EXIT_TRAILER_RE = re.compile(
 )
 
 
-def _worker_log_exit_code(task_id: str, board: Optional[str] = None, *, run_id=None) -> Optional[int]:
+def _worker_log_exit_code(task_id: str, board: Optional[str] = None, *, run_id=None, log: Optional[str] = None) -> Optional[int]:
     """Exit code from the trailer the worker CLI wrote to its own log; None when absent.
 
     The durable twin of ``_recent_worker_exits``: written by the worker itself
     (``hermes_cli.quiet_single_query.exit_single_query``), so it is there whether
     or not the process running this sweep ever reaped the worker. Last trailer
-    wins — the log is append-mode across re-runs.
+    wins — the log is append-mode across re-runs. ``log``: the whole log a caller holds (not re-read).
     """
     try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=None if run_id is not None else 4000, board=board)
+        raw = log if log is not None else _kb.read_worker_log(task_id, tail_bytes=None if run_id is not None else 4000, board=board)
     except Exception:
         return None
     # A log with no run marker predates it (worker spawned before the deploy): last trailer wins, as before.
@@ -1178,8 +1178,8 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    log = _kb.read_worker_log(task_id, tail_bytes=None, board=board) if task_id and run_id else ""
-    exited = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id)
+    log = (_kb.read_worker_log(task_id, tail_bytes=None, board=board) or "") if task_id and run_id else None
+    exited = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id, log=log)
     failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid, started_at=_worker_scope.run_started_at(conn, run_id),
                                          exit_code=0 if exited.kind == "clean_exit" else None) if task_id else None  # rc 0 skips the kernel log
     if failure:
@@ -1206,7 +1206,7 @@ def _classify_dead_worker(
 
 def _classify_dead_worker_exit(
     pid: int, claimer: Optional[str], exit_code=None, *, task_id: Optional[str] = None,
-    board: Optional[str] = None, run_id: Optional[int] = None,
+    board: Optional[str] = None, run_id: Optional[int] = None, log: Optional[str] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 
@@ -1215,13 +1215,13 @@ def _classify_dead_worker_exit(
     registry only knows children of THIS process; a per-tick dispatcher reads the exit trailer
     the worker left in its log instead, so the same death gets the same booking (protocol
     violation / rate-limit requeue / crash) as under the gateway-embedded dispatcher. A worker
-    that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash.
+    that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash. ``log``: as held by the caller.
     """
     kind, code = _classify_worker_exit(pid)
     if exit_code is not None:
         kind, code = _exit_code_kind(int(exit_code))
     elif kind == "unknown" and task_id:
-        logged = _worker_log_exit_code(task_id, board=board, run_id=run_id)
+        logged = _worker_log_exit_code(task_id, board=board, run_id=run_id, log=log)
         if logged is not None:
             kind, code = _exit_code_kind(logged)
     if kind == "clean_exit":

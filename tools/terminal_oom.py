@@ -18,6 +18,9 @@ _SCOPE_PREFIX = "hermes-worker-kanban-"
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
 _PROC_CGROUP = Path("/proc/self/cgroup")
 _SIGKILL_EXITS = {137, -9}
+# A survivable command's own scope keeps systemd's default OOMPolicy=stop (process_registry): after
+# an OOM kill there, systemd stops the scope with SIGTERM, so the command exits 143 / -15.
+_SCOPE_STOP_EXITS = {143, -15}
 
 
 def run_scope_cgroup() -> Optional[Path]:
@@ -88,6 +91,9 @@ class OomWatch:
     command was killed only when the victim is not a process that was already running when
     the command started; otherwise it names the victim and says no more. A ``survivable``
     foreground command runs in its own transient scope, where any victim is the command's.
+    Cost: every survivable foreground command that finishes, rc 0 included, pays one
+    ``journalctl -k`` read bounded by ``since``; a run-scope command reads it only when the
+    scope's ``oom_kill`` count rose.
     Attribution is approximate: membership is judged against the ``cgroup.procs`` snapshot taken
     at the start, and the kernel lookup returns only the window's last victim, so a pid reused
     during the command or a second kill in the same window can be misattributed.
@@ -128,9 +134,12 @@ class OomWatch:
     def _own_scope_note(self, returncode) -> Optional[str]:
         """A survivable command's own scope holds only it: any OOM victim there is the command's.
 
-        Its scope is collected on exit, so no ``oom_kill`` count is left to compare: the kernel
-        log is read for every finished command, rc 0 included, where a pipeline can mask the
-        kill exactly as in the run scope.
+        Its scope is collected on exit, so no ``oom_kill`` count is left to compare: every
+        survivable foreground command that finishes, rc 0 included, pays one ``journalctl -k``
+        read, bounded by ``since`` (the command's start). As in the run scope, only a kill exit
+        gets the firm wording: SIGKILL, or SIGTERM from systemd stopping the scope under its
+        default ``OOMPolicy=stop``. Any other rc (0, or a ``cmd | grep`` exiting 1) may be a
+        pipeline hiding the victim's exit status.
         """
         session = getattr(self.survivable, "session", None)
         unit = getattr(session, "systemd_unit", None)
@@ -140,7 +149,7 @@ class OomWatch:
         if victim is None:
             return None
         cap = f"{_size(victim.get('limit_bytes'))}; kernel victim: {victim['task']} pid {victim['pid']}"
-        if returncode == 0:
-            return (f"a process was killed by the OOM killer at its scope's memory cap ({cap}) while this "
-                    f"command ran (a pipeline may hide its exit status); {_ADVICE}")
-        return f"killed by the OOM killer at its scope's memory cap ({cap}); {_ADVICE}"
+        if returncode in _SIGKILL_EXITS | _SCOPE_STOP_EXITS:
+            return f"killed by the OOM killer at its scope's memory cap ({cap}); {_ADVICE}"
+        return (f"a process was killed by the OOM killer at its scope's memory cap ({cap}) while this "
+                f"command ran (a pipeline may hide its exit status); {_ADVICE}")

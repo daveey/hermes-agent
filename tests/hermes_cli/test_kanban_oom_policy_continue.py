@@ -254,6 +254,23 @@ def test_classify_dead_worker_passes_the_run_start(monkeypatch):
     assert seen == {"pid": 4242, "started_at": 1794550650, "exit_code": None}
 
 
+def test_failure_path_reads_the_worker_log_once(monkeypatch):
+    """No authority rc and a reap-registry miss: the exit trailer comes from the log already read."""
+    from hermes_cli import kanban_db_dispatch as kbd
+    reads = []
+    monkeypatch.setattr(kbd._kb, "read_worker_log", lambda *a, **kw: reads.append(kw) or "no trailer\n")
+    monkeypatch.setattr(kbd, "_recent_worker_exits", {})
+    monkeypatch.setattr(kbd._worker_scope, "read_failure",
+                        lambda *a, **kw: {"systemd_unit": UNIT, "scope_result": "oom-kill",
+                                          "memory_max_bytes": None, "memory_peak_bytes": None})
+    monkeypatch.setattr(kbd._worker_scope, "note_oom_kill", lambda *a, **kw: None)
+    monkeypatch.setattr(kbd, "crash_worker_output", lambda *a, **kw: "")
+    assert kbd._classify_dead_worker(4242, "h:1", task_id="t_x", run_id=5).kind == "oom_killed"
+    assert len(reads) == 1
+    assert kbd._worker_log_exit_code("t_x", run_id=5, log="x\n" + kbd.KANBAN_WORKER_EXIT_TRAILER + "3\n") == 3
+    assert len(reads) == 1  # a caller-held log is never re-read
+
+
 def test_clean_exit_never_reads_the_kernel_log(monkeypatch):
     """rc 0: the worker outlived any kill, so no journalctl runs inside the reclaim write txn."""
     seen = _journal_argv(monkeypatch, props="LoadState=loaded\nResult=success\n")
