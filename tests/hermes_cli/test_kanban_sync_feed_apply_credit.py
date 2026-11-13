@@ -268,8 +268,7 @@ def test_a_heal_that_writes_after_the_inputs_read_breaks_the_chain(live, svc, ka
     """The heals run after the inputs read, every round; a write they make is a local write for the next round."""
     import hermes_cli.kanban_sync_divergence as divergence
     parent, child = _settle(live, svc, kanban_home)
-    owner = ksc if heal == "heal_clobbered_completions" else divergence
-    real = getattr(owner, heal)
+    real = getattr(divergence, heal)
     fired = []
 
     def heal_and_write(conn, *a, **k):
@@ -278,7 +277,7 @@ def test_a_heal_that_writes_after_the_inputs_read_breaks_the_chain(live, svc, ka
             fired.append(1)
             _uncaptured_edit(conn, child, f"healed by {heal}")
         return out
-    monkeypatch.setattr(owner, heal, heal_and_write)
+    monkeypatch.setattr(divergence, heal, heal_and_write)
     _heartbeat(svc, parent)
     assert _round(kanban_home, svc).repair_deferred  # the heal wrote after this round's read
     calls = _spy(monkeypatch)

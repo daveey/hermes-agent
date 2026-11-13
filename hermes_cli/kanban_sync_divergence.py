@@ -393,3 +393,48 @@ def _heal_one(live: sqlite3.Connection, row: sqlite3.Row) -> str | None:
         kb._append_event(live, tid, "status_healed", {"from": "running", "to": status,
                                                       "outcome": row["outcome"]}, run_id=row["run_id"])
     return status
+
+
+# rows.ts ``upsertTask``: the holder moved its card out of ``running`` before its own end of the run arrived, so the
+# Board ended the lease's run with this placeholder. Its comment: "the holder's own end of the run normally follows".
+_LEASE_END_PLACEHOLDER = "card left running (done)"
+
+
+def heal_clobbered_completions(live: sqlite3.Connection) -> list[str]:
+    """Restore completed runs the Board's placeholder lease end overwrote; returns the task ids healed.
+
+    Guarded to the one shape that write leaves: the card is ``done``; the run is its latest; the run reads exactly
+    ``released``/``released`` with the Board's placeholder error; and the card's latest ``completed`` event names
+    that run (``complete_task`` writes the event and the ``done/completed`` run end in one transaction, so the
+    event proves how this holder ended the run). The run is set back to ``done``/``completed`` with the event's
+    summary, through the capture triggers, so the Board's copy is corrected by the next push too. Anything else is
+    left alone: a run released for any other reason is not a completion. [daveey]"""
+    from hermes_cli.kanban_db_connect import write_txn
+    rows = live.execute(
+        "SELECT r.id AS run_id, r.task_id, r.ended_at, t.completed_at FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+        "WHERE r.status = 'released' AND r.outcome = 'released' AND r.error = ? AND t.status = 'done' "
+        "AND r.id = (SELECT MAX(id) FROM task_runs WHERE task_id = r.task_id)", (_LEASE_END_PLACEHOLDER,)).fetchall()
+    healed = []
+    for row in rows:
+        event = live.execute(
+            "SELECT run_id, payload FROM task_events WHERE task_id = ? AND kind = 'completed' ORDER BY id DESC LIMIT 1",
+            (row["task_id"],)).fetchone()
+        if event is None or event["run_id"] != row["run_id"]:
+            continue
+        try:
+            payload = json.loads(event["payload"] or "{}")
+        except ValueError:
+            payload = {}
+        summary = (payload.get("summary") or payload.get("result")) if isinstance(payload, dict) else None
+        ended = max(int(row["ended_at"] or 0), int(row["completed_at"] or 0)) or None
+        with write_txn(live):
+            changed = live.execute(
+                "UPDATE task_runs SET status = 'done', outcome = 'completed', error = NULL, "
+                "summary = COALESCE(summary, ?), ended_at = ? "
+                "WHERE id = ? AND status = 'released' AND outcome = 'released' AND error = ?",
+                (summary, ended, row["run_id"], _LEASE_END_PLACEHOLDER)).rowcount
+        if changed:
+            healed.append(row["task_id"])
+            _log.warning("kanban sync: %s run %s was ended by the Board's lease placeholder over its completion; "
+                         "restored done/completed", row["task_id"], row["run_id"])
+    return healed

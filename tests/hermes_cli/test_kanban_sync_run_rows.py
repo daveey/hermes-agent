@@ -20,6 +20,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kd
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import kanban_sync_divergence as divergence
 from tests.hermes_cli import kanban_sync_support as support
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 
@@ -351,7 +352,7 @@ def test_the_completion_heal_leaves_a_run_released_for_another_reason(live, kanb
         live.execute("UPDATE task_runs SET status = 'released', outcome = 'released', "
                      "error = 'card left running (done)', ended_at = 5 WHERE uid = ?", (uid,))
         live.execute("UPDATE tasks SET status = 'done', completed_at = 5, current_run_id = NULL WHERE id = ?", (tid,))
-    assert ksc.heal_clobbered_completions(live) == []  # no completed event names this run
+    assert divergence.heal_clobbered_completions(live) == []  # no completed event names this run
     assert tuple(_run(live, uid))[:2] == ("released", "released")
 
 
