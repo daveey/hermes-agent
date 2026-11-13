@@ -104,7 +104,8 @@ _HUB_READ_SSH = re.compile(r"\bssh[ \t]+hermes-hub[ \t]+(?:" + "|".join(HUB_READ
 # (``logs/'..'``, ``logs/{..,x}``, ``logs/$(echo ..)``) would hide a ``..`` from :func:`_under_roots`
 # (reviews 5877418508, 5877782890). ``%`` is literal in shell (``%2e%2e`` is a directory name, not ``..``).
 _STATE_PATH = re.compile(r"(?:~|/home/[A-Za-z0-9_][\w.-]*)/\.hermes/([\w.@+%~/-]*)")
-_QUOTES = "'\"`"
+# Text with a backtick keeps every path (``_BACKTICK``), so only shell quotes reach :func:`_ends_word`.
+_QUOTES = "'\""
 # After the path and its closing quote/paren, if any: at most one sentence mark, then the end or whitespace; or a
 # shell operator, which ends the word.
 _WORD_END = re.compile(r"[.,:;!?]?(?:$|\s)|[&;|<>]")
@@ -180,15 +181,26 @@ _DOTDOT = re.compile(r"(?<![\w.~-])\.\.(?![\w.~-])")
 # command or parameter expansion computes one (``$(dirname "$PWD")``, ``$(printf "\56\56")``, ``${D%logs/}``). So
 # text with any of these keeps every path, as does a directory change other than into a plain absolute path outside
 # ``~/.hermes`` (``cd ~/.hermes/logs`` then ``cd -``, ``popd`` or a relative path walks out of a root).
-_SPLIT = re.compile(r"[\\'\"`]")
+_SPLIT = re.compile(r"[\\'\"]")
 _EXPANSION = re.compile(r"\$[({'\"]")
+# A bare parameter computes a path just as well (``X=~/.hermes/logs/; cat $X../.env``, ``$Y$X$X/.env`` with
+# ``X=.``, or ``"$*"`` joining ``set -- ~/.hermes/logs/ . .`` under an empty IFS), and so does a backtick
+# substitution (a backtick-quoted ``printf '\56\56'`` glued to a root path, or a backtick-quoted ``printf c\\x64`` as
+# a computed cd). Any backtick counts: ``marker_work_text`` drops whole backtick spans anyway, so this only keeps the
+# paths outside them. ``$@`` never joins its words, and the other special parameters hold no path. A directory change
+# is judged with quotes and backslashes removed, as bash runs it: ``c''d`` and ``c\d`` are a ``cd``, and
+# ``cd '/tmp'`` is the plain ``cd /tmp``.
+_PARAMETER = re.compile(r"\$[\w*]")
+_BACKTICK = re.compile(r"`")
 _CHDIR = re.compile(r"(?<![\w.-])(?:cd|pushd|popd)(?![\w.-])(?![ \t]+(?:~|/)(?![^\s;&|]*\.hermes)[\w./-]*(?=$|[\s;&|)]))")
 
 
 def _strip_read_paths(text, roots):
-    if _DOTDOT.search(text) or _DOTDOT.search(_SPLIT.sub("", text)) or _EXPANSION.search(text) or _CHDIR.search(text):
+    split = _SPLIT.sub("", text)
+    if (_DOTDOT.search(text) or _DOTDOT.search(split) or _EXPANSION.search(text) or _PARAMETER.search(text)
+            or _BACKTICK.search(text) or _CHDIR.search(split)):
         return text
-    # Keep a separator so surrounding backtick runs cannot merge and hide later markers.
+    # Keep a separator so the words around a removed path cannot merge into a new marker.
     return _STATE_PATH.sub(
         lambda m: " " if _ends_word(text, m.start(), m.end()) and _under_roots(m.group(1), roots) else m.group(0),
         text)
