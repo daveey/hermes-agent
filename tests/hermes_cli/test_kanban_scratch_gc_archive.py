@@ -898,10 +898,49 @@ def test_marker_judged_against_its_scanned_stat(board):
     _tid, path = _plain_task(lambda p: _uv_cache(p))
     cache = path / "test-home" / ".cache" / "uv" / "sdists-v10"
     stale = (cache / ".git").lstat()
-    assert sa._is_gitlink(cache, stale) is False
-    (cache / ".git").write_bytes(b"gitdir: /elsewhere\n")
-    with pytest.raises(sa.ArchiveRefused, match="changed during scan"):
-        sa._is_gitlink(cache, stale)
+    dfd = os.open(cache, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert sa._is_gitlink(dfd, cache, stale) is False
+        (cache / ".git").write_bytes(b"gitdir: /elsewhere\n")
+        with pytest.raises(sa.ArchiveRefused, match="changed during scan"):
+            sa._is_gitlink(dfd, cache, stale)
+    finally:
+        os.close(dfd)
+
+
+def test_marker_read_through_the_scans_own_directory_fd(board, monkeypatch):
+    """Markers are judged via the scan's descriptor: no per-marker re-walk from /."""
+    from hermes_cli import kanban_scratch_archive as sa
+
+    def build(p):
+        _uv_cache(p)
+        (p / "other").mkdir()
+        (p / "other" / ".git").write_bytes(b"")
+
+    _tid, path = _plain_task(build)
+    opens = []
+    real_open_root = sa._open_root
+    monkeypatch.setattr(sa, "_open_root", lambda r: opens.append(r) or real_open_root(r))
+    assert sa.find_repos(path) == []
+    assert opens == [path]  # the scan root only, not once more per .git marker
+
+    # The directory is swapped by path after the scan entered it: the read stays on
+    # the directory the scan saw (its marker matches the scanned lstat), instead of
+    # following the path to the replacement's gitlink.
+    cache = path / "test-home" / ".cache" / "uv" / "sdists-v10"
+    real_is_gitlink = sa._is_gitlink
+
+    def swap_then_judge(dfd, directory, st):
+        if directory == cache:
+            cache.rename(cache.with_name("moved"))
+            cache.mkdir()
+            (cache / ".git").write_bytes(b"gitdir: /src/repo/.git/worktrees/wt\n")
+        return real_is_gitlink(dfd, directory, st)
+
+    monkeypatch.setattr(sa, "_is_gitlink", swap_then_judge)
+    repos, markers = sa._find_repos(path)
+    assert repos == [] and set(markers) == {"other/.git", "test-home/.cache/uv/sdists-v10/.git"}
+    assert (cache.with_name("moved") / ".git").read_bytes() == b""
 
 
 def test_marker_rewritten_into_gitlink_after_judgement_keeps_workspace(board, monkeypatch):

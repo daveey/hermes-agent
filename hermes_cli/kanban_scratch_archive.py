@@ -24,6 +24,9 @@ against the manifest and the source tree is re-scanned for mutation before the
 archive is published. Trees with no git repository are archived by the payload
 alone. That directory name is reserved: a workspace entry with that name is
 refused so the metadata can never collide with archived content.
+``tree.tar.gz`` is written at gzip level 1 (``_GZIP_LEVEL``), which trades
+about 14% more archive bytes for ~7x faster reclaim (see the constant for the
+measurements and how to reverse it).
 
 Anything it cannot prove safe keeps the workspace: a linked worktree or
 submodule (a ``.git`` gitlink file or symlink: the worktree GC owns those; a
@@ -46,7 +49,7 @@ import subprocess
 import tarfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -73,19 +76,19 @@ _GITLINK_PREFIX = b"gitdir:"
 _GITLINK_PROBE = 4096
 
 
-def _is_gitlink(directory: Path, st: os.stat_result) -> bool:
-    """True unless the regular file ``directory/.git`` (lstat *st*) is provably not a gitlink.
+def _is_gitlink(dfd: int, directory: Path, st: os.stat_result) -> bool:
+    """True unless the regular file ``.git`` under *dfd* (lstat *st*) is provably not a gitlink.
 
-    Opened without following links and checked against the scanned lstat, so
-    the bytes read belong to the entry the scan recorded. Git only accepts a
-    file starting ``gitdir: ``; leading whitespace is tolerated here too, so the
-    rule errs towards keeping the tree.
+    Handles regular files only: the caller treats any other ``.git`` type
+    (symlink, fifo, ...) as a gitlink without calling this. *dfd* is the scan's
+    own descriptor for *directory* (used only in messages), so the read is tied
+    to the directory the scan saw rather than a fresh walk of the path. Opened
+    without following links and checked against the scanned lstat, so the bytes
+    read belong to the entry the scan recorded. Git only accepts a file starting
+    ``gitdir: ``; leading whitespace is tolerated here too, so the rule errs
+    towards keeping the tree.
     """
-    dfd = _open_root(directory)
-    try:
-        fd = os.open(".git", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
-    finally:
-        os.close(dfd)
+    fd = os.open(".git", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
     with os.fdopen(fd, "rb") as fh:
         fst = os.fstat(fh.fileno())
         if not stat.S_ISREG(fst.st_mode) or _signature(fst) != _signature(st):
@@ -94,13 +97,26 @@ def _is_gitlink(directory: Path, st: os.stat_result) -> bool:
     return head.lstrip().startswith(_GITLINK_PREFIX)
 
 
+def _in_git_metadata(rel: str) -> bool:
+    return rel == ".git" or rel.endswith("/.git") or rel.startswith(".git/") or "/.git/" in rel
+
+
 def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
     """``find_repos`` plus the signatures of the ``.git`` data files it judged.
 
     The caller re-checks those signatures against the payload snapshot, so a
-    marker rewritten into a gitlink after this judgement is refused.
+    marker rewritten into a gitlink after this judgement is refused. Each
+    regular ``.git`` file is judged during the scan, through the scan's own
+    descriptor for its directory.
     """
-    found = _scan(root)
+    verdicts: dict[str, bool] = {}
+
+    def judge(dfd: int, gitrel: str, st: os.stat_result) -> None:
+        rel = gitrel.rpartition("/")[0] or "."
+        if not _in_git_metadata(rel):
+            verdicts[gitrel] = _is_gitlink(dfd, root if rel == "." else root / rel, st)
+
+    found = _scan(root, on_git_file=judge)
     markers: dict[str, list[int]] = {}
     kids: dict[str, set[str]] = {".": set()}
     for rel, st in found.items():
@@ -112,7 +128,7 @@ def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
             kids.setdefault(rel, set())
     repos: list[Path] = []
     for rel, names in kids.items():
-        if rel == ".git" or rel.endswith("/.git") or rel.startswith(".git/") or "/.git/" in rel:
+        if _in_git_metadata(rel):
             continue  # never descend into repository metadata
         directory = root if rel == "." else root / rel
         if ".git" in names:
@@ -121,11 +137,7 @@ def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
             if stat.S_ISDIR(gst.st_mode):
                 repos.append(directory)
                 continue
-            try:
-                gitlink = not stat.S_ISREG(gst.st_mode) or _is_gitlink(directory, gst)
-            except OSError as exc:
-                raise ArchiveRefused(f"scan uncertain: {exc!r}") from exc
-            if gitlink:
+            if not stat.S_ISREG(gst.st_mode) or verdicts[gitrel]:
                 raise ArchiveRefused(f"linked worktree or submodule at {directory / '.git'} (left to the worktree GC)")
             markers[gitrel] = _signature(gst)  # plain data (e.g. uv's empty cache marker)
         if {"HEAD", "objects"} <= names and names & {"refs", "reftable"}:
@@ -210,6 +222,10 @@ PAYLOAD_DIR = ".hermes-complete-archive-v1"
 PAYLOAD_VERSION = 1
 _TREE = "tree.tar.gz"
 _MANIFEST = "manifest.json"
+# Level 1 trades size for reclaim speed: archives are ~14% larger than at level 9
+# (547 MB worker tree: L9 59.8 s / 180.2 MB, L6 18.6 s / 181.6 MB, L1 8.3 s / 205.2 MB),
+# so budget archive/scratch disk for that. To reverse, set 6 (near-L9 size at ~2x L1
+# time); readers need no change, every level reads back through "r:gz".
 _GZIP_LEVEL = 1
 
 
@@ -260,13 +276,17 @@ class _HashingReader:
 
 
 def _scan(root: Path, tar: Optional[tarfile.TarFile] = None,
-          entries: Optional[dict] = None) -> dict[str, os.stat_result]:
+          entries: Optional[dict] = None, *,
+          on_git_file: Optional[Callable[[int, str, os.stat_result], None]] = None,
+          ) -> dict[str, os.stat_result]:
     """lstat of every entry below *root* (``"."`` is the root), by directory descriptor.
 
     Every directory is opened ``O_DIRECTORY|O_NOFOLLOW`` relative to its parent
     descriptor and every stat/open/readlink is relative to a descriptor, so a
     symlink swapped in for any ancestor is refused rather than followed. With
     *tar*/*entries* the content is archived during the same traversal.
+    *on_git_file(dfd, rel, lstat)* is called for each regular ``.git`` file
+    while its directory's descriptor *dfd* is still open.
     """
     found: dict[str, os.stat_result] = {}
     seen_inodes: dict[tuple[int, int], str] = {}
@@ -277,6 +297,8 @@ def _scan(root: Path, tar: Optional[tarfile.TarFile] = None,
             st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
             kind = _kind(st.st_mode)
             found[erel] = st
+            if on_git_file is not None and name == ".git" and stat.S_ISREG(st.st_mode):
+                on_git_file(dfd, erel, st)
             info = rec = None
             if tar is not None:
                 info = tarfile.TarInfo(erel)
@@ -377,9 +399,8 @@ def _write_payload(workspace: Path, dest: Path) -> dict[str, list[int]]:
     tree = dest / _TREE
     with open(tree, "wb") as raw:
         # mtime=0 keeps the gzip header deterministic. Level 1, not the default 9:
-        # archive time bounds reclaim throughput, and on a real 547 MB worker tree
-        # level 9 took 59.8 s (180.2 MB), level 6 18.6 s (181.6 MB), level 1 8.3 s
-        # (205.2 MB). Any level reads back through the same "r:gz" path.
+        # archive time bounds reclaim throughput (size/time trade-off at _GZIP_LEVEL).
+        # Any level reads back through the same "r:gz" path.
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=_GZIP_LEVEL) as gz:
             with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
                 before = _scan(workspace, tar, entries)
