@@ -153,7 +153,8 @@ def prove_origin(path: str, cfg: Settings, *, lookup: Optional[Callable[[str], d
 
 def _secret_in(text: str) -> bool:
     from agent.redact import redact_sensitive_text
-    return bool(text.strip()) and redact_sensitive_text(text) != text
+    # force: the publish gate never honours ``security.redact_secrets: false`` (that only governs display).
+    return bool(text.strip()) and redact_sensitive_text(text, force=True) != text
 
 
 def secret_scan(deadline: _Deadline, path: str, base: str, head: str) -> None:
