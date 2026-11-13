@@ -228,6 +228,12 @@
     "kind": "bare_which"
   },
   {
+    "path": "hermes_cli/kanban_worker_scope.py",
+    "symbol": "_probe_oom_policy_continue",
+    "kind": "bare_which",
+    "reason": "systemd-run is a host system binary (not a Hermes-managed runtime); same lookup as process_registry._systemd_run_user_scope_available."
+  },
+  {
     "path": "hermes_cli/linux_desktop_entry.py",
     "symbol": "_refresh_hicolor_cache",
     "kind": "bare_which"
