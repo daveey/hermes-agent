@@ -15,7 +15,8 @@ Guards:
   :func:`hermes_cli.kanban_worker_node.check_machine_pins`);
 * ``kanban.move.max_moves`` (default 3) moves per card;
 * moving back to a machine the card already left is ping-pong: refused unless ``force``, and it still counts;
-* ``dir`` / ``worktree`` workspaces exist only on their creator, so those cards never move;
+* ``dir`` workspaces exist only on their creator, so those cards never move; a ``worktree`` card moves only with
+  portable workspace_source custody (published branch, :mod:`hermes_cli.kanban_source_move`);
 * the card's ``requires`` must fit the assignee's profile on at least one matching machine whose profile
   tools are known or unknown; every match known to lack one refuses ``capability_mismatch``, naming the
   machine and the missing tool (:mod:`hermes_cli.kanban_runs_on_capabilities`);
@@ -42,6 +43,7 @@ Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reas
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from typing import Any, Mapping, Optional
@@ -127,13 +129,16 @@ def _requirement_matches(matches, machines, requires, skills, *, me=None, assign
 def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool = False,
           machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
           cfg: Optional[dict] = None, host_reason: Optional[str] = None,
-          reason: Optional[str] = None, checkpoint: Optional[str] = None) -> dict[str, Any]:
+          reason: Optional[str] = None, checkpoint: Optional[str] = None,
+          fresh: Optional[tuple] = None) -> dict[str, Any]:
     """Validate a move; returns ``{runs_on, previous, matches, move_no, forced, me, host}`` or raises
     :class:`MoveRefused`. ``host`` holds the event fields of a pin to one pool worker (:mod:`kanban_move_pool`).
     A ``reason`` claiming ship custody needs ``host_reason`` (:mod:`kanban_move_ship`). ``checkpoint`` is the
-    move's own, not yet written checkpoint: scanned for tree paths with the card's stored text."""
+    move's own, not yet written checkpoint: scanned for tree paths with the card's stored text. ``fresh`` is a running
+    card's just-published ``(manifest, custody)`` (workspace_source, v2 §7)."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_move_ship as kms
+    from hermes_cli import kanban_source_move as ksm
     from hermes_cli import kanban_worker_node as wn
     try:
         labels = wn.normalize_runs_on(runs_on)
@@ -145,15 +150,17 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     if ship_custody:
         raise MoveRefused(kms.SHIP_CUSTODY_REFUSED, ship_custody)
     row = conn.execute("SELECT status, workspace_kind, workspace_path, runs_on, assignee, requires, skills, "
-                       "model_override, provider_override, model_pin_mandatory FROM tasks "
-                       "WHERE id = ?", (task_id,)).fetchone()
+                       "model_override, provider_override, model_pin_mandatory, workspace_source, workspace_custody "
+                       "FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         raise MoveRefused("not_found", f"task {task_id} not found")
-    if row["workspace_kind"] in ("dir", "worktree"):
-        raise MoveRefused("workspace_bound", f"a {row['workspace_kind']} card runs only where its workspace is")
     if sync.board_mode(conn) != "primary":
+        if row["workspace_kind"] in ("dir", "worktree"):
+            raise MoveRefused("workspace_bound", f"a {row['workspace_kind']} card runs only where its workspace is")
         raise MoveRefused("not_synced", "runs_on needs a board that syncs to the Board service (kanban.sync)")
     me = me or str(sync._state(conn)["gateway_id"])
+    if bound := ksm.parked_refusal(conn, task_id, me=me, fresh=fresh):
+        raise MoveRefused(*bound)
     from hermes_cli.kanban_mandatory_pin import carry
     # A mandatory pin keeps its attestation label through every move (agent, operator, pickup-stall alarm):
     # [pool:worker] alone would let an old core lease it; machine:<x> needs x to attest it. [daveey]
@@ -185,7 +192,8 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     matches = _requirement_matches(matches, pool, requires, wn._parse(row["skills"]) or [],
                                    me=me, assignee=row["assignee"])
     try:
-        roc.check(labels, assignee=row["assignee"], requires=requires, workspace_kind=row["workspace_kind"] or "scratch",
+        roc.check(labels, assignee=row["assignee"], requires=requires, workspace_kind=ksm.capability_kind(
+                      {**dict(row), **({"workspace_source": fresh[0], "workspace_custody": fresh[1]} if fresh else {})}),
                   me=me, machines={m: pool[m] for m in matches}, exclude_me=exclude_me)
     except roc.PlacementCapabilityMismatch as exc:
         raise MoveRefused("capability_mismatch", str(exc)) from exc
@@ -282,9 +290,15 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     from hermes_cli.kanban_hub_admission_placement import gate_move
     if (refused := gate_move(conn, task_id, runs_on)) is not None:
         return refused  # a hub target must convince the admission judge first [daveey]
+    from hermes_cli import kanban_source_move as ksm
+    from hermes_cli import kanban_source_receipt as carrier
+    receipt, fresh, code = ksm.publish_for_move(conn, task_id)  # workspace_source: publish, then check (v2 §7)
+    if code:
+        return {"ok": False, "reason_code": code, "error": f"the worktree could not be published ({code}); the run "
+                                                          "stays here"}
     try:
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
-                     reason=reason, checkpoint=checkpoint)
+                     reason=reason, checkpoint=checkpoint, fresh=fresh)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
 
@@ -304,8 +318,10 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
             run_id=run_id)
 
     note = f"Moving to {plan['runs_on']} ({', '.join(plan['matches'])}): {reason}"
-    res = continue_task(conn, task_id, checkpoint=f"{checkpoint.strip()}\n\n[{note}]",
-                        expected_run_id=expected_run_id, in_txn=_in_txn)
+    run_id = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
+    with carrier.staged(task_id, run_id, receipt) if receipt else contextlib.nullcontext():
+        res = continue_task(conn, task_id, checkpoint=f"{checkpoint.strip()}\n\n[{note}]",
+                            expected_run_id=expected_run_id, in_txn=_in_txn)
     if not res.get("ok"):
         return {"ok": False, "reason_code": res.get("reason_code") or "not_running", "error": res.get("error")}
     out = {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
@@ -390,6 +406,11 @@ def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason
     from hermes_cli.kanban_hub_admission_placement import gate_move
     if (refused := gate_move(conn, task_id, runs_on)) is not None:
         return refused  # a hub target must convince the admission judge first [daveey]
+    from hermes_cli.kanban_source_move import reclaim_refusal
+    if code := reclaim_refusal(conn, task_id):  # a reclaim is involuntary: it cannot publish (v2 §7)
+        return {"ok": False, "reason_code": code,
+                "error": "a worktree/source card cannot be reclaimed to move: move it from its run (kanban_move), "
+                         "or let it park and move it then"}
     try:
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
                      reason=reason)

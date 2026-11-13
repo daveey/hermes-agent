@@ -251,9 +251,10 @@ def claim_refusal(card: Mapping[str, Any], *, me: str = "") -> Optional[str]:
     if not assignee:
         return None
     from hermes_cli.kanban_capabilities import validate_assignment
+    from hermes_cli.kanban_source_move import capability_kind
     try:
         validate_assignment(assignee, requires=_loads(card.get("requires"), []) or [],
-                            workspace_kind=card.get("workspace_kind") or "scratch",
+                            workspace_kind=capability_kind(card),
                             skills=_loads(card.get("skills"), None) or None)
     except CapabilityMismatchError as exc:
         reason = str(exc)

@@ -1,10 +1,9 @@
-"""workspace_source v1 (core PR-1, inert): manifest + custody parsing, the grant snapshot, resolver refusals, the
-host-local skip memo, the pickup skip and the ``workspace_kind``/``branch_name`` fence.
+"""workspace_source v1: manifest + custody parsing, the grant snapshot, resolver refusals, the host-local skip memo,
+the pickup skip and the ``workspace_kind``/``branch_name`` fence.
 
 Spec: daveey/hermes ``docs/designs/workspace-source-v1`` (plan v2 §1/§3, v3 §2/§6/§6b, v4 R4b/R4c/S9, v4.1).
-Everything here is gated on ``kanban.workspace_source.enabled``, which is refused until ``SOURCE_PROTOCOL_COMPLETE``
-(core PR-2 flips it): until then no grant request carries ``source_protocol`` and the Board never grants a custody or
-manifest card to this core, so the routing below only ever sees snapshots with no source.
+Everything here is gated on ``kanban.workspace_source.enabled`` (default off). Core PR-2 completed the protocol
+(``SOURCE_PROTOCOL_COMPLETE``): attach before spawn, publish at every voluntary ending, move/reclaim and the CLI gates.
 """
 
 from __future__ import annotations
@@ -23,9 +22,9 @@ from hermes_cli.kanban_workspace_source_config import DEFAULTS
 
 _log = logging.getLogger(__name__)
 
-# Core PR-2 (preflight/publish, attach + pre-spawn abort, source_protocol) flips this. Until then ``enabled: true``
-# is refused: a half-built client must never ask the Board for custody cards (v4 S9).
-SOURCE_PROTOCOL_COMPLETE = False
+# Core PR-2 (preflight/publish, attach + pre-spawn abort, source_protocol) completed the protocol; ``enabled`` is
+# honoured. A core without it must keep this False: a half-built client never asks the Board for custody cards (S9).
+SOURCE_PROTOCOL_COMPLETE = True
 
 MANIFEST_MAX_BYTES = 8 * 1024
 CUSTODY_STATES = frozenset({"attached", "published", "unchanged", "retained"})

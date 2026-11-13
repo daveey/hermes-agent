@@ -78,13 +78,15 @@ def test_manifest_size_cap():
 
 # --- settings (S9) -----------------------------------------------------------------------------------------------
 
-def test_enabled_refused_until_protocol_complete(caplog):
+def test_enabled_honoured_once_protocol_complete(caplog):
+    """PR-2 completes the protocol: ``enabled: true`` now enables (no refusal warning); default stays off."""
     kws._WARNED.clear()
     with caplog.at_level(logging.WARNING):
         s = kws.settings({"kanban": {"workspace_source": {"enabled": True, "clones": {"acme/widget": "/x"}}}})
-    assert s.requested and not s.enabled
-    assert "SOURCE_PROTOCOL_COMPLETE" in caplog.text
-    assert kws.SOURCE_PROTOCOL_COMPLETE is False
+    assert s.requested and s.enabled
+    assert "SOURCE_PROTOCOL_COMPLETE" not in caplog.text
+    assert kws.SOURCE_PROTOCOL_COMPLETE is True
+    assert not kws.settings({"kanban": {}}).enabled
 
 
 def test_config_defaults_and_derived_timeouts():

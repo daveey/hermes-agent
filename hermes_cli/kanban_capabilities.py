@@ -16,6 +16,9 @@ _WORKSPACE_REQUIRES = {
     "scratch": (),
     "dir": ("terminal", "file", "host_repo"),
     "worktree": ("terminal", "file", "git", "host_repo"),
+    # workspace_source: a worktree card with portable custody resumes from its published branch on any machine
+    # with a registered clone (the Board's repo proof gates the grant), so it needs no host checkout.
+    "worktree_source": ("terminal", "file", "git"),
 }
 
 

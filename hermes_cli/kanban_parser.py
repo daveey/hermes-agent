@@ -578,6 +578,13 @@ _SPECS = [
         _arg("--probe", action="store_true",
              help="Release only when a live usage read shows headroom on every walled provider (else refuse, audited)"),
     ], help="Operator-only: end the card's quota episode (a stale 'resets at' hold) so it is admissible again"),
+    _cmd("source-release", [
+        _TASK_ID,
+        _arg("--to", required=True, choices=("published", "unchanged"),
+             help="Custody state to set (the branch on GitHub must equal the manifest commit)"),
+        _arg("--by", default=None, help="Operator name recorded on the source_released event"),
+        _json_flag(),
+    ], help="Operator-only (hub, Board admin key): free workspace_source custody held by a dead or disabled holder"),
     _cmd("promote", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),
