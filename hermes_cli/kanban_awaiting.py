@@ -174,8 +174,22 @@ def normalize(value: Any) -> Optional[dict]:
     return out
 
 
-def premise_hash(awaiting: dict, reason: Optional[str]) -> str:
-    """Stable id of what a park waits on: the declared producer (with its why), else the reason."""
+_FULL_SHA = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{40}(?![0-9A-Fa-f])")
+
+
+def run_heads(awaiting: dict, wake_check: Optional[str]) -> list[str]:
+    """Sorted full (40-hex) commit SHAs a ``ci``/``deploy`` park names in its ``ref`` or ``wake_check``."""
+    text = f"{awaiting.get('ref', '')} {wake_check or ''}"
+    return sorted({m.lower() for m in _FULL_SHA.findall(text)})
+
+
+def premise_hash(awaiting: dict, reason: Optional[str], wake_check: Optional[str] = None) -> str:
+    """Stable id of what a park waits on: the declared producer (with its why), else the reason.
+
+    A ``ci``/``deploy`` park also hashes the full commit SHAs its ``ref``/``wake_check`` name: red CI, a fix
+    pushed as a new head and a park on that head is new evidence, not the same premise. A PR-URL ref with
+    no per-head ``why`` folded every head into one premise and escalated the third fix round (PR #1806,
+    t_01a1d19e0179a093). The same head re-parked still counts, so a stuck head escalates. [daveey]"""
     if awaiting.get("inferred"):
         basis = " ".join((reason or "").lower().split())[:400]
     elif awaiting.get("kind") == RESOURCE:
@@ -183,6 +197,9 @@ def premise_hash(awaiting: dict, reason: Optional[str]) -> str:
         basis = "|".join(awaiting.get(k, "") for k in ("kind", "gateway", "ref"))
     else:
         basis = "|".join(awaiting.get(k, "") for k in ("kind", "gateway", "ref", "why"))
+        heads = run_heads(awaiting, wake_check) if awaiting.get("kind") in ("ci", "deploy") else []
+        if heads:  # SHA-less parks keep their old premise
+            basis += "|heads:" + ",".join(heads)
     return hashlib.sha256(basis.encode()).hexdigest()[:16]
 
 
@@ -766,7 +783,7 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
                      clock_only=clock_only, op=op, wake_in=wake_in)
     if record["kind"] == "card" or (record["kind"] == "clock" and record.get("inferred")):
         return record
-    record["premise"] = premise_hash(record, reason)
+    record["premise"] = premise_hash(record, reason, wake_check)
     if record["kind"] == RESOURCE:
         # A governor/pool hold is internal and transient: its probe resumes the card when the reading drops.
         # Escalating it made "Unstick" cards for a premise nobody can act on (bb t_01a19f5cca30ed12), and on a
