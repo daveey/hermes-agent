@@ -24,6 +24,9 @@ _refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (ref
 # than re-asking a repin the Board already refused; a new revision asks again. Explicit kanban_move repins never
 # fall back: a reserve would hand the run's move straight back to the pool.
 _selfcheck_refused: dict[tuple[str, str], int] = {}
+# Same rule for the pickup gate's origin repin (machine:<origin>), keyed apart: a refused pool repin must still let
+# the origin repin be asked once at that revision (review of PR #2362, t_01a1d5edeefa8430).
+_origin_refused: dict[tuple[str, str], int] = {}
 _RETRYABLE_4XX = frozenset({408, 425, 429})  # request timeout, too early, rate limited: not the Board's answer
 # No assigned keepalive exists here. Sixty seconds bounds queue probes while still discovering
 # registry-only capacity changes without waiting for a task revision. Assigned renewals are unchanged.
@@ -407,7 +410,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
             key = (board, row["id"])
             if _backed_off(key, row["sync_version"], now):
                 continue  # refused not_claimable at this revision: wait for the feed, don't re-ask every tick
-            labels, why, skip = _repin_target(conn, row, key, gateway, cfg, mode, candidates)
+            labels, why, skip, refusals = _repin_target(conn, row, key, gateway, cfg, mode, candidates)
             if skip:
                 continue  # no candidate's pickup gate takes it and no repin may be asked: never reserve
             stage = "recover" if mode else ("reserve" if labels is None else "repin")
@@ -448,7 +451,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
                     logger.info("Board recovery endpoint unavailable; backing off for %ss", recovery.RECOVERY_RETRY_S)
                     continue
                 fence = None
-                _remember_selfcheck_refusal(key, row["sync_version"], why, exc)
+                _remember_refusal(refusals, key, row["sync_version"], exc)
                 if rejection_code(exc) == "not_claimable":
                     # The Board already has it leased or not ready: our copy is behind. Back off at this revision.
                     _refused[key] = (row["sync_version"], now + NOT_CLAIMABLE_BACKOFF_S)
@@ -567,44 +570,49 @@ def _backed_off(key, revision, now):
 
 
 def _repin_target(conn, row, key, gateway, cfg, mode, candidates):
-    """``(labels, why, skip)`` for one selected row: a recovery reserves (``mode`` set); else the self-check's
-    pool repin, else the origin repin when no candidate's pickup gate takes the card
+    """``(labels, why, skip, refusals)`` for one selected row: a recovery reserves (``mode`` set); else the
+    self-check's pool repin, else the origin repin when no candidate's pickup gate takes the card
     (:func:`kanban_worker_pickup_gate.origin_target`, t_01a1d560c6d3bc3c), else the reserve ``(None, None)``.
-    ``skip``: such a card has no repin to ask now; it must not be reserved either."""
+    ``skip``: such a card has no repin to ask now; it must not be reserved either. ``refusals``: the map a Board
+    refusal of this repin is recorded in (:data:`_selfcheck_refused` or :data:`_origin_refused`), None for a run's
+    ``kanban_move`` or a reserve."""
     from hermes_cli import kanban_worker_pickup_gate as pickup_gate
 
     if mode:
-        return None, None, False
-    labels, why = _selfcheck_unrefused(key, row, *_move_target(conn, row, gateway, cfg))
+        return None, None, False, None
+    labels, why = _unrefused(_selfcheck_refused, key, row, *_move_target(conn, row, gateway, cfg))
     if labels is None and (home := pickup_gate.origin_target(
-            conn, row, gateway, candidates, refused_at=_selfcheck_refused.get(key))) is not None:
-        return home[0], home[1], home[0] is None
-    return labels, why, False
+            conn, row, gateway, candidates, refused_at=_origin_refused.get(key))) is not None:
+        if home[0] is not None:
+            _origin_refused.pop(key, None)  # asked at a new revision: the old refusal no longer holds
+        return home[0], home[1], home[0] is None, _origin_refused
+    return labels, why, False, _selfcheck_refused if why is not None else None
 
 
-def _selfcheck_unrefused(key, row, labels, why):
+def _unrefused(refusals, key, row, labels, why):
     """``(labels, why)``, except a self-check repin (``why`` set) the Board refused at this revision becomes the
     reserve ``(None, None)``. A new revision clears the refusal so the repin is asked again."""
     if why is None:
         return labels, why
-    if _selfcheck_refused.get(key) == row["sync_version"]:
+    if refusals.get(key) == row["sync_version"]:
         return None, None
-    _selfcheck_refused.pop(key, None)
+    refusals.pop(key, None)
     return labels, why
 
 
-def _remember_selfcheck_refusal(key, revision, why, exc):
-    """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead).
+def _remember_refusal(refusals, key, revision, exc):
+    """Record a Board refusal of a self-check or origin repin in ``refusals`` (``not_claimable`` is
+    :data:`_refused`'s backoff instead; None records nothing).
 
     Any 4xx but 408/425/429, coded or not (a Board or proxy without the repin route answers an uncoded 404/405 HTML
     body every tick), and a 501 are persistent. Other 5xx and 408/425/429 are outages, retried on the next tick."""
     status = getattr(exc, "status", None)
     persistent = type(status) is int and (400 <= status <= 499 or status == 501) and status not in _RETRYABLE_4XX
-    if why is None or not persistent or rejection_code(exc) == "not_claimable":
+    if refusals is None or not persistent or rejection_code(exc) == "not_claimable":
         return
-    _selfcheck_refused[key] = revision  # popped by _selfcheck_unrefused first, so this is the newest entry
-    if len(_selfcheck_refused) > 1024:  # cards that left the query never come back to clear theirs
-        del _selfcheck_refused[next(iter(_selfcheck_refused))]
+    refusals[key] = revision  # popped before every new ask, so this is the newest entry
+    if len(refusals) > 1024:  # cards that left the query never come back to clear theirs
+        del refusals[next(iter(refusals))]
 
 
 def _record_repin(conn, task_id, gateway, labels, reply, *, reason=None):

@@ -165,10 +165,12 @@ def no_pull(monkeypatch):
     wp._refused.clear()
     wp._queued.clear()
     wp._selfcheck_refused.clear()
+    wp._origin_refused.clear()
     yield
     wp._refused.clear()
     wp._queued.clear()
     wp._selfcheck_refused.clear()
+    wp._origin_refused.clear()
 
 
 def _stranded(conn, *, age, requires=("terminal", "file", "git", "hub:write")):
