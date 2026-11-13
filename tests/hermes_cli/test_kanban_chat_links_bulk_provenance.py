@@ -576,3 +576,93 @@ def test_prefetch_leaves_scoped_verdicts_unchanged(home, gateway, profile):
     provenance.prefetch_sources(MIXED)
     assert provenance.scoped_sources(gateway, MIXED, local_gateway=GW, profile=profile) == cold
     assert any(v is not None for v in cold.values()) or gateway == "away"
+
+
+def test_backfill_resolves_replica_links_on_a_host_without_a_gateway_name(home, opens, monkeypatch):
+    """t_01a1d41a82ced7d9 (PR #2013 review nit 1): without a hub.db gateway name ``LinkVerdicts.read`` leaves the
+    replica unopened, yet ``_ReplicaReader`` still resolves creators from it. Safe because every replica link names
+    a gateway (``chat_gateway`` is NOT NULL in the synced schema, so no bare link exists) and, with no local name,
+    ``scoped_sources`` answers each such ref without a read: a map miss gets the per-row verdict, with no
+    provenance read under ``write_txn`` even as the source cache expires before each use."""
+    from hermes_cli import kanban_db as kdb
+    monkeypatch.setattr("hermes_cli.kanban_origin.gateway_names", lambda: ("", set()))
+    rep = ksc.shadow_path("default")
+    rep.parent.mkdir(parents=True, exist_ok=True)
+    kbc.init_db(rep)
+    rows = [("away", None, "20261101_000000_human"), ("", "default", "20261101_000000_cron"),
+            (GW, None, DESKTOP), ("away", "research", WORKER), (GW, "default", "20261101_000000_nosuch")]
+    with kbc.connect_closing(rep) as remote:
+        creator = kdb.create_task(remote, title="creator synced from another machine", assignee="default")
+        with kbc.write_txn(remote):
+            for gw, prof, sid in rows:
+                _link(remote, creator, sid, gateway=gw, profile=prof)
+        with pytest.raises(sqlite3.IntegrityError, match="chat_gateway"):  # the premise: no bare link
+            _link(remote, creator, DESKTOP, gateway=None)
+    notify._source_cache.clear()
+    want = {r for r in rows if not notify.is_machine_session(r[0], r[2], local_gateway="", profile=r[1])}
+    assert want and want != set(rows)  # owners kept and machine links dropped
+    seen, board = opens
+    calls: list[tuple[str, bool]] = []
+
+    def spy(name):
+        real = getattr(provenance, name)
+
+        def wrapped(*a, **kw):
+            conn = board.get("conn")
+            calls.append((name, bool(conn is not None and conn.in_transaction)))
+            return real(*a, **kw)
+        monkeypatch.setattr(provenance, name, wrapped)
+
+    for name in ("_local_session_sources",):  # a map miss calls scoped_sources, which answers without this read
+        spy(name)
+    with kbc.connect_closing() as conn:
+        assert not conn.execute("SELECT 1 FROM tasks WHERE id=?", (creator,)).fetchone()
+        with kbc.write_txn(conn):
+            _add_task(conn, "t_child", payload={"creator_task_id": creator})
+        notify._source_cache.clear()
+        monkeypatch.setattr(provenance, "time", _SlowClock)
+        board["conn"] = conn
+        seen.clear()
+        calls.clear()
+        out = creator_chats.backfill(conn)
+        board.clear()
+        owned = conn.execute("SELECT chat_gateway, chat_profile, chat_session FROM task_chat_links "
+                             "WHERE task_id='t_child' AND released=0").fetchall()
+        resolved = conn.execute("SELECT payload FROM task_events WHERE task_id='t_child' "
+                                "AND kind='creator_chats_resolved'").fetchone()
+    assert out == {"attempted": ["t_child"], "unresolved": []}
+    assert {tuple(r) for r in owned} == want
+    assert json.loads(resolved[0])["source"] == "replica"
+    inside = [n for n, in_txn in calls if in_txn] + [p for p, in_txn in seen if in_txn]
+    assert not inside, f"{len(inside)} provenance reads inside write_txn: {sorted(set(inside))}"
+
+
+_SCOPE_REFS = [*MIXED, f"{GW}/research/{RCHAT}", f"away/research/{RCHAT}", f"{GW}//{DESKTOP}", f"{GW}/default/",
+               "", "x/y/z/w"]
+
+
+@pytest.mark.parametrize("local_gateway", [GW, ""])
+@pytest.mark.parametrize("gateway", [None, GW, "away"])
+@pytest.mark.parametrize("profile", [None, "default", "research"])
+def test_reads_local_store_is_exactly_when_scoped_sources_reads(home, monkeypatch, local_gateway, gateway, profile):
+    """t_01a1d41a82ced7d9 (PR #2013 review nit 2): ``reads_local_store`` answers the same rule as ``scoped_sources``,
+    including a qualified ``gw/profile/sid`` ref whose outer gateway or profile contradicts the scope (answered
+    unknown without a read, so not reported as a read either)."""
+    real = provenance._local_homes
+    reads: list[Any] = []
+
+    def counted(prof):
+        reads.append(prof)
+        return real(prof)
+    monkeypatch.setattr(provenance, "_local_homes", counted)
+    mismatched = 0
+    for ref in _SCOPE_REFS:
+        reads.clear()
+        provenance.scoped_sources(gateway, [ref], local_gateway=local_gateway, profile=profile)
+        claim = provenance.reads_local_store(gateway, ref, local_gateway=local_gateway, profile=profile)
+        assert claim == bool(reads), (ref, claim, reads)
+        parts = ref.split("/")
+        mismatched += len(parts) == 3 and parts[0] == local_gateway and (
+            (gateway is not None and gateway != parts[0]) or (profile is not None and profile != parts[1]))
+    if local_gateway and (gateway == "away" or profile is not None):
+        assert mismatched  # the corpus holds the over-approximated case for this scope

@@ -84,6 +84,25 @@ def _local_homes(profile: Optional[str]) -> list[Path]:
     return list(dict.fromkeys([get_hermes_home(), *(get_profile_dir(p) for p in list_profile_names())]))
 
 
+def _local_scope(gateway: Any, profile: Any, ref: str, me: Any) -> Optional[tuple[Any, str]]:
+    """``(profile, sid)`` when :func:`scoped_sources` looks ``ref`` up in this host's state.db, else None (answered
+    unknown without a read): a malformed or empty ref, a ``gw/profile/sid`` ref whose outer gateway or profile
+    contradicts the scope, or another gateway's ref. [daveey]"""
+    parts = ref.split("/")
+    gw, prof = gateway, profile
+    if len(parts) == 3:
+        gw, prof, sid = parts
+        if (gateway is not None and gateway != gw) or (profile is not None and profile != prof):
+            return None
+    elif len(parts) == 1:
+        sid = ref
+    else:
+        return None
+    if not sid or (gw is not None and (not me or gw != me)):
+        return None
+    return prof, sid
+
+
 def scoped_sources(gateway: Any, sessions: Iterable[Any], *, local_gateway=None, profile=None) -> dict[str, Optional[str]]:
     """No network lookup: foreign/ambiguous provenance is unknown, never human proof."""
     from hermes_cli.kanban_origin import gateway_names
@@ -91,19 +110,8 @@ def scoped_sources(gateway: Any, sessions: Iterable[Any], *, local_gateway=None,
     grouped: dict[Optional[str], dict[str, str]] = {}
     out: dict[str, Optional[str]] = {str(s or ""): None for s in sessions}
     for ref in out:
-        parts = ref.split("/")
-        gw, prof = gateway, profile
-        if len(parts) == 3:
-            gw, prof, sid = parts
-            if (gateway is not None and gateway != gw) or (profile is not None and profile != prof):
-                continue
-        elif len(parts) == 1:
-            sid = ref
-        else:
-            continue
-        if not sid or (gw is not None and (not me or gw != me)):
-            continue
-        grouped.setdefault(prof, {})[ref] = sid
+        if (scope := _local_scope(gateway, profile, ref, me)) is not None:
+            grouped.setdefault(scope[0], {})[ref] = scope[1]
     for prof, refs in grouped.items():
         observations = [_local_session_sources(refs.values(), home=home) for home in _local_homes(prof)]
         for ref, sid in refs.items():
@@ -128,12 +136,12 @@ def prefetch_sources(refs: Iterable[Any], *, local_gateway=None) -> None:
             _local_session_sources(sids, home=home)
 
 
-def reads_local_store(gateway: Any, session: Any, *, local_gateway: Any) -> bool:
-    """Whether :func:`scoped_sources` may open a state.db for ``session`` scoped to ``gateway`` (the same rule it
-    applies): only another gateway's ref is answered unknown without a read. [daveey]"""
-    parts = str(session or "").split("/")
-    gw = parts[0] if len(parts) == 3 else gateway
-    return len(parts) in (1, 3) and (gw is None or bool(local_gateway and gw == local_gateway))
+def reads_local_store(gateway: Any, session: Any, *, local_gateway: Any, profile: Any = None) -> bool:
+    """Whether :func:`scoped_sources` (``local_gateway=local_gateway, profile=profile``) may open a state.db for
+    ``session`` scoped to ``gateway``. It shares that function's routing (:func:`_local_scope`), so a ref answered
+    unknown without a read (another gateway's, or a qualified ref whose outer gateway/profile contradicts the
+    scope) is never reported as a read. [daveey]"""
+    return _local_scope(gateway, profile, str(session or ""), local_gateway) is not None
 
 
 def machine_verdicts(keys: Iterable[tuple[Any, Any, Any]], *, local_gateway) -> dict[tuple, bool]:
@@ -144,8 +152,9 @@ def machine_verdicts(keys: Iterable[tuple[Any, Any, Any]], *, local_gateway) -> 
     groups: dict[tuple, list[str]] = {}
     for gw, prof, session in keys:
         groups.setdefault((gw, prof), []).append(str(session or ""))
-    prefetch_sources([s for (gw, _p), refs in groups.items() for s in refs
-                      if reads_local_store(gw, s, local_gateway=local_gateway)], local_gateway=local_gateway)
+    prefetch_sources([s for (gw, prof), refs in groups.items() for s in refs
+                      if reads_local_store(gw, s, local_gateway=local_gateway, profile=prof)],
+                     local_gateway=local_gateway)
     out: dict[tuple, bool] = {}
     for (gw, prof), refs in groups.items():
         machine = machine_sessions(gw, refs, local_gateway=local_gateway, profile=prof)

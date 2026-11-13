@@ -293,7 +293,7 @@ class LinkVerdicts:
         hit = self.verdicts.get((gateway, profile, str(session or "")))
         if hit is not None:
             return hit
-        if reads_local_store(gateway, session, local_gateway=self.local_gateway):
+        if reads_local_store(gateway, session, local_gateway=self.local_gateway, profile=profile):
             return True
         return is_machine_session(gateway, session, local_gateway=self.local_gateway, profile=profile)
 
@@ -305,8 +305,10 @@ class LinkVerdicts:
         from hermes_cli.kanban_session_provenance import machine_verdicts
         me = gateway_names()[0]
         keys: dict[tuple, None] = {}
-        # Without a gateway name nothing here is synced: links of named gateways need no read, and the replica
-        # stays unopened until a creator is missing locally (``_ReplicaReader``).
+        # Without a gateway name the replica stays unopened until a creator is missing locally (``_ReplicaReader``):
+        # its links all name a gateway (``chat_gateway`` is NOT NULL in the synced schema), and with no local name
+        # ``scoped_sources`` answers every such ref unknown without a read, so a lookup that misses this map gets
+        # the same verdict with no state.db read (t_01a1d41a82ced7d9).
         for db in (conn, replica_reader.open() if me else None):
             try:
                 if db is None or not db.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
