@@ -130,7 +130,8 @@ def test_complete_blobless_clone_archives_like_a_full_one(board, promisor, tmp_p
     assert not (dest / "remote_base.json").exists()
 
 
-@pytest.mark.parametrize("promisor_value", [None, "false"])
+# "" is `promisor =`, which git reads as bool false; "No" checks case-insensitive bool parsing.
+@pytest.mark.parametrize("promisor_value", [None, "false", "", "No", "0"])
 def test_missing_object_in_a_full_clone_still_refuses(board, tmp_path, promisor_value):
     from hermes_cli import kanban_scratch_archive as sa
 
@@ -139,6 +140,7 @@ def test_missing_object_in_a_full_clone_still_refuses(board, tmp_path, promisor_
     _run("init", "-q", cwd=repo)
     if promisor_value is not None:  # a remote explicitly NOT a promisor vouches for nothing
         _run("config", "remote.origin.promisor", promisor_value, cwd=repo)
+        assert not sa._is_partial_clone(repo, sa._env(repo))
     (repo / "f.txt").write_text("base\n")
     _run("add", ".", cwd=repo)
     _run("commit", "-q", "-m", "c", cwd=repo)
@@ -164,6 +166,35 @@ def test_unborn_partial_clone_archives_its_files(board, tmp_path):
     meta = sa.archive_repo(repo, tmp_path / "out", task_id="t_x", completed_at=None)
     assert meta["head"] is None and "+fresh" in (tmp_path / "out" / "tracked.diff").read_text()
     assert "remote_base_count" not in meta
+
+
+@pytest.mark.parametrize("key,value,expected", [
+    ("remote.origin.promisor", "true", True),
+    ("remote.origin.promisor", "yes", True),
+    ("remote.origin.promisor", "1", True),
+    ("extensions.partialClone", "origin", True),  # names the promisor remote: not a bool
+    ("extensions.partialClone", "", False),
+])
+def test_is_partial_clone_reads_git_bool_semantics(board, tmp_path, key, value, expected):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _run("init", "-q", cwd=repo)
+    assert not sa._is_partial_clone(repo, sa._env(repo))
+    _run("config", key, value, cwd=repo)
+    assert sa._is_partial_clone(repo, sa._env(repo)) is expected
+
+
+def test_unparseable_promisor_value_refuses(board, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _run("init", "-q", cwd=repo)
+    _run("config", "remote.origin.promisor", "maybe", cwd=repo)  # git itself rejects this as a bool
+    with pytest.raises(sa.ArchiveRefused):
+        sa._is_partial_clone(repo, sa._env(repo))
 
 
 def test_archive_git_never_reaches_the_network(board, tmp_path):

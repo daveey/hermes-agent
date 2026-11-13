@@ -187,11 +187,18 @@ def _text(proc: subprocess.CompletedProcess) -> str:
 
 
 def _is_partial_clone(repo: Path, env: dict[str, str]) -> bool:
-    """Whether *repo* has a promisor remote (objects it may lack are promised, not lost)."""
-    proc = _git(repo, env, "config", "--get-regexp", r"^(remote\..*\.promisor|extensions\.partialclone)$",
+    """Whether *repo* has a promisor remote (objects it may lack are promised, not lost).
+
+    Read with git's own semantics: ``remote.<name>.promisor`` is a bool (an empty
+    ``promisor =`` is false; a value git cannot parse refuses), and
+    ``extensions.partialClone`` names the promisor remote, so only a non-empty
+    name counts. Anything else is a full clone, whose missing objects refuse.
+    """
+    proc = _git(repo, env, "config", "--null", "--type=bool", "--get-regexp", r"^remote\..*\.promisor$",
                 ok=(0, 1))
-    return any(line.split()[-1].lower() not in ("false", "no", "off", "0")
-               for line in _text(proc).splitlines())
+    if any(entry.rpartition("\n")[2] == "true" for entry in _text(proc).split("\0") if entry):
+        return True
+    return bool(_text(_git(repo, env, "config", "--get", "extensions.partialclone", ok=(0, 1))))
 
 
 def _raw_changes(repo: Path, env: dict[str, str], base: str) -> list[dict]:
