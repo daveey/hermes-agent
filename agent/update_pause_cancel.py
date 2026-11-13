@@ -118,9 +118,49 @@ def compression_can_yield(trigger: Any, messages: Any, *, api_call_count: int) -
 
 def compression_yield_requested(agent: Any) -> bool:
     """The update's cancel covered the running compression and is still the pending interrupt (no Stop since)."""
+    return _yield_requested(agent, COMPRESSION_CALL_ID)
+
+
+def _yield_requested(agent: Any, call_id: str) -> bool:
     record = _slots(agent).get(_CANCEL)
-    return bool(record) and COMPRESSION_CALL_ID in record["calls"] \
+    return bool(record) and call_id in record["calls"] \
         and bool(getattr(agent, "_interrupt_requested", False)) and interrupt_issuer(agent) == _ISSUER
+
+
+# [daveey] t_01a1d293248f5e12: the in-flight id of a model request issued at a step boundary.
+MODEL_CALL_ID = "model-request"
+
+
+def model_request_can_yield(messages: Any, *, api_call_count: int) -> bool:
+    """The request about to run sits at a step boundary: an earlier model call ran this turn
+    (``api_call_count`` already counts this one, begin_iteration reserved it) and the transcript ends on a tool
+    result, so a pause landing here loses nothing but this request (``_step_boundary_pause``'s precondition)."""
+    if api_call_count - 1 <= 0 or not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    return isinstance(last, dict) and last.get("role") == "tool"
+
+
+@contextmanager
+def model_request_in_flight(agent: Any, messages: Any, *, api_call_count: int) -> Iterator[bool]:
+    """[daveey] t_01a1d293248f5e12: a model request at a step boundary is in flight like a tool call, so the
+    watcher's cancel reaches it after the same grace. Without this a long request (169 s on the hub) held the
+    turn's admission reservation unpublished past the instant update's cap: a pause lands only at a step boundary.
+    The turn's first request (no tool result yet) is not tracked: there is no boundary to pause at."""
+    tracked = model_request_can_yield(messages, api_call_count=api_call_count)
+    if tracked:
+        started(agent, MODEL_CALL_ID)
+    try:
+        yield tracked
+    finally:
+        if tracked:
+            finished(agent, MODEL_CALL_ID)
+
+
+def model_yield_requested(agent: Any) -> bool:
+    """The update's cancel covered the running model request and is still the pending interrupt (no Stop since):
+    its output is discarded and the turn pauses at the boundary it was issued from."""
+    return _yield_requested(agent, MODEL_CALL_ID)
 
 
 def _continues_in_background(result: Any) -> bool:

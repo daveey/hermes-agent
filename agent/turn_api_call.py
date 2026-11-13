@@ -19,6 +19,7 @@ from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholde
 from agent.message_metadata import append_message
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.turn_failure_copy import site_copy, stamp_failure
+from agent import update_pause_cancel
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -76,7 +77,7 @@ def perform_api_call(
     agent: Any, *, api_kwargs: Any, _original_api_kwargs: Any, _llm_middleware_trace: Any,
     _moa_prepared_request: Any, _retry: Any, thinking_spinner: Any, retry_count: Any,
     api_call_count: Any, api_request_id: Any, effective_task_id: Any, turn_id: Any,
-    interrupted: Any,
+    interrupted: Any, messages: Any = None,
 ) -> ApiCallVerdict:
     """Issue the request (see ``_should_stream`` for the streaming decision)."""
     response = None
@@ -141,13 +142,15 @@ def perform_api_call(
         if _model_request_active is not None:
             _model_request_active.set()
     try:
-        response = run_llm_execution_middleware(
-            api_kwargs, _perform_api_call, original_request=_original_api_kwargs,
-            task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
-            session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
-            provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
-            api_call_count=api_call_count, middleware_trace=list(_llm_middleware_trace),
-        )
+        # [daveey] t_01a1d293248f5e12: a request issued at a step boundary yields to a core-update pause.
+        with update_pause_cancel.model_request_in_flight(agent, messages, api_call_count=api_call_count):
+            response = run_llm_execution_middleware(
+                api_kwargs, _perform_api_call, original_request=_original_api_kwargs,
+                task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+                session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
+                provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
+                api_call_count=api_call_count, middleware_trace=list(_llm_middleware_trace),
+            )
     finally:
         with _bracket:
             if _model_request_active is not None:
@@ -165,7 +168,22 @@ def perform_api_call(
         else:
             interrupted = True
         return _verdict("break")
+    if update_pause_cancel.model_yield_requested(agent):
+        # The update's cancel landed as the response arrived: drop it like a cancelled one, so the turn
+        # pauses at the boundary the request was issued from instead of acting with the pause pending.
+        thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
+        response = None
+        yield_to_update_pause(_retry)
+        return _verdict("break")
     return _verdict("fallthrough")
+
+
+def yield_to_update_pause(_retry: Any) -> None:
+    """[daveey] t_01a1d293248f5e12: a model request the core-update pause cancelled produced nothing to keep.
+    Re-issue the same logical iteration (the redirect restart: iteration count and budget refunded, bounded by
+    ``max_retries``); ``begin_iteration`` then takes the pending cancel and pauses at the step boundary, with no
+    partial or interrupt row after the tool results."""
+    _retry.restart_with_redirected_messages = True
 
 
 @dataclass
@@ -194,6 +212,11 @@ def handle_api_interrupt(
     # signed/encrypted reasoning items.
     if agent._has_pending_redirect() and agent.clear_interrupt(preserve_redirect=True):
         _retry.restart_with_redirected_messages = True
+        return ApiInterruptVerdict("break", thinking_spinner, interrupted, final_response)
+    if update_pause_cancel.model_yield_requested(agent):
+        # [daveey] t_01a1d293248f5e12: the core-update pause cancelled this boundary request. Its partial text is
+        # dropped (the resumed turn re-issues the request); the pause lands at the boundary (begin_iteration).
+        yield_to_update_pause(_retry)
         return ApiInterruptVerdict("break", thinking_spinner, interrupted, final_response)
     api_elapsed = time.time() - api_start_time
     agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
