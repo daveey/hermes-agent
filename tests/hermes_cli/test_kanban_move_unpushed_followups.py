@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_move as km
 from hermes_cli import kanban_move_pool as kmp
@@ -106,7 +108,14 @@ def test_a_fast_scan_within_the_budget_reads_clean(hub, tmp_path):
 
 # --- 6: the worker-first Board repin to the queue -------------------------------------------------------------------
 
-def test_a_started_worker_first_cards_queue_repin_is_refused_on_unpushed_state(conn, tmp_path, monkeypatch):
+@pytest.fixture
+def pool_registry(monkeypatch):
+    """A live Board registry with one unheld pool worker (pool repin eligibility reads it)."""
+    from hermes_cli import kanban_worker_node as wn
+    monkeypatch.setattr(wn, "registry", lambda **kw: {"machines": {"worker-1": {"labels": ["pool:worker"]}}})
+
+
+def test_a_started_worker_first_cards_queue_repin_is_refused_on_unpushed_state(conn, tmp_path, monkeypatch, pool_registry):
     from pathlib import Path
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     tid = _acknowledged(conn, started_at=1)
@@ -119,7 +128,7 @@ def test_a_started_worker_first_cards_queue_repin_is_refused_on_unpushed_state(c
     assert [c["runs_on"] for c in hub.calls] == [["pool:worker"]]  # force reaches the Board
 
 
-def test_a_clean_worker_first_cards_queue_repin_reaches_the_board(conn, tmp_path, monkeypatch):
+def test_a_clean_worker_first_cards_queue_repin_reaches_the_board(conn, tmp_path, monkeypatch, pool_registry):
     from pathlib import Path
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     tid = _acknowledged(conn, started_at=1)
