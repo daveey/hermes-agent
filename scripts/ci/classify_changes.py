@@ -281,8 +281,32 @@ _PY_TEST_HARNESS = (
 )
 # The macOS state lane (hermes-state-macos.yml runs tests/hermes_state/ on the mini):
 # hermes_state.py and every hermes_state_* sibling, their tests, the shared pytest harness
-# that runs them, and the dependency manifests they import through.
-_HERMES_STATE_PATHS = ("hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS)
+# that runs them, the dependency manifests they import through, and the first-party
+# modules hermes_state* imports at load time (a break there fails ``import hermes_state``).
+# tests/ci/test_macos_state_import_surface.py reads those imports from the source and
+# fails until this list equals them; lazy imports and their own imports are left out.
+HERMES_STATE_IMPORTS = (
+    "agent/__init__.py",
+    "agent/compaction_display.py",
+    "agent/context_compressor.py",
+    "agent/conversation_compression_archive.py",
+    "agent/memory_context.py",
+    "agent/message_metadata.py",
+    "agent/message_sanitization.py",
+    "agent/model_routing_switch_intent.py",
+    "agent/session_activity.py",
+    "agent/skill_commands.py",
+    "hermes_cli/__init__.py",
+    "hermes_cli/sqlite_runtime.py",
+    "hermes_cli/timefmt.py",
+    "hermes_constants.py",
+    "hermes_dir_acl.py",
+    "hermes_startup_watchdog.py",
+    "utils.py",
+)
+_HERMES_STATE_PATHS = (
+    "hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS, *HERMES_STATE_IMPORTS,
+)
 # The native memory lane (native-memory-macos.yml): the Darwin memory reader, its one
 # caller, their macOS-only tests and the lane's own wiring. Exact files, kept equal to the
 # standalone workflow's ``push.paths`` by tests/ci/test_native_memory_gate.py.
