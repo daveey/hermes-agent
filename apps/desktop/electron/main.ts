@@ -10361,7 +10361,7 @@ async function ensureRegistryBackend(
         },
         reconnect: () => ensureRegistryBackend(id, profile, '', { passive }),
         // [daveey] An SSH tunnel whose probe times out while its master is alive is slow, not down (slow-link.ts).
-        slowLink: source.kind === 'ssh' ? dispatchSlowLink(key, () => sshConnections.get(key)?.ssh?.isAlive()) : undefined,
+        slowLink: source.kind === 'ssh' ? dispatchSlowLink(key, () => sshConnections.get(key)?.ssh?.isAlive(), rememberLog) : undefined,
         retire: async (error: any) => {
           // A late failure from an old descriptor must never tear down a newer
           // entry that another caller has already installed.

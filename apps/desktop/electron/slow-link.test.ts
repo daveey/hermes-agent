@@ -321,7 +321,7 @@ describe('main.ts wiring helpers', () => {
     const { tracker } = harness()
     const scope = 'conn:mac-mini::default'
     const mini = 'http://127.0.0.1:50111'
-    const option = dispatchSlowLink(scope, async () => true, tracker)
+    const option = dispatchSlowLink(scope, async () => true, undefined, tracker)
 
     expect(option.isTimeout(new Error('Timed out connecting to Hermes backend after 10000ms'))).toBe(true)
     expect(option.isTimeout(new Error('socket hang up'))).toBe(false)
@@ -329,8 +329,19 @@ describe('main.ts wiring helpers', () => {
     expect(option.noteTimeout({ baseUrl: mini })).toEqual({ giveUp: false, strikes: 1 })
     expect(tracker.isScopeSlow(scope)).toBe(true)
 
-    await expect(dispatchSlowLink(scope, async () => false, tracker).transportAlive()).resolves.toBe(false)
-    await expect(dispatchSlowLink(scope, () => undefined, tracker).transportAlive()).resolves.toBe(false)
+    await expect(dispatchSlowLink(scope, async () => false, undefined, tracker).transportAlive()).resolves.toBe(false)
+    await expect(dispatchSlowLink(scope, () => undefined, undefined, tracker).transportAlive()).resolves.toBe(false)
+  })
+
+  it('dispatchSlowLink logs the slow-link entry line when a probe times out before any remote has answered', () => {
+    // A fresh process: no log wired yet, and nothing has answered, so noteRemoteAnswer never set one.
+    const tracker = new SlowLinkTracker()
+    const lines: string[] = []
+    const mini = 'http://127.0.0.1:50111'
+    const option = dispatchSlowLink('conn:mac-mini::default', async () => true, line => lines.push(line), tracker)
+
+    expect(option.noteTimeout({ baseUrl: mini })).toEqual({ giveUp: false, strikes: 1 })
+    expect(lines).toEqual([expect.stringMatching(/^\[slow-link\] http:\/\/127\.0\.0\.1:50111 is slow \(probe timed out/)])
   })
 
   it('thinnedPoll: holds a repeated timer poll, frees an unsent one, and never holds a foreground or non-GET request', async () => {
@@ -416,7 +427,7 @@ describe('main.ts wiring', () => {
     expect(slowLink).toBeGreaterThan(0)
     expect(slowLink).toBeLessThan(dispatch.indexOf('retire: async'))
     expect(dispatch.slice(slowLink, slowLink + 300).replace(/\s+/g, ' ')).toContain(
-      "source.kind === 'ssh' ? dispatchSlowLink(key, () => sshConnections.get(key)?.ssh?.isAlive()) : undefined"
+      "source.kind === 'ssh' ? dispatchSlowLink(key, () => sshConnections.get(key)?.ssh?.isAlive(), rememberLog) : undefined"
     )
   })
 

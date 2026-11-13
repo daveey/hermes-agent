@@ -16,9 +16,14 @@
 // A backend that never answers is still given up on: SLOW_LINK_STRIKE_LIMIT timeouts with no answer in between
 // report giveUp, and the caller retires it as before. A dead transport is never treated as slow.
 //
-// Known cost: `ssh -O check` proves the master process is alive, not that the link carries traffic. When a network
-// drops without a reset, the master lives until its keepalive gives up (~45 s), so for that window requests wait
-// their stretched timeout instead of failing after the 10 s probe.
+// Known costs:
+// - `ssh -O check` proves the master process is alive, not that the link carries traffic. When a network drops
+//   without a reset, the master lives until its keepalive gives up (~45 s), so for that window requests wait their
+//   stretched timeout instead of failing after the 10 s probe.
+// - A remote process that hangs while its tunnel stays alive looks exactly like a slow link. It is retired only after
+//   SLOW_LINK_STRIKE_LIMIT (3) probe timeouts with no answer in between: from the second strike each probe waits its
+//   stretched 40 s, and between probes requests wait up to SLOW_LINK_TIMEOUT_CAP_MS (60 s) each. Such a hang now
+//   takes minutes to retire instead of ~10 s.
 
 import { isBackgroundRead, type PowerSettleRequest, PowerSettlingError } from './power-settle'
 import { isRemoteTimeout } from './remote-down-gate'
@@ -285,12 +290,21 @@ export const slowLinkTracker = new SlowLinkTracker()
 
 // --- main.ts wiring. It lives here because main.ts is over its line cap and may only shrink. ---
 
-/** The `slowLink` option of ensureHealthyPooledRemoteBackendForDispatch for one SSH pool scope. */
+/**
+ * The `slowLink` option of ensureHealthyPooledRemoteBackendForDispatch for one SSH pool scope. `log` is wired here,
+ * before any probe can time out, so the "[slow-link] ... is slow" entry line is written even when no remote request
+ * has answered yet in this process (noteRemoteAnswer wires it too, but only once something answers).
+ */
 export function dispatchSlowLink(
   scope: string,
   masterAlive: () => Promise<boolean> | undefined,
+  log?: (line: string) => void,
   tracker: SlowLinkTracker = slowLinkTracker
 ) {
+  if (log) {
+    tracker.setLog(log)
+  }
+
   return {
     isTimeout: isRemoteTimeout,
     noteTimeout: (connection: { baseUrl?: null | string }) => {

@@ -862,15 +862,38 @@ export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
   return rememberOwners(board, slug)
 }
 
-export const fetchTask = async (id: string, owner?: TaskOwner) => {
+/** [daveey] One opening of a task detail view. Its first read of each kind (`kind` names the query) is the user's
+ *  and goes out as priority 'foreground', so a slow link's poll thinner never skips it, even when the same task is
+ *  re-opened within the thinning gap. Every later read of that kind (interval or socket refetch) is a background
+ *  poll again and may be thinned (electron/slow-link.ts). */
+export function userOpenReads(): (kind: string) => PluginRestOptions {
+  const read = new Set<string>()
+
+  return kind => {
+    if (read.has(kind)) {
+      return {}
+    }
+
+    read.add(kind)
+
+    return { priority: 'foreground' }
+  }
+}
+
+export const fetchTask = async (id: string, owner?: TaskOwner, read: PluginRestOptions = {}) => {
   const downloadAttachment = captureGatewayFileDownload(owner ? { connectionId: owner.gateway, profile: owner.profile } : undefined)
-  const detail = await call<KanbanTaskDetail>(...forTask(id, `/tasks/${id}`, {}, owner))
+  const [path, opts] = forTask(id, `/tasks/${id}`, {}, owner)
+  const detail = await call<KanbanTaskDetail>(path, { ...opts, ...read })
 
   return { ...detail, downloadAttachment }
 }
 
 /** Worker stdout/stderr tail (last 16 KiB — plenty for the drawer). */
-export const fetchLog = (id: string, owner?: TaskOwner) => call<WorkerLog>(...forTask(id, `/tasks/${id}/log`, { tail: '16384' }, owner))
+export const fetchLog = (id: string, owner?: TaskOwner, read: PluginRestOptions = {}) => {
+  const [path, opts] = forTask(id, `/tasks/${id}/log`, { tail: '16384' }, owner)
+
+  return call<WorkerLog>(path, { ...opts, ...read })
+}
 
 /** Every gateway's boards as one list: union by slug, card totals summed,
  *  `current` = the routed gateway's. A remote-only board is listed too, so

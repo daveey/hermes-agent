@@ -265,6 +265,36 @@ describe('task attachment compatibility', () => {
 })
 
 describe('task modal dialog', () => {
+  it('tags the reads of each open foreground, so a slow link never skips a re-open; refetches stay polls', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+
+    const priorities = (match: (path: string) => boolean) =>
+      rest.mock.calls
+        .filter(([path, options]) => match(path) && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    const taskReads = () => priorities(path => path === '/tasks/t_example')
+
+    const logReads = () => priorities(path => path.startsWith('/tasks/t_example/log?'))
+
+    const first = openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground']))
+    await waitFor(() => expect(logReads()).toEqual(['foreground']))
+
+    // The socket invalidation / interval heartbeat of the same open: a background poll, thinned on a slow link.
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['kanban'] })
+    })
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', undefined]))
+    await waitFor(() => expect(logReads()).toEqual(['foreground', undefined]))
+
+    // Closing and re-opening the same task within seconds (cache still warm) is the user's read again.
+    first.unmount()
+    openDrawer()
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', undefined, 'foreground']))
+    await waitFor(() => expect(logReads()).toEqual(['foreground', undefined, 'foreground']))
+  })
+
   it('is a modal dialog named by the task title that Esc dismisses', async () => {
     detail = { ...legacyDetail, attachments: [] }
     const onClose = vi.fn()

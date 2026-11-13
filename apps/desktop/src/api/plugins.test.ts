@@ -21,7 +21,10 @@ describe('plugin REST qualified owner', () => {
     { opts: { connectionId: 'owner' }, expected: { connectionId: 'owner' } },
     { opts: { connectionId: 'owner', profile: null }, expected: { connectionId: 'owner' } },
     { opts: { profile: null }, expected: { connectionId: 'ambient-gw' } },
-    { opts: { profile: 'worker' }, expected: { connectionId: 'ambient-gw', priority: 'foreground', profile: 'worker' } }
+    { opts: { profile: 'worker' }, expected: { connectionId: 'ambient-gw', priority: 'foreground', profile: 'worker' } },
+    // A user-driven read (opening a detail view) carries its foreground tag, so main never thins or holds it.
+    { opts: { priority: 'foreground' as const }, expected: { connectionId: 'ambient-gw', priority: 'foreground', profile: 'ambient' } },
+    { opts: { connectionId: 'owner', priority: 'foreground' as const }, expected: { connectionId: 'owner', priority: 'foreground' } }
   ])('preserves scoped semantics for $opts', async ({ opts, expected }) => {
     const api = vi.fn().mockResolvedValue({ ok: true })
     Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { api } })

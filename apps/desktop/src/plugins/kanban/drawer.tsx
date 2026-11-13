@@ -56,7 +56,8 @@ import {
   routedToScope,
   taskKey,
   type TaskOwner,
-  useKanbanScope
+  useKanbanScope,
+  userOpenReads
 } from './api'
 import { uploadFiles, useFileDrop } from './attach-drop'
 import { ModelOverrideField, overridePatch } from './model-override'
@@ -858,11 +859,14 @@ export function TaskDrawer({
   const qc = useQueryClient()
   const scope = useKanbanScope()
   const slug = useValue($boardSlug)
+  // [daveey] The drawer mounts once per open (keyed by its task): the first task and log read of this open are the
+  // user's (foreground, never thinned on a slow link); the interval and socket refetches after them are polls.
+  const [openRead] = useState(userOpenReads)
 
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => fetchTask(id!, owner),
+    queryFn: () => fetchTask(id!, owner, openRead(`task:${id}`)),
     queryKey: taskKey(scope, slug, id ?? '', owner),
     refetchInterval: 30_000
   })
@@ -873,7 +877,7 @@ export function TaskDrawer({
 
   const { data: log } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => fetchLog(id!, owner),
+    queryFn: () => fetchLog(id!, owner, openRead(`log:${id}`)),
     queryKey: logKey(scope, slug, id ?? '', owner),
     refetchInterval: running ? 3_000 : 15_000
   })
