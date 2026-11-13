@@ -10,6 +10,11 @@ branch ``sync/upstream-<X>``. ``.github/workflows/upstream-sync.yml`` runs the f
 run completed green, with every required job succeeding on an approved fork runner at exactly X, is
 landed through a pull request from that same branch. main is protected for admins too: GitHub
 refuses any direct push whose exact sha lacks a green "All required checks pass (v2)" (ci.yaml).
+A sync that carries fork-authored content (a merge with a non-empty ``git show --remerge-diff``, i.e. a
+conflict resolution or fork edit, or any commit upstream/main lacks, e.g. a ``[daveey]`` fixup) also needs an
+independent exact-head review through ``hermes-core-wt ship``'s own gate before it merges
+(scripts/ci/upstream_sync_review.py); until then it reports NOT YET naming the review card. A mechanical sync
+(empty remerge-diffs, nothing else) needs no review. ``--classify REV`` prints that verdict and lands nothing.
 The gate opens (or reuses) the PR, waits across calls until that check is green on exactly X, then
 runs ``gh pr merge --merge --match-head-commit X`` (never --admin). Nothing is ever force-pushed.
 Red, pending or unreadable evidence is a refusal. A protection refusal is reported as REFUSED
@@ -277,7 +282,7 @@ def _remote_sha(repo, ref: str) -> str:
     return out.split()[0] if out else ""
 
 
-def _land_pr(repo, cand: Candidate, gh_repo, request, gh) -> dict:
+def _land_pr(repo, cand: Candidate, gh_repo, request, gh, review_note: str = "") -> dict:
     """The open PR main <- sync/upstream-<head> whose head is exactly the tested head; opened if absent.
 
     The PR comes from the candidate's own staging branch, so its head IS the sha the full suite
@@ -306,7 +311,7 @@ def _land_pr(repo, cand: Candidate, gh_repo, request, gh) -> dict:
                  "--body", f"Opened by scripts/ci/upstream_sync.py. The upstream sync {cand.head} passed the "
                            f"fork's full suite: {cand.url}\n\nThe gate merges this PR (merge commit, "
                            f"`--match-head-commit {cand.head}`, never `--admin`) once \"{REQUIRED_CHECK}\" is "
-                           "green on exactly this head. Do not push to this branch.",
+                           "green on exactly this head. Do not push to this branch." + review_note,
                  reason="upstream sync gate: open the landing PR")
     text = ((created.stdout or "") + (created.stderr or "")).strip()
     url = re.search(r"https://\S+/pull/(\d+)", text)
@@ -335,8 +340,31 @@ def required_check(gh_repo, sha, request) -> tuple[str, str]:
     return "red", f'"{REQUIRED_CHECK}" concluded {run.get("conclusion")} on {sha[:10]} {where}'.rstrip()
 
 
-def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli, protected=None) -> int:
-    """Put the tested head on main through its PR, merged once the required check is green on exactly it."""
+def _review_module():
+    if __package__:  # imported as scripts.ci.upstream_sync (tests): the same module object they patch
+        from . import upstream_sync_review as review
+    else:  # run as a script: scripts/ci is sys.path[0]
+        import upstream_sync_review as review
+    return review
+
+
+def _fork_review(repo, cand: Candidate, found, pr: dict, gh_repo: str, review) -> tuple[int | None, str]:
+    """(None, receipt line) when the fork-authored sync has its independent exact-head approval, else
+    (NOT_YET | REFUSED, the visible status naming the review card or what blocks judging it)."""
+    where = f"PR #{pr['number']} {pr.get('html_url', '')}".rstrip()
+    status = f"{where} is a fork-authored sync ({found.summary()})"
+    try:
+        approved, message = review.check(gh_repo, int(pr["number"]), cand.head, BRANCH_PREFIX + cand.head)
+    except _review_module().ReviewUnavailable as exc:
+        return REFUSED, f"REFUSED: {status}; it lands only after an independent exact-head review, but {exc}"
+    if approved:
+        return None, message
+    return NOT_YET, f"NOT YET: {status}; it lands only after an independent exact-head review: {message}"
+
+
+def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli, protected=None, review=None) -> int:
+    """Put the tested head on main through its PR, merged once the required check is green on exactly it, and,
+    for a fork-authored sync, once an independent exact-head review approves it."""
     main = _fetch_main(repo)
     if _parents_on_main(repo, cand.head, main):
         print(f"LANDED: sync {cand.head[:10]} is superseded; main {main} contains every parent")
@@ -352,7 +380,15 @@ def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli
             return REFUSED
     if protected is not None:
         protected.add(cand.head)
-    pr = _land_pr(repo, cand, gh_repo, request, gh)
+    reviews = _review_module()
+    try:
+        found = reviews.classify(repo, cand.head, main)
+    except reviews.ClassifyError as exc:
+        raise GateError(f"cannot classify {cand.head[:10]} as mechanical or fork-authored: {exc}") from exc
+    print(f"  sync {cand.head[:10]} is {found.verdict}" + "".join(f"\n    {line}" for line in found.lines()))
+    note = (f"\n\n**Fork-authored sync**: {found.summary()}. It merges only after an independent exact-head "
+            f"review of these (upstream's own commits need none):\n{found.review_scope()}") if found.fork_authored else ""
+    pr = _land_pr(repo, cand, gh_repo, request, gh, note)
     where = f"PR #{pr['number']} {pr.get('html_url', '')}".rstrip()
     verdict, detail = required_check(gh_repo, cand.head, request)
     if verdict == "pending":
@@ -361,9 +397,17 @@ def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli
     if verdict == "red":
         print(f"REFUSED: {where} cannot land: {detail}")
         return REFUSED
+    receipt = ""
+    if found.fork_authored:
+        code, message = _fork_review(repo, cand, found, pr, gh_repo, review or reviews.ShipReview(repo))
+        if code is not None:
+            print(message)
+            return code
+        receipt = f"\nReview: {message}"
+        print(f"  {message}")
     merged = gh("pr", "merge", str(pr["number"]), "-R", gh_repo, "--merge", "--match-head-commit", cand.head,
                 "--subject", f"Merge tested upstream sync {cand.head[:10]} into main",
-                "--body", f"Full suite: {cand.url}\n{REQUIRED_CHECK}: {detail}",
+                "--body", f"Full suite: {cand.url}\n{REQUIRED_CHECK}: {detail}{receipt}",
                 reason="upstream sync gate: merge the landing PR")
     if merged.returncode:
         message = ((merged.stderr or "") + (merged.stdout or "")).strip()[-600:]
@@ -382,11 +426,12 @@ def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli
     return LANDED
 
 
-def _land_other_greens(repo, found, head, main, *, gh_repo, request, gh, protected=None) -> bool:
+def _land_other_greens(repo, found, head, main, *, gh_repo, request, gh, protected=None, review=None) -> bool:
     landed = False
     for cand in found.values():
         if cand.status == "green" and cand.head != head and not _is_ancestor(repo, cand.head, main):
-            landed = land(repo, cand, gh_repo=gh_repo, request=request, gh=gh, protected=protected) == LANDED or landed
+            landed = land(repo, cand, gh_repo=gh_repo, request=request, gh=gh, protected=protected,
+                          review=review) == LANDED or landed
     return landed
 
 
@@ -444,19 +489,20 @@ def _close_superseded(repo, gh_repo, request, gh, protected=()) -> None:
 
 
 def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages, gh=gh_cli, now=None,
-            cache: VerdictCache | None = None) -> int:
+            cache: VerdictCache | None = None, review=None) -> int:
     """Land green candidates, then report ``head``'s state or stage it (module doc, exit codes).
 
     Every call then closes open sync PRs whose parents main already holds, including any this call's landing
     made redundant."""
     protected = set()
     verdict = _advance(repo, head, gh_repo=gh_repo, request=request, gh=gh, now=now, protected=protected,
-                       cache=cache)
+                       cache=cache, review=review)
     _close_superseded(repo, gh_repo, request, gh, protected)
     return verdict
 
 
-def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now, protected, cache=None) -> int:
+def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now, protected, cache=None,
+             review=None) -> int:
     now = time.time() if now is None else now
     try:
         if head is not None:
@@ -471,7 +517,7 @@ def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now, pr
 
         found = candidates(gh_repo, request, wanted=wanted, cache=cache)
         landed_other = _land_other_greens(repo, found, head, main, gh_repo=gh_repo, request=request,
-                                         gh=gh, protected=protected)
+                                         gh=gh, protected=protected, review=review)
         if head is None:
             return LANDED if landed_other else NOT_YET
         main = _fetch_main(repo)
@@ -486,7 +532,7 @@ def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now, pr
             protected.add(head)
             return _stage_or_wait(repo, head, found, now)
         if cand.status == "green":
-            return land(repo, cand, gh_repo=gh_repo, request=request, gh=gh, protected=protected)
+            return land(repo, cand, gh_repo=gh_repo, request=request, gh=gh, protected=protected, review=review)
         if cand.status == "red":
             print(f"REFUSED: the full suite failed on {head[:10]}: {cand.url}")
             _explain_red(repo, cand, main, gh_repo, request, gh)
@@ -571,16 +617,46 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--head", help="candidate commit; omitted: only land staged candidates that went green")
     parser.add_argument("--guard-push", metavar="SHA", help="pre-push check (scripts/check --commit runs it)")
+    parser.add_argument("--classify", metavar="REV", help="dry run: print whether REV is a mechanical or a "
+                        "fork-authored sync (and what it carries), land nothing")
+    parser.add_argument("--base", metavar="REV", help="--classify against this fork main (default: origin/main, "
+                        "or main just before REV landed)")
+    parser.add_argument("--review-reply", default="", help="answer an approving review's non-blocking points "
+                        "(posted on the PR, as hermes-core-wt ship --review-reply)")
+    parser.add_argument("--impl-task", default="", help="the Kanban card that authored a fork-authored sync: "
+                        "its sessions cannot be its independent reviewer (as hermes-core-wt ship --impl-task)")
     args = parser.parse_args(argv)
     if args.guard_push:
         return guard_push(args.repo, args.guard_push)
+    if args.classify:
+        return classify_cli(args.repo, args.classify, args.base)
     try:
         slug = origin_slug(args.repo)
     except GateError as exc:
         print(f"REFUSED: {exc}")
         return REFUSED
     cache = VerdictCache(default_cache_path())
-    return advance(args.repo, args.head, gh_repo=canonical_slug(slug, cache=cache), cache=cache)
+    review = _review_module().ShipReview(args.repo, reply=args.review_reply, impl_task=args.impl_task)
+    return advance(args.repo, args.head, gh_repo=canonical_slug(slug, cache=cache), cache=cache, review=review)
+
+
+def classify_cli(repo, rev: str, base: str | None) -> int:
+    """``--classify``: the verdict the gate would reach for ``rev``, printed; nothing is staged or landed."""
+    reviews = _review_module()
+    try:
+        head = git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}")
+        main = git(repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
+        base = git(repo, "rev-parse", "--verify", f"{base}^{{commit}}") if base else reviews.landing_base(repo, head,
+                                                                                                         main)
+        found = reviews.classify(repo, head, base)
+    except (GateError, reviews.ClassifyError) as exc:
+        print(f"REFUSED: cannot classify {rev}: {exc}")
+        return REFUSED
+    print(f"CLASSIFY {head[:10]} against base {base[:10]} (upstream/main {found.upstream[:10] or 'missing'}): "
+          f"{found.verdict}" + (f" ({found.summary()})" if found.fork_authored else ""))
+    for line in found.lines():
+        print(f"  {line}")
+    return 0
 
 
 if __name__ == "__main__":
