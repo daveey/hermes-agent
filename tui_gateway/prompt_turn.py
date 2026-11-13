@@ -1595,6 +1595,10 @@ def _run_admitted_prompt(
     if work is not None and not can_start:
         work.cancel()
     if not can_start:
+        # Closing bookend of "tui prompt accepted" for a turn that never started (admission re-held, closing).
+        logger.info("tui prompt refused: ui_session=%s session_key=%s kind=%s cause=%s", sid,
+                    session.get("session_key") or "", display_kind or "user",
+                    "admission" if work is None else "closing" if session.get("_closing") else "not_started")
         from tui_gateway.turn_admission import owns
         with session["history_lock"]:
             if owns(session):

@@ -342,11 +342,16 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                                                  else "Resuming interrupted turn…"})
                     _emit("message.start", sid)
                 render_notification(announce, platform="tui", diagnostic=diagnostic)
-                _run_prompt_submit(rid, sid, session, text, display_kind=None if held else "auto_continue",
+                accepted = _run_prompt_submit(rid, sid, session, text,
+                    display_kind=None if held else "auto_continue",
                     **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
             _notif_release_turn(session)  # rebound from session_notifications
+            return
+        if accepted is False:
+            _notif_release_turn(session)  # rebound from session_notifications
+            _auto_continue_refused(sid, session, session_key, paused, "submit refused at admission")
     if _start_session_work(kickoff, name=f"auto-continue-{sid}", home=session.get("profile_home")) is None:
         session["_auto_continue_scheduled"] = False
         return None
@@ -354,6 +359,24 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                 "reader pid %s)", session_key, attempt, ", core-update pause" if paused else "", age,
                 marker.get("writer_pid"), writer_state, os.getpid())
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
+
+
+def _auto_continue_refused(sid: str, session: dict, session_key: str, paused: bool, cause: str) -> None:
+    """[daveey] The kickoff's submit was refused before its turn started (admission re-held during the agent
+    build): "scheduled" is not "started", so the continuation keeps an owner. The claim is released; a
+    core-update pause re-arms the in-place watcher (it waits out the hold and schedules again after a short
+    backoff, no attempt used), anything else retries after the 30 s backoff. The marker is untouched: it is
+    still the turn's record. The WARNING is the detection signal: no continuation is dropped silently."""
+    rearm = paused and not (session.get("_closing") or session.get("_finalized"))
+    with session["history_lock"]:
+        session["_auto_continue_scheduled"] = False
+        # Paused: short, so a hold that lifted is not waited on, yet a refusal that persists cannot spin.
+        session["_auto_continue_retry_after"] = time.monotonic() + (10.0 if rearm else 30.0)
+    logger.warning("auto-continue: continuation of %s never started (%s); rescheduling %s", session_key, cause,
+                   "through its pause watcher" if rearm else "after 30s")
+    if rearm:
+        from tui_gateway import update_pause
+        update_pause.start_in_place_watcher(sid, session, session_key)
 
 
 def _ac_inflight_original(session: dict) -> str:
