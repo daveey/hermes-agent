@@ -233,7 +233,8 @@ def _fetch(deadline: _Deadline, path: str, task_id: str, what: str) -> None:
 
 def _push(deadline: _Deadline, path: str, cfg: Settings, branch: str, head: str, lease: Optional[str]) -> None:
     url = _git(deadline, path, "ls-remote", "--get-url", "origin").strip()
-    args = ["-c", "core.hooksPath=/dev/null", "-c", "push.default=nothing", "-c", "remote.origin.push=",
+    # Pushing to the URL (not the remote name) never reads remote.origin.push/pushurl config.
+    args = ["-c", "core.hooksPath=/dev/null", "-c", "push.default=nothing",
             "push", "--no-verify", "--porcelain", f"--force-with-lease=refs/heads/{branch}:{lease or ''}",
             url, f"{head}:refs/heads/{branch}"]
     try:

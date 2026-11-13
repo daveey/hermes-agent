@@ -42,6 +42,11 @@ class Card:
         git(clone, "fetch", "-q", "origin")
         git(clone, "worktree", "add", "-q", "-b", self.branch, str(self.path), "origin/main")
         assert kb.claim_task(self.conn, self.id, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
+        with kbc.write_txn(self.conn):  # the Board has acknowledged the card (the ordinary custody case)
+            self.conn.execute("UPDATE kanban_sync_state SET applying = 1")
+            self.conn.execute("UPDATE tasks SET sync_version = 1 WHERE id = ?", (self.id,))
+            self.conn.execute("UPDATE kanban_sync_state SET applying = 0")
+            self.conn.execute("DELETE FROM kanban_sync_outbox")
         self.run_id = kb.get_task(self.conn, self.id).current_run_id
         self.run_uid = sync.run_uid(self.conn, self.run_id)
         kbs.record_run(self.conn, kbs.AttachedRun(
