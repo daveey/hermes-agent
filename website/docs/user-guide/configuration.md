@@ -399,7 +399,8 @@ processes outlive a gateway or backend restart (for example a Hermes update):
 Without a usable scope the setting logs one warning and nothing changes.
 
 A host that applies Hermes updates without first waiting for running work to finish should turn this on:
-the update then interrupts a turn, not the long command the turn was running.
+the update then interrupts a turn, not the covered command the turn was running (a background job without
+a PTY, or a foreground command with a timeout above 60 seconds).
 
 ### Docker Backend
 
