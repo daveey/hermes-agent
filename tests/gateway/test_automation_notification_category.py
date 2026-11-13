@@ -113,6 +113,22 @@ async def test_display_kind_is_a_closed_producer_set(tmp_path, monkeypatch):
             automation_display_metadata(bad)
 
 
+def test_producer_card_kinds_is_explicit_and_excludes_loop_tick():
+    """A silence-machinery kind is not thereby nameable by a producer card: ``loop_tick`` is machinery
+    for silence, but no automation admission carries it (a slash /loop tick bypasses the FIFO)."""
+    from gateway.response_filters import (MACHINERY_DISPLAY_KINDS, PRODUCER_CARD_KINDS,
+                                          PRODUCER_NOTICE_DISPLAY_KINDS)
+    from gateway.session_automation import automation_display_metadata
+    assert PRODUCER_CARD_KINDS == {'internal_notification', 'process_complete', 'async_delegation_complete',
+                                   'kanban_notice'}
+    assert 'loop_tick' in PRODUCER_NOTICE_DISPLAY_KINDS and 'loop_tick' in MACHINERY_DISPLAY_KINDS
+    for kind in sorted(PRODUCER_CARD_KINDS):
+        card = {'display_kind': kind, 'display_text': 'x'}
+        assert automation_display_metadata(card) == card
+    with pytest.raises(RuntimeStoreError, match='invalid_params'):
+        automation_display_metadata({'display_kind': 'loop_tick', 'display_text': '↻ /loop /recap'})
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('category', ['result', 'diagnostic'])
 async def test_native_automation_category_roundtrip(tmp_path, monkeypatch, category):
