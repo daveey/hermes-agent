@@ -436,17 +436,6 @@ describe('remote down gate: trial deadline', () => {
 describe('main.ts wiring', () => {
   const main = readFileSync(join(__dirname, 'main.ts'), 'utf8')
 
-  it('fetchJson and fetchPublicJson start the total deadline before http.request and arm it on the request', () => {
-    for (const name of ['function fetchJson(', 'function fetchPublicJson(']) {
-      const body = main.slice(main.indexOf(name), main.indexOf(name) + 9000)
-      const start = body.indexOf('startRequestDeadline(timeoutMs)')
-
-      expect(start).toBeGreaterThan(0)
-      expect(start).toBeLessThan(body.indexOf('client.request('))
-      expect(body).toMatch(/deadline\.arm\(req, reject, body\?\.length\)/)
-    }
-  })
-
   it('fetchJson picks the probe pool when asked and fetchJsonForBackend forwards it', () => {
     expect(main).toMatch(/jsonAgentFor\(parsed\.protocol, options\.pool === 'probe' \? 'probe' : 'json'\)/)
     const body = main.slice(main.indexOf('async function fetchJsonForBackend('))

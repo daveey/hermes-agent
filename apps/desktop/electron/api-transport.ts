@@ -164,6 +164,43 @@ function startRequestDeadline(timeoutMs: number, now: () => number = Date.now) {
   }
 }
 
+type RequestDeadline = ReturnType<typeof startRequestDeadline>
+
+/**
+ * [daveey] Put one JSON request on the wire under its already-started total deadline (fetchJson / fetchPublicJson).
+ *
+ * Taking the started deadline and an `open` callback (the `http.request` call) makes the ordering structural: the
+ * clock started before the request was created. The body is passed once and used both to arm the deadline (its byte
+ * size grows the total budget) and as what is written, so the budget always matches the bytes sent. Marks
+ * `requestState.bodySent` before writing: from here a transport error can't prove the server didn't process it.
+ */
+function sendWithRequestDeadline(
+  deadline: RequestDeadline,
+  open: () => http.ClientRequest,
+  {
+    body,
+    onError,
+    requestState
+  }: { body?: Buffer; onError: (error: Error) => void; requestState?: { bodySent?: boolean } }
+): http.ClientRequest {
+  const req = open()
+
+  req.on('error', onError)
+  deadline.arm(req, onError, body?.length)
+
+  if (requestState) {
+    requestState.bodySent = true
+  }
+
+  if (body) {
+    req.write(body)
+  }
+
+  req.end()
+
+  return req
+}
+
 // Transient transport errors: retry MAY be safe (subject to verb gating).
 const TRANSIENT_CODES = new Set([
   'ECONNRESET',
@@ -384,6 +421,7 @@ export {
   readStatusCode,
   requestDeadlineBudgetMs,
   requestTimeoutError,
+  sendWithRequestDeadline,
   shouldRetryRequest,
   startRequestDeadline,
   withRetry
