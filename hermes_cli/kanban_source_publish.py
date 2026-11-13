@@ -219,7 +219,7 @@ _BOMS = ((b"\xef\xbb\xbf", "utf-8-sig"), (b"\xff\xfe\x00\x00", "utf-32"), (b"\x0
 
 
 def _decode(blob: bytes) -> Optional[str]:
-    """Text for a blob: UTF-8, or UTF-16/32 by BOM or by a NUL-every-other-byte pattern; None means binary."""
+    """Text for a blob: UTF-8, or UTF-16/32 by BOM or by its NUL byte pattern; None means binary."""
     for bom, codec in _BOMS:
         if blob.startswith(bom):
             try:
@@ -228,6 +228,14 @@ def _decode(blob: bytes) -> Optional[str]:
                 return None
     if b"\x00" in blob:
         head = blob[:4096]
+        quarter = [head[i::4].count(0) for i in range(4)]
+        n = len(head) // 4
+        for codec, zero, text in (("utf-32-le", (1, 2, 3), 0), ("utf-32-be", (0, 1, 2), 3)):
+            if n and min(quarter[i] for i in zero) * 4 >= n * 3 and quarter[text] * 8 <= n:
+                try:
+                    return blob[:len(blob) - len(blob) % 4].decode(codec)
+                except UnicodeDecodeError:
+                    return None
         even, odd = head[0::2].count(0), head[1::2].count(0)
         if max(even, odd) * 4 >= len(head) and min(even, odd) * 8 <= max(even, odd):
             try:
@@ -266,18 +274,6 @@ def _tree_entries(data: bytes) -> list[tuple[str, bytes, str]]:
         entries.append((data[pos:sp].decode("ascii"), data[sp + 1:nul], data[nul + 1:nul + 21].hex()))
         pos = nul + 21
     return entries
-
-
-def _commit_text(raw: bytes) -> str:
-    """A raw commit (headers + message) without signature continuation lines (the PEM marker check reads those)."""
-    lines, skip = [], False
-    for line in raw.decode("utf-8", "replace").split("\n"):
-        if skip and line.startswith(" "):
-            continue
-        skip = line.startswith(("gpgsig ", "gpgsig-sha256 ", "mergetag "))
-        if not skip:
-            lines.append(line)
-    return "\n".join(lines)
 
 
 def _name_text(name: bytes) -> str:
@@ -322,19 +318,18 @@ def secret_scan(deadline: _Deadline, path: str, base: str, head: str) -> None:
                     raise PublishRefused("secret_scan_refused", f"the push adds denylisted path {shown}")
                 where.setdefault(sha, shown)
 
-    for sha in commits:
-        raw = objects[sha][1]
-        if _KEY_MARKER_BYTES.search(raw) or _secret_in(_commit_text(raw)):
-            raise PublishRefused("secret_scan_refused", f"commit {sha[:12]} message holds a credential")
-        tree = raw.split(b"\n", 1)[0].removeprefix(b"tree ").decode("ascii")
+    for sha in commits:  # the tree line only locates new paths (denylist, labels); content is matched below
+        tree = objects[sha][1].split(b"\n", 1)[0].removeprefix(b"tree ").decode("ascii")
         if tree in new:
             walk(tree, b"")
+    # No object format is parsed for the credential match: the ENTIRE raw bytes of every new object (a commit with
+    # all its headers, signatures and message; a tag; a tree; a blob) go to the matcher (review 5891362210).
     for sha, (kind, data) in objects.items():
+        if (line := _blob_secret_line(data)) is not None:
+            label = where.get(sha, f"blob {sha[:12]}") if kind == "blob" else f"{kind} {sha[:12]}"
+            raise PublishRefused("secret_scan_refused", f"{label}{f':{line}' if line else ''} adds a credential")
         if kind == "tag":
             raise PublishRefused("secret_scan_refused", f"tag object {sha[:12]} in the push range")
-        if kind == "blob" and (line := _blob_secret_line(data)) is not None:
-            label = where.get(sha, f"blob {sha[:12]}")
-            raise PublishRefused("secret_scan_refused", f"{label}{f':{line}' if line else ''} adds a credential")
 
 
 # --- the publish --------------------------------------------------------------------------------------------------

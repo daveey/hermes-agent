@@ -727,8 +727,9 @@ exactly as it was.
 handoff, request changes, continue/move) first publishes the task branch: it
 must be the card's own branch (`wt/<task>` or `<slug>/<task>`, never a protected
 or shared one), clean, free of private ignored files, LFS and submodules, and
-every object the push would send passes a secret scan: each new blob's raw bytes
-(UTF-8, UTF-16/32 or binary), each new commit's message and each new path name,
+every object the push would send passes a secret scan: the entire raw bytes of
+each new object (blobs as UTF-8, UTF-16/32 or binary; whole commits including
+every header, signature and the message; trees) and each new path name,
 including denylisted names such as `.env*` or `*.pem`. The scan and the push run
 in one isolated git environment (no system or global config, replace refs,
 grafts, attributes or hooks), and the push sends the exact scanned commit as a

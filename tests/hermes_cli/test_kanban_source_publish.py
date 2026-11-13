@@ -157,6 +157,53 @@ def test_secret_in_commit_message_refused(card):
     _refused(card, "secret_scan_refused")
 
 
+@pytest.mark.parametrize("header", ["gpgsig", "gpgsig-sha256", "mergetag"])
+def test_signature_shaped_message_line_cannot_hide_the_body(card, header):
+    """A message line that looks like a signature header is message text; the indented lines after it are scanned
+    (review 5891362210: ``subject\\n\\ngpgsig x\\n token = sk-...`` was published)."""
+    (card.path / "a.txt").write_text("a")
+    git(card.path, "add", "a.txt")
+    git(card.path, "commit", "-q", "--cleanup=verbatim", "-m", f"subject\n\n{header} x\n token = {SECRET}\n")
+    _refused(card, "secret_scan_refused")
+
+
+def _raw_commit(card, headers: str, message: str) -> str:
+    """Write a hand-built commit on top of HEAD (extra ``headers`` after committer) and move the branch to it."""
+    parent = git(card.path, "rev-parse", "HEAD")
+    tree = git(card.path, "rev-parse", "HEAD^{tree}")
+    who = "T <t@example.com> 1700000000 +0000"
+    raw = f"tree {tree}\nparent {parent}\nauthor {who}\ncommitter {who}\n{headers}\n{message}"
+    sha = subprocess.run(["git", "-C", str(card.path), "hash-object", "-t", "commit", "-w", "--stdin"],
+                         input=raw.encode(), check=True, capture_output=True).stdout.decode().strip()
+    git(card.path, "reset", "-q", "--hard", sha)
+    return sha
+
+
+_ARMOR = ("-----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEEabcdefghijklmnopqrstuvwxyz0123456789+/=\n =AbCd\n"
+          " -----END PGP SIGNATURE-----")
+
+
+def test_mergetag_tag_message_is_scanned(card):
+    """An embedded mergetag is pushed content: the raw commit, mergetag included, goes to the matcher."""
+    tagged = git(card.path, "rev-parse", "HEAD")
+    tag = (f"mergetag object {tagged}\n type commit\n tag v1\n tagger T <t@example.com> 1700000000 +0000\n \n"
+           f" release notes {SECRET}\n {_ARMOR}")
+    _raw_commit(card, tag, "merge v1\n")
+    _refused(card, "secret_scan_refused")
+
+
+def test_secret_in_signature_block_is_scanned(card):
+    """Signature blocks are not skipped: the whole raw commit object is matched."""
+    _raw_commit(card, f"gpgsig -----BEGIN PGP SIGNATURE-----\n token = {SECRET}\n -----END PGP SIGNATURE-----",
+                "signed\n")
+    _refused(card, "secret_scan_refused")
+
+
+def test_real_signature_armor_does_not_trip_the_scan(card):
+    head = _raw_commit(card, f"gpgsig {_ARMOR}", "signed\n")
+    assert card.receipt()["state"] == "published" and card.remote() == head
+
+
 def test_denylisted_rename_refused(card):
     commit(card.path, "notes.txt", "plain")
     git(card.path, "mv", "notes.txt", ".env.production")
@@ -229,7 +276,8 @@ def test_added_line_that_looks_like_a_diff_header_is_scanned(card, line):
     _refused(card, "secret_scan_refused")
 
 
-@pytest.mark.parametrize("codec", ["utf-16", "utf-16-le", "utf-16-be", "utf-8-sig", "utf-32"])
+@pytest.mark.parametrize("codec", ["utf-16", "utf-16-le", "utf-16-be", "utf-8-sig", "utf-32", "utf-32-le",
+                                   "utf-32-be"])
 def test_non_utf8_text_encodings_are_scanned(card, codec):
     (card.path / "wide.txt").write_bytes(f"token = {SECRET}\n".encode(codec))
     git(card.path, "add", "wide.txt")
@@ -270,35 +318,63 @@ def test_benign_unchanged_denylisted_file_on_base_is_not_refused(card, world):
     assert card.receipt()["state"] == "published" and card.remote() == head
 
 
-@pytest.mark.parametrize("seed", range(12))
+def _plant_blob(card, rng, secret, seed, prefix, deep=False):
+    name = f"{prefix}{'x/y/' if deep else ''}cfg{seed}.txt"
+    commit(card.path, name, "a\n" * rng.randint(0, 5) + f"key: {secret}\n" + "b\n" * rng.randint(0, 5))
+    commit(card.path, name, "redacted\n")
+
+
+def _plant_message(card, rng, secret, seed, prefix):
+    (card.path / f"m{seed}.txt").write_text("m")
+    git(card.path, "add", f"m{seed}.txt")
+    git(card.path, "commit", "-q", "-m", f"subject\n\nbody {secret} tail")
+
+
+def _plant_path(card, rng, secret, seed, prefix):
+    name = f"{prefix}{secret}.txt"
+    (card.path / name).parent.mkdir(parents=True, exist_ok=True)
+    (card.path / name).write_text("plain\n")
+    git(card.path, "add", name)
+    git(card.path, "commit", "-q", "-m", "add a file")  # the message must not carry the name
+    git(card.path, "rm", "-q", name)
+    git(card.path, "commit", "-q", "-m", "drop")
+
+
+def _plant_mergetag(card, rng, secret, seed, prefix):
+    tagged = git(card.path, "rev-parse", "HEAD")
+    _raw_commit(card, f"mergetag object {tagged}\n type commit\n tag v{seed}\n"
+                      f" tagger T <t@example.com> 1700000000 +0000\n \n notes {secret}\n {_ARMOR}", "merge\n")
+
+
+_PLANTERS = {
+    "blob": _plant_blob,
+    "deep-blob": lambda *a: _plant_blob(*a, deep=True),
+    "message": _plant_message,
+    "path": _plant_path,
+    "header": lambda card, rng, secret, *_: _raw_commit(card, f"x-note {secret}", "plain\n"),
+    "signature": lambda card, rng, secret, *_: _raw_commit(
+        card, f"gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEz{rng.randint(0, 9)}\n {secret}\n =AbCd\n"
+              " -----END PGP SIGNATURE-----", "signed\n"),
+    "sig-shaped-message": lambda card, rng, secret, *_: _raw_commit(
+        card, "", f"subject\n\n{rng.choice(['gpgsig', 'gpgsig-sha256', 'mergetag'])} x\n {secret}\n"),
+    "mergetag": _plant_mergetag,
+}
+
+
+@pytest.mark.parametrize("seed", range(16))
 def test_property_random_secret_in_any_new_object_is_refused(card, seed):
-    """A random credential placed in a new blob, a commit message or a path name, behind 0-3 benign commits and
-    then removed again, is always refused and never pushed."""
+    """A random credential placed in a new blob, a path name, or anywhere in a commit object (message, an extra
+    header, a gpgsig signature block, a signature-shaped message line, an embedded mergetag), behind 0-3 benign
+    commits (and for blobs/paths removed again), is always refused and never pushed."""
     import random
     rng = random.Random(seed)
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789"
     secret = "sk-" + "".join(rng.choice(alphabet) for _ in range(rng.randint(24, 40)))
     for i in range(rng.randint(0, 3)):
         commit(card.path, f"pad{i}/f{rng.randint(0, 99)}.txt", f"benign {i}\n")
-    where = rng.choice(["blob", "message", "path", "deep-blob"])
+    places = list(_PLANTERS)
     folder = "/".join(f"d{rng.randint(0, 9)}" for _ in range(rng.randint(0, 3)))
-    prefix = f"{folder}/" if folder else ""
-    if where in ("blob", "deep-blob"):
-        name = f"{prefix}{'x/y/' if where == 'deep-blob' else ''}cfg{seed}.txt"
-        commit(card.path, name, "a\n" * rng.randint(0, 5) + f"key: {secret}\n" + "b\n" * rng.randint(0, 5))
-        commit(card.path, name, "redacted\n")
-    elif where == "message":
-        (card.path / f"m{seed}.txt").write_text("m")
-        git(card.path, "add", f"m{seed}.txt")
-        git(card.path, "commit", "-q", "-m", f"subject\n\nbody {secret} tail")
-    else:
-        name = f"{prefix}{secret}.txt"
-        (card.path / name).parent.mkdir(parents=True, exist_ok=True)
-        (card.path / name).write_text("plain\n")
-        git(card.path, "add", name)
-        git(card.path, "commit", "-q", "-m", "add a file")  # the message must not carry the name
-        git(card.path, "rm", "-q", name)
-        git(card.path, "commit", "-q", "-m", "drop")
+    _PLANTERS[places[seed % len(places)]](card, rng, secret, seed, f"{folder}/" if folder else "")
     _refused(card, "secret_scan_refused")
 
 
