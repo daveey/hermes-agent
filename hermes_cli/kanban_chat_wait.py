@@ -32,8 +32,10 @@ THRESHOLD_SECONDS = pu.THRESHOLD_SECONDS
 # A ready episode older than this when first seen is backlog, not a wait the chat just promised; kanban_show's
 # queue_hint covers it. This also bounds the burst on the first tick after deploy.
 MAX_EPISODE_SECONDS = 6 * 3600
-# The current lag stall has logged its WARNING (the rest of it logs at INFO); cleared by a sweep that runs undeferred.
-_LAG_WARNED = False
+# Boards (main DB file of the swept conn) whose current lag stall has logged its WARNING; the rest of that stall logs
+# at INFO. Keyed per board: the dispatcher sweeps each board separately, so a healthy board's undeferred sweep must
+# not re-arm a lagging board's WARNING every tick. A board leaves the set on its own undeferred sweep.
+_LAG_WARNED: set[str] = set()
 NO_PROMISE = "check placement and available capacity first; re-place if suitable; don't promise a pickup"
 
 
@@ -170,6 +172,12 @@ def _clock_hold_unchecked(conn, task_id: str, since: int, now: float) -> dict[st
     return {"hold_reason": str(reason), "hold_until": int(until)} if until else {}
 
 
+def _board_key(conn) -> str:
+    """Identity of the board ``conn`` reads, for :data:`_LAG_WARNED`: its main DB file ("" in memory)."""
+    from hermes_cli.kanban_db_connect import _main_db_file
+    return _main_db_file(conn) or ""
+
+
 def sweep(conn, *, now: Optional[float] = None) -> int:
     """Append the once-per-ready-episode notice for every qualifying card; returns how many were appended.
 
@@ -192,13 +200,13 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
     if not due:
         return 0
     lag = fresh.lag_hold(conn, now=now)
-    global _LAG_WARNED
+    board = _board_key(conn)
     if lag is not None:
-        (_log.info if _LAG_WARNED else _log.warning)(
-            "kanban chat-wait: %d notice(s) deferred: %s", len(due), lag["reason"])
-        _LAG_WARNED = True
+        (_log.info if board in _LAG_WARNED else _log.warning)(
+            "kanban chat-wait: %d notice(s) deferred: %s (board %s)", len(due), lag["reason"], board or "<memory>")
+        _LAG_WARNED.add(board)
         return 0
-    _LAG_WARNED = False
+    _LAG_WARNED.discard(board)
     newer = fresh.newer_rows(conn, [row["id"] for row, _since, _for in due])
     drain = update_hold()
     posted = 0

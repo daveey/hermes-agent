@@ -226,7 +226,7 @@ def synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
         monkeypatch.delenv(key, raising=False)
     support.write_sync_config(home, True)
-    monkeypatch.setattr(cw, "_LAG_WARNED", False)
+    monkeypatch.setattr(cw, "_LAG_WARNED", set())
     c = kbc.connect(home / "kanban.db")
     ksc.ensure_identity(c, "default", "macbook")
     sync.set_mode(c, "primary")  # the MacBook's mode: the live board applies the feed
@@ -363,3 +363,45 @@ def test_detached_or_disabled_board_is_not_compared(synced, tmp_path, how):
         if conn is not synced:
             conn.close()
     assert len(_notices(synced, tid, cw.NOTICE_KIND)) == 1
+
+
+def _db_file(conn):
+    return next(file for _seq, name, file in conn.execute("PRAGMA database_list") if name == "main")
+
+
+def test_lagging_board_warns_once_per_stall_while_another_board_is_healthy(tmp_path, monkeypatch, caplog):
+    """PR #1932 review nit: the dispatcher sweeps each board separately. Board A lags its replica, board B is
+    healthy; B's undeferred sweep each tick must not re-arm A's WARNING, so A warns once per stall, not per tick."""
+    from hermes_cli import kanban_replica_freshness as fresh
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(cw, "_LAG_WARNED", set())
+    a, b = kbc.connect(tmp_path / "a.db"), kbc.connect(tmp_path / "b.db")
+    try:
+        ta, tb = _waiting(a), _waiting(b)
+        lagging = {_db_file(a)}
+        monkeypatch.setattr(fresh, "lag_hold", lambda conn, now=None: (
+            {"reason": "live feed 9999 rows behind its replica"} if _db_file(conn) in lagging else None))
+        ticks = 5
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+            posted = [(cw.sweep(a), cw.sweep(b)) for _tick in range(ticks)]
+        assert posted == [(0, 1)] + [(0, 0)] * (ticks - 1)  # B's card stays due, so every B sweep runs undeferred
+        deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+        assert deferred == ["WARNING"] + ["INFO"] * (ticks - 1)
+        assert _notices(a, ta, cw.NOTICE_KIND) == [] and len(_notices(b, tb, cw.NOTICE_KIND)) == 1
+        lagging.clear()  # A's lag closes: its own undeferred sweep ends the stall and posts the held notice
+        assert cw.sweep(a) == 1
+        lagging.add(_db_file(a))
+        _waiting(a)  # a new due card on A, so the next stall has something to defer
+        caplog.clear()
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_chat_wait"):
+            cw.sweep(b)
+            cw.sweep(a)
+        deferred = [r.levelname for r in caplog.records if "deferred" in r.getMessage()]
+        assert deferred == ["WARNING"]  # a new stall on A warns again
+    finally:
+        a.close()
+        b.close()
