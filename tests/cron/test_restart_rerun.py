@@ -739,11 +739,15 @@ def extra_fire_key():
     return extra_fire.RESTORE_KEY
 
 
-def test_rerun_cut_after_ten_awake_minutes_is_not_rearmed(clock, awake_host):
+@pytest.mark.parametrize("awake,wall", [
+    (600, 700),
+    (1000, 1700),  # asleep 700 s, but awake for most of the attempt: it really ran
+])
+def test_rerun_cut_after_ten_awake_minutes_is_not_rearmed(clock, awake_host, awake, wall):
     job = create_job("post", "every 120m", name="post")
     clock["now"] += timedelta(minutes=121)
     _owner_cut(job["id"], clock, awake=900, wall=900)
-    _rerun, again = _owner_cut(job["id"], clock, awake=600, wall=700)
+    _rerun, again = _owner_cut(job["id"], clock, awake=awake, wall=wall)
     assert not again
     assert get_job(job["id"])["restart_rerun"]["settled"] is True
     assert _due_ids() == []
@@ -773,14 +777,17 @@ def test_slept_rerun_cap_is_three_per_original_cut(clock, awake_host):
 @pytest.mark.parametrize("awake,wall,slept", [
     (None, None, False), (599, 599, True), (600, 600, False),
     (700, 3 * 3600, True),  # ~10 awake minutes in 3 h 17 m: the incident's rerun
-    (1200, 1700, False), (True, 10, False), (-1, 10, False)])
+    (1200, 1700, False), (1000, 1700, False),  # asleep >= 10 min, but less than awake
+    (True, 10, False), (-1, 10, False)])
 def test_slept_through_reads_the_owner_clock(awake, wall, slept):
     from cron.restart_rerun import slept_through
 
     assert slept_through(awake, wall) is slept
 
 
-def test_pending_rerun_waits_for_full_wake_until_the_next_slot(clock, awake_host, caplog):
+@pytest.mark.parametrize("past_slot", [timedelta(seconds=1), timedelta(0)])
+def test_pending_rerun_waits_for_full_wake_until_the_next_slot(clock, awake_host, caplog, past_slot):
+    """The held rerun is settled from the slot's own instant on (``past_slot`` 0: exactly at it)."""
     job = create_job("post", "every 120m", name="post")
     clock["now"] += timedelta(minutes=121)
     awake_host["awake"] = False
@@ -792,7 +799,7 @@ def test_pending_rerun_waits_for_full_wake_until_the_next_slot(clock, awake_host
     # Held all the way to the natural slot: that slot settles it (no double run).
     awake_host["awake"] = False
     slot = get_job(job["id"])[extra_fire_key()]
-    clock["now"] = datetime.fromisoformat(slot) + timedelta(seconds=1)
+    clock["now"] = datetime.fromisoformat(slot) + past_slot
     with caplog.at_level(logging.WARNING, logger="cron.jobs"):
         assert _due_ids() == []
     assert f"pending restart rerun of {job['id']} settled by its next slot" in caplog.text
@@ -845,6 +852,114 @@ def test_deferred_pending_rerun_stays_held_and_survives_the_oneshot_grace(clock,
     assert get_job(job["id"]) is not None, "held past the one-shot grace, never retired as missed"
     awake_host["awake"] = True
     assert _due_ids() == [job["id"]], "it fires on the first fully awake tick"
+
+
+def test_attempt_claimed_before_the_pending_rerun_was_armed_starts_a_fresh_count(clock, awake_host):
+    """Only the rerun itself (claimed at or after its reschedule) spends from its cut's budget.
+    An attempt that was already running when another cut armed a rerun is its own original cut:
+    its rerun starts again at one, never inheriting the other cut's count."""
+    from cron.jobs import load_jobs, save_jobs
+    from cron.restart_rerun import reschedule_interrupted
+
+    job = create_job("post", "every 120m", name="post")
+    clock["now"] += timedelta(minutes=121)
+    claimed, record = _start(job["id"])
+    clock["now"] += timedelta(minutes=1)
+    assert mark_job_run(job["id"], False, "cut", shutdown_interrupted=True, execution_id=record["id"],
+                        expected_fire_owner=claimed["fire_claim"]["by"])
+    executions.finish_execution(record["id"], success=False, error="cut")
+    jobs = load_jobs()
+    jobs[0]["restart_rerun"] = {"execution_id": "another-cut", "at": clock["now"].isoformat(), "reruns": 2}
+    save_jobs(jobs)
+
+    assert reschedule_interrupted(executions.get_execution(record["id"]), restart_cut=True,
+                                  awake_seconds=5, wall_seconds=5)
+
+    marker = get_job(job["id"])["restart_rerun"]
+    assert marker["execution_id"] == record["id"]
+    assert "reruns" not in marker, f"the fresh cut inherited the other cut's rerun count: {marker}"
+
+
+def test_deferring_a_slept_rerun_keeps_its_spent_reruns(clock, awake_host):
+    """A draining owner that refuses a pending rerun (defer_unadmitted) re-arms it without
+    resetting how many reruns its cut has spent: the MAX_RERUNS cap still holds after it."""
+    from cron.restart_cut import defer_unadmitted
+
+    job = create_job("post", "every 600m", name="post")
+    clock["now"] += timedelta(minutes=601)
+    assert _owner_cut(job["id"], clock, awake=5, wall=5)[1]  # the original cut: rerun 1
+    assert _owner_cut(job["id"], clock, awake=5, wall=1800)[1]  # rerun 2
+    clock["now"] += timedelta(minutes=1)
+    claimed, record = _start(job["id"])
+    assert defer_unadmitted(claimed, record["id"], "runtime_draining", claimed["fire_claim"]["by"])
+    assert get_job(job["id"])["restart_rerun"]["reruns"] == 2, get_job(job["id"])["restart_rerun"]
+
+    clock["now"] += timedelta(minutes=1)  # the next gateway claims it later: a newer attempt
+    assert _owner_cut(job["id"], clock, awake=5, wall=1800)[1]  # rerun 3
+    _rerun, again = _owner_cut(job["id"], clock, awake=5, wall=1800)
+    assert not again, "the deferral must not hand the cut a fresh rerun budget"
+    assert _due_ids() == []
+
+
+def test_deferred_original_fire_is_no_restart_rerun_and_fires_in_a_darkwake(clock, awake_host):
+    """A fire the draining owner refused before it ran (not a rerun) is re-armed with a
+    ``deferred`` marker: it is the job's own fire, so a DarkWake does not hold it."""
+    from cron.restart_cut import defer_unadmitted
+    from cron.restart_rerun import pending_rerun
+
+    job = create_job("remind me", "in 30m", name="reminder")
+    clock["now"] += timedelta(minutes=31)
+    claimed, record = _start(job["id"])
+    assert defer_unadmitted(claimed, record["id"], "runtime_draining", claimed["fire_claim"]["by"])
+    deferred = get_job(job["id"])
+    assert deferred["restart_rerun"].get("deferred") is True
+    assert deferred["next_run_at"] == deferred["restart_rerun"]["at"]
+    assert not pending_rerun(deferred)
+
+    awake_host["awake"] = False
+    assert _due_ids() == [job["id"]], "a deferred original fire is not held in a DarkWake"
+
+
+def test_replanned_oneshot_is_no_pending_rerun(clock, awake_host):
+    """An operator re-plans a one-shot whose rerun is pending: the new time is the job's own
+    fire, not the rerun, so it fires at that time even in a DarkWake."""
+    from cron.jobs import rearm_oneshot
+    from cron.restart_rerun import pending_rerun
+
+    job = create_job("remind me", "in 30m", name="reminder")
+    clock["now"] += timedelta(minutes=31)
+    assert _owner_cut(job["id"], clock, awake=900, wall=900)[1]
+    new_time = clock["now"] + timedelta(hours=3)
+    rearm_oneshot(job["id"], new_time)
+    replanned = get_job(job["id"])
+    assert replanned["next_run_at"] != replanned["restart_rerun"]["at"]
+    assert not pending_rerun(replanned)
+
+    awake_host["awake"] = False
+    clock["now"] = new_time
+    assert _due_ids() == [job["id"]], "the re-planned time fires as itself"
+
+
+def test_recurring_rerun_without_its_saved_slot_is_not_pending(clock, awake_host):
+    """A recurring rerun is an extra fire only while ``manual_run_restore_at`` keeps the natural
+    slot (the run-now intent extra_fire.queued reads). Once that is gone, as a claim leaves it,
+    the due fire is not a pending rerun and is not held in a DarkWake."""
+    from cron import extra_fire
+    from cron.jobs import load_jobs, save_jobs
+    from cron.restart_rerun import pending_rerun
+
+    job = create_job("post", "every 120m", name="post")
+    clock["now"] += timedelta(minutes=121)
+    assert _owner_cut(job["id"], clock, awake=900, wall=900)[1]
+    jobs = load_jobs()
+    jobs[0].pop(extra_fire.RESTORE_KEY)
+    save_jobs(jobs)
+    shape = get_job(job["id"])
+    assert shape["manual_run_at"] == shape["next_run_at"] == shape["restart_rerun"]["at"]
+    assert not pending_rerun(shape)
+
+    awake_host["awake"] = False
+    assert _due_ids() == [job["id"]]
 
 
 def test_full_wake_probe_reads_pmset_assertions(monkeypatch):

@@ -330,3 +330,52 @@ async def test_forwarded_cancel_during_owner_restart_stays_a_restart_cut_after_t
     assert [lvl for lvl, _ in records] == [logging.WARNING], records
     assert 'stopped by gateway shutdown' in records[0][1]
     assert authority.pending_results[row['admission_id']]['result']['cron_job_flags'].get(RESTART_CUT_FLAG) is True
+
+
+@pytest.mark.asyncio
+async def test_restart_cut_reports_the_attempts_awake_and_wall_clock(tmp_path, monkeypatch):
+    """[daveey] cron-7dfb141525: the owner reports how long the cut attempt was awake (monotonic,
+    which stops while the host sleeps) and how long it took on the wall clock, so the firer can
+    re-arm a rerun the host slept through (cron/restart_rerun.py ``slept_through``)."""
+    from contextlib import nullcontext
+    import json
+    from cron import scheduler
+    from cron.restart_cut import AWAKE_FLAG, RESTART_CUT_FLAG
+    from gateway import run, session_cron
+    from gateway.session_authority import LiveSession, SessionAuthority
+    from gateway.session_contract import SessionRef
+    from hermes_state import SessionDB
+    from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    db = SessionDB(tmp_path / 'state.db')
+    db.create_session('s', source='cron')
+    runner = SimpleNamespace(_draining=False, _interrupting_remaining_work=False)
+    authority = SessionAuthority(runner, profile_id='p', instance_id='test', db=db,
+                                 epoch=begin_runtime_epoch(db, instance_id='test'))
+    authority.sessions['s'] = LiveSession(SimpleNamespace(platform=None, user_id='cron-owner'), 'route')
+    monkeypatch.setattr(run, '_profile_runtime_scope', lambda home: nullcontext())
+    # The owner's clocks only; asyncio keeps the real ones. Each read returns the current value,
+    # so the fake never runs out however often it is read.
+    clocks = {'awake': 1000.0, 'wall': 1_790_000_000.0}
+    monkeypatch.setattr(session_cron, 'time', SimpleNamespace(
+        monotonic=lambda: clocks['awake'], time=lambda: clocks['wall']))
+
+    def run_job(job, *, extra_prompt, execution_id, cancel_event):
+        clocks['awake'] += 50  # awake for 50 s of a 15-minute attempt: the host slept the rest
+        clocks['wall'] += 900
+        runner._interrupting_remaining_work = True  # this owner's restart stops the run
+        return (False, '', '', 'interrupted')
+    monkeypatch.setattr(scheduler, 'run_job', run_job)
+
+    with db:
+        admit_session_input(db, epoch=authority.epoch, principal_id='cron-owner', session_id='s',
+                            request_id='cron:job:fire', payload={'text': ''})
+        row = claim_session_input(db, epoch=authority.epoch, session_id='s')
+        policy = SimpleNamespace(request_json=json.dumps({
+            'extra_prompt': None, 'request_id': 'cron:job:fire', 'cron_job': {'id': 'job'}}))
+        with pytest.raises(RuntimeError):
+            await session_cron.execute(authority, SessionRef('p', 's'), row, policy)
+    flags = authority.pending_results[row['admission_id']]['result']['cron_job_flags']
+    assert flags.get(RESTART_CUT_FLAG) is True
+    assert flags.get(AWAKE_FLAG) == {'awake': 50.0, 'wall': 900.0}
