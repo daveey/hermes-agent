@@ -107,6 +107,11 @@ def test_an_added_number_is_not_an_enumeration(mine, theirs):
     ("Fix guard v2", "Fix guard v3"),
     ("Fix guard (2nd attempt)", "Fix guard (3rd attempt)"),
     ("Fix guard (round 1)", "Round 2: fix guard"),
+    # PR #2481 review 5896093750: a dotted version and a try/take counter are re-issue counters too.
+    ("Fix guard v2.1", "Fix guard v2.2"),
+    ("Fix guard (2nd try)", "Fix guard (3rd try)"),
+    ("Fix guard, take 2", "Fix guard, take 3"),
+    ("Fix guard, try 1", "Fix guard, try 2"),
 ])
 def test_a_bumped_reissue_counter_is_not_an_enumeration(mine, theirs):
     """PR #2429 review: a counter after attempt/round/retry/v... is a re-issue of the same work, not a leg."""
@@ -124,6 +129,10 @@ def test_a_bumped_reissue_counter_is_not_an_enumeration(mine, theirs):
     ("w1-01 sleep probe", "sleep probe w1-02"),  # PR #2429 review: a moved index is still an index
     ("Pass 1 of 3: parser", "Pass 2 of 3: parser"),  # PR #2481 review: a staged pass is a leg
     ("Fixture A: idle hold", "idle hold, fixture B"),
+    # PR #2481 review 5896093750: a counter beside a real index hides only itself, not the index.
+    ("Fix guard (attempt 2, w1-01)", "Fix guard (attempt 3, w1-02)"),
+    ("Fix guard (2nd try, worker-2)", "Fix guard (3rd try, worker-3)"),
+    ("Take 1 of 3: parser", "Take 2 of 3: parser"),  # a staged "N of M" stays a leg
 ])
 def test_an_index_in_the_same_place_is_an_enumeration(mine, theirs):
     from hermes_cli import kanban_overlap_own as own

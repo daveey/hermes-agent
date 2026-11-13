@@ -104,24 +104,38 @@ def _title_tokens(title: str) -> list[str]:
 
 
 # A counter after one of these words numbers a re-issue of the same work, not a leg (PR #2429 review).
-# "pass"/"take"/"try" are left out: "Pass 1 of 3: parser" / "Pass 2 of 3: parser" are staged legs (PR #2481 review).
+# "pass"/"take"/"try" are not here: "Pass 1 of 3: parser" / "Pass 2 of 3: parser" are staged legs (PR #2481 review);
+# try/take go through ``_TRY_WORD`` below.
 _REISSUE_WORD = re.compile(r"(?:attempts?|rounds?|retry|retries|v|rev|revision|iterations?)",
                            re.IGNORECASE)
-_REISSUE_TOKEN = re.compile(r"(?:v|rev)\d+(?:\.\d+)*", re.IGNORECASE)  # "v2", "rev3"
+_REISSUE_TOKEN = re.compile(r"(?:v|rev)\d+(?:\.\d+)*", re.IGNORECASE)  # "v2", "rev3", "v2.1"
+_COUNT = re.compile(r"\d+(?:\.\d+)*")  # "2", "2.1"
+# "try 2"/"take 3" number a re-issue unless a staged "N of M" follows ("Take 1 of 3"); "2nd try" is one. "pass"
+# stays out of both: "Pass 1 of 3" and "2nd pass" are staged legs (PR #2481 reviews 5895781842, 5896093750).
+_TRY_WORD = re.compile(r"(?:try|tries|take)", re.IGNORECASE)
 _ORDINAL = re.compile(r"\d+(?:st|nd|rd|th)", re.IGNORECASE)  # "2nd attempt"
 
 
-def _reissue_counter(tokens: list[str], i1: int, i2: int) -> bool:
-    """``tokens[i1:i2]`` holds a re-issue counter: a number right after a re-issue word (``attempt 2``,
-    ``round 1``), ``v3``, or an ordinal before one (``2nd attempt``)."""
+def _counters(tokens: list[str], i1: int, i2: int) -> set[int]:
+    """Indices in ``tokens[i1:i2]`` of re-issue counters: a number right after a re-issue word (``attempt 2``,
+    ``round 1``, ``try 2``), ``v3``/``v2.1``, or an ordinal before one (``2nd attempt``, ``3rd try``)."""
+    found = set()
     for k in range(i1, i2):
         tok = tokens[k]
-        if not _DIGIT_TOKEN.fullmatch(tok.lower()):
-            continue
-        if (_REISSUE_TOKEN.fullmatch(tok) or (k > 0 and _REISSUE_WORD.fullmatch(tokens[k - 1]))
-                or (_ORDINAL.fullmatch(tok) and k + 1 < len(tokens) and _REISSUE_WORD.fullmatch(tokens[k + 1]))):
-            return True
-    return False
+        before = tokens[k - 1] if k > 0 else ""
+        after = tokens[k + 1] if k + 1 < len(tokens) else ""
+        if (_REISSUE_TOKEN.fullmatch(tok)
+                or (_COUNT.fullmatch(tok) and (_REISSUE_WORD.fullmatch(before)
+                                               or (_TRY_WORD.fullmatch(before) and after.lower() != "of")))
+                or (_ORDINAL.fullmatch(tok) and (_REISSUE_WORD.fullmatch(after) or _TRY_WORD.fullmatch(after)))):
+            found.add(k)
+    return found
+
+
+def _span_markers(tokens: list[str], i1: int, i2: int) -> frozenset[str]:
+    """Index markers of ``tokens[i1:i2]`` without its re-issue counters: ``attempt 3, w1-02`` keeps ``w1-02``."""
+    skip = _counters(tokens, i1, i2)
+    return markers(" ".join(tokens[k] for k in range(i1, i2) if k not in skip))
 
 
 def _shape(marker: str) -> str:
@@ -143,9 +157,9 @@ def enumerated(title: str, theirs: str) -> Optional[tuple[frozenset[str], frozen
     deleted: set[str] = set()
     inserted: set[str] = set()
     for tag, i1, i2, j1, j2 in ops:
-        if tag == "equal" or _reissue_counter(a, i1, i2) or _reissue_counter(b, j1, j2):
+        if tag == "equal":
             continue
-        mine_m, their_m = markers(" ".join(a[i1:i2])), markers(" ".join(b[j1:j2]))
+        mine_m, their_m = _span_markers(a, i1, i2), _span_markers(b, j1, j2)
         if tag == "replace" and mine_m and their_m and mine_m != their_m:
             return mine_m - their_m, their_m - mine_m
         deleted |= mine_m if tag == "delete" else set()

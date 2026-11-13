@@ -32,11 +32,17 @@ _AFTER = re.compile(rf"[^.\n]{{0,120}}?\b({_CARD})\b")
 # A denial that governs the keyword in its own clause: "Not a duplicate of t_X", "No duplicates found; parent
 # t_X", "isn't a duplicate", "non-duplicate", "0 duplicates", "Not a real duplicate", "No other duplicates" (PR
 # #2329 review). Up to two words may sit between. Only "non" takes a hyphen, so "No-op as duplicate of t_X" is
-# no denial, and a "no"/"0" whose window holds "as"/"with" counts a noun, not the keyword ("no changes as
-# duplicate of t_X") (PR #2429 reviews). An earlier clause ("No code changes; duplicate of t_X") does not deny it.
+# no denial, and a window holding a joining word ("as", "with", "because", ...) negates another word, not the
+# keyword ("no changes as duplicate of t_X", "Never started as duplicate of t_X", "no work because duplicate of
+# t_X") (PR #2429 reviews, PR #2481 review 5896093750). After not/never, a judging verb before "as" still denies
+# ("Not marked as a duplicate of t_X"). An earlier clause ("No code changes; duplicate of t_X") does not deny it.
 _WORD = r"[\w'\u2019]+\s+"
-_NOT_NOUN = rf"(?:(?!(?:as|with)\b){_WORD})"
-_NEGATED = re.compile(rf"(?:\b(?:not|never|\w+n['\u2019]t)\s+(?:{_WORD}){{0,2}}"
+_JOIN = r"(?:as|with|because|since|so|but|due|hence|thus)"
+_NOT_NOUN = rf"(?:(?!{_JOIN}\b){_WORD})"
+_JUDGED = (r"(?:marked|considered|flagged|treated|closed|counted|filed|labell?ed|tagged|reported|listed|deemed|"
+           r"regarded|classified|recorded|identified|confirmed|resolved|seen)")
+_NEGATED = re.compile(rf"(?:\b(?:not|never|\w+n['\u2019]t)\s+(?:{_NOT_NOUN}{{0,2}}"
+                      rf"|{_NOT_NOUN}?{_JUDGED}\s+(?:as\s+)?(?:(?:an?|the)\s+)?)"
                       rf"|(?:\b(?:no|zero)|(?<![\w.])0)\s+{_NOT_NOUN}{{0,2}}"
                       r"|\bnon[\s-]+)$", re.IGNORECASE)
 # "Checked for duplicates: none", "Duplicates found: 0": a count of none right after the keyword that ends the
