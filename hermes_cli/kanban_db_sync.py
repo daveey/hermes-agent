@@ -453,6 +453,22 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
     _SYNCED_PATHS.add(db_path)
 
 
+def register_without_install(conn: sqlite3.Connection, db_path: str) -> None:
+    """:func:`install_or_remove` for a core that may not change this board's schema (``kanban_schema_owner``: a
+    non-installed checkout on a board already at its schema). Writes nothing: the installed core owns the sync
+    tables and capture triggers. When it has attached the board (state row not ``off``, capture triggers present),
+    register the path, so :func:`board_mode` reads the real mode and this process mints Board ids and takes Board
+    leases like the installed core. [daveey]"""
+    try:
+        live = (sync_enabled() and board_selected(db_path)
+                and conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+                                 "AND name LIKE 'kanban_sync_%' LIMIT 1").fetchone() is not None
+                and (conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone() or ("off",))[0] != "off")
+    except sqlite3.OperationalError:  # no kanban_sync_state: the installed core never enabled sync here
+        live = False
+    (_SYNCED_PATHS.add if live else _SYNCED_PATHS.discard)(db_path)
+
+
 def _attached(conn: sqlite3.Connection) -> bool:
     """The file is bound to a Board-service board (not a ``local:`` id) and not detached to ``off``."""
     try:

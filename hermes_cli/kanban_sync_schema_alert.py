@@ -121,23 +121,26 @@ def _body(host: str, why: str, since: float, info: dict) -> str:
     ])
 
 
-def _replica_open(hub_cli: str, runner) -> list[dict]:
-    rc, out, _err = runner([hub_cli, "tasks", "--gw", HUB, "--json"])
+def _replica_rows(hub_cli: str, runner) -> list[dict]:
+    """The hub replica's cards, closed ones included (``--all``), so a recently filed card that already closed
+    is not mistaken for one still waiting to appear in the replica."""
+    rc, out, _err = runner([hub_cli, "tasks", "--gw", HUB, "--json", "--all"])
     if rc != 0:
         return []
     try:
         rows = json.loads(out or "[]")
     except ValueError:
         return []
-    return [r for r in rows if isinstance(r, dict) and str(r.get("status") or "") not in _CLOSED]
+    return [r for r in rows if isinstance(r, dict)]
 
 
 def _open_card(host: str, state: dict, hub_cli: str, runner, now: float) -> Optional[str]:
     """The id of this host's open SchemaAhead card on the hub, or None."""
     prefix = f"{KEY_PREFIX}:{host}:"
-    rows = _replica_open(hub_cli, runner)
+    rows = _replica_rows(hub_cli, runner)
     for row in rows:
-        if str(row.get("idempotency_key") or "").startswith(prefix):
+        if (str(row.get("idempotency_key") or "").startswith(prefix)
+                and str(row.get("status") or "") not in _CLOSED):
             return str(row.get("id"))
     tid = state.get("task_id")
     if not tid and state.get("request_id"):
@@ -146,8 +149,12 @@ def _open_card(host: str, state: dict, hub_cli: str, runner, now: float) -> Opti
             tid = kp.remote_task_id(state["request_id"])
         except Exception:  # health: allow BLE001 -- a stale courier db only means "not known yet"
             tid = None
-    if tid and now - float(state.get("filed_at") or 0) < _FRESH_S and not any(r.get("id") == tid for r in rows):
-        return str(tid)  # filed recently, not in the replica yet
+    if tid:
+        seen = next((r for r in rows if r.get("id") == tid), None)
+        if seen is not None:  # in the replica: open or closed decides it
+            return str(tid) if str(seen.get("status") or "") not in _CLOSED else None
+        if now - float(state.get("filed_at") or 0) < _FRESH_S:
+            return str(tid)  # filed recently, not in the replica yet
     return None
 
 

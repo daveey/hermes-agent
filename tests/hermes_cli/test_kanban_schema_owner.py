@@ -63,6 +63,14 @@ def _columns(db: Path, table: str = "tasks") -> list[str]:
         raw.close()
 
 
+def _triggers(db: Path) -> list[tuple]:
+    raw = sqlite3.connect(db)
+    try:
+        return raw.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name").fetchall()
+    finally:
+        raw.close()
+
+
 def _foreign_install(home: Path) -> Path:
     """``<home>/hermes-agent``: an installed core that is not the tree these tests run from."""
     core = home / "hermes-agent"
@@ -219,6 +227,42 @@ def test_another_hosts_open_card_does_not_absorb_this_hosts_incident(home):
     hub.open = [{"id": "t_mini", "status": "ready", "idempotency_key": "kanban-sync-schema-ahead:mini:5"}]
     alert.report("macbook", WHY, 900.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_000.0)
     assert len(hub.sent("create-task")) == 1 and not hub.sent("request")
+
+
+def test_a_card_filed_and_closed_within_the_fresh_window_gets_a_new_card_not_a_comment(home):
+    hub = FakeHubCli()
+    alert.report("macbook", WHY, 900.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_000.0)
+    state = alert._read_state()
+    alert._write_state({**state, "task_id": "t_first"})
+    hub.open = [{"id": "t_first", "status": "done", "idempotency_key": "kanban-sync-schema-ahead:macbook:900"}]
+    alert.report("macbook", WHY, 1_100.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_200.0)
+    assert len(hub.sent("create-task")) == 2 and not hub.sent("request")
+    assert all("--all" in c for c in hub.sent("tasks"))
+
+
+# --- the review finding: a non-installed core at par keeps the board's sync mode ------------------------
+
+def test_non_installed_checkout_on_a_synced_board_at_par_keeps_its_sync_mode(home):
+    from hermes_cli import kanban_db_sync as sync
+    support.write_sync_config(home, True)
+    db = home / "kanban.db"
+    conn = kbc.connect(db)  # "the installed core" (no install yet) creates it and installs sync
+    assert sync.board_mode(conn) == "shadow"
+    conn.close()
+    resolved = str(db.resolve())
+    kbc._INITIALIZED_PATHS.discard(resolved)
+    sync._SYNCED_PATHS.discard(resolved)
+    _foreign_install(home)
+    triggers_before = _triggers(db)
+    assert triggers_before
+    conn = kbc.connect(db)
+    try:
+        assert sync.board_mode(conn) == "shadow"
+        tid = kb.create_task(conn, title="board id, not a classic one", assignee="default")
+        assert not (len(tid) == 10 and tid.startswith("t_"))  # classic ids are t_ + 8 hex
+    finally:
+        conn.close()
+    assert _triggers(db) == triggers_before
 
 
 def test_run_forever_give_up_opens_the_hub_card(home, monkeypatch):

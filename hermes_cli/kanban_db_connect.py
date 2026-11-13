@@ -974,7 +974,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
                 refusal = _schema_owner.check(conn, path)
                 if refusal:
                     return refusal
-                if refusal == "":
+                if refusal == "":  # at par: no schema pass, but keep the board's sync mode (ids, Board leases)
+                    _kb._sync.register_without_install(conn, resolved)
                     _INITIALIZED_PATHS.add(resolved)
                     return None
                 conn.executescript(_kb.SCHEMA_SQL)
