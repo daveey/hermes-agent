@@ -14,6 +14,14 @@ can become a card, and a card reads the whole record (hash-bound owner evidence,
 other row keeps ``SLIM_FIELDS``, all the release, fold and moved logic reads, and is decoded again from its packed
 text in the rare case a legacy alias folds a link of this origin into it. Keeping every record whole was ~150 MB of
 each gateway/dashboard/serve heap for ~13.5k replica cards of which 54 linked the mini (t_01a1cf67a93c05b6).
+
+One state is kept per ``(replica, gateway, origin profile)``. A Desktop ``serve`` answers every profile of its home
+(``profile=all`` polls, the annotation holder's scopes), and with one state per replica each profile's read threw
+away the previous profile's state and decoded every row again: 18,264 rows and 976 ms of CPU per read on the mini's
+replica, where a single profile's read costs 31 ms, and the holder ran five such reads per 2 s pass
+(t_01a1d6d42877f719). A row that does not link the reading origin projects the same for every profile, so those
+stages are decoded once per replica and shared by its states (``_shared``); only a row linking the reading origin
+is decoded for that state, which keeps its whole record.
 """
 from __future__ import annotations
 
@@ -89,6 +97,7 @@ class _Stage:
         'error',
         'historical',
         'legacy',
+        'links',
         'order',
         'owner3',
         'published',
@@ -103,14 +112,41 @@ class _Stage:
     )
 
 
-def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
+def link_targets(task: dict[str, Any]) -> tuple:
+    """Every ``(gw, profile)`` whose sessions the record links: ``linked_sessions(task, gw, profile)`` is empty
+    for exactly the pairs not listed here."""
+    links = task.get("sessions")
+    out: list = []
+    for link in links if isinstance(links, list) else ():
+        if isinstance(link, dict) and link.get('session') and link.get('rel') in LINK_RELS:
+            pair = (link.get('gw'), link.get('profile'))
+            if pair not in out:
+                out.append(pair)
+    return tuple(out)
+
+
+def _shareable(st: _Stage, row: tuple, me: str, origin_profile: str) -> bool:
+    """Whether ``st``, staged for some origin, is this origin's stage of ``row`` too: the same row text, and a
+    record that links no session of this origin (or a malformed row, which no origin projects)."""
+    if not (st.row is row or st.row == row):
+        return False
+    return st.error is not None or (me, origin_profile) not in st.links
+
+
+def _stage(row: tuple, me: str, origin_profile: str, shared: dict | None = None) -> _Stage:
     from hermes_cli.kanban_replica_rows import text
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, _decode_replica_task
 
-    stats["projected"] += 1
     gw, record_key, data, updated, version = row
+    rk = (gw, record_key)
+    if shared is not None:
+        kept = shared.get(rk)
+        if kept is not None and _shareable(kept, row, me, origin_profile):
+            stats["shared"] += 1
+            return kept
+    stats["projected"] += 1
     st = _Stage()
-    st.row, st.error, st.order, st.slim = row, None, (str(gw), str(record_key)), False
+    st.row, st.error, st.order, st.slim, st.links = row, None, (str(gw), str(record_key)), False, ()
     try:
         t, digest, evidence = _decode_replica_task(record_key, text(data))
         parts = str(record_key).split('/')
@@ -125,10 +161,13 @@ def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
             raise ValueError('replica task identity mismatch')
     except ValueError as exc:
         st.error = exc
+        if shared is not None:
+            shared[rk] = st
         return st
     gw = str(gw)
     st.tkey = (gw, owner_profile, board, tid)
     st.sids = linked_sessions(t, me, origin_profile)
+    st.links = link_targets(t)
     # [daveey] Release evidence reads the whole record (``record_attests_terminal`` reads origin_bindings and
     # more), so it is computed before the record is slimmed.
     st.attest = ((gw, owner_profile, board) if record_attests_terminal(t, gw, owner_profile, board, evidence)
@@ -148,6 +187,11 @@ def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
     st.published = (board, tid, created) if owner_profile is not None and created is not None else None
     st.owner3 = (gw, board, tid)
     st.historical = st.cards = None
+    if shared is not None:
+        if st.slim:  # links nothing of this origin: every other such origin's stage as well
+            shared[rk] = st
+        else:  # this origin keeps its own whole record; an earlier text's stage is nobody's any more
+            shared.pop(rk, None)
     return st
 
 
@@ -199,9 +243,14 @@ class _State:
     closed: set  # released tkeys whose owner verified the completion
 
 
+_MAX_STATES = 16
 _lock = threading.Lock()
-_states: dict[str, _State] = {}
-stats = {"projected": 0, "rebuilt": 0, "historical": 0, "considered": 0, "rehydrated": 0}
+# (replica path, this gateway, origin profile) -> the state of that origin's reads, most recently read last.
+_states: dict[tuple, _State] = {}
+# replica path -> (gw, key) -> the stage of a row that links no session of the origin it was staged for, shared by
+# every state of that replica whose origin it does not link either (``_shareable``). Dropped with the path's last state.
+_shared: dict[str, dict[tuple, _Stage]] = {}
+stats = {"projected": 0, "rebuilt": 0, "historical": 0, "considered": 0, "rehydrated": 0, "shared": 0}
 
 
 def _new_state(tag: str, key: tuple) -> _State:
@@ -298,6 +347,11 @@ def _advance(s: _State, view, me: str, origin_profile: str) -> None:
     else:  # not the view ``s`` was advanced from: compare every row (no decode for unchanged ones)
         removed = s.stages.keys() - view.by_key.keys()
         candidates = view.by_key.keys()
+    shared = _shared.setdefault(s.tag, {})
+    # A new scope has no removed rows of its own. Reconcile the shared cache against the replica itself,
+    # or deleted rows survive indefinitely when their older scopes are evicted before reading again.
+    for rk in shared.keys() - view.by_key.keys():
+        del shared[rk]
     for rk in removed:
         if rk in s.stages:
             _unapply(s, rk)
@@ -308,7 +362,7 @@ def _advance(s: _State, view, me: str, origin_profile: str) -> None:
             continue
         if old is not None:
             _unapply(s, rk)
-        _apply(s, rk, _stage(row, me, origin_profile))
+        _apply(s, rk, _stage(row, me, origin_profile, shared))
     s.gen = view.gen
 
 
@@ -333,22 +387,31 @@ def project(view, now: float, me: str, info_rows: list, last_ok: float | None, o
     origin_profile = get_active_profile_name()
     stale = offline is not None or last_ok is None or now - last_ok > _hub_stale_after()
     key = (me, origin_profile, stale, fresh)
+    slot = (view.path, me, origin_profile)
     with _lock:
-        s = _states.get(view.path)
+        s = _states.pop(slot, None)
         try:
-            if s is None or s.key[:2] != key[:2]:
+            if s is None:
                 s = _new_state(view.path, key)
             elif s.key != key:
                 s = _rekeyed(s, key)
             _advance(s, view, me, origin_profile)
         except BaseException:
-            _states.pop(view.path, None)
+            _forget_unused_shared()
             raise
-        _states[view.path] = s
-        while len(_states) > 16:
+        _states[slot] = s
+        while len(_states) > _MAX_STATES:
             _states.pop(next(iter(_states)))
+        _forget_unused_shared()
         return _emit(s, me, origin_profile, last_ok, stale, fresh, qualified_out=qualified_out,
                      owners_out=owners_out, seen_out=seen_out, moved_out=moved_out, closed_out=closed_out)
+
+
+def _forget_unused_shared() -> None:
+    """Caller holds ``_lock``: shared stages live only as long as a state of their replica does."""
+    live = {tag for tag, _me, _profile in _states}
+    for tag in [tag for tag in _shared if tag not in live]:
+        del _shared[tag]
 
 
 def _hub_stale_after() -> float:
@@ -412,5 +475,6 @@ def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: 
 def reset() -> None:
     with _lock:
         _states.clear()
+        _shared.clear()
     for k in stats:
         stats[k] = 0

@@ -581,7 +581,11 @@ def _decode_replica_task(record_key: str, data: Any) -> tuple[dict[str, Any], st
 # delete lowers ``count``: ``_REPLICA_PROBE`` (index-only, ~6 ms) plus the small identity/heartbeat rows is the
 # whole input. Reused while that key (scope heartbeats as their freshness verdicts at read time), the origin
 # profile, the stale verdict and every ``synced_at`` are unchanged and wall time has not stepped back.
-_remote_read_memo: tuple | None = None
+# One memo per (replica path, this gateway, origin profile), most recently written last (replaced whole, never
+# mutated: readers take no lock). A serve answers every profile of its home, and one slot made each profile's read
+# miss behind another's (t_01a1d6d42877f719).
+_remote_read_memo: dict[tuple, tuple] | None = None
+_REMOTE_READ_MEMOS = 16
 _REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(version), total(octet_length(data)) "
                   "FROM replica WHERE coll = 'tasks'")
 
@@ -623,7 +627,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                 # (release, moved evidence): the owner's per-cycle ``observed_at`` rewrite alone is no new answer.
                 key = (str(path), me, version_column, _scope_hb.fresh_scopes(_scope_heartbeats(info_rows), now),
                        offline, probe, get_active_profile_name())
-            memo = _remote_read_memo
+            memo = (_remote_read_memo or {}).get((key[0], me, key[6])) if key is not None else None
             # [daveey] ``last_ok`` moves on every hub pull (~2 s) while the task rows rarely do; it reaches the
             # answer only through the stale verdict and each card's ``synced_at`` (``_replica_synced``), so the
             # memo compares those instead of ``last_ok`` itself.
@@ -661,9 +665,14 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                                         qualified_out=qualified, owners_out=owners, seen_out=seen_at,
                                         moved_out=moved, closed_out=closed)
     # Heartbeat cut-offs are the live verdicts in ``key``, hub staleness the ``stale`` check; a clock step back rereads.
-    _remote_read_memo = (key, now, None, list(cards),
-                         frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
-                         dict(seen_at), dict(moved), frozenset(closed))
+    memos = dict(_remote_read_memo or {})
+    memos.pop((key[0], me, key[6]), None)
+    memos[(key[0], me, key[6])] = (key, now, None, list(cards),
+                                   frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
+                                   dict(seen_at), dict(moved), frozenset(closed))
+    while len(memos) > _REMOTE_READ_MEMOS:
+        del memos[next(iter(memos))]
+    _remote_read_memo = memos
     if qualified_out is not None:
         qualified_out.update(qualified)
     if owners_out is not None:
