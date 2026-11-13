@@ -412,9 +412,10 @@ def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
 
 
 def interrupted_tool_result(at: float | None = None) -> str:
-    """The persisted result of a tool call the update cancelled (UTC, whole seconds)."""
+    """The persisted result of a tool call the update cancelled (UTC, whole seconds). It never invites a blind
+    re-run: a cancelled side-effecting call may have taken effect (t_01a1d41fd158579d)."""
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_now() if at is None else at))
-    return f"[interrupted by Hermes update at {stamp}: re-run if still needed]"
+    return f"[interrupted by Hermes update at {stamp}: check its outcome before re-running]"
 
 
 def mid_tool_cancel_step(session: dict, marker_key: str, agent: Any, state: dict) -> list[str] | None:

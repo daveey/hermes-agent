@@ -62,7 +62,7 @@ def test_a_real_owner_restart_mid_turn_continues_the_same_run(tmp_path, mid_tool
         # The tool call the Stop cut off reaches the continued turn with exactly the update-pause result.
         import re
         assert len(receipt['mid_tool_results']) == 1, receipt['mid_tool_results']
-        assert re.fullmatch(r'\[interrupted by Hermes update at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: re-run if still needed\]',
+        assert re.fullmatch(r'\[interrupted by Hermes update at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: check its outcome before re-running\]',
                             receipt['mid_tool_results'][0]), receipt['mid_tool_results']
 
 
@@ -398,7 +398,7 @@ def test_the_new_owner_answers_the_interrupted_tool_call_and_records_the_continu
     tool = history[-1]
     assert tool['role'] == 'tool' and tool['tool_call_id'] == 'call-1'
     import re
-    assert re.fullmatch(r'\[interrupted by Hermes update at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: re-run if still needed\]',
+    assert re.fullmatch(r'\[interrupted by Hermes update at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: check its outcome before re-running\]',
                         tool['content'])
     with closing(__import__('sqlite3').connect(board.db)) as conn:
         kinds = [r[0] for r in conn.execute('SELECT kind FROM task_events WHERE task_id=?', (board.params['task_id'],))]

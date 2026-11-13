@@ -678,7 +678,7 @@ def test_long_foreground_command_outlives_a_shutdown_interrupt(tmp_path, monkeyp
 @pytest.mark.skipif(not _user_systemd(), reason="needs a user systemd bus")
 def test_update_pause_cancel_keeps_the_surviving_jobs_result(tmp_path, monkeypatch):
     """Card A's mid-tool update cancel commits the cancelled call's result: for a survivable foreground
-    command it is the real ``process continues as <id>`` result, not the "re-run if still needed" stamp."""
+    command it is the real ``process continues as <id>`` result, not the update stamp."""
     from agent import update_pause_cancel
 
     result = _run_owner(tmp_path, monkeypatch, {"command": "sleep 8; echo fg-done", "timeout": 120},
@@ -697,7 +697,7 @@ def test_update_pause_cancel_keeps_the_surviving_jobs_result(tmp_path, monkeypat
 
         agent = _Agent()
         update_pause_cancel.started(agent, "c1")
-        assert update_pause_cancel.cancel(agent, "[interrupted by Hermes update: re-run if still needed]") == ["c1"]
+        assert update_pause_cancel.cancel(agent, "[interrupted by Hermes update: check its outcome before re-running]") == ["c1"]
         tool_text = json.dumps(result, ensure_ascii=False)
         committed, cancelled = update_pause_cancel.committed(agent, "c1", tool_text)
         assert cancelled is True

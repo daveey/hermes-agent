@@ -361,8 +361,8 @@ async def test_finite_local_turn_inside_a_long_tool_call_is_cancelled_parked_and
         assert get_session_admission(authority.db, admission_id=receipt.admission_id)['status'] == 'started'
         tool_rows = [m for m in authority.db.get_messages(physical) if m['role'] == 'tool']
         assert len(tool_rows) == 1 and re.search(
-            r'\[interrupted by Hermes update at [0-9T:Z-]+: re-run if still needed\]', tool_rows[0]['content'])
-        assert 'partial' not in tool_rows[0]['content']
+            r'\[interrupted by Hermes update at [0-9T:Z-]+: check its outcome before re-running\]', tool_rows[0]['content'])
+        assert "\npartial\n" in tool_rows[0]['content']  # the call's own result, kept below the stamp
         assert len(provider_inputs) == 1 and calls == ['web_search']
 
         owner = authority

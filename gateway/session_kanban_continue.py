@@ -10,7 +10,7 @@ retried ask returns the same receipt) and records it as the run's newest ``owner
 continued turn's outcome is the attempt's outcome: same run id, claim, submitter and session.
 
 Before the continuation, each tool call the stop left without a result gets
-``[interrupted by Hermes update at <UTC>: re-run if still needed]`` (the Desktop update pause's text).
+``[interrupted by Hermes update at <UTC>: check its outcome before re-running]`` (the Desktop update pause's text).
 
 Continuation is refused (``kanban_continuation_unsafe``; the submitter then exits with the uncounted
 owner-restart booking, and the next run copies this transcript, ``gateway.session_kanban_resume``)
@@ -40,7 +40,7 @@ CONTINUE_TEXT = (CONTINUE_PREFIX + ' The gateway restarted (a Hermes update) whi
                  'this is the same run, claim and session. Continue the task from where the conversation above '
                  'stops. A tool call the restart interrupted may or may not have taken effect: check the current '
                  'state before repeating any side effect.')
-INTERRUPTED_RESULT = '[interrupted by Hermes update at {at}: re-run if still needed]'
+INTERRUPTED_RESULT = '[interrupted by Hermes update at {at}: check its outcome before re-running]'
 CONTINUED_EVENT = 'restart_continued'
 REFUSED_EVENT = 'restart_continue_refused'
 # One continuation prepare per session at a time: a retried ``kanban.run`` racing the first must not
