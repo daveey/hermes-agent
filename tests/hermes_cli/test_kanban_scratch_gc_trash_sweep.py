@@ -42,6 +42,17 @@ def test_stale_detached_tree_is_swept_and_not_reported(board, caplog):
     assert "owner_unverified" not in caplog.text
 
 
+def test_each_swept_tree_is_logged(board, caplog):
+    # The rename runs before the removal is logged, so a failed log leaves trash with no removal
+    # record: the sweep itself must leave a trace for every tree it deletes (PR #2022 review nit).
+    trees = [_stale_trash("t_a"), _stale_trash("t_b")]
+    with caplog.at_level(logging.WARNING, logger=gc.log.name):
+        _run_gc()
+    for trash in trees:
+        assert not trash.exists()
+        assert f"swept detached tree {trash}" in caplog.text
+
+
 def test_sweep_leaves_lookalike_names_alone(board, caplog):
     root = kb.workspaces_root()
     root.mkdir(parents=True, exist_ok=True)

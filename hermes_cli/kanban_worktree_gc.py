@@ -124,7 +124,9 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
 
 
 # A tree detached for removal: ``.<workspace name>.gc-rm-<uuid4 hex>``, a sibling of the workspace.
-# Only this GC creates the name, after the owner check passed and the removal was logged.
+# Only this GC creates the name, after the owner check passed; the rename runs before the removal
+# is logged, so a log failure rolls the txn back but leaves the tree detached with no removal
+# record. _sweep_detached_trash therefore logs every tree it deletes.
 _TRASH_INFIX = ".gc-rm-"
 _TRASH_NAME = re.compile(r"\..+\.gc-rm-[0-9a-f]{32}")
 
@@ -157,6 +159,8 @@ def _sweep_detached_trash(root: Path, rows) -> None:
             shutil.rmtree(trash, ignore_errors=True)
             if os.path.lexists(trash):
                 log.warning("Scratch GC left detached tree %s; retried next run", trash)
+            else:
+                log.warning("Scratch GC swept detached tree %s left by an earlier run", trash)
 
 
 def _scratch_owner_unchanged(conn: sqlite3.Connection, row: sqlite3.Row, path: Path) -> bool:
