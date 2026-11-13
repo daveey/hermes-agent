@@ -23,7 +23,11 @@ from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_sha
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
 from cron.lifecycle_guard_lines import _split_logical_lines  # newlines outside quotes
-from cron.lifecycle_guard_printf import _printf_format_lines  # what `printf FORMAT …` prints
+
+# Lines a printer may print, walked as the sink's command (moved out for FILE_LINES).
+from cron.lifecycle_guard_printf import printed_argument_lines as _printed_argument_lines
+from cron.lifecycle_guard_printf import with_escapes_decoded as _with_escapes_decoded
+
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
 
@@ -1488,37 +1492,8 @@ def _iter_shell_command_payloads(command: str) -> Iterator[str]:
 # the next one of its kind, not just alternate pairs: an apostrophe inside the other kind
 # (`print("it's")`) must not shift which spans count as literals (review 5890784121 nit 1).
 _QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r"(?=\"([^\"]+)\")"))
-# C-style escapes a producer turns into whitespace (`printf 'bash /x/a.sh\n'`, `print('…\n')`):
-# left in, `\n` would glue onto the path and hide the script it names.
-_PRINTED_ESCAPE_RE = re.compile(r"\\[ntrvf]")
 # Producers that print their own arguments, quoted or not (`echo bash /x/a.sh | bash`).
 _ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
-# bash's builtin echo options (`echo -n`, `echo -ne`): they are not printed, so left in the line
-# the walk would read `-n` as the executed command and the script path as its argument.
-_ECHO_OPTION_RE = re.compile(r"-[neE]+")
-
-
-def _printed_argument_lines(name: str, arguments: list[str]) -> Iterator[str]:
-    """The line(s) an ``echo``/``printf`` with *arguments* may print: as written, without
-    ``echo``'s leading option words, and (fail closed) without every leading ``-word``."""
-    yield " ".join(arguments)
-    if name == "echo":
-        index = 0
-        while index < len(arguments) and _ECHO_OPTION_RE.fullmatch(arguments[index]):
-            index += 1
-        yield " ".join(arguments[index:])
-    index = 0
-    while index < len(arguments) and arguments[index].startswith("-"):
-        index += 1
-    yield " ".join(arguments[index:])
-    if name == "printf":  # the format is not printed as written (`printf '%s %s' bash X`)
-        yield from _printf_format_lines(arguments[index:])
-
-
-def _with_escapes_decoded(text: str) -> Iterator[str]:
-    yield text
-    if "\\" in text:
-        yield _PRINTED_ESCAPE_RE.sub("\n", text)
 
 
 def _iter_printed_shell_payloads(command: str) -> Iterator[str]:

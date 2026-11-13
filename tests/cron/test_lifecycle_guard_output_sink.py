@@ -6,6 +6,8 @@ an interpreter string literal. The shape corpus (``heredoc_shape_corpus``, ``s_p
 "sink"``) crosses every sink with every wrapper and nesting form under real bash.
 """
 
+import shutil
+import subprocess
 import time
 
 import pytest
@@ -65,6 +67,22 @@ _SINK_SHAPES = {
     "printf-format-function-keyword": "function f { printf '%s %s' bash {big}; }; f | bash\n",
     "printf-variable-format": "printf \"$f\" bash {big} | bash\n",
     "printf-format-repeats": "printf '%s%s ' ba sh {big} | bash\n",
+    # Review 5893864308 (PR #2341): a `*` width or precision takes an argument, a precision
+    # truncates and `%b` decodes its argument, so the whole-argument walk read the wrong words.
+    "printf-star-width": "printf '%*s %s' 5 bash {big} | bash\n",
+    "printf-star-precision": "printf '%.*s %s' 4 bashrc {big} | bash\n",
+    "printf-precision": "printf '%.4s %s' bashrc {big} | bash\n",
+    "printf-b-hex": "printf '%b %s' 'ba\\x73h' {big} | bash\n",
+    "printf-b-octal": "printf '%b %s' 'ba\\0163h' {big} | bash\n",
+    "printf-b-stop": "printf '%b%s' 'bash {big}\\c' .bak | bash\n",  # `\c` ends all output
+    "printf-format-hex": "printf 'ba\\x73h %s' {big} | bash\n",
+    "echo-e-hex": "echo -e 'ba\\x73h {big}' | bash\n",
+    "echo-e-octal": "echo -e 'ba\\0163h {big}' | bash\n",  # echo's `\0NNN`, not the format's
+    "print-hex": "python3 - <<'PY' | bash\nprint('ba\\x73h {big}')\nPY\n",
+    # Review of PR #2341 @d532aef7d4: `-v NAME` takes an operand, so the format is the next word.
+    "printf-v": "printf -v x '%s %s' bash {big}; echo $x | bash\n",
+    "printf-v-dashdash": "printf -v x -- '%s %s' bash {big}; echo $x | bash\n",
+    "printf-v-glued": "printf -vx -- '%s %s' bash {big}; echo $x | bash\n",
     # Kept from the old opener peel (fails closed): a leading `in` is not read as the command.
     "echo-after-in": "for w\nin echo bash {big}; do :; done | bash\n",
     # Nit 3 (intended, fails closed): any later pipe word counts as the shell, a grep pattern too.
@@ -118,6 +136,8 @@ _NO_SINK_SHAPES = {
     "echo-or-list": "echo bash {big} || bash -c true\n",
     "echo-function-keyword-no-sink": "function f { echo bash {big}; }; f\n",
     "printf-format-no-sink": "printf '%s %s' bash {big}\n",
+    "printf-star-width-no-sink": "printf '%*s %s' 5 bash {big}\n",
+    "printf-b-hex-no-sink": "printf '%b %s' 'ba\\x73h' {big}\n",
 }
 
 
@@ -197,22 +217,110 @@ def test_shape_corpus_catches_a_guard_that_keeps_masking_sink_bodies(tmp_path, m
 @pytest.mark.parametrize(("format_text", "arguments", "printed"), [
     ("%s %s", ["bash", "/x/a.sh"], "bash /x/a.sh"),
     ("%s ", ["bash", "/x/a.sh"], "bash /x/a.sh "),  # the format repeats over the arguments
-    # Flags, width and precision are dropped: the whole argument stands in (only adds text).
-    ("%-8s|%5.2s|%%", ["ab", "cdef"], "ab|cdef|%"),
+    # Width pads; precision truncates a string (it does not only add text).
+    ("%-4s|%5.2s|%%", ["ab", "cdef"], "ab  |   cd|%"),
+    ("%*s %s", ["5", "bash", "/x/a.sh"], " bash /x/a.sh"),  # `*` takes the width argument
+    ("%.*s %s", ["4", "bashrc", "/x/a.sh"], "bash /x/a.sh"),
+    ("%*.*s|", ["-6", "2", "abc"], "ab    |"),  # a negative `*` width left-justifies
+    ("%*s|", ["x", "ab"], "ab|"),  # a non-number width is 0
+    ("%b %s", ["ba\\x73h", "/x/a.sh"], "bash /x/a.sh"),  # `%b` decodes its argument
+    ("%b|%b|%b", ["\\0101", "\\101", "a\\'b"], "A|A|a\\'b"),
+    ("%b%s", ["bash /x/a.sh\\c", ".bak"], "bash /x/a.sh"),  # `\c` ends all output
+    ("%.2b|", ["a\\x41bc"], "aA|"),  # precision after decoding
+    ("ba\\x73h %s\\c\\0101", ["/x/a.sh"], "bash /x/a.sh\\c\b1"),  # the format's own escapes
+    ("%c|%q|%d|%x|%.3d|%5.1f", ["xyz", "a b", "12abc", "255", "7", "3.14159"],
+     "x|a\\ b|12|ff|007|  3.1"),
+    ("%d|%d|%u|%#o|%.0d|", ["'a", "0x1f", "-1", "8", "0"], "97|31|18446744073709551615|010||"),
+    ("%s|%y|%s", ["a", "b", "c"], "a|"),  # an invalid conversion ends the output (bash)
     ("x", ["bash", "/x/a.sh"], "x"),  # no conversion consumes nothing and stops at once
     ("%s", [], ""),
+    ("%d|%s|", [], "0||"),  # missing arguments print as 0 or empty
 ])
 def test_printf_output_applies_the_format(format_text, arguments, printed):
-    from cron.lifecycle_guard_printf import _printf_output
+    from cron.lifecycle_guard_printf import printf_output
 
-    assert _printf_output(format_text, arguments) == printed
+    assert printf_output(format_text, arguments) == printed
+
+
+# Formats whose output the model must reproduce byte for byte; compared against real bash.
+_BASH_PRINTF_CASES = [
+    ("%*s %s", ["5", "bash", "/x/a.sh"]),
+    ("%.4s %s", ["bashrc", "/x/a.sh"]),
+    ("%.*s %s", ["4", "bashrc", "/x/a.sh"]),
+    ("%*.*s|%-*s|%*s|", ["-6", "2", "abcdef", "4", "a", "x", "b"]),
+    ("%b %s", ["ba\\x73h", "/x/a.sh"]),
+    ("%b|%b|%b|%b|%b", ["\\0163", "\\163", "x\\1234", "a\\'b\\q", "\\x4g"]),
+    ("%b%s", ["bash /x/a.sh\\c", ".bak"]),
+    ("%5b|%.2b|", ["a\\cb", "ab"]),
+    ("ba\\x73h \\101\\0101\\c\\'\\\"\\?\\q|%s", ["/x/a.sh"]),
+    ("%s%s ", ["ba", "sh", "/x/a.sh"]),
+    ("%c|%5c|%-3c|%.3c|", ["xyz", "a", "b", "cd"]),
+    ("%q|%q|%q|%q|", ["bash", "/x/a.sh", "it's", "a b"]),
+    ("%d|%i|%d|%d|%d|%d|%d|", ["12abc", "'a", "0x1f", "017", "08", "  -5", "+5"]),
+    ("%u|%x|%X|%o|%#x|%#o|%#o|", ["-1", "255", "255", "8", "255", "8", "0"]),
+    ("%+d|% d|%05d|%-5d|%5.3d|%.0d|%+u|", ["3", "3", "3", "3", "-7", "0", "3"]),
+    ("%e|%G|%F|%5.1f|%g|%f|", ["1234.5", "0.0001", "2", "3.14159", "1e10", "abc"]),
+    ("%s|%y|%s", ["a", "b", "c"]),
+    ("%s %", ["a"]),
+    ("%d|%s|%b|", []),
+    ("a%zb%s%ls%hd|", ["z", "y", "4"]),
+    ("%.s|%.0s|%5%|", ["abc", "def"]),
+    ("%.1Q|%Q|%.2Q|%.2q|%(%Y-%m)T|", ["a b", "it's", "a b", "a b", "1296000"]),  # Jan 1970
+    ("%.*s|%d|%i|", ["-1", "abcdef", "99999999999999999999", "-99999999999999999999"]),
+    ("%f|%.1f|%g|%e|", ["'a", "0x10", "inf", "1.5x"]),
+]
+
+
+@pytest.mark.parametrize(("format_text", "arguments"), _BASH_PRINTF_CASES)
+def test_printf_output_matches_real_bash(format_text, arguments):
+    from cron.lifecycle_guard_printf import printf_output
+
+    bash = shutil.which("bash") or ""
+    if not bash:
+        pytest.skip("no bash")
+    version = subprocess.run([bash, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True,
+                             text=True, check=True).stdout.strip()
+    if int(version) < 5:
+        pytest.skip(f"bash {version}: the model follows bash 5's printf")
+    real = subprocess.run([bash, "-c", 'printf "$@"', "printf", format_text, *arguments],
+                          capture_output=True, check=False, env={"LC_ALL": "C"}).stdout
+    assert printf_output(format_text, arguments).encode("latin-1") == real
 
 
 def test_printf_output_stops_after_the_round_cap():
-    from cron.lifecycle_guard_printf import _PRINTF_MAX_ROUNDS, _printf_output
+    from cron.lifecycle_guard_printf import PRINTF_MAX_ROUNDS, printf_output
 
-    printed = _printf_output("%s,", [str(n) for n in range(_PRINTF_MAX_ROUNDS + 10)])
-    assert printed == "".join(f"{n}," for n in range(_PRINTF_MAX_ROUNDS))
+    printed = printf_output("%s,", [str(n) for n in range(PRINTF_MAX_ROUNDS + 10)])
+    assert printed == "".join(f"{n}," for n in range(PRINTF_MAX_ROUNDS))
+
+
+def test_printf_output_caps_huge_widths():
+    from cron.lifecycle_guard_printf import printf_output
+
+    printed = printf_output("%999999999s|%*d|%.999999999d", ["x", "999999999", "1", "2"])
+    assert len(printed) < 15_000  # three fields of at most 4096 characters each
+
+
+def test_printed_text_is_walked_with_each_escape_decoding():
+    from cron.lifecycle_guard_printf import with_escapes_decoded
+
+    assert list(with_escapes_decoded("ba\\x73h \\0163\\t")) == [
+        "ba\\x73h \\0163\\t", "ba\\x73h \\0163\n", "bash \x0e3\t", "bash s\t"]
+    assert list(with_escapes_decoded("bash x")) == ["bash x"]
+
+
+@pytest.mark.parametrize(("text", "echo_style", "decoded"), [
+    ("ba\\x73h \\0101\\101\\c|", False, "bash \b1A\\c|"),
+    ("ba\\x73h \\0101\\101\\c|", True, "bash AA"),
+    ("\\'\\u0041\\U00000042\\x\\", False, "'AB\\x\\"),
+    ("\\'\\e\\t", True, "\\'\x1b\t"),
+    # Past U+10FFFF Python has no character (bash prints invalid UTF-8): kept as written.
+    ("\\U00110000|\\U0010FFFF", False, "\\U00110000|\U0010ffff"),
+])
+def test_decode_c_escapes(text, echo_style, decoded):
+    from cron.lifecycle_guard_printf import decode_c_escapes
+
+    assert decode_c_escapes(text, echo_style=echo_style) == decoded
 
 
 @pytest.mark.parametrize("printer", ["printf --", "printf", "echo -n"])
