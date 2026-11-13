@@ -30,6 +30,7 @@ def git(cwd, *args) -> str:
 
 
 def commit(cwd, name, text="x") -> str:
+    (Path(cwd) / name).parent.mkdir(parents=True, exist_ok=True)
     (Path(cwd) / name).write_text(text)
     git(cwd, "add", name)
     git(cwd, "commit", "-q", "-m", name)

@@ -173,6 +173,38 @@ def test_secret_scan_ignores_display_redaction_setting(card, monkeypatch):
     _refused(card, "secret_scan_refused")
 
 
+def test_secret_scan_survives_hostile_diff_config(card):
+    """The clone's own config must not blind the scan: colour codes, missing a/ b/ prefixes, external diff drivers."""
+    for key, value in (("color.ui", "always"), ("color.diff", "always"), ("diff.noprefix", "true"),
+                       ("diff.mnemonicPrefix", "true"), ("diff.external", "/bin/true"), ("core.quotePath", "true")):
+        git(card.path, "config", key, value)
+    commit(card.path, "config.py", f"KEY = '{SECRET}'\n")
+    _refused(card, "secret_scan_refused")
+
+
+def test_secret_in_nondiff_attribute_file_refused(card):
+    """``-diff`` / ``binary`` attributes hide content from a plain patch; the scan reads it as text anyway."""
+    commit(card.path, ".gitattributes", "*.cfg -diff\n*.dat binary\n")
+    commit(card.path, "app.cfg", f"token = {SECRET}\n")
+    _refused(card, "secret_scan_refused")
+
+
+def _pem(kind: str) -> str:
+    body = "\n".join(["b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"] * 5)
+    return f"-----BEGIN {kind}PRIVATE KEY-----\n{body}\n-----END {kind}PRIVATE KEY-----\n"
+
+
+@pytest.mark.parametrize("name", ["deploy/id_ed25519", "deploy/notes.txt", "deploy/server.cert"])
+def test_multiline_private_key_refused(card, name):
+    commit(card.path, name, _pem("OPENSSH "))
+    _refused(card, "secret_scan_refused")
+
+
+def test_denylisted_non_ascii_path_refused(card):
+    commit(card.path, "dé/server.pem", "not even a key\n")
+    _refused(card, "secret_scan_refused")
+
+
 def test_lfs_and_submodules_refused(card):
     commit(card.path, ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n")
     _refused(card, "source_lfs_unsupported")

@@ -35,6 +35,14 @@ def resolve(conn: sqlite3.Connection, claimed: Any, *, board: Optional[str], kbw
     snapshot = ws.pop_grant_snapshot(claimed.id)
     from hermes_cli import kanban_source_launch as launch
     launch.note_grant(claimed.id, snapshot)
+    try:
+        return _resolve(conn, claimed, snapshot, launch, board=board, kbw=kbw)
+    except BaseException:
+        launch.drop_grant(claimed.id)  # launch() never runs for this claim: do not keep its grant
+        raise
+
+
+def _resolve(conn: sqlite3.Connection, claimed: Any, snapshot: Any, launch: Any, *, board: Optional[str], kbw: Any):
     if snapshot is None and launch.old_board_grant(conn, claimed):
         replica = _replica(conn, claimed.id)
         if replica is not None and replica.has_source:

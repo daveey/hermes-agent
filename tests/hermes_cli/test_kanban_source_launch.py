@@ -271,6 +271,38 @@ def test_old_board_skips_card_with_replica_custody(conn, board, dispatcher):
     assert spawned == [] and kbs.board_lacks_source()
 
 
+def _custody_card(conn, title):
+    tid = kb.create_task(conn, title=title, assignee="worker")
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE kanban_sync_state SET applying=1")
+        conn.execute("UPDATE tasks SET workspace_kind='worktree', workspace_source=?, workspace_custody=? WHERE id=?",
+                     (json.dumps(manifest()), json.dumps({"source_holder": "hub", "state": "published",
+                                                          "manifest_revision": 3}), tid))
+        conn.execute("UPDATE kanban_sync_state SET applying=0")
+    return tid
+
+
+def test_old_board_skips_every_later_card_with_replica_custody(conn, board, dispatcher, monkeypatch):
+    """Once this process knows the Board is old, EVERY later custody card is refused too (not only the first one
+    that tripped the detection), and none reaches the legacy resolver."""
+    from hermes_cli import kanban_db_dispatch as d
+    dispatcher.snapshot = None
+    legacy, spawned = [], []
+    monkeypatch.setattr(d._kbw, "resolve_worktree_for_dispatch",
+                        lambda *a, **kw: legacy.append(a[1].id) or (dispatcher.path, "wt/legacy"))
+    for title in ("first", "second", "third"):
+        tid = _custody_card(conn, title)
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        d._dispatch_lane_task(conn, row, "worker", d.DispatchResult(), lane="ready", dry_run=False, ttl_seconds=900,
+                              board=None, failure_limit=3, spawn_fn=lambda task, path: spawned.append(task.id),
+                              per_profile_cap=None, per_profile_running={})
+        refused = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='workspace_source_refused'",
+                               (tid,)).fetchone()
+        assert refused is not None and json.loads(refused[0])["code"] == "board_lacks_source", title
+    assert spawned == [] and legacy == [] and kbs.board_lacks_source()
+    assert launch._GRANTS == {}
+
+
 def test_snapshot_present_null_is_no_custody():
     snap = kws.snapshot_from_row({"workspace_source": None, "workspace_custody": None})
     assert snap is not None and not snap.has_source

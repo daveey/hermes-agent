@@ -49,11 +49,18 @@ def _pop_grant(task_id: str) -> Any:
     return _GRANTS.pop(task_id, _NO_SNAPSHOT)
 
 
+def drop_grant(task_id: str) -> None:
+    _GRANTS.pop(task_id, None)
+
+
 def old_board_grant(conn: sqlite3.Connection, claimed: Any) -> bool:
-    """A primary grant asked with ``source_protocol`` came back with no snapshot keys: an old Board (v4 S2)."""
-    if sync.board_mode(conn) != "primary" or board_calls.board_lacks_source() or not ws.settings().enabled:
+    """This grant came from an old Board (v4 S2): a primary grant asked with ``source_protocol`` came back with no
+    snapshot keys (detected now), or an earlier grant already showed it (this process then stops sending the
+    protocol, so every later grant lacks the keys too and its card must still never take the legacy path)."""
+    if sync.board_mode(conn) != "primary" or not ws.settings().enabled:
         return False
-    board_calls.mark_board_lacks_source(f"grant of {claimed.id} carried no source snapshot")
+    if not board_calls.board_lacks_source():
+        board_calls.mark_board_lacks_source(f"grant of {claimed.id} carried no source snapshot")
     return True
 
 

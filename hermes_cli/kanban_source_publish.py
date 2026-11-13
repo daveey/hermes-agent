@@ -24,7 +24,13 @@ from hermes_cli.kanban_workspace_source import Settings
 
 MAX_SCAN_COMMITS = 500
 MAX_SCAN_BYTES = 20 * 1024 * 1024
-DENYLIST = (".env*", "*.pem", "id_rsa*", "*.p12", "*.key", "credentials*.json")
+DENYLIST = (".env*", "*.pem", "id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*", "*.p12", "*.pfx", "*.ppk", "*.key",
+            "*.jks", "*.keystore", ".netrc", ".pgpass", "credentials*.json")
+# Config the clone may carry that would blind or reshape ``git show`` output (colour codes, prefixes, quoting,
+# signatures); forced off for every scan call. ``--no-ext-diff``/``--no-textconv``/``--text`` sit on the commands.
+_SCAN_CONFIG = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "core.quotePath=false",
+                "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "log.showSignature=false")
+_KEY_MARKER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")
 # Ignored paths that are build/tool caches, never private data (v2 §4 step 2).
 IGNORED_ALLOWLIST = ("__pycache__", "*.pyc", "*.pyo", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules",
                      ".venv", "venv", ".tox", "dist", "build", "*.egg-info", ".DS_Store", ".coverage", "htmlcov",
@@ -157,23 +163,46 @@ def _secret_in(text: str) -> bool:
     return bool(text.strip()) and redact_sensitive_text(text, force=True) != text
 
 
+def _denylisted(rel: str) -> bool:
+    return any(fnmatch.fnmatch(Path(rel).name, pat) for pat in DENYLIST)
+
+
+def _show(deadline: _Deadline, path: str, *args: str) -> str:
+    return _git(deadline, path, *_SCAN_CONFIG, "show", "--no-color", "--no-ext-diff", "--no-textconv", *args)
+
+
+def _changed_paths(names: str) -> list[str]:
+    """Target paths of added/renamed/copied/modified entries in ``--name-status -z`` output (never quoted)."""
+    fields, out, i = names.split("\0"), [], 0
+    while i < len(fields):
+        status = fields[i]
+        if not status:
+            i += 1
+            continue
+        width = 2 if status[:1] in ("R", "C") else 1
+        paths = fields[i + 1:i + 1 + width]
+        if status[:1] in ("A", "R", "C", "M", "T") and paths:
+            out.append(paths[-1])
+        i += 1 + width
+    return out
+
+
 def secret_scan(deadline: _Deadline, path: str, base: str, head: str) -> None:
     commits = _git(deadline, path, "rev-list", head, f"^{base}").split()
     if len(commits) > MAX_SCAN_COMMITS:
         raise PublishRefused("scan_range_too_large", f"{len(commits)} commits > {MAX_SCAN_COMMITS}")
     total = 0
     for commit in commits:
-        names = _git(deadline, path, "show", "--format=", "--name-status", "--find-renames", commit)
-        for line in names.splitlines():
-            status, *paths = line.split("\t")
-            if status[:1] in ("A", "R", "C", "M") and paths:
-                target = paths[-1]
-                if any(fnmatch.fnmatch(Path(target).name, pat) for pat in DENYLIST):
-                    raise PublishRefused("secret_scan_refused", f"commit {commit[:12]} adds denylisted path {target}")
-        message = _git(deadline, path, "show", "-s", "--format=%B", commit)
-        if _secret_in(message):
+        for target in _changed_paths(_show(deadline, path, "--format=", "--name-status", "-z", "--find-renames",
+                                           commit)):
+            if _denylisted(target):
+                raise PublishRefused("secret_scan_refused", f"commit {commit[:12]} adds denylisted path {target}")
+        message = _show(deadline, path, "-s", "--format=%B", commit)
+        if _secret_in(message) or _KEY_MARKER.search(message):
             raise PublishRefused("secret_scan_refused", f"commit {commit[:12]} message holds a credential")
-        patch = _git(deadline, path, "show", "--format=", "--patch", "--find-renames", "--binary", commit)
+        # --text: ``-diff``/``binary`` attributes must not hide content; explicit prefixes whatever the config says.
+        patch = _show(deadline, path, "--format=", "--patch", "--text", "--find-renames", "--src-prefix=a/",
+                      "--dst-prefix=b/", commit)
         total += len(patch.encode("utf-8", "replace"))
         if total > MAX_SCAN_BYTES:
             raise PublishRefused("scan_range_too_large", f"patches exceed {MAX_SCAN_BYTES} bytes")
@@ -181,8 +210,18 @@ def secret_scan(deadline: _Deadline, path: str, base: str, head: str) -> None:
 
 
 def _scan_patch(commit: str, patch: str) -> None:
-    current, line_no = None, 0
+    """Each added line, then each file's added lines joined (multi-line credentials such as PEM blocks)."""
+    current, line_no, added = None, 0, []
+
+    def flush() -> None:
+        if added and _secret_in("\n".join(added)):
+            raise PublishRefused("secret_scan_refused", f"commit {commit[:12]} {current} adds a credential")
+        added.clear()
+
     for raw in patch.splitlines():
+        if raw.startswith("diff --git "):
+            flush()
+            continue
         if raw.startswith("+++ "):
             current = raw[6:] if raw.startswith("+++ b/") else raw[4:]
             continue
@@ -190,16 +229,15 @@ def _scan_patch(commit: str, patch: str) -> None:
             m = re.search(r"\+(\d+)", raw)
             line_no = int(m.group(1)) - 1 if m else 0
             continue
-        if raw.startswith("GIT binary patch") and current and any(
-                fnmatch.fnmatch(Path(current).name, pat) for pat in DENYLIST):
-            raise PublishRefused("secret_scan_refused", f"commit {commit[:12]} adds denylisted binary {current}")
-        if raw.startswith("+") and not raw.startswith("+++"):
+        if raw.startswith("+"):
             line_no += 1
-            if _secret_in(raw[1:]):
+            added.append(raw[1:])
+            if _secret_in(raw[1:]) or _KEY_MARKER.search(raw):
                 raise PublishRefused("secret_scan_refused",
                                      f"commit {commit[:12]} {current}:{line_no} adds a credential")
         elif not raw.startswith("-"):
             line_no += 1
+    flush()
 
 
 # --- the publish --------------------------------------------------------------------------------------------------
