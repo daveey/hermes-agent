@@ -73,12 +73,14 @@ def worker_first_refusal(item: Mapping[str, Any]) -> Optional[str]:
 def carry(labels: list[str], item: Mapping[str, Any], *, me: str = "") -> list[str]:
     """``labels`` (a new ``runs_on``) with :data:`LABEL` added when ``item`` has a mandatory pin, so a move keeps
     the attestation (``[pool:worker]`` alone would let an old core lease it). Unchanged when every ``machine:``
-    label names ``me``: this machine runs this core, which refuses a pin it cannot serve."""
+    label names ``me`` and no ``pool:`` label is present: this machine runs this core, which refuses a pin it
+    cannot serve. A ``pool:`` label always gets it (fail closed: the pool may hold an old core)."""
     need = requirements(item)
     if not need or need <= set(labels):
         return list(labels)
     machines = [label[8:] for label in labels if label.startswith("machine:")]
-    if machines and me and all(name == me for name in machines):
+    pooled = any(label.startswith("pool:") for label in labels)
+    if not pooled and machines and me and all(name == me for name in machines):
         return list(labels)
     return sorted(set(labels) | need)
 
@@ -105,11 +107,13 @@ def mark(conn: Any, task_id: str) -> bool:
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli.kanban_db_connect import write_txn
-    synced = "runs_on" in sync.table_columns(conn, "tasks") and sync.board_mode(conn) == "primary"
-    me = str(sync._state(conn)["gateway_id"] or "") if synced else ""
+    # Read runs_on whatever this process's sync mode: a process without sync writing to an attached board must
+    # still label a pool card, or the Board would lease the mark to an old core (review 5879616348 on #1622).
+    placed = "runs_on" in sync.table_columns(conn, "tasks")
+    me = _gateway_id(conn) if placed else ""
     fields: tuple[str, ...] = ("model_pin_mandatory",)
     with write_txn(conn):
-        row = conn.execute("SELECT status, model_override, " + ("runs_on" if synced else "NULL") +
+        row = conn.execute("SELECT status, model_override, " + ("runs_on" if placed else "NULL") +
                            " FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             return False
@@ -134,6 +138,17 @@ def mark(conn: Any, task_id: str) -> bool:
         kb._append_event(conn, task_id, "model_pin_mandatory_set", payload)
     kb.notify_task_updated(conn, task_id, fields)
     return True
+
+
+def _gateway_id(conn: Any) -> str:
+    """The board file's own gateway id (``kanban_sync_state``), or "" when it was never attached. Read from the
+    file, not ``board_mode``: that answers ``off`` in a process that did not install sync."""
+    import sqlite3
+    try:
+        row = conn.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return ""
+    return _str(row[0]) if row else ""
 
 
 def refusal(card: Mapping[str, Any], *, me: str = "") -> Optional[str]:

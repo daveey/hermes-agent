@@ -299,6 +299,26 @@ def test_carry_leaves_a_pin_to_this_machine_alone():
     assert mp.carry([f"machine:{HUB}"], card, me=HUB) == [f"machine:{HUB}"]  # this core refuses what it can't serve
     assert mp.carry([f"machine:{WORKER}"], card, me=HUB) == [mp.LABEL, f"machine:{WORKER}"]
     assert mp.carry([POOL], {"model_override": "x"}, me=HUB) == [POOL]
+    # A pool label always takes the attestation, even beside this machine: the pool may hold an old core.
+    assert mp.carry([f"machine:{HUB}", POOL], card, me=HUB) == sorted([mp.LABEL, f"machine:{HUB}", POOL])
+
+
+def test_marking_labels_a_pool_card_in_a_process_without_sync(gws, monkeypatch):
+    # Review 5879616348 on #1622: a process that did not install sync (board_mode 'off') writing to an attached
+    # board used to skip runs_on, so the Board got model_pin_mandatory=1 without the label for an old core to lease.
+    from hermes_cli import kanban_pin_reroute as pr
+    hub, _ = gws
+    tid = _placed(hub)
+    mine = _placed(hub)
+    with kb.write_txn(hub.conn):
+        wn.set_runs_on(hub.conn, mine, [f"machine:{HUB}"])
+    monkeypatch.setattr(sync, "_SYNCED_PATHS", set())
+    assert sync.board_mode(hub.conn) == "off"
+    assert pr.set_pin_mandatory(hub.conn, tid, True)
+    assert _runs_on(hub.conn, tid) == sorted([POOL, mp.LABEL])
+    # The file's own gateway id still names this machine: a pin to it stays unlabeled.
+    assert pr.set_pin_mandatory(hub.conn, mine, True)
+    assert _runs_on(hub.conn, mine) == [f"machine:{HUB}"]
 
 
 # --- review 5879416189: a later mark is fenced like a create-time one -------------------------------------------
