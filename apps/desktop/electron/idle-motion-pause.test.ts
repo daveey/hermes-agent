@@ -127,6 +127,47 @@ describe('IdleMotionPause', () => {
     expect(b.live).toEqual([IDLE_MOTION_PAUSE_CSS])
   })
 
+  it('a window whose sheet survives did-finish-load while paused is unfrozen on resume', async () => {
+    // The 1 s paused tick can insert into a new window after its document commits but before did-finish-load,
+    // so that sheet is still live when noteLoaded re-applies.
+    const win = new FakeContents(1)
+    const h = harness([win])
+
+    h.setIdle(IDLE_MOTION_PAUSE_AFTER_SECONDS)
+    h.pause.check()
+    await flush()
+    h.pause.noteLoaded(win)
+    await flush()
+    expect(win.live).toEqual([IDLE_MOTION_PAUSE_CSS])
+
+    h.setIdle(0)
+    h.pause.check()
+    await flush()
+    expect(win.live).toEqual([])
+  })
+
+  it('a reload while paused whose insertCSS is still pending ends with one sheet that resume removes', async () => {
+    const win = new FakeContents(1)
+    let release: (() => void) | undefined
+    const realInsert = win.insertCSS.bind(win)
+    win.insertCSS = css => new Promise(resolve => (release = () => resolve(realInsert(css))))
+    const h = harness([win])
+
+    h.setIdle(IDLE_MOTION_PAUSE_AFTER_SECONDS)
+    h.pause.check()
+    const firstRelease = release!
+    win.insertCSS = realInsert
+    h.pause.noteLoaded(win) // did-finish-load before the first insertCSS settled
+    firstRelease()
+    await flush()
+    expect(win.live).toEqual([IDLE_MOTION_PAUSE_CSS])
+
+    h.setIdle(0)
+    h.pause.check()
+    await flush()
+    expect(win.live).toEqual([])
+  })
+
   it('skips destroyed windows and survives insertCSS failures', async () => {
     const gone = new FakeContents(1)
     gone.destroyed = true

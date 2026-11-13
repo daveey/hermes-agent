@@ -9,9 +9,16 @@
 // no one is watching. Busy-session spinners do the same overnight.
 //
 // While the system has seen no keyboard/mouse input for `pauseAfterSeconds`, this injects one stylesheet into every
-// window that sets `animation-play-state: paused` on everything; a paused animation needs no frames, so the window
-// stops repainting. Any input (polled every second while paused) removes it again. Windows that load or reload while
-// paused get it re-applied. Transitions and JS-driven updates (streamed text) are untouched.
+// BrowserWindow's top-level webContents that sets `animation-play-state: paused` on everything; a paused animation
+// needs no frames, so the window stops repainting. Any input (polled every second while paused) removes it again.
+// Windows that load or reload while paused get it re-applied. Transitions and JS-driven updates (streamed text) are
+// untouched.
+//
+// Limits:
+// - Only BrowserWindow top-level webContents are covered. `<webview>` guests (the preview pane) are separate
+//   webContents that getAllWindows() does not list, so they keep animating.
+// - An exit animation that starts while idle with no input (a timer-driven toast that unmounts on `animationend`)
+//   is paused mid-way and stays on screen, frozen, until the next input resumes it.
 
 export const IDLE_MOTION_PAUSE_AFTER_SECONDS = 300
 export const IDLE_MOTION_ACTIVE_POLL_MS = 30_000
@@ -86,9 +93,17 @@ export class IdleMotionPause {
     return IDLE_MOTION_ACTIVE_POLL_MS
   }
 
-  /** A window (re)loaded: its old stylesheet is gone with the page, so re-apply while paused. */
+  /** A window (re)loaded: re-apply while paused. */
   noteLoaded(target: IdleMotionTarget): void {
+    // The old sheet is usually gone with the old page, but the 1 s paused tick can insert into a new window after its
+    // document commits and before did-finish-load; that sheet survives the load. Remove the old key (a no-op when the
+    // page already dropped it) before re-applying, or resume removes only the second copy and the window stays frozen.
+    const previous = this.#keys.get(target.id)
     this.#keys.delete(target.id)
+
+    if (previous) {
+      this.#remove(previous)
+    }
 
     if (this.#paused) {
       this.#applyMissing()
@@ -117,15 +132,23 @@ export class IdleMotionPause {
     const entries = [...this.#keys.values()]
     this.#keys.clear()
 
-    for (const { target, key } of entries) {
-      void key.then(value => {
-        if (value === null || target.isDestroyed()) {
-          return
-        }
-
-        return Promise.resolve(target.removeInsertedCSS(value)).catch(() => undefined)
-      })
+    for (const entry of entries) {
+      this.#remove(entry)
     }
+  }
+
+  #remove({ target, key }: { target: IdleMotionTarget; key: Promise<string | null> }): void {
+    void key.then(value => {
+      if (value === null || target.isDestroyed()) {
+        return
+      }
+
+      try {
+        return Promise.resolve(target.removeInsertedCSS(value)).catch(() => undefined)
+      } catch {
+        return undefined
+      }
+    })
   }
 }
 
