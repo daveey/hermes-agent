@@ -12,6 +12,9 @@ This backend removes the block once the notice no longer needs it:
 - custody transfer: the orderly-exit journal wrote it into the session's turn marker
   (``exit_job_receipts.journal_session_jobs``), so the next backend reports it from there, not twice.
 
+A tui obligation whose chat is never reopened (deleted or archived) is re-armed and wakes that chat on each
+Desktop start until ``OBLIGATION_MAX_RECOVERIES`` / ``OBLIGATION_MAX_AGE_SECONDS`` drops it (bounded by design).
+
 Every call is best effort: a failed settle keeps the obligation, and the worst case is one more delivery after
 a crash, never a lost notice.
 """
@@ -24,18 +27,20 @@ from typing import Iterable
 logger = logging.getLogger(__name__)
 
 
-def _settle(pids: Iterable, how: str) -> None:
+def _settle(pids: Iterable, how: str, *, owed_here_only: bool = False) -> None:
     try:
         from tools.process_registry import process_registry
+        settle = process_registry.settle_tui_completion if owed_here_only else process_registry.settle_completion
         for pid in {p for p in pids if isinstance(p, str) and p}:
-            process_registry.settle_completion(pid, how)
+            settle(pid, how)
     except Exception:  # health: allow BLE001 -- a failed settle keeps the obligation (at least once)
         logger.warning("settling owed Desktop completions failed (%s)", how, exc_info=True)
 
 
 def settle_started(offered: Iterable) -> None:
-    """The notice turn carrying these completions (process ids) started: delivered into the session."""
-    _settle(offered, "delivered: Desktop notice turn started")
+    """The notice turn carrying these completions (process ids) started: delivered into the session. Runs on every
+    notice-turn start, so a job this backend never owed a notice (``_tui_owed``) costs no receipt read."""
+    _settle(offered, "delivered: Desktop notice turn started", owed_here_only=True)
 
 
 def settle_suppressed(evt: dict, how: str) -> bool:

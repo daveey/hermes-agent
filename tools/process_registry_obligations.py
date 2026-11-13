@@ -32,7 +32,9 @@ block. Its delivery is in that backend's memory until the notice turn starts; a 
 (no orderly exit journal) lost it. ``tui_gateway/completion_obligation.py`` settles it (turn start, intended
 suppression, the exit journal's custody transfer), and Desktop recovery (``recover_from_checkpoint(owner="tui")``)
 re-arms an owed one whose writer is gone, once per start, through the re-adopt sink. Each owner adopts only its
-own (``owner``; a block without one is the gateway's).
+own (``owner``; a block without one is the gateway's). A tui obligation whose chat is never reopened (deleted or
+archived) is re-armed and wakes that chat on each Desktop start until ``OBLIGATION_MAX_RECOVERIES`` or
+``OBLIGATION_MAX_AGE_SECONDS`` drops it: bounded by design, like the gateway's.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ logger = logging.getLogger("tools.process_registry")
 OBLIGATION_KEY = "delivery_obligation"
 # Like the async-delegation replay cap: an owed notice older than this is dropped with a logged reason.
 OBLIGATION_MAX_AGE_SECONDS = 48 * 3600
-# Gateway starts that may re-arm one obligation (a notice refused at every start must not loop forever).
+# Gateway or Desktop starts that may re-arm one obligation (a notice refused at every start must not loop forever).
 OBLIGATION_MAX_RECOVERIES = 8
 _ROUTE_FIELDS = ("watcher_platform", "watcher_chat_id", "watcher_user_id", "watcher_user_name",
                  "watcher_thread_id", "watcher_message_id", "watcher_interval", "parent_session_id",
@@ -166,7 +168,9 @@ def settle_quietly(session_id: str, how: str) -> bool:
 
 
 class ProcessObligationMixin:
-    """Registry side: decide, settle and re-arm owed gateway completions."""
+    """Registry side: decide, settle and re-arm owed completions, a messaging gateway's (``owner: gateway``) and a
+    Desktop chat's (``owner: tui``). ``_tui_owed`` holds the ids this process wrote or re-armed a tui obligation for,
+    so a Desktop notice turn settles only those and never reads the receipt of a job that owes nothing."""
 
     # Supplied by ProcessRegistry / ProcessCheckpointMixin / ProcessReadoptMixin.
     _lock: Any
@@ -186,7 +190,13 @@ class ProcessObligationMixin:
             return None
         if owes_gateway_delivery(session):
             return {**obligation_for(session), "owner": OWNER_GATEWAY}
-        return {**obligation_for(session), "owner": OWNER_TUI} if owes_tui_delivery(session) else None
+        if not owes_tui_delivery(session):
+            return None
+        self._tui_owed_ids().add(session.id)
+        return {**obligation_for(session), "owner": OWNER_TUI}
+
+    def _tui_owed_ids(self) -> set:
+        return vars(self).setdefault("_tui_owed", set())
 
     def _consume_completion(self, session_id: str) -> None:
         """The agent has the output (wait/log/kill): suppress the autonomous notice, here and across a restart.
@@ -200,6 +210,19 @@ class ProcessObligationMixin:
         concurrent kill-path rewrite cannot read the obligation before it and write it back after."""
         with self._lock:
             return settle_quietly(session_id, how)
+
+    def settle_tui_completion(self, session_id: str, how: str) -> bool:
+        """``settle_completion`` for a Desktop notice: only an id in ``_tui_owed`` (this process wrote or re-armed
+        its obligation) can owe one here, so any other id is answered from memory, with no receipt read. The id
+        stays while the receipt still owes it, so a failed write is retried by the next settle."""
+        with self._lock:
+            owed = self._tui_owed_ids()
+            if session_id not in owed:
+                return False
+            settled = settle_quietly(session_id, how)
+            if settled or owed_still(session_id) is None:
+                owed.discard(session_id)
+            return settled
 
     def _rewrite_killed_receipt(self, session, consume_output: bool) -> None:
         """A kill that lost the finish race rewrites the reader's receipt as killed. An explicit kill
@@ -272,6 +295,8 @@ class ProcessObligationMixin:
                 continue
             with self._lock:
                 self._finished[sid] = session
+                if owner == OWNER_TUI:
+                    self._tui_owed_ids().add(sid)
             if owner == OWNER_TUI:  # parks for the chat (woken when it is not loaded here)
                 from tools.process_registry_awaiting import completion_event, publishable
                 self._deliver_readopted_event({**publishable(completion_event(session)), "park_if_unowned": True})

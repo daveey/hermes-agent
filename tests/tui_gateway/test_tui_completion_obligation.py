@@ -254,6 +254,31 @@ def test_consumed_or_quiet_completion_is_not_redelivered(home, registry, backend
     assert (armed, wakes, reg.has_parked_events()) == (0, [], False)
 
 
+def test_notice_turn_start_reads_only_receipts_this_backend_owes(home, registry, monkeypatch):
+    """``settle_started`` runs on every notice-turn start: a job that never carried an obligation costs no receipt
+    read; an owed one (written here, or re-armed by the next backend) is still settled."""
+    from tui_gateway.completion_obligation import settle_started
+    _as_dead_writer(monkeypatch)
+    _finish(registry, _job(registry, "proc_quiet0001", notify=False))
+    _finish(registry, _job(registry, "proc_desk0001"))
+    assert OBLIGATION_KEY not in _receipt(home, "proc_quiet0001") and OBLIGATION_KEY in _receipt(home)
+    reads: list = []
+    real_path = obligations.receipt_path
+    monkeypatch.setattr(obligations, "receipt_path", lambda sid: reads.append(sid) or real_path(sid))
+
+    settle_started(["proc_quiet0001", "proc_never0001"])
+    assert reads == [], "a pid with no owed tui obligation must not touch its receipt"
+
+    _reg, armed, _ = _next_backend(monkeypatch)  # the owed one, re-armed by a fresh backend
+    assert armed == 1
+    reads.clear()
+    settle_started(["proc_desk0001", "proc_quiet0001"])
+    assert set(reads) == {"proc_desk0001"} and OBLIGATION_KEY not in _receipt(home)
+    reads.clear()
+    settle_started(["proc_desk0001"])  # settled: dropped from memory, no further reads
+    assert reads == []
+
+
 @pytest.mark.parametrize("when", ["finished", "running"])
 def test_orderly_exit_journal_takes_custody_and_delivers_once(home, registry, backend, monkeypatch, when):
     """A finished notice the chat had not run yet, or a running job the exit stops: the turn marker reports it."""

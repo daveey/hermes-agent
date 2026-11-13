@@ -38,7 +38,8 @@ class ProcessCheckpointMixin:
         raise NotImplementedError
 
     def _recover_owed_completions_locked(self, owner: Optional[str]) -> int:
-        """ProcessObligationMixin re-arms owed gateway completions; a bare checkpoint owes none."""
+        """ProcessObligationMixin re-arms owed completions, a gateway's and a Desktop chat's (``owner: tui``); a bare
+        checkpoint owes none."""
         return 0
 
     # ----- Checkpoint (crash recovery) -----
