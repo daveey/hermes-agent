@@ -249,24 +249,30 @@ def _complete(task, runtime, client, kwargs):
 
 def _stream(task, runtime, client, kwargs, options):
     from agent import auxiliary_client as aux
-    try:
-        if aux._client_streams_internally(client):
-            # Native adapters aggregate their SDK stream; expose one normalized
-            # chunk, preserving tool calls, rather than iterating a response object.
+
+    def close(c):
+        aux._close_cached_client(c, close_async=True)
+    if aux._client_streams_internally(client):
+        # Native adapters aggregate their SDK stream; expose one normalized
+        # chunk, preserving tool calls, rather than iterating a response object.
+        # _complete runs the protected provider daemon, so client_scope keeps a hard cancel's close off this
+        # thread. Nothing is yielded inside the scope: its context var is set and reset in one resumption.
+        with client_scope(client, close):
             response = _complete(task, runtime, client, kwargs)
-            choice = response.choices[0]
-            yield SimpleNamespace(choices=[SimpleNamespace(index=0, delta=choice.message,
-                                                           finish_reason=choice.finish_reason)],
-                                  model=runtime["model"], usage=getattr(response, "usage", None))
-        else:
-            kwargs["stream"] = True
-            if options.get("stream_options"):
-                kwargs["stream_options"] = options["stream_options"]
-            yield from aux._relay_sync_stream(client, kwargs, provider=runtime["provider"],
-                                              api_mode=runtime["api_mode"])
+        choice = response.choices[0]
+        yield SimpleNamespace(choices=[SimpleNamespace(index=0, delta=choice.message,
+                                                       finish_reason=choice.finish_reason)],
+                              model=runtime["model"], usage=getattr(response, "usage", None))
+        return
+    try:
+        kwargs["stream"] = True
+        if options.get("stream_options"):
+            kwargs["stream_options"] = options["stream_options"]
+        yield from aux._relay_sync_stream(client, kwargs, provider=runtime["provider"],
+                                          api_mode=runtime["api_mode"])
         # Never replay a stream after yielding any output.
     finally:
-        aux._close_cached_client(client, close_async=True)
+        close(client)
 
 
 def _stream_with_recovery(task, options, request):

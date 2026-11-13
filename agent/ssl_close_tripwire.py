@@ -3,20 +3,18 @@
 ``close()`` from a thread other than the one inside ``recv`` releases the fd under the reader's live SSL
 object; the kernel recycles the number and the reader's next ``SSL_read`` / alert write lands in whatever
 file took it (hub SQLite headers, 2026-11-11 and 2026-11-13). The FD-safe stranger-thread wake is
-``shutdown()`` (``agent_runtime_helpers._shutdown_socket``). Set ``HERMES_DEBUG_SSL_CLOSE=1`` to install;
-off by default because every TLS read then pays a Python-level wrapper.
+``shutdown()`` (``agent_runtime_helpers._shutdown_socket``). Set config.yaml ``logging.debug_ssl_close: true``
+to install (read by ``hermes_logging.setup_logging``); off by default because every TLS read then pays a Python-level wrapper.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import ssl
 import threading
 
 logger = logging.getLogger(__name__)
 
-_ENV = "HERMES_DEBUG_SSL_CLOSE"
 _READS = ("recv", "recv_into", "read")
 _installed = False
 _install_lock = threading.Lock()
@@ -82,7 +80,8 @@ def uninstall() -> None:
         _installed = False
 
 
-def install_from_env() -> bool:
-    if os.environ.get(_ENV, "").strip().lower() not in ("1", "true", "yes", "on"):
+def install_if_enabled(enabled: object) -> bool:
+    """Install when config ``logging.debug_ssl_close`` is true (bool, or a 1/true/yes/on string)."""
+    if enabled is not True and str(enabled).strip().lower() not in ("1", "true", "yes", "on"):
         return False
     return install()

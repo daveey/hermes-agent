@@ -114,8 +114,9 @@ def _fd_is_open(fd: int) -> bool:
     return True
 
 
+@pytest.mark.parametrize("streamed", [False, True], ids=["complete", "native-adapter-stream"])
 def test_cancelled_class_call_never_hands_the_daemons_tls_fd_to_sqlite(stalling_stream, tmp_path, monkeypatch,
-                                                                       caplog):
+                                                                       caplog, streamed):
     caplog.set_level("INFO", logger="agent.aux_provider_handoff")
     http = httpx.Client(verify=stalling_stream.ssl_context, timeout=httpx.Timeout(20.0))
     client = _PerCallClient(http)
@@ -136,12 +137,18 @@ def test_cancelled_class_call_never_hands_the_daemons_tls_fd_to_sqlite(stalling_
         {"provider": "anthropic", "model": "deep", "api_mode": "anthropic_messages"}, client, {}))
     monkeypatch.setattr(routing, "_complete", lambda task, runtime, client, kwargs:
                         aux._run_protected_sync_provider_call(provider, kwargs))
+    # stream=True on a native adapter (Anthropic/Codex/Bedrock) aggregates through the same _complete.
+    monkeypatch.setattr(aux, "_client_streams_internally", lambda _client: True)
     outcome: dict = {}
 
     def owner() -> None:  # the compression host: protected, with a hard-cancel source
         try:
             with aux.aux_interrupt_protection(cancel_check=cancel.is_set):
-                routing.class_routed_sync(lambda *a, **k: None)(task="compression", messages=[])
+                call = routing.class_routed_sync(lambda *a, **k: None)
+                if streamed:
+                    list(call(task="compression", messages=[], stream=True) or ())
+                else:
+                    call(task="compression", messages=[])
         except aux.AuxiliaryExplicitCancellation:
             outcome["cancelled"] = True
 
@@ -270,7 +277,7 @@ def test_tripwire_is_quiet_for_an_owner_close(stalling_stream, tripwire, caplog)
     assert caplog.text == ""
 
 
-def test_tripwire_installs_only_when_enabled(monkeypatch):
-    monkeypatch.delenv("HERMES_DEBUG_SSL_CLOSE", raising=False)
-    assert ssl_close_tripwire.install_from_env() is False
+def test_tripwire_installs_only_when_enabled():
+    assert ssl_close_tripwire.install_if_enabled(None) is False
+    assert ssl_close_tripwire.install_if_enabled(False) is False
     assert not hasattr(ssl.SSLSocket.recv, "__wrapped__")

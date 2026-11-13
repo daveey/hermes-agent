@@ -85,7 +85,6 @@ def release_client(client: Any, close: Callable[[Any], None], abandoned: list[Pr
         close(client)
         return
     from agent.agent_runtime_helpers import force_close_tcp_sockets
-    shutdown_count = force_close_tcp_sockets(getattr(client, "_real_client", None) or client)
     remaining = [len(abandoned)]
     lock = threading.Lock()
 
@@ -96,9 +95,12 @@ def release_client(client: Any, close: Callable[[Any], None], abandoned: list[Pr
         if last:
             close(client)
 
+    # Defer before the shutdown wakes the daemon: shutting down first let a woken daemon finish before the
+    # defer, so the close fell back to this thread (FD-safe then, but no longer the daemon's).
     deferred = sum(attempt.defer(one_done) for attempt in abandoned)
     for _ in range(len(abandoned) - deferred):
         one_done()
+    shutdown_count = force_close_tcp_sockets(getattr(client, "_real_client", None) or client) if deferred else 0
     if deferred:
         logger.info("auxiliary client close handed to %d abandoned provider daemon(s) (tcp_shutdown=%d)",
                     deferred, shutdown_count)
