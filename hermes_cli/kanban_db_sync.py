@@ -32,7 +32,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 
@@ -1280,6 +1280,7 @@ _CLAIMABLE = ("ready", "review")
 def apply_remote_changes(
     conn: sqlite3.Connection, changes: Sequence[RemoteChange], *, new_cursor: int, board: Optional[str] = None,
     observers: bool = True, local_pending_wins: bool = False,
+    keep: Optional[Callable[[sqlite3.Connection, RemoteChange], bool]] = None,
 ) -> ApplyResult:
     """Apply one feed page in ONE transaction, then fire local observers.
 
@@ -1291,7 +1292,8 @@ def apply_remote_changes(
     ``origin_gateway``; a page that makes work claimable wakes the dispatcher.
     ``observers=False`` (a shadow copy) applies the rows and fires nothing. ``local_pending_wins`` (the feed
     pull and the snapshot rebuild) keeps every task field that has an unanswered local edit in the outbox, read
-    in the same transaction as the apply. [daveey]"""
+    in the same transaction as the apply. ``keep`` (the live-file rebuild sweep) is asked about each change inside
+    that transaction; a change it refuses is skipped. [daveey]"""
     from hermes_cli.kanban_db_connect import write_txn
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     with write_txn(conn):
@@ -1304,6 +1306,9 @@ def apply_remote_changes(
             conn.execute("UPDATE kanban_sync_state SET applying = 1")
             own = _state(conn)["gateway_id"]
             for change in changes:
+                if keep is not None and not keep(conn, change):
+                    result.skipped += 1
+                    continue
                 _apply_one(conn, change, own, result)
             if result.left_terminal or result.reopened:  # a wake never reopens a done card [daveey]
                 from hermes_cli.kanban_terminal_guard import enforce_after_apply

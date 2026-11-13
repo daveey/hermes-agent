@@ -1042,9 +1042,9 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                     with credited(live):
                         result.behind |= pull(live, hub, slug, observers=True, partition=gateway).more
                 except Resync:
-                    _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
+                    from hermes_cli.kanban_sync_resync_sweep import resync_live  # also sweeps the Board's deletes
                     applies = None
-                    resync(live, hub, slug, observers=True, partition=gateway)
+                    resync_live(live, hub, slug, gateway)
             from hermes_cli.kanban_sync_repair_revision import ensure_revision
             ensure_revision(live)
             inputs = _repair_inputs(path, replica, mode, gateway)
