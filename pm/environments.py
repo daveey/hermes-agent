@@ -34,6 +34,14 @@ def installs_root() -> Path:
     return dependency_home_root() / "installs"
 
 
+ACCOUNT_SEED_ENV = "HERMES_PM_ACCOUNT_SEED"
+
+
+def account_seed_enabled() -> bool:
+    """False when ``HERMES_PM_ACCOUNT_SEED`` is ``0``/``false``/``no``/``off``: borrow nothing."""
+    return os.environ.get(ACCOUNT_SEED_ENV, "").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def account_home_root() -> Path | None:
     """The account's default home when the active home is another one on its filesystem, else ``None``.
 
@@ -41,9 +49,17 @@ def account_home_root() -> Path | None:
     immutable, content-checked state (verified tool entries, uv's cache, source snapshots) by
     hard link instead of fetching and unpacking its own ~2 GiB copy. Another filesystem keeps
     the home's own state: a link cannot cross it.
+
+    The signal is only "another home on the same filesystem", so it also catches a primary
+    home kept outside ``~/.hermes`` while a stale ``~/.hermes`` remains: that home shares the
+    old home's uv cache and compiles bytecode on first import instead of eagerly. Such a home,
+    and CI (whose cache save/restore and prune act on the uv cache path), set
+    ``HERMES_PM_ACCOUNT_SEED=0`` (``ACCOUNT_SEED_ENV``) to keep every piece of state its own.
     """
     from hermes_constants import _get_platform_default_hermes_home
 
+    if not account_seed_enabled():
+        return None
     account = _get_platform_default_hermes_home()
     active = dependency_home_root()
     while not active.exists() and active.parent != active:

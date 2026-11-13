@@ -20,7 +20,7 @@ from pm.lock import Facts, Lockfile
 from pm.package import InstallError, Package, Runner, StatePackage, compose_env
 from pm.plugin_inputs import Candidates, Members, PluginInput, Selection, StagedUpdate
 from pm.registry import get_package, walk
-from pm.store import Store, current_target, digest_matches, merge_tree, tree_digest
+from pm.store import Store, current_target, digest_matches, merge_tree, tree_digest, verified_digest
 
 LOG = logging.getLogger(__name__)
 
@@ -461,28 +461,32 @@ def _account_seed(package, lockfile, store: Store, version, target) -> tuple[dic
     return fact, seed
 
 
-def _seed_from_account(package, lockfile, store, staged, version, target) -> bool:
-    """Stage *package* by linking the account store's entry; False leaves the download to the caller.
+def _seed_from_account(package, lockfile, store, staged, version, target) -> str | None:
+    """Stage *package* by linking the account store's entry and return its verified digest;
+    ``None`` leaves the download to the caller.
 
     Entries are immutable once published and every name is replaced by rename, so a link shares
     bytes without sharing a tree. The staged tree must still hash to the digest the account
-    recorded for this exact pin; a seed that changes mid-link fails that check and is dropped."""
+    recorded for this exact pin; a seed that changes mid-link fails that check and is dropped.
+    The returned digest is ``tree_digest(staged)``, computed once while verifying; the caller
+    records it rather than hashing the published tree again."""
     seed = _account_seed(package, lockfile, store, version, target)
     if seed is None:
-        return False
+        return None
     fact, source_store = seed
     try:
         shutil.copytree(source_store.entry(fact["entry"]), staged, symlinks=True, copy_function=_link_or_copy)
-        if digest_matches(staged, fact["digest"]):
+        digest = verified_digest(staged, fact["digest"])
+        if digest is not None:
             LOG.info("%s: linked from %s", package.name, native(source_store.root))
-            return True
+            return digest
         LOG.warning("%s: %s does not match its recorded digest; downloading", package.name,
                     native(source_store.entry(fact["entry"])))
     except OSError as exc:
         LOG.warning("%s: cannot link from %s (%s); downloading", package.name, native(source_store.root), exc)
     if staged.exists():
         remove_tree(staged)
-    return False
+    return None
 
 
 def _log_repair(package, previous, version, artifacts) -> None:
@@ -551,10 +555,13 @@ def _install(
             )
         with store.scratch() as scratch:
             staged = scratch / "tree"
+            # The seeded tree's digest, hashed once while verifying the seed; a repair drops it.
+            seeded_digest = None
             try:
                 if copy_from is not None:
                     _copy_verified_source(package, lockfile, copy_from, staged, version, target)
-                elif facts is not None and _seed_from_account(package, lockfile, store, staged, version, target):
+                elif facts is not None and (seeded_digest := _seed_from_account(
+                        package, lockfile, store, staged, version, target)) is not None:
                     pass
                 else:
                     staged = _prepare_artifacts(package, store, scratch, artifacts, version, target,
@@ -566,6 +573,7 @@ def _install(
                     progress("verify", 0, 0, "")
                 reason, remedy = package.verify(staged, target), ""
                 if reason:
+                    seeded_digest = None  # the repair may rewrite the staged tree
                     reason, remedy = package.repair_staged_verification(staged, target, reason)
                 if reason:
                     raise InstallError(package.name, f"staged entry failed verification: {reason}", remedy)
@@ -576,7 +584,7 @@ def _install(
                         facts.record(
                             package.name, version, entry_name, package.env(entry, target), store.root,
                             target=target, artifacts=[a["sha256"] for a in artifacts],
-                            digest=tree_digest(entry),
+                            digest=seeded_digest or tree_digest(entry),
                         )
                 _remove_downloads(store, artifacts)
             except (InstallError, DownloadPaused):

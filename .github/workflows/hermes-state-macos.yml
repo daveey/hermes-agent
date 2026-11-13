@@ -23,8 +23,19 @@ name: hermes_state (macOS)
 # regression (disk, runner loss, host timeouts; t_01a1d37abf5db0ae). ci-probe/**
 # branches keep an unfiltered push trigger for probing the runner.
 #
-# HERMES_HOME points at a throwaway temp dir so the lane can never touch the
-# live ~/.hermes of anything else running on the mini.
+# HERMES_HOME points at a throwaway temp dir, so the lane writes none of the live
+# ~/.hermes's config, state, sessions or environments. The runner is the daveey
+# login (HOME=/Users/daveey, same APFS volume as RUNNER_TEMP), so the temp home
+# BORROWS that account's content-checked state (pm/AGENTS.md, Homes that borrow
+# the account's state): run_tests.sh provisions from its tool store when the
+# pins match, pm hard-links its verified tool entries and unchanged snapshot
+# files (never written in place), and uv shares its cache. uv locks that cache
+# and keys it by content, the same contract the account's own concurrent
+# processes rely on; this lane runs no actions/cache and no cache prune on it
+# (setup-pm, which does, sets HERMES_PM_ACCOUNT_SEED=0), and the seed marker is
+# kept per uv.lock, so a lane on another lock never re-triggers the account's
+# payload merge. Set HERMES_PM_ACCOUNT_SEED=0 here to borrow nothing (the run
+# then downloads its own ~2 GiB of tools and uv cache).
 
 on:
   push:

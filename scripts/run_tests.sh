@@ -76,6 +76,8 @@ _has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/nul
 _account_tool_store() {
   local account py_minor
   [ -z "${HERMES_RUNTIME_DIR:-}" ] || return 1
+  # The same opt-out as pm.environments.account_seed_enabled (pm/AGENTS.md).
+  case "${HERMES_PM_ACCOUNT_SEED:-}" in 0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) return 1 ;; esac
   account="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
   [ -n "$account" ] || account="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')"
   [ -n "$account" ] && [ -d "$account" ] || return 1

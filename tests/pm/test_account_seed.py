@@ -25,6 +25,12 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="Windows seeds copy, nev
 engine = importlib.import_module("pm.install")
 
 
+@pytest.fixture(autouse=True)
+def _borrowing_enabled(monkeypatch):
+    """CI's setup-pm exports the opt-out; these tests exercise the borrowing it turns off."""
+    monkeypatch.delenv("HERMES_PM_ACCOUNT_SEED", raising=False)
+
+
 def _zip(body: bytes) -> bytes:
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as archive:
@@ -305,3 +311,175 @@ def test_install_error_is_not_swallowed_by_the_seed(tool, monkeypatch):
     tool.account_file.write_bytes(b"tampered")
     with pytest.raises(InstallError):
         tool.install()
+
+
+# --- opt-out ----------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", ["0", "off", "False", " no "])
+def test_opt_out_borrows_nothing(tool, monkeypatch, tmp_path, value):
+    """CI (setup-pm) and a primary home beside a stale ~/.hermes keep every piece of state their own."""
+    from pm import environments
+    from pm.packages import uv_cache_path
+
+    (tmp_path / ".hermes" / "cache" / "uv").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", value)
+    assert environments.account_home_root() is None
+    assert uv_cache_path() == tmp_path / "borrower" / "cache" / "uv"
+    assert _environment(environments.installs_root() / "k" / "environments" / "g" / "venv")._compile_bytecode()
+    installed = tool.install()
+    assert installed.read_bytes() == b"pinned bytes"
+    assert os.stat(installed).st_ino != os.stat(tool.account_file).st_ino
+
+
+@pytest.mark.parametrize("value", ["", "1", "yes"])
+def test_other_opt_out_values_keep_borrowing(tmp_path, monkeypatch, value):
+    from pm import environments
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "fresh"))
+    monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", value)
+    assert environments.account_home_root() == tmp_path / ".hermes"
+
+
+# --- seed marker ------------------------------------------------------------------------------
+
+def test_homes_on_different_locks_do_not_rerun_each_others_seed(tmp_path, monkeypatch):
+    """The account and a borrowing home share one uv cache; the marker keeps each lock's seed.
+
+    Regression: a single-value ``.seeded`` flipped to the borrower's lock, so the account merged
+    its whole payload cache again on its next call."""
+    from pm import packages
+
+    shared = tmp_path / ".hermes" / "cache" / "uv"
+    shared.mkdir(parents=True)
+    payload = tmp_path / "payload"
+    (payload / "uv-cache" / "archive-v0" / "bucket").mkdir(parents=True)
+    (payload / "uv-cache" / "archive-v0" / "bucket" / "module.py").write_text("seeded = True\n", encoding="utf-8")
+    (payload / "tools").mkdir()
+    checkouts = {}
+    for name in ("account", "borrower"):
+        checkouts[name] = tmp_path / f"code-{name}"
+        checkouts[name].mkdir()
+        (checkouts[name] / "uv.lock").write_text(f"version = 1\n# {name}\n", encoding="utf-8")
+    merges = []
+    real_seed_tree = packages._seed_tree
+
+    def counting_seed_tree(src, dst):
+        if src.parent.name == "uv-cache":  # one payload bucket merged; nested calls recurse
+            merges.append(src)
+        real_seed_tree(src, dst)
+
+    monkeypatch.setattr(packages, "_seed_tree", counting_seed_tree)
+
+    def call(home):
+        if home == "account":
+            monkeypatch.delenv("HERMES_HOME", raising=False)
+            monkeypatch.setattr(paths, "store_root", lambda: payload / "tools")
+        else:
+            monkeypatch.setenv("HERMES_HOME", str(tmp_path / "fresh"))
+            monkeypatch.setattr(paths, "store_root", lambda: tmp_path / "fresh" / "tools")
+        monkeypatch.setattr(paths, "repo_root", lambda: checkouts[home])
+        assert packages.uv_cache_dir().resolve() == shared.resolve()
+
+    call("account")
+    assert len(merges) == 1
+    call("borrower")
+    call("account")
+    assert len(merges) == 1, "the borrower's lock evicted the account's seed record"
+    assert (shared / "archive-v0" / "bucket" / "module.py").is_file()
+
+
+def _recorded_digest(store: Store, name: str) -> str:
+    fact = Facts(store.root / "facts.json").get(name)
+    assert fact is not None
+    return fact["digest"]
+
+
+# --- shared inodes are never written in place --------------------------------------------------
+
+def test_borrower_lifecycle_never_rewrites_an_account_inode(tool):
+    """Install, heal, re-pin: every account byte and its recorded digest survive the borrower.
+
+    A borrowing home's entry files ARE the account's inodes (pm/AGENTS.md); only
+    ``_heal_exec_bit`` may change one in place, and only by adding execute bits."""
+    from pm.store import digest_matches
+
+    account_entry = tool.account_file.parent
+    tool.account_file.chmod(0o644)
+    before = {path: path.read_bytes() for path in account_entry.rglob("*") if path.is_file()}
+    recorded = _recorded_digest(tool.account, tool.package.name)
+
+    installed = tool.install()
+    assert os.stat(installed).st_ino == os.stat(tool.account_file).st_ino
+    assert engine._heal_exec_bit(installed)
+    assert os.stat(tool.account_file).st_mode & 0o777 == 0o755  # +x is the one shared change
+    tool.pin("2.0", b"new pin")
+    assert tool.install().read_bytes() == b"new pin"
+
+    assert {path: path.read_bytes() for path in account_entry.rglob("*") if path.is_file()} == before
+    assert digest_matches(account_entry, recorded)
+
+
+def test_snapshot_rewrites_never_reach_a_donor_file(tmp_path, monkeypatch):
+    """The generation's own rewrites (the root pyproject.toml drops the release-age cutoff) land
+    on copies; only unchanged package files are links to the account's snapshot."""
+    from pm import workspace
+
+    source, donor, root = tmp_path / "checkout", tmp_path / "donor", tmp_path / "generation"
+    pyproject = ('[project]\nname = "core"\nversion = "0"\n'
+                 '[tool.setuptools.packages.find]\ninclude = ["pkg*"]\n'
+                 '[tool.uv]\nexclude-newer = "3 days"\n')
+    for tree in (source, donor):
+        (tree / "pkg").mkdir(parents=True)
+        (tree / "pkg" / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tree / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    monkeypatch.setattr(workspace, "_snapshot_donor", lambda _source: donor)
+    before = {path: path.read_bytes() for path in donor.rglob("*") if path.is_file()}
+
+    workspace._generate_pyproject([], root, source=source, python=Path("python"))
+
+    assert os.stat(root / "pkg" / "mod.py").st_ino == os.stat(donor / "pkg" / "mod.py").st_ino
+    assert "exclude-newer" not in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert {path: path.read_bytes() for path in donor.rglob("*") if path.is_file()} == before
+
+
+# --- digest reuse -----------------------------------------------------------------------------
+
+def test_seeded_install_hashes_the_tree_once(tool, monkeypatch):
+    """The digest verified against the account's fact is the one recorded, not a second hash."""
+    from pm import store as store_module
+
+    hashed = []
+    real = store_module._tree_digest
+
+    def counting(root, *, skip_metadata):
+        hashed.append(Path(root))
+        return real(root, skip_metadata=skip_metadata)
+
+    monkeypatch.setattr(store_module, "_tree_digest", counting)
+    RangeHandler.payloads.clear()
+    tool.install()
+    assert len(hashed) == 1, hashed
+    assert _recorded_digest(tool.store, tool.package.name) == _recorded_digest(tool.account, tool.package.name)
+
+
+def test_repaired_seed_records_the_published_digest(tool, monkeypatch):
+    """A staged repair may rewrite the seed, so the verified digest is not reused after one."""
+    from pm.store import tree_digest
+
+    seen = []
+
+    def fail_once(entry, target):
+        if not seen:
+            seen.append(entry)
+            return "needs repair"
+        return ""
+
+    def repair(entry, target, reason):
+        (entry / "repaired.txt").write_bytes(b"added by repair")
+        return "", ""
+
+    monkeypatch.setattr(tool.package, "verify", fail_once)
+    monkeypatch.setattr(tool.package, "repair_staged_verification", repair)
+    RangeHandler.payloads.clear()
+    installed = tool.install()
+    assert _recorded_digest(tool.store, tool.package.name) == tree_digest(installed.parent)
