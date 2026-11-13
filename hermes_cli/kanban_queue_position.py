@@ -343,10 +343,13 @@ def local_words(place: dict[str, Any]) -> str:
         words = f"{words}, {census}; class {place['admission_class']}"
         pool_advice = ("Queued, not stuck: check class/placement and available capacity; priority slots are "
                        "marked-only. Do not run its work outside the dispatcher")
+        if place.get("pool_could_run"):  # a pool worker could start it now: the census must not hide that (#1821)
+            pool_advice = pool_words(place)
         if not skip:
             return f"{words}. {pool_advice}"
         words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
-        return words + ". " + (pool_advice if skips.is_ordering(skip) else skips.advice(skip))
+        return words + ". " + (pool_advice if skips.is_ordering(skip) or place.get("pool_could_run")
+                               else skips.advice(skip))
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:
@@ -359,16 +362,17 @@ def local_words(place: dict[str, Any]) -> str:
     return words + ". " + (_NOT_STUCK if skips.is_ordering(skip) else skips.advice(skip))
 
 
-def pool_words(place: dict[str, Any]) -> str:
+def pool_words(place: dict[str, Any], *, advice: bool = True) -> str:
     """The re-place sentence for a local-lane card that ``pool_could_run`` workers could start now. Shared by
-    :func:`local_words` and the chat-wait notices (``kanban_parent_unclaimed._queue_words``), which dropped it: a chat
-    told David to wait for hub slots while worker-1 could run the card (kanban-e7a33105a4). [daveey]"""
+    :func:`local_words` and the chat-wait notices (``kanban_parent_unclaimed._pool_sentence``), which dropped it: a
+    chat told David to wait for hub slots while worker-1 could run the card (kanban-e7a33105a4). ``advice=False``
+    leaves out the dispatcher warning for the notices, whose own advice already ends with it. [daveey]"""
     from hermes_cli.kanban_placement_coordination import REASON
     pool = place.get("pool_could_run") or []
     return (f"Home-only by a stale creation verdict ({REASON}): pool worker(s) {', '.join(pool)} now carry its "
             "access labels and have free slots. Re-place it (`hermes kanban move "
             f"{place.get('task_id') or '<id>'} --runs-on machine:{pool[0]} --reason \"pool attests its labels\"`) "
-            "instead of waiting for a local slot; do not run its work outside the dispatcher")
+            "instead of waiting for a local slot" + ("; do not run its work outside the dispatcher" if advice else ""))
 
 
 def read(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:

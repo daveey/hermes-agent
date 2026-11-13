@@ -70,14 +70,47 @@ def _assert_pool_hint(text: str, tid: str) -> None:
     assert f"hermes kanban move {tid} --runs-on machine:worker-2" in text
 
 
-def test_queue_words_carry_the_pool_hint_from_the_shared_helper():
+def test_pool_sentence_comes_from_the_shared_helper_without_repeated_advice():
     place = {**_PLACE, "pool_could_run": ["worker-2", "worker-1"], "task_id": "t_x"}
-    words = pu._queue_words(place)
-    assert words.startswith("16 card(s) ahead of it, 7/7 worker slots busy. ")
-    assert words.endswith(kqp.pool_words(place))
-    assert kqp.pool_words(place) in kqp.local_words(place)  # one wording for kanban_show and the chat notices
+    sentence = pu._pool_sentence(place)
+    assert sentence == kqp.pool_words(place, advice=False)
+    assert sentence in kqp.local_words(place)  # one wording for kanban_show and the chat notices
+    assert "outside the dispatcher" in kqp.local_words(place)  # kanban_show has no advice after it
+    assert "outside the dispatcher" not in sentence  # the notices' own advice follows it
+    _assert_pool_hint(sentence, "t_x")
+    assert "worker-2, worker-1" in sentence
+    assert pu._queue_words(place) == "16 card(s) ahead of it, 7/7 worker slots busy"  # a bare queue clause
+    assert pu._pool_sentence(dict(_PLACE)) == ""
+
+
+def test_kanban_show_keeps_the_pool_hint_under_the_admission_census():
+    """PR #1821 review: ``local_words`` returned from its ``admission_pools`` branch before ``pool_could_run``."""
+    pools = {"regular": 7, "regular_cap": 7, "priority": 0, "priority_cap": 2}
+    place = {**_PLACE, "admission_pools": pools, "admission_class": "normal", "pool_could_run": ["worker-2"],
+             "task_id": "t_x"}
+    words = kqp.local_words(place)
+    assert "regular 7/7" in words
     _assert_pool_hint(words, "t_x")
-    assert "worker-2, worker-1" in words
+    assert words.count("outside the dispatcher") == 1, words
+    skipped = kqp.local_words({**place, "skip": {"reason": "per_profile_capped"}})
+    assert skipped.startswith("last dispatcher skip of this ready episode: ")
+    _assert_pool_hint(skipped, "t_x")
+    unpooled = kqp.local_words({**place, "pool_could_run": None})
+    assert "--runs-on" not in unpooled and unpooled.endswith("Do not run its work outside the dispatcher")
+
+
+def _assert_pool_sentence_outside_parens(text: str) -> None:
+    """The multi-sentence pool hint follows the parenthesised queue clause, and the dispatcher warning is said once
+    (by the advice that ends the notice). PR #1821 review nit."""
+    start = text.index("with no worker (") + len("with no worker (")
+    depth, end = 1, start
+    for end in range(start, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[end], 0)
+        if depth == 0:
+            break
+    assert "pool worker(s)" not in text[start:end], text
+    assert "pool worker(s)" in text[end:], text
+    assert text.count("outside the dispatcher") == 1, text
 
 
 def test_queue_words_without_pool_are_unchanged():
@@ -91,6 +124,7 @@ def test_direct_chat_wait_notice_names_the_pool_worker(home, pool):
         assert cw.sweep(conn) == 1
         payload = _notice(conn, tid, cw.NOTICE_KIND)
     _assert_pool_hint(cw.notice_text(payload), tid)
+    _assert_pool_sentence_outside_parens(cw.notice_text(payload))
 
 
 def test_parent_unclaimed_notice_names_the_pool_worker(home, pool):
@@ -105,6 +139,7 @@ def test_parent_unclaimed_notice_names_the_pool_worker(home, pool):
         assert pu.sweep(conn) == 1
         payload = _notice(conn, child, pu.NOTICE_KIND)
     _assert_pool_hint(pu.notice_text(payload), parent)
+    _assert_pool_sentence_outside_parens(pu.notice_text(payload))
 
 
 def test_ready_hint_names_the_pool_worker(home, pool):
@@ -113,6 +148,7 @@ def test_ready_hint_names_the_pool_worker(home, pool):
         hint = pu.ready_hint(conn, kb.get_task(conn, tid))
     assert hint is not None
     _assert_pool_hint(hint, tid)
+    assert hint.count("outside the dispatcher") == 1, hint
 
 
 def test_notices_without_pool_name_no_worker(home):
