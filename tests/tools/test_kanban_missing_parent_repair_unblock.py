@@ -424,3 +424,23 @@ def test_later_block_naming_the_repair_card_but_not_from_the_detector_is_refused
         assert not _unblocked(conn, kb, child)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("status", ["todo", "ready", "running", "done", "archived"])
+def test_grant_needs_the_child_to_still_be_blocked(board, status):
+    """The grant releases a held child only: a child that left ``blocked`` without an ``unblocked`` event (an
+    archive, a completion, a direct status move) still has the parent_missing block as its newest event, and the
+    repair card must get no grant over it."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_requeue as kr
+
+    conn = kbc.connect()
+    try:
+        child, repair = _parent_missing_child(conn, kb)
+        assert kr.missing_parent_repair_grant(conn, repair, child) == repair
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, child))
+        assert kr.missing_parent_repair_grant(conn, repair, child) is None
+    finally:
+        conn.close()
