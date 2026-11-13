@@ -348,3 +348,71 @@ def test_stranded_blocker_probe_runs_when_its_interval_ends_with_no_other_change
         sweep_shared_blockers(conn, r)
         assert r.shared_blocker_probed == [tid]
         assert kb.get_task(conn, tid).status != "blocked"
+
+
+def test_scoped_blocker_probe_reruns_when_a_route_enters_its_scope_with_no_board_write(home, monkeypatch):
+    """G2 follow-up (review 5898596145): ``task_applies`` reads the assignee's config, outside the gate key. A
+    blocked card whose route moves into a provider-scoped blocker's scope with no board write is probed within
+    ``ROUTE_RECHECK_SECONDS``, not at the next content write or the 14-day lookback exit."""
+    from unittest import mock
+
+    from hermes_cli import kanban_model_assignment as assignment
+    from hermes_cli import kanban_model_tier as tier
+    from hermes_cli import kanban_shared_blockers as ksb
+    from hermes_cli import kanban_timed_park as ktp
+    from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
+
+    profile = {"model": {"default": "gpt-5", "provider": "openai-codex"}}  # the assignee's config.yaml
+    monkeypatch.setattr(tier, "load_tier_config", dict)
+    monkeypatch.setattr(assignment, "_assignee_config", lambda _a: profile)
+    monkeypatch.setattr(ksb, "probe_interval_seconds", lambda cfg=None: 1800)
+    t0 = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="behind", assignee="default")
+        assert kb.claim_task(conn, tid)
+        with mock.patch.object(ktp, "park_mode", lambda *a, **k: None):  # a plain ``blocked`` card, no wake
+            assert kb.block_task(conn, tid, reason="wall", kind="capability", blocker_id="wall-a",
+                                 blocker_provider="anthropic")
+        st = ksb.blocker_states(conn)["wall-a"]
+        assert st.is_open and st.blocker_provider == "anthropic"
+        assert not ksb.task_applies(conn, st, tid)  # routed to openai-codex: outside the scope
+
+        class R:
+            shared_blocker_released = shared_blocker_probed = None
+
+        clock = {"t": t0 + 1801}  # the probe interval is over: only the scope keeps the card unprobed
+        monkeypatch.setattr(kb.time, "time", lambda: clock["t"])
+        r = R()
+        sweep_shared_blockers(conn, r)
+        assert r.shared_blocker_probed == []
+        revision = _revision(conn)
+        _, skips0 = _runs("dispatch.shared_blocker_probed")
+        clock["t"] += 15  # one more tick, nothing moved: still gated (the cadence keeps the budget)
+        sweep_shared_blockers(conn, r)
+        assert _runs("dispatch.shared_blocker_probed")[1] == skips0 + 1
+
+        profile["model"] = {"default": "claude-opus-4", "provider": "anthropic"}  # no board write
+        assert ksb.task_applies(conn, st, tid)
+        assert _revision(conn) == revision
+        clock["t"] = t0 + 1801 + 300  # the stated cadence (ksb.ROUTE_RECHECK_SECONDS)
+        sweep_shared_blockers(conn, r)
+        assert r.shared_blocker_probed == [tid]
+        assert kb.get_task(conn, tid).status != "blocked"
+
+
+def test_unscoped_blocker_adds_no_route_recheck(home, monkeypatch):
+    """The cadence is only for provider-scoped blockers: an unscoped one holds every card whatever its route."""
+    from unittest import mock
+
+    from hermes_cli import kanban_shared_blockers as ksb
+    from hermes_cli import kanban_timed_park as ktp
+
+    t0 = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="behind", assignee="default")
+        assert kb.claim_task(conn, tid)
+        with mock.patch.object(ktp, "park_mode", lambda *a, **k: None):
+            assert kb.block_task(conn, tid, reason="wall", kind="capability", blocker_id="wall-x")
+        due: list = []
+        assert ksb.probe_stranded_blockers(conn, now=t0 + 10, interval=1800, due_out=due) == []
+        assert due and min(due) > t0 + 10 + 300  # the probe interval's end, not a route recheck

@@ -64,7 +64,9 @@ def sweep_shared_blockers(conn, result) -> None:
     [daveey] G2: each lane also skips while the board's content revision, this gateway's id and the config hold
     and none of its clocks ran out (``kanban_sweep_gate``). Both lanes read only content rows (``task_runs``
     outcomes and metadata, statuses, events). Their clocks: the probe interval of a blocker the probe lane deferred,
-    and the 14-day lookback, whose oldest assertion leaving the window reruns both lanes."""
+    the 14-day lookback, whose oldest assertion leaving the window reruns both lanes, and the route recheck of an
+    open provider-scoped blocker (``ROUTE_RECHECK_SECONDS``): the probe lane's scope test reads routes, whose
+    config/wall inputs are not in the key."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_shared_blockers import probe_stranded_blockers, release_cleared_blockers
     from hermes_cli.kanban_sweep_gate import config_key, gated

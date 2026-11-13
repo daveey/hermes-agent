@@ -70,6 +70,11 @@ GUARD_REASON = "shared_blocker"
 CLEARED_EVENT = "shared_blocker_cleared"
 PROBE_RELEASED_EVENT = "shared_blocker_probe_released"
 DEFAULT_PROBE_SECONDS = 1800
+# [daveey] G2 follow-up: which cards a provider-scoped blocker holds comes from ``task_route``, whose inputs sit
+# outside the probe lane's gate key: the assignee profile's config, the effective user/managed config, provider
+# walls and quota episodes that end with time. A route can enter the scope with no board write, so while a scoped
+# blocker is open the lane rechecks on this cadence instead of waiting for the next content write.
+ROUTE_RECHECK_SECONDS = 300
 MAX_BLOCKER_ID_CHARS = 64
 # Outcomes that prove nothing about an external condition.
 NEUTRAL_OUTCOMES = frozenset({
@@ -597,6 +602,8 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
     for st in blocker_states(conn, now=now, oldest_out=due_out).values():
         if not st.is_open or not st.behind:
             continue
+        if st.blocker_provider and due_out is not None:
+            due_out.append(now + ROUTE_RECHECK_SECONDS)
         ids = sorted(t for t in st.behind if task_applies(conn, st, t))
         if not ids:
             continue
