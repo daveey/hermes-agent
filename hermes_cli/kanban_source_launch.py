@@ -225,9 +225,12 @@ def _prepare(conn: sqlite3.Connection, claimed: Any, workspace: Any, branch: Opt
     from hermes_cli import kanban_db_dispatch as dispatch
     kbw = dispatch._kbw
     kbw.set_workspace_path(conn, claimed.id, str(workspace))
-    if source is not None:  # the source branch is the manifest's (fenced): record it only on a card without one
+    if source is not None:
+        # The source branch is the manifest's/custody's, and ``branch_name`` is fenced on such a card (here by
+        # ``fence`` and on the Board as forbidden_field). Writing it, even NULL -> branch, raised SourceFenced out of
+        # the dispatcher tick after the claim and leaked the lease until it went stale (LIVE t_01a1d5b1c1798e2a).
+        # The worker only needs it in memory.
         if not (claimed.branch_name or "").strip():
-            kbw.set_branch_name(conn, claimed.id, source.branch)
             claimed.branch_name = source.branch
         kbw._maybe_emit_scratch_tip(conn, claimed.id, "worktree")
         claimed.source_env = _source_env(source)
@@ -235,6 +238,22 @@ def _prepare(conn: sqlite3.Connection, claimed: Any, workspace: Any, branch: Opt
     if claimed.workspace_kind == "worktree":
         kbw.set_branch_name(conn, claimed.id, branch or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
     kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+
+
+def _release_unprepared(conn: sqlite3.Connection, claimed: Any, exc: Exception, result: Any) -> None:
+    """Recording the workspace failed after the claim and before any attach: release the grant unused (custody is
+    untouched, nothing ran) and count the failure, instead of raising out of the tick and leaving the lease to go
+    stale."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli import kanban_failure_release as release
+    from hermes_cli.kanban_db_connect import write_txn
+    error = f"workspace_source: workspace record refused ({type(exc).__name__}: {exc})"
+    _log.warning("kanban dispatcher: %s not launched: %s", claimed.id, error)
+    with write_txn(conn):
+        release.queue(conn, claimed.id, claimed.current_run_id, outcome="released", unused_grant=True, error=error)
+    dispatch._record_task_failure(conn, claimed.id, error, outcome="released", release_claim=True, end_run=True,
+                                  infrastructure=True)
+    result.respawn_guarded.append((claimed.id, f"workspace_prepare_failed:{type(exc).__name__}"))
 
 
 def _attach_or_release(conn: sqlite3.Connection, claimed: Any, workspace: Any, source: Any, grant: Any,
@@ -271,7 +290,11 @@ def launch(conn: sqlite3.Connection, claimed: Any, workspace: Any, branch: Optio
     """Record the workspace, attach (source/legacy-adopt cards), then spawn. True when a spawn slot was used."""
     from hermes_cli import kanban_db_dispatch as dispatch
     grant = _pop_grant(claimed.id)
-    _prepare(conn, claimed, workspace, branch, source)
+    try:
+        _prepare(conn, claimed, workspace, branch, source)
+    except Exception as exc:  # health: allow BLE001 -- a claimed card must never leak its lease out of the tick
+        _release_unprepared(conn, claimed, exc, result)
+        return False
     ok, run = _attach_or_release(conn, claimed, workspace, source, grant, result)
     if not ok:
         return False

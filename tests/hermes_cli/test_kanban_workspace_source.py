@@ -292,12 +292,15 @@ def test_dispatch_routes_before_kind_branch(conn, monkeypatch, kind):
     result = d.DispatchResult()
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
     assert d._dispatch_lane_task(conn, row, "worker", result, lane="ready", dry_run=False,
-        ttl_seconds=900, board=None, failure_limit=2, spawn_fn=lambda task, path: spawned.append((task.id, path)),
+        ttl_seconds=900, board=None, failure_limit=2,
+        spawn_fn=lambda task, path: spawned.append((task.id, path, task.branch_name)),
         per_profile_cap=None, per_profile_running={})
-    assert seen == [tid] and spawned == [(tid, "/source/exact")]
+    assert seen == [tid] and spawned == [(tid, "/source/exact", "wt/exact")]
     assert result.spawned == [(tid, "worker", "/source/exact")]
     assert kb.get_task(conn, tid).workspace_path == "/source/exact"
-    assert branches == ["wt/exact"]  # the branch comes from the manifest (source branch), never the legacy default
+    # The worker gets the manifest's (source) branch, never the legacy default, and the fenced branch_name column is
+    # never written for a source card (the write raised SourceFenced on a custody replica: LIVE t_01a1d5b1c1798e2a).
+    assert branches == []
 
 
 # --- pickup skip + skip memo ----------------------------------------------------------------------------------------
