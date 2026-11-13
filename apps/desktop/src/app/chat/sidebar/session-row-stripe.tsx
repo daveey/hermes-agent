@@ -6,7 +6,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import { reportSessionStripeRemote, type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { outcomeHasCrons, outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
+import { outcomeHasCrons, outcomeHasWatches, outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useSessionParked } from '@/lib/use-session-parked'
@@ -94,6 +94,17 @@ interface SessionRowStatusStripeProps {
   outcomePainted: boolean
 }
 
+/** [daveey] Which glyphs the stripe draws: `sync` for a live cron or a done chat's owned cron, `project` for open
+ *  cards, plus the eye for a done chat still watching a card (self-heal desktop-e6cce5965c). */
+function stripeGlyphs(statusStripe: SessionStatusStripe, painted: boolean, outcome: SessionInfo['outcome']) {
+  const doneCron = painted && outcomeHasCrons(outcome)
+  const doneWatch = painted && outcomeHasWatches(outcome)
+  const listed = GLYPH_STRIPES.has(statusStripe)
+  const mainGlyph = statusStripe === 'periodic' || doneCron ? 'sync' : listed ? 'project' : null
+
+  return { doneWatch, glyph: listed || doneCron || doneWatch, mainGlyph }
+}
+
 /** [daveey] The stripe itself, with the stored outcome's explanation on hover: the summary, the open questions, what
  *  it waits on, or why it is unresolved. */
 export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }: SessionRowStatusStripeProps) {
@@ -114,8 +125,7 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
       ? outcomeTooltip(session.outcome, t.sidebar.row)
       : null
 
-  const doneCron = Boolean(outcomeKind) && outcomeHasCrons(session.outcome)
-  const glyph = GLYPH_STRIPES.has(statusStripe) || doneCron
+  const { doneWatch, glyph, mainGlyph } = stripeGlyphs(statusStripe, Boolean(outcomeKind), session.outcome)
 
   return (
     <Tip label={tipText ? <span className="whitespace-pre-line">{tipText}</span> : null}>
@@ -135,8 +145,14 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
         role={tipText ? 'img' : undefined}
       >
         {/* `periodic`: a live cron job, it recurs so it is never "done". `waiting`: open kanban cards hold it — the
-            card glyph (amber when `stalled`). A finished chat's cron keeps the loop glyph, in the green of `done`. */}
-        {glyph && <Codicon name={statusStripe === 'periodic' || doneCron ? 'sync' : 'project'} size="0.5625rem" />}
+            card glyph (amber when `stalled`). A finished chat's cron keeps the loop glyph, in the green of `done`.
+            [daveey] A finished chat still watching a card adds the eye, so it never reads as "all done". */}
+        {glyph && mainGlyph && <Codicon name={mainGlyph} size="0.5625rem" />}
+        {doneWatch && (
+          <span className="flex" data-testid="stripe-watch">
+            <Codicon name="eye" size="0.5625rem" />
+          </span>
+        )}
       </span>
     </Tip>
   )

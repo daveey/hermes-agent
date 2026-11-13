@@ -1,5 +1,6 @@
 {
   "sidebar.row.outcomeCrons": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "sidebar.row.outcomeWatches": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "agents.ageDays": ["ar"],
   "appTour.capabilities.text": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "appTour.capabilities.title": ["ar","de","es","fr","ja","ru","zh","zh-hant"],

@@ -52,6 +52,9 @@ export interface SessionOutcome {
   on?: SessionOutcomeWaitingOn[]
   /** Recurring jobs a `done` chat owns: they never end, so they are named, not waited on. */
   crons?: SessionOutcomeWaitingOn[]
+  /** [daveey] Cards a `done` chat parked as watches (state `watching`, `eta` = wake time): a later check that needs
+   *  nothing from the user, so it does not hold the chat open, but the row still names it. */
+  watches?: SessionOutcomeWaitingOn[]
   reason?: SessionOutcomeReason | string
   /** Last admitted receipt; can remain historical while kind describes new work. Absence is unspecified. */
   completion_receipt?: CompletionReceipt

@@ -1199,7 +1199,7 @@ def _handle_schedule(args: dict, **kw) -> str:
         # [daveey] A watch says so; a long non-watch park says which chat it holds open and how to free it.
         hold = kwatch.chat_hold_hint(conn, tid)
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason, **_wake_check_echo(wake),
-                          **({"watch": True} if kwatch.is_watch(conn, tid) else {}),
+                          **({"watch": True, "watch_note": kwatch.WATCH_NOTE} if kwatch.is_watch(conn, tid) else {}),
                           **({"chat_hold": hold} if hold else {}))
 
 

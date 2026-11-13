@@ -7,6 +7,7 @@ import type { SessionOutcome } from '@/types/session-outcome'
 import {
   outcomeEtaLabel,
   outcomeHasCrons,
+  outcomeHasWatches,
   outcomeStripe,
   outcomeTooltip,
   outcomeWaitingLine,
@@ -431,6 +432,37 @@ describe('a finished chat that owns a cron', () => {
 
   it('leaves a plain done alone', () => {
     expect(outcomeHasCrons(OUTCOMES.done)).toBe(false)
+    expect(outcomeTooltip(OUTCOMES.done, r)).toBe('Shipped PR #12 and closed the card.')
+  })
+})
+
+// [daveey] self-heal desktop-e6cce5965c: a chat whose card is parked as a watch was plain green, and "why is this
+// session green" got "everything is finished" while the card's last check was still pending.
+describe('a finished chat that still watches a card', () => {
+  const eta = new Date(2026, 10, 18, 9, 0).getTime() / 1000
+
+  const outcome: SessionOutcome = {
+    kind: 'done',
+    summary: 'Fix landed.',
+    watches: [{ kind: 'card', id: 't_watch1', label: 'verify the re-run limit', state: 'watching', eta }]
+  }
+
+  it('stays green and names the pending check with its wake time', () => {
+    expect(outcomeStripe(outcome)).toBe('done')
+    expect(outcomeHasWatches(outcome)).toBe(true)
+    expect(outcomeTooltip(outcome, r)).toBe(`Fix landed.\nStill watching: t_watch1 (wakes Wed 09:00)`)
+  })
+
+  it('names crons and watches together', () => {
+    const both: SessionOutcome = { ...outcome, crons: [{ kind: 'cron', id: 'j1', label: 'sweep' }] }
+    expect(outcomeTooltip(both, r)).toBe(
+      `Fix landed.\nKeeps running: sweep\nStill watching: t_watch1 (wakes Wed 09:00)`
+    )
+  })
+
+  it('leaves a plain done, or a waiting outcome with watches, alone', () => {
+    expect(outcomeHasWatches(OUTCOMES.done)).toBe(false)
+    expect(outcomeHasWatches({ ...OUTCOMES.waiting, watches: outcome.watches })).toBe(false)
     expect(outcomeTooltip(OUTCOMES.done, r)).toBe('Shipped PR #12 and closed the card.')
   })
 })

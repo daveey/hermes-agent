@@ -519,7 +519,8 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
         "blocker_id": _prop("string", _BLOCKER_ID_DESC),
         "watch": _prop("boolean", (
             "True for a later check that needs nothing from David before it reports (e.g. verify X on "
-            "Friday): the parked card stops holding its chat unfinished; a block, failure or done still "
+            "Friday): the parked card stops holding its chat unfinished (the chat shows done with a watch mark "
+            "naming this card; asked about the chat, name this pending check); a block, failure or done still "
             "notifies the chat. Sticky across re-parks; false clears it."
         )),
         **_CLEAR_BLOCKER_PROP,

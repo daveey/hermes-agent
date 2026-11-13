@@ -4945,6 +4945,7 @@
     "sidebar.row.outcomeRunning",
     "sidebar.row.outcomeUnresolved",
     "sidebar.row.outcomeWaiting",
+    "sidebar.row.outcomeWatches",
     "sidebar.row.ownedByProfile",
     "sidebar.row.pausedQueue",
     "sidebar.row.pin",

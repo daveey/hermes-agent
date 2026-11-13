@@ -18,6 +18,9 @@ from typing import Any, Optional
 
 # A park further out than this, holding an interactive chat, gets the ``chat_hold`` hint.
 HINT_AFTER_S = 24 * 3600
+# ``kanban_schedule`` result for a watch park: what the chat's row shows, and what to say when asked about it.
+WATCH_NOTE = ("The chat shows done with a watch mark naming this card until it wakes. Asked about the chat's state, "
+              "name this pending check; do not say everything is finished.")
 
 
 def _park_kinds_sql() -> str:
@@ -99,6 +102,57 @@ def held_chats(conn: sqlite3.Connection, task_id: str) -> list[str]:
     except (sqlite3.Error, OSError, ValueError):  # unreadable hub/state db: treat every chat as interactive
         machine = set()
     return [c for c in chats if c not in machine and not c.rsplit("/", 1)[-1].startswith("cron_")]
+
+
+def _read_chat_watches(conn: sqlite3.Connection, ids: list[str], counted_sub: str) -> list[dict]:
+    """``{id, title, wake_at}`` per watch-parked card on one board that ``ids`` created or counts as a ``tui``
+    subscriber of: the cards ``kanban_session_activity`` leaves out of the chat's open work."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    events = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
+    if "session_id" not in cols or not {"id", "task_id", "kind", "payload"} <= events:
+        return []
+    ph = ",".join("?" for _ in ids)
+    found: dict[str, str] = {}
+    for tid, title in conn.execute(
+            f"SELECT t.id, t.title FROM tasks t WHERE t.session_id IN ({ph}) AND {watch_park_sql('t')}", ids):
+        found[tid] = title
+    try:
+        for tid, title in conn.execute(
+                f"SELECT t.id, t.title FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+                f"WHERE s.platform = 'tui' AND {counted_sub} AND s.chat_id IN ({ph}) AND {watch_park_sql('t')}", ids):
+            found.setdefault(tid, title)
+    except sqlite3.Error:  # board predates notify subscriptions
+        pass
+    out = []
+    for tid, title in found.items():
+        wake = (_last_scheduled(conn, tid) or {}).get("wake_at")
+        out.append({"id": tid, "title": title,
+                    "wake_at": float(wake) if isinstance(wake, (int, float)) and not isinstance(wake, bool) else None})
+    return out
+
+
+def chat_watches(session_ids: list[str]) -> list[dict]:
+    """The chat's watch-parked cards on this gateway's boards, as outcome items
+    ``{kind: "card", id, label, state: "watching", eta?}``. A watch frees the chat (it is not open work), so a done
+    chat names them like the crons it owns, instead of reading as "nothing left" (self-heal desktop-e6cce5965c).
+    Failed board reads propagate; the outcome guards this read like the cron one."""
+    from hermes_cli import kanban_session_activity as ksa
+    ids = [s for s in dict.fromkeys(str(s) for s in session_ids if s)]
+    if not ids:
+        return []
+    items, seen = [], set()
+    for path in ksa._board_db_paths():
+        with ksa.cached_ro(path) as conn:
+            rows = _read_chat_watches(conn, ids, ksa._counted_sub_clause(conn))
+        for card in rows:
+            if card["id"] in seen:
+                continue
+            seen.add(card["id"])
+            item = {"kind": "card", "id": card["id"], "label": card["title"] or card["id"], "state": "watching"}
+            if card["wake_at"] is not None:
+                item["eta"] = card["wake_at"]
+            items.append(item)
+    return items
 
 
 def chat_hold_hint(conn: sqlite3.Connection, task_id: str, *, now: Optional[float] = None) -> Optional[str]:
