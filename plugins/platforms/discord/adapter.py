@@ -4790,7 +4790,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
               - id: "123456"
                 skills: ["skill-a", "skill-b"]
         """
-        from gateway.platforms.base_channel_skills import resolve_channel_skills
+        from gateway.platforms.base import resolve_channel_skills
         return resolve_channel_skills(self.config.extra, channel_id, parent_id)
 
     def _resolve_channel_prompt(self, channel_id: str, parent_id: str | None = None) -> str | None:

@@ -35,9 +35,10 @@ def spawn_context_thread(target: Callable[..., Any], *, name: str, daemon: bool 
     Ownership is captured here but reservation begins at start(), not construction.
     """
     from hermes_cli.local_work import ACTIVE_SCOPE
-    from hermes_cli.local_work_threads import TrackedThread
+    from hermes_cli.local_work_threads import TrackedThread, thread_class_replaced
 
-    if ACTIVE_SCOPE.get() is not None and not passive:
+    owner = ACTIVE_SCOPE.get()
+    if owner is not None and not passive and not thread_class_replaced(owner.registry):
         return TrackedThread(target=target, args=args, kwargs=kwargs, name=name, daemon=daemon)
     return threading.Thread(target=ctx_bound(target), args=args, kwargs=kwargs, name=name, daemon=daemon)
 

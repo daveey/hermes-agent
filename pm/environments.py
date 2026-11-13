@@ -617,9 +617,11 @@ def activate_dependencies(project_root: Path) -> None:
     import site
 
     # Executed-code attestation (quiet proof) receipts this tree before site runs its .pth.
-    from hermes_cli import code_attestation
-
-    code_attestation.register_dependency_environment(selected)
+    # Only when ``hermes_bootstrap`` already installed it: activation never imports a module
+    # the launch closure may lack (an older or partial tree); no installation = refused later.
+    attestation = sys.modules.get("hermes_cli.code_attestation")
+    if attestation is not None:
+        attestation.register_dependency_environment(selected)
     sys.path[:] = [entry for entry in sys.path
                    if Path(entry).name not in ("site-packages", "dist-packages")
                    and Path(entry).resolve() != project_root.resolve()]

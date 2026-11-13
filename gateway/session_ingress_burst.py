@@ -115,7 +115,8 @@ def _track(adapter, task):
     # A burst timer/commit holds an accepted, undispatched input: ingress work until it ends.
     # Reserved here (after create_task) only because the coroutine has not yet run a step.
     from hermes_cli.local_work_threads import begin_work
-    handle = begin_work('gateway_ingress', f'{adapter.name}:busy_burst')
+    from gateway.platforms.base import _work_label
+    handle = begin_work('gateway_ingress', _work_label(adapter, 'busy_burst'))
     if handle is not None:
         task.add_done_callback(handle.finish)
     adapter._background_tasks.add(task)

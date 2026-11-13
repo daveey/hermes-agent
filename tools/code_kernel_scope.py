@@ -97,8 +97,10 @@ def tracked_thread(kind, source, **kwargs):
     registry = _registry()
     if registry is None:
         return threading.Thread(**kwargs)  # health: allow HX012 -- no registry installed: plain thread, nothing to track
-    from hermes_cli.local_work_threads import TrackedThread
+    from hermes_cli.local_work_threads import TrackedThread, thread_class_replaced
 
+    if thread_class_replaced(registry):
+        return threading.Thread(**kwargs)  # health: allow HX012 -- replaced class: honoured, unknown coverage latched
     return TrackedThread(registry=registry, home=_home(registry), source=source,
                          kind=kind, **kwargs)
 

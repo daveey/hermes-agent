@@ -224,7 +224,8 @@ class TurnFacadeMixin:
         from agent import local_work_agent
 
         with local_work_agent.scope("agent_turn", "agent.turn_facade.run_conversation"):
-            return self._run_conversation_scoped(*args, **kwargs)
+            # Through the class, not self: callers drive this on stand-in agents (tests, relays).
+            return TurnFacadeMixin._run_conversation_scoped(self, *args, **kwargs)
 
     run_conversation = functools.wraps(_run_conversation_scoped)(run_conversation)
 

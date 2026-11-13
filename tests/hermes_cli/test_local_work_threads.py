@@ -215,3 +215,28 @@ def test_canceled_async_waiter_does_not_release_physical_thread(tmp_path):
     asyncio.run(scenario())
     assert registry.snapshot().active == 0
     assert registry.snapshot().unknowns == ()
+
+
+def test_replaced_thread_class_is_honoured_and_latches_unknown(tmp_path, monkeypatch):
+    """A replaced ``threading.Thread`` (test double, green threads) cannot carry custody: the
+    spawn honours it and the registry latches unknown coverage instead of claiming tracking."""
+    from agent.memory_provider import spawn_context_thread
+    import hermes_cli.local_work_threads as lwt
+
+    registry, home = setup_owner(tmp_path)
+
+    class _Double:
+        def __init__(self, target=None, **_options):
+            self.target = target
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(threading, "Thread", _Double)
+    # Resolved through the main thread's MRO: an import under the double still finds stdlib's.
+    assert lwt._real_thread_class() is lwt.TrackedThread.__mro__[1]
+    assert lwt._real_thread_class() is not _Double
+    with registry.scope("turn", home=home, source="parent"):
+        thread = spawn_context_thread(lambda: None, name="t")
+    assert isinstance(thread, _Double)
+    assert "threading-thread-replaced" in registry.snapshot().unknowns

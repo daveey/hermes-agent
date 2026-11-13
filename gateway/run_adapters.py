@@ -66,10 +66,11 @@ UNRESOLVED_PROFILE_HOME = _UnresolvedProfileHome()
 
 def _ingress_work_scope(adapter, home):
     """Direct message_handler ingress reservation (home None: the launch/context home)."""
+    from gateway.platforms.base import _work_label
     from hermes_cli.local_work_threads import work_scope
     if home is UNRESOLVED_PROFILE_HOME:
         home = "unresolved-profile-home"
-    return work_scope("gateway_ingress", f"{getattr(adapter, 'name', 'adapter')}:message_handler", home)
+    return work_scope("gateway_ingress", _work_label(adapter, "message_handler"), home)
 
 
 class _NoWork:

@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 import os
 import threading
+from typing import TYPE_CHECKING
 import weakref
 
 from hermes_cli.local_work import ACTIVE_SCOPE, WorkScope, get_registry
@@ -60,7 +61,33 @@ def _owner(registry, home, source, kind):
     return WorkScope(registry, kind, home, source or "explicit-physical-work")
 
 
-class TrackedThread(threading.Thread):
+def _real_thread_class():
+    # Resolve the stdlib class through the main thread's MRO, not the ``threading.Thread``
+    # attribute: a first import while a test double replaces that attribute must not make the
+    # double this class's base for the rest of the process.
+    for cls in type(threading.main_thread()).__mro__:
+        if cls.__module__ == "threading" and cls.__name__ == "Thread":
+            return cls
+    return threading.Thread
+
+
+if TYPE_CHECKING:
+    _RealThread = threading.Thread
+else:
+    _RealThread = _real_thread_class()
+
+
+def thread_class_replaced(registry):
+    """True when ``threading.Thread`` is not the stdlib class (a test double, a green-thread
+    monkeypatch). Physical custody cannot attach to a replaced class, so the caller honours the
+    replacement and this latches unknown coverage instead of claiming the work tracked."""
+    if threading.Thread is _RealThread:
+        return False
+    registry.mark_unknown("threading-thread-replaced")
+    return True
+
+
+class TrackedThread(_RealThread):
     """Capture ownership/context at construction; reserve only on first start.
 
     Use a target, not a run() override: this class owns physical finalization.
@@ -280,7 +307,7 @@ def create_tracked_task(create, kind, source, home=None):
     return task
 
 
-_scoped_loops = weakref.WeakSet()
+_scoped_loops = weakref.WeakKeyDictionary()  # loop -> its scope-aware default executor
 
 
 async def run_in_pool(executor, ctx, func, *args, source="gateway:run_in_executor"):
@@ -292,6 +319,8 @@ async def run_in_pool(executor, ctx, func, *args, source="gateway:run_in_executo
     registry = installed_registry()
     if registry is None:
         return await loop.run_in_executor(executor, ctx.run, func, *args)
+    if executor is None:  # ``run_in_executor(None, ...)`` semantics: the loop's (scope-aware) default
+        executor = _scoped_loops[loop]
     future = submit_tracked(executor, ctx.run, func, *args, registry=registry,
                             home=current_home(), source=source, kind="gateway_pool")
     return await asyncio.wrap_future(future, loop=loop)
@@ -303,6 +332,7 @@ def install_scope_default_executor(loop):
     maintenance ``to_thread`` stays uncounted while scoped work keeps physical custody."""
     if loop in _scoped_loops:
         return False
-    loop.set_default_executor(ScopeAwareExecutor(thread_name_prefix="hermes-gateway-default"))
-    _scoped_loops.add(loop)
+    executor = ScopeAwareExecutor(thread_name_prefix="hermes-gateway-default")
+    loop.set_default_executor(executor)
+    _scoped_loops[loop] = executor
     return True

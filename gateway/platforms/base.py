@@ -23,6 +23,7 @@ from gateway.platforms.base_log_safety import describe_proxy_error, env_proxy_fo
 from gateway.platforms.base_image_sniff import _looks_like_image
 from gateway.platforms.base_media_flags import pad_inline_flags
 from gateway.runtime_footer import footer_onto_photo_caption, send_footer_unless_captioned
+from gateway.platforms.base_channel_skills import resolve_channel_skills  # plugin API re-export
 from gateway.platforms.session_model import _SessionModelSettingsMixin
 from utils import normalize_proxy_url, unlink_files_older_than
 from agent.i18n import t
@@ -1785,6 +1786,13 @@ def _ingress_task(create, source):
     return create_tracked_task(create, "gateway_ingress", source)
 
 
+def _work_label(adapter, what: str) -> str:
+    """Reservation source label; never raises (``name`` needs ``platform``, which a partially
+    built adapter lacks), so the label can never be what breaks message handling."""
+    platform = getattr(getattr(adapter, "platform", None), "value", None)
+    return f"{platform or type(adapter).__name__}:{what}"
+
+
 class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
     """Base class for platform adapters: connect/auth, receive, send, handle media."""
 
@@ -2472,7 +2480,7 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         if prior_task and not prior_task.done():
             prior_task.cancel()
         self._pending_text_batch_tasks[key] = _ingress_task(
-            lambda: asyncio.create_task(self._flush_text_batch(key)), f"{self.name}:text_batch")
+            lambda: asyncio.create_task(self._flush_text_batch(key)), _work_label(self, "text_batch"))
 
     def _text_batch_delay_for(self, pending: Optional[MessageEvent]) -> float:
         """Quiet period before ``pending`` is dispatched; near-split chunks wait longer."""
@@ -3739,7 +3747,7 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         state.cancel_timer()
         delay = self._text_debounce_delay(session_key)
         state.task = _ingress_task(
-            lambda: asyncio.create_task(self._flush_text_debounce(session_key, delay)), f"{self.name}:text_debounce")
+            lambda: asyncio.create_task(self._flush_text_debounce(session_key, delay)), _work_label(self, "text_debounce"))
 
     async def _flush_text_debounce(self, session_key: str, delay: float) -> None:
         """Timer task that flushes the debounced text buffer."""
@@ -3817,7 +3825,7 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         self._active_sessions[session_key] = guard
         task = _ingress_task(
             lambda: asyncio.create_task(self._process_message_background(event, session_key)),
-            f"{self.name}:process_message")
+            _work_label(self, "process_message"))
         if not self._track_session_task(session_key, task):
             self._session_tasks.pop(session_key, None)
             self._release_session_guard(session_key, guard=guard)
@@ -3885,7 +3893,7 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         from gateway.platforms.base_process_admission import handle_message
         from hermes_cli.local_work_threads import work_scope
         # Reserve at entry: before topic recovery, preflight, guard/burst decisions.
-        with work_scope("gateway_ingress", f"{self.name}:handle_message"):
+        with work_scope("gateway_ingress", _work_label(self, "handle_message")):
             await handle_message(self, event)
 
     def _shared_runtime_owns_input(self, event: MessageEvent) -> bool:
@@ -4489,7 +4497,7 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         self._track_session_task(
             session_key,
             _ingress_task(lambda: asyncio.create_task(self._drain_after(pending_event, session_key, delay, guard)),
-                          f"{self.name}:drain_after"))
+                          _work_label(self, "drain_after")))
 
     async def _drain_after(self, pending_event: MessageEvent, session_key: str, delay: float,
                            guard: Optional[asyncio.Event]) -> None:
