@@ -1996,9 +1996,36 @@ def resolve_job_ref(ref: str) -> Optional[dict[str, Any]]:
     return _normalize_job_record(name_matches[0])
 
 
+_LIST_MEMO: dict[Path, tuple[tuple[int, int, int], list[dict[str, Any]]]] = {}
+_LIST_MEMO_LOCK = threading.Lock()
+
+
+def _listed_records() -> list[dict[str, Any]]:
+    """Normalized jobs, memoized on the jobs file's (mtime_ns, size, ino): a Desktop cron poll re-parsed
+    jobs.json (and re-ran ensure_dirs) per profile on every read (t_01a1d59ed9eb75fe). A write renames a new
+    file in (new ino), so it is picked up by the next call. Only a read no write raced is remembered. P1 pass
+    ``cron.list_jobs``: a skip is a memo hit. [daveey]"""
+    from hermes_cli import loop_accounting as la
+    jobs_file = _current_cron_store().jobs_file
+    stamp = _jobs_file_stamp(jobs_file)
+    with _LIST_MEMO_LOCK:
+        hit = _LIST_MEMO.get(jobs_file)
+    with la.pass_("cron.list_jobs") as p:
+        if stamp is not None and hit is not None and hit[0] == stamp:
+            p.skip()
+            _record_load_stamp(stamp)
+            return copy.deepcopy(hit[1])
+        p.change()
+        jobs = [_normalize_job_record(j) for j in load_jobs()]
+        if stamp is not None and _jobs_file_stamp(jobs_file) == stamp:
+            with _LIST_MEMO_LOCK:
+                _LIST_MEMO[jobs_file] = (stamp, copy.deepcopy(jobs))
+        return jobs
+
+
 def list_jobs(include_disabled: bool = False) -> list[dict[str, Any]]:
     """List all jobs, optionally including disabled ones."""
-    jobs = [_normalize_job_record(j) for j in load_jobs()]
+    jobs = _listed_records()
     if not include_disabled:
         jobs = [j for j in jobs if j.get("enabled", True)]
     try:
