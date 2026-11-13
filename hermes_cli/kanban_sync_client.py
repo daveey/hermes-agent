@@ -1183,6 +1183,17 @@ def _links_clock() -> float:
     return time.monotonic()
 
 
+# A board's links pass logs its duration with its counts (``kanban sync: <board> chat links {...} in <s>s``); a pass
+# with no changes logs only when it took this long, so a slow pass is visible even when it changed nothing; a whole
+# pass this slow (ledger read included) also logs ``kanban sync: chat links pass over N board(s) took <s>s``. The hub
+# pass ran ~10 min on 2026-11-13 and the line carried no duration to measure it by (t_01a1d35d8d7e22a7). [daveey]
+LINKS_SLOW_LOG_S = 10.0
+
+
+def _links_pass_clock() -> float:
+    return time.monotonic()
+
+
 # The running loop's links pass (tests wait on it to observe a pass deterministically).
 _LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop runs
 
@@ -1250,6 +1261,7 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
     the loop's connection scope (``kanban_sync_connections``). [daveey]"""
     from hermes_cli import kanban_chat_links
     from hermes_cli.kanban_placement import config_snapshot
+    pass_began = _links_pass_clock()
     with config_snapshot() as placement:
         ledger: Optional[dict[str, frozenset]] = None
         try:
@@ -1266,6 +1278,8 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
         signature = _links_signature(gateway, placement) if skip_unchanged else None
         for slug, path in boards:
             key = str(path)
+            counts: dict = {}
+            began = _links_pass_clock()
             try:
                 with connection(path, lambda: _connect(path)) as conn:
                     mode = sync.board_mode(conn)
@@ -1283,10 +1297,14 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                     counts = kanban_chat_links.reconcile(conn, slug, gateway)
                     if inputs is not None:
                         _LINKS_DONE[key] = (inputs, started)
-                if any(counts.values()):
-                    _log.info("kanban sync: %s chat links %s", slug, counts)
+                took = _links_pass_clock() - began
+                if any(counts.values()) or took >= LINKS_SLOW_LOG_S:
+                    _log.info("kanban sync: %s chat links %s in %.1fs", slug, counts, took)
             except Exception as exc:  # health: allow BLE001 -- one board's links must not stop the sync loop
                 _log.warning("kanban sync: chat links for %s failed (%s: %s)", slug, type(exc).__name__, exc)
+    took = _links_pass_clock() - pass_began
+    if took >= LINKS_SLOW_LOG_S:
+        _log.info("kanban sync: chat links pass over %d board(s) took %.1fs", len(boards), took)
 
 
 class _BoardWatch:

@@ -438,3 +438,48 @@ def test_the_sync_loop_skips_unchanged_links_passes(live, ledger, svc, kanban_ho
     ksc.run_forever(lambda: iterations["n"] < 10, interval=1)
     assert (tid, "s_between", "created", 0) in _links(live)
     assert per_iteration[6:] == [4, 5, 5, 5], per_iteration  # the change, its own writes once, then skipped
+
+
+@pytest.fixture
+def slow_reconcile(monkeypatch):
+    """Each board reconcile costs ``cost[0]`` seconds on a fake pass clock (t_01a1d35d8d7e22a7)."""
+    now, cost = [1000.0], [0.0]
+    real = links.reconcile
+
+    def reconcile(*a, **k):
+        now[0] += cost[0]
+        return real(*a, **k)
+
+    monkeypatch.setattr(ksc, "_links_pass_clock", lambda: now[0], raising=False)  # absent at base: fails on the line
+    monkeypatch.setattr(links, "reconcile", reconcile)
+    return cost
+
+
+def _link_lines(caplog):
+    return [r.getMessage() for r in caplog.records if "chat links" in r.getMessage()]
+
+
+def test_the_links_log_line_carries_the_pass_duration(live, ledger, kanban_home, scope, slow_reconcile, caplog):
+    """The hub's ~10 min pass (2026-11-13) logged only its counts, so no pass length could be read from the log.
+    A pass with changes logs ``in <s>s``; an unchanged pass logs only at ``LINKS_SLOW_LOG_S`` (10 s) or more, with
+    a whole-pass line naming the boards it covered."""
+    caplog.set_level("INFO", logger="hermes_cli.kanban_sync_client")
+    _seed(live, ledger)
+    slow_reconcile[0] = 2.5
+    _pass(kanban_home)
+    changed = _link_lines(caplog)
+    assert changed and changed[0].startswith(f"kanban sync: {BOARD} chat links {{") and changed[0].endswith(" in 2.5s")
+    assert not any("pass over" in m for m in changed), "a 2.5 s pass is under the 10 s slow-pass line"
+
+    for _ in range(3):
+        ksc.reconcile_links([(BOARD, kanban_home / "kanban.db")], ME)
+    caplog.clear()
+    slow_reconcile[0] = 9.9  # unchanged, under the threshold: silent
+    ksc.reconcile_links([(BOARD, kanban_home / "kanban.db")], ME)
+    assert _link_lines(caplog) == []
+
+    slow_reconcile[0] = 12.0  # unchanged but slow: logged with zero counts and its duration
+    ksc.reconcile_links([(BOARD, kanban_home / "kanban.db")], ME)
+    assert _link_lines(caplog) == [
+        f"kanban sync: {BOARD} chat links {{'added': 0, 'changed': 0, 'released': 0, 'retired': 0}} in 12.0s",
+        "kanban sync: chat links pass over 1 board(s) took 12.0s"]
