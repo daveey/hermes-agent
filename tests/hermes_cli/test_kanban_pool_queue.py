@@ -434,7 +434,7 @@ def test_remote_refresh_caps_and_stdin(monkeypatch):
         return None  # unrelated old tips and failed fetches must not prove publication
 
     monkeypatch.setattr(worktree_ops, "_git_out", git_out)
-    monkeypatch.setattr(worktree_ops, "_worktree_has_unpushed_commits", lambda tree: True)
+    monkeypatch.setattr(worktree_ops, "_worktree_has_unpushed_commits", lambda tree, **kw: True)
     assert not kmp.pushed_on_remote("unused")
     assert sum(args[0] == "merge-base" for args, _ in calls) == 50
     assert sum(args[0] == "fetch" for args, _ in calls) == 5
