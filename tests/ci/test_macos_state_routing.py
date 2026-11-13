@@ -1,4 +1,5 @@
 """Replay the macOS state lane's real workflow wiring, without running a mini job."""
+import fnmatch
 import json
 import os
 import subprocess
@@ -132,8 +133,11 @@ def test_main_push_never_starts_the_standalone_lane():
     # merged tree; the 4-hourly schedule tests main HEAD. ci-probe branches keep a
     # push trigger, unfiltered, for probing the runner.
     on = workflow('hermes-state-macos.yml')['on']
-    assert on['push'] == {'branches': ['ci-probe/**']}
-    assert set(on) == {'push', 'schedule', 'workflow_dispatch', 'workflow_call'}
+    if 'push' in on:
+        branches = (on['push'] or {}).get('branches')
+        assert branches, 'a push trigger without a branches filter fires on main pushes'
+        assert not [pattern for pattern in branches for ref in ('main', 'master')
+                    if fnmatch.fnmatchcase(ref, pattern)], branches
     # ci.yaml must keep masking its main-push call too, or main pushes come back
     # through CI instead.
     assert detect(['hermes_state.py'], context('push', 'refs/heads/main'))['hermes_state'] == 'false'

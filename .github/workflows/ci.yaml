@@ -135,8 +135,8 @@ jobs:
         # or a push to main, whatever the diff or labels say. The macOS state and
         # native memory lanes are off on a main push (hermes-state-macos.yml tests
         # main from its own 4-hourly schedule, and native-memory-macos.yml from
-        # its own push trigger, so a main push never queues the one mini runner
-        # behind required PR jobs) and on for a dispatch or a release.
+        # its own push trigger, so required PR jobs never queue behind a main-push
+        # CI run on the one mini runner) and on for a dispatch or a release.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}

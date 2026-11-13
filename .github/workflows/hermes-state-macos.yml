@@ -23,6 +23,13 @@ name: hermes_state (macOS)
 # regression (disk, runner loss, host timeouts; t_01a1d37abf5db0ae). ci-probe/**
 # branches keep an unfiltered push trigger for probing the runner.
 #
+# Alerting on a red scheduled run: no workflow_run watcher here on purpose. The
+# hub's main-CI watcher (hermes-state hosts/hermes-hub/ci-watch/ci_main_watch.py,
+# SCHEDULED) reads this workflow's schedule runs on main and opens one ci-red
+# Kanban fix card per red streak, as for a red main push. hermes-state-recovery.yml
+# reruns a runner-lost job once; the watcher reads the run's latest conclusion.
+# Renaming or moving this file needs that SCHEDULED entry updated too.
+#
 # HERMES_HOME points at a throwaway temp dir, so the lane writes none of the live
 # ~/.hermes's config, state, sessions or environments. The runner is the daveey
 # login (HOME=/Users/daveey, same APFS volume as RUNNER_TEMP), so the temp home
