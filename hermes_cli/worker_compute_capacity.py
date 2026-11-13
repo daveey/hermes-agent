@@ -155,21 +155,50 @@ def _test_policy_override(environ=None) -> Path | None:
     policy anywhere durable, so it cannot disable host CPU policy by accident.
     """
     import os
-    import tempfile
     raw = (os.environ if environ is None else environ).get('HERMES_TEST_POLICY_ROOT', '')
     if not raw or not os.path.isabs(raw):
         return None
     path = Path(os.path.realpath(raw))
-    # no-tmp: ok — recognises a harness's temp root; nothing is written here
-    for root in ('/tmp', '/var/tmp', '/dev/shm', tempfile.gettempdir()):
-        real = Path(os.path.realpath(root))
+    for real in _override_temp_roots():
         if path != real and path.is_relative_to(real):
             return path
     return None
 
 
+# no-tmp: ok — recognises a harness's temp root; nothing is written here
+SYSTEM_TEMP_ROOTS: tuple[str, ...] = ('/tmp', '/var/tmp', '/dev/shm')
+
+
+def _override_temp_roots() -> list[Path]:
+    """Roots a policy override may live under: the system temp roots, plus TMPDIR only when it is ephemeral.
+
+    An honoured empty root turns :func:`worker_enabled` off, so ``refusal()`` lets every claim through. An odd
+    TMPDIR (``/``, a home, the account root, a durable dir inside the account) must not let the override move a
+    worker's policy somewhere durable; inside the account only the pruned ``.hermes/cache/scratch`` qualifies.
+    Same intent as ``worker_account_boards._ephemeral_roots``, judged against the passwd account, never the
+    override itself.
+    """
+    import os
+    import tempfile
+    from hermes_constants import _account_home
+    roots = [Path(os.path.realpath(root)) for root in SYSTEM_TEMP_ROOTS]
+    account = Path(os.path.realpath(_account_home()))
+    home = Path(os.path.realpath(os.path.expanduser('~')))
+    scratch = account / '.hermes' / 'cache' / 'scratch'
+    tmp = Path(os.path.realpath(tempfile.gettempdir()))
+    durable = (account.is_relative_to(tmp) or home.is_relative_to(tmp)
+               or (tmp.is_relative_to(account) and not tmp.is_relative_to(scratch)))
+    if not durable:
+        roots.append(tmp)
+    return roots
+
+
 def worker_enabled() -> bool:
-    """Read installation policy, never a card's environment or profile override."""
+    """Read installation policy, never a card's environment or profile override.
+
+    The only environment that moves it is a test harness's ``HERMES_TEST_POLICY_ROOT`` under a temp root
+    (:func:`_test_policy_override`).
+    """
     from hermes_cli.config_backend import read_config_doc_readonly
 
     try:

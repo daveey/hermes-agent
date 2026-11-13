@@ -66,6 +66,21 @@ def test_any_other_answer_ends_the_streak_and_a_gap_starts_a_new_one(tmp_path):
     assert alarm.read()["since"] == 2000.0 + alarm.GAP_SECONDS + 1
 
 
+def test_refusal_answers_feed_the_streak_without_an_exception(monkeypatch):
+    """PR #2454 review nit 1 (t_01a1d602f93945f1): refusal()'s plain-answer observe was untested (a `pass` mutant
+    survived). A non-unknown answer clears unknown.json; an unknown one with no exception (cap unreadable) records it."""
+    alarm.observe(True, now=time.time())
+    assert alarm.read() is not None
+    monkeypatch.setattr(admission, "_refusal", lambda echo, *, claimant: "worker_load_pressure")
+    assert admission.refusal(enabled=True) == "worker_load_pressure"
+    assert not (capacity.policy_root() / "worker-resources" / "unknown.json").exists()
+    monkeypatch.setattr(admission, "_refusal", lambda echo, *, claimant: "worker_resources_unknown")
+    assert admission.refusal(enabled=True) == "worker_resources_unknown"
+    state = alarm.read()
+    assert state is not None
+    assert state["detail"] == "occupancy or max_in_progress unreadable" and state["record"] is None
+
+
 def _streak(seconds, *, record="/acct/.hermes/worker-resources/boards/abc.json"):
     now = time.time()
     path = capacity.policy_root() / "worker-resources" / "unknown.json"

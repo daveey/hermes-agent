@@ -68,6 +68,34 @@ def test_test_policy_root_is_honoured_only_under_a_temp_root(raw, honoured):
     assert got == (Path(os.path.realpath(raw)) if honoured else None)
 
 
+@pytest.mark.parametrize('tmpdir, raw, honoured', [
+    ('{home}', '{home}/x/.hermes', False),  # TMPDIR=HOME: a durable home dir is no temp root
+    ('{account}', '{account}/x/.hermes', False),  # the account itself
+    ('/', '/srv/policy/.hermes', False),  # TMPDIR=/ would admit anything
+    ('{account}/.hermes', '{account}/.hermes/x/.hermes', False),  # durable dirs inside the account
+    ('{account}/.hermes/cache/scratch', '{account}/.hermes/cache/scratch/t1/.hermes', True),  # the worker default
+    ('{other}', '{other}/shard-1/account-policy/.hermes', True),  # an ordinary harness TMPDIR
+])
+def test_an_odd_tmpdir_never_admits_a_durable_policy_root(tmp_path, monkeypatch, tmpdir, raw, honoured):
+    """PR #2454 review nit 2 (t_01a1d602f93945f1): TMPDIR=/home/ubuntu honoured /home/ubuntu/x/.hermes. An honoured
+    empty root turns worker_enabled() off, so refusal() fails open; TMPDIR joins the roots only when ephemeral."""
+    import os
+    import tempfile
+    from pathlib import Path
+    from hermes_cli import worker_compute_capacity as capacity
+    account, home, other = tmp_path / 'account', tmp_path / 'home', tmp_path / 'harness-tmp'
+    for path in (account / '.hermes' / 'cache' / 'scratch', home, other):
+        path.mkdir(parents=True)
+    names = {'account': str(account), 'home': str(home), 'other': str(other)}
+    monkeypatch.setattr('hermes_constants._account_home', lambda: account)
+    monkeypatch.setattr(capacity, 'SYSTEM_TEMP_ROOTS', ())  # tmp_path itself sits under /tmp
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setattr(tempfile, 'tempdir', tmpdir.format(**names))
+    raw = raw.format(**names)
+    got = capacity._test_policy_override({'HERMES_TEST_POLICY_ROOT': raw})
+    assert got == (Path(os.path.realpath(raw)) if honoured else None)
+
+
 def test_policy_root_follows_the_override_in_a_child(tmp_path):
     """The unpatched policy_root (a fresh interpreter, no conftest) answers the shard dir, not the account."""
     import os
