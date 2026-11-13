@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -88,11 +89,18 @@ def _path(scope: tuple[str, ...]) -> Path:
 
 
 def _encode(value: Any) -> Any:
+    # [daveey] Lists, tuples and nested dicts keep their own type, so a decoded copy equals the read exactly (the
+    # execution part's evidence dicts hold lists); a copy written before kept lists as "t" and still decodes.
     if isinstance(value, (set, frozenset, tuple, list)):
         items = [_encode(v) for v in value]
         if isinstance(value, (set, frozenset)):
             items.sort(key=lambda v: json.dumps(v, sort_keys=True))
-        return {"s": items} if isinstance(value, (set, frozenset)) else {"t": items}
+            return {"s": items}
+        return {"l": items} if isinstance(value, list) else {"t": items}
+    if isinstance(value, dict):
+        if not all(isinstance(k, str) for k in value):
+            raise TypeError("annotation copy: non-string dict key")
+        return {"d": {k: _encode(v) for k, v in value.items()}}
     return value
 
 
@@ -102,6 +110,11 @@ def _decode(value: Any) -> Any:
             return frozenset(_decode(v) for v in value["s"])
         if set(value) == {"t"}:
             return tuple(_decode(v) for v in value["t"])
+        if set(value) == {"l"}:
+            return [_decode(v) for v in value["l"]]
+        if set(value) == {"d"} and isinstance(value["d"], dict):
+            return {k: _decode(v) for k, v in value["d"].items()}
+        return {k: _decode(v) for k, v in value.items()}
     return value
 
 
@@ -127,6 +140,76 @@ def save(scope: tuple[str, ...], parts: tuple) -> bool:
     except Exception:  # health: allow BLE001 -- best-effort cache write; the in-memory annotation is unaffected
         log.debug("kanban annotation copy not saved", exc_info=True)
         return False
+
+
+def _write_json(path: Path, body: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _decode_parts(raw: Any) -> tuple | None:
+    if not isinstance(raw, list) or len(raw) not in (_PARTS, _PARTS + 1) or not all(isinstance(p, dict) for p in raw):
+        return None
+    return tuple({k: _decode(v) for k, v in part.items()} for part in raw)
+
+
+def save_host(scope: tuple[str, ...], fingerprint: str, read_at: float, parts: tuple) -> bool:
+    """[daveey] The host copy other processes adopt (``kanban_annotation_host``): ``parts`` answered exactly the
+    inputs ``fingerprint`` names, read at ``read_at``. Never raises."""
+    if not enabled() or len(parts) not in (_PARTS, _PARTS + 1):
+        return False
+    try:
+        body = {"version": _VERSION, "scope": list(scope), "fingerprint": fingerprint, "read_at": float(read_at),
+                "parts": [{str(k): _encode(v) for k, v in part.items()} for part in parts]}
+        _write_json(_path(scope).with_suffix(".host.json"), body)
+        return True
+    except Exception:  # health: allow BLE001 -- best-effort; other processes then read for themselves
+        log.debug("kanban annotation host copy not saved", exc_info=True)
+        return False
+
+
+def load_host(scope: tuple[str, ...]) -> tuple[str, float, tuple] | None:
+    """``(fingerprint, read_at, parts)`` of the host copy for ``scope``, else None. Never raises."""
+    if not enabled():
+        return None
+    try:
+        body = json.loads(_path(scope).with_suffix(".host.json").read_text(encoding="utf-8-sig"))
+        if body.get("version") != _VERSION or body.get("scope") != list(scope):
+            return None
+        fingerprint, read_at = body["fingerprint"], float(body["read_at"])
+        parts = _decode_parts(body["parts"])
+        if not isinstance(fingerprint, str) or parts is None or not read_at <= time.time():
+            return None
+        return fingerprint, read_at, parts
+    except FileNotFoundError:
+        return None
+    except Exception:  # health: allow BLE001 -- a bad copy is no copy
+        log.debug("kanban annotation host copy unreadable", exc_info=True)
+        return None
+
+
+def touch_demand(scope: tuple[str, ...]) -> None:
+    """Mark ``scope`` as polled now (the host refresher keeps such scopes' copies current). Never raises."""
+    if not enabled():
+        return
+    try:
+        path = _path(scope).with_suffix(".demand")
+        try:
+            os.utime(path)
+        except FileNotFoundError:
+            _write_json(path, {"scope": list(scope)})
+    except Exception:  # health: allow BLE001 -- demand only steers the refresher
+        log.debug("kanban annotation demand not recorded", exc_info=True)
+
+
+def demand_age(scope: tuple[str, ...]) -> float | None:
+    """Seconds since any process last polled ``scope`` (None: never, or unreadable)."""
+    try:
+        return time.time() - _path(scope).with_suffix(".demand").stat().st_mtime
+    except OSError:
+        return None
 
 
 def load(scope: tuple[str, ...], *, max_age_s: float = MAX_AGE_S) -> tuple[tuple, float] | None:

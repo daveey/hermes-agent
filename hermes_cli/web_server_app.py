@@ -138,6 +138,14 @@ async def standalone_lifespan(app: "FastAPI"):
         start_annotation_prewarm()
     except Exception:
         logger.warning("kanban annotation prewarm did not start", exc_info=True)
+    # One process per home keeps the published annotation current for the others (kanban_annotation_host). [daveey]
+    try:
+        from hermes_cli.kanban_annotation_host import start_holder
+        from hermes_cli.process_identity import is_desktop_owned_backend as _desktop_owned
+
+        start_holder("serve" if _desktop_owned() else "dashboard")
+    except Exception:
+        logger.warning("kanban annotation holder did not start", exc_info=True)
 
     # Re-adopt background jobs a previous backend's chats left running (orphans of a Desktop
     # restart) and wake each chat when its job exits (tools/process_registry_readopt.py). [daveey]

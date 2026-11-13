@@ -17,6 +17,7 @@ from __future__ import annotations
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_annotation_disk as _annotation_copy
+from hermes_cli import kanban_annotation_host as _host_copy
 from hermes_cli import kanban_annotation_refresh as _bounded
 from hermes_cli import kanban_activity_revision as _revision
 from hermes_cli import kanban_session_activity_busy as _busy
@@ -1418,8 +1419,11 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
 _waiting_sources: dict[str, Any] = {}
 
 
-def register_waiting_source(name: str, fn) -> None:
-    """Register (or replace, ``fn=None`` removes) a plugin source of waiting card ids per session. [daveey]"""
+def register_waiting_source(name: str, fn, inputs=None) -> None:
+    """Register (or replace, ``fn=None`` removes) a plugin source of waiting card ids per session. [daveey] ``inputs()``
+    (optional) returns a JSON key that moves whenever ``fn`` could answer differently: other processes may then adopt
+    this host's annotation instead of re-running ``fn`` (``kanban_annotation_host``)."""
+    _host_copy.declare_inputs(name, fn, inputs)
     if fn is None:
         _waiting_sources.pop(name, None)
     else:
@@ -1728,32 +1732,10 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     return counts
 
 
-def _read_annotation_parts() -> tuple:
-    snapshot = _all_counts(include_snapshot=True)
-    active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys = snapshot[:9]
-    execution = getattr(snapshot, "execution", {})
-    extra = _extra_waiting()
-    try:
-        attention = attention_task_counts()
-    except Exception:
-        _log.debug("kanban attention unavailable", exc_info=True)
-        attention = {}
-    raw = (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention, execution)
-    # [daveey] Nothing moved since the last read of this scope: return that read's frozen copy instead of freezing an
-    # equal one. Safe: frozen parts are never mutated (every poll already shares one), and ``==`` per part (sets and
-    # frozensets compare by members) proves the copy is exactly what freezing ``raw`` would build. The same object
-    # also lets ``_annotation_copy.published`` skip its deep comparison.
-    scope = _origin_scope()
-    previous = _frozen_parts.get(scope)
-    if previous is not None and len(previous) == len(raw) and all(old is new or old == new for old, new in zip(previous, raw)):
-        return previous
-    frozen = _identity.freeze_annotation(raw)
-    _frozen_parts[scope] = frozen
-    return frozen
-
-
-# [daveey] Per origin scope, the last frozen annotation parts (``_read_annotation_parts``).
-_frozen_parts: dict[tuple[str, ...], tuple] = {}
+# [daveey] The read itself lives with the host copy that publishes it (kanban_annotation_host); monkeypatching
+# ``_read_annotation_parts`` here still replaces it for ``_refresh_annotation_locked``.
+_read_annotation_parts = _host_copy.read_annotation_parts
+_frozen_parts = _host_copy.frozen_parts
 
 
 def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = None) -> tuple:
@@ -1762,11 +1744,16 @@ def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = N
     _annotate_flight_scope = scope
     _annotate_flight_result = None
     read_at = time.time() if read_at is None else read_at
-    parts = _read_annotation_parts()
+    prepared = _host_copy.prepare(scope)  # [daveey] the inputs this read answers, for the host copy
+    try:
+        parts = _read_annotation_parts()
+    finally:
+        _host_copy.finish(scope)
     _bounded.record(scope, parts, read_at)
     _last_annotation[scope] = parts
     _annotate_flight_result = parts
     _annotation_copy.published(scope, parts)  # [daveey] a restart serves it while its first read runs
+    _host_copy.publish(scope, prepared, parts)  # other processes adopt it instead of reading again
     return parts
 
 
@@ -1785,6 +1772,7 @@ def _annotation_snapshot() -> tuple | None:
     """
     global _annotate_waiters
     scope = _origin_scope()
+    _host_copy.demand(scope)
     deadline = time.monotonic() + _REFRESH_WAIT_S
     if not _annotate_refresh_lock.acquire(blocking=False):
         _annotate_waiters += 1
@@ -1807,6 +1795,15 @@ def _annotation_snapshot() -> tuple | None:
         return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock,
                                         None, max(0.0, deadline - time.monotonic()))
     previous = _last_annotation.get(scope)
+    try:  # [daveey] unchanged inputs: re-read inline; else adopt another process's read of exactly these inputs
+        parts = previous is not None and _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
+        parts = parts or _host_copy.adopt(scope)
+    except BaseException:
+        _annotate_refresh_lock.release()
+        raise
+    if parts is not None:
+        _annotate_refresh_lock.release()
+        return parts
     if previous is None:
         # [daveey] An uncontended cold read (a fresh process such as the session-idle-check collector, or a
         # restarted backend before any poll overlapped) passed no fallback, so one read slower than the budget
@@ -1815,14 +1812,6 @@ def _annotation_snapshot() -> tuple | None:
         fallback = _annotation_copy.seed(scope, _last_annotation, _identity.freeze_annotation)
         return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock,
                                         fallback, max(0.0, deadline - time.monotonic()))
-    try:
-        parts = _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
-    except BaseException:
-        _annotate_refresh_lock.release()
-        raise
-    if parts is not None:
-        _annotate_refresh_lock.release()
-        return parts
     return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock, previous,
                                     _REFRESH_WAIT_S)
 
@@ -1973,6 +1962,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     _bounded.reset()
     _recent_done.reset()
     _annotation_copy.reset()
+    _host_copy.reset()
     with _pairs_lock:
         _board_memo.clear()
     _busy.reset()
