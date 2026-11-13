@@ -974,16 +974,12 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
                 refusal = _schema_owner.check(conn, path)
                 if refusal:
                     return refusal
-                if refusal == "":  # at par: no schema pass, but keep the board's sync mode (ids, Board leases)
+                if refusal == "":  # at par: no schema pass, but keep the board's sync mode (ids, Board leases);
+                    # the display-only activity revision is skipped too (its readers fall back to stat keys)
                     _kb._sync.register_without_install(conn, resolved)
                     _INITIALIZED_PATHS.add(resolved)
                     return None
-                conn.executescript(_kb.SCHEMA_SQL)
-                _migrate_add_optional_columns(conn)
-                from hermes_cli.kanban_wake_episode import ensure_schema
-                ensure_schema(conn)
-                from hermes_cli import kanban_source_receipt
-                kanban_source_receipt.ensure_schema(conn)  # before the capture triggers that read it
+                apply_schema_steps(conn)
                 _kb._sync.install_or_remove(conn, resolved)
                 _ensure_activity_revision(conn, resolved)
                 _INITIALIZED_PATHS.add(resolved)
@@ -995,6 +991,17 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
         return _schema_owner.open_read_only(path, refusal, timeout_s=_resolve_busy_timeout_ms() / 1000.0,
                                             text_factory=_kb._lossy_text)
     return conn
+
+
+def apply_schema_steps(conn: sqlite3.Connection) -> None:
+    """Every table/column step of connect()'s schema pass. kanban_schema_owner replays this same function on an
+    in-memory DB to judge "at par", so a step added here is never missed there. [daveey]"""
+    conn.executescript(_kb.SCHEMA_SQL)
+    _migrate_add_optional_columns(conn)
+    from hermes_cli.kanban_wake_episode import ensure_schema
+    ensure_schema(conn)
+    from hermes_cli import kanban_source_receipt
+    kanban_source_receipt.ensure_schema(conn)  # before the capture triggers that read it
 
 
 @contextlib.contextmanager

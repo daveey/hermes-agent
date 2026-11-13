@@ -122,6 +122,47 @@ def test_non_installed_checkout_opens_a_current_board_normally(home):
         conn.close()
 
 
+def test_reference_schema_matches_what_connect_creates(home):
+    """The "at par" reference is every table/column connect()'s schema pass creates: no step is left out.
+    Only ``kanban_activity_revision`` is outside it: display-only, its absence leaves readers on a stat fallback."""
+    from hermes_cli.kanban_activity_revision import REVISION_TABLE
+    db = home / "kanban.db"
+    kbc.connect(db).close()
+    raw = sqlite3.connect(db)
+    try:
+        created = {t: c for t, c in owner._tables(raw).items() if t != REVISION_TABLE}
+        assert created == owner._reference_schema()
+    finally:
+        raw.close()
+
+
+def test_board_missing_a_table_the_installed_core_predates_is_not_at_par(home):
+    """A board without ``kanban_source_receipt_pending`` (installed core predates it) stays read-only here
+    with the clear refusal, not a read-write open that fails later with a raw "no such table"."""
+    from hermes_cli import kanban_source_receipt
+    db = _older_board(home)
+    raw = sqlite3.connect(db)
+    raw.execute(f'DROP TABLE "{kanban_source_receipt.TABLE}"')
+    raw.execute("ALTER TABLE tasks ADD COLUMN review_required INTEGER NOT NULL DEFAULT 0")  # other columns at par
+    raw.commit()
+    raw.close()
+    before = _triggers(db), _columns(db)
+    _foreign_install(home)
+    probe = sqlite3.connect(db)
+    try:
+        assert kanban_source_receipt.TABLE in owner.missing_schema(probe)
+    finally:
+        probe.close()
+    conn = kbc.connect(db)
+    try:
+        with pytest.raises(owner.BoardSchemaNotOwned) as err:
+            kb.create_task(conn, title="from a worktree", assignee="default")
+    finally:
+        conn.close()
+    assert kanban_source_receipt.TABLE in str(err.value)
+    assert (_triggers(db), _columns(db)) == before
+
+
 # --- (b) the installed core ---------------------------------------------------------------------------------
 
 def test_installed_core_migrates_as_before(home):

@@ -133,15 +133,11 @@ def _reference_schema() -> dict[str, frozenset[str]]:
     global _REFERENCE
     with _REFERENCE_LOCK:
         if _REFERENCE is None:
-            from hermes_cli import kanban_db as kb
             from hermes_cli import kanban_db_connect as kbc
-            from hermes_cli.kanban_wake_episode import ensure_schema
             mem = sqlite3.connect(":memory:", isolation_level=None)  # noqa: kanban-lockguard (in-memory reference schema, not a board)
             try:
                 mem.row_factory = sqlite3.Row
-                mem.executescript(kb.SCHEMA_SQL)
-                kbc._migrate_add_optional_columns(mem)
-                ensure_schema(mem)
+                kbc.apply_schema_steps(mem)  # the same steps connect()'s schema pass runs
                 _REFERENCE = _tables(mem)
             finally:
                 mem.close()
