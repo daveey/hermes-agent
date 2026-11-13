@@ -892,7 +892,7 @@ _TOOL_DOC_LINES = [
     ("patch", "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False)"),
     ("terminal", "  terminal(command: str, timeout=None, workdir=None)\n"
      "    Foreground only (no background/pty). Returns {\"output\": \"...\", \"exit_code\": N, \"truncated\": bool}.\n"
-     "    output is the complete stdout; if truncated is True the middle was cut, so read full_output_path."),
+     "    output is the complete stdout (a long one comes raw from the spill: redacted, no sudo notes or plugin hook rewrites); if truncated is True the middle was cut, so read full_output_path."),
 ]
 
 

@@ -92,9 +92,10 @@ def _rpc_token_ok(request: dict, rpc_token: str) -> bool:
 
 def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_counter: list,
                         max_tool_calls: int, dispatch, tool_call_log: list, call_start: float,
-                        where: str) -> str:
+                        where: str, full_output_cap: int | None = None) -> str:
     """Enforce allow-list + budget, then dispatch one authenticated request. Only a dispatched
-    call consumes budget and is logged; refusals are free."""
+    call consumes budget and is logged; refusals are free. ``full_output_cap`` bounds the spill
+    a terminal() result may inline (default: the local socket cap)."""
     tool_name = request.get("tool", "")
     tool_args = request.get("args", {})
     if tool_name not in allowed_tools:
@@ -115,7 +116,7 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
         result = tool_error(str(exc))
     tool_call_counter[0] += 1
     if tool_name == "terminal":
-        result = _complete_terminal_output(result)
+        result = _complete_terminal_output(result, full_output_cap or _FULL_OUTPUT_READ_CAP_BYTES)
     entry = {"tool": tool_name, "args_preview": str(tool_args)[:80],
              "duration": round(time.monotonic() - call_start, 2)}
     error = _result_error(result)
@@ -126,15 +127,19 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
 
 
 _FULL_OUTPUT_READ_CAP_BYTES = 20 * 1024 * 1024
+# The file-RPC poller ships each result base64 (+33%) through env.execute stdin: Modal's legacy
+# server path caps one stdin buffer at 2 MB and Daytona/Vercel stage it as an uploaded file, so a
+# remote result inlines at most 1 MiB of spill; a bigger one stays truncated with its path.
+_REMOTE_FULL_OUTPUT_READ_CAP_BYTES = 1024 * 1024
 _SPILL_CAPPED_MARK = "[spill capped at "
 
 
-def _read_full_output(path) -> str | None:
+def _read_full_output(path, cap: int = _FULL_OUTPUT_READ_CAP_BYTES) -> str | None:
     """The terminal spill file's text when it holds the WHOLE output, else None (missing,
-    unreadable, over the read cap, or itself capped by the collector)."""
+    unreadable, over *cap* bytes, or itself capped by the collector)."""
     try:
         spill = Path(str(path))
-        if spill.stat().st_size > _FULL_OUTPUT_READ_CAP_BYTES:
+        if spill.stat().st_size > cap:
             return None
         text = spill.read_text(encoding="utf-8-sig", errors="replace")
     except (OSError, ValueError):
@@ -153,7 +158,7 @@ def _looks_windowed(body: dict) -> bool:
     return bool(body.get("truncation_note")) or contains_truncation_notice(output)
 
 
-def _complete_terminal_output(result):
+def _complete_terminal_output(result, cap: int = _FULL_OUTPUT_READ_CAP_BYTES):
     """Give code the complete stdout of a sandbox ``terminal()`` call. The terminal tool
     renders a head+tail window sized for the chat; a script that writes ``output`` to disk
     as data must not get that window (defect agent-7ac9c5fa93: a checksum manifest shipped
@@ -173,7 +178,7 @@ def _complete_terminal_output(result):
     if body.get("approval_pending") or body.get("status") == "pending_approval":
         return result  # the command never ran: keep the approval contract's exact shape
     spill_path = body.get("full_output_path")
-    full = _read_full_output(spill_path) if spill_path else None
+    full = _read_full_output(spill_path, cap) if spill_path else None
     if full is not None:
         body["output"] = full
         body.pop("truncation_note", None)
@@ -308,6 +313,7 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
                     request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
                     max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
                     call_start=call_start, where="remote sandbox",
+                    full_output_cap=_REMOTE_FULL_OUTPUT_READ_CAP_BYTES,
                 )
                 # Atomic (tmp + rename) and owner-only; results carry tool output
                 # on a shared-host backend.

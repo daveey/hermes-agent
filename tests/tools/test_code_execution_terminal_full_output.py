@@ -112,6 +112,72 @@ def test_window_without_spill_reports_truncated():
     assert r["truncated"] is True
 
 
+WINDOW = "AAA\n\n... [OUTPUT TRUNCATED - 1,500 chars omitted out of 2,006 total] ...\n\nBBB"
+
+
+def _file_rpc_result(monkeypatch, tool_result: dict) -> tuple[dict, int]:
+    """One terminal call through the remote file-RPC poller (modal/daytona/vercel/ssh
+    transport); returns the decoded res_ payload and the size of the shipped stdin."""
+    import base64
+    import threading
+    from tools import code_execution_rpc
+
+    monkeypatch.setattr(code_execution_rpc, "_default_dispatch",
+                        lambda task_id: lambda name, args: json.dumps(tool_result))
+    stop, shipped = threading.Event(), {}
+    request = json.dumps({"seq": 1, "tool": "terminal", "token": "tok", "args": {"command": "cat big"}})
+
+    class Env:
+        def execute(self, cmd, cwd=None, timeout=None, stdin_data=None):
+            if cmd.startswith("ls "):
+                return {"output": "" if shipped else "/rpc/req_000001\n", "returncode": 0}
+            if cmd.startswith("cat "):
+                return {"output": request, "returncode": 0}
+            if "base64 -d" in cmd:
+                shipped["stdin"] = stdin_data
+                stop.set()
+            return {"output": "", "returncode": 0}
+
+    code_execution_rpc._rpc_poll_loop(Env(), "/rpc", "t-file-rpc", [], [0], 50,
+                                      frozenset({"terminal"}), stop, "tok")
+    payload = shipped["stdin"]
+    return json.loads(base64.b64decode(payload).decode("utf-8")), len(payload)
+
+
+def test_remote_file_rpc_caps_shipped_full_output(tmp_path, monkeypatch):
+    """A file-RPC result travels base64 through env.execute stdin (Modal's legacy path caps
+    a stdin buffer at 2 MB): a big spill stays on disk, reported truncated with its path."""
+    spill = tmp_path / "out.log"
+    spill.write_text("x" * (3 * 1024 * 1024))
+    r, shipped = _file_rpc_result(monkeypatch, {
+        "output": WINDOW, "exit_code": 0, "error": None,
+        "output_total_chars": 3 * 1024 * 1024, "full_output_path": str(spill)})
+    assert r["output"] == WINDOW
+    assert r["truncated"] is True
+    assert r["full_output_path"] == str(spill)
+    assert shipped < 2 * 1024 * 1024
+    # The local socket transport still hands code the whole spill.
+    assert _rpc({"output": WINDOW, "exit_code": 0, "error": None,
+                 "full_output_path": str(spill)})["truncated"] is False
+
+
+def test_remote_file_rpc_ships_small_full_output(tmp_path, monkeypatch):
+    spill = tmp_path / "out.log"
+    spill.write_text("A" * 1000 + "MIDDLE" + "B" * 1000)
+    r, _ = _file_rpc_result(monkeypatch, {
+        "output": WINDOW, "exit_code": 0, "error": None, "full_output_path": str(spill)})
+    assert r["output"] == spill.read_text()
+    assert r["truncated"] is False
+
+
+def test_terminal_doc_line_names_what_the_spill_omits():
+    """Code gets the redacted raw stream: sudo notes and transform-hook rewrites that the
+    chat result carries are not in a spill-backed ``output``."""
+    from tools.code_execution_tool import _TOOL_DOC_LINES
+    doc = dict(_TOOL_DOC_LINES)["terminal"]
+    assert "raw" in doc and "hook" in doc
+
+
 def test_short_output_is_marked_complete():
     r = _rpc({"output": "hello", "exit_code": 0, "error": None})
     assert r["output"] == "hello"
