@@ -25,6 +25,7 @@ from cron.lifecycle_guard_groups import (
     heredoc_scripts, heredoc_views_overflow, iter_script_segment_contexts, join_continued_lines)
 from cron.lifecycle_guard_words import REDIRECTION as _REDIRECTION
 from cron.lifecycle_guard_words import redirection_parts, tokenize_redirections
+from cron.lifecycle_guard_fds import carry_exec_descriptors
 from cron.lifecycle_guard_lines import join_line_continuations
 # Lines a printer may print, walked as the sink's command (moved out for FILE_LINES).
 from cron.lifecycle_guard_printf import printed_argument_lines as _printed_argument_lines
@@ -793,7 +794,9 @@ def _iter_segment_contexts(
         return _opens_call_arguments(segment) and alias_names.isdisjoint(segment)
     for script in heredoc_scripts(command):
         yield from iter_script_segment_contexts(
-            join_continued_lines(_iter_command_token_lists(script)),
+            carry_exec_descriptors(
+                join_continued_lines(_iter_command_token_lists(script)), pattern=_REDIRECTION,
+                peel_reserved_words=_peel_reserved_words, control_chars=_CONTROL_CHARS),
             cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
             opens_call_arguments=opens_call, peel_reserved_words=_peel_reserved_words,
             stdin_redirections=lambda words: _split_redirections(words)[1])
