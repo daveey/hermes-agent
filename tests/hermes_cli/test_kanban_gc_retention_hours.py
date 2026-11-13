@@ -54,6 +54,19 @@ def test_unset_hours_keeps_days_type_exactly(board):
     assert value == 1 and type(value) is int
 
 
+def test_seeded_default_is_unset_and_keeps_days_behaviour(board):
+    """DEFAULT_CONFIG seeds hours as None (so `hermes config set` knows the key); with no user
+    value the merged config still yields the plain 7-day window."""
+    from hermes_cli.config import _validate_config_key
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["kanban"]["worktree_retention_hours"] is None
+    assert _validate_config_key("kanban.worktree_retention_hours") == (True, None)
+    _config("kanban: {}\n")
+    value = gc.retention_days()
+    assert value == DEFAULT_CONFIG["kanban"]["worktree_retention_days"] == 7 and type(value) is int
+
+
 @pytest.mark.parametrize("raw", ["-1", "-0.5", "'3'", "true", "false", ".nan", ".inf", "[3]", "{h: 3}"])
 def test_invalid_hours_disables_and_warns(board, caplog, raw):
     # A valid days key must not mask a bad hours key: the operator asked for hours.

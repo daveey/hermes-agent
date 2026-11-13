@@ -1375,6 +1375,12 @@ Worktree GC also covers done, failed, and cancelled tasks. After
 worktrees may be removed even with unpushed commits: their HEAD and history are
 first retained in the repository at `refs/hermes/kanban-archive/<task-id>/<commit>`.
 Zero disables this age-based archival; legacy clean, fully-pushed cleanup remains.
+For a sub-day window set `kanban.worktree_retention_hours` to a non-negative number
+of hours (fractions allowed, e.g. `3` or `1.5`); when set it takes precedence over
+`worktree_retention_days`, and `0` disables age-based archival. Unset or `null` (the
+default) keeps the days behaviour. An invalid value (a boolean, a string, NaN,
+infinity or a negative number) disables age-based archival and logs a warning; it
+never falls back to the days key. Remove the key to return to the days window.
 Dirty trees, locked trees, active tasks, active children and live shared workspaces
 are preserved. Custom branches remain; generated `wt/` branches are pruned only
 when their tip still matches the archived commit.

@@ -1,9 +1,11 @@
 """Archive-then-remove for aged terminal scratch workspaces holding git clones. [daveey]
 
 Completion cleanup and ``gc_task_scratch`` keep every scratch tree that holds
-Git metadata, so a worker's clone survives its card forever. Past
-``kanban.worktree_retention_days`` this module saves each standalone repo's
-unique work under ``<kanban home>/archive/scratch/<board>/<task>/<relpath>/``:
+Git metadata, so a worker's clone survives its card forever. Past the
+retention window (``kanban.worktree_retention_hours`` when set, else
+``kanban.worktree_retention_days``; see ``kanban_worktree_gc.retention_days``)
+this module saves each standalone repo's unique work under
+``<kanban home>/archive/scratch/<board>/<task>/<relpath>/``:
 
 * ``commits.bundle``: refs and HEAD not reachable from the repo's
   remote-tracking refs (omitted when there are none), verified before use;
