@@ -87,6 +87,14 @@ def handle_api_error(
     if agent.thinking_callback:
         agent.thinking_callback("")
 
+    if update_pause_cancel.model_yield_requested(agent):
+        # [daveey] t_01a1d293248f5e12: the core-update pause cancelled this boundary request and the cancel
+        # surfaced as a provider error: yield exactly as an InterruptedError would (turn_api_call).
+        # t_01a1d2bfdf5b5260: first, so the cancel is no API failure: no request-error hook, offline wait,
+        # recovery or credential rotation, retry count or error-attempt log.
+        yield_to_update_pause(_retry)
+        return _verdict("break")
+
     _recovered, active_system_prompt = recover_before_classification(
         agent, api_error, messages=messages, api_messages=api_messages, api_kwargs=api_kwargs,
         active_system_prompt=active_system_prompt,
@@ -207,11 +215,6 @@ def handle_api_error(
     )
 
     if agent._interrupt_requested:
-        if update_pause_cancel.model_yield_requested(agent):
-            # [daveey] t_01a1d293248f5e12: the core-update pause cancelled this boundary request and the
-            # cancel surfaced as a provider error: yield exactly as an InterruptedError would (turn_api_call).
-            yield_to_update_pause(_retry)
-            return _verdict("break")
         # Preserve a pending redirect: the user is steering, not stopping — rebuild the
         # turn from the correction instead of aborting.
         if agent.clear_interrupt(preserve_redirect=True):
