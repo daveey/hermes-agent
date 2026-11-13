@@ -401,6 +401,25 @@ def test_n4_a_gateway_turn_lease_hands_the_chat_back_like_ledger_work(env, monke
     assert _row(tid)[1] is None
 
 
+def test_gateway_owned_chat_skips_the_remote_collection_a_legacy_only_chat_keeps_it(env, monkeypatch):
+    """Review 5881224107 nit: an owned chat's remote notices were claimed each poll, then released at once by the
+    hand-back (``_kb_rewind_refused(not_owned=True)``). The gateway's ``kanban_remote_owner`` (or the sweep)
+    delivers them, so the legacy poller no longer claims them at all."""
+    _runner, authority, _adapter, _admitted = env
+    asked = []
+    monkeypatch.setattr(server, "_collect_remote_kanban_notifications",
+                        lambda key, claims: asked.append(key) or [])
+    session = _session()
+    _legacy_collect(session)
+    assert asked == [CHAT], "a legacy-only chat still collects its remote notices"
+
+    authority.sessions[CHAT] = _Live(CHAT)
+    authority.db.work(CHAT)  # the gateway owns the chat
+    _next_poll(session)
+    server._notif_poll_kanban_scoped("sid", session)
+    assert asked == [CHAT], "an owned chat's poll claims no remote notice"
+
+
 def test_legacy_only_idle_chat_still_delivers_once(env):
     runner, _authority, adapter, admitted = env
     tid = _card(local=False)

@@ -833,8 +833,8 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     """Claim unseen terminal kanban events for this session's ``platform="tui"`` subscriptions (``kanban_create``
     auto-subscribes with ``chat_id=HERMES_SESSION_KEY``; no "tui" messaging adapter exists, so this poller is the
     delivery path). Same atomic cursor-claim as the gateway notifier: exactly-once even if a gateway polls the same DB.
-
-    See #59890.
+    See #59890. An owned chat's remote notices: kanban_remote_owner or the sweep (a claim here was handed straight
+    back by ``_kb_rewind_refused(not_owned=True)`` each poll, review 5881224107 nit). [daveey]
     """
     session_key = str(session.get("session_key") or "")
     if not session_key or session.get("_finalized"):
@@ -856,12 +856,12 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
         unique.setdefault(resolved, slug)
     seen = session.setdefault("_kb_board_seen", {})
     stray, unreclaimed = _kb_stray_delegate_keys(session, session_key), []
-    _kb_gateway_owns(session)  # the live gateway's collector admits the rows it claims in one tick: skipped below
+    owned = _kb_gateway_owns(session)  # the gateway's collector admits the rows it claims in one tick: skipped below
     texts = [t for slug in unique.values() for t in _kb_poll_board(
         _kb, slug, session_key, claims, seen, stray=stray, unreclaimed=unreclaimed)]
     if stray and not unreclaimed:
         session["_kanban_stray_keys"] = ()  # every board is clean; stop probing
-    return texts + _collect_remote_kanban_notifications(session_key, claims)
+    return texts if owned else texts + _collect_remote_kanban_notifications(session_key, claims)
 
 
 _LINEAGE_TTL_S = 30.0
