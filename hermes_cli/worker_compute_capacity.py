@@ -134,9 +134,38 @@ def policy_root() -> Path:
 
     Worker enrollment uses this fixed Linux account installation. Custom profile
     roots remain valid for session data, but cannot disable host CPU policy.
+    The one exception is a test harness's temp root (:func:`_test_policy_override`).
     """
+    override = _test_policy_override()
+    if override is not None:
+        return override
     from hermes_constants import _account_home
     return _account_home() / '.hermes'
+
+
+def _test_policy_override(environ=None) -> Path | None:
+    """``HERMES_TEST_POLICY_ROOT``, honoured only as an absolute path under a temp root.
+
+    A non-pytest suite (state's unittest ``run-state-suite-local``) rebinds HOME,
+    which never moved :func:`policy_root`: a test's core child that claimed a card
+    registered its throwaway board in the REAL account inventory, and once the
+    test deleted it every claim on the host deferred ``worker_resources_unknown``
+    (worker-1, 2026-11-13, t_01a1d5bf526e1344). The suite points the policy at
+    its shard dir instead. Temp roots only: no setting can move a worker's
+    policy anywhere durable, so it cannot disable host CPU policy by accident.
+    """
+    import os
+    import tempfile
+    raw = (os.environ if environ is None else environ).get('HERMES_TEST_POLICY_ROOT', '')
+    if not raw or not os.path.isabs(raw):
+        return None
+    path = Path(os.path.realpath(raw))
+    # no-tmp: ok — recognises a harness's temp root; nothing is written here
+    for root in ('/tmp', '/var/tmp', '/dev/shm', tempfile.gettempdir()):
+        real = Path(os.path.realpath(root))
+        if path != real and path.is_relative_to(real):
+            return path
+    return None
 
 
 def worker_enabled() -> bool:
