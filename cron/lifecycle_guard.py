@@ -1111,6 +1111,61 @@ def _iter_referenced_shell_scripts(
             yield from _references_at(segment, peeled, cwd)
 
 
+# CPython short options that take a value (glued `-Wignore` or the next token), and the ones after
+# which no script FILE runs (`-c` inline code, `-m` module).
+_PYTHON_VALUE_SHORT_OPTIONS = frozenset("WX")
+_PYTHON_NO_SCRIPT_SHORT_OPTIONS = frozenset("cm")
+_PYTHON_VALUE_LONG_OPTIONS = frozenset({"--check-hash-based-pycs"})
+
+
+def _python_script_operand(arguments: list[str]) -> Optional[str]:
+    """The script file a CPython argv tail runs; ``None`` for ``-c``/``-m``/``-`` (stdin) or no
+    operand. Short-option clusters are read like CPython's getopt (`-uc code` is ``-u -c``)."""
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            index += 1
+            break
+        if argument == "-" or not argument.startswith("-"):
+            break
+        if argument.startswith("--"):
+            index += 2 if argument in _PYTHON_VALUE_LONG_OPTIONS else 1
+            continue
+        for position, flag in enumerate(argument[1:], start=1):
+            if flag in _PYTHON_NO_SCRIPT_SHORT_OPTIONS:
+                return None
+            if flag in _PYTHON_VALUE_SHORT_OPTIONS:
+                if position == len(argument) - 1:
+                    index += 1  # the value is the next token
+                break
+        index += 1
+    if index < len(arguments) and arguments[index] != "-":
+        return arguments[index]
+    return None
+
+
+def _iter_python_interpreter_scripts(command: str, *, cwd: Optional[str] = None) -> Iterator[Path]:
+    """Yield files a segment runs as ``python3 [options] <file>`` (also behind wrappers:
+    ``/usr/bin/env python3 <file>``). An interpreter is never itself a wrapper, so only the
+    executed command is read."""
+    for segment in _iter_command_segments(command):
+        index = _executed_command_index(segment)
+        if index is None or not _INTERPRETER_IMAGE_RE.match(_executable_name(segment[index]).lower()):
+            continue
+        operand = _python_script_operand(segment[index + 1 :])
+        if operand is not None:
+            yield from _resolved_or_nothing(operand, cwd)
+
+
+def _python_source_is_unsafe(text: str, budget: _LifecycleScanBudget) -> bool:
+    """Scan an interpreter-run Python file the way ``check_gateway_lifecycle`` scans a ``.py`` cron
+    script: the lifecycle regex with data-sink masking, never the shell reference walk (a
+    false-positive generator on Python sources, #77131). The masker tokenizes, so charge first;
+    text over the budget is not scanned and not refused (see ``_walk_candidates``)."""
+    return budget.charge_text(text) and _lifecycle_command_scan_with_data_exemption(text)
+
+
 def _iter_shell_command_payloads(command: str) -> Iterator[str]:
     """Yield code passed through ``sh|bash|... -c`` (and ``su -c`` / ``env -S``) for recursive
     scanning."""
@@ -1272,8 +1327,9 @@ def _read_script_for_scanning(script_path: str) -> tuple[str, Optional[str]]:
 def _walk_candidates(
     command: str, walk_command: str, *, cwd: Optional[str], executed: bool,
     budget: _LifecycleScanBudget,
-) -> Iterator[tuple[Path, bool]]:
-    """``(path, executed)`` for every path *command* references, executed candidates first.
+) -> Iterator[tuple[Path, bool, bool]]:
+    """``(path, executed, python_source)`` for every path *command* references, executed
+    candidates first.
 
     Paths named only inside a masked body are still READ: an interpreter body that hands
     `/x/restart.sh` to os.system() executes it. Only the fail-closed verdicts (cloud placeholder,
@@ -1284,6 +1340,11 @@ def _walk_candidates(
     unless an alias may turn its `NAME (` into a subshell (`alias T=' '; T ( bash big.sh )`). That
     is decided lazily, when the entry is reached: the executed candidates before it (a sourced
     script may define the alias) have been walked by then.
+
+    A file run as ``python3 <file>`` (masked or not) comes last, as ``python_source``: regex-scanned
+    only, never walked as shell, and never failed closed. A file the scan cannot read (oversized, a
+    stream such as ``/dev/stdin``, a device) ran before this scan existed, so only a lifecycle
+    command actually found in it blocks.
     """
     entries = [
         (path, executed, False) for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd)
@@ -1300,11 +1361,25 @@ def _walk_candidates(
                 command, cwd=cwd, call_arguments=call_arguments)
         ]
     for path, candidate_executed, call_argument in entries:
-        yield path, candidate_executed and (budget.aliases_possible or not call_argument)
+        yield path, candidate_executed and (budget.aliases_possible or not call_argument), False
+    # Python candidates are never executed (fail-closed) entries, so the unmasked text, a superset
+    # of the masked view, finds them all.
+    for path in _iter_python_interpreter_scripts(command, cwd=cwd):
+        yield path, False, True
+
+
+def _visit_key(resolved: Path, *, python_source: bool) -> object:
+    """A shell walk of a file subsumes its Python regex scan, never the reverse, so the two are
+    keyed apart in ``visited``."""
+    return (resolved, "python") if python_source else resolved
+
+
+def _already_visited(visited: set[object], resolved: Path, *, python_source: bool) -> bool:
+    return resolved in visited or _visit_key(resolved, python_source=python_source) in visited
 
 
 def _contains_unsafe_gateway_action(
-    command: str, *, cwd: Optional[str], depth: int, visited: set[Path], budget: _LifecycleScanBudget,
+    command: str, *, cwd: Optional[str], depth: int, visited: set[object], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
     source: Optional[str] = None,
 ) -> bool:
@@ -1321,7 +1396,11 @@ def _contains_unsafe_gateway_action(
     if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
         return _depth_limit_reached(budget, depth, executed=executed)
 
-    def recurse(text: str, cwd: Optional[str], executed: bool, source: Optional[str]) -> bool:
+    def recurse(
+        text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,
+    ) -> bool:
+        if python_source:
+            return _python_source_is_unsafe(text, budget)
         return _contains_unsafe_gateway_action(
             text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
             read_remote_script=read_remote_script, executed=executed, source=source,
@@ -1340,7 +1419,7 @@ def _contains_unsafe_gateway_action(
         if recurse(payload, cwd, executed, source):
             return True
 
-    for script_path, candidate_executed in _walk_candidates(
+    for script_path, candidate_executed, python_source in _walk_candidates(
             command, walk_command, cwd=cwd, executed=executed, budget=budget):
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
         if _on_cloud_path(script_path):
@@ -1352,13 +1431,13 @@ def _contains_unsafe_gateway_action(
                 )
             continue
         resolved = _resolve_lenient(script_path)
-        if resolved in visited:
+        if _already_visited(visited, resolved, python_source=python_source):
             continue
         if not budget.charge_path():
             if candidate_executed:
                 return _budget_exhausted(budget, "paths", depth)
             continue  # an alias may make a later call-argument entry executed
-        visited.add(resolved)
+        visited.add(_visit_key(resolved, python_source=python_source))
         # Never read more than the walk can still afford to tokenize; a file larger than the
         # remainder fails closed exactly like an oversized one.
         script_text, unsafe = _read_referenced_script(script_path, max_bytes=budget.bytes_remaining)
@@ -1389,7 +1468,7 @@ def _contains_unsafe_gateway_action(
         # Relative references inside a script resolve against that script's directory, not the cwd.
         if recurse(
             script_text, _resolve_script_directory(str(resolved)) or cwd, candidate_executed,
-            f"`{script_path}`",
+            f"`{script_path}`", python_source,
         ):
             return True
     return False
