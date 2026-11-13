@@ -478,6 +478,7 @@ class _LifecycleScanBudget:
     cloud placeholder) so the caller can tell the model the real reason (#113944)."""
 
     __slots__ = (
+        "aliases_possible",
         "bytes_remaining",
         "lines_remaining",
         "overrun",
@@ -500,6 +501,14 @@ class _LifecycleScanBudget:
         # Message-only: newlines a caller added when joining the root text (cron's empty-prompt
         # join). Charged like any line, never reported as the text's own; spent on the first charge.
         self.separator_lines = separator_lines
+        # Sticky for the whole walk: any walked text (the command, an eval payload, a sourced
+        # script) that may define an alias makes `NAME ( … )` possibly a keyword-led subshell.
+        self.aliases_possible = False
+
+    def note_aliases(self, text: str) -> None:
+        """Record (sticky) that walked *text* may define or enable an alias."""
+        if not self.aliases_possible:
+            self.aliases_possible = _may_define_alias(text)
 
     def charge_text(self, text: str) -> bool:
         """Charge *text* before tokenization; False when it does not fit (``overrun`` says why)."""
@@ -730,6 +739,7 @@ def _iter_command_segments(command: str) -> Iterator[list[str]]:
 # Words after which `(` still opens a command list (`if (cd x && ./y)`, `! (…)`, `time (…)`).
 _SUBSHELL_OPENING_WORDS = frozenset({
     "if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc", "in", "{",
+    "function",
 })
 
 
@@ -752,12 +762,21 @@ def _opens_call_arguments(segment: list[str]) -> bool:
                 index += 1
             if index < len(segment) and segment[index] == "--":
                 index += 1
-        elif word == "coproc" and index < len(segment):
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", segment[index]):
+        elif word in ("coproc", "function") and index < len(segment):
+            # `coproc NAME ( … )`; `function NAME ( … )` defines a function whose body is a subshell.
+            if word == "function" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", segment[index]):
                 index += 1
     if index == len(segment):
         return False
     return not segment[-1].endswith(("$", "<", ">", "="))
+
+
+def _may_define_alias(text: str) -> bool:
+    """Whether *text* may define or enable an alias (``alias T=' '``, ``BASH_ALIASES[T]=…``,
+    ``shopt -s expand_aliases``), even quote-split (``al''ias``) or ANSI-C quoted (``$'…'``).
+    An alias can expand to a keyword prefix, so ``T ( bash big.sh )`` may run a subshell."""
+    # Dropping every quote and backslash rejoins quote-split words (`al''ias`, `al\ias`).
+    return "alias" in re.sub(r"[\"'\\\\]", "", text).lower() or "$'" in text
 
 
 def _iter_positioned_command_segments(command: str) -> Iterator[tuple[list[str], bool]]:
@@ -1225,6 +1244,40 @@ def _read_script_for_scanning(script_path: str) -> tuple[str, Optional[str]]:
 
 # --- recursive walk ---------------------------------------------------------------------------
 
+def _walk_candidates(
+    command: str, walk_command: str, *, cwd: Optional[str], executed: bool,
+    budget: _LifecycleScanBudget,
+) -> Iterator[tuple[Path, bool]]:
+    """``(path, executed)`` for every path *command* references, executed candidates first.
+
+    Paths named only inside a masked body are still READ: an interpreter body that hands
+    `/x/restart.sh` to os.system() executes it. Only the fail-closed verdicts (cloud placeholder,
+    oversized/binary, budget) stay restricted to the executed view — a mere data mention must not
+    trip them. Executed candidates come first so a mention never starves a real script's budget. A
+    path in interpreter call syntax (`expanduser("~/x")`, `connect('/d/x.db')`) is a string
+    literal the shell never runs: a mention too, read and scanned but never a fail-closed verdict,
+    unless an alias may turn its `NAME (` into a subshell (`alias T=' '; T ( bash big.sh )`). That
+    is decided lazily, when the entry is reached: the executed candidates before it (a sourced
+    script may define the alias) have been walked by then.
+    """
+    entries = [
+        (path, executed, False) for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd)
+    ]
+    entries += [
+        (path, executed, True)
+        for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd, call_arguments=True)
+    ]
+    if walk_command != command:
+        entries += [
+            (path, False, False)
+            for call_arguments in (False, True)
+            for path in _iter_referenced_shell_scripts(
+                command, cwd=cwd, call_arguments=call_arguments)
+        ]
+    for path, candidate_executed, call_argument in entries:
+        yield path, candidate_executed and (budget.aliases_possible or not call_argument)
+
+
 def _contains_unsafe_gateway_action(
     command: str, *, cwd: Optional[str], depth: int, visited: set[Path], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
@@ -1239,6 +1292,7 @@ def _contains_unsafe_gateway_action(
         return _budget_exhausted(budget, "text", depth, source=source) if executed else False
     if _direct_lifecycle_scan(command):
         return True
+    budget.note_aliases(command)
     if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
         return _depth_limit_reached(budget, depth, executed=executed)
 
@@ -1260,26 +1314,8 @@ def _contains_unsafe_gateway_action(
         if recurse(payload, cwd, executed, source):
             return True
 
-    # Paths named only inside a masked body are still READ: an interpreter body that hands
-    # `/x/restart.sh` to os.system() executes it. Only the fail-closed verdicts (cloud placeholder,
-    # oversized/binary, budget) stay restricted to the executed view — a mere data mention must not
-    # trip them. Executed candidates come first so a mention never starves a real script's budget. A
-    # path in interpreter call syntax (`expanduser("~/x")`, `connect('/d/x.db')`) is a string
-    # literal the shell never runs: a mention too, read and scanned but never a fail-closed verdict.
-    candidates = [(path, executed) for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd)]
-    candidates += [
-        (path, False)
-        for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd, call_arguments=True)
-    ]
-    if walk_command != command:
-        candidates += [
-            (path, False)
-            for call_arguments in (False, True)
-            for path in _iter_referenced_shell_scripts(
-                command, cwd=cwd, call_arguments=call_arguments)
-        ]
-
-    for script_path, candidate_executed in candidates:
+    for script_path, candidate_executed in _walk_candidates(
+            command, walk_command, cwd=cwd, executed=executed, budget=budget):
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
         if _on_cloud_path(script_path):
             if candidate_executed:
@@ -1295,7 +1331,7 @@ def _contains_unsafe_gateway_action(
         if not budget.charge_path():
             if candidate_executed:
                 return _budget_exhausted(budget, "paths", depth)
-            break  # remaining candidates are all mentions
+            continue  # an alias may make a later call-argument entry executed
         visited.add(resolved)
         # Never read more than the walk can still afford to tokenize; a file larger than the
         # remainder fails closed exactly like an oversized one.
@@ -1310,7 +1346,7 @@ def _contains_unsafe_gateway_action(
             if not budget.charge_remote_read():
                 if candidate_executed:
                     return _budget_exhausted(budget, "remote reads", depth)
-                break
+                continue
             script_text, unsafe = _sanitize_remote_script_text(
                 read_remote_script(str(script_path)), max_bytes=budget.bytes_remaining
             )

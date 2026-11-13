@@ -690,3 +690,94 @@ def test_keyword_operands_before_parens_still_execute_scripts(tmp_path, prefix):
     _assert_bash_marker(tmp_path, command)
     unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
     assert unsafe is True and "scan cap" in refusal
+
+
+_REWRITE_STARTUP = "unset BASH_ENV\nexec 0< <(sed s/python3/bash/)\n"
+_WALK_ONLY_BODY = "python3 - <<'PY'\nbash -c 'hermes gateway \"restart\"'\nPY\n"
+
+
+@pytest.mark.parametrize("shape", [
+    "home-login", "home-long-login", "home-interactive", "env-home-login", "separate-line-home",
+    "prompt-command", "combined-flags", "nested", "remote",
+])
+def test_startup_files_and_prompt_hooks_cannot_authorize_nested_masking(tmp_path, shape):
+    """Review 5882059941 #1: login/interactive shells source `$HOME` startup files and run
+    PROMPT_COMMAND before each line; either can rewrite the stdin script (main refuses)."""
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    home = tmp_path / "home"
+    home.mkdir()
+    for name in (".bash_profile", ".profile", ".bashrc"):
+        (home / name).write_text(_REWRITE_STARTUP)
+    ssh = tmp_path / "ssh"
+    # Local SSH transport control; no network access.
+    ssh.write_text('#!/bin/sh\nshift\nexec /bin/sh -c "$*"\n')
+    ssh.chmod(0o755)
+    opener = {
+        "home-login": f"HOME={home} bash -l -s",
+        "home-long-login": f"HOME={home} bash --login -s",
+        "home-interactive": f"HOME={home} bash -i -s",
+        "env-home-login": f"env HOME={home} bash -l",
+        "separate-line-home": f"HOME={home}\nbash -l -s",
+        "prompt-command": "PROMPT_COMMAND='exec 0< <(sed s/python3/bash/)' bash --norc -i -s",
+        "combined-flags": f"HOME={home} bash -els",
+        "nested": f"HOME={home} bash -l -s",
+        "remote": f"ssh h 'HOME={home} bash -l -s'",
+    }[shape]
+    command = opener + " <<'R'\n" + _WALK_ONLY_BODY + "R\n"
+    if shape == "nested":
+        command = "bash -s <<'OUTER'\n" + command + "OUTER\n"
+    _assert_bash_marker(tmp_path, command)
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+    assert guard(command, cwd=str(tmp_path)) is True
+
+
+@pytest.mark.parametrize("opener", [
+    "zsh -s", "HOME=/untrusted zsh -s", "ZDOTDIR=/untrusted zsh", "ssh h 'zsh -s'",
+    "bash -i", "bash -l", "bash --login -s", "sh -il", "bash -H -s", "bash -k -s",
+    "HOME=/untrusted bash -s", "PROMPT_COMMAND=x bash -s", "PS1=x bash -s", "env PS0=x bash -s",
+])
+def test_startup_reading_shells_are_not_verbatim_stdin_shells(opener):
+    """zsh sources `$ZDOTDIR/.zshenv` on every start; -i/-l/-H/-k change how lines are read."""
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    command = opener + " <<'R'\npython3 - <<'PY'\nx\nPY\nR\n"
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("opener", ["bash -s", "bash -e -s", "sh -eu", "bash --norc --noprofile -s"])
+def test_plain_stdin_shells_still_nest_mask(opener):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    command = opener + " <<'R'\npython3 - <<'PY'\nx\nPY\nR\n"
+    assert strip_inert_heredoc_bodies(command, nested=True) != command
+
+
+def _keyword_led_subshell_command(tmp_path, shape):
+    big = tmp_path / "big.sh"
+    big.write_text("# padding\n" * 130000 + 'hermes gateway "restart"\n')
+    # No file or directory name may contain "alias": only the command text may enable aliases.
+    prefix = tmp_path / "prefix.sh"
+    prefix.write_text("shopt -s expand_aliases\nalias T=' '\n")
+    return {
+        "function": f"function f ( bash {big} ); f",
+        "alias-blank": f"shopt -s expand_aliases\nalias T=' '\nT ( bash {big} )",
+        "alias-time": f"shopt -s expand_aliases\nalias T=time\nT ( bash {big} )",
+        "alias-quote-split": f"shopt -s expand_al''iases\nal''ias T=' '\nT ( bash {big} )",
+        "alias-sourced": f"source {prefix}\nT ( bash {big} )",
+    }[shape]
+
+
+@pytest.mark.parametrize("shape", [
+    "function", "alias-blank", "alias-time", "alias-quote-split", "alias-sourced",
+])
+def test_keyword_led_subshells_still_execute_scripts(tmp_path, shape):
+    """Review 5882059941 #2: `function f ( … )` and alias-expanded keyword prefixes make `NAME (`
+    a subshell; the oversized-script refusal must survive (main refuses)."""
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    assert "alias" not in str(tmp_path).lower()
+    command = _keyword_led_subshell_command(tmp_path, shape)
+    _assert_bash_marker(tmp_path, command)
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe is True and refusal is not None and "scan cap" in refusal

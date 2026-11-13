@@ -52,8 +52,14 @@ _INERT_HEREDOC_WRAPPERS: dict[str, tuple[frozenset[str], re.Pattern[str], int]] 
 _ASSIGNING_WRAPPERS = frozenset({"env", "sudo"})
 # Outer owners whose quoted heredoc body a SHELL parses verbatim: only their bodies' nested
 # heredocs may be judged as shell text. A POSIX shell reading its script from stdin.
-_STDIN_SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
-_SHELL_FLAG_RE = re.compile(r"[-+][abefhkmnpstuvxBCEHPTil]+|--(?:login|noprofile|norc|posix)")
+# zsh is excluded: it sources ``$ZDOTDIR/.zshenv`` (default ``$HOME``) on every start, even a
+# non-interactive ``zsh -s``, and that file can rewrite the stdin script before zsh reads it.
+_STDIN_SHELLS = frozenset({"bash", "sh", "dash", "ksh"})
+# Flags that keep the shell non-interactive and non-login. ``-i``/``-l``/``--login`` source
+# startup files located by ``$HOME`` and run ``PROMPT_COMMAND``/``PS1`` before each line, which can
+# rewrite the stdin script; ``-H`` (history expansion) and ``-k`` (keyword assignments) change how
+# its lines are read. No word containing them, alone or combined, is a verbatim stdin shell.
+_SHELL_FLAG_RE = re.compile(r"[-+][abefhmnpstuvxBCEPT]+|--(?:noprofile|norc|posix)")
 _SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
 _SSH_FLAG_OPTIONS = frozenset("46AaCgKkMnqTtVvXxYy")
 _PURE_EXPANSION_RE = re.compile(r"^\$(?:\{[A-Za-z_]\w*(?::?[-=+?][^}]*)?\}|[A-Za-z_]\w*)$")
@@ -133,9 +139,11 @@ def _peeled_command(words: list[str]) -> tuple[int, str] | None:
 def _reserved_assignment(word: str) -> bool:
     """Environment words that invalidate interpreter/stream provenance."""
     name, separator, _value = word.partition("=")
+    # HOME/ZDOTDIR locate startup files; PROMPT_COMMAND/PSn run code before each line.
     return bool(separator) and (name in {
-        "PATH", "IFS", "ENV", "CDPATH", "GLOBIGNORE", "SHELLOPTS", "PS4",
-    } or name.startswith("BASH"))
+        "PATH", "IFS", "ENV", "CDPATH", "GLOBIGNORE", "SHELLOPTS", "HOME", "ZDOTDIR",
+        "PROMPT_COMMAND", "HISTFILE", "INPUTRC",
+    } or name.startswith("BASH") or re.fullmatch(r"PS\d", name) is not None)
 
 
 def _is_stdin_shell(words: list[str]) -> bool:
