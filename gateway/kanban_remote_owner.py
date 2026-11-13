@@ -37,6 +37,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 INTERVAL_S = 10.0
+SLOW_PASS_S = 5.0  # a pass longer than this logs its collect vs admit split (WARNING)
 PRODUCER = "kanban-wake"
 _DISPLAY_LIMIT = 2000  # session_automation._DISPLAY_TEXT_LIMIT
 
@@ -261,13 +262,20 @@ async def tick(runner: Any, *, force: bool = False) -> list[dict]:
         authority = _launch_authority(runner, None)
         if adapter is None or authority is None:
             return []
+        started = time.monotonic()
         plan = await asyncio.to_thread(_collect, runner, authority, _owned_lives(runner, authority))
+        collected = time.monotonic()
         out = []
         for live, ids, tip, items in plan:
             for item in items:
                 if await _admit(runner, adapter, live, ids, tip, item):
                     out.append(item)
+        done = time.monotonic()
+        if done - started > SLOW_PASS_S:  # the pass's own cost, separate from the FIFO's: t_01a1d4de28a8510d
+            logger.warning("remote kanban owner pass took %.1fs (collect %.1fs over %d chat(s), admit %.1fs for "
+                           "%d notice(s))", done - started, collected - started, len(plan), done - collected,
+                           sum(len(items) for *_, items in plan))
         return out
-    except Exception:  # health: allow BLE001 -- a failed pass never stops the notifier loop; the next pass retries
+    except Exception:  # health: allow BLE001 -- a failed pass never stops the remote owner watcher; the next pass retries
         logger.warning("remote kanban owner pass failed", exc_info=True)
         return []

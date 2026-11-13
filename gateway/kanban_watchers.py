@@ -75,6 +75,8 @@ class GatewayKanbanWatchersMixin:
             await self._sleep_between_ticks(lease.retry_interval())
         return False
 
+    _KANBAN_WATCHER_START_DELAY = 5.0  # seconds the notifier and remote owner watchers wait before their first pass
+
     async def _sleep_between_ticks(self, interval: float) -> None:
         """Sleep *interval* (floored to 1s) in 1s slices so stop() never waits a full interval."""
         interval = max(interval, 1.0)
@@ -137,7 +139,7 @@ class GatewayKanbanWatchersMixin:
         self._kanban_notifier_profile = notifier_profile
 
         # Initial delay so the gateway can finish wiring adapters.
-        await asyncio.sleep(5)
+        await asyncio.sleep(self._KANBAN_WATCHER_START_DELAY)
 
         # Stale done-sub GC: subs survive ``done``, so boards that never
         # archive would accumulate rows scanned every tick. One DELETE per
@@ -160,11 +162,38 @@ class GatewayKanbanWatchersMixin:
                     await _KanbanNotification(
                         self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
                     ).deliver()
-                # Remote cards' notices for busy chats this gateway owns (gateway/kanban_remote_owner.py). [daveey]
-                from gateway import kanban_remote_owner
-                await kanban_remote_owner.tick(self)
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
+            await self._sleep_between_ticks(interval)
+
+    async def _kanban_remote_owner_watcher(self, interval: Optional[float] = None) -> None:
+        """Admit remote cards' notices for busy chats this gateway owns (gateway/kanban_remote_owner.py). [daveey]
+
+        Its own cadence, not the notifier loop's: inline after the local deliveries, one slow pass (or a slow
+        delivery) delayed both, and the MacBook admitted busy-chat remote notices 13-88 s after it first saw
+        them (t_01a1d4de28a8510d). The only caller of ``kanban_remote_owner.tick`` (it is not re-entrant).
+        Stops between passes via ``_running``; a pass is never cancelled midway (a cancel during its
+        ``to_thread`` collect strands claims, and inside ``admit_route_wake`` it can commit with no ``_track``).
+        """
+        from gateway import kanban_remote_owner
+        try:
+            from hermes_cli.config import load_config as _load_config
+
+            cfg = await asyncio.to_thread(_load_config)
+            kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        except Exception:  # health: allow BLE001 -- config is advisory here: a bad file keeps the default (enabled), logged
+            logger.warning("kanban remote owner: cannot load config; continuing enabled", exc_info=True)
+            kanban_cfg = {}
+        if not kanban_cfg.get("notify_in_gateway", True):
+            logger.info("kanban remote owner: disabled via config kanban.notify_in_gateway=false")
+            return
+        # The notifier's profile context (``kanban_remote_owner._profile`` falls back to it).
+        if not getattr(self, "_kanban_notifier_profile", None):
+            self._kanban_notifier_profile = self._active_profile_name()
+        interval = kanban_remote_owner.INTERVAL_S if interval is None else interval
+        await asyncio.sleep(self._KANBAN_WATCHER_START_DELAY)  # as the notifier: let adapters wire up first
+        while self._running:
+            await kanban_remote_owner.tick(self, force=True)  # never raises
             await self._sleep_between_ticks(interval)
 
     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> Any:

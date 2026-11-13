@@ -23,6 +23,7 @@ import uuid
 
 import pytest
 
+from tests.waiting import async_wait_until
 from gateway import kanban_remote_owner as kro
 from gateway import session_automation
 from gateway.config import Platform
@@ -787,3 +788,81 @@ async def test_a_relabelled_local_wake_last_in_a_remote_batch_keeps_guidance_thr
         assert drained.count(GUIDANCE) == 1 and drained.endswith(GUIDANCE)
     finally:
         authority.db.close()
+
+
+def test_remote_notice_admitted_while_the_notifier_deliveries_are_blocked(env, monkeypatch):
+    """The remote owner pass has its own watcher and cadence (t_01a1d4de28a8510d): it ran inline after the
+    notifier's local deliveries, so a slow delivery or a slow pass held both and the MacBook admitted busy-chat
+    remote notices 13-88 s after it first saw them. A notifier stuck in a delivery must not hold it back."""
+    from gateway import kanban_watchers as kw
+    hub, runner, authority, fifo, db = env
+    authority.sessions[CHAT] = _Live(CHAT)
+    _busy(db, fifo)
+    runner._running = True
+    runner._KANBAN_WATCHER_START_DELAY = 0.0
+    in_delivery = asyncio.Event()
+    blocker = asyncio.Event()  # never set while the remote notice is waited for
+
+    class _StuckNotification:
+        def __init__(self, *a, **k):
+            pass
+
+        async def deliver(self):
+            in_delivery.set()
+            await blocker.wait()
+
+    monkeypatch.setattr(kw, "_notifier_collect", lambda *a, **k: [{"local": "delivery"}])
+    monkeypatch.setattr(kw, "_KanbanNotification", _StuckNotification)
+
+    async def scenario():
+        notifier = asyncio.ensure_future(runner._kanban_notifier_watcher(interval=1))
+        await asyncio.wait_for(in_delivery.wait(), 5)
+        owner = asyncio.ensure_future(runner._kanban_remote_owner_watcher(interval=1))
+        _publish(hub, [_done("t_01a1cfabf44499dd")])
+        try:
+            # within 2 owner-pass intervals (1 s each), plus slack for the pass itself
+            await async_wait_until(fifo.queued, timeout=2 * 1.0 + 0.5,
+                                   what="remote notice admitted within 2 owner-pass intervals")
+            assert not blocker.is_set() and not notifier.done()  # the local delivery is still stuck
+        finally:
+            runner._running = False
+            blocker.set()
+            await asyncio.wait_for(asyncio.gather(notifier, owner), 5)  # stopped between passes, not cancelled
+
+    asyncio.run(scenario())
+    [queued] = fifo.queued()
+    assert "t_01a1cfabf44499dd" in queued["text"]
+    assert _ledger("t_01a1cfabf44499dd")["holder_pid"] == os.getpid()  # claim in flight, not stranded
+
+
+def test_remote_owner_watcher_honours_notify_in_gateway(env, monkeypatch):
+    from hermes_cli import config as hc
+    _hub, runner, _authority, _fifo, _db = env
+    runner._running = True
+    calls = []
+    monkeypatch.setattr(hc, "load_config", lambda: {"kanban": {"notify_in_gateway": False}})
+    monkeypatch.setattr(kro, "tick", lambda *a, **k: calls.append(a))
+    asyncio.run(asyncio.wait_for(runner._kanban_remote_owner_watcher(interval=1), 2))
+    assert calls == []
+
+
+def test_the_notifier_loop_no_longer_runs_the_remote_owner_pass(env, monkeypatch):
+    """Exactly one caller of ``kro.tick`` (not re-entrant): the supervised remote owner watcher."""
+    from gateway import kanban_watchers as kw
+    _hub, runner, _authority, _fifo, _db = env
+    runner._running = True
+    runner._KANBAN_WATCHER_START_DELAY = 0.0
+    calls = []
+
+    async def tick(*a, **k):
+        calls.append(a)
+        return []
+
+    def collect(*a, **k):
+        runner._running = False  # one notifier pass
+        return []
+    monkeypatch.setattr(kro, "tick", tick)
+    monkeypatch.setattr(kw, "_notifier_collect", collect)
+    asyncio.run(asyncio.wait_for(runner._kanban_notifier_watcher(interval=1), 5))
+    assert calls == []
+    assert "_kanban_remote_owner_watcher" in GatewayRunner._PRE_RECONNECT_WATCHERS

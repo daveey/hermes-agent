@@ -487,15 +487,33 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
     return out
 
 
+class _ExpiredReason:
+    """The settle reason of an observed state past ``LATE_MAX_S``: ``transcript`` when the chat already has its row
+    (under another session id of it: nothing was lost), else ``expired``. Resolved lazily, by ``_claim_notice``,
+    only when the ledger has no row for it yet: every pass offers each expired card again, and one lineage scan
+    per card per pass cost the gateway's remote owner pass 12-20 s on two chats with 158 and 207 already-settled
+    expired cards (t_01a1d4de28a8510d). ``reason`` stays None until resolved. [daveey]"""
+
+    def __init__(self, transcript_has: Callable[[str, str], bool], key: str) -> None:
+        self.transcript_has, self.key = transcript_has, key
+        self.reason: Optional[str] = None
+
+    def __call__(self) -> str:
+        self.reason = "transcript" if self.transcript_has(self.key, "") else "expired"
+        return self.reason
+
+
 def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id, transcript_has,
-                  swept_key: Optional[tuple] = None, settle_reason: str = "stale") -> str:
+                  swept_key: Optional[tuple] = None,
+                  settle_reason: str | _ExpiredReason = "stale") -> str:
     """``offer`` a new or orphaned claim, ``acked`` when the transcript already has it, else ``skip``.
 
     A fresh claim is in flight (delivered=0, this process's pid + start). It becomes delivered only in
     :func:`ack`, after the transcript write. A holder that is gone is re-offered unless the key is already
     in the transcript. A state that is not fresh is recorded SETTLED (never DELIVERED, ``settled`` =
     ``settle_reason``) with a ``swept`` row carrying ``settle_reason`` when ``swept_key`` is given; that first
-    settle returns ``settled``.
+    settle returns ``settled``. An :class:`_ExpiredReason` is resolved only for that first settle (no row yet):
+    it may cost a transcript scan, which a row already in the ledger never needs.
 
     [daveey] The dead-holder check matches the claim's own key only. It used ``notice_in_transcript``'s legacy
     ``Kanban <task id>`` text match too, so ANY earlier notice of the same card (an earlier blocked state)
@@ -508,6 +526,9 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
         (session, ref, state)).fetchone()
     pid, start = _my_holder()
     if row is None:
+        if not fresh and isinstance(settle_reason, _ExpiredReason):
+            settle_reason = settle_reason()  # outside the write txn: it may scan the transcript
+        reason = str(settle_reason)
         with conn:
             conn.execute(
                 "INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, notice_key, "
@@ -516,8 +537,8 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
                  start if fresh else None, notice_key, 0 if fresh else 1))
             if not fresh:
                 conn.execute("UPDATE notices SET settled=? WHERE session=? AND ref=? AND state=?",
-                             (settle_reason, session, ref, state))
-                _swept_row(conn, swept_key, settle_reason)
+                             (reason, session, ref, state))
+                _swept_row(conn, swept_key, reason)
         return "offer" if fresh else "settled"
     if row["delivered"]:
         return "skip"
@@ -653,19 +674,20 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 # it in the late group). Only a seeded state (first snapshot) settles silently as ``stale``.
                 first_seen = _observed_first_seen(fresh_times, ident)
                 reason = "stale" if fresh or first_seen is None else _late_verdict(now, first_seen)
+                settle: str | _ExpiredReason = reason
                 if reason == "late":
                     fresh = True
-                elif reason == "expired" and transcript_has is not None and transcript_has(key, ""):
-                    reason = "transcript"  # already in the chat (another session id of it): nothing was lost
+                elif reason == "expired" and transcript_has is not None:
+                    settle = _ExpiredReason(transcript_has, key)
                 if fresh and skip is not None and conn.execute(
                         "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
                         (claim_session, ref, state)).fetchone() is None and skip(str(task["id"])):
-                    fresh, reason = False, "placeholder"  # recorded silently: the placeholder's notice covers it
+                    fresh, settle = False, "placeholder"  # recorded silently: the placeholder's notice covers it
                 swept_key = (str(path), profile, sid, _notice_id(card["gw"], card["key"], task, profile, sid))
                 verdict = _claim_notice(conn, session=claim_session, ref=ref, state=state, now=now, fresh=fresh,
                                         notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has,
-                                        swept_key=swept_key, settle_reason=reason)
-                if verdict == "settled" and reason == "expired":
+                                        swept_key=swept_key, settle_reason=settle)
+                if verdict == "settled" and getattr(settle, "reason", settle) == "expired":
                     _log_dropped(task, ref, state, claim_session, first_seen or 0.0, now)  # expired: observed
                 if verdict == "offer":
                     out.append(_notice_item(card, claim_session, me, profile, now))
