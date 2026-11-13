@@ -123,6 +123,60 @@ def test_dropped_init_state_reopens_through_connect(board, prepares):
     assert str(board.resolve()) in kbc._INITIALIZED_PATHS
 
 
+def test_recreated_shm_reopens_kept_connection(board):
+    """A new or missing ``-shm`` is a new WAL generation (kanban-759104eb56): a kept connection still maps the
+    deleted one and must be reopened, although the board file itself (inode, init state) did not change."""
+    from hermes_cli.kanban_lockguard import shm_identity
+
+    with kept.reading() as conn:
+        old = conn
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    key = gen._resolved(str(board))
+    assert getattr(old, "_hermes_generation_shm", None) == shm_identity(key) is not None
+    os.unlink(str(board) + "-shm")  # the idle kept connection now maps a deleted WAL index
+    with kept.reading() as conn:
+        assert conn is not old
+        assert getattr(conn, "_hermes_generation_shm", None) == shm_identity(key) is not None
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    assert _is_closed(old)
+
+
+def test_recovery_closed_connection_is_not_reused(board):
+    """Generation recovery closes a stale handle with ``conn.close()``, which only ``forget``s it in
+    ``kanban_generation``; the kept entry is not told. The next borrow must notice and reopen."""
+    from hermes_cli.kanban_lockguard import shm_identity
+
+    # Keep the WAL generation alive: otherwise last-close removes -shm and its
+    # independent identity check masks a missing recovery-closed check.
+    with kbc.connect_closing(board):
+        with kept.reading() as conn:
+            old = conn
+        key = gen._resolved(str(board))
+        identity = shm_identity(key)
+        assert identity is not None
+        old.close()  # recovery's close/forget boundary, without retiring the kept entry
+        assert old not in gen._connections
+        assert shm_identity(key) == identity
+        assert key in kbc._INITIALIZED_PATHS and key not in gen._poisoned
+        with kept.reading() as conn:
+            assert conn is not old
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_connection_left_in_transaction_is_not_kept_and_next_read_sees_new_write(board):
+    """A body that leaves a read transaction open must not leave that connection kept: its snapshot would serve
+    every later read stale."""
+    with kept.reading() as conn:
+        first = conn
+        conn.execute("BEGIN")
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0  # the snapshot starts here
+    assert _is_closed(first)
+    tid = _triage("written after the open snapshot")
+    with kept.reading() as conn:
+        assert conn is not first
+        assert [r["id"] for r in conn.execute("SELECT id FROM tasks")] == [tid]
+
+
 def test_idle_kept_connection_on_another_thread_is_evicted_by_recovery(board):
     """Generation recovery must be able to retire an idle kept connection parked on another thread; otherwise
     every other thread's open of a stranded board fails until that thread reads again."""

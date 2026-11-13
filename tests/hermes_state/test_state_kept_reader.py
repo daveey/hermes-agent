@@ -6,6 +6,7 @@ read-only handle reconciles nothing and opens once per file identity.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 from pathlib import Path
@@ -101,6 +102,56 @@ def test_replaced_file_reopens_the_kept_handle(state_db, opens):
     assert old._conn is None  # the stale handle was closed, not left on the old inode
 
 
+def test_state_sidecars_changed_reopens(state_db, opens):
+    """Same ``state.db`` inode, new WAL generation (its ``-wal``/``-shm`` deleted under the kept handle): the
+    handle may be stranded on the deleted index, so it is retired and a fresh one opened."""
+    with kept.read_only(state_db) as db:
+        old = db
+        assert db.get_session("s1") is not None
+    before = os.stat(state_db)
+    assert kept._sidecars(state_db), "a WAL reader keeps its sidecars while open"
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.unlink(str(state_db) + suffix)
+        except FileNotFoundError:
+            pass
+    assert (os.stat(state_db).st_dev, os.stat(state_db).st_ino) == (before.st_dev, before.st_ino)
+    with kept.read_only(state_db) as db:
+        assert db is not old
+        assert db.get_session("s1") is not None
+    assert len(opens) == 2
+    assert old._conn is None
+
+
+def test_state_db_replaced_reopens(state_db, opens):
+    """A replaced ``state.db`` whose sidecar identities happen to match (here: rollback-journal files with no
+    sidecars at all) is caught by the file identity alone."""
+    with contextlib.closing(sqlite3.connect(state_db)) as conn:
+        conn.execute("PRAGMA journal_mode=DELETE")
+    other = state_db.with_name("other.db")
+    fresh = SessionDB(other)
+    try:
+        fresh.create_session("s2", source="cli")
+    finally:
+        fresh.close()
+    with contextlib.closing(sqlite3.connect(other)) as conn:
+        conn.execute("PRAGMA journal_mode=DELETE")
+    for base in (state_db, other):
+        for suffix in ("-wal", "-shm"):
+            assert not os.path.exists(str(base) + suffix)
+    with kept.read_only(state_db) as db:
+        old = db
+        assert db.get_session("s1") is not None
+    sidecars = kept._sidecars(state_db)
+    os.replace(other, state_db)
+    assert kept._sidecars(state_db) == sidecars  # only the file identity tells the two files apart
+    with kept.read_only(state_db) as db:
+        assert db is not old
+        assert db.get_session("s2") is not None and db.get_session("s1") is None
+    assert len(opens) == 2
+    assert old._conn is None
+
+
 def test_closed_handle_is_replaced(state_db, opens):
     with kept.read_only(state_db) as db:
         db.close()
@@ -133,6 +184,18 @@ def test_registry_close_all_under_retires_kept_handles(state_db):
         pass
     hermes_state_registry.close_all_under(state_db.parent)
     assert db._conn is None
+
+
+def test_registry_close_all_retires_kept_handles(state_db):
+    """Gateway shutdown's ``close_all`` must retire kept read handles too, not only the shared writers."""
+    import hermes_state_registry
+
+    with kept.read_only(state_db) as db:
+        pass
+    hermes_state_registry.close_all()
+    assert db._conn is None
+    with kept.read_only(state_db) as again:
+        assert again is not db
 
 
 def test_notice_write_goes_through_the_shared_writer(state_db, monkeypatch):
