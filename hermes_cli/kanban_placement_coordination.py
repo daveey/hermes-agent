@@ -100,6 +100,8 @@ _HUB_READ_SSH = re.compile(r"\bssh[ \t]+hermes-hub[ \t]+(?:" + "|".join(HUB_READ
                            re.IGNORECASE)
 # A Hermes state path (same roots as ``kanban_placement.HERMES_STATE_PATH``). The path is an allow-list of path
 # characters, so a shell operator glued to it (``&&``, ``;``, ``:``, ``|``, ``$(``) ends it and stays in the text.
+# Text with ``cd ~/.hermes`` (the state directory itself) keeps every path (:data:`_CHDIR`), so it keeps pinning
+# (PR #2463 review 5895947424 nit).
 # The match must also end its shell word (:func:`_ends_word`), or a quoted, brace, ``$``, ``\\`` or glob remainder
 # (``logs/'..'``, ``logs/{..,x}``, ``logs/$(echo ..)``) would hide a ``..`` from :func:`_under_roots`
 # (reviews 5877418508, 5877782890). ``%`` is literal in shell (``%2e%2e`` is a directory name, not ``..``).

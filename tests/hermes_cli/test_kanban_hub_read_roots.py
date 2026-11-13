@@ -10,6 +10,35 @@ fleet = helpers.fleet
 ROOTS = ["logs", "cron", "kanban", "cache/core-update", "core-update", "cache/hermes-sync", "cache/delegation",
          "config.yaml", "coach", "user-steps", "inbox"]
 STEP = "Step 1: ssh hermes-hub grep X ~/.hermes/logs/hermes-sync.log and report the matches."
+# ``$HOME`` spellings and a home-relative path after a cd home are state paths too (review 5894942332 nit). The
+# roots clear only ``~``/``/home/<u>`` spellings, so a declared hub:read keeps these pinned even under a root.
+HOME_SPELLINGS = [
+    "ssh hermes-hub cat $HOME/.hermes/logs/x.log",
+    "ssh hermes-hub cat ${HOME}/.hermes/logs/x.log",
+    'ssh hermes-hub cat "$HOME"/.hermes/logs/x.log',
+    'ssh hermes-hub cat "${HOME}/.hermes/logs/x.log"',
+    "cat $HOME/.hermes/.env",
+    "cd ~ && cat .hermes/.env",
+    "cd ~ && cat .hermes/logs/x.log",
+    "cd $HOME && cat ./.hermes/logs/x.log",
+    'cd "${HOME}"; cat .hermes/logs/x.log',
+    "cd\ncat .hermes/.env",
+    "ssh hermes-hub cat ~/.hermes/logs/x.log; cd ~ && cat .hermes/.env",
+    "cd ~ && ssh hermes-hub cat ~/.hermes/logs/x.log && cat '.hermes/.env'",
+    # The state directory itself (PR #2463 review 5895947424 nit): a cd into it. No root clears it:
+    # _strip_read_paths keeps any text with such a cd.
+    "cd ~/.hermes && cat .env",
+    "cd $HOME/.hermes; cat .env",
+    'cd "${HOME}/.hermes" && cat logs/x.log',
+    "cd ~/.hermes/ && cat logs/x.log",
+    "pushd /home/ubuntu/.hermes && cat logs/x.log",
+    "cd ~ && cd .hermes && cat logs/x.log",
+]
+# A later cd elsewhere ends the home-relative span (review 5895947424 nit): a repo's own .hermes is no marker.
+REPO_RELATIVE = [
+    "cd ~ && git clone x repo && cd repo && cat .hermes/plans/p.md",
+    "cd $HOME\ncd code/x\ncat .hermes/notes.md",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -169,10 +198,23 @@ def test_malformed_roots_clear_nothing(attested, roots):
     "echo 'a '/home/ubuntu/.hermes/logs/' b/'.''.'/'.''.'/state.db'",
     "cat ~/.hermes/logs/x; D=~/.hermes/logs/; cat ${D%logs/}.env",
     "D=$(dirname ~/.hermes/logs/x); cat $(dirname $D)/.env",
-])
+] + HOME_SPELLINGS)
 def test_controls_still_pin(attested, body):
     cfg, _, _ = attested
     assert reason(body, cfg) == "home gateway marker"
+
+
+@pytest.mark.parametrize("body", HOME_SPELLINGS)
+def test_home_spellings_pin_an_undeclared_card(attested, body):
+    cfg, _, _ = attested
+    assert reason(body, cfg, requires=()) == "home gateway marker"
+
+
+@pytest.mark.parametrize("body", REPO_RELATIVE)
+def test_a_repo_relative_hermes_after_a_later_cd_does_not_pin(attested, body):
+    cfg, _, _ = attested
+    assert reason(body, cfg, requires=()) is None
+    assert reason(body, cfg) is None
 
 
 @pytest.mark.parametrize("body", [
