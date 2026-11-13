@@ -98,8 +98,9 @@ def _attach_plan(conn: sqlite3.Connection, claimed: Any, source: Any, grant: Any
     if (grant is _NO_SNAPSHOT or not isinstance(grant, ws.SourceSnapshot) or grant.has_source
             or claimed.workspace_kind != "worktree" or not ws.settings().enabled):
         return None
-    created_on = getattr(claimed, "created_on", None)
-    if not created_on or created_on != _me(conn):
+    row = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (claimed.id,)).fetchone()
+    created_on = row[0] if row else None
+    if created_on and created_on != _me(conn):  # NULL: created by this gateway (a local, never-imported row)
         return None
     return "legacy_adopt", 0, None
 
