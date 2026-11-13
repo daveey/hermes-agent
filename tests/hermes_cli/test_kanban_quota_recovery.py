@@ -114,6 +114,81 @@ def test_verified_proof_releases_its_cooldown(monkeypatch, tmp_path):
     assert sorted(c.args[2].id for c in complete.call_args_list) == ['acct1', 'acct1', 'acct2']
 
 
+def _gate_rows(path):
+    import sqlite3
+    from contextlib import closing
+    if not path.exists():
+        return []
+    with closing(sqlite3.connect(path)) as conn:
+        return [row[0] for row in conn.execute('SELECT key FROM proofs')]
+
+
+def test_expired_deadline_reserves_no_proof(monkeypatch, tmp_path):
+    """A deadline already spent before the gate leaves no 600 s bench without a failed proof."""
+    from hermes_cli import kanban_quota_recovery as recovery
+    gate = tmp_path / 'gate.db'
+    monkeypatch.setattr(recovery, '_proof_gate_path', lambda: str(gate))
+    _, pool = _gated_entries('acct1')
+    monkeypatch.setattr('agent.credential_pool.load_pool', lambda *a, **k: pool)
+    complete = Mock(return_value=True)
+    monkeypatch.setattr(recovery, 'completion_succeeds', complete)
+    assert not recovery.recover('anthropic', 'model', seconds=0)
+    assert _gate_rows(gate) == []
+    complete.assert_not_called()
+
+
+def test_deadline_lost_during_reservation_releases_rows(monkeypatch, tmp_path):
+    """The deadline passing while the gate is reserved releases every unprobed reservation."""
+    from hermes_cli import kanban_quota_recovery as recovery
+    gate = tmp_path / 'gate.db'
+    monkeypatch.setattr(recovery, '_proof_gate_path', lambda: str(gate))
+    _, pool = _gated_entries('acct1', 'acct2')
+    monkeypatch.setattr('agent.credential_pool.load_pool', lambda *a, **k: pool)
+    complete = Mock(return_value=True)
+    monkeypatch.setattr(recovery, 'completion_succeeds', complete)
+    real_reserve = recovery._reserve_proofs
+
+    def slow_reserve(*args, **kwargs):
+        allowed = real_reserve(*args, **kwargs)
+        assert len(_gate_rows(gate)) == 2
+        late = time.monotonic() + 1000
+        monkeypatch.setattr(recovery, 'time', SimpleNamespace(time=time.time, monotonic=lambda: late))
+        return allowed
+
+    monkeypatch.setattr(recovery, '_reserve_proofs', slow_reserve)
+    assert not recovery.recover('anthropic', 'model', seconds=30)
+    assert _gate_rows(gate) == []
+    complete.assert_not_called()
+
+
+def test_successful_late_proof_releases_its_row(monkeypatch, tmp_path):
+    """A proof that succeeds after the deadline cannot clear the bench but must drop its reservation."""
+    from hermes_cli import kanban_quota_recovery as recovery
+    from tests.waiting import wait_until
+    gate = tmp_path / 'gate.db'
+    monkeypatch.setattr(recovery, '_proof_gate_path', lambda: str(gate))
+    _, pool = _gated_entries('ok', 'walled')
+    monkeypatch.setattr('agent.credential_pool.load_pool', lambda *a, **k: pool)
+    release = threading.Event()
+    returned = []
+
+    def complete(provider, model, entry, deadline):
+        release.wait(5)
+        returned.append(entry.id)
+        return entry.id == 'ok'
+
+    monkeypatch.setattr(recovery, 'completion_succeeds', complete)
+    try:
+        assert not recovery.recover('anthropic', 'model', seconds=0.5)
+        assert len(_gate_rows(gate)) == 2  # both proofs still in flight
+    finally:
+        release.set()
+    wait_until(lambda: len(returned) == 2, what='late proofs to finish')
+    wait_until(lambda: _gate_rows(gate) == [recovery._proof_key('anthropic', 'model', SimpleNamespace(id='walled'))],
+               what='successful late proof to release its row')
+    pool.clear_verified_model_cooldown.assert_not_called()
+
+
 def test_broken_proof_gate_fails_open(monkeypatch, tmp_path):
     from hermes_cli import kanban_quota_recovery as recovery
     monkeypatch.setattr(recovery, '_proof_gate_path', lambda: str(tmp_path / 'missing-dir' / 'gate.db'))

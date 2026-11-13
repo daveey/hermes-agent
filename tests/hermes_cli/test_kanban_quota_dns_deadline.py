@@ -132,6 +132,20 @@ def test_unreaped_resolver_timeout_never_escapes(monkeypatch, child_ok):
     process.kill.assert_called_once_with()
 
 
+def test_completion_returns_false_when_resolver_spawn_raises_subprocess_error(monkeypatch):
+    """A SubprocessError from the resolver spawn (not an OSError) still reads as a failed proof."""
+    import httpx
+    import types
+
+    def spawn(*args, **kwargs):
+        raise subprocess.SubprocessError('resolver spawn failed')
+
+    monkeypatch.setattr(subprocess, 'Popen', spawn)
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(timeout=timeout, trust_env=False))
+    entry = types.SimpleNamespace(runtime_api_key='synthetic')
+    assert recovery.completion_succeeds('anthropic', 'm', entry, time.monotonic() + 5) is False
+
+
 def test_completion_returns_false_when_resolver_cannot_be_reaped(monkeypatch):
     import httpx
     import io

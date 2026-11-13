@@ -264,8 +264,9 @@ def recover(provider, model, *, seconds=None):
     Futures hold detached observations, never the pool. Timed-out futures can finish but cannot
     clear anything. Usage endpoints are intentionally not prerequisites: unknown usage is common.
     Each (provider, model, account) proof is reserved for FAILED_PROOF_COOLDOWN_SECONDS across
-    processes (released only by a completed proof), so a real wall costs one completion per
-    account per window, not one per Kanban start.
+    processes, so a real wall costs one completion per account per window, not one per Kanban
+    start. Only a proof that ran and did not succeed keeps its row: nothing is reserved past the
+    deadline, and unprobed or successful (even late) proofs release theirs.
     """
     from copy import deepcopy
     from agent.credential_pool import load_pool
@@ -282,16 +283,30 @@ def recover(provider, model, *, seconds=None):
     pool = load_pool(provider, allowed_auth_types={'oauth'})
     disabled = disabled_keys(provider)
     entries = [deepcopy(e) for e in pool.entries() if _eligible(e, provider, model, time.time(), disabled)]
-    if entries:
-        entries = _reserve_proofs(provider, model, entries, time.time())
+    # A reservation stands only for a proof that ran and did not succeed: never reserve past the
+    # deadline, and release rows that will not be probed or whose proof succeeded (even late).
     if not entries or time.monotonic() >= deadline:
         return False
+    entries = _reserve_proofs(provider, model, entries, time.time())
+    if not entries:
+        return False
+    if time.monotonic() >= deadline:
+        for entry in entries:
+            _release_proof(provider, model, entry)
+        return False
+
+    def settle(future, entry):
+        if future.cancelled() or (future.exception() is None and future.result()):
+            _release_proof(provider, model, entry)
+
     executor = ThreadPoolExecutor(max_workers=len(entries), thread_name_prefix='quota-proof')
     cleared = False
     verified = []
     try:
         futures = {executor.submit(copy_context().run, completion_succeeds, provider, model, e, deadline): e
                    for e in entries}
+        for future, entry in futures.items():
+            future.add_done_callback(lambda f, entry=entry: settle(f, entry))
         try:
             for future in as_completed(futures, timeout=max(0, deadline - time.monotonic())):
                 if time.monotonic() >= deadline:
