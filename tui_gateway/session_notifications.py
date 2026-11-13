@@ -833,8 +833,8 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     """Claim unseen terminal kanban events for this session's ``platform="tui"`` subscriptions (``kanban_create``
     auto-subscribes with ``chat_id=HERMES_SESSION_KEY``; no "tui" messaging adapter exists, so this poller is the
     delivery path). Same atomic cursor-claim as the gateway notifier: exactly-once even if a gateway polls the same DB.
-    See #59890. An owned chat's remote notices: kanban_remote_owner or the sweep (a claim here was handed straight
-    back by ``_kb_rewind_refused(not_owned=True)`` each poll, review 5881224107 nit). [daveey]
+    See #59890. An owned chat's remote notices: kanban_remote_owner while it holds the chat's work, else this poller
+    once ownership ends; the sweep skips live chats (a claim here was handed straight back, review 5890277360). [daveey]
     """
     session_key = str(session.get("session_key") or "")
     if not session_key or session.get("_finalized"):
