@@ -9,7 +9,9 @@ An open card matches when:
 - the new card names its board, is not being created on that board, and the titles share a word (for a
   plain-word slug, 2 words that are a quarter of the longer title: one shared word or a hostname with any of
   the hundreds of cards on ``bb`` or ``hermes`` is chance, not overlap), or
-- both titles share at least half of the longer title's significant words (3 or more).
+- both titles share at least half of the longer title's significant words (3 or more), or
+- both titles name the same code file (``tests/run_ci.py`` / ``run_ci.py``) and share 6 or more significant words
+  that are at least 30% of the longer title (:func:`code_files`).
 
 The hermes-mods core mirror is a singleton job: a whole ``mirror`` token plus
 ``hermes-mods``, ``core``, or both ``fork`` and ``backlog`` matches regardless of score
@@ -259,7 +261,33 @@ def _reasons(card: dict, new_words: set[str], title: str, body: str, target_boar
         # The title ratio alone: a failure match sets score to 1.0 without any title overlap.
         if len(shared) >= MIN_SHARED and ratio >= 0.5:
             reasons.append(f"titles share {len(shared)} words ({', '.join(sorted(shared))})")
+        elif len(shared) >= MIN_FILE_SHARED and ratio >= FILE_SCORE and (same := code_files(title)
+                                                                          & code_files(card.get("title") or "")):
+            reasons.append(f"titles name {', '.join(sorted(same))} and share {len(shared)} words "
+                           f"({', '.join(sorted(shared))})")
     return reasons, score
+
+
+# Shared code file (t_01a1d290dc768ba1): "State suite: ... runs tests/run_ci.py on a pool worker ..." and "Local full
+# state suite on pool workers: run_ci.py fails ..." were one job across two gateways, but long descriptive titles
+# shared 8 of 19 words, under half. A file both titles name is a strong signal, like a shared failing test; with 6
+# shared words, replayed over 14 days of replica cards (8112 creates, 482 naming a file), it adds 2 refusals, both
+# true duplicates, and no false one; 3 more fire but cite the open card by id and are admitted (see _find).
+# A dotted basename is one name: ``sync-handoff.test.ts``, never its ``test.ts`` suffix (every vitest file has it).
+_CODE_FILE = re.compile(r"(?<![\w.-])(?:[\w.~-]+/)*((?:[\w-]+\.)*[\w-]*[a-z][\w-]*\."
+                        r"(?:py|sh|ts|tsx|js|mjs|cjs|json|jsonl|ya?ml|"
+                        r"toml|sql|md|swift|rs|go|rb|plist|service|timer|db))\b", re.IGNORECASE)
+MIN_FILE_SHARED = 6
+FILE_SCORE = 0.3
+
+
+def code_files(title: str) -> frozenset[str]:
+    """File basenames a title names (``tests/run_ci.py`` and ``run_ci.py`` are both ``run_ci.py``)."""
+    return frozenset(m.lower() for m in _CODE_FILE.findall(title or ""))
+
+
+def _file_reason(why: str) -> bool:
+    return why.startswith("titles name ")
 
 
 # Target identity (overlap audit t_01a189c70884fa59). Shared title words say two cards are the same KIND of work;
@@ -689,8 +717,8 @@ def _find(*, title: str, body: str, target_board: str, session_id: Optional[str]
             mine = _identity(title, body, gateways)
         admit = (f"waits on {card['id']}" if waits_on(card["id"], title, body)
                  else f"recovers {card['id']}" if recovers(card["id"], title, card.get("title") or "")
-                 # A failure-only match the new card cites by id was written knowing that owner.
-                 else f"cites {card['id']}" if (all(_failure_reason(r) for r in reasons)
+                 # A failure- or file-only match the new card cites by id was written knowing that owner.
+                 else f"cites {card['id']}" if (all(_failure_reason(r) or _file_reason(r) for r in reasons)
                                                 and cites(card["id"], title, body))
                  else _distinct(mine, _identity(card.get("title") or "", card.get("body") or "", gateways)))
         if admit and not singleton:
