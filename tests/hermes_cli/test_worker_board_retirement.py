@@ -1,4 +1,6 @@
 """Removal cannot strand account registrations or race final admission."""
+import errno
+import os
 import sqlite3
 from pathlib import Path
 
@@ -118,6 +120,27 @@ def test_post_rename_failure_retires_proven_idle_record(registered, monkeypatch)
     assert not path.exists()
     assert not list((root / 'worker-resources' / 'boards').glob('*.json'))
     inventory.paths()  # must not poison all account claims
+
+
+def test_unreadable_board_after_failed_removal_keeps_registration(registered, monkeypatch):
+    """removing()'s finally: a stat that fails with anything but ENOENT is not
+    proof of removal (``except OSError: removed = False``), so the record stays
+    and the body's own error, not the PermissionError, propagates."""
+    root, path = registered
+    blocked = os.fspath(path.resolve())
+    real_stat = os.stat
+
+    def denied_stat(target, *args, **kwargs):
+        if isinstance(target, (str, os.PathLike)) and os.fspath(target) == blocked:
+            raise PermissionError(errno.EACCES, 'Permission denied', blocked)
+        return real_stat(target, *args, **kwargs)
+
+    with pytest.raises(RuntimeError, match='fixture removal failed'):
+        with monkeypatch.context() as denied, inventory.removing(path):
+            path.unlink()  # absent underneath: only the EACCES hides it
+            denied.setattr(os, 'stat', denied_stat)
+            raise RuntimeError('fixture removal failed')
+    assert list((root / 'worker-resources' / 'boards').glob('*.json'))
 
 
 def test_enabled_metadata_only_board_can_be_removed(registered):

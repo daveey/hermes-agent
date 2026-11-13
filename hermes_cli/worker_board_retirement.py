@@ -35,6 +35,13 @@ def missing(path: Path) -> bool:
     OSError, while 3.11-3.13 raise e.g. PermissionError. Inventory and
     retirement decisions must not depend on that: an unreadable path read as
     absent would drop or retire a board silently instead of refusing loudly.
+
+    ENOTDIR is deliberately not absence either (3.11-3.13 ``exists()`` said
+    False): a path component that is a regular file (e.g. ``kanban`` or
+    ``worker-resources`` is a file) is a broken layout, so NotADirectoryError
+    propagates rather than silently dropping every record under it. A caller
+    that wants a non-directory entry to mean "no board" says so itself
+    (``worker_account_boards._board_file`` for a board slug).
     """
     try:
         path.stat()

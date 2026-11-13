@@ -241,6 +241,27 @@ def test_unreadable_inventory_location_refuses_instead_of_dropping(monkeypatch, 
         inventory.paths()
 
 
+@pytest.mark.parametrize('parent', ['worker-resources', 'kanban'])
+def test_regular_file_inventory_parent_refuses_instead_of_dropping(monkeypatch, tmp_path, parent):
+    """ENOTDIR is not absence: a regular file where the inventory directory's
+    parent belongs is a broken layout, so paths() raises NotADirectoryError
+    (3.11-3.13 ``Path.exists()`` returned False and would drop the records)."""
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
+    (tmp_path / 'kanban.db').touch()
+    (tmp_path / parent).write_text('not a directory')
+    with pytest.raises(NotADirectoryError):
+        inventory.paths()
+
+
+def test_regular_file_board_slug_is_no_board(monkeypatch, tmp_path):
+    """Contrast: ``_board_file`` absorbs ENOTDIR for a single slug entry only."""
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
+    boards = tmp_path / 'kanban' / 'boards'
+    boards.mkdir(parents=True)
+    (boards / 'stray').write_text('not a board directory')
+    assert inventory.paths() == []
+
+
 def test_unreadable_registration_record_is_not_rewritten(monkeypatch, tmp_path):
     """register() treats only a missing record as absent; EACCES propagates."""
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
