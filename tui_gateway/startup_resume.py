@@ -137,7 +137,10 @@ def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, 
         if row["profile"]:
             params["profile"] = row["profile"]
         try:
-            env = resume(f"startup-resume-{next(_ids)}", params) or {}
+            from agent.local_work_agent import scope as work_scope
+            # Reserve before session.resume's agent build/prompt prep; the idle marker scan stays free.
+            with work_scope("sweep", "startup_resume.session.resume"):
+                env = resume(f"startup-resume-{next(_ids)}", params) or {}
         except Exception as exc:  # one bad session must not stop the rest
             logger.warning("startup resume of %s failed", row["session_key"], exc_info=True)
             results.append({**row, "ok": False, "error": str(exc)})

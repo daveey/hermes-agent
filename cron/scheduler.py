@@ -2081,8 +2081,11 @@ def _run_agent_with_watchdog(
     _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     # Carry scheduler-scoped ContextVar state (e.g. env passthrough) into the worker thread.
     _cron_context = contextvars.copy_context()
-    _cron_future = _cron_pool.submit(
-        _cron_context.run, agent.run_conversation, prompt, task_id=task_id)
+    from agent import local_work_agent
+    from functools import partial
+    _cron_future = local_work_agent.submit(
+        _cron_pool, partial(_cron_context.run, agent.run_conversation, prompt, task_id=task_id),
+        kind="cron_agent", source="cron.scheduler.run_job")
     if worker_state is not None:
         worker_state["future"] = _cron_future
     _inactivity_timeout = False
@@ -3062,7 +3065,15 @@ def _run_with_fire_claim_heartbeat(job: dict, run, *, execution_token: Optional[
         heartbeat_thread.join(timeout=1.0)
 
 
-def run_one_job(
+def run_one_job(job: dict, **kwargs) -> bool:
+    """Run ONE due job (see ``_run_one_job_unscoped``). Reserves at entry so claim/setup before the agent
+    reservation (``run_job``) is covered; cron itself is never gated by quiet."""
+    from agent import local_work_agent
+    with local_work_agent.scope("cron_fire", "cron.scheduler.run_one_job"):
+        return _run_one_job_unscoped(job, **kwargs)
+
+
+def _run_one_job_unscoped(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, cancel_event: Optional[_CancelEventLike] = None,
 ) -> bool:
@@ -4591,7 +4602,12 @@ def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, p
             release_running_job(j["id"], home=home, owner=registration_owner)
 
     try:
-        fut = pool.submit(_run_and_release)
+        from agent import local_work_agent
+        # Reserve before the pool can start the fire; the worker's outermost finally (after the claim release)
+        # releases. Home is the job's claim home (cron-only homes stay known to the registry).
+        fut = local_work_agent.submit(
+            pool, _run_and_release, kind="cron_fire", source="cron.scheduler._submit_with_guard",
+            home=str(_claim_home))
     except Exception as submit_err:
         release_running_job(job_id, home=_claim_home, owner=registration_owner)
         _clear_run_claim_best_effort()

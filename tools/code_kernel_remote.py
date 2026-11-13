@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tools.code_kernel import RUNNER_CELL_SOURCE, KernelRegistry, stale_modules_warning
+from tools.code_kernel_scope import tracked_thread as _tracked_thread
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +410,9 @@ def _run_attached_cell(kernel: RemoteKernel, key: tuple, code: str, *, env, task
     tool_call_counter, tool_call_log, stop_event = [0], [], threading.Event()
     # Per-cell RPC thread carrying THIS call's approval/session context — the remote analogue
     # of CellAuthority: authority lives exactly as long as the cell's poll loop.
-    rpc_thread = threading.Thread(
+    # Tracked: a join(timeout=5) that expires leaves this thread counted until it exits.
+    rpc_thread = _tracked_thread(
+        "rpc_poll_thread", "code-kernel-remote-rpc-poll",
         target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
         args=(env, f"{kernel.kernel_dir}/rpc", task_env_id, tool_call_log, tool_call_counter,
               max_tool_calls, sandbox_tools, stop_event, kernel.rpc_token))

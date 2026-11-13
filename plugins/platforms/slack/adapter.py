@@ -4821,7 +4821,7 @@ class SlackAdapter(SlackSocketLifecycleMixin, BasePlatformAdapter):
             is_bot=self._event_declares_bot_sender(event) or await self._resolve_user_is_bot(
                 user_id, chat_id=channel_id, team_id=team_id))
         source.shared_session = event.get("channel_type") == "mpim"  # a group DM keys "dm" but is shared
-        from gateway.platforms.base import resolve_channel_skills
+        from gateway.platforms.base_channel_skills import resolve_channel_skills
         # Remaining ``<@UID>`` are OTHER participants (own mention stripped
         # above); render as ``@DisplayName`` so the agent knows who is addressed.
         text = await self._humanize_user_mentions(text, chat_id=channel_id, team_id=team_id)
@@ -6211,7 +6211,7 @@ class SlackAdapter(SlackSocketLifecycleMixin, BasePlatformAdapter):
         source = self.build_source(
             chat_id=channel_id, chat_type="dm" if is_dm else "group", user_id=user_id,
             thread_id=thread_id, scope_id=team_id or None)
-        from gateway.platforms.base import resolve_channel_skills
+        from gateway.platforms.base_channel_skills import resolve_channel_skills
         event = MessageEvent(
             text=text,
             message_type=(MessageType.COMMAND if text.startswith("/") else MessageType.TEXT),

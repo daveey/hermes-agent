@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from agent.thread_scoped_output import thread_scoped_silence
+from tools.code_kernel_scope import scope as _local_scope
 from tools.registry import tool_error
 
 # Logger name kept as the origin module's so existing log expectations hold.
@@ -109,9 +110,16 @@ def _rpc_token_ok(request: dict, rpc_token: str) -> bool:
     )
 
 
-def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_counter: list,
-                        max_tool_calls: int, dispatch, tool_call_log: list, call_start: float,
-                        where: str, full_output_cap: int | None = None) -> str:
+def _handle_rpc_request(request: dict, **kwargs) -> str:
+    """Local-work seam: reserve FIRST (before allow-list/budget/dispatch, so a late callback
+    invalidates quiet before any processing, refusals included); release in finally."""
+    with _local_scope("tool_dispatch", "code-execution-rpc"):
+        return _handle_rpc_request_body(request, **kwargs)
+
+
+def _handle_rpc_request_body(request: dict, *, allowed_tools: frozenset, tool_call_counter: list,
+                             max_tool_calls: int, dispatch, tool_call_log: list, call_start: float,
+                             where: str, full_output_cap: int | None = None) -> str:
     """Enforce allow-list + budget, then dispatch one authenticated request. Only a dispatched
     call consumes budget and is logged; refusals are free. ``full_output_cap`` (the remote
     file-RPC transport) bounds the shipped bytes of every result: a terminal() result inlines
@@ -286,16 +294,18 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
                 if not line:
                     continue
                 call_start = time.monotonic()
-                try:
-                    request = json.loads(line.decode())
-                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    resp = tool_error(f"Invalid RPC request: {exc}")
-                else:
-                    resp = _handle_rpc_request(
-                        request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
-                        max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
-                        call_start=call_start, where="sandbox",
-                    ) if _rpc_token_ok(request, rpc_token) else tool_error("Unauthorized RPC request")
+                # Reserve before parse/auth: even refused late requests invalidate quiet.
+                with _local_scope("tool_dispatch", "code-execution-rpc-socket"):
+                    try:
+                        request = json.loads(line.decode())
+                    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                        resp = tool_error(f"Invalid RPC request: {exc}")
+                    else:
+                        resp = _handle_rpc_request(
+                            request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
+                            max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
+                            call_start=call_start, where="sandbox",
+                        ) if _rpc_token_ok(request, rpc_token) else tool_error("Unauthorized RPC request")
                 conn.sendall(_wire_bytes(resp + "\n"))
     except TimeoutError:
         logger.debug("RPC listener socket timeout")

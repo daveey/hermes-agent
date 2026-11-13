@@ -434,6 +434,17 @@ class _KanbanDispatcher:
     @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
         """Decompose one triage task; returns 1 on success, 0 otherwise."""
+        # The autonomous agent/auxiliary call starts here: recheck the claim-quiet lease immediately before it
+        # and skip only this attempt (the triage card stays as it was). Read-only; uncertain reads are open.
+        try:
+            from agent.claim_quiet import read_active
+            lease = read_active()
+        except Exception:  # health: allow BLE001 -- a failed quiet read must fail open, never block decomposition
+            lease = None
+        if lease is not None:
+            logger.info("kanban auto-decompose [%s]: %s skipped: claim-quiet episode %s (deferred to a later tick)",
+                        slug, tid, lease.episode_id)
+            return 0
         try:
             outcome = _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:

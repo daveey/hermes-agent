@@ -25,6 +25,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.thread_context import propagate_context_to_thread
+from tools.code_kernel_scope import tracked_thread as _tracked_thread
 from tools.registry import registry, tool_error
 
 from hermes_time import get_timezone_name
@@ -620,7 +621,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         # Wrapped so the thread inherits the turn's approval context + callbacks
         # (tools.thread_context) — else sandbox RPC tool calls lose approval routing.
         # See #30882.
-        rpc_thread = threading.Thread(
+        rpc_thread = _tracked_thread(
+            "rpc_poll_thread", "code-execution-rpc-poll",
             target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
             args=(env, f"{sandbox_dir}/rpc", effective_task_id, tool_call_log, tool_call_counter,
                   max_tool_calls, sandbox_tools, stop_event, rpc_token))

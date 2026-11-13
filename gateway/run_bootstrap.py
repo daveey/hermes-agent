@@ -429,6 +429,9 @@ async def _start_gateway_start_control_socket(runner):
         from gateway.webapp_listener import register_control_verbs
         from hermes_constants import get_hermes_home
         register_control_verbs(runner, get_hermes_home(), server=_control_server)
+        # Quiet-v3 observer handlers (private, measurement bookkeeping); refuse until attestation finalizes.
+        from gateway.quiet_control import register_quiet_control
+        register_quiet_control(runner, _control_server)
         if not await _control_server.start():
             _control_server = None
         else:
@@ -847,6 +850,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     """Run the gateway without ever turning an inherited daemon TTY (tmux respawn loop, hidden
     Windows console) into a lazy-install ``input()`` prompt that blocks the event loop (#125607)."""
     from pm.extras import suppress_interactive_install_prompts
+    # The loop's default executor is scope-aware from the first instruction on the gateway loop,
+    # before any work-producing callback (config load, plugins, adapters, recovery, cron).
+    import asyncio
+
+    from hermes_cli.local_work_threads import install_scope_default_executor
+    install_scope_default_executor(asyncio.get_running_loop())
     with suppress_interactive_install_prompts():
         return await _start_gateway_runtime(config, replace, verbosity, force, idle_exit)
 
@@ -877,6 +886,10 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
     )
     # Set here (not at import) so incidental gateway.run imports from CLI code don't poison it.
     os.environ["HERMES_EXEC_ASK"] = "1"
+    # Quiet-v3: capture the bootstrap-installed work registry before config/plugin initialization can start
+    # any work; absence is recorded later as unknown 'unattested_bootstrap' (never a late install).
+    from gateway.quiet_control import capture_bootstrap_registry
+    capture_bootstrap_registry()
     from hermes_cli.update_proxy_env import restore_user_proxy_env
     restore_user_proxy_env()  # a gateway an update restarted keeps the user's proxy env, not the update's
     _start_gateway_resolve_terminal_cwd()
@@ -961,6 +974,8 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
             runner = GatewayRunner(resolved_config)
         finally:
             unpin_launch_store(_launch_store_pin)
+        from gateway.quiet_control import bind_registry
+        bind_registry(runner)
         await initialize_gateway_runtime(runner)
         # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
         # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
@@ -1052,6 +1067,8 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
             await await_session_socket_preload(ws_preload)
             # READY only once adapters, cron and housekeeping run; missing systemd state just disables watchdog.
             publish_gateway_runtime_ready(runner)
+            from gateway.quiet_control import finalize_attestation
+            finalize_attestation(runner)
             runner._start_systemd_watchdog()
             if idle_exit:
                 from gateway.run_idle_exit import arm_unmanaged_idle_exit

@@ -576,7 +576,9 @@ async def dispatch_shared_busy(adapter, event, session_key, *, durable=False):
 
     token, commit_token = busy_acceptance.set(accepted), busy_commit.set(committed)
     try:
-        task = asyncio.create_task(observe())
+        from hermes_cli.local_work_threads import create_tracked_task
+        task = create_tracked_task(lambda: asyncio.create_task(observe()), 'gateway_ingress',
+                                   f'{adapter.name}:busy_follow_up')
     finally:
         busy_acceptance.reset(token)
         busy_commit.reset(commit_token)

@@ -27,9 +27,18 @@ def ctx_bound(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def spawn_context_thread(target: Callable[..., Any], *, name: str, daemon: bool = True,
-                         args: tuple = (), kwargs: Optional[dict[str, Any]] = None) -> threading.Thread:
-    """Unstarted thread running *target* under the spawner's contextvars (see :func:`ctx_bound`).
-    Every memory-provider background job (prefetch, sync, writer loops) must go through this."""
+                         args: tuple = (), kwargs: Optional[dict[str, Any]] = None,
+                         passive: bool = False) -> threading.Thread:
+    """Unstarted context-bound thread; scoped work retains physical custody.
+
+    ``passive`` is only for reviewed infrastructure, never detached agent work.
+    Ownership is captured here but reservation begins at start(), not construction.
+    """
+    from hermes_cli.local_work import ACTIVE_SCOPE
+    from hermes_cli.local_work_threads import TrackedThread
+
+    if ACTIVE_SCOPE.get() is not None and not passive:
+        return TrackedThread(target=target, args=args, kwargs=kwargs, name=name, daemon=daemon)
     return threading.Thread(target=ctx_bound(target), args=args, kwargs=kwargs, name=name, daemon=daemon)
 
 # v1 = best-effort on_pre_compress() with the raw message list; v2 = opt-in fail-closed

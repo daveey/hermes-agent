@@ -49,6 +49,17 @@ def _profile_label(profile_id) -> str:
     return profile_name_for_home(text) or 'default'
 
 
+def _method_work_scope(method):
+    """Entry scope for an authority-path verb; same classification as ``rpc_dispatch._activity_scope``.
+    Passive polling (``contracts.activity.PASSIVE_METHODS``) never reserves."""
+    from contextlib import nullcontext
+    from tui_gateway.contracts import activity
+    if not activity.is_work(method):
+        return nullcontext()
+    from agent import local_work_agent
+    return local_work_agent.scope("rpc", f"rpc:{method}" if isinstance(method, str) and method else "rpc:invalid")
+
+
 def _log_refusal(profile, method, exc: RuntimeStoreError) -> None:
     """One line per refusal, at the level its audience deserves.
 
@@ -360,9 +371,12 @@ class AuthorityConnection:
             from gateway.session_plugin_rpc import call_plugin_rpc, resolve_plugin_rpc
             async with async_owner_scope(self.authority):
                 if method in GROUP_METHODS or method == 'profiles.list':
-                    result = await dispatch_group_control(self, method, params)
+                    with _method_work_scope(method):
+                        result = await dispatch_group_control(self, method, params)
                 elif method not in handlers and (plugin := await resolve_plugin_rpc(self, method)) is not None:
-                    return {'jsonrpc': '2.0', 'id': rid, 'result': await call_plugin_rpc(self, ref, method, plugin, params)}
+                    with _method_work_scope(method):  # plugin RPC: unclassified => work
+                        plugin_result = await call_plugin_rpc(self, ref, method, plugin, params)
+                    return {'jsonrpc': '2.0', 'id': rid, 'result': plugin_result}
                 elif method not in handlers or (method in CONNECTION_METHODS and not session_owned(params)):
                     # JSON-RPC's own verdict: clients key compat fallbacks on -32601, and a
                     # 4001 'invalid_params' would read as a bad argument on a method that exists.
@@ -371,7 +385,8 @@ class AuthorityConnection:
                         'code': -32601, 'message': unknown_method_message(method),
                         'data': {'reason': 'unknown_method'}}}
                 else:
-                    result = await handlers[method](ref, params)
+                    with _method_work_scope(method):
+                        result = await handlers[method](ref, params)
                     if isinstance(result, DeferredReply):  # answered off the serial dispatch
                         check_params_accepted(contract, original_params)
                         return result.start(self, rid, partial(check_result, contract))

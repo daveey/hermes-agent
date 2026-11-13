@@ -35,8 +35,10 @@ from agent.error_classifier import (
 )
 from agent.errors import InvalidProviderResponseError
 from agent.auxiliary_fallback_recovery import reapply_repairs
+from agent.auxiliary_call_scope import aux_call_scope
 from agent.auxiliary_managed_local import _is_managed_local_endpoint
 from agent.aux_provider_handoff import ProviderAttempt, note_abandoned as note_abandoned_provider_call, run_in_thread
+from agent.auxiliary_probe_stub import _AuxProbeClientStub
 from agent.auxiliary_reasoning_floor import remember_reasoning_floor, with_reasoning_floor
 from agent.auxiliary_profile_gates import (
     PROFILE_REASONING_KEYS, contains_profile_reasoning_fields, profile_forwards_max_tokens,
@@ -90,25 +92,6 @@ OpenAI = _OpenAIProxy()
 # inside `aux_probe_mode()` constructors return a stub instead of importing openai + building
 # httpx/SSL (~0.3s on CLI startup). Stubs are never cached (see _store_cached_client).
 _aux_probe_state = threading.local()
-
-
-class _AuxProbeClientStub:
-    """Non-functional placeholder returned while `aux_probe_mode` is active."""
-    __slots__ = ("_hermes_aux_backend_provider", "_hermes_aux_effective_provider", "api_key", "base_url")
-
-    def __init__(self, api_key: str = "", base_url: str = "") -> None:
-        self.api_key = api_key
-        self.base_url = base_url
-        self._hermes_aux_backend_provider = self._hermes_aux_effective_provider = ""
-
-    def __getattr__(self, name: str) -> Any:
-        # Loud failure if a probe stub ever leaks into a runtime call path.
-        raise RuntimeError(
-            f"_AuxProbeClientStub used as a real client (attribute {name!r}); "
-            "aux_probe_mode is for availability checks only")
-
-    def __repr__(self) -> str:
-        return "<aux availability-probe client stub>"
 
 
 def _aux_probe_active() -> bool:
@@ -472,9 +455,7 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
     provider_response_hook = getattr(_aux_provider_response, "hook", None)
     host_deadline = getattr(_aux_stream_deadline, "value", None)
     reading_hook = current_prompt_reading_hook()
-    # #99692: the stream is consumed on the daemon below, and thread-locals do not cross that boundary — an
-    # owner-thread-only deadline would leave the fix inert on exactly the path large-session compression
-    # takes (protected call + hard-cancel source installed).
+    # The daemon consumes the stream: an owner-thread-only deadline would be inert (#99692).
     provider_context = contextvars.copy_context()
     done, outcome, attempt = threading.Event(), {}, ProviderAttempt()
 
@@ -494,7 +475,9 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
             done.set()
             attempt.finish()  # deferred client closes run here, on the thread that owns the socket
 
-    threading.Thread(
+    from agent.memory_provider import spawn_context_thread
+
+    spawn_context_thread(
         target=provider_context.run, args=(_provider_worker,), name="hermes-protected-aux-provider",
         daemon=True).start()
     while True:
@@ -7883,6 +7866,7 @@ def _stamp_latency_once(latency_info: Optional[dict[str, int]], key: str, starte
         latency_info[key] = _elapsed_ms(started_at)
 
 
+@aux_call_scope
 @_relay_auxiliary_call
 def call_llm(
     task: str | None = None, *, provider: str | None = None, model: str | None = None, base_url: str | None = None,
@@ -8174,6 +8158,7 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
     return text
 
 
+@aux_call_scope
 @_relay_auxiliary_call_async
 async def async_call_llm(
     task: str | None = None, *, provider: str | None = None, model: str | None = None, base_url: str | None = None,

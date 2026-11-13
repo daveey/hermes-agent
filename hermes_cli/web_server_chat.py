@@ -41,6 +41,45 @@ except ImportError:  # pragma: no cover - pywinpty / ptyprocess missing
 
     class PtyUnavailableError(RuntimeError):  # type: ignore[no-redef]
         """Stub when the platform PTY bridge cannot be imported."""
+
+
+if PtyBridge is not None:
+    _RawPtyBridge = PtyBridge
+
+    class PtyBridge(_RawPtyBridge):  # type: ignore[no-redef,valid-type,misc]
+        """Platform bridge + local-work custody of the child: reserved BEFORE fork/exec (kind
+        ``pty_child``), released only once ``close()`` has proven the leader exited. A child that
+        outlives close() keeps the token and latches the registry unknown. No registry: no-ops."""
+
+        _local_work_held = None
+
+        @classmethod
+        def spawn(cls, *args, **kwargs):
+            from agent import local_work_agent
+            held = local_work_agent.reserve("pty_child", "web_server_chat.PtyBridge.spawn")
+            try:
+                bridge = super().spawn(*args, **kwargs)
+            except BaseException:
+                local_work_agent.release(held)  # no child was created
+                raise
+            bridge._local_work_held = held
+            return bridge
+
+        def close(self) -> None:
+            try:
+                super().close()
+            finally:
+                held = self._local_work_held
+                if held is not None:
+                    try:
+                        exited = not self._proc.isalive()
+                    except Exception:  # health: allow BLE001 -- liveness unprovable: keep the token and latch unknown
+                        exited = False
+                    if exited:
+                        self._local_work_held = None
+                        held.release()
+                    else:
+                        held.mark_unknown("pty-child-exit-unverified")
 _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
 

@@ -30,6 +30,21 @@ from hermes_constants import get_hermes_home_override
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from utils import base_url_hostname
+from tools.code_kernel_scope import submit as _submit_local_work
+
+_HYGIENE_EXECUTOR = None
+_HYGIENE_EXECUTOR_LOCK = threading.Lock()
+
+
+def _hyg_executor():
+    """Dedicated pool for tracked hygiene compaction (not an agent-work slot; the default executor
+    is not a public handle to submit through). Created lazily, only when a registry is installed."""
+    global _HYGIENE_EXECUTOR
+    with _HYGIENE_EXECUTOR_LOCK:
+        if _HYGIENE_EXECUTOR is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _HYGIENE_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="hermes-hygiene")
+        return _HYGIENE_EXECUTOR
 
 if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
     from gateway.run import GatewayRunner
@@ -729,20 +744,21 @@ class GatewayTurnHygieneMixin:
             # Default executor (NOT self._get_executor): a hung summary must never occupy an
             # agent-work slot. MUST run in the caller's contextvars (multiplex secret scope).
             attempt.commit_fence = _hyg_commit_fence
-            attempt.future = loop.run_in_executor(
-                None,
-                # But it MUST run inside the caller's contextvars: under multiplex_profiles the profile
-                # secret scope / HERMES_HOME override live in ContextVars, and a bare run_in_executor worker
-                # starts with an empty Context — the summary model's get_secret(<PROVIDER>_API_KEY) then
-                # fails closed (UnscopedSecretError) and every hygiene compaction silently degrades to a
-                # lossy truncation (#100849 bundle).
-                copy_context().run,
-                # task_id = the live turn's dedup bucket (session row id), never "" (= reset every task).
-                lambda: _hyg_agent._compress_context(
-                    _hyg_msgs, "", approx_tokens=plan.approx_tokens, commit_fence=_hyg_commit_fence,
-                    task_id=session_entry.session_id or "default", trigger="gateway_hygiene",
-                ),
+            _hyg_job = lambda: _hyg_agent._compress_context(
+                _hyg_msgs, "", approx_tokens=plan.approx_tokens, commit_fence=_hyg_commit_fence,
+                task_id=session_entry.session_id or "default", trigger="gateway_hygiene",
             )
+            # Local-work seam: with a registry installed the worker is reserved BEFORE enqueue and
+            # released by its own finally (never by a canceled/timed-out waiter). It runs in the
+            # submit-time contextvars (same guarantee as copy_context().run below).
+            _hyg_tracked = _submit_local_work(_hyg_executor, _hyg_job, kind="aux_call", source="gateway-hygiene-compaction")
+            if _hyg_tracked is not None:
+                attempt.future = asyncio.wrap_future(_hyg_tracked, loop=loop)
+            else:
+                # Must run inside the caller's contextvars: under multiplex_profiles the profile
+                # secret scope / HERMES_HOME override live in ContextVars, and a bare run_in_executor
+                # worker starts with an empty Context (UnscopedSecretError -> lossy truncation, #100849).
+                attempt.future = loop.run_in_executor(None, copy_context().run, _hyg_job)
             # Register the live worker with shutdown NOW, not only once it is deferred: the default
             # executor is outside self._executor's quiesce, so an untracked in-flight summary would let
             # stop() close/checkpoint state.db under its late write (mirrors run_codex_hygiene_compaction).

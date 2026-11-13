@@ -400,6 +400,17 @@ class PluginHost:
         return (caller or self._base_context).copy()
 
     def _handle(self, method: str, params: dict[str, Any], _origin: Optional[int]) -> Any:
+        # Local-work ingress: the child host calls back on Channel handler threads, possibly long
+        # after the last local work ended. Reserve first for work-bearing kinds; ``dispose`` and
+        # ``ctx.register_*`` are passive bookkeeping.
+        if method in ("ctx", "facade", "session_event") and not (
+                method == "ctx" and str(params.get("method") or "").startswith("register_")):
+            from tools.code_kernel_scope import scope
+            with scope("plugin_host_ingress", f"plugin-host-{method}", home=self._home):
+                return self._handle_inner(method, params, _origin)
+        return self._handle_inner(method, params, _origin)
+
+    def _handle_inner(self, method: str, params: dict[str, Any], _origin: Optional[int]) -> Any:
         if method == "ctx":
             return self._serve_ctx(params)
         if method == "facade":

@@ -518,7 +518,11 @@ class PluginDispatchMixin:
                         "Hook '%s' callback %s (%s) finished %.1fs after the host stopped waiting — result discarded",
                         hook_name, callback_name, module, time.monotonic() - budget.deadline)
 
-        thread = threading.Thread(target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True)
+        # Tracked: the reservation is released by _runner's physical finally (TrackedThread),
+        # never by the done.wait timeout below — an abandoned hook that keeps running stays counted.
+        from tools.code_kernel_scope import tracked_thread
+        thread = tracked_thread("hook_thread", "plugin-hook-callback", target=_runner,
+                                name=f"hermes-hook-{callback_name}"[:40], daemon=True)
         try:
             thread.start()
         except RuntimeError as exc:

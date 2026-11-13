@@ -5,6 +5,7 @@ refresher thread and liveness watchdog (``agent.turn_facade_lease``), relay/acco
 balanced start/finish marks. Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s
 MRO unchanged.
 """
+import functools
 import logging
 import uuid
 from contextlib import suppress
@@ -19,7 +20,7 @@ logger = logging.getLogger("run_agent")
 class TurnFacadeMixin:
     """run_conversation()/chat() (see module docstring)."""
 
-    def run_conversation(
+    def _run_conversation_scoped(
         self, user_message: Any, system_message: str | None=None,
         conversation_history: list[dict[str, Any]] | None=None, task_id: str | None=None,
         stream_callback: Optional[callable]=None, persist_user_message: Optional[Any]=None,
@@ -216,6 +217,16 @@ class TurnFacadeMixin:
                     # Balance note_turn_started so the idle queue's live-turn count cannot leak.
                     with suppress(Exception):
                         _review_queue.note_turn_finished()
+
+    def run_conversation(self, *args, **kwargs) -> dict[str, Any]:
+        """One local-work reservation spanning the whole turn: before the durable lease admits, through the
+        outermost finally after it releases, on every exit (including pre-agent failures)."""
+        from agent import local_work_agent
+
+        with local_work_agent.scope("agent_turn", "agent.turn_facade.run_conversation"):
+            return self._run_conversation_scoped(*args, **kwargs)
+
+    run_conversation = functools.wraps(_run_conversation_scoped)(run_conversation)
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """Final response string of one turn; ``stream_callback`` receives each text delta."""

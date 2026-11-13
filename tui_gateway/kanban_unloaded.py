@@ -283,8 +283,11 @@ def _wake_skip_reason(task, texts: list) -> Optional[str]:
 
 
 def _spawn_thread(job: Callable[[], str]) -> str:
+    from agent.local_work_agent import scope as work_scope
     from agent.memory_provider import spawn_context_thread
-    spawn_context_thread(job, name="kanban-sweep-wake").start()  # keeps the sweeper's profile scope
+    # Reserve BEFORE the thread exists: spawn_context_thread then returns a TrackedThread that keeps custody.
+    with work_scope("sweep", "kanban_unloaded.spawn"):
+        spawn_context_thread(job, name="kanban-sweep-wake").start()  # keeps the sweeper's profile scope
     return "dispatched"
 
 
@@ -292,7 +295,9 @@ def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now)
     """Run on a worker: the wake, then (unless it started) the passive row on a fresh board connection."""
     try:
         try:
-            verdict = str(wake(tip, text, {**metadata, "woken": True}) or "error")
+            from agent.local_work_agent import scope as work_scope
+            with work_scope("sweep", "kanban_unloaded.wake"):
+                verdict = str(wake(tip, text, {**metadata, "woken": True}) or "error")
         except Exception:
             logger.warning("kanban sweep wake of %s failed", tip, exc_info=True)
             verdict = "error"

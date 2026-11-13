@@ -1760,29 +1760,6 @@ def resolve_channel_prompt(config_extra: dict, channel_id: str, parent_id: str |
     return None
 
 
-def resolve_channel_skills(
-    config_extra: dict, channel_id: str, parent_id: str | None = None) -> list[str] | None:
-    """Auto-loaded skill(s) for a channel/thread from ``channel_skill_bindings`` (entries
-    ``{id: "<channel/forum id>", skills: [...]}``; ``skill: "<name>"`` also accepted). Exact
-    *channel_id* first, then *parent_id* (threads inherit). Deduplicated ordered list or None."""
-    bindings = config_extra.get("channel_skill_bindings") or []
-    if not isinstance(bindings, list) or not bindings:
-        return None
-    # One pass per id, not one pass matching either: the parent's entry may be listed first.
-    for wanted in (str(key) for key in (channel_id, parent_id) if key):
-        for entry in bindings:
-            if not isinstance(entry, dict) or str(entry.get("id", "")) != wanted:
-                continue
-            skills = entry.get("skills") or entry.get("skill")
-            if isinstance(skills, str):
-                return [skills.strip()] if skills.strip() else None
-            if isinstance(skills, list) and skills:
-                seen = dict.fromkeys(
-                    nm for name in skills if isinstance(name, str) and (nm := name.strip()))
-                return list(seen) or None
-    return None
-
-
 def _split_post_delivery_entry(entry: Any) -> tuple[Optional[int], Any]:
     """``(generation, callback)`` from a post-delivery slot; legacy bare callbacks have no
     generation."""
@@ -1800,6 +1777,12 @@ def _lazy_attr(obj: Any, name: str, factory: Callable[[], Any]) -> Any:
 
 
 _strip_media_directives = _strip_media_tag_directives
+
+
+def _ingress_task(create, source):
+    """Create an ingress task with a reservation held from before create_task to task end."""
+    from hermes_cli.local_work_threads import create_tracked_task
+    return create_tracked_task(create, "gateway_ingress", source)
 
 
 class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
@@ -2488,7 +2471,8 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         prior_task = self._pending_text_batch_tasks.get(key)
         if prior_task and not prior_task.done():
             prior_task.cancel()
-        self._pending_text_batch_tasks[key] = asyncio.create_task(self._flush_text_batch(key))
+        self._pending_text_batch_tasks[key] = _ingress_task(
+            lambda: asyncio.create_task(self._flush_text_batch(key)), f"{self.name}:text_batch")
 
     def _text_batch_delay_for(self, pending: Optional[MessageEvent]) -> float:
         """Quiet period before ``pending`` is dispatched; near-split chunks wait longer."""
@@ -3754,7 +3738,8 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
             state.last_ts = now
         state.cancel_timer()
         delay = self._text_debounce_delay(session_key)
-        state.task = asyncio.create_task(self._flush_text_debounce(session_key, delay))
+        state.task = _ingress_task(
+            lambda: asyncio.create_task(self._flush_text_debounce(session_key, delay)), f"{self.name}:text_debounce")
 
     async def _flush_text_debounce(self, session_key: str, delay: float) -> None:
         """Timer task that flushes the debounced text buffer."""
@@ -3830,7 +3815,9 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         (False)."""
         guard = interrupt_event or asyncio.Event()
         self._active_sessions[session_key] = guard
-        task = asyncio.create_task(self._process_message_background(event, session_key))
+        task = _ingress_task(
+            lambda: asyncio.create_task(self._process_message_background(event, session_key)),
+            f"{self.name}:process_message")
         if not self._track_session_task(session_key, task):
             self._session_tasks.pop(session_key, None)
             self._release_session_guard(session_key, guard=guard)
@@ -3896,7 +3883,10 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
 
     async def handle_message(self, event: MessageEvent) -> None:
         from gateway.platforms.base_process_admission import handle_message
-        await handle_message(self, event)
+        from hermes_cli.local_work_threads import work_scope
+        # Reserve at entry: before topic recovery, preflight, guard/burst decisions.
+        with work_scope("gateway_ingress", f"{self.name}:handle_message"):
+            await handle_message(self, event)
 
     def _shared_runtime_owns_input(self, event: MessageEvent) -> bool:
         """True when a non-command input belongs to the shared runtime's session authority."""
@@ -4498,7 +4488,8 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         guard = self._active_sessions.get(session_key)
         self._track_session_task(
             session_key,
-            asyncio.create_task(self._drain_after(pending_event, session_key, delay, guard)))
+            _ingress_task(lambda: asyncio.create_task(self._drain_after(pending_event, session_key, delay, guard)),
+                          f"{self.name}:drain_after"))
 
     async def _drain_after(self, pending_event: MessageEvent, session_key: str, delay: float,
                            guard: Optional[asyncio.Event]) -> None:

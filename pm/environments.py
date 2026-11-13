@@ -616,6 +616,10 @@ def activate_dependencies(project_root: Path) -> None:
         raise RuntimeError(f"dependency environment has no site-packages: {selected}")
     import site
 
+    # Executed-code attestation (quiet proof) receipts this tree before site runs its .pth.
+    from hermes_cli import code_attestation
+
+    code_attestation.register_dependency_environment(selected)
     sys.path[:] = [entry for entry in sys.path
                    if Path(entry).name not in ("site-packages", "dist-packages")
                    and Path(entry).resolve() != project_root.resolve()]

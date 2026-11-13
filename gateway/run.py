@@ -3855,9 +3855,8 @@ class GatewayRunner(
 
     async def _run_in_executor_with_context(self, func, *args):
         """Run blocking work in the thread pool while preserving session contextvars."""
-        loop = asyncio.get_running_loop()
-        ctx = copy_context()
-        return await loop.run_in_executor(self._get_executor(), ctx.run, func, *args)
+        from hermes_cli.local_work_threads import run_in_pool
+        return await run_in_pool(self._get_executor(), copy_context(), func, *args)
 
     async def _run_housekeeping_in_executor(self, func, *args):
         """Run best-effort session housekeeping off the TURN pool.

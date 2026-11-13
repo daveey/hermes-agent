@@ -959,6 +959,21 @@ def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
 
 
+def _tool_function_scope(function):
+    """Local-work seam: reserve at entry, release at exit (belt-and-braces for non-kernel callers)."""
+    import functools
+
+    @functools.wraps(function)
+    def _scoped(*args, **kwargs):
+        from tools.code_kernel_scope import scope
+
+        with scope("tool_function", "handle-function-call"):
+            return function(*args, **kwargs)
+
+    return _scoped
+
+
+@_tool_function_scope
 def handle_function_call(
     function_name: str, function_args: dict[str, Any], task_id: Optional[str] = None,
     tool_call_id: Optional[str] = None, session_id: Optional[str] = None, turn_id: Optional[str] = None,

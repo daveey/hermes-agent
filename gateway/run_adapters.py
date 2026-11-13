@@ -64,6 +64,25 @@ class _UnresolvedProfileHome:
 UNRESOLVED_PROFILE_HOME = _UnresolvedProfileHome()
 
 
+def _ingress_work_scope(adapter, home):
+    """Direct message_handler ingress reservation (home None: the launch/context home)."""
+    from hermes_cli.local_work_threads import work_scope
+    if home is UNRESOLVED_PROFILE_HOME:
+        home = "unresolved-profile-home"
+    return work_scope("gateway_ingress", f"{getattr(adapter, 'name', 'adapter')}:message_handler", home)
+
+
+class _NoWork:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
+_NO_WORK = _NoWork()
+
+
 class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryReconnectMixin):
     """Adapter lifecycle: connect/teardown, fatal recovery, reconnect watcher, multiplex profiles."""
 
@@ -1563,10 +1582,13 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
             identity = self._canonicalize(getattr(event, "source", None), transport_profile=profile_name)
             if transport_home is not None:
                 event.source._authorization_profile_home = transport_home
-            with native_callback(self, event, transport_home, profile_name):
-                async with self._async_scope_or_null(
-                        _async_profile_runtime_scope, self._routed_runtime_home(identity, profile_home)):
-                    return await self._handle_message(event)
+            routed_home = self._routed_runtime_home(identity, profile_home)
+            # Reserve BEFORE the profile scope/auth/preflight; an unresolved profile has no
+            # member home, so it invalidates instead of falling back to the launch home.
+            with _ingress_work_scope(self, routed_home):
+                with native_callback(self, event, transport_home, profile_name):
+                    async with self._async_scope_or_null(_async_profile_runtime_scope, routed_home):
+                        return await self._handle_message(event)
 
         return _handler.__get__(self)
 
@@ -1605,9 +1627,10 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
             # A rejected route still enters ``_handle_message``, whose ingress gate drops it fail-closed.
             profile_home = self._admit_primary_source(event.source, default_home) or default_home
             from gateway.session_ingress_context import native_callback
-            with native_callback(self, event, default_home):
-                async with _async_profile_runtime_scope(profile_home):
-                    return await self._handle_message(event)
+            with _ingress_work_scope(self, profile_home):
+                with native_callback(self, event, default_home):
+                    async with _async_profile_runtime_scope(profile_home):
+                        return await self._handle_message(event)
 
         return _handler.__get__(self)
 
@@ -1644,7 +1667,7 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
         shared = getattr(self, 'session_authority', None) is not None
         if self._multiplex_on() or shared:
             return self._make_default_profile_message_handler()
-        return self._standalone_scoped(self._handle_message)
+        return self._standalone_scoped(self._handle_message, work=True)
 
     def _primary_busy_session_handler(self):
         """Return the correctly scoped busy-session handler for a primary adapter."""
@@ -1652,7 +1675,7 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
             return self._make_default_profile_busy_session_handler()
         return self._standalone_scoped(self._handle_active_session_busy_message)
 
-    def _standalone_scoped(self, handler):
+    def _standalone_scoped(self, handler, *, work=False):
         """Standalone twin of the ``_make_default_profile_*`` wrappers: run ``handler`` under
         ``_standalone_launch_scope`` so slash commands and turns keep resolving the launch profile's
         credentials after a hosted room flipped the process-wide guard (#112878). The credential
@@ -1661,7 +1684,8 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
         from tui_gateway.launch_profile_policy import launch_body
 
         async def _handler(*args):
-            with launch_body(), self._standalone_launch_scope():
+            with (_ingress_work_scope(self, None) if work else _NO_WORK), launch_body(), \
+                    self._standalone_launch_scope():
                 return await handler(*args)
 
         return _handler

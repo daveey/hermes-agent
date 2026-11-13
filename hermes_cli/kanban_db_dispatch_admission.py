@@ -54,6 +54,46 @@ def capsule_claim_check(conn: sqlite3.Connection, task_id: str, assignee: str, s
     return check, refused
 
 
+def _native_local_destination(conn: sqlite3.Connection, task_id: str, spawn_fn) -> bool:
+    """True only when this dispatcher will start the worker itself on this host: the native default spawn
+    (``spawn_fn`` unset or ``_default_spawn``) and no registered capsule transport for the board. A capsule
+    callable, any other custom transport or an unreadable board is NOT a local destination."""
+    from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import kanban_capsule_admission as capsule
+
+    if spawn_fn is not None and spawn_fn is not kbd._default_spawn:
+        return False
+    db = capsule._conn_db(conn)
+    if db is None:
+        return False
+    with capsule._LOCK:
+        handle = capsule._REGISTRY.get(db)
+    if handle is not None and handle.live:
+        return False  # a registered capsule board: its destination is not proven native
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row is not None and ("runs_on" not in row.keys() or row["runs_on"] in (None, "", "[]"))
+
+
+def quiet_claim_check(conn: sqlite3.Connection, task_id: str, assignee: str, spawn_fn, result):
+    """Write-free refusal closure for an AUTOMATIC native-local claim while a root claim-quiet lease is
+    verified active. Runs inside ``claim_task``'s admission transaction; on refusal it records
+    ``(task_id, episode_id)`` on ``result.quiet_deferred`` (and the lease deadline) and nothing else.
+    Remote/unresolved destinations never refuse. Operator ``claim_task`` never installs this."""
+
+    def check() -> bool:
+        from agent.claim_quiet import read_active
+
+        lease = read_active()  # read-only; uncertain/expired/unlocked => None => open
+        if lease is None or not _native_local_destination(conn, task_id, spawn_fn):
+            return False
+        if (task_id, lease.episode_id) not in result.quiet_deferred:
+            result.quiet_deferred.append((task_id, lease.episode_id))
+        result.quiet_deadlines[lease.episode_id] = lease.expires_at
+        return True
+
+    return check
+
+
 def record_claim_refusal(conn: sqlite3.Connection, task_id: str, assignee: str, code: str, result) -> None:
     """After the refused claim's transaction: audit and report, nothing else (no failure increment)."""
     from hermes_cli.kanban_capsule_admission import record_refusal
@@ -69,7 +109,12 @@ def admitted_claim(conn: sqlite3.Connection, task_id: str, assignee: str, lane, 
     from hermes_cli.kanban_gateway_drain import claim_if_admitting
 
     from hermes_cli.kanban_source_board import protocol_call
-    recheck, refusals = capsule_claim_check(conn, task_id, assignee, spawn_fn)
+    capsule_check, refusals = capsule_claim_check(conn, task_id, assignee, spawn_fn)
+    quiet_check = quiet_claim_check(conn, task_id, assignee, spawn_fn, result)
+
+    def recheck() -> bool:  # capsule first so its refusal code is never masked by quiet
+        return capsule_check() or quiet_check()
+
     with protocol_call():  # workspace_source R3-a: only the dispatcher's own grant may carry source_protocol
         claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_check=recheck)
     if claimed is None and refusals:

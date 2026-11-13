@@ -179,6 +179,8 @@ class ManagedWorker:
         self._frames = deque()
         self._arrived = None
         self.stderr_drain = None
+        # Local-work custody handed over by acquire_process (None when no registry/handle without it).
+        self.work_held = getattr(process, '_local_work_held', None)
         # Exact secrets this worker was handed; the stderr sink scrubs them besides the patterns.
         self.secrets = []
 
@@ -355,6 +357,36 @@ class ManagedWorker:
         elif self.process.stderr is not None:
             with suppress(OSError):
                 self.process.stderr.close()
+        self._release_work_if_proven_dead()
+
+    def _release_work_if_proven_dead(self):
+        """Release the child's local-work token only on PROOF: the handle is reaped, the verified interpreter
+        behind a launcher is gone, and the reader/writer/stderr threads ended. ``closed``, map removal or a
+        finished frame prove nothing; unprovable death keeps the token and latches unknown."""
+        held = self.work_held
+        if held is None:
+            return
+        threads = (self.writer if self.writer.ident is not None else None, self.reader, self.stderr_drain)
+        proven = (self.process.poll() is not None and self._interpreter_gone()
+                  and not any(t is not None and t.is_alive() for t in threads))
+        if proven:
+            self.work_held = None
+            held.release()
+        else:
+            held.mark_unknown('managed-child-death-unproven')
+
+    def _interpreter_gone(self):
+        if self.worker is None or self.worker[0] == self.process.pid:
+            return True
+        import psutil
+        try:
+            proc = psutil.Process(self.worker[0])
+            from hermes_cli.process_identity import worker_birth
+            return worker_birth(proc) != self.worker[1] or not proc.is_running()
+        except psutil.NoSuchProcess:
+            return True
+        except psutil.Error:
+            return False
 
 
 def close_quietly(close):

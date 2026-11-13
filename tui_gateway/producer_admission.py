@@ -26,6 +26,7 @@ from typing import Optional
 
 import hermes_state_producer_admission as pa
 from agent.memory_provider import spawn_context_thread
+from agent.local_work_agent import scope as work_scope
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +126,10 @@ def deliver_pending(sid: str, session: dict) -> str:
             # Nothing irreversible ran before the first tool: a restart then continues the turn (prompt.admit).
             session["_marker_until_tool"] = True
         claimed = False  # _notif_submit owns the claim now (it releases on refusal)
-        accepted = server._notif_submit(f"__producer__{int(time.time() * 1000)}", sid, session, staged["content"],
-                                        "producer completion dispatch failed", display_kind=pa.DISPLAY_KIND,
-                                        display_metadata=metadata)
+        with work_scope("sweep", "producer_admission._notif_submit"):
+            accepted = server._notif_submit(f"__producer__{int(time.time() * 1000)}", sid, session,
+                                            staged["content"], "producer completion dispatch failed",
+                                            display_kind=pa.DISPLAY_KIND, display_metadata=metadata)
         if not accepted:
             with session["history_lock"]:
                 if session.get("_submit_user_row") is staged:
@@ -203,7 +205,8 @@ def _sweep_owner(server, db, profile: Optional[str], owner: str) -> dict:
         if handler is None:
             return {**record, "verdict": "no_resume"}
         params = {"session_id": tip, "omit_messages": True, **({"profile": profile} if profile else {})}
-        env = handler(f"producer-wake-{int(time.time() * 1000)}", params) or {}
+        with work_scope("sweep", "producer_admission.session.resume"):
+            env = handler(f"producer-wake-{int(time.time() * 1000)}", params) or {}
         if isinstance(env, dict) and env.get("error"):
             logger.info("producer admission: resume of %s refused (%s); it stays queued", tip, env.get("error"))
             return {**record, "verdict": "resume_refused"}
@@ -212,9 +215,10 @@ def _sweep_owner(server, db, profile: Optional[str], owner: str) -> dict:
             return {**record, "verdict": "not_live"}
     sid, session = live
     if not session.get("agent") and not session.get("agent_error"):
-        server._start_agent_build(sid, session)
-        if server._wait_agent(session, f"producer-wake-{sid}", timeout=120.0):
-            return {**record, "verdict": "build_failed"}
+        with work_scope("sweep", "producer_admission.agent_build"):
+            server._start_agent_build(sid, session)
+            if server._wait_agent(session, f"producer-wake-{sid}", timeout=120.0):
+                return {**record, "verdict": "build_failed"}
     return {**record, "verdict": deliver_pending(sid, session)}
 
 

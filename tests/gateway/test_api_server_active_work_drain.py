@@ -711,16 +711,16 @@ class TestShutdownSettleWindow:
 
 
 @pytest.mark.asyncio
-async def test_failed_executor_submission_releases_the_worker_count():
-    """A request that reaches ``run_in_executor`` after ``shutdown_default_executor()`` raises
+async def test_failed_executor_submission_releases_the_worker_count(monkeypatch):
+    """A request that reaches the executor after it was shut down raises
     RuntimeError and never runs a worker; the worker-scoped count must not stay elevated for the
     process lifetime, or the shutdown SessionDB-close gate skips the close forever (#116535)."""
+    from concurrent.futures import ThreadPoolExecutor
     baseline = _api_runs.api_worker_live_count()
+    shut = ThreadPoolExecutor(max_workers=1)
+    shut.shutdown()
+    monkeypatch.setattr(_api_runs, "api_turn_executor", lambda: shut)
 
-    class _ShutExecutorLoop:
-        def run_in_executor(self, executor, fn):
-            raise RuntimeError("Executor shutdown has been called")
-
-    with pytest.raises(RuntimeError, match="Executor shutdown"):
-        _api_runs._submit_api_worker(_ShutExecutorLoop(), lambda: None)
+    with pytest.raises(RuntimeError, match="shutdown"):
+        _api_runs._submit_api_worker(asyncio.get_running_loop(), lambda: None)
     assert _api_runs.api_worker_live_count() == baseline

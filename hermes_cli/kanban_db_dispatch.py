@@ -43,10 +43,12 @@ from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [
 from hermes_cli.kanban_failure_accounting import _record_task_failure
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import skip_reap
-from hermes_cli.kanban_admission_pools import (host_remaining, lane_rows, pickup_budget, pool_admits,
-                                               pool_take)
+from hermes_cli.kanban_db_dispatch_quiet import QuietResultFields
+from hermes_cli.kanban_admission_pools import host_remaining, lane_rows, pickup_budget, pool_admits, pool_take
 from hermes_cli.kanban_db_dispatch_clock import record_clock_hold as _record_clock_hold
 from hermes_cli.kanban_db_dispatch_rerun import reopened_after
+from hermes_cli import kanban_db_dispatch_custody as _custody
+from hermes_cli.kanban_db_dispatch_pid import _pid_alive  # re-export
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -152,7 +154,7 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(r"https?://github\.com/[^/\s]+/[^/\s]+/pul
 
 
 @dataclass
-class DispatchResult:
+class DispatchResult(QuietResultFields):
     """Outcome of a single ``dispatch`` pass.
     ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
     telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
@@ -259,7 +261,7 @@ class DispatchResult:
 
 
 from hermes_cli.kanban_db_dispatch_stuck import (  # re-exports for the stuck detectors [daveey]
-    all_at_capacity, all_clock_held, describe_suppression, stuck_warning)
+    all_at_capacity, all_clock_held, all_quiet_deferred, describe_suppression, stuck_warning)
 
 
 # Bounded registry of recently-reaped worker exits, filled by the reap loop in
@@ -357,62 +359,14 @@ def reap_worker_zombies() -> list[int]:
         if not isinstance(returncode, int):
             if not callable(poll):
                 _live_worker_procs.pop(pid, None)
+                _custody.on_dropped(pid, proc)
             continue
         _record_worker_exit(
             pid, _wait_status_from_returncode(returncode) if returncode >= 0 else -returncode)
         _live_worker_procs.pop(pid, None)
+        _custody.on_reaped(pid, proc)
         reaped.append(pid)
     return reaped
-
-
-def _pid_alive(pid: Optional[int]) -> bool:
-    """Return True if ``pid`` is still running on this host.
-
-    Uses ``gateway.status._pid_exists`` (OpenProcess on Windows, ``os.kill(pid, 0)``
-    on POSIX). **DO NOT** call ``os.kill(pid, 0)`` directly on Windows — there
-    ``sig=0`` is ``CTRL_C_EVENT`` broadcast to the console group, potentially
-    killing unrelated processes.
-
-    Zombies (exited, not yet reaped) still pass the existence check, so a
-    worker would look "alive" forever between exit and reap. Linux: peek at
-    ``/proc/<pid>/status`` and treat ``State: Z`` as dead; macOS: ask ``ps``
-    for the BSD ``stat`` field and treat ``Z`` as dead.
-    """
-    if not pid or pid <= 0:
-        return False
-    from gateway.status import _pid_exists
-    if not _pid_exists(int(pid)):
-        return False
-    if sys.platform == "linux":
-        try:
-            with open(f"/proc/{int(pid)}/status", "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.startswith("State:"):
-                        # "State:\tZ (zombie)" → dead
-                        if "Z" in line.split(":", 1)[1]:
-                            return False
-                        break
-        except (FileNotFoundError, PermissionError, OSError):
-            # proc entry gone → already reaped; treat as dead.
-            pass
-    elif sys.platform == "darwin":
-        try:
-            proc = subprocess.run(
-                ["ps", "-o", "stat=", "-p", str(int(pid))],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=1,
-                check=False,
-            )
-            if proc.returncode != 0:
-                return False
-            if "Z" in (proc.stdout or "").strip():
-                return False
-        except (OSError, subprocess.SubprocessError, TimeoutError):
-            # If the secondary probe fails, keep the kill(0) answer.
-            pass
-    return True
 
 
 # ``worker_started_at`` value for a spawn whose fingerprint could not be captured. Distinct from the
@@ -2778,7 +2732,12 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
     _worker_scope.apply_toolchain_env(env, cmd)
     from tools.process_registry import systemd_user_bus_env
     env = systemd_user_bus_env(env)
-    log_f = _open_worker_log(task, board)
+    held = _custody.reserve()  # BEFORE the child exists; released by the reap that proves its exit
+    try:
+        log_f = _open_worker_log(task, board)
+    except BaseException:
+        _custody.abort(held)
+        raise
     try:
         proc = (observation or subprocess.Popen)(
             cmd,
@@ -2792,16 +2751,23 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
         )
     except PermissionError:
         log_f.close()
+        _custody.abort(held)
         raise
     except FileNotFoundError:
         log_f.close()
+        _custody.abort(held)
         raise RuntimeError(
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
+    except BaseException:
+        log_f.close()
+        _custody.abort(held)  # no child was created
+        raise
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
     _live_worker_procs[proc.pid] = proc
+    _custody.adopt(proc, held, _process_fingerprint(proc.pid))
     return proc.pid
 
 
