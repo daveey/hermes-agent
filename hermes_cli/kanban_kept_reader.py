@@ -43,7 +43,9 @@ from typing import Iterator, Optional
 
 from hermes_cli import kanban_generation as _gen
 
-# Boards one thread keeps at once; the oldest idle one is closed past this (each holds db + -wal + -shm fds).
+# Boards one thread keeps at once; past this the oldest idle one is closed (each holds db + -wal + -shm fds).
+# A borrowed entry is never evicted under its borrower: if every older entry is borrowed, the oldest is detached
+# and closed by its own borrow's exit.
 MAX_PER_THREAD = 16
 
 
@@ -217,14 +219,7 @@ def reading(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> I
         with _registry_lock:
             _registry.add(entry)
         mine[key] = entry
-        while len(mine) > MAX_PER_THREAD:
-            old_key, old = next(iter(mine.items()))
-            mine.pop(old_key)
-            if old.lock.acquire(blocking=False):
-                try:
-                    _close(old)
-                finally:
-                    old.lock.release()
+        _enforce_cap(mine)
     mine.move_to_end(key)
     conn = entry.conn
     keep = False
@@ -239,11 +234,29 @@ def reading(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> I
         keep = not entry.closed and not _in_transaction(conn)
         raise
     finally:
+        if mine.get(key) is not entry:
+            keep = False  # detached from the map while borrowed (the cap): nothing else would close it
         if not keep:
             if mine.get(key) is entry:
                 mine.pop(key, None)
             _close(entry)
         entry.lock.release()
+
+
+def _enforce_cap(mine: OrderedDict[str, _Entry]) -> None:
+    """Close this thread's oldest idle entries past ``MAX_PER_THREAD``. A borrowed entry is skipped; only when
+    every older entry is borrowed is the oldest detached, and its borrow's exit closes it."""
+    while len(mine) > MAX_PER_THREAD:
+        for old_key, old in list(mine.items()):  # the entry just added is borrowed, so never picked
+            if old.lock.acquire(blocking=False):
+                try:
+                    mine.pop(old_key, None)
+                    _close(old)
+                finally:
+                    old.lock.release()
+                break
+        else:
+            mine.popitem(last=False)
 
 
 def _in_transaction(conn: sqlite3.Connection) -> bool:

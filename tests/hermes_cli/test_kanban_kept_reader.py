@@ -6,6 +6,7 @@ the connection is reopened whenever the board file, its WAL generation or its in
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
@@ -165,6 +166,64 @@ def test_nested_borrow_gets_its_own_connection(board):
         assert outer.execute("SELECT 1").fetchone()[0] == 1
     with kept.reading() as again:
         assert again is outer
+
+
+def _boards(base: Path, n: int) -> list[Path]:
+    paths = []
+    for i in range(n):
+        path = base.parent / f"extra-{i}.db"
+        kb.init_db(path)
+        paths.append(path)
+    return paths
+
+
+def _is_closed(conn: sqlite3.Connection) -> bool:
+    try:
+        conn.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        return True
+    return False
+
+
+def _thread_map() -> dict:
+    return dict(kept._mine())
+
+
+def test_cap_eviction_skips_a_borrowed_entry_and_closes_the_idle_one(board):
+    """RED on main: opening ``MAX_PER_THREAD`` other boards inside a borrow of board A popped A (the oldest) from
+    the thread map although it was borrowed; A was then never closed explicitly (left to GC) and was no longer
+    reachable by recovery or ``close_all``. The cap must evict the oldest IDLE entry, close it, and keep A."""
+    others = _boards(board, kept.MAX_PER_THREAD)
+    key_a = gen._resolved(str(board))
+    with kept.reading(board) as a:
+        opened = []
+        for path in others:
+            with kept.reading(path) as conn:
+                opened.append(conn)
+        assert key_a in _thread_map(), "a borrowed entry was evicted from the thread map"
+        assert a.execute("SELECT 1").fetchone()[0] == 1
+    assert _is_closed(opened[0]), "the evicted idle connection was left to GC instead of closed"
+    assert all(not _is_closed(c) for c in opened[1:])
+    assert len(_thread_map()) == kept.MAX_PER_THREAD
+    with kept.reading(board) as again:
+        assert again is a  # still kept, reachable by close_all/recovery
+    assert kept.close_all() == kept.MAX_PER_THREAD
+    assert _is_closed(a)
+
+
+def test_cap_overflow_with_every_entry_borrowed_closes_the_evicted_one_on_exit(board):
+    """Every kept entry borrowed (nested borrows of MAX_PER_THREAD + 1 boards): the oldest is detached from the map
+    and its connection is closed when its own borrow exits, not leaked."""
+    others = _boards(board, kept.MAX_PER_THREAD)
+    with contextlib.ExitStack() as stack:
+        a = stack.enter_context(kept.reading(board))
+        for path in others:
+            stack.enter_context(kept.reading(path))
+        assert len(_thread_map()) == kept.MAX_PER_THREAD
+        assert gen._resolved(str(board)) not in _thread_map()
+        assert a.execute("SELECT 1").fetchone()[0] == 1  # never closed under its borrower
+    assert _is_closed(a)
+    assert len(_thread_map()) == kept.MAX_PER_THREAD
 
 
 def test_sqlite_error_in_body_drops_the_connection(board):
