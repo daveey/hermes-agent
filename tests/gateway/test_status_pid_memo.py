@@ -154,10 +154,21 @@ def test_profiles_check_gateway_running_uses_the_memo(tmp_path, monkeypatch, ali
 
 # -- replay benchmark: budget 0.05% of one core (design §3: get_running_pid 0.4 -> 0.05) --------------------------
 
-def test_replay_budget_polled_profile_list(files):
+def _unguarded_io(monkeypatch) -> None:
+    """Measure production cost: the suite's HomeIOGuard wraps os.stat/open in Python checks (3-4x a memo hit,
+    which made this bench flake at ~1 ms per list under load). The wrappers keep the originals in __wrapped__."""
+    import builtins
+    import io
+    for module, name in ((os, "stat"), (os, "lstat"), (builtins, "open"), (io, "open")):
+        fn = getattr(module, name)
+        monkeypatch.setattr(module, name, getattr(fn, "__wrapped__", fn))
+
+
+def test_replay_budget_polled_profile_list(files, monkeypatch):
     """The measured stream: 11 profiles listed every 2 s by an open Desktop, no gateway changing state. A memo
     hit costs two stats plus one /proc read per profile; budget is per wall second of polling."""
     import fcntl
+    _unguarded_io(monkeypatch)
     paths, held = [], []
     for n in range(11):
         d = files.parent / f"p{n}"

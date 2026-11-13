@@ -148,6 +148,66 @@ def test_removed_profile_store_drops_its_observer(monkeypatch):
     assert not any("work" in p for p in delivery._observers)
 
 
+def test_profile_delete_release_closes_the_observer_under_that_home(sdb, monkeypatch):
+    """A profile delete (and a snapshot restore) calls ``hermes_state_registry.close_all_under`` before rmtree; on
+    Windows any open handle fails it with WinError 32, and a still-listed store would keep its observer forever."""
+    import hermes_state_registry
+    work = _db("work")
+    work.create_session(SID, "desktop")
+    work.close()
+    delivery.sweep_once()
+    work_home = _root() / "profiles" / "work"
+    assert any("work" in p for p in delivery._observers)
+    hermes_state_registry.close_all_under(work_home)
+    assert not any("work" in p for p in delivery._observers), "the delete path must release the observer fd"
+    assert any(p == str(_root() / "state.db") for p in delivery._observers), "other homes keep theirs"
+    hermes_state_registry.close_all()
+    assert delivery._observers == {} and delivery._last_pass == {}
+
+
+def test_released_observer_is_reopened_and_the_next_admission_still_lands(sdb, turns, monkeypatch):
+    import hermes_state_registry
+    calls, _ = _install_resume(monkeypatch)
+    delivery.sweep_once()
+    hermes_state_registry.close_all_under(_root())
+    _admit()
+    [rec] = delivery.sweep_once()
+    assert rec["verdict"] == "started" and len(calls) == 1
+
+
+def test_key_from_a_dropped_observer_is_not_remembered(sdb, turns, monkeypatch):
+    """A fresh connection's data_version restarts low, so a key read by an observer that was dropped mid-pass
+    could equal a later key and skip commits: it must not be recorded."""
+    _install_resume(monkeypatch, refuse=True)
+    _admit()
+    real = delivery._sweep_profile
+
+    def _reset_mid_pass(*args, **kwargs):
+        delivery.reset_observers()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(delivery, "_sweep_profile", _reset_mid_pass)
+    delivery.sweep_once()
+    assert str(_root() / "state.db") not in delivery._last_pass
+
+
+def test_lease_loss_closes_the_observers(sdb):
+    class _Lease:
+        def __init__(self, held):
+            self._held = held
+
+        def held(self):
+            return self._held
+
+        def beat(self):
+            pass
+
+    assert delivery.run_pass(_Lease(True)) is True
+    assert delivery._observers
+    assert delivery.run_pass(_Lease(False)) is False
+    assert delivery._observers == {}, "another process sweeps now: this one must hold no store fds"
+
+
 def test_unreadable_store_takes_the_full_path(sdb, opens, monkeypatch):
     def _broken(path):
         raise OSError("observer unavailable")

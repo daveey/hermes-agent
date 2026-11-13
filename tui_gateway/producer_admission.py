@@ -184,11 +184,22 @@ def _drop_observer(path: str) -> None:
 
 
 def reset_observers() -> None:
-    """Close every kept observer connection (tests, shutdown)."""
+    """Close every kept observer connection (tests, sweeper shutdown, lease loss)."""
+    release_under(None)
+
+
+def release_under(root: Optional[Path]) -> int:
+    """Close the kept observers of stores under *root* (all when None); returns how many closed.
+    ``hermes_state_registry.close_all``/``close_all_under`` call this, so a profile delete's rmtree (WinError 32 on
+    Windows while any handle is open) and a snapshot restore never meet an observer fd. The next pass reopens."""
+    from hermes_state_common import path_is_under
     with _observers_lock:
-        for path in list(_observers):
+        chosen = [p for p in _observers if root is None or path_is_under(Path(p), root)]
+        for path in chosen:
             _drop_observer(path)
-        _last_pass.clear()
+        if root is None:
+            _last_pass.clear()
+    return len(chosen)
 
 
 def _observe(path: Path) -> tuple[tuple, sqlite3.Connection]:
@@ -220,21 +231,30 @@ def _pending_owners_on(conn: sqlite3.Connection) -> list[str]:
 
 
 def _gate(path: Path) -> Optional[tuple]:
-    """None to skip ``path`` this pass; else ``(key, owners)`` where ``owners`` is None when the observer could not
-    answer (the caller then takes today's full path). Called under ``_observers_lock``."""
+    """None to skip ``path`` this pass; else ``(key, owners, conn)`` where ``owners`` is None when the observer could
+    not answer (the caller then takes today's full path). Called under ``_observers_lock``."""
     try:
         key, conn = _observe(path)
     except (OSError, sqlite3.Error):
         _drop_observer(str(path))
-        return (None, None)
+        return (None, None, None)
     last = _last_pass.get(str(path))
     if last is not None and last[0] == key and not last[1]:
         return None
     try:
-        return key, _pending_owners_on(conn)
+        return key, _pending_owners_on(conn), conn
     except sqlite3.Error:
         _drop_observer(str(path))
-        return (None, None)
+        return (None, None, None)
+
+
+def _record(path: Path, key: tuple, conn, had_pending: bool) -> None:
+    """Remember this pass's key only while ``conn`` (the observer that read it) is still the kept one: a fresh
+    connection's ``data_version`` restarts low, so a key read by a dropped observer could equal a later one and
+    skip commits nobody saw. Called under ``_observers_lock``."""
+    entry = _observers.get(str(path))
+    if entry is not None and entry[1] is conn:
+        _last_pass[str(path)] = (key, had_pending)
 
 
 @_la.accounted("producer_admission.sweep", rows=True)
@@ -256,16 +276,16 @@ def sweep_once() -> list[dict]:
             if gate is None:
                 acct.skip()
                 continue
-            key, owners = gate
+            key, owners, conn = gate
             acct.change(key is not None)
             if owners is not None and not owners:
-                _last_pass[str(path)] = (key, False)
+                _record(path, key, conn, False)
                 continue
             acct.fallback(owners is None)
         had_pending = _sweep_profile(server, profile, home, out)
         if key is not None:
             with _observers_lock:
-                _last_pass[str(path)] = (key, had_pending)
+                _record(path, key, conn, had_pending)
     return out
 
 
@@ -336,6 +356,8 @@ def run_pass(lease) -> bool:
     (design t_01a1d45d75851804 §2b; ``HERMES_HOST_LOOP_LEASE=0`` = every process). The per-chat poller's
     ``deliver_pending`` is unchanged. True when the sweep ran."""
     if not lease.held():
+        if _observers:
+            reset_observers()  # another process sweeps now: hold no store fds for it
         return False
     try:
         sweep_once()
@@ -356,6 +378,7 @@ def _loop(stop: threading.Event) -> None:
                 logger.warning("producer admission sweep failed", exc_info=True)
             stop.wait(INTERVAL_S)
     finally:
+        reset_observers()
         lease.release()
 
 
