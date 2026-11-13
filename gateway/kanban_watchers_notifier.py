@@ -357,6 +357,7 @@ class _Collector:
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
         from gateway.kanban_wake_sibling import tui_sibling_floor
+        sub = kanban_tui_owner.with_tip_chats(self, conn, sub)  # its tui rows sit on the chat's compression tips
         tui_floor = tui_sibling_floor(conn, sub)
         return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug,
                 "tui_notice": tui_floor is not None, "tui_floor": tui_floor}

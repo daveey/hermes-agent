@@ -25,12 +25,29 @@ WAKE_MODES = ("notify+wake", "wake")
 # How long a ``tui`` row waits for its waking ``local`` sibling to deliver a covered event before delivering it
 # itself. A healthy wake acks at admission to the chat's FIFO, seconds after the event.
 DEFER_MAX_S = 600.0
+# :func:`local_since` for a ``local`` row it cannot date: past every event, so that row covers and settles nothing
+# (a duplicate beats a lost notice).
+UNDATABLE = 2 ** 62
 
 
 def _chats(sub: dict) -> tuple:
     """This row's chat and the other ids of its compression lineage (``sibling_chats``, stamped by the caller that
-    knows the lineage): a ``local`` row on the lineage root is the same chat as a ``tui`` row on its tip."""
+    knows the lineage): a ``local`` row on the lineage root is the same chat as a ``tui`` row on its tip.
+
+    The gateway stamps ``(tip, logical_owner root)`` and the legacy poller the whole ``_session_lineage`` chain.
+    Both contain the root, and the root is the only chat a ``local`` row is keyed by (the gateway subscribes a chat
+    under its logical owner), so both legs find the same ``local`` sibling; the chain's intermediate compaction
+    parents never hold one."""
     chats = tuple(dict.fromkeys(str(c) for c in (sub["chat_id"], *(sub.get("sibling_chats") or ())) if c))
+    return chats or (str(sub["chat_id"]),)
+
+
+def _tui_chats(sub: dict) -> tuple:
+    """For a waking ``local`` row: its chat and every compression tip whose lineage root it is (``tui_chats``,
+    stamped by the gateway collector, :func:`gateway.kanban_tui_owner.with_tip_chats`). ``tui`` rows are keyed by
+    the tip: a wake on the root that settled only a ``tui`` row on the root left the tip's row owing the event, and
+    after an archive drained the ``local`` row it delivered again (review t_01a1d39942db8c2c of PR #1720)."""
+    chats = tuple(dict.fromkeys(str(c) for c in (sub["chat_id"], *(sub.get("tui_chats") or ())) if c))
     return chats or (str(sub["chat_id"]),)
 
 
@@ -71,7 +88,7 @@ def local_since(conn: Any, row: Any) -> int:
         found = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id = ? AND created_at <= ?",
                              (row["task_id"], int(row["created_at"] or 0))).fetchone()
     except sqlite3.Error:
-        return 2 ** 62  # undatable: it covers nothing (a duplicate beats a lost notice)
+        return UNDATABLE
     return int((found[0] if found else 0) or 0)
 
 
@@ -202,20 +219,22 @@ def has_tui_sibling(conn: Any, sub: dict) -> bool:
 
 
 def tui_sibling_floor(conn: Any, sub: dict) -> Optional[int]:
-    """For a waking ``local`` row: the event id up to which its ``tui`` sibling has delivered or holds a claim
-    (``inflight_from`` while a claim is in flight, else ``last_event_id``), or None when there is no such row.
-    The wake turn carries the ``tui`` notices for its batch's events past this floor (:func:`notice_lines`)."""
+    """For a waking ``local`` row: the event id up to which its ``tui`` siblings (its chat and compression tips,
+    :func:`_tui_chats`) have delivered or hold a claim (``inflight_from`` while a claim is in flight, else
+    ``last_event_id``; the lowest over the rows), or None when there is no such row. The wake turn carries the
+    ``tui`` notices for its batch's events past this floor (:func:`notice_lines`)."""
     if not _waking_local(sub):
         return None
+    chats = _tui_chats(sub)
     try:
-        row = conn.execute("SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE task_id = ? "
-                           "AND platform = 'tui' AND chat_id = ? AND thread_id = ?",
-                           (sub["task_id"], sub["chat_id"], sub.get("thread_id") or "")).fetchone()
+        rows = conn.execute("SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE task_id = ? "
+                            f"AND platform = 'tui' AND chat_id IN ({','.join('?' * len(chats))}) AND thread_id = ?",
+                            (sub["task_id"], *chats, sub.get("thread_id") or "")).fetchall()
     except sqlite3.Error:
         return None
-    if row is None:
+    if not rows:
         return None
-    return int((row[0] if row[1] is None else row[1]) or 0)
+    return min(int((row[0] if row[1] is None else row[1]) or 0) for row in rows)
 
 
 def _waking_local(sub: dict) -> bool:
@@ -263,46 +282,58 @@ def settle_tui_sibling(board: Optional[str], sub: dict, upto: int, carried: froz
     An event the ``tui`` row would show but the wake does not wake on settles only when its id is in ``carried``
     (the wake turn showed its line, :func:`carried_ids`); any other such event keeps the row where it is. So does
     any event written before this ``local`` row existed (:func:`local_since`): the wake never carried it.
+
+    Every ``tui`` row of the chat is settled: the one on this chat and those on its compression tips
+    (:func:`_tui_chats`), since the ``local`` row sits on the lineage root and the ``tui`` row on the live tip.
     """
     import contextlib
+
+    from hermes_cli import kanban_db_connect as kbc
+    if not _waking_local(sub):
+        return False
+    task, thread = sub["task_id"], sub.get("thread_id") or ""
+    changed = False
+    with contextlib.closing(kbc.connect(board=board)) as conn, kbc.write_txn(conn):
+        mine = conn.execute("SELECT * FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local' AND chat_id = ? "
+                            "AND thread_id = ?", (task, sub["chat_id"], thread)).fetchone()
+        since = local_since(conn, mine) if mine is not None else 0
+        for chat in _tui_chats(sub):
+            changed = _settle_row(conn, (task, chat, thread), upto, carried, since) or changed
+    return changed
+
+
+def _settle_row(conn: Any, ident: tuple, upto: int, carried: frozenset, since: int) -> bool:
+    """:func:`settle_tui_sibling` for one ``tui`` row ``(task_id, chat_id, thread_id)``, inside its transaction."""
     import json
     from types import SimpleNamespace
 
-    from hermes_cli import kanban_db_connect as kbc
     from hermes_cli.kanban_failure_notice import provisional_failure
     from tui_gateway.session_notifications import _KANBAN_EVENT_FORMATTERS
-    if not _waking_local(sub):
-        return False
-    ident = (sub["task_id"], sub["chat_id"], sub.get("thread_id") or "")
     key = "task_id = ? AND platform = 'tui' AND chat_id = ? AND thread_id = ?"
-    with contextlib.closing(kbc.connect(board=board)) as conn, kbc.write_txn(conn):
-        row = conn.execute(f"SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE {key}", ident).fetchone()
-        if row is None:
-            return False
-        last, held = int(row[0] or 0), row[1]
-        start = last if held is None else int(held)
-        stop = upto if held is None else min(upto, last)
-        if start >= stop:
-            return False
-        mine = conn.execute("SELECT * FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local' AND chat_id = ? "
-                            "AND thread_id = ?", ident).fetchone()
-        since = local_since(conn, mine) if mine is not None else 0
-        for ev_id, kind, payload in conn.execute("SELECT id, kind, payload FROM task_events WHERE task_id = ? "
-                                                 "AND id > ? AND id <= ?", (ident[0], start, stop)):
-            try:
-                data = json.loads(payload) if payload else {}
-            except ValueError:
-                data = {}
-            ev = SimpleNamespace(kind=kind, payload=data)
-            if provisional_failure(ev):
-                continue  # the tui row shows nothing for it; its failure_finalized carries the notice
-            owed = int(ev_id) <= since or (not covered(ev) and int(ev_id) not in carried)
-            if kind in _KANBAN_EVENT_FORMATTERS and owed:
-                return False  # the tui row still owes a notice the wake did not carry
-        if held is None:
-            cur = conn.execute(f"UPDATE kanban_notify_subs SET last_event_id = ? WHERE {key} "
-                               "AND last_event_id = ? AND inflight_from IS NULL", (stop, *ident, last))
-        else:
-            cur = conn.execute(f"UPDATE kanban_notify_subs SET inflight_from = ? WHERE {key} "
-                               "AND inflight_from = ?", (stop, *ident, held))
-        return cur.rowcount == 1
+    row = conn.execute(f"SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE {key}", ident).fetchone()
+    if row is None:
+        return False
+    last, held = int(row[0] or 0), row[1]
+    start = last if held is None else int(held)
+    stop = upto if held is None else min(upto, last)
+    if start >= stop:
+        return False
+    for ev_id, kind, payload in conn.execute("SELECT id, kind, payload FROM task_events WHERE task_id = ? "
+                                             "AND id > ? AND id <= ?", (ident[0], start, stop)):
+        try:
+            data = json.loads(payload) if payload else {}
+        except ValueError:
+            data = {}
+        ev = SimpleNamespace(kind=kind, payload=data)
+        if provisional_failure(ev):
+            continue  # the tui row shows nothing for it; its failure_finalized carries the notice
+        owed = int(ev_id) <= since or (not covered(ev) and int(ev_id) not in carried)
+        if kind in _KANBAN_EVENT_FORMATTERS and owed:
+            return False  # the tui row still owes a notice the wake did not carry
+    if held is None:
+        cur = conn.execute(f"UPDATE kanban_notify_subs SET last_event_id = ? WHERE {key} "
+                           "AND last_event_id = ? AND inflight_from IS NULL", (stop, *ident, last))
+    else:
+        cur = conn.execute(f"UPDATE kanban_notify_subs SET inflight_from = ? WHERE {key} "
+                           "AND inflight_from = ?", (stop, *ident, held))
+    return cur.rowcount == 1

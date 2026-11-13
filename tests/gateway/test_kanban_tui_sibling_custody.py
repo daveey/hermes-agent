@@ -441,13 +441,52 @@ def test_a_root_local_wake_settles_the_tip_tui_leg_across_archive(env, monkeypat
     tid = _card(tui=False, local=False)
     _sub(tid, "local", "notify+wake", chat="root")
     _sub(tid, "tui", "notify", chat=CHAT)
-    _complete(tid)
+    completed = _complete(tid)
     monkeypatch.setattr(authority, "logical_owner", lambda chat: "root")
     authority.sessions[CHAT] = _Live(CHAT)
     authority.db.work(CHAT)
     _gateway_tick(runner)
     assert len(adapter.turns) == 1
+    assert _row(tid)[0] >= completed, "the root wake settles the tip's tui row, not only claim-time cover"
     _archive(tid)
     _gateway_tick(runner)  # drain and ack the archived local row
     _gateway_tick(runner)
     assert admitted == [], "tip tui leg delivered after root local leg and archive"
+
+
+def test_n3_root_local_wake_resolves_a_held_tip_claim_after_archive(env, monkeypatch):
+    """N3 across compression: the wake row is on the lineage root, the held tui claim on the tip; the card is archived
+    and the root local row drains before the busy holder re-checks its buffer (review t_01a1d39942db8c2c)."""
+    runner, authority, adapter, _admitted = env
+    tid = _card(tui=False, local=False)
+    _sub(tid, "local", "notify+wake", chat="root")
+    _sub(tid, "tui", "notify", chat=CHAT)
+    _complete(tid)
+    monkeypatch.setattr(server, "_session_lineage", lambda key, limit=8: ("root",) if key == CHAT else ())
+    monkeypatch.setattr(authority, "logical_owner", lambda chat: "root")
+    session = _session()
+    with monkeypatch.context() as m:
+        m.setattr(sibling, "DEFER_MAX_S", -1.0)
+        assert len(_legacy_collect(session)) == 1 and _row(tid)[1] is not None
+    _gateway_tick(runner)  # the root wake delivers the completion
+    _archive(tid)
+    _gateway_tick(runner)
+    _gateway_tick(runner)  # the archived root local row drains and is removed
+    server._kb_settle_held(session)
+    assert len(adapter.turns) + len(session["_kanban_pending"]) == 1
+    assert session.get("_kanban_claims") in (None, [])
+    _gateway_tick(runner)
+    assert _legacy_collect(session) == [] and len(adapter.turns) == 1
+
+
+def test_a_root_wake_floor_reads_the_tip_tui_row(env):
+    tid = _card(tui=False, local=False)
+    _sub(tid, "local", "notify+wake", chat="root")
+    _sub(tid, "tui", "notify", chat=CHAT)
+    conn = kbc.connect()
+    try:
+        local = {"task_id": tid, "platform": "local", "chat_id": "root", "thread_id": "", "delivery_mode": "notify+wake"}
+        assert sibling.tui_sibling_floor(conn, local) is None
+        assert sibling.tui_sibling_floor(conn, {**local, "tui_chats": (CHAT,)}) == _row(tid)[0]
+    finally:
+        conn.close()

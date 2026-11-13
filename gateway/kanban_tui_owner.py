@@ -155,6 +155,25 @@ def _lineage_this_tick(collector: Any, sub: dict) -> tuple:
     return seen[chat]
 
 
+def with_tip_chats(collector: Any, conn: Any, sub: dict) -> dict:
+    """``sub`` (a waking ``local`` row) stamped with ``tui_chats``: the chats of the card's ``tui`` rows whose
+    compression-lineage root is this row's chat (``kanban_wake_sibling._tui_chats``). ``local`` rows are keyed by
+    the root and ``tui`` rows by the live tip, so the wake's floor and settle must reach the tip's row. Reads only
+    the card's few ``tui`` rows; a row whose lineage cannot be read is left out (claim-time cover still applies)."""
+    from gateway import kanban_wake_sibling as sibling
+    if not sibling._waking_local(sub):
+        return sub
+    chat = str(sub.get("chat_id") or "")
+    try:
+        rows = conn.execute("SELECT chat_id FROM kanban_notify_subs WHERE task_id = ? AND platform = 'tui' "
+                            "AND thread_id = ? AND chat_id != ?",
+                            (sub["task_id"], sub.get("thread_id") or "", chat)).fetchall()
+    except sqlite3.Error:
+        return sub
+    tips = tuple(str(r[0]) for r in rows if chat in _lineage_this_tick(collector, {**sub, "chat_id": r[0]})[1:])
+    return {**sub, "tui_chats": tips} if tips else sub
+
+
 def claim(collector: Any, conn: Any, slug: str, sub: dict) -> Optional[dict]:
     """Claim one tui row's unseen events for this gateway, or None (left to the legacy backend).
 
