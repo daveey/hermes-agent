@@ -834,7 +834,8 @@ def _iter_segment_contexts(
         return _opens_call_arguments(segment) and alias_names.isdisjoint(segment)
     for tokens in _iter_command_token_lists(command):
         yield from iter_line_segment_contexts(
-            tokens, cat_operands=_cat_operands, opens_call_arguments=opens_call,
+            tokens, cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
+            opens_call_arguments=opens_call,
             peel_reserved_words=_peel_reserved_words,
             stdin_redirections=lambda words: _split_redirections(words)[1])
 
@@ -959,6 +960,27 @@ def _cat_operands(segment: Optional[list[str]]) -> list[str]:
             arguments, stdin = _split_redirections(view[index + 1 :])
             return [argument for argument in arguments if not argument.startswith("-")] + stdin
     return []
+
+
+def _cat_relays_stdin(segment: list[str]) -> bool:
+    """Whether a ``cat`` segment writes the stdin it is fed (``… | cat | bash``, ``{ cat; } <
+    f``): no file operand or a ``-`` one, and no redirection, heredoc or here-string of its own
+    on fd 0 (``cat < x``, ``cat <<< x`` and ``cat x.txt`` ignore the feed)."""
+    for view in _command_segment_views(segment):
+        index = _executed_command_index(view)
+        if index is not None and _executable_name(view[index]) == "cat":
+            words, arguments = iter(view[index + 1 :]), []
+            for word in words:
+                match = _REDIRECTION.match(word)
+                if match is None:
+                    arguments.append(word)
+                    continue
+                fd, operator, target = match.groups()
+                target = target or next(words, "")
+                if fd in ("", "0") and operator.startswith("<") and (operator, target) != ("<&", "0"):
+                    return False  # `cat < x`, `cat <<< x`, `cat <&3` read their own stdin
+            return "-" in arguments or all(argument.startswith("-") for argument in arguments)
+    return False
 
 
 def contains_launchctl_submit_command(command: str) -> bool:
