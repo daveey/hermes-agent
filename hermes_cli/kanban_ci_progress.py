@@ -21,10 +21,10 @@ list is read first and decides alone when it has an online match. The lists coun
 fails (listing runners needs admin scope; a repo served only by org runners and a token without org admin show a
 readable but empty repo list) and no online runner matched. A self-hosted job is then still ``busy`` when a job
 asking for the same labels is running or a runner took it within ``QUEUED_LIMIT_SECONDS`` (this run's jobs, then
-recent runs of the repo): 2026-11-13, run 43423320884 waited 15 min behind ~10 min jobs on the one-runner
-``hermes-state`` pool, which was online and busy, and the card owning an approved PR was woken behind
-``runners-offline.hermes-state``. With no such job the run stays ``not_starting`` and every message says only that
-no runner picked it up; a message says no online runner has the labels only when both lists were read.
+every in-progress run and the recently completed runs of the repo): 2026-11-13, run 43423320884 waited 15 min behind
+~10 min jobs on the one-runner ``hermes-state`` pool, which was online and busy, and the card owning an approved PR
+was woken behind ``runners-offline.hermes-state``. With no such job the run stays ``not_starting`` and every message
+says only that no runner picked it up; a message says no online runner has the labels only when both lists were read.
 
 * Park time (:func:`confirm`, called by ``kanban_awaiting.confirm_remote`` before the write txn): a ``kind=ci``
   park on such a run is refused with ``ci_run_unstartable`` naming the labels.
@@ -61,7 +61,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -78,7 +78,10 @@ NO_CREDENTIAL_WARN_SECONDS = 60 * 60
 SWEEP_EVERY_SECONDS = 60
 MAX_CARDS_PER_SWEEP = 6
 SWEEP_BUDGET_SECONDS = 90
-RECENT_RUNS_MAX = 4  # runs per status whose jobs the unreadable-runner-list fallback reads
+RECENT_RUNS_MAX = 4  # completed runs whose jobs the unreadable-runner-list fallback reads
+IN_PROGRESS_RUNS_MAX = 40  # in-progress runs whose jobs it reads (all of them on a normal day: 23 on 2026-11-13)
+POOL_SCAN_READERS = 6  # those job lists read at once: each read is a broker vend + gh call, ~3 s on the hub
+POOL_SCAN_TTL_SECONDS = SWEEP_EVERY_SECONDS  # how long one repo-wide scan answers for the same repo and labels
 BLOCKER_PREFIX = "runners-offline"
 AUTHOR = "kanban-dispatcher"
 
@@ -281,7 +284,7 @@ def ci_run_progress(ref: str, *, hint: str = "", fetch: Optional[Fetch] = None,
             return Progress(NOT_STARTING, repo, run_id, labels, age, runners_readable=True, idle_runner=idle)
     elif "self-hosted" in {x.lower() for x in labels}:
         try:
-            took = _recent_job_on(repo, labels, (data or {}).get("jobs") or [], now, deadline)
+            took = _recent_job_on(repo, labels, (data or {}).get("jobs") or [], now, deadline, run_id=run_id)
         except OverBudget as exc:
             return Progress("unknown", repo, run_id, labels, age, detail=str(exc), deferred=True)
         if took:
@@ -292,11 +295,19 @@ def ci_run_progress(ref: str, *, hint: str = "", fetch: Optional[Fetch] = None,
     return Progress(NOT_STARTING, repo, run_id, labels, age, runners_readable=runners is not None)
 
 
-def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadline: Optional[float]) -> str:
+def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadline: Optional[float], *,
+                   run_id: str = "") -> str:
     """With the runner lists unreadable: a job asking for exactly ``labels`` that a runner is running, or took
-    within ``QUEUED_LIMIT_SECONDS``, shows the pool alive. This run's jobs first, then the jobs of up to
-    ``RECENT_RUNS_MAX`` in-progress or recently updated runs of the repo. "" when none or unreadable; raises
-    :class:`OverBudget` when ``deadline`` passed before a read."""
+    within ``QUEUED_LIMIT_SECONDS``, shows the pool alive. This run's jobs first, then the jobs of every
+    in-progress run of the repo (up to ``IN_PROGRESS_RUNS_MAX``), then of up to ``RECENT_RUNS_MAX`` recently
+    completed runs. "" when none or unreadable; raises :class:`OverBudget` when ``deadline`` passed before a read.
+
+    GitHub has no jobs-by-label query, and the run list's order says nothing about which run holds the pool's
+    runner: on 2026-11-13 the run holding the one ``hermes-state`` runner was 21st of 23 in-progress runs (and of
+    another workflow than the queued run), so a 4-run window answered ``not_starting`` for a busy pool. Every
+    in-progress run is read instead (``POOL_SCAN_READERS`` at a time), stopping at the first batch with a match. The
+    answer for a repo and label set is kept ``POOL_SCAN_TTL_SECONDS``, so cards waiting on the same pool in one sweep
+    share one scan."""
     want = {x.lower() for x in labels}
     cutoff = now - QUEUED_LIMIT_SECONDS
 
@@ -316,23 +327,50 @@ def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadlin
             raise OverBudget(f"sweep budget spent before {path.split('?', 1)[0]} was read")
         return _gh_api(path) or {}
 
+    def batch(paths: list[str]) -> str:
+        """Jobs of several runs at once (each read is a broker vend plus a GitHub call, ~3 s): the first match in
+        run order; when none matched, the first read's error is raised."""
+        if deadline is not None and time.monotonic() >= deadline:
+            raise OverBudget(f"sweep budget spent before {paths[0].split('?', 1)[0]} was read")
+        with ThreadPoolExecutor(max_workers=len(paths), thread_name_prefix="ci-pool-scan") as ex:
+            futures = [ex.submit(_gh_api, p) for p in paths]
+        error: Optional[BaseException] = None
+        for fut in futures:
+            exc = fut.exception()
+            if exc is not None:
+                error = error or exc
+            elif hit := took((fut.result() or {}).get("jobs") or []):
+                return hit
+        if error is not None:
+            raise error
+        return ""
+
     found = took(jobs)
+    if found:
+        return found
+    key = (repo.lower(), frozenset(want))
+    seen = _POOL_SCANS.get(key)
+    if seen is not None and time.monotonic() - seen[0] < POOL_SCAN_TTL_SECONDS:
+        return seen[1]
+    lists = (("in_progress", 100, IN_PROGRESS_RUNS_MAX), ("completed", 10, RECENT_RUNS_MAX))
     try:
-        runs: list = []
-        for status in ("in_progress", "completed"):
+        for status, per_page, limit in lists:
             if found:
                 break
-            runs = [r for r in read(f"repos/{repo}/actions/runs?status={status}&per_page=10").get("workflow_runs")
-                    or [] if isinstance(r, dict) and r.get("id")
-                    and (status == "in_progress" or (_epoch(r.get("updated_at")) or 0) >= cutoff)]
-            for run in runs[:RECENT_RUNS_MAX]:
-                found = took(read(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100").get("jobs") or [])
+            listed = read(f"repos/{repo}/actions/runs?status={status}&per_page={per_page}").get("workflow_runs")
+            runs = [r for r in listed or [] if isinstance(r, dict) and r.get("id") and str(r["id"]) != str(run_id)
+                    and (status == "in_progress" or (_epoch(r.get("updated_at")) or 0) >= cutoff)][:limit]
+            paths = [f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100" for run in runs]
+            for i in range(0, len(paths), POOL_SCAN_READERS):
+                found = batch(paths[i:i + POOL_SCAN_READERS])
                 if found:
                     break
     except OverBudget:
         raise
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         logger.debug("ci run progress: recent runs of %s unreadable: %s", repo, exc)
+        return found  # an unread list is no evidence either way: not remembered
+    _POOL_SCANS[key] = (time.monotonic(), found)
     return found
 
 
@@ -386,6 +424,8 @@ _LOCK = threading.Lock()
 _LAST_CHECK: dict[tuple[str, str], float] = {}   # (db, task id) -> monotonic time of its last read; live waits only
 _LAST_SWEEP: dict[str, float] = {}               # db -> monotonic time its last sweep started
 _SWEEPS: dict[str, Future] = {}
+# (repo, labels) -> (monotonic time, answer) of the last repo-wide scan for a job on those labels
+_POOL_SCANS: dict[tuple[str, frozenset], tuple[float, str]] = {}
 # (home, board db) -> monotonic time of the last disabled-check WARNING. Keyed like ``_LAST_CHECK`` (and by home,
 # whose gh_command_prefix the read used) so one home's warning never hides another's in a multi-home process.
 _WARNED_AT: dict[tuple[str, str], float] = {}

@@ -47,7 +47,7 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     kb.init_db()
     yield home
     kwc._shutdown_for_tests()
-    for state in (kcp._LAST_CHECK, kcp._LAST_SWEEP, kcp._SWEEPS):
+    for state in (kcp._LAST_CHECK, kcp._LAST_SWEEP, kcp._SWEEPS, kcp._POOL_SCANS):
         state.clear()
 
 
@@ -104,9 +104,17 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
         def recent(self, status: str, run_id: int, *, updated_age: int, jobs: list[dict]) -> None:
             """One recent run of the repo with ``status`` (as the run list shows it) and its jobs."""
-            (tmp_path / f"runs-{status}.json").write_text(json.dumps({"total_count": 1, "workflow_runs": [{
-                "id": run_id, "status": status, "updated_at": _iso(updated_age)}]}))
-            (tmp_path / f"jobs-{run_id}.json").write_text(json.dumps({"total_count": len(jobs), "jobs": jobs}))
+            self.runs(status, (run_id, updated_age, jobs))
+
+        def runs(self, status: str, *runs: tuple[int, int, list[dict] | None]) -> None:
+            """The repo's run list for ``status``, newest first: ``(run id, updated age, jobs)`` each."""
+            (tmp_path / f"runs-{status}.json").write_text(json.dumps({"total_count": len(runs), "workflow_runs": [
+                {"id": run_id, "status": status, "updated_at": _iso(age)} for run_id, age, _jobs in runs]}))
+            for run_id, _age, run_jobs in runs:
+                if run_jobs is None:  # served from jobs.json (the queued run itself)
+                    continue
+                (tmp_path / f"jobs-{run_id}.json").write_text(json.dumps({"total_count": len(run_jobs),
+                                                                          "jobs": run_jobs}))
 
         def calls(self, what: str = "") -> int:
             lines = calls.read_text().splitlines() if calls.exists() else []
@@ -1103,3 +1111,132 @@ def test_github_hosted_labels_read_no_recent_runs(kanban_home, fake_gh) -> None:
     p = kcp.ci_run_progress(RUN_URL, fetch=lambda _repo, _run: queued)
     assert p.state == kcp.NOT_STARTING, p
     assert fake_gh.calls("actions/runs?") == 0
+
+
+def test_unreadable_runners_find_the_pools_running_job_past_the_first_runs(kanban_home, fake_gh) -> None:
+    """2026-11-13 ~13:50: 23 in-progress runs, and the one holding the only ``hermes-state`` runner was 21st (of
+    another workflow than the queued run). A 4-run window answered ``not_starting`` for a busy pool."""
+    fake_gh.serve(age=20 * 60)
+    busy_elsewhere = [_taken(run_id=600 + i, started_age=3 * 60, status="in_progress", labels=("self-hosted", "x"))
+                      for i in range(20)]
+    fake_gh.runs("in_progress", *[(600 + i, 30, [job]) for i, job in enumerate(busy_elsewhere)],
+                 (620, 30, [_taken(run_id=620, started_age=3 * 60, status="in_progress")]),
+                 *[(621 + i, 30, []) for i in range(4)])
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.BUSY and "took job 6200" in p.detail, p
+    assert fake_gh.calls("actions/runs?status=in_progress") == 1
+    assert fake_gh.calls("/runs/623/jobs") == 1  # read with the match, in its batch of POOL_SCAN_READERS
+    assert fake_gh.calls("/runs/624/jobs") == 0  # stops after the batch with the match
+    assert fake_gh.calls("status=completed") == 0
+
+
+def test_unreadable_runners_with_a_long_running_job_on_the_labels_is_busy(kanban_home, fake_gh) -> None:
+    """A job the pool's runner started 40 min ago and is still running: the pool is alive, just slow."""
+    fake_gh.serve(age=20 * 60)
+    fake_gh.recent("in_progress", 558, updated_age=60, jobs=[_taken(run_id=558, started_age=40 * 60,
+                                                                     status="in_progress")])
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.BUSY and "took job 5580" in p.detail, p
+
+
+def test_readable_runner_list_with_only_an_offline_runner_ignores_recent_jobs(kanban_home, fake_gh) -> None:
+    """Readable runner lists decide alone: the only runner for the labels is offline, so a job it ran minutes ago (or
+    is said to be running) does not make the pool ``busy``."""
+    fake_gh.serve(age=20 * 60)
+    fake_gh.runners(_runner(status="offline"))
+    fake_gh.runners(org=True)  # both lists read: they decide alone
+    fake_gh.recent("in_progress", 559, updated_age=60, jobs=[_taken(run_id=559, started_age=3 * 60,
+                                                                     status="in_progress")])
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.NOT_STARTING and p.runners_readable, p
+    assert fake_gh.calls("actions/runs?") == 0
+
+
+def test_one_repo_scan_answers_every_card_on_the_same_pool_for_a_minute(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=20 * 60)
+    fake_gh.runs("in_progress", (int(RUN), 30, None), (701, 30, []), (702, 30, []))
+    first = kcp.ci_run_progress(RUN_URL)
+    assert first.state == kcp.NOT_STARTING, first
+    assert fake_gh.calls(f"/runs/{RUN}/jobs") == 1  # the queued run itself is not read twice
+    assert fake_gh.calls("/runs/701/jobs") == 1 and fake_gh.calls("status=completed") == 1
+    assert kcp.ci_run_progress(RUN_URL).state == kcp.NOT_STARTING
+    assert fake_gh.calls("actions/runs?") == 2 and fake_gh.calls("/runs/701/jobs") == 1  # remembered
+    fake_gh.runs("in_progress", (701, 30, [_taken(run_id=701, started_age=60, status="in_progress")]))
+    monkeypatch.setattr(kcp, "POOL_SCAN_TTL_SECONDS", 0)
+    assert kcp.ci_run_progress(RUN_URL).state == kcp.BUSY  # expired: scanned again
+
+
+def test_repo_scan_cut_by_the_budget_is_deferred_and_not_remembered(kanban_home, monkeypatch) -> None:
+    clock = _Clock(60)
+    queued = {"jobs": [{"id": 1, "status": "queued", "runner_name": None, "created_at": _iso(20 * 60),
+                        "labels": LABELS}]}
+
+    def api(path: str) -> dict:
+        clock.now += clock.step
+        if "actions/runs?" in path:
+            return {"workflow_runs": [{"id": 800 + i, "status": "in_progress"} for i in range(5)]}
+        return {"jobs": []}
+
+    monkeypatch.setattr(kcp, "time", clock)
+    monkeypatch.setattr(kcp, "_gh_api", api)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: queued, fetch_runners=lambda _r: None,
+                            deadline=clock.now + 150)
+    assert p.state == "unknown" and p.deferred, p
+    assert kcp._POOL_SCANS == {}
+
+
+def test_unreadable_run_list_is_not_remembered(kanban_home, monkeypatch) -> None:
+    """A 502 on the run list is no evidence the pool is idle: the next card on the pool reads it again."""
+    queued = {"jobs": [{"id": 1, "status": "queued", "runner_name": None, "created_at": _iso(20 * 60),
+                        "labels": LABELS}]}
+
+    def api(path: str) -> dict:
+        raise RuntimeError("gh api exit 1: HTTP 502")
+
+    monkeypatch.setattr(kcp, "_gh_api", api)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: queued, fetch_runners=lambda _r: None)
+    assert p.state == kcp.NOT_STARTING, p
+    assert kcp._POOL_SCANS == {}
+
+
+def _scan_api(monkeypatch, runs: int, jobs_for) -> None:
+    """Fake ``_gh_api`` for a repo scan: ``runs`` in-progress runs (ids 900..), each run's jobs from ``jobs_for``."""
+    def api(path: str) -> dict:
+        if "actions/runs?" in path:
+            if "status=completed" in path:
+                return {"workflow_runs": []}
+            return {"workflow_runs": [{"id": 900 + i, "status": "in_progress"} for i in range(runs)]}
+        return {"jobs": jobs_for(int(path.split("/runs/", 1)[1].split("/", 1)[0]))}
+
+    monkeypatch.setattr(kcp, "_gh_api", api)
+
+
+_QUEUED = {"jobs": [{"id": 1, "status": "queued", "runner_name": None, "created_at": _iso(20 * 60), "labels": LABELS}]}
+
+
+def test_job_lists_of_a_scan_are_read_concurrently(kanban_home, monkeypatch) -> None:
+    """Each read is a broker vend plus a GitHub call (~3 s on the hub): 23 runs one by one ate most of the 90 s
+    sweep budget. The six reads of a batch must all be in flight together to pass the barrier."""
+    barrier = threading.Barrier(kcp.POOL_SCAN_READERS, timeout=10)
+
+    def jobs_for(run_id: int) -> list:
+        barrier.wait()
+        return [_taken(run_id=run_id, started_age=60, status="in_progress")] if run_id == 905 else []
+
+    _scan_api(monkeypatch, kcp.POOL_SCAN_READERS, jobs_for)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
+    assert p.state == kcp.BUSY and "took job 9050" in p.detail, p
+
+
+@pytest.mark.parametrize("match,state", [(True, kcp.BUSY), (False, kcp.NOT_STARTING)], ids=["match", "no-match"])
+def test_one_unreadable_job_list_in_a_scan(kanban_home, monkeypatch, match, state) -> None:
+    """A 502 on one run's jobs does not hide a match in another; with no match the scan is not remembered."""
+    def jobs_for(run_id: int) -> list:
+        if run_id == 901:
+            raise RuntimeError("gh api exit 1: HTTP 502")
+        return [_taken(run_id=run_id, started_age=60, status="in_progress")] if match and run_id == 903 else []
+
+    _scan_api(monkeypatch, 4, jobs_for)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
+    assert p.state == state, p
+    assert bool(kcp._POOL_SCANS) is match
