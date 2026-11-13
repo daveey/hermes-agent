@@ -11,6 +11,8 @@ import http.client
 import os
 import time
 import threading as _threading
+import contextlib
+import contextvars as _contextvars
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 from agent.command_token_source import build_command_token_provider, materialize_probe_api_key
@@ -165,6 +167,29 @@ def _fetch_picker_live_models(
 _picker_prewarm_done = _threading.Event()
 
 
+# [daveey] One picker build asks about the same pool from several sections (raw-pool, overlay,
+# canonical rows): ~2 full ``load_pool`` reads per provider, about half of a ``model.options``
+# call (design t_01a1d563 card J). The answer is memoized for the duration of ONE build only,
+# never across calls, so a credential added or exhausted is seen by the next build.
+_POOL_STATE_MEMO: _contextvars.ContextVar[Optional[dict]] = _contextvars.ContextVar(
+    "picker_pool_state_memo", default=None)
+_AUTH_STORE_MEMO_KEY = ("auth.json",)  # tuple: never collides with a provider-slug key
+
+
+def _picker_pool(provider: str):
+    """``load_pool(provider)``, shared while a picker build is running (see
+    ``_POOL_STATE_MEMO``); outside a build every call loads afresh."""
+    memo = _POOL_STATE_MEMO.get()
+    key = (provider or "").strip().lower()
+    if memo is not None and key in memo:
+        return memo[key]
+    from agent.credential_pool import load_pool
+    pool = load_pool(provider)  # a load error propagates (not memoized): the caller's except handles it
+    if memo is not None:
+        memo[key] = pool
+    return pool
+
+
 def _credential_pool_is_usable(provider: str, *, raw_pool_present: bool = False, for_picker: bool = False) -> bool:
     """Whether *provider* has a credential that can be selected now.
 
@@ -174,13 +199,25 @@ def _credential_pool_is_usable(provider: str, *, raw_pool_present: bool = False,
     accepts a pool whose entries are all in cooldown: a rate-limited provider is not a signed-out
     one, and limits are per-model for many providers, so another model may still work."""
     try:
-        from agent.credential_pool import load_pool
-        pool = load_pool(provider)
+        pool = _picker_pool(provider)
         if pool.has_credentials():
             return for_picker or pool.has_available()
     except Exception:
         pass
     return raw_pool_present
+
+
+@contextlib.contextmanager
+def picker_build_scope():
+    """Share pool reads across one picker build; nested scopes reuse the outer one."""
+    if _POOL_STATE_MEMO.get() is not None:
+        yield
+        return
+    token = _POOL_STATE_MEMO.set({})
+    try:
+        yield
+    finally:
+        _POOL_STATE_MEMO.reset(token)
 
 
 def prewarm_picker_cache_async() -> Optional[_threading.Thread]:
@@ -302,11 +339,29 @@ def _iter_builtin_candidates(models_dev_data: dict, excluded: set, seen: set):
             yield hermes_id, mdev_id, pconfig, env_vars
 
 
+def _picker_auth_store() -> dict:
+    """``_load_auth_store()`` for the READ-ONLY checks below. Inside a picker build the parse is
+    shared while the file's version is unchanged (a ``load_pool`` seed that persists mid-build
+    changes it, and the next check re-reads); callers must not mutate the result."""
+    from hermes_cli.auth import _auth_file_path, _load_auth_store
+    memo = _POOL_STATE_MEMO.get()
+    if memo is None:
+        return _load_auth_store()
+    from utils import file_cache_version
+    path = _auth_file_path()
+    version = (str(path), file_cache_version(path))
+    cached = memo.get(_AUTH_STORE_MEMO_KEY)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    store = _load_auth_store()
+    memo[_AUTH_STORE_MEMO_KEY] = (version, store)
+    return store
+
+
 def _auth_store_has_provider(*keys: str) -> bool:
     """True when ``auth.json`` has a ``providers`` entry under any of *keys*."""
     try:
-        from hermes_cli.auth import _load_auth_store
-        store = _load_auth_store()
+        store = _picker_auth_store()
         providers_store = store.get("providers", {})
         return bool(store and any(k in providers_store for k in keys))
     except Exception as exc:
@@ -317,8 +372,7 @@ def _auth_store_has_provider(*keys: str) -> bool:
 def _raw_pool_usable(hermes_id: str, *, for_picker: bool = False) -> bool:
     """Section-1 pool check: only consult the pool when auth.json lists a raw entry."""
     try:
-        from hermes_cli.auth import _load_auth_store
-        store = _load_auth_store()
+        store = _picker_auth_store()
         if store and store.get("credential_pool", {}).get(hermes_id):
             return _credential_pool_is_usable(hermes_id, raw_pool_present=True, for_picker=for_picker)
     except Exception:
@@ -1226,6 +1280,7 @@ def _build_curated_lists(current_provider: str, current_base_url: str, current_m
     return curated
 
 
+@picker_build_scope()
 def list_authenticated_providers(
     current_provider: str = "", current_base_url: str = "", user_providers: dict | None = None,
     custom_providers: list | None = None, *, force_fresh_nous_tier: bool = False,
