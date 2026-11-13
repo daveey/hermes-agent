@@ -279,7 +279,7 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
 # kanban_archive is not here: it sends the holder a stop request instead (kanban_remote_stop). [daveey]
 _LEASE_FENCED_TOOLS = frozenset({
     "kanban_complete", "kanban_block", "kanban_unblock", "kanban_schedule", "kanban_continue",
-    "kanban_request_review", "kanban_request_changes",
+    "kanban_request_review", "kanban_request_changes", "kanban_move",
 })
 
 
@@ -294,7 +294,7 @@ def _remote_lease_refusal(tool_name: str, args: dict) -> Optional[str]:
     if not tid:
         return None
     try:
-        from hermes_cli.kanban_remote_stop import remote_holder
+        from hermes_cli.kanban_remote_stop import refusal, remote_holder
         with _board(args.get("board"), quiet_close=True) as (_kb, conn):
             holder = remote_holder(conn, str(tid))
     except Exception:
@@ -302,11 +302,9 @@ def _remote_lease_refusal(tool_name: str, args: dict) -> Optional[str]:
         return None  # the handler reports its own board errors
     if holder is None:
         return None
-    return tool_error(
-        f"{tool_name} refused: {tid} is running under {holder}'s live lease on the Board, which accepts "
-        f"lifecycle writes only from the lease holder. Nothing changed. Act on {holder}, use kanban_archive "
-        f"(it sends {holder} a stop request), or wait for the run to end.",
-        rejection="live_claim", code="remote_live_lease", holder=holder)
+    verb = tool_name.removeprefix("kanban_").replace("_", " ")
+    return tool_error(refusal(verb, str(tid), holder), rejection="live_claim", code="remote_live_lease",
+                      holder=holder)
 
 
 # The delegate-child / worker-subprocess write fence lives in a sibling (line cap); re-exported here. [daveey]

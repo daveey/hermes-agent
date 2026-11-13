@@ -30,6 +30,7 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
+from hermes_cli import kanban_remote_stop as _remote_stop
 from hermes_cli import kanban_review_contract as _review_contract
 from hermes_cli import kanban_worker_shell as _worker_shell
 from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
@@ -212,6 +213,8 @@ def kanban_command(args: argparse.Namespace) -> int:
         handler = _HANDLERS.get(action)
         if not handler:
             return _err(f"kanban: unknown action {action!r}", 2)
+        if refused := _remote_stop.cli_refusal(action, args):  # [daveey] another machine's live Board lease
+            return _err(refused)
         try:
             return int(handler(args) or 0)
         except BoardSchemaNotOwned as exc:  # a write a non-installed core may not make here, not a traceback [daveey]
