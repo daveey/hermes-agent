@@ -15,25 +15,44 @@ _CLAIM = frozenset({"posted", "sent", "delivered", "commented", "relayed"})
 # claim, so it still needs the exact receipt (fail closed).
 _NOT_CLAIM = frozenset({"not", "never", "no", "nothing", "none", "neither", "nor", "without", "queued", "pending",
                         "failed", "refused", "rejected", "unable", "will", "would", "could", "should", "may",
-                        "might", "if", "once", "until", "awaiting", "waiting", "yet", "be", "being"})
+                        "might", "if", "once", "until", "awaiting", "waiting", "yet"})
 _GOVERN_WINDOW = 3  # words before the verb: "has not yet been posted", "will later be sent"
-# A comma, ':', a dash (a standalone spaced '-' or '--' too, never an intra-word hyphen; U+2212 minus), '(' or a
-# conjunction ends the governing span: "filed no card, so I posted ..." and "No longer pending - posted to ..." are
-# claims.
-_BOUNDARY = frozenset({",", ":", "—", "–", "−", "-", "--", "(", "so", "and", "but", "then", "after", "before",
+# A comma, ':', a dash, '(' or a conjunction ends the governing span: "filed no card, so I posted ..." and "No
+# longer pending - posted to ..." are claims. A dash is an em/en dash, U+2212, or an ASCII hyphen run of any length
+# that touches a space or the clause edge on either side ("pending - posted", "pending --- posted", "pending -posted",
+# "pending- posted"); an intra-word hyphen ("re-posted") is no dash.
+_BOUNDARY = frozenset({",", ":", "—", "–", "−", "(", "so", "and", "but", "then", "after", "before",
                        "because", "which", "while", "that"})
-_WORD = re.compile(r"[\w’']+|[,:—–−(]|(?<!\S)--?(?!\S)")
+_WORD = re.compile(r"[\w’']+|[,:—–−(]|(?<!\S)-+|-+(?!\S)")
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{8}(?:[0-9a-f]{8})?\b")
+_BE = ("be", "being")
+# Only adverbs may stand between be/being and the verb for it to govern ("to be soon posted", "is being quickly
+# sent"); "To be safe I posted ..." and "Being thorough I posted ..." stay claims (fail closed).
+_ADVERBS = frozenset({"soon", "later", "eventually", "still", "also", "again", "just", "now", "only", "first",
+                      "properly", "manually", "automatically"})
+
+
+def _is_boundary(w):
+    return w in _BOUNDARY or not w.strip("-")
+
+
+def _adverb(w):
+    return w in _ADVERBS or (len(w) > 3 and w.endswith("ly"))
 
 
 def _governed(words, i):
-    if i and words[i - 1] in ("be", "being"):
-        # "to be posted", "will be sent", "is being posted": an infinitive, future or progressive form is never a
-        # past claim, whatever boundary cuts it from its queue word ("Queued: to be posted to ..."). Known
-        # fail-open: the rare past-tense infinitive "it turned out to be posted twice to t_X" is not a claim.
-        return True
-    for w in reversed(words[max(0, i - _GOVERN_WINDOW):i]):
-        if w in _BOUNDARY:
+    lo = max(0, i - _GOVERN_WINDOW)
+    for j in range(i - 1, -1, -1):
+        # "to be posted", "will be sent", "is being posted", "to be later posted": an infinitive, future or
+        # progressive form is never a past claim, whatever boundary cuts it from its queue word ("Queued: to be
+        # posted to ..."). Known fail-open: the rare past-tense infinitive "it turned out to be posted twice to
+        # t_X" is not a claim.
+        if words[j] in _BE:
+            return True
+        if not _adverb(words[j]):
+            break
+    for w in reversed(words[lo:i]):
+        if _is_boundary(w):
             return False
         if w in _NOT_CLAIM or w.endswith(("n't", "n’t")):
             return True

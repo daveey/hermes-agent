@@ -348,10 +348,10 @@ def test_unreachable_board_stops_paging_behind_a_deferral(fleet, monkeypatch, tm
              for i in range(3)]
     real, down = kox._caller_refusal, {"on": True}
 
-    def flaky(rep, board, event, payload):
+    def flaky(rep, board, event, payload, *replica):
         if down["on"] and (payload.get("args") or {}).get("text") == "s0":
             return None, True
-        return real(rep, board, event, payload)
+        return real(rep, board, event, payload, *replica)
     monkeypatch.setattr(kox, "_caller_refusal", flaky)
     helpers._round(f)
     assert [_outcome(f, r["request_id"]) for r in later] == [None] * 3, "a call after the retry was applied first"
@@ -375,6 +375,22 @@ def test_caller_refusal_wins_over_a_deferral_refusal(fleet, monkeypatch, tmp_pat
     assert request["result"][0]["outcome"] == "refused", request
     assert "caller_unproven: isolated probe" in request["result"][0]["detail"]
     assert "consent_unproven" not in request["result"][0]["detail"]
+
+
+def test_replica_caller_checks_run_once_per_call(fleet, monkeypatch):
+    """The deferral check and the caller refusal share one replica caller check (task_runs + claimed scan)."""
+    from hermes_cli import kanban_operator_call as kox
+    f = fleet
+    real, calls = kox._caller_replica_refusal, []
+
+    def counted(rep, event, payload):
+        calls.append(payload.get("request_uid"))
+        return real(rep, event, payload)
+    monkeypatch.setattr(kox, "_caller_replica_refusal", counted)
+    later = helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "once"})
+    helpers._round(f)
+    assert _outcome(f, later["request_id"]) == "applied"
+    assert calls and len(calls) == len(set(calls)), f"replica caller checks repeated per call: {calls}"
 
 
 @pytest.mark.parametrize("ahead", [0, 3600])
@@ -417,6 +433,10 @@ def test_future_requested_at_never_defers_a_home_refusal():
     caller = {"gateway": "worker-5", "task_id": "t_" + "9" * 16, "run_uid": "x"}
     assert "in the future" in kox._caller_replica_refusal(
         rep, {"task_id": caller["task_id"]}, {"caller": caller, "requested_at": now + 3600})
+    # Called without a precomputed replica result, _caller_refusal still runs the replica checks itself.
+    refusal, retry = kox._caller_refusal(rep, "default", {"task_id": caller["task_id"]},
+                                         {"caller": caller, "requested_at": now + 3600})
+    assert retry is False and "in the future" in (refusal or "")
 
 
 def test_without_a_deferral_one_tick_reads_one_batch(fleet, monkeypatch):

@@ -302,6 +302,21 @@ def test_negation_outside_the_claim_verb_still_needs_a_receipt(fleet, summary):
     ("Queued: to be later posted to t_0123456789abcdef.", False),
     ("Queued: to be eventually sent to t_0123456789abcdef.", False),
     ("The note to t_0123456789abcdef is being posted.", False),
+    ("Queued to be soon posted to t_0123456789abcdef.", False),
+    ("The note to t_0123456789abcdef is being quickly posted.", False),
+    # Windowed be/being governs only across an adverb gap: an unrelated "to be safe" or "being thorough" before
+    # an affirmative claim leaves it a claim (fail closed).
+    ("To be safe I posted the summary to t_0123456789abcdef.", True),
+    ("Being thorough I posted to t_0123456789abcdef.", True),
+    ("To be sure, posted to t_0123456789abcdef.", True),
+    # A spaced dash run of any length is a boundary, and a hyphen glued to either side of the verb splits too.
+    ("Not done --- posted to t_0123456789abcdef.", True),
+    ("Not done ---- posted to t_0123456789abcdef.", True),
+    ("Not done -posted to t_0123456789abcdef.", True),
+    ("Not done- posted to t_0123456789abcdef.", True),
+    ("Comment to t_0123456789abcdef --- not posted.", False),
+    ("Comment to t_0123456789abcdef -not posted.", False),
+    ("The note to t_0123456789abcdef was never re-posted.", False),
 ])
 def test_claimed_targets_scopes_negation_to_the_verb(text, claimed):
     from hermes_cli.kanban_operator_delivery import claimed_targets

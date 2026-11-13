@@ -567,9 +567,17 @@ def _caller_replica_refusal(rep: sqlite3.Connection, event: dict, payload: dict)
     return None
 
 
-def _caller_refusal(rep: sqlite3.Connection, board: str, event: dict, payload: dict) -> tuple[Optional[str], bool]:
-    """``(refusal, retry)``: None when the caller is proven; ``retry`` when the Board could not be read."""
-    refusal = _caller_replica_refusal(rep, event, payload)
+_UNCHECKED = object()
+
+
+def _caller_refusal(rep: sqlite3.Connection, board: str, event: dict, payload: dict,
+                    replica: Any = _UNCHECKED) -> tuple[Optional[str], bool]:
+    """``(refusal, retry)``: None when the caller is proven; ``retry`` when the Board could not be read.
+
+    ``replica`` is ``_caller_replica_refusal``'s result when the caller already ran it (``apply_incoming`` runs it
+    once per call, before the deferral check), so its task_runs and claimed-event queries are not repeated.
+    """
+    refusal = _caller_replica_refusal(rep, event, payload) if replica is _UNCHECKED else replica
     if refusal is not None:
         return refusal, False
     gw, task, at = payload["caller"]["gateway"], payload["caller"]["task_id"], payload["requested_at"]
@@ -729,13 +737,21 @@ def _incoming(conn: sqlite3.Connection, own: str, raw: Optional[str]) -> Optiona
     return payload
 
 
-def _home_check(rep: sqlite3.Connection, event: dict, payload: dict, target) -> tuple[Optional[str], bool]:
+def _home_check(rep: sqlite3.Connection, payload: dict, target,
+                replica_refusal: Optional[str]) -> tuple[Optional[str], bool]:
     """``home_refusal`` (unsynced created event: retry, then refuse), only for a caller the replica proves.
 
-    Replica-only caller checks run first: an unproven caller is refused, never deferred, so a forged call (one
-    with a future requested_at too) cannot pin the watermark and page the whole request tail every tick.
+    ``replica_refusal`` is ``_caller_replica_refusal``'s result for this call, run once by the caller and passed on
+    to ``_caller_refusal``. Replica-only caller checks run first: an unproven caller is refused, never deferred, so
+    a forged call (one with a future requested_at too) cannot pin the watermark and page the whole request tail
+    every tick.
+
+    Cost of a deferral, bounded: while any hold is set, each tick rescans from the held watermark and pages the
+    whole request tail past it (up to MAX_PER_TICK handled calls), and a caller that passes the replica checks but
+    would fail the Board evidence check (``_caller_refusal``) is still deferred first, so it can hold the watermark
+    for up to ``CREATION_SYNC_GRACE_S`` before it is refused.
     """
-    if _caller_replica_refusal(rep, event, payload) is not None:
+    if replica_refusal is not None:
         return None, False  # _caller_refusal refuses it
     from hermes_cli.kanban_consent import home_refusal
     return home_refusal(rep, payload, target)
@@ -778,7 +794,8 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
                     hi, stop = eid - 1, True
                     break
                 event = {"id": eid, "uid": euid, "task_id": etask}
-                home = _home_check(rep, event, payload, target)
+                replica = _caller_replica_refusal(rep, event, payload)
+                home = _home_check(rep, payload, target, replica)
                 if home[1]:
                     # Only this caller lags: keep the watermark below it (retried next tick) and go on with the
                     # rest. A deferral takes no tick slot and no Board read; calls handled meanwhile are logged,
@@ -786,7 +803,7 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
                     hold = eid - 1 if hold is None else min(hold, eid - 1)
                     continue
                 handled += 1
-                refusal, retry = _caller_refusal(rep, board, event, payload)
+                refusal, retry = _caller_refusal(rep, board, event, payload, replica)
                 if retry:  # unreachable Board: every later call would retry too
                     hi, stop = eid - 1, True
                     break
