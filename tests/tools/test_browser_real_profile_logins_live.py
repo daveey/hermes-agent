@@ -16,14 +16,12 @@ from __future__ import annotations
 
 import hashlib
 import http.server
-import json
 import os
 import shutil
 import socket
 import sqlite3
 import subprocess
 import threading
-import urllib.request
 from pathlib import Path
 
 import pytest
@@ -65,11 +63,19 @@ def _free_port() -> int:
 
 
 def _launch_chrome(profile_root: Path) -> tuple[subprocess.Popen, str]:
-    """Launch headless Chrome on ``profile_root`` with a CDP port; return (proc, browser ws URL)."""
-    port = _free_port()
+    """Launch headless Chrome on ``profile_root`` with a CDP port; return (proc, browser ws URL).
+
+    Chrome picks its own CDP port (``--remote-debugging-port=0``) and writes it to
+    ``<user-data-dir>/DevToolsActivePort`` once the endpoint is listening. A port pre-picked by
+    ``_free_port`` is closed again before Chrome binds it, so on a busy runner another process can
+    take it and Chrome never answers there. The deadline is generous because a cold Chrome start on
+    a CPU-throttled runner can take well over 20 s; a healthy start still returns in about a second.
+    """
+    active_port = profile_root / "DevToolsActivePort"
+    active_port.unlink(missing_ok=True)
     proc = subprocess.Popen(
         [_CHROME, f"--user-data-dir={profile_root}", "--password-store=basic", "--headless=new",
-         "--no-first-run", "--no-default-browser-check", f"--remote-debugging-port={port}",
+         "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0",
          "--disable-gpu", "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -79,13 +85,14 @@ def _launch_chrome(profile_root: Path) -> tuple[subprocess.Popen, str]:
         if proc.poll() is not None:
             raise RuntimeError("chrome exited before opening its CDP port")
         try:
-            info = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version"))
-            return info["webSocketDebuggerUrl"]
-        except Exception:
-            return None
+            lines = active_port.read_text().splitlines()
+            port, path = int(lines[0]), lines[1]
+        except (OSError, ValueError, IndexError):
+            return ""  # not written yet, or caught mid-write
+        return f"ws://127.0.0.1:{port}{path}"
 
     try:
-        ws_url = wait_until(_devtools_ws, timeout=20, interval=0.1,
+        ws_url = wait_until(_devtools_ws, timeout=120, interval=0.1,
                             what="chrome CDP endpoint")
     except Exception:
         # The caller registers proc for cleanup only once we return, so a startup that never opens
