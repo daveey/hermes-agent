@@ -237,10 +237,10 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
             elif current_scope() is not None:
                 # A bound scope (kanban dispatch, a scoped turn) refuses the unbinds below: bind the
                 # launch profile whole instead, from the LIVE env (single-profile: freezing it here
-                # would capture it before activation, see ``_launch_env``).
+                # would capture it before activation, see ``launch_terminal_env``).
                 stack.enter_context(bind_state(
                     scope_for_profile(launch), secrets=launch_secret_scope(launch), stamp_home=False,
-                    env_overlay={k: v for k, v in _launch_env().items() if k.startswith("TERMINAL_")}))
+                    env_overlay=launch_terminal_env()))
             else:
                 # Unbind an enclosing secondary's home and terminal, or the launch secrets would
                 # pair with that profile's config. Unset resolves to the process home, which is the

@@ -308,10 +308,11 @@ def _profile_policy(assignee: str):
     # shared loader. That is fine for startup, but cannot establish assignment authority.
     _check_policy_shape(read_config_doc_readonly(config_path))
     scope = scope_for_profile(home)
-    # The process's own profile reads its launch secret scope and the frozen launch ``TERMINAL_*``
-    # overlay, as ``_bind_whole_profile`` binds it: a managed ``${VAR}`` or a ``TERMINAL_ENV`` that only
-    # systemd / ``op run`` injects has no file to rebuild from. Any other profile gets its own files
-    # only (t_01a1d3f89c1e13c6, t_01a1d4138fd1167a).
+    # The process's own profile reads its launch secret scope and the launch ``TERMINAL_*`` overlay
+    # (frozen once multiplexing is active, the live env before), as ``_bind_whole_profile`` binds
+    # it: a managed ``${VAR}`` or a ``TERMINAL_ENV`` that only systemd / ``op run`` injects has no
+    # file to rebuild from. Any other profile gets its own files only (t_01a1d3f89c1e13c6,
+    # t_01a1d4138fd1167a).
     secrets = owner_secret_scope(home)
     # Unstamped marks the process's own profile, as the legacy setter left it; any other home is routed.
     stamp = not _is_process_home(home)
