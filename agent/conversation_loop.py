@@ -1845,7 +1845,7 @@ def run_conversation(
     # Per-provider-response context accounting starts empty every turn (agent/context_usage.py).
     begin_turn_context_usage(agent)
     if (paused := pause_before_turn(agent, conversation_history)) is not None:  # [daveey] t_01a1d31bf400d56c
-        return paused  # never started: skips the boundary/user_intervened/context_usage stamping, transcript unchanged
+        return paused  # never started: skips everything after the turn body (stamps, settle, failed-turn close)
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):
