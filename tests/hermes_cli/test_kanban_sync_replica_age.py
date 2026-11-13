@@ -312,6 +312,122 @@ def test_an_unreachable_board_lists_the_local_mirror_status_instead(live, kanban
     assert child in body and "running (local mirror" in body
 
 
+def test_a_shadow_mode_board_is_judged_too(live, kanban_home):
+    """``shadow`` boards pull the Board's feed as well: a stale replica there files the same one card."""
+    sync.set_mode(live, "shadow")
+    host = Host(kanban_home, _pt("2026-11-12 18:00:00"))
+    _stamp(host.wall)
+    host.check()
+    host.run(21 * MIN, each=lambda: host.round(behind=True))
+    assert len(host.cards) == 1
+
+
+def test_the_sync_loops_after_round_records_the_outcome_the_card_names(live, kanban_home):
+    """``run_forever`` calls only ``outbox_age.after_round``; the card's last-round text must come through it."""
+    host = Host(kanban_home, _pt("2026-11-12 18:00:00"))
+    _stamp(host.wall)
+    host.check()
+
+    def loop_round():
+        outbox_age.after_round([ksc.RoundResult(board=BOARD, mode="primary", behind=False, error="HubError: 502")],
+                               host.boards, mono=lambda: host.mono, age=lambda _p: None)
+
+    host.run(21 * MIN, each=loop_round)
+    assert len(host.cards) == 1 and "last round failed: HubError: 502" in host.cards[0][1]
+
+
+# --- process restarts (the hub's gateway restarts on every core update, ~4 min apart on 2026-11-13) ---------------
+
+def _restart():
+    """A new gateway process: every in-memory observation is gone; files on disk and awake time carry on."""
+    outbox_age.reset()
+
+
+def test_a_stall_across_gateway_restarts_every_4_min_files_exactly_one_card(live, kanban_home):
+    """hermes-hub 2026-11-13: 148 gateway restarts, median 4.2 min apart; every telemetry line read `not advanced
+    for 0 awake s`. The replica stops advancing and the checking process restarts every 4 min for 30 min."""
+    host = Host(kanban_home, _pt("2026-11-13 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    for _ in range(8):  # 32 awake minutes
+        host.run(4 * MIN, each=lambda: host.round(behind=True))
+        _restart()
+        host.check()
+    assert len(host.cards) == 1
+    assert _fired(host) == ["08:20 PT"]
+    assert "2026-11-13 08:00:00 PST" in host.cards[0][1]
+
+
+def test_restarts_resume_the_awake_clock_but_never_count_sleep(live, kanban_home):
+    """Awake time between processes counts; the wall clock's 5 h asleep across a restart does not."""
+    host = Host(kanban_home, _pt("2026-11-12 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    host.run(10 * MIN, each=lambda: host.round(behind=True))
+    _restart()
+    host.sleep(5 * 3600)
+    host.run(9 * MIN, each=lambda: host.round(behind=True))
+    assert host.cards == []  # 19 awake minutes
+    host.run(2 * MIN, each=lambda: host.round(behind=True))
+    assert len(host.cards) == 1
+
+
+def test_a_new_boot_starts_the_clock_afresh(live, kanban_home, monkeypatch):
+    """Monotonic time is only comparable within one boot: after a reboot the remembered clock is discarded."""
+    host = Host(kanban_home, _pt("2026-11-12 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    host.run(15 * MIN, each=lambda: host.round(behind=True))
+    _restart()
+    monkeypatch.setattr(replica_age, "_boot_id", lambda: "another-boot")
+    host.check()
+    host.run(15 * MIN, each=lambda: host.round(behind=True))
+    assert host.cards == []
+    host.run(6 * MIN, each=lambda: host.round(behind=True))
+    assert len(host.cards) == 1
+
+
+def test_an_unwatched_gap_starts_the_clock_afresh(live, kanban_home):
+    """No check for over 20 awake minutes (sync turned off, the gateway down): nothing is known about that span."""
+    host = Host(kanban_home, _pt("2026-11-12 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    host.run(5 * MIN, each=lambda: host.round(behind=True))
+    _restart()
+    host.mono += 3600
+    host.wall += 3600
+    host.check()
+    assert host.cards == []
+
+
+def test_an_open_incident_survives_a_restart_without_filing_again(live, kanban_home):
+    host = Host(kanban_home, _pt("2026-11-12 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    host.run(21 * MIN, each=lambda: host.round(behind=True))
+    assert len(host.cards) == 1
+    for _ in range(5):
+        _restart()
+        host.run(4 * MIN, each=lambda: host.round(behind=True))
+    assert len(host.cards) == 1
+    host.run(1 * MIN, each=lambda: host.round(head=True))  # incident over
+    host.run(21 * MIN, each=lambda: host.round(behind=True))
+    assert len(host.cards) == 2
+
+
+def test_a_detached_board_forgets_the_remembered_clock(live, kanban_home):
+    host = Host(kanban_home, _pt("2026-11-12 08:00:00"))
+    _stamp(host.wall)
+    host.check()
+    host.run(15 * MIN, each=lambda: host.round(behind=True))
+    sync.set_mode(live, "off")
+    host.check()
+    sync.set_mode(live, "primary")
+    _restart()
+    host.run(15 * MIN, each=lambda: host.round(behind=True))
+    assert host.cards == []
+
+
 # --- replays of the 2026-11-12 incidents ---------------------------------------------------------------------------
 
 def _fired(host):

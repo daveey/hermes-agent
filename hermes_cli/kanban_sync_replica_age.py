@@ -14,13 +14,21 @@ unreadable replica counts as a stamp that has not advanced. When the stamp has n
 path (comment at most hourly on an open card, a new card once it is done). Monotonic time stands still while a Mac
 sleeps, so a laptop's sleep never counts. The incident ends (one INFO line) when the stamp advances.
 
+The observation is also kept in ``.replica-age.json`` beside ``.sync-state.json`` (with the boot id), so a gateway
+restart resumes the same awake clock and open incident: on 2026-11-13 the hub restarted its gateway 148 times
+(median 4.2 min apart) and an in-memory clock never reached the bound (t_01a1d5ead18cf1c3). Monotonic time is shared
+by every process of one boot and stops in sleep (Linux CLOCK_MONOTONIC, macOS), so a resumed clock still never counts
+sleep; another boot, or a span of over :data:`REPLICA_STALE_S` with no observation, starts afresh.
+
 One check covers every shape: rounds ending behind, rounds failing, no rounds at all (a dead loop or a give-up),
 and a missing replica. The card names the host, board, stamp (PT), awake minutes, the last round's outcome, the
 loop's recorded stop, the pending outbox, the running core and the cards frozen behind a remote parent.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import socket
 import sqlite3
 import threading
@@ -39,6 +47,7 @@ NO_ROUND_S = 300.0
 TELEMETRY_EVERY_S = 3600.0
 KEY = "kanban-sync-replica-stale"
 AUTHOR = "kanban-sync-replica"
+_MEMO = ".replica-age.json"
 _FROZEN_CAP = 25
 _PT = "America/Los_Angeles"
 
@@ -130,14 +139,96 @@ def check(boards: list[tuple[str, Path]], *, now: float, wall: Callable[[], floa
     return out
 
 
+def _boot_id() -> Optional[str]:
+    """This boot's identity (monotonic time is comparable across processes only within one boot), else None."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() or None
+    except OSError:
+        pass
+    try:  # macOS: kern.bootsessionuuid
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        buf = ctypes.create_string_buffer(64)
+        size = ctypes.c_size_t(len(buf))
+        if libc.sysctlbyname(b"kern.bootsessionuuid", buf, ctypes.byref(size), None, ctypes.c_size_t(0)) == 0:
+            return buf.value.decode("ascii", "replace") or None
+    except (OSError, AttributeError, TypeError, ValueError):
+        pass
+    return None
+
+
+def _memo_path() -> Path:
+    """Beside ``.sync-state.json``: each board's observation, so a gateway restart resumes the awake clock."""
+    from hermes_cli import kanban_db as kb
+    return kb.kanban_home() / "kanban" / _MEMO
+
+
+def _load_memo() -> dict[str, Any]:
+    try:
+        memo = json.loads(_memo_path().read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    return memo if isinstance(memo, dict) else {}
+
+
+def _save_memo(update: Callable[[dict[str, Any]], None]) -> None:
+    target = _memo_path()
+    try:
+        memo = _load_memo()
+        update(memo)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(f"{_MEMO}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temp.write_text(json.dumps(memo), encoding="utf-8")
+        temp.replace(target)
+    except OSError:
+        log.debug("kanban sync: cannot record the replica observation at %s", target, exc_info=True)
+
+
+def _resume(slug: str, now: float) -> Optional[_Seen]:
+    """The previous process's observation of ``slug``, when it is safe to keep counting from it: the same boot
+    (monotonic time stops in sleep on Linux and macOS and is shared by every process of one boot), not in the
+    future, and observed within :data:`REPLICA_STALE_S` (a longer unwatched span says nothing about the replica)."""
+    rec = _load_memo().get(slug)
+    boot = _boot_id()
+    if not isinstance(rec, dict) or boot is None or rec.get("boot") != boot:
+        return None
+    try:
+        stamp = None if rec.get("stamp") is None else float(rec["stamp"])
+        since, seen_at = float(rec["since"]), float(rec["seen_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not since <= seen_at <= now or now - seen_at > REPLICA_STALE_S:
+        return None
+    return _Seen(stamp, since, bool(rec.get("open")))
+
+
+def _remember(slug: str, seen: Optional[_Seen], now: float) -> None:
+    boot = _boot_id()
+
+    def update(memo: dict[str, Any]) -> None:
+        if seen is None or boot is None:
+            memo.pop(slug, None)
+        else:
+            memo[slug] = {"stamp": seen.stamp, "since": seen.since, "open": seen.open, "seen_at": now, "boot": boot}
+
+    _save_memo(update)
+
+
 def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], file_fn, board_status) -> Optional[str]:
     if _mode(path) not in ("primary", "shadow"):
         with _LOCK:
-            _SEEN.pop(slug, None)  # detached or unsynced: nothing to judge, and a later attach starts afresh
+            known = _SEEN.pop(slug, None)  # detached or unsynced: nothing to judge, and a later attach starts afresh
+        if known is not None or slug in _load_memo():
+            _remember(slug, None, now)
         return None
     stamp = _stamp(slug)
     with _LOCK:
         seen = _SEEN.get(slug)
+        if seen is None:
+            seen = _resume(slug, now)  # a restarted gateway keeps counting the same incident
+            if seen is not None:
+                _SEEN[slug] = seen
         # Any change counts: ``pulled_at`` is wall time, and a wall clock stepped back (NTP, a manual fix) writes
         # stamps below the remembered one on healthy rounds.
         if seen is None or (stamp is not None and (seen.stamp is None or stamp != seen.stamp)):
@@ -150,6 +241,7 @@ def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], f
         if due:
             seen.open = True
         rnd = _ROUNDS.get(slug)
+    _remember(slug, seen, now)
     _telemetry(slug, seen, elapsed, now)
     if not due:
         return None
