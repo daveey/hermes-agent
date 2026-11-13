@@ -65,6 +65,29 @@ async def test_cron_floor_does_not_restore_spent_update_grace(tmp_path, monkeypa
         assert 30 <= clock[0] < 30.2
 
 
+@pytest.mark.parametrize("cron_cut, expired", [(True, True), (1, False), ("true", False)])
+def test_checkpoint_wait_requires_boolean_cron_cut(tmp_path, monkeypatch, cron_cut, expired):
+    # Cards alone reach the checkpoint predicate even when cron_cut is malformed.
+    body = {"kind": "unfenced", "checkpoint": True, "cron_cut": cron_cut}
+    runner = cut._runner(tmp_path, monkeypatch, body, cron=0, kanban=1)
+    intent = runner._restart_update_intent
+    assert runner._kanban_restart_wait_state(intent, now=100, since=None) == (100, False)
+    assert runner._kanban_restart_wait_state(intent, now=102, since=100) == (100, expired)
+
+
+@pytest.mark.parametrize("initial, updated", [(True, False), (False, True)])
+def test_checkpoint_wait_rereads_same_intent_between_polls(tmp_path, monkeypatch, initial, updated):
+    body = {"kind": "unfenced", "checkpoint": initial, "cron_cut": True}
+    runner = cut._runner(tmp_path, monkeypatch, body, cron=0, kanban=1)
+    intent = runner._restart_update_intent
+    since, expired = runner._kanban_restart_wait_state(intent, now=100, since=None)
+    assert (since, expired) == (100, False)
+    # Keep the runner and Path: a cached first read would select the wrong wait.
+    intent.write_text(json.dumps({**body, "checkpoint": updated}), encoding="utf-8")
+    assert runner._kanban_restart_wait_state(intent, now=102, since=since) == (100, updated)
+    assert runner._kanban_restart_wait_state(intent, now=115, since=since) == (100, True)
+
+
 @pytest.mark.parametrize("text, expected", [
     ('{"kind":"unfenced","checkpoint":true,"cron_cut":true}', True),
     ('\ufeff{"kind":"unfenced","checkpoint":true,"cron_cut":true}', True),
