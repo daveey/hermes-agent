@@ -21,7 +21,9 @@ from typing import Callable, Iterator, Optional
 
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
-from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
+from cron.lifecycle_guard_groups import (
+    iter_line_segment_contexts, join_continued_lines, protect_redirection_ampersands,
+    restore_redirection_ampersands, split_glued_redirections)
 from cron.lifecycle_guard_lines import (  # newlines outside quotes, word-start `#` comments
     _split_logical_lines, join_line_continuations, strip_shell_comments,
 )
@@ -373,7 +375,7 @@ _PYTHON_SOURCE_SUFFIXES = (".py", ".pyw")
 # A redirection word: optional fd or `{NAME}` (NAME may be an array element, `{a[1]}`),
 # operator, optional glued target (`<f`, `0<f`, `2>>log`, `{fd}>&2`, `{a[1]}>/dev/null`).
 _REDIRECTION = re.compile(
-    r"^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\})(<<<|<<-|<<|<>|<&|>&|>>|>\||<|>)(.*)$", re.DOTALL)
+    r"^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\})(<<<|<<-|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)(.*)$", re.DOTALL)
 
 # Bound the walk: a pathological token run must not spin here.
 _MAX_PREFIX_PEELS = 8
@@ -709,12 +711,13 @@ def _refuse_unreadable(budget: _LifecycleScanBudget, path: Path, reason: str) ->
 # --- shell tokenization -----------------------------------------------------------------------
 
 def _shlex_tokens(line: str) -> list[str]:
-    """POSIX-tokenize one shell line, honoring quotes and `#` comments; raises ValueError. Only a
-    word-start `#` comments (shlex's own commenters would also cut `a#b`, which bash keeps)."""
-    lexer = shlex.shlex(strip_shell_comments(line), posix=True, punctuation_chars=";&|()")
+    """POSIX-tokenize a shell line; only word-start `#` comments. A redirection's
+    ``&`` stays in its word, never a background operator. Raises ValueError."""
+    lexer = shlex.shlex(protect_redirection_ampersands(strip_shell_comments(line)),
+                        posix=True, punctuation_chars=";&|()")
     lexer.whitespace_split = True
     lexer.commenters = ""
-    return list(lexer)
+    return [restore_redirection_ampersands(token) for token in lexer]
 
 
 def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterator[list[str]]:
@@ -815,12 +818,12 @@ def _iter_segment_contexts(
     """``(segment, call_argument, piped_files)``: whether the segment is the argument list of a
     call (the segment right after a ``(`` that follows an ordinary word), and the files a ``cat``
     pipes into its stdin (``cat f.sh | bash``), through groups, compound commands and process
-    substitution too (``{ cat f; } | bash``, ``cat f | if …; fi``, ``bash <(cat f)``). A ``(``
-    whose opener holds any word in *alias_names* is never a call: the alias may expand to a
-    keyword prefix (``alias t='time '``)."""
+    substitution too (``{ cat f; } | bash``, ``cat f | if …; fi``, ``bash <(cat f)``), across a
+    line ending in a pipe. A ``(`` whose opener holds any word in *alias_names* is never a call:
+    the alias may expand to a keyword prefix (``alias t='time '``)."""
     def opens_call(segment: list[str]) -> bool:
         return _opens_call_arguments(segment) and alias_names.isdisjoint(segment)
-    for tokens in _iter_command_token_lists(command):
+    for tokens in join_continued_lines(_iter_command_token_lists(command)):
         yield from iter_line_segment_contexts(
             tokens, cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
             opens_call_arguments=opens_call,
@@ -951,12 +954,13 @@ def _cat_operands(segment: Optional[list[str]]) -> list[str]:
 
 
 def _cat_relays_stdin(segment: list[str]) -> bool:
-    """Whether a ``cat`` segment writes the stdin it is fed (``… | cat | bash``, ``{ cat; } <
-    f``): no file operand or a ``-`` one, and no redirection, heredoc or here-string of its own
-    on fd 0 (``cat < x``, ``cat <<< x`` and ``cat x.txt`` ignore the feed)."""
+    """Whether a ``cat`` or ``tee`` segment writes the stdin it is fed (``… | cat | bash``,
+    ``{ cat; } < f``, ``… | tee log | bash``): no redirection, heredoc or here-string of its own
+    on fd 0 (``cat < x``, ``cat <<< x`` ignore the feed) and, for ``cat``, no file operand or a
+    ``-`` one (``cat x.txt`` ignores it; ``tee``'s operands are files it writes)."""
     for view in _command_segment_views(segment):
         index = _executed_command_index(view)
-        if index is not None and _executable_name(view[index]) == "cat":
+        if index is not None and (name := _executable_name(view[index])) in ("cat", "tee"):
             words, arguments = iter(view[index + 1 :]), []
             for word in words:
                 match = _REDIRECTION.match(word)
@@ -967,7 +971,8 @@ def _cat_relays_stdin(segment: list[str]) -> bool:
                 target = target or next(words, "")
                 if fd in ("", "0") and operator.startswith("<") and (operator, target) != ("<&", "0"):
                     return False  # `cat < x`, `cat <<< x`, `cat <&3` read their own stdin
-            return "-" in arguments or all(argument.startswith("-") for argument in arguments)
+            return name == "tee" or "-" in arguments \
+                or all(argument.startswith("-") for argument in arguments)
     return False
 
 
