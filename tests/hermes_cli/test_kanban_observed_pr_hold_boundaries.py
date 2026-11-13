@@ -47,7 +47,7 @@ def test_fresh_replica_must_match_home_episode(stores, monkeypatch, case):
 
 @pytest.mark.parametrize("case", ["no_boundary", "bad_clock", "diagnostic", "wrong_reason", "before_boundary",
                                   "parked"])
-def test_local_observation_requires_ready_boundary(stores, monkeypatch, case):
+def test_local_observation_requires_a_hold_after_the_latest_boundary(stores, monkeypatch, case):
     home, _ = stores
     home.execute("INSERT INTO task_events VALUES (2,'task','respawn_guarded',"
                  "'2026-01-01T00:00:01Z','{\"reason\":\"active_pr\"}','hold')")
