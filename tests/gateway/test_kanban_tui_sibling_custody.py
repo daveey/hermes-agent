@@ -688,3 +688,45 @@ def test_gateway_launch_profile_reads_a_real_gateway_state_json(tmp_path, monkey
     assert custody._gateway_launch_profile(4242) == ""  # no served_profiles
     record(served_profiles=[])
     assert custody._gateway_launch_profile(4242) == ""  # empty served_profiles
+
+
+def test_busy_non_owner_backend_hands_a_remote_notice_back_when_the_gateway_owns_the_chat(env, tmp_path,
+                                                                                          monkeypatch):
+    """Remote (hub-replica) notices follow the same hand-back as tui rows (t_01a1d46be379dfd3).
+
+    Chat 20261026_235722_bef6c6 on David-MBP, 2026-11-13 (PST), core 2cc7101849: worker-2's t_01a1d405586c5ba1 was
+    observed at 00:34:33 but reached the chat only at 02:08:50. The chat was gateway-owned (marker writer pid
+    81192) and also loaded by Desktop backends; a busy backend's legacy poller claimed the remote notice into
+    its buffer and held it in flight until its own turn ended (02:07:45 "rewound 1 of 1"), so the owner's sweep
+    found it claimed elsewhere and skipped it silently. A busy non-owner must release the ledger claim on its
+    next poll, so the owner's next pass offers it."""
+    import os
+    import time
+
+    from tests.tui_gateway.test_kanban_remote_notices import _card as remote_card, _hub, _ledger_row
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [remote_card("t_remote_custody", CHAT, status="done", at=now - 4)])
+    ledger = tmp_path / "remote-notices.db"
+    krn._reset_for_tests()
+    monkeypatch.setattr(krn, "hub_db_path", lambda: replica)
+    monkeypatch.setattr(krn, "ledger_path", lambda: ledger)
+    ref = "hub/default/default/t_remote_custody"
+
+    session = _session()
+    session["running"] = True  # this backend is mid-turn: the poll buffers what it claims
+    _legacy_collect(session)
+    assert [c["remote"]["ref"] for c in session["_kanban_claims"]] == [ref]
+    assert _ledger_row(ledger, CHAT, ref)["holder_pid"] == os.getpid()  # in flight under this backend
+
+    authority = env[1]
+    authority.sessions[CHAT] = _Live(CHAT)
+    authority.db.work(CHAT)  # the gateway owns the chat
+    _next_poll(session)
+    server._notif_poll_kanban_scoped("sid", session, prepared=([], []))  # one poll, still mid-turn
+    assert session["_kanban_pending"] == [] and session["_kanban_claims"] == []
+    assert _ledger_row(ledger, CHAT, ref) is None, "the remote claim waited in flight for this backend's turn"
+
+    offered = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now)  # the owner's next pass
+    assert [item["ref"] for item in offered] == [ref]

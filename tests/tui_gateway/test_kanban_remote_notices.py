@@ -786,3 +786,63 @@ def test_origin_that_is_also_a_shepherd_gets_one_notice_and_foreign_origins_none
         assert len(db.get_messages(CHAT)) == 1
     assert [g["ref"].rsplit("/", 1)[-1] for g in krn.collect(CHAT, "default", hub_db=replica,
                                                                ledger=tmp_path / "ledger2.db", now=now)] == ["t_both"]
+
+
+def test_every_silent_sweep_skip_names_its_reason_once(tmp_path, caplog):
+    """t_01a1d46be379dfd3: t_01a1d405586c5ba1's notice was held in flight by another Desktop backend for 30 min
+    and the sweep skipped it with no log line, so the delay was misread as 46 min of discovery lag. Each skip
+    (claim in flight elsewhere, chat open here) and each live-poller claim logs once per (chat, notice, reason)."""
+    import logging
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    card = _card("t_waits", CHAT, status="done", at=now - 40)
+    replica = _hub(tmp_path, [card])
+    ledger = tmp_path / "ledger.db"
+    ref, state = "hub/default/default/t_waits", krn._notice_state(card["task"])
+    krn._reset_for_tests()
+    krn._ledger(ledger).close()
+    other = os.getppid()  # a live backend that is not this process
+    with sqlite3.connect(ledger) as conn:
+        conn.execute("INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, notice_key, "
+                     "legacy_seen) VALUES (?,?,?,?,0,?,NULL,?,0)", (CHAT, ref, state, now - 30, other, "k"))
+    woken = []
+
+    class Waker:
+        grace_s = 0.0
+
+        def deliver(self, tip, text, metadata, task, now, *, persist, started):
+            woken.append(task["id"])
+            return "started"
+
+    with SessionDB(tmp_path / "state.db") as db:
+        db.create_session(CHAT, "desktop")
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            yield (db, sid) if sid == CHAT else (None, None)
+
+        caplog.set_level(logging.INFO, logger=krn.__name__)
+        for _ in range(3):
+            sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger,
+                                 now=now, waker=Waker())
+        for _ in range(2):
+            sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger,
+                                 now=now, waker=Waker(), live_ids={CHAT})
+        assert woken == []
+        with sqlite3.connect(ledger) as conn:
+            conn.execute("DELETE FROM notices WHERE session=? AND ref=?", (CHAT, ref))  # the holder released it
+        for _ in range(2):
+            krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now)
+            with sqlite3.connect(ledger) as conn:  # a non-owner hands it straight back (release) and re-claims
+                conn.execute("DELETE FROM notices WHERE session=? AND ref=?", (CHAT, ref))
+
+    waits = [r.getMessage() for r in caplog.records if " waits: " in r.getMessage()]
+    assert waits == [
+        f"remote Kanban notice {ref} {state} for chat {CHAT} waits: in flight under backend pid {other} until that "
+        "claim is acked or released",
+        f"remote Kanban notice {ref} {state} for chat {CHAT} waits: chat is open in this backend; its live poller "
+        "claims it",
+        f"remote Kanban notice {ref} {state} for chat {CHAT} waits: claimed by the live poller of backend pid "
+        f"{os.getpid()}",
+    ]
