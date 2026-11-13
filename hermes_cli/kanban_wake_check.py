@@ -947,6 +947,10 @@ def _wake(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> O
 
     from hermes_cli.kanban_terminal_guard import skip_wake
     if skip_wake(conn, task_id, kind):  # a stale scheduled copy of a done card: no wake [daveey]
+        # Nor another probe: the held card's probe would rerun every ``check_every`` (holding a probe slot) until
+        # the feed heals the row to done. ``restore_missing_checks`` skips a held card, so it stays gone.
+        conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
+        episode.reset(conn, task_id)
         return None
     park = pending_wake(conn, task_id) or {}
     resume = park.get("resume_status") if park.get("resume_status") in ("ready", "review") else "ready"

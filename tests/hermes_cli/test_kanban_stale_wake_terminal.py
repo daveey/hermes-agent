@@ -309,6 +309,36 @@ def test_a_passing_probe_on_a_stale_copy_of_a_completed_card_does_not_wake_it(bo
     assert [n["wake_kind"] for n in _ignored(board, tid)] == [kwc.CONDITION_MET_EVENT]
 
 
+def test_an_ignored_probe_wake_drops_the_probe_so_the_next_sweep_runs_none(board, tmp_path):
+    """Review of #1958 (nit 1): the skip returned before the probe row was deleted, so a stale scheduled copy kept
+    probing every ``check_every`` (and held a probe slot) until the feed healed the row to done. The restore lint
+    must not bring the dropped probe back either: it skips the held card before restoring."""
+    runs = tmp_path / "runs"
+    tid = _parked(board, wake_check=f"echo x >> {runs}")
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    now = int(time.time())
+    kwc.run_due_wake_checks(board, now=now + 10 ** 6, wait=True)
+    assert runs.read_text().count("x") == 2                            # one probe: an exit 0 is confirmed by a rerun
+    assert board.execute("SELECT COUNT(*) FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()[0] == 0
+    assert kwc.run_due_wake_checks(board, now=now + 2 * 10 ** 6, wait=True)["submitted"] == []
+    assert runs.read_text().count("x") == 2                            # no second probe
+    assert board.execute("SELECT COUNT(*) FROM task_wake_checks WHERE task_id = ?", (tid,)).fetchone()[0] == 0
+    assert kwc.RESTORED_EVENT not in _kinds(board, tid)
+    assert _status(board, tid) == "scheduled"
+    assert kwc.CONDITION_MET_EVENT not in _kinds(board, tid)
+
+
+def test_an_ignored_wake_also_drops_the_cards_wake_episode(board):
+    tid = _parked(board, wake_check="true")
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    with kb.write_txn(board):
+        board.execute("INSERT OR REPLACE INTO task_wake_episodes (task_id, cmd, first_at, checks) "
+                      "VALUES (?, 'true', 1, 3)", (tid,))
+        assert kwc._wake(board, tid, kwc.CONDITION_MET_EVENT, {}) is None
+    for table in ("task_wake_checks", "task_wake_episodes"):
+        assert board.execute(f"SELECT COUNT(*) FROM {table} WHERE task_id = ?", (tid,)).fetchone()[0] == 0
+
+
 def test_an_implied_wake_on_a_stale_copy_of_a_completed_card_does_nothing(board):
     """A ``scheduled`` row with no park event (``_enforce_wake_invariant``'s implied wake)."""
     tid = kb.create_task(board, title="t", assignee="worker")
