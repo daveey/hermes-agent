@@ -426,6 +426,41 @@ def test_unblock_of_a_live_card_still_lands(board):
         assert _ignored(board, tid) == []
 
 
+@pytest.mark.parametrize("parked", ["scheduled", "blocked"])
+def test_a_review_reopen_after_the_completion_is_a_reopen(board, parked):
+    """``review_reopened`` is in ``REOPEN_KINDS``: a card completed, then reopened through review and parked, is live.
+    Without it ``unblock_task`` refuses the card and a wake skips it (PR #2186 post-merge mutant c1)."""
+    tid = _parked(board)
+    with kb.write_txn(board):
+        kb._append_event(board, tid, "completed", {})
+        kb._append_event(board, tid, "review_reopened", None)
+        board.execute("UPDATE tasks SET status = ? WHERE id = ?", (parked, tid))
+    assert ktg.terminal_hold(board, tid) is None
+    assert kb.unblock_task(board, tid) is True
+    assert _status(board, tid) == "ready"
+    assert _ignored(board, tid) == []
+
+
+def test_a_review_reopen_after_a_completion_and_reopen_cycle_lands_and_is_not_held(board):
+    """The real path: done, reopened by an operator, back in ``review``; the review reopen still lands (PR #2186
+    post-merge mutant c3 refused any card with a prior ``completed``), and the card is not held afterwards."""
+    from hermes_cli.kanban_db_operator import reopen_done_task
+    tid = kb.create_task(board, title="t", assignee="worker")
+    claim = kb.claim_task(board, tid, claimer="worker")
+    assert claim is not None
+    assert kb.complete_task(board, tid, result="first pass", expected_run_id=claim.current_run_id) is True
+    assert reopen_done_task(board, tid, reason="more", actor="david") == "ready"
+    claim = kb.claim_task(board, tid, claimer="worker")
+    assert claim is not None
+    assert kb.request_review(board, tid, summary="second pass", expected_run_id=claim.current_run_id) is True
+    assert _status(board, tid) == "review"
+    assert kb.reopen_review_task(board, tid) is True
+    assert _status(board, tid) == "ready"
+    assert "review_reopened" in _kinds(board, tid)
+    assert ktg.terminal_hold(board, tid) is None
+    assert _ignored(board, tid) == []
+
+
 def test_unblock_of_a_done_row_is_refused_without_a_note(board):
     """Not unblockable anyway: the row is already terminal, so there is no stale wake to record."""
     tid = kb.create_task(board, title="t", assignee="worker")
