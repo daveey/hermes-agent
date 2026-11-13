@@ -92,8 +92,26 @@ def test_the_launch_home_inside_a_bound_scope_binds_the_launch_scope(homes, boun
         assert current_scope() == outer
         assert get_hermes_home() == (launch if bound == "launch" else work)
     assert (get_hermes_home_override(), current_secret_scope(), get_terminal_scope()) == (None, None, None)
+    # Only for bound=="work": bind_profile_scope(launch) on a single-profile host already freezes
+    # ``_snapshot`` itself (``_bind_whole_profile`` -> ``launch_terminal_env()``), before this body runs.
     if bound == "work" and not multiplex:
         assert policy._snapshot is frozen_before is None  # a single-profile host's launch env is not frozen early
+
+
+def test_the_launch_home_inside_a_bound_launch_turn_keeps_the_turn(homes):
+    """``scope_for_profile`` returns the bound scope when it already is the launch home, so the
+    turn's session, turn id and fence survive the nested launch bind."""
+    from agent.runtime_scope import bind_profile_scope, bind_turn
+    from hermes_scope import Fence, TurnScope, current_scope
+
+    launch, _, _ = homes
+    with bind_profile_scope(launch, hydrate_secrets=False), bind_turn("session-1", "turn-1", Fence(1, 1)) as turn:
+        assert isinstance(turn, TurnScope)
+        with policy.profile_config_scope(launch, launch_home=launch):
+            assert current_scope() == turn
+            assert get_hermes_home() == launch
+        assert current_scope() == turn
+    assert current_scope() is None
 
 
 def test_a_secondary_home_inside_a_bound_launch_scope_gets_only_its_own_files(homes):
