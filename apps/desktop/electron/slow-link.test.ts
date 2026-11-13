@@ -432,7 +432,7 @@ describe('main.ts wiring', () => {
   })
 
   it('stretches every backend request timeout and times every answer in fetchJsonForBackend', () => {
-    const fetcher = main.slice(main.indexOf('async function fetchJsonForBackend('))
+    const fetcher = main.slice(main.indexOf('async function fetchJsonForBackendOnce('))
     const body = fetcher.slice(0, fetcher.indexOf('\nipcMain.handle('))
 
     expect(body).toContain('slowLinkTracker.scaleTimeout(')

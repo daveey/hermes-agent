@@ -515,6 +515,7 @@ import {
   createQuitTeardownCoordinator,
   type QuitTeardownTask
 } from './quit-teardown'
+import { backendReadCoalescer, type BackendReadOpts, coalescedBackendRead } from './read-coalescing'
 import {
   boundedInstallId,
   createPrimaryInstallIdResolver,
@@ -14816,19 +14817,12 @@ async function getJsonForBackend(descriptor, path, opts: any = {}) {
 // Any-method REST call against a resolved backend descriptor, the one sink for renderer-routed paths (so the
 // join refuses any path that would move the credentials off the backend origin). OAuth backends prefer a native
 // bearer (cookieless RFC 8252) and fall back to the cookie partition; token/local use the session-token header.
-async function fetchJsonForBackend(
-  descriptor,
-  path,
-  opts: {
-    method?: string
-    body?: unknown
-    upload?: unknown
-    timeoutMs?: number
-    profileScoped?: boolean
-    // 'probe' = the dispatch health probe's dedicated socket pool (api-transport.ts).
-    pool?: 'json' | 'probe'
-  } = {}
-) {
+// [daveey] read-coalescing.ts: an identical read already in flight is shared, not sent again.
+function fetchJsonForBackend(descriptor: any, path: string, opts: BackendReadOpts = {}): Promise<any> {
+  return coalescedBackendRead(backendReadCoalescer, descriptor, path, opts, fetchJsonForBackendOnce)
+}
+
+async function fetchJsonForBackendOnce(descriptor: any, path: string, opts: BackendReadOpts = {}): Promise<any> {
   const url = joinBackendApiUrl(descriptor.baseUrl, path)
 
   // A native grant names one profile and the gateway refuses `all`: assemble the unified

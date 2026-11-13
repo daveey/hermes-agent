@@ -564,7 +564,7 @@ test('a sidebar read mints for the profile its recents_profile names', () => {
 test('main issues native-gateway REST calls only through the shared descriptor transport', async () => {
   const fs = await import('node:fs/promises')
   const source = await fs.readFile(new URL('./main.ts', import.meta.url), 'utf8')
-  const transport = source.indexOf('async function fetchJsonForBackend(')
+  const transport = source.indexOf('async function fetchJsonForBackendOnce(')
   const transportEnd = source.indexOf('\n}\n', transport)
   const outside = source.slice(0, transport) + source.slice(transportEnd)
 

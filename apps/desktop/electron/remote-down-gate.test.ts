@@ -438,7 +438,7 @@ describe('main.ts wiring', () => {
 
   // fetchJson's own pool choice is proven by behaviour in json-fetch.test.ts.
   it('fetchJsonForBackend forwards the pool option', () => {
-    const body = main.slice(main.indexOf('async function fetchJsonForBackend('))
+    const body = main.slice(main.indexOf('async function fetchJsonForBackendOnce('))
     expect(body.slice(0, 4000)).toMatch(/pool: opts\.pool/)
   })
 
