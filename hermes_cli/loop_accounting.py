@@ -213,8 +213,7 @@ class Pass:
         else:  # opened before an os.fork, closing in the child: only the child's part, from the fork
             cpu = _thread_time() - _fork["c0"]
             wall = _perf() - _fork["w0"]
-        # Clamped: a fork while a nested pass is open clears the child's depth, so its exits would go negative
-        # and the thread would never count another outermost pass.
+        # Defensive clamp for callers that cleared thread-local state while a pass was open.
         _local.depth = max(0, getattr(_local, "depth", 1) - 1)
         tid = _own_tid() if self._outer else 0
         with _lock:
@@ -607,7 +606,9 @@ def _after_fork_child() -> None:
     _started_at = time.time()
     _state.pop("exited_accounted", None)
     _state.update(thread=None, stop=None, pid=os.getpid(), role=None)
+    depth = getattr(_local, "depth", 0)  # this thread's open passes survive on the child's stack
     _local.__dict__.clear()  # drops this thread's _ThreadExit, queueing the parent's tid: cleared next
+    _local.depth = depth  # child-opened passes remain nested until the inherited outer pass exits
     _exited_tids.clear()
     _fork.update(gen=_fork["gen"] + 1, c0=_thread_time(), w0=_perf())
 

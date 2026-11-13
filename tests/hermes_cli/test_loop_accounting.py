@@ -158,8 +158,7 @@ def test_host_loop_lease_pass_that_raised_before_beat_is_closed_as_an_error(monk
 
 
 def test_fork_with_a_nested_pass_open_keeps_counting_outermost_passes():
-    """The at-fork hook clears the child's thread-local depth while two passes are open: their exits must not
-    drive depth below 0, or the thread never counts another outermost pass."""
+    """Inherited nested passes unwind to zero, so later outermost passes still count."""
     with la.pass_("outer"):
         with la.pass_("inner"):
             la._after_fork_child()  # what os.fork runs in the child, here on this thread
@@ -632,13 +631,35 @@ def test_fork_child_does_not_book_negative_cpu_for_pre_fork_passes(monkeypatch):
     assert la.counters()["after"]["cpu_s"] == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize("forks", [1, 2])
+def test_child_opened_nested_pass_is_not_accounted_twice(monkeypatch, forks):
+    clock = [50.0]
+    monkeypatch.setattr(la, "_thread_time", lambda: clock[0])
+    with la.pass_("outer"):
+        with la.pass_("inherited_inner"):
+            for _ in range(forks):
+                clock[0] = 0.0
+                la._after_fork_child()
+            with la.pass_("child_inner"):
+                clock[0] += 0.25
+            la.record("child_record", cpu_s=0.125)
+            clock[0] += 0.5
+    assert la._local.depth == 0
+    assert la.counters()["child_inner"]["cpu_s"] == pytest.approx(0.25)
+    assert la.snapshot()["process"]["accounted_cpu_s"] == pytest.approx(0.75)
+    with la.pass_("after"):
+        clock[0] += 0.5
+    assert la.snapshot()["process"]["accounted_cpu_s"] == pytest.approx(1.25)
+
+
 def _fork_inside_nested_passes() -> int:
     with la.pass_("outer"):
         _burn(0.1)  # the parent's thread clock is well past the child's at the fork
         with la.pass_("inner"):
             pid = os.fork()
             if pid == 0:
-                _burn(0.01)
+                with la.pass_("child_inner"):
+                    _burn(0.01)
     return pid
 
 
@@ -664,4 +685,5 @@ def test_real_fork_child_books_no_negative_cpu_for_pre_fork_passes():
     assert os.waitstatus_to_exitcode(status) == 0
     child = json.loads(raw)
     assert min(child.values()) >= 0.0, child
+    assert child["accounted"] == pytest.approx(child["outer"]), child
     assert child["inner"] >= 0.005, child  # the child's own CPU inside the pass is booked
