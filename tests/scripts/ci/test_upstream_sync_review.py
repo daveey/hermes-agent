@@ -39,6 +39,10 @@ def _save(state):
     with open(os.environ["STUB_LAND_STATE"], "w") as fh:
         json.dump(state, fh)
 
+def board_db_paths():
+    from pathlib import Path
+    return [Path(os.environ["STUB_LAND_STATE"]).with_suffix(".db")]
+
 def keyed_review_card(slug, number, sha):
     return _load()["cards"].get(f"{slug}#{number}:{sha}", "")
 
