@@ -533,8 +533,8 @@ def _check_cooldown(dir_fd: int, wall: float, ns: int, boot: str) -> None:
     # Same boot: the monotonic age alone is authoritative, so a wall clock that was ahead when the
     # record was written (and later corrected) cannot refuse every start until real time catches up.
     # Other boot: only the wall age exists. A negative one means the record was written while the
-    # wall clock was ahead before the reboot; it counts as elapsed (admission-open, like crash,
-    # unlock and expiry), since refusing would wedge every start until real time caught up.
+    # wall clock was ahead before the reboot; it counts as elapsed (start-permissive), since refusing
+    # would wedge every start until real time caught up.
     if last.boot_id == boot:
         age = (ns - last.started_ns) / _NS
         if age < 0:

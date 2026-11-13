@@ -49,6 +49,26 @@ def test_canonical_home_relative_spelling_follows_the_current_directory(tmp_path
     assert os.path.abspath(absolute) in module._HOME_KEYS
 
 
+def test_canonical_home_follows_a_symlink_before_dotdot_like_hermes_home_key(tmp_path, monkeypatch):
+    """``x/link/../h`` with ``x/link -> y/z`` names ``y/h``: realpath follows the link before
+    ``..``. A textual normpath (os.path.abspath) collapsed it to ``x/h`` first, disagreeing with
+    hermes_home_key. Checked for absolute and relative spellings."""
+    import hermes_cli.local_work as module
+    from hermes_constants import hermes_home_key
+    monkeypatch.setattr(module, "_HOME_KEYS", {})
+    (tmp_path / "x" / "h").mkdir(parents=True)
+    (tmp_path / "y" / "z").mkdir(parents=True)
+    (tmp_path / "y" / "h").mkdir()
+    (tmp_path / "x" / "link").symlink_to(tmp_path / "y" / "z")
+    expected = os.path.normcase(os.path.realpath(tmp_path / "y" / "h"))
+    absolute = os.path.join(str(tmp_path), "x", "link", "..", "h")
+    assert module.canonical_home(absolute) == expected
+    assert module.canonical_home(absolute) == expected  # the cached answer agrees
+    assert module.canonical_home(absolute) == str(hermes_home_key(absolute))
+    monkeypatch.chdir(tmp_path)
+    assert module.canonical_home(os.path.join("x", "link", "..", "h")) == expected
+
+
 def test_install_is_explicit_and_snapshot_is_detached(tmp_path, monkeypatch):
     import hermes_cli.local_work as module
     monkeypatch.setattr(module, "_registry", None)

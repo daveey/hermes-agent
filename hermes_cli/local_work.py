@@ -28,10 +28,18 @@ def canonical_home(home):
     expanduser + realpath + normcase. Only an existing directory's answer is cached, because a
     path that does not exist yet can resolve differently once created. The cache is keyed on the
     absolute spelling, so a relative spelling is resolved against the current directory every time.
+    That spelling is joined onto the cwd, never ``abspath``-normalized: normpath collapses
+    ``link/..`` as text, while realpath follows the link first.
     """
     if home is None:
         return None
-    spelling = os.path.abspath(os.path.expanduser(os.fspath(home)))
+    spelling = os.path.expanduser(os.fspath(home))
+    if os.path.isabs(spelling):
+        pass
+    elif isinstance(spelling, bytes):
+        spelling = os.path.join(os.getcwdb(), spelling)
+    else:
+        spelling = os.path.join(os.getcwd(), spelling)
     cached = _HOME_KEYS.get(spelling)
     if cached is not None:
         return cached
