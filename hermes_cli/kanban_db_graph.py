@@ -80,8 +80,9 @@ def clear_found_parents(conn: sqlite3.Connection, row, *, remote: bool) -> str:
     Only the detector's own block is cleared: the child's newest lifecycle event must be the ``blocked`` with
     ``source`` 'parent_missing', with no human request on the card. A later hand, policy or
     breaker block, or a block from any other source, stays for its owner. A child left with no parent link at all
-    also clears (nothing is missing). The repair card is left to finish, with a comment (while still open) saying
-    the block cleared via parent_found.
+    also clears (nothing is missing): that unblock's ``source`` is ``parents_unlinked``, since no parent came back
+    and no ``parent_found`` follows. The repair card is left to finish, with a system comment (while still open)
+    saying which of the two cleared the block.
     2026-11-13, David-MBP: t_01a1d0ea6db6c158 stayed blocked hours after its parent was mirrored done. [daveey]"""
     from hermes_cli import kanban_db as kb
 
@@ -95,7 +96,8 @@ def clear_found_parents(conn: sqlite3.Connection, row, *, remote: bool) -> str:
     if last is None or _event_field(last["payload"], "source") != "parent_missing":  # only the detector's block
         return status
     # No parent left (every link removed while blocked) counts as resolved: nothing is missing any more.
-    if any(st is None for _pid, st in kb.parent_states(conn, task_id, remote=remote)):
+    states = kb.parent_states(conn, task_id, remote=remote)
+    if any(st is None for _pid, st in states):
         return status
     cur = conn.execute(
         "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'blocked' AND human_request IS NULL", (task_id,),
@@ -103,27 +105,31 @@ def clear_found_parents(conn: sqlite3.Connection, row, *, remote: bool) -> str:
     if cur.rowcount != 1:
         return status
     repair_id = _event_field(last["payload"], "repair_task_id")
+    # PR #2192 review: with no link left note_missing_parents writes no parent_found, so say what really happened.
+    source = "parent_found" if states else "parents_unlinked"
     kb._append_event(conn, task_id, "unblocked", {
-        "status": "todo", "source": "parent_found", "cleared_block": "parent_missing",
+        "status": "todo", "source": source, "cleared_block": "parent_missing",
         "blocked_event_id": last["id"], "parents": _event_field(last["payload"], "parents"),
         "repair_task_id": repair_id,
     })
-    _tell_repair_card(conn, repair_id, task_id, last["id"])
+    _tell_repair_card(conn, repair_id, task_id, last["id"], source)
     return "todo"
 
 
-def _tell_repair_card(conn: sqlite3.Connection, repair_id, task_id: str, blocked_event_id: int) -> None:
+def _tell_repair_card(conn: sqlite3.Connection, repair_id, task_id: str, blocked_event_id: int, source: str) -> None:
     """In the caller's txn: note on the still-open repair card that its child's block cleared, so its worker does
-    not investigate a parent that is back. A finished or absent repair card gets nothing. [daveey]"""
+    not investigate a parent that is back. A finished or absent repair card gets nothing. The note is a system
+    comment (no writer run), so the repair card's own worker receives it even when this pass ran inside it. [daveey]"""
     from hermes_cli import kanban_db as kb
 
     if not isinstance(repair_id, str) or kb._task_status(conn, repair_id) in (None, "done", "archived"):
         return
+    why = ("every parent came back (parent_found)" if source == "parent_found"
+           else "every parent link was removed while it was blocked (parents_unlinked); no parent came back")
     kb.add_comment(conn, repair_id, "kanban-dispatcher", (
-        f"The parent_missing block on {task_id} cleared via parent_found (blocked_event_id {blocked_event_id}): "
-        "every parent is present again (or no parent link remains), so the child is back in todo. "
-        "Nothing is left to recover for that block; confirm and close this card."
-    ))
+        f"The parent_missing block on {task_id} (blocked_event_id {blocked_event_id}) cleared: {why}, "
+        "so the child is back in todo. Nothing is left to recover for that block; confirm and close this card."
+    ), system=True)
 
 
 def report_deferred_pass(conn: sqlite3.Connection, fresh: dict) -> None:

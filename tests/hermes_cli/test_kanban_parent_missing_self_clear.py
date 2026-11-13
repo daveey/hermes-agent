@@ -135,6 +135,11 @@ def test_every_parent_unlinked_returns_the_detector_blocked_child_to_ready(local
     assert kb.get_task(local, child).status == "ready"  # before the fix: blocked with nothing to wait on
     payload = json.loads(support._events(local, child, "unblocked")[-1]["payload"])
     assert payload["cleared_block"] == "parent_missing" and payload["parents"] == ["t_late"]
+    # PR #2192 review: no parent came back, so the timeline must not claim parent_found (none is ever written).
+    assert payload["source"] == "parents_unlinked"
+    assert not support._events(local, child, "parent_found")
+    [body] = _repair_comments(local, payload["repair_task_id"])
+    assert child in body and "every parent link was removed" in body and "parent_found" not in body
 
 
 def test_a_hand_block_with_no_parents_stays_blocked(local):
@@ -163,8 +168,27 @@ def test_clearing_the_block_comments_on_the_open_repair_card(local):
     assert kb.get_task(local, child).status == "ready"
     [body] = _repair_comments(local, repair)  # before the fix: no comment, the repair card reads as live work
     assert child in body and "parent_found" in body and str(blocked_id) in body
+    assert "came back" in body and "link was removed" not in body
     kb.recompute_ready(local)
     assert len(_repair_comments(local, repair)) == 1  # once per cleared block
+
+
+def test_the_repair_note_is_not_the_repair_workers_own_comment(local, monkeypatch):
+    """PR #2192 review: readiness can run inside the repair card's own worker. The note must not be stamped as that
+    run's comment, or the live comment bridge skips it for exactly the worker it is meant for."""
+    child = _blocked_on_missing(local, "t_late")
+    repair = _repair(local, child)
+    assert kb.claim_task(local, repair) is not None
+    run_id = kb.get_task(local, repair).current_run_id
+    monkeypatch.setenv("HERMES_KANBAN_TASK", repair)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    with kbc.write_txn(local):
+        local.execute("INSERT INTO tasks (id, title, status, created_at) VALUES ('t_late', 'late', 'done', 0)")
+    kb.recompute_ready(local)
+    assert kb.get_task(local, child).status == "ready"
+    [payload] = [json.loads(e["payload"]) for e in support._events(local, repair, "commented")]
+    assert "writer_run_id" not in payload and "writer_run_uid" not in payload
+    assert kb.own_comment_ids(local, repair, run_id) == set()  # before the fix: {the note's id}
 
 
 def test_a_finished_repair_card_gets_no_comment(local):
