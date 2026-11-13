@@ -175,6 +175,7 @@ def test_redirection_ampersands_survive_tokenizing():
     # The `|` of `>|` (clobber) stays in its redirection; `> |` is still a pipe.
     assert words("a >|x 2>| y | b") == ["a", ">|x", "2>|", "y", "|", "b"]
     assert words("a > | b '>|'") == ["a", ">", "|", "b", ">|"]
+    assert words("a \ue001 b") == ["a", "\ue001", "b"]
 
 
 def test_glued_ampersand_redirection_splits_from_its_word():
