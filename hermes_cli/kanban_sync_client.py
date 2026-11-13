@@ -40,6 +40,7 @@ from dataclasses import astuple, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
+from hermes_cli import kanban_awaited_card_wake as acw  # parks naming a card a pull or rebuild moved re-probe now
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_replica_lag as lag  # pushed rows the replica holds only after its next pull
 from hermes_cli import kanban_sync_backlog as backlog  # page budget per pull; boards the loop reruns at once
@@ -863,7 +864,7 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             return Pulled(total, more=True, status_changed=changed)  # unbounded, a backlog starved the round's push for hours
         pages += 1
         checkpoint()
-        page = hub.changes(board, cursor)
+        page = acw.changes_page(hub, board, cursor, changed)  # a Resync carries the pages applied before it
         checkpoint()
         changes = [c for c in (adapt(ch) for ch in page.get("changes", [])) if c is not None]
         if partition is not None:
@@ -956,16 +957,17 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str, max_pages: Optional[int] 
         generation = lag.pull_started(path)  # done only below: a failed pull leaves this gateway's pushes lagging
         try:
             pulled = pull(replica, hub, slug, observers=False, max_pages=max_pages)
-        except Resync:
+        except Resync as exc:
             if diagnostic:
                 raise
+            before = acw.statuses(replica, getattr(exc, "status_changed", None))  # read before the file goes
             _log.warning("kanban sync: %s replica cursor below the retention floor; rebuilding from a snapshot", slug)
             stack.close()
             invalidate(path)  # must close the pooled descriptor BEFORE unlinking its database
             path.unlink(missing_ok=True)
             replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
-            pulled = Pulled(resync(replica, hub, slug, observers=False))
+            pulled = Pulled(resync(replica, hub, slug, observers=False), status_changed=acw.rebuilt(before, replica))
         if not pulled.more:  # both mean "holds everything up to the feed head", not "a page was read"
             lag.pull_done(path, generation)
             try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
@@ -1033,8 +1035,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
             result.behind = pulled.more
-            from hermes_cli.kanban_awaited_card_wake import expedite
-            expedite(live, pulled.status_changed)  # a park naming a card the pull moved re-probes now [daveey]
+            acw.expedite(live, pulled.status_changed)  # a park naming a card the pull moved re-probes now [daveey]
             applies: Optional[list] = []  # credited revision steps (kanban_sync_own_writes); None = a rebuild
             if mode == "primary":
                 try:

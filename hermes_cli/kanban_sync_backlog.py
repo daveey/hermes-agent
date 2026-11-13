@@ -11,11 +11,14 @@ that board at once, without the poll wait: the backlog drains over consecutive r
 """
 from __future__ import annotations
 
+import logging
+import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
+_log = logging.getLogger(__name__)
 PULL_PAGE_BUDGET = 20  # 20 pages x 500 changes = 10k changes per database per round
 BUSY_RETRY_S = 0.5  # a round skipped because a dispatcher tick held the board (wait_for_work's tick)
 RECONCILE_BUSY_WAIT_S = 600.0  # a reconcile waits this long in all for rounds holding the board between its chunks
@@ -112,6 +115,8 @@ def replica_at_head(slug: str, hub: Any, gateway: str, live_path: Path) -> None:
     waited = 0.0
     while True:
         pulled = ksc._pull_replica(slug, hub, gateway, live_path)
+        if pulled.status_changed:  # a park naming a card this pull moved re-probes now, as after a round [daveey]
+            _expedite(live_path, pulled.status_changed)
         if not pulled.busy and not pulled.more:
             return
         if pulled.busy:
@@ -119,6 +124,19 @@ def replica_at_head(slug: str, hub: Any, gateway: str, live_path: Path) -> None:
                 raise SyncRoundBusy("a kanban sync round keeps holding this board; rerun the reconcile later")
             _sleep(BUSY_RETRY_S)
             waited += BUSY_RETRY_S
+
+
+def _expedite(live_path: Path, changed: dict) -> None:
+    """``kanban_awaited_card_wake.expedite`` on the live board for a standalone replica pull (``reconcile``): the
+    sync round's own call never sees these changes, since the replica cursor has moved past them. Never raises."""
+    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_awaited_card_wake import expedite
+    path = Path(live_path)
+    try:
+        with ksc.connection(path, lambda: ksc._connect(path)) as live:
+            expedite(live, changed)
+    except (sqlite3.Error, OSError) as exc:
+        _log.warning("kanban sync: %s: parks naming %d moved card(s) not re-probed (%s)", path, len(changed), exc)
 
 
 def reset() -> None:

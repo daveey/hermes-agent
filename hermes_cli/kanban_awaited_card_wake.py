@@ -13,8 +13,15 @@ to ``check_every`` later. The probe stays the judge: an unmet change (``--from``
 reads "not yet" and the probe goes back to its cadence, so each status change costs at most one probe per park.
 Nothing here polls: no status change, no work (hub-load design t_01a1d563324d7e8e).
 
+Every replica apply path reports its changes (review 5894353204 on #2370, t_01a1d5aec0e3a0c5): the feed pull, a
+snapshot rebuild on Resync (:func:`statuses` before the file is dropped, :func:`rebuilt` diffs it against the
+rebuilt replica, with the pages a pull applied before its Resync, :func:`changes_page`), and ``kanban sync
+reconcile``'s standalone pull (``kanban_sync_backlog.replica_at_head``).
+
 Detection: when an awaited card reached done/archived and its park is still ``scheduled`` more than
 ``LAG_WARN_SECONDS`` later, the wake-check tick logs one ``awaited_card_done_park_lag`` WARNING (``report_lag``).
+It reads the awaited cards' status from the replica itself (at most once per ``_SCAN_SECONDS`` per board), so a
+status that arrived by any path is seen, not only one ``expedite`` was handed.
 """
 from __future__ import annotations
 
@@ -23,17 +30,20 @@ import re
 import sqlite3
 import threading
 import time
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
 LAG_WARN_SECONDS = 120
+_SCAN_SECONDS = 60  # report_lag's replica read, per board: a lag is first seen at most this late
 _MAX_WATCHED = 1000  # in-memory lag records; the oldest are dropped past this
 _WAIT_CHECK_TASK = re.compile(r"\bwait-check\b[^;&|\n]*?\btask\s+(t_[0-9a-f]{8,16})\b")
 _FINISHED = ("done", "archived")
 _LOCK = threading.Lock()
 # (board db path, waiting card) -> (awaited card, its status, when this gateway applied it)
 _WATCH: dict[tuple[str, str], tuple[str, str, float]] = {}
+_WARNED: dict[tuple[str, str], str] = {}  # parks already warned for (-> awaited card), until they leave scheduled
+_SCANNED: dict[str, float] = {}  # board db path -> when report_lag last read the replica
 
 
 def named_cards(conn: sqlite3.Connection, task_id: str, cmd: Optional[str]) -> set[str]:
@@ -69,19 +79,29 @@ def expedite(live: sqlite3.Connection, changed: Mapping[str, str], *, now: Optio
         return []
 
 
-def _expedite(live: sqlite3.Connection, changed: Mapping[str, str], now: float) -> list[str]:
-    from hermes_cli import kanban_db_sync as sync
-    from hermes_cli.kanban_db_connect import write_txn
-
+def _parks(conn: sqlite3.Connection) -> list[tuple[str, str, set[str]]]:
+    """``(waiting card, probe cmd, cards it names)`` for every scheduled park's probe that names a card."""
     try:
-        rows = live.execute(
+        rows = conn.execute(
             "SELECT w.task_id, w.cmd FROM task_wake_checks w JOIN tasks t ON t.id = w.task_id "
             "WHERE t.status = 'scheduled' AND w.purpose IS NOT 'ask_resolved'").fetchall()
     except sqlite3.OperationalError:  # a board without the probe table (older schema): nothing parks on probes
         return []
-    hits = []
+    out = []
     for task_id, cmd in rows:
-        refs = sorted(named_cards(live, task_id, cmd) & set(changed))
+        refs = named_cards(conn, task_id, cmd)
+        if refs:
+            out.append((task_id, cmd, refs))
+    return out
+
+
+def _expedite(live: sqlite3.Connection, changed: Mapping[str, str], now: float) -> list[str]:
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_db_connect import write_txn
+
+    names, hits = set(changed), []
+    for task_id, cmd, named in _parks(live):
+        refs = sorted(named & names)
         if refs:
             hits.append((task_id, cmd, refs[0]))
     if not hits:
@@ -107,19 +127,75 @@ def _remember(key: str, hits: list, changed: Mapping[str, str], now: float) -> N
     with _LOCK:
         for task_id, _cmd, ref in hits:
             if changed[ref] in _FINISHED:
-                _WATCH.setdefault((key, task_id), (ref, changed[ref], now))
+                if (key, task_id) not in _WARNED:
+                    _WATCH.setdefault((key, task_id), (ref, changed[ref], now))
             else:
                 _WATCH.pop((key, task_id), None)
-        while len(_WATCH) > _MAX_WATCHED:
-            _WATCH.pop(next(iter(_WATCH)))
+        _bound()
+
+
+def _bound() -> None:
+    for table in (_WATCH, _WARNED):
+        while len(table) > _MAX_WATCHED:
+            table.pop(next(iter(table)))
+
+
+def _replica_finished(conn: sqlite3.Connection) -> Optional[dict[str, tuple[str, str]]]:
+    """``{waiting card: (awaited card, its replica status)}`` for each scheduled park naming a card the replica has
+    done/archived; None when there is no readable replica (nothing to judge by)."""
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_foreign_card import open_replica
+
+    with open_replica(kbc._main_db_file(conn)) as replica:
+        if replica is None:
+            return None
+        parks = _parks(conn)
+        refs = sorted({ref for _tid, _cmd, named in parks for ref in named})
+        if not refs:
+            return {}
+        marks = ",".join("?" * len(refs))
+        status = {r[0]: r[1] for r in replica.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({marks})", refs).fetchall()}
+    out: dict[str, tuple[str, str]] = {}
+    for task_id, _cmd, named in parks:
+        done = sorted(ref for ref in named if status.get(ref) in _FINISHED)
+        if done and task_id not in out:
+            out[task_id] = (done[0], status[done[0]])
+    return out
+
+
+def _scan(conn: sqlite3.Connection, key: str, now: float) -> None:
+    """Record the parks whose awaited card the replica shows finished, whatever path applied it, and forget the
+    warned mark of a park that no longer waits on a finished card. At most once per ``_SCAN_SECONDS`` per board."""
+    with _LOCK:
+        last = _SCANNED.get(key)
+        if last is not None and 0 <= now - last < _SCAN_SECONDS:
+            return
+        _SCANNED[key] = now
+    try:
+        found = _replica_finished(conn)
+    except (sqlite3.Error, OSError, ValueError):
+        logger.debug("kanban awaited-card wake: replica scan failed", exc_info=True)
+        return
+    if found is None:
+        return
+    with _LOCK:
+        for task_id, (ref, status) in found.items():
+            if (key, task_id) not in _WARNED:
+                _WATCH.setdefault((key, task_id), (ref, status, now))
+        for k in [k for k in _WARNED if k[0] == key and k[1] not in found]:
+            del _WARNED[k]
+        _bound()
 
 
 def report_lag(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list[str]:
     """Log one WARNING per park still ``scheduled`` ``LAG_WARN_SECONDS`` after its awaited card finished (seen by
-    ``expedite``), then forget it; a park that left ``scheduled`` is forgotten silently. Returns the warned cards.
-    Reads only the parks ``expedite`` recorded, so it costs nothing while no awaited card finishes."""
+    ``expedite`` when it applied, or by the replica scan at most ``_SCAN_SECONDS`` later), then mark it warned
+    until it leaves ``scheduled``; a park that left ``scheduled`` is forgotten silently. Returns the warned cards.
+    Beyond the throttled replica read it reads only the recorded parks."""
     key = _db_key(conn)
     now = time.time() if now is None else float(now)
+    _scan(conn, key, now)
     with _LOCK:
         mine = [(tid, v) for (k, tid), v in _WATCH.items() if k == key]
     warned = []
@@ -132,6 +208,9 @@ def report_lag(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list
             continue
         with _LOCK:
             _WATCH.pop((key, task_id), None)
+            if row is not None and row[0] == "scheduled":
+                _WARNED[(key, task_id)] = ref
+                _bound()
         if row is not None and row[0] == "scheduled":
             warned.append(task_id)
             logger.warning("awaited_card_done_park_lag task=%s awaited=%s lag_s=%d (awaited card %s, park still "
@@ -139,6 +218,47 @@ def report_lag(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list
     return warned
 
 
+# --- a snapshot rebuild's status changes ------------------------------------------------------------------------
+
+def changes_page(hub: Any, board: str, cursor: int, applied: Mapping[str, str]) -> dict:
+    """``hub.changes(board, cursor)``; a Resync it raises carries ``status_changed``, the status changes the pull
+    already applied from earlier pages (the rebuild's pre-read sees them as the old state, so its diff would not)."""
+    from hermes_cli.kanban_sync_client import Resync
+    try:
+        return hub.changes(board, cursor)
+    except Resync as exc:
+        exc.status_changed = dict(applied)  # type: ignore[attr-defined]
+        raise
+
+
+def _statuses(conn: sqlite3.Connection) -> Optional[dict[str, str]]:
+    try:
+        return {r[0]: r[1] for r in conn.execute("SELECT id, status FROM tasks").fetchall()}
+    except sqlite3.Error:
+        logger.warning("kanban awaited-card wake: replica statuses unreadable around a rebuild", exc_info=True)
+        return None
+
+
+def statuses(replica: sqlite3.Connection, applied: Optional[Mapping[str, str]] = None) -> tuple:
+    """The replica's card statuses read before a rebuild drops it (None when unreadable: then every rebuilt card
+    counts as changed), with the status changes the failed pull had already applied (``changes_page``)."""
+    return _statuses(replica), dict(applied or {})
+
+
+def rebuilt(before: tuple, replica: sqlite3.Connection) -> dict[str, str]:
+    """``{card id: status}`` for every card whose status the rebuild changed (or brought in), plus those the failed
+    pull had changed, at their rebuilt status: what ``expedite`` gets for the round. Never raises."""
+    old, applied = before
+    new = _statuses(replica)
+    if new is None:
+        return {}
+    out = {tid: s for tid, s in new.items() if old is None or old.get(tid) != s}
+    out.update({tid: new[tid] for tid in applied if tid in new})
+    return out
+
+
 def _reset_for_tests() -> None:
     with _LOCK:
         _WATCH.clear()
+        _WARNED.clear()
+        _SCANNED.clear()

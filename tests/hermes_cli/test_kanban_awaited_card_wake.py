@@ -313,3 +313,102 @@ def test_lag_records_are_bounded(live, monkeypatch):
     acw._WATCH[("elsewhere", "t_0000000000000001")] = (REVIEW, "done", 0.0)
     acw.expedite(live, {REVIEW: "done"}, now=time.time())
     assert list(acw._WATCH) == [(acw._db_key(live), owner)]
+
+
+# --- f. every replica apply path: a snapshot rebuild and `kanban sync reconcile` (review 5894353204) ----------
+
+def _confirmed(monkeypatch):
+    from hermes_cli import kanban_awaiting as ka
+    monkeypatch.setitem(ka._REMOTE_CONFIRMED, (OTHER, REVIEW), (time.monotonic(), f"{REVIEW} running"))
+
+
+def _woke_within_a_minute(live, owner, t0):
+    assert sync.consume_dispatcher_wake()
+    assert _next_at(live, owner) <= t0 + 60  # before the fix: t0 + 900 (only the check_every cadence)
+    kwc.run_due_wake_checks(live, now=t0 + 60, wait=True)
+    assert _status(live, owner) == "ready"
+    met = [e for e in kb.list_events(live, owner) if e.kind == "condition_met"]
+    assert met and f"{REVIEW} done" in met[-1].payload["output"]
+
+
+def test_review_done_arriving_by_a_snapshot_rebuild_wakes_the_owner_within_a_minute(
+        live, svc, kanban_home, probes, monkeypatch):
+    _confirmed(monkeypatch)
+    owner, t0 = _setup(live, svc, kanban_home, probes, f"hermes kanban wait-check task {REVIEW}")
+    rebuilds = []
+    real = ksc.resync
+    monkeypatch.setattr(ksc, "resync", lambda conn, *a, **kw: rebuilds.append(kw) or real(conn, *a, **kw))
+    _other(svc, REVIEW, {"status": "done"})
+    svc.compact(BOARD)  # the retention floor passes the replica's cursor: the round rebuilds from the snapshot
+    _round(kanban_home, svc)
+    assert rebuilds and rebuilds[0].get("partition") is None  # the replica was rebuilt, not pulled
+    _woke_within_a_minute(live, owner, t0)
+
+
+@pytest.mark.parametrize("compacted", [False, True])
+def test_review_done_arriving_by_sync_reconcile_wakes_the_owner_within_a_minute(
+        live, svc, kanban_home, probes, monkeypatch, compacted):
+    _confirmed(monkeypatch)
+    owner, t0 = _setup(live, svc, kanban_home, probes, f"hermes kanban wait-check task {REVIEW}")
+    _other(svc, REVIEW, {"status": "done"})
+    if compacted:  # reconcile's own replica pull meets the retention floor and rebuilds
+        svc.compact(BOARD)
+    ksc.reconcile(BOARD, kanban_home / "kanban.db", svc.hub(ME))  # no sync round runs
+    _woke_within_a_minute(live, owner, t0)
+
+
+def test_lag_warning_reads_the_replica_for_a_status_no_expedite_was_handed(
+        live, svc, kanban_home, probes, caplog):
+    """A replica apply that never reaches ``expedite`` (here ``sync diff``'s diagnostic pull) is still seen."""
+    caplog.set_level("WARNING", logger=acw.__name__)
+    owner, t0 = _setup(live, svc, kanban_home, probes, f"hermes kanban wait-check task {REVIEW} --until review")
+    _other(svc, REVIEW, {"status": "done"})
+    ksc._pull_replica(BOARD, svc.hub(ME), ME, kanban_home / "kanban.db", diagnostic=True)
+    assert not acw._WATCH  # nothing was handed the change
+
+    def lags():
+        return [r.getMessage() for r in caplog.records if "awaited_card_done_park_lag" in r.getMessage()]
+
+    scanned = t0 + acw._SCAN_SECONDS
+    assert acw.report_lag(live, now=scanned) == []  # the replica read records it
+    assert acw.report_lag(live, now=scanned + acw.LAG_WARN_SECONDS - 5) == [] and not lags()
+    assert acw.report_lag(live, now=scanned + acw.LAG_WARN_SECONDS + 1) == [owner]
+    [line] = lags()
+    assert f"task={owner} awaited={REVIEW} lag_s=" in line
+    for later in range(2, 12):  # later scans still see it done: warned once, not once per scan
+        acw.report_lag(live, now=scanned + acw.LAG_WARN_SECONDS + 60 * later)
+    assert len(lags()) == 1
+
+
+def test_the_replica_read_is_throttled_and_skipped_without_a_replica(live, monkeypatch):
+    calls = []
+    monkeypatch.setattr(acw, "_replica_finished", lambda conn: calls.append(1) or None)
+    now = time.time()
+    for dt in (0, 10, 30, 59):
+        acw.report_lag(live, now=now + dt)
+    assert len(calls) == 1
+    acw.report_lag(live, now=now + 60)
+    assert len(calls) == 2
+
+
+def test_rebuilt_diffs_the_replica_and_keeps_the_pages_applied_before_the_resync(live):
+    a = kb.create_task(live, title="a")
+    b = kb.create_task(live, title="b")
+    before = acw.statuses(live, {b: "review"})
+    with kb.write_txn(live):
+        live.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (a,))
+    c = kb.create_task(live, title="c")
+    got = acw.rebuilt(before, live)
+    assert got[a] == "done" and c in got and b in got  # changed, new, and changed by a page before the Resync
+    assert got[b] == kb.get_task(live, b).status  # at its rebuilt status
+    assert set(acw.rebuilt((None, {}), live)) == {a, b, c}  # an unreadable pre-read: every card counts
+
+
+def test_changes_page_attaches_the_pull_s_applied_changes_to_a_resync():
+    class Hub:
+        def changes(self, board, cursor):
+            raise ksc.Resync("below the floor")
+
+    with pytest.raises(ksc.Resync) as info:
+        acw.changes_page(Hub(), BOARD, 7, {REVIEW: "done"})
+    assert info.value.status_changed == {REVIEW: "done"}
