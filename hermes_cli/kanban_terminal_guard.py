@@ -183,6 +183,33 @@ def strip_stale_push(conn: sqlite3.Connection, op: dict) -> dict:
     return {**op, "fields": {k: v for k, v in fields.items() if k != "status"}}
 
 
+def board_may_hold_terminal(conn: sqlite3.Connection, hub: Any, board: str, row: dict, seen: dict) -> bool:
+    """The push before the feed head (t_01a1d36ddcea59fe): True when this outbox row must wait for the pull.
+
+    :func:`strip_stale_push` only sees a completion this file already pulled. A round pushes before its pulls, and
+    while a page budget leaves it behind the head, so a live ``status`` on an acknowledged card is checked against
+    the Board's own row first: a done/archived row there (or no answer) holds it until a pull reaches the head and
+    the strip can judge it. ``seen`` caches one Board read per card per push."""
+    if row.get("table_name") != "tasks" or row.get("op") != "upsert":
+        return False
+    status = _payload(row.get("fields")).get("status")
+    if not isinstance(status, str) or status in TERMINAL_STATUSES or status == "running":
+        return False
+    acked = conn.execute("SELECT sync_version FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone()
+    reader = getattr(hub, "row_evidence", None)
+    if acked is None or acked[0] is None or reader is None:  # a create has no Board copy to reopen
+        return False
+    uid = row["row_uid"]
+    if uid not in seen:
+        from hermes_cli.kanban_sync_client import HubError
+        try:
+            board_row = reader(board, "tasks", uid).get("row") or {}
+            seen[uid] = board_row.get("status") in TERMINAL_STATUSES
+        except (HubError, OSError, ValueError, AttributeError):
+            seen[uid] = True  # unknown: wait for the pull, which the strip can judge
+    return seen[uid]
+
+
 # --- feed apply ---------------------------------------------------------------------------------------------------
 
 def enforce_after_apply(conn: sqlite3.Connection, left_terminal: Iterable[tuple[str, str]],

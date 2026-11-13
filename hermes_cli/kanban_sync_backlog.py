@@ -21,6 +21,27 @@ BUSY_RETRY_S = 0.5  # a round skipped because a dispatcher tick held the board (
 RECONCILE_BUSY_WAIT_S = 600.0  # a reconcile waits this long in all for rounds holding the board between its chunks
 _sleep = time.sleep  # tests
 
+
+def sendable_before_head(conn: Any, hub: Any, board: str, rows: list[dict], seen: dict) -> tuple[list[dict], bool]:
+    """The outbox rows a push may send while this file has not pulled to the feed head (``push(before_head=True)``),
+    and whether it stopped: the first run row ends the batch (FIFO kept: a run row is sent whole and the Board keeps
+    the last write, so it waits for any end in an unread page). A task row with a live ``status`` whose Board row is
+    done/archived (``kanban_terminal_guard.board_may_hold_terminal``) is skipped with every later row of that card;
+    other cards' rows still go, so one stale wake holds back no one else's edits."""
+    from hermes_cli.kanban_terminal_guard import board_may_hold_terminal
+    out: list[dict] = []
+    skipped: set[tuple[str, str]] = set()
+    for r in rows:
+        if r["table_name"] == "task_runs":
+            return out, True
+        key = (r["table_name"], r["row_uid"])
+        if key in skipped or board_may_hold_terminal(conn, hub, board, r, seen):
+            skipped.add(key)
+            continue
+        out.append(r)
+    return out, False
+
+
 _LOCK = threading.Lock()
 _BEHIND: set[str] = set()  # live board paths whose last round stopped before the feed head
 

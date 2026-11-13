@@ -47,7 +47,7 @@ def oldest_pending_age_s(conn: sqlite3.Connection, *, unanswered: bool = False, 
                          now: Optional[float] = None) -> Optional[float]:
     """Seconds since the oldest pending outbox op was queued (None: no pending op). ``unanswered`` counts only ops
     the Board never deferred; ``held_runs`` leaves out run rows, which a round behind the feed head holds back on
-    purpose (``push(hold_runs=...)``)."""
+    purpose (``push(before_head=...)``)."""
     sql = "SELECT MIN(created_at) FROM kanban_sync_outbox WHERE state = 'pending'"
     sql += " AND retry_after IS NULL" if unanswered else ""
     sql += " AND table_name != 'task_runs'" if held_runs else ""

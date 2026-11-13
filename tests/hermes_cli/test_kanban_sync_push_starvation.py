@@ -194,6 +194,44 @@ def test_a_round_left_behind_holds_a_pending_run_start_over_the_boards_end(kanba
         c.close()
 
 
+def test_a_wake_on_a_card_the_board_completed_waits_for_the_head_while_a_live_one_goes_first(live, svc, kanban_home):
+    """CI on 71d46e0099: the pre-pull send pushed a stale wake (``status=ready``) for a card the Board had completed
+    in a page not pulled yet, so #1958's push strip never saw the completion and the Board reopened the card. A
+    status whose Board row is done waits for the pull to reach the head; a wake on a live card still goes first."""
+    stale = kb.create_task(live, title="done elsewhere", assignee="worker")
+    woke = kb.create_task(live, title="still parked", assignee="worker")
+    with kbc.write_txn(live):  # both parked, and the Board knows it
+        live.execute("UPDATE tasks SET status = 'scheduled' WHERE id IN (?, ?)", (stale, woke))
+    assert _round(kanban_home, svc.hub(ME)).error is None
+    assert svc.board(BOARD)["rows"]["tasks"][woke]["status"] == "scheduled"
+    _other_creates(svc, BACKLOG_PAGES)  # the completion lands after the backlog: in a page round 1 does not reach
+    now = time.time_ns() // 1_000_000
+    svc.hub(OTHER).ops(BOARD, [
+        {"client_op_id": "w1-done", "op": "upsert", "table": "tasks", "uid": stale,
+         "hlc": f"{now:013d}-0000-{OTHER}", "fields": {"status": "done", "completed_at": int(time.time())}},
+        {"client_op_id": "w1-ev", "op": "upsert", "table": "task_events", "uid": sync.uuid7(),
+         "hlc": f"{now + 1:013d}-0000-{OTHER}",
+         "fields": {"task_id": stale, "kind": "completed", "payload": "{}", "created_at": int(time.time())}}])
+    assert svc.board(BOARD)["rows"]["tasks"][stale]["status"] == "done"
+    with kbc.write_txn(live):  # both local wakes, minted before this host pulled the completion
+        live.execute("UPDATE tasks SET status = 'ready' WHERE id IN (?, ?)", (stale, woke))
+    log: list = []
+    hub = PagedHub(svc, ME, log)
+    assert _round(kanban_home, hub).behind
+    pages = [i for i, (kind, _) in enumerate(log) if kind == "changes"]
+    sent = [i for i, (kind, uids) in enumerate(log) if kind == "ops" and woke in uids]
+    assert sent and sent[0] < pages[1]  # the live card's wake did not wait for the backlog
+    assert not any(kind == "ops" and stale in uids for kind, uids in log)  # the Board's done row held it
+    rows = svc.board(BOARD)["rows"]["tasks"]
+    assert rows[stale]["status"] == "done" and rows[woke]["status"] == "ready"
+    while _round(kanban_home, hub).behind:
+        assert svc.board(BOARD)["rows"]["tasks"][stale]["status"] == "done"
+    _round(kanban_home, hub)
+    assert svc.board(BOARD)["rows"]["tasks"][stale]["status"] == "done"
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE row_uid = ? AND state = 'pending'",
+                            (stale,)).fetchone()  # stripped and sent at the head, not left pending
+
+
 # --- a budget-ended round still finishes ---------------------------------------------------------------------
 
 def test_a_round_ending_its_page_budget_still_pushes_resolves_refreshes_and_reevaluates(live, svc, kanban_home,

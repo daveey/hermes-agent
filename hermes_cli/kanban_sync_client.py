@@ -668,22 +668,24 @@ class PushResult:
 
 
 def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primary: bool,
-         max_batches: int = MAX_BATCHES_PER_ROUND, hold_runs: bool = False) -> PushResult:
+         max_batches: int = MAX_BATCHES_PER_ROUND, before_head: bool = False) -> PushResult:
     """Drain pending outbox rows in FIFO batches. A transport failure leaves them pending (retried next round).
 
-    ``hold_runs`` stops at the first run row (t_01a1d36ddcea59fe). A round sets it before its pulls, and after them
-    while it stopped behind the feed head: a run row is sent whole and the Board keeps the last write, so a pending
-    startup sent before the pull reached the head could overwrite an end the Board already holds in an unread page
-    (``_local_row_is_newer`` lets that end land locally first)."""
+    ``before_head`` (t_01a1d36ddcea59fe): a round sets it before its pulls, and after them while it stopped behind the
+    feed head. It stops at the first run row (sent whole, the Board keeps the last write, so a pending startup could
+    overwrite an end the Board holds in an unread page; ``_local_row_is_newer`` lets that end land locally first),
+    and skips a card whose live ``status`` the Board's row has as done/archived (a stale wake: the strip below judges
+    it once the completion is pulled). See ``kanban_sync_backlog.sendable_before_head``."""
     from hermes_cli.kanban_db_connect import write_txn
     refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
-    out = PushResult()
+    out, seen = PushResult(), {}
     for _ in range(max_batches):
-        rows = [dict(r) for r in conn.execute(
+        rows = selected = [dict(r) for r in conn.execute(
             "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' AND (retry_after IS NULL OR retry_after <= ?) "
             "ORDER BY created_at, rowid LIMIT ?", (int(time.time()), PUSH_BATCH))]
-        run_at = next((i for i, r in enumerate(rows) if r["table_name"] == "task_runs"), None) if hold_runs else None
-        rows = rows if run_at is None else rows[:run_at]  # FIFO order is kept: nothing after the run row goes first
+        stopped = False
+        if before_head:
+            rows, stopped = backlog.sendable_before_head(conn, hub, board, selected, seen)
         if not rows:
             break
         with write_txn(conn):
@@ -757,7 +759,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
         if authoritative:
             cursor = (sync.sync_state(conn) or {}).get("cursor", 0)
             sync.apply_remote_changes(conn, authoritative, new_cursor=cursor, board=board)
-        if out.deferred or len(rows) < PUSH_BATCH:  # deferred rows retry next round, not in a hot loop
+        if out.deferred or stopped or len(selected) < PUSH_BATCH:  # deferred rows retry next round, not in a hot loop
             break
     return out
 
@@ -1017,7 +1019,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         # Send before pulling as well as after: a pull backlog never holds local edits back (9 h, t_01a1d36ddcea59fe).
         # Safe: the Board merges on base_version + field HLC, an acked task's sync_version fences off older feed
         # copies of it, and rejections are resolved here as after the pulls.
-        _send(live, hub, slug, gateway, mode, result, after_pull=False, hold_runs=True)
+        _send(live, hub, slug, gateway, mode, result, after_pull=False, before_head=True)
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
             result.behind = pulled.more
@@ -1073,7 +1075,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                 heal_clobbered_completions(live)
                 heal_running_over_ended_run(live)
         # Still behind the head: the Board may hold a run's end in a page not read yet, so run rows wait.
-        _send(live, hub, slug, gateway, mode, result, after_pull=True, hold_runs=result.behind)
+        _send(live, hub, slug, gateway, mode, result, after_pull=True, before_head=result.behind)
         if mode == "primary":
             from hermes_cli.kanban_worker_placement import reevaluate
             with credited(live):  # reservation observations and the feed pull after them
@@ -1083,11 +1085,11 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
 
 
 def _send(live: sqlite3.Connection, hub: Hub, slug: str, gateway: str, mode: str, result: RoundResult, *,
-          after_pull: bool, hold_runs: bool) -> None:
+          after_pull: bool, before_head: bool) -> None:
     """Push the outbox and resolve rejections, adding to ``result``. A round does this before its pulls and after
-    them (``after_pull``, which also transfers attachments); for ``hold_runs`` see :func:`push`."""
+    them (``after_pull``, which also transfers attachments); for ``before_head`` see :func:`push`."""
     with credited(live):  # acknowledgements and the Board's merged rows: sync bookkeeping, not local edits
-        pushed = push(live, hub, slug, gateway, primary=mode == "primary", hold_runs=hold_runs)
+        pushed = push(live, hub, slug, gateway, primary=mode == "primary", before_head=before_head)
     result.push = pushed if result.push is None else PushResult(*map(sum, zip(astuple(result.push), astuple(pushed))))
     if after_pull:
         from hermes_cli.kanban_sync_attachments import transfer_pending
