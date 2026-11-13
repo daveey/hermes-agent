@@ -102,13 +102,14 @@ def test_blocked_for_review_counts_and_lists(env):
     assert_parity("s1", expect=2)
 
 
-def test_done_without_verified_release_stays_an_unknown_chip_and_counts(env):
+def test_done_without_verified_release_stays_a_pending_chip_and_counts(env):
     """The Upkeep 14 vs 9: a done card whose link is not released is still an obligation in both places."""
     replica(env, [("t_open", "running", HUB), ("t_done", "done", HUB), ("t_arch", "archived", HUB)],
             [("t_open", "s1", "created", 0), ("t_done", "s1", "created", 0), ("t_arch", "s1", "shepherd", 0)])
     _, rows = assert_parity("s1", expect=3)
     done = {r["id"]: r for r in rows}
-    assert (done["t_done"]["status"], done["t_done"]["reported_status"], done["t_done"]["unfinished"]) == ("unknown", "done", True)
+    assert (done["t_done"]["status"], done["t_done"]["reported_status"], done["t_done"]["unfinished"]) == (
+        "done_pending_release", "done", True)
     assert done["t_arch"]["status"] == "unknown"
 
 
@@ -307,7 +308,7 @@ def test_links_diff_agrees_on_a_done_unverified_card_whose_owner_written_sibling
     env["ledger"].append(_unknown_row("t_done", "s1"))
     report = links.links_diff(ME)
     assert report["clean"], report
-    assert [(c["id"], c["status"]) for c in links.replica_cards(["s1"], ME)] == [("t_done", "unknown")]
+    assert [(c["id"], c["status"]) for c in links.replica_cards(["s1"], ME)] == [("t_done", "done_pending_release")]
 
 
 def test_links_diff_leaves_out_placement_placeholder_chats(env):

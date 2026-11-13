@@ -9,6 +9,9 @@ Each case below ran a lifecycle ``.py``/``.sh`` on stdin the guard never opened:
    closer, after the group's commands were read, and fed none of them.
 4. An environment assignment glued to ``<`` (``X=1<f.py python3``): the assignment pattern took
    the whole word, so the redirection was never split off.
+5. A closer glued to the closer before it (``{ bash; { true; } } < f.sh``, ``… { true; } fi``):
+   only the inner group closed, so the redirection was credited to it and the outer
+   group's commands kept their old feed.
 """
 
 from __future__ import annotations
@@ -68,6 +71,23 @@ def files(tmp_path) -> dict[str, str]:
         "{{ true; bash; }} > /dev/null < {sh}",
         "true; {{ bash; }} < {sh}",
         "cat {clean_sh} | {{ bash; }} < {sh}",
+        # 5. A closer glued to the closer before it closes the next group too, so the
+        #    redirection after the run belongs to the outermost group closed in it.
+        "{{ bash; {{ true; }} }} < {sh}",
+        "{{ {{ bash; }} }} < {sh}",
+        "{{ python3; {{ {{ true; }} }} }} < {py}",
+        "{{ bash; {{ {{ true; }} }} }} < {sh}",
+        "{{ bash; if true; then {{ true; }} fi }} < {sh}",
+        "if true; then bash; {{ true; }} fi < {sh}",
+        "while read l; do bash; {{ true; }} done < {sh}",
+        "for x in 1; do bash; {{ true; }} done < {sh}",
+        "case x in *) bash; {{ true; }} esac < {sh}",
+        "{{ bash; if true; then true; fi }} < {sh}",
+        "cat {sh} | {{ {{ {{ true; }} }}; bash; }}",
+        "{{ {{ cat {sh}; }} }} | bash",
+        "{{ {{ {{ cat {py}; }} }} }} | python3",
+        "if true; then {{ cat {sh}; }} fi | bash",
+        "{{ ( cat {sh} ) }} | bash",
         # 4. An environment assignment glued to `<`.
         "X=1<{py} python3",
         "X=1 Y=2<{py} python3",
@@ -92,6 +112,16 @@ def test_group_and_glued_stdin_feeds_are_scanned(files, template):
         "(true) 2< {sh}",
         "while read l; do echo $l; done < {sh}",
         "{{ cat; }} < {clean_sh} | bash",
+        # A glued closer run's redirection feeds the groups it closes, nothing after them.
+        "{{ {{ true; }} }} < {sh}; bash {clean_sh}",
+        "{{ bash {clean_sh}; {{ true; }} }} < {sh}",
+        "{{ {{ true; }} }} < {sh}; bash < {clean_sh}",
+        "{{ echo }}; }} < {sh}",
+        # A closed group's redirection ends at the next operator: the next command's `<` is its own.
+        "(bash); grep x < {sh}",
+        "(bash) && cat < {sh}",
+        "(bash) | grep x < {sh}",
+        "{{ bash; }}; grep x < {sh}",
         # Data: the redirection names the file, nothing runs it.
         "echo '{{ bash; }} < {sh}'",
         "grep -c x < {sh}",

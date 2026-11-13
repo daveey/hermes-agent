@@ -3309,6 +3309,7 @@ cli:
     removed: "➖ Kaldırıldı: {names}"
     tools_available: "🔧 {servers} sunucudan {tools} araç kullanılabilir"
     agent_updated: "✅ Ajan güncellendi — {count} araç kullanılabilir"
+    agent_updated_count_unknown: "✅ MCP yeniden yüklendi — araç sayısı bilinmiyor ({error})"
   reload_skills:
     reloading: "🔄 Skill'ler yeniden yükleniyor..."
     total: "📚 {count} skill kullanılabilir"

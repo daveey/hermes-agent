@@ -330,6 +330,22 @@ def _run_identified(run_job, job, execution_id, **kwargs):
         exit_cron_execution(token)
 
 
+class CronTurnStopped(RuntimeError):
+    """A cron turn that ended in a stop someone asked for (CronRunCancelled) or in this gateway's own
+    shutdown (CronShutdownInterrupted). ``run_job`` already logged it as one WARNING; the authority
+    still settles the turn ``failed`` but logs it without the ERROR traceback (cron-7c04faf754)."""
+    expected_stop = True
+
+
+def _expected_stop(error):
+    """Whether ``run_job``'s error is one of its expected stops, read from the ``<type>: <message>``
+    text it builds (``scheduler._job_error_message``) for exactly the exceptions ``_log_expected_stop``
+    logs as a WARNING."""
+    from cron.cancellation import CronRunCancelled, CronShutdownInterrupted
+    return isinstance(error, str) and error.startswith(
+        tuple(f'{cls.__name__}: ' for cls in (CronRunCancelled, CronShutdownInterrupted)))
+
+
 async def execute(authority, ref, row, policy):
     from cron.scheduler import run_job
     from gateway.run import _profile_runtime_scope
@@ -408,6 +424,8 @@ async def execute(authority, ref, row, policy):
             'result': {'final_response': result[2], 'cron_result': list(result), 'cron_job_flags': flags,
                        'failed': not result[0], 'completed': result[0]}, 'usage': {}}
         if not result[0]:
+            if _expected_stop(result[3]):
+                raise CronTurnStopped(result[3])
             raise RuntimeError(result[3] or 'cron execution failed')
         return result[2]
     finally:

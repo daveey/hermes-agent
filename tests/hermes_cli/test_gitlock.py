@@ -511,8 +511,15 @@ def test_a_killed_updates_lock_stays_while_any_git_works_in_the_checkout(repo: P
         assert lock.exists(), "premise: git commit holds index.lock in its editor"
     else:
         lock.write_bytes(b"")
-        proc = subprocess.Popen(["git", "cat-file", "--batch"], cwd=repo, stdin=subprocess.PIPE,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(["git", "cat-file", "--batch-check"], cwd=repo, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # Popen returns once the exec is past its point of no return, before the kernel has laid out
+        # the new argv: /proc/<pid>/cmdline reads empty there and the scan rightly skips it as no git.
+        # A starved runner reached the scan inside that window. An answered query proves git runs here.
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(b"HEAD\n")
+        proc.stdin.flush()
+        assert b" commit " in proc.stdout.readline(), "premise: the reader git answers in the checkout"
     try:
         assert release_dead_index_lock(repo) is False
         assert lock.exists(), f"{form}: the reclaim deleted a lock a live git may own"

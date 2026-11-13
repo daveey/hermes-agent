@@ -217,8 +217,11 @@ _SPECS = [
         _arg("--json", action="store_true", help="Return structured receipt (always JSON)"),
     ], help="Accept a courier origin obligation and read back its durable receipt"),
     _cmd("quiet-hold", [
-        _arg("--max-s", type=int, required=True, metavar="N", help="Lease length in seconds (1..480, no renewal)"),
-        _arg("--reason", required=True, help="Why local automatic claims should pause (nonempty text)"),
+        _arg("--check", action="store_true",
+             help="Read-only preflight: print what quiet-observe-start would refuse (JSON) without taking a "
+                  "lease or starting a cooldown; exit 0 when admitted apart from the lease, 3 otherwise"),
+        _arg("--max-s", type=int, metavar="N", help="Lease length in seconds (1..480, no renewal)"),
+        _arg("--reason", help="Why local automatic claims should pause (nonempty text)"),
         _arg("observer_argv", nargs=argparse.REMAINDER, metavar="-- OBSERVER_COMMAND",
              help="Observer argv, after a literal '--'; run without a shell in its own process group"),
     ], help="Pause local automatic claims for a bounded, non-renewable observer run (root-scoped)"),

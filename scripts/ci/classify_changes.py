@@ -382,6 +382,7 @@ _UPDATE_PIPELINE = (
     # Prefix: _early_recovery.py and its _early_recovery_* siblings (ZIP swap journal).
     "hermes_cli/_early_recovery",  # interrupted pull / shim restore at launch
     "hermes_cli/venv_sync.py",  # completion obligation + launch-time tail
+    "hermes_cli/_launch_template.py",  # venv_sync's relaunch prefix text
     "hermes_cli/launch_probe.py",  # venv_sync's bounded launch-time currency probe
     "hermes_cli/source_",  # source_completion/_build/_releases/_check/_stamp
     "hermes_cli/_launchers.py",

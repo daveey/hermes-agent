@@ -932,21 +932,11 @@ def relaunch_command(
         if option in ("-W", "-X") and index < len(original):
             options.append(original[index])
             index += 1
-    # Select deps before run_path. ``__setitem__`` returns None, so the ``or``
-    # still execs the module; registering it first keeps a later import from
-    # re-entering prepare_launch under a HERMES_HOME the script has not set yet.
-    # _hermes_relaunched marks the child this starts (not processes it spawns) for _relaunch_target;
-    # a restore re-execs sys.orig_argv and keeps it, which is why that guard re-checks currency.
-    prefix = (
-        f"import sys, runpy; sys.path.insert(0, {str(root)!r}); sys.argv = {argv!r}; "
-        "sys._hermes_relaunched = True; "
-        "import importlib.util as _iu, pathlib as _pl; "
-        f"_bp = _pl.Path({str(root)!r}) / 'hermes_bootstrap.py'; "
-        "_spec = _iu.spec_from_file_location('hermes_bootstrap', _bp) if _bp.is_file() else None; "
-        "_mod = _iu.module_from_spec(_spec) if _spec is not None else None; "
-        "(sys.modules.__setitem__('hermes_bootstrap', _mod) or _spec.loader.exec_module(_mod)) "
-        "if _mod is not None else None; "
-    )
+    # The prefix text is shared with bootstrap attestation (byte-compared there). A restore
+    # re-execs sys.orig_argv and keeps _hermes_relaunched, which is why _relaunch_target re-checks.
+    from hermes_cli._launch_template import relaunch_prefix
+
+    prefix = relaunch_prefix(str(root), argv)
     if argv[0] == "-c":
         body = f"exec({original[index + 1]!r})"
     elif module and module != "__main__":

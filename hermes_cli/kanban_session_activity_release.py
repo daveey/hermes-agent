@@ -11,6 +11,18 @@ from hermes_cli import kanban_scope_heartbeat as _scope_hb
 
 
 TERMINAL_STATUSES = ("done", "archived")
+# An unreleased chat link to a closed card is the chat's unfinished obligation, listed under one of these. ``unknown``:
+# its state is not known (no card row, no status, archived without a completion). ``done_pending_release``: the card
+# is done and the owner has not released the link yet (it releases after verifying the completion, a sync pass or two
+# later). Origin chat 20261026_235722_bef6c6 showed such freshly finished cards ``[unknown]`` for 1-2 min. [daveey]
+UNKNOWN = "unknown"
+DONE_PENDING_RELEASE = "done_pending_release"
+PENDING_RELEASE_STATUSES = (UNKNOWN, DONE_PENDING_RELEASE)
+
+
+def unreleased_obligation(card: dict[str, Any]) -> bool:
+    """A closed card the chat still waits on: listed and counted (fail-closed), never released."""
+    return card.get("status") in PENDING_RELEASE_STATUSES and bool(card.get("unfinished"))
 
 
 def owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,

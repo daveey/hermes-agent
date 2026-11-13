@@ -90,9 +90,10 @@ def _substituted_variants(segment: list[str], subs: list[tuple[int, list[str]]])
 class _LineWalk:
     """State of one line's walk; ``contexts`` yields ``(segment, call_argument, piped_files)``."""
 
-    def __init__(self, cat_operands, opens_call_arguments, peel_reserved_words, stdin_redirections,
-                 redirected: Optional[dict[int, list[str]]] = None) -> None:
+    def __init__(self, cat_operands, cat_relays_stdin, opens_call_arguments, peel_reserved_words,
+                 stdin_redirections, redirected: Optional[dict[int, list[str]]] = None) -> None:
         self.cat_operands = cat_operands
+        self.cat_relays_stdin = cat_relays_stdin
         self.opens_call_arguments = opens_call_arguments
         self.peel_reserved_words = peel_reserved_words
         self.stdin_redirections = stdin_redirections
@@ -140,6 +141,9 @@ class _LineWalk:
         for variant in _substituted_variants(self.segment, self.subs):
             yield variant, self.call_argument, self.feed
             written += self.cat_operands(variant)
+            # A bare `cat` (or `cat -`) writes what it is fed: `cat f | cat | bash`, `{ cat; } < f`.
+            if self.feed and self.cat_relays_stdin(variant):
+                written += self.feed
         self.pending = self.closed if self.closed is not None else written
         self.closed = None
         self.segment, self.subs = [], []
@@ -162,12 +166,19 @@ class _LineWalk:
         self.feed = group.feed
 
     def word(self, token: str) -> None:
-        if not self.segment and token in _CLOSERS and self.groups \
+        # A closer right after the closers that started this segment closes the next group too
+        # (`{ bash; { true; } } < f`, `… { true; } fi`): bash ends a compound command at its
+        # closer, so the run's redirection belongs to the outermost group it closed.
+        run = self.closing[1] if self.closing is not None else 0
+        if len(self.segment) == run and token in _CLOSERS and self.groups \
                 and self.groups[-1].closer == token:
+            if run:
+                # What the group closed just before wrote is its enclosing group's output.
+                self.pending = self.closed or []
             self.route()
             group = self.groups.pop()
             self.closed = group.output
-            self.closing = (group.ordinal, 1)
+            self.closing = (group.ordinal, run + 1)
             self.feed = self.enclosing_feed()
         self.segment.append(token)
 
@@ -181,7 +192,7 @@ class _LineWalk:
             and self.opens_call_arguments(self.segment)
         if self.segment:
             yield from self.flush()
-        self.closing = None
+        self.closing = self.closed = None
         if operator in ("|", "|&"):
             self.feed, self.pending = self.pending, []
         elif operator == "(":
@@ -193,7 +204,9 @@ class _LineWalk:
                 if group.outer is not None:
                     self.resume(group)
                     return
-                self.pending = group.output
+                # Its redirections (`) < f`, `) 2>/dev/null`) flush as a segment of their own,
+                # which writes what the group wrote.
+                self.pending = self.closed = group.output
                 self.closing = (group.ordinal, 0)
             self.feed = self.enclosing_feed()
         self.call_argument = next_is_call
@@ -215,18 +228,21 @@ class _LineWalk:
 def iter_line_segment_contexts(
     tokens: list[str], *,
     cat_operands: Callable[[Optional[list[str]]], list[str]],
+    cat_relays_stdin: Callable[[list[str]], bool],
     opens_call_arguments: Callable[[list[str]], bool],
     peel_reserved_words: Callable[[list[str]], int],
     stdin_redirections: Callable[[list[str]], list[str]],
 ) -> Iterator[Context]:
     """``(segment, call_argument, piped_files)`` for one line's shell *tokens* (see
     ``cron.lifecycle_guard._iter_segment_contexts``). *cat_operands* names the files a segment
-    writes to its stdout; *stdin_redirections* the files some words redirect to stdin.
+    writes to its stdout, *cat_relays_stdin* whether it also writes the feed on its stdin (a
+    bare ``cat``); *stdin_redirections* the files some words redirect to stdin.
 
     A group's own redirection follows its closer, after its commands were read, so the line is
     walked twice: the first walk only collects those redirections, the second feeds each group
     from its own. Both walks open the same groups in the same order: feeds never change that."""
-    callables = (cat_operands, opens_call_arguments, peel_reserved_words, stdin_redirections)
+    callables = (cat_operands, cat_relays_stdin, opens_call_arguments, peel_reserved_words,
+                 stdin_redirections)
     probe = _LineWalk(*callables)
     for _ in _walk(probe, tokens):
         pass

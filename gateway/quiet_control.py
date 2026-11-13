@@ -29,7 +29,7 @@ from gateway.control_dispatch import QUIET_BOOKKEEPING_VERBS
 logger = logging.getLogger(__name__)
 
 SCHEMA = 1
-START, SNAPSHOT, END = QUIET_BOOKKEEPING_VERBS
+START, SNAPSHOT, END, CHECK = QUIET_BOOKKEEPING_VERBS
 UPDATE_WINDOW_MAX_AGE_S = 120  # stricter than hermes_cli.kanban_deploy_window.FRESH_SECONDS (1200)
 # quiet-hold's preflight wants this much freshness left for the observer's spawn + handshake.
 START_PREFLIGHT_MARGIN_S = 30
@@ -43,7 +43,7 @@ _FOLLOW_KEYS = {"schema", "episode_id", "observer_token", "expected_gateway", "d
 
 # Process-wide bootstrap capture: ``capture_bootstrap_registry`` runs at the earliest gateway launch
 # boundary; the runner (and its constructor) read the same instance from here.
-_boot: dict[str, Any] = {"registry": None, "captured": False}
+_boot: dict[str, Any] = {"registry": None, "captured": False, "code": None}
 
 
 # ---- bootstrap binding ---------------------------------------------------------------------
@@ -61,7 +61,19 @@ def capture_bootstrap_registry():
     except RuntimeError:
         registry = None
     _boot["registry"], _boot["captured"] = registry, True
+    _boot["code"] = _installed_code_ledger()
     return registry
+
+
+def _installed_code_ledger():
+    """The bootstrap-installed executed-code ledger (``hermes_cli.code_attestation``), or None.
+
+    Its unknowns (an unsupported launch route included) refuse ``quiet-observe-start``; a missing
+    ledger is pending coverage. Read here, never installed here (a late install has no provenance).
+    """
+    from hermes_cli import code_attestation
+
+    return code_attestation._installed
 
 
 def bootstrap_registry():
@@ -85,6 +97,7 @@ def bind_registry(runner, registry=None) -> None:
         except RuntimeError:
             registry = None
     runner._quiet_registry = registry
+    runner._quiet_code = _boot["code"] if _boot["captured"] else _installed_code_ledger()
     runner._quiet_bootstrap_provenance = provenance
     runner._quiet_attested = False
     runner._quiet_local_unknowns = set()
@@ -115,6 +128,7 @@ def register_quiet_control(runner, server) -> QuietControl:
     server.private_handlers[START] = control.start
     server.private_handlers[SNAPSHOT] = control.snapshot
     server.private_handlers[END] = control.end
+    server.private_handlers[CHECK] = control.check
     return control
 
 
@@ -271,14 +285,30 @@ class QuietControl:
                 reasons.append("coverage_unreadable")
         if registry is not None and not callable(getattr(registry, "membership_generation", None)):
             reasons.append("membership_unsupported")
+        if getattr(runner, "_quiet_code", None) is None:
+            reasons.append("code_attestation_missing")
         return reasons
 
-    def _registry_view(self, registry) -> tuple[dict[str, Any], list[str]]:
+    def _code_unknowns(self, *, inventory: bool) -> set[str]:
+        """The executed-code ledger's unknowns as ``code:<reason>``. Snapshots read only the latched
+        set (no module inventory while the gateway is being measured); start and check inventory
+        first. An unreadable ledger is itself an unknown."""
+        ledger = getattr(self._runner, "_quiet_code", None)
+        if ledger is None:
+            return set()
+        try:
+            found = ledger.unknowns() if inventory else ledger.latched_unknowns()
+        except Exception:  # health: allow BLE001 -- an unreadable ledger is unknown, never clean
+            return {"code:unreadable"}
+        return {f"code:{reason}" for reason in found}
+
+    def _registry_view(self, registry, *, inventory: bool = False) -> tuple[dict[str, Any], list[str]]:
         snap = registry.snapshot()
         gen = None
         if callable(getattr(registry, "membership_generation", None)):
             gen = registry.membership_generation()
-        unknowns = sorted(set(snap.unknowns) | set(getattr(self._runner, "_quiet_local_unknowns", ())))
+        unknowns = sorted(set(snap.unknowns) | set(getattr(self._runner, "_quiet_local_unknowns", ()))
+                          | self._code_unknowns(inventory=inventory))
         view = {"activity_epoch": snap.epoch, "active_count": snap.active,
                 "per_kind": dict(snap.per_kind), "unknowns": unknowns,
                 "membership_generation": gen,
@@ -449,14 +479,9 @@ class QuietControl:
         reasons += self._lease_reasons(params, now)
         if reasons:
             return self._refuse(episode_id, "refused", reasons)
-        view, _ = self._registry_view(registry)
-        if view["unknowns"]:
-            return self._refuse(episode_id, "refused", [f"unknown:{u}" for u in view["unknowns"]])
-        update, update_reasons = self._update_status()
-        if update_reasons:
-            return self._refuse(episode_id, "refused", [f"update:{r}" for r in update_reasons])
-        if update["window_age_s"] is None or update["window_age_s"] > UPDATE_WINDOW_MAX_AGE_S:
-            return self._refuse(episode_id, "refused", ["update_window_stale"])
+        for reasons in self._state_gates(registry):
+            if reasons:
+                return self._refuse(episode_id, "refused", reasons)
         now = self._mono()  # deadline re-checked immediately before the episode is armed
         if now is None or now >= params["deadline_mono_ns"]:
             return self._refuse(episode_id, "refused", ["deadline_reached"])
@@ -476,6 +501,37 @@ class QuietControl:
         result = self._measure(episode_id, "started")
         result["observer_token"] = token
         return result
+
+    def _state_gates(self, registry):
+        """Start's lease-independent gates after coverage, in start's order (one list each)."""
+        view, _ = self._registry_view(registry, inventory=True)
+        yield [f"unknown:{u}" for u in view["unknowns"]]
+        update, update_reasons = self._update_status()
+        yield [f"update:{r}" for r in update_reasons]
+        stale = update["window_age_s"] is None or update["window_age_s"] > UPDATE_WINDOW_MAX_AGE_S
+        yield ["update_window_stale"] if stale else []
+
+    def check(self, params, peer):
+        """Read-only preflight (``hermes kanban quiet-hold --check``): what ``start`` would refuse
+        apart from the lease and the observer's identity, without arming an episode, reading or
+        taking a lease, or reserving work (a bookkeeping verb: the registry epoch does not move)."""
+        if not isinstance(params, dict) or set(params) != {"schema"} or params["schema"] != SCHEMA:
+            raise ValueError(f"params fields must be exactly: schema (= {SCHEMA})")
+        registry = self._registry()
+        reasons = self._pending(registry)
+        unknowns: list[str] = []
+        if registry is not None:
+            for gate in self._state_gates(registry):
+                reasons += gate
+            unknowns = [r[len("unknown:"):] for r in reasons if r.startswith("unknown:")]
+        ledger = getattr(self._runner, "_quiet_code", None)
+        try:
+            route = ledger.route_report().get("route") if ledger is not None else None
+        except Exception:  # health: allow BLE001 -- an unreadable route is reported as none, never invented
+            route = None
+        return {"schema": SCHEMA, "phase": "check", "admitted": not reasons, "reasons": reasons,
+                "registry_unknowns": unknowns, "route": route,
+                "activity_epoch": registry.snapshot().epoch if registry is not None else None}
 
     def _follow(self, params, peer, phase):
         _check_params(params, _FOLLOW_KEYS)

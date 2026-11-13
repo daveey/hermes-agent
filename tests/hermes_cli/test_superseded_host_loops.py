@@ -1,0 +1,232 @@
+"""A backend being replaced gives its host loops up at once (t_01a1d65520e78e7d). [daveey]
+
+Hub 2026-11-13: the always-on backend :9148 (booted on 17f28630e4, before a fix) took the ``kanban-unloaded``
+lease while the gateway restarted on the fix (19:10:13), was superseded at 19:11:14, and still ran a sweep wake
+during its drain at 19:11:19. That wake failed on the pre-fix code (SubscriptionQuotaUnavailable) and booked its
+replay at the quota wall's reset, 4 days out. A superseded backend, or one whose boot commit is behind the
+checkout, now releases every host-loop lease, refuses them while it drains, starts no automation wake, and a
+build failure in it never defers a delivery to a wall reset.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+
+import pytest
+
+from hermes_cli import host_loop_lease as hll
+from hermes_cli import web_server_skew_exit as skew
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+
+pytestmark = pytest.mark.skipif(fcntl is None, reason="flock leases need fcntl")
+
+
+@pytest.fixture(autouse=True)
+def _clean(monkeypatch):
+    monkeypatch.delenv(hll.KILL_SWITCH_ENV, raising=False)
+    skew._DRAINING.clear()
+    with hll._RETIRE_MU:
+        hll._RETIRED.clear()
+    yield
+    skew._DRAINING.clear()
+    with hll._RETIRE_MU:
+        hll._RETIRED.clear()
+
+
+def _lock_is_free(lease: hll.HostLoopLease) -> bool:
+    """Whether another open file description can take the lease's flock right now."""
+    fd = os.open(lease.path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    finally:
+        os.close(fd)
+
+
+class _Server:
+    should_exit = False
+
+
+class _BusyFence:
+    """A live turn refuses the retirement fence: the backend keeps draining (the window the bug lived in)."""
+
+    def prepare(self):
+        return {"ok": False}
+
+    def commit(self, token):  # pragma: no cover - never reached
+        return {"ok": False}
+
+
+def _held_lease(tmp_path) -> hll.HostLoopLease:
+    lease = hll.HostLoopLease("kanban-unloaded", "serve", interval=30, home=tmp_path)
+    assert lease.held() is True and not _lock_is_free(lease)
+    return lease
+
+
+# ── the lease ──────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_retiring_releases_every_held_lease_and_refuses_it_until_resumed(tmp_path, monkeypatch):
+    lease = _held_lease(tmp_path)
+    assert hll.retire_host_loops("test", "superseded") is True
+    assert hll.host_loops_retired() == "superseded"
+    assert _lock_is_free(lease)  # the gateway / successor can take it at once
+    assert lease.held() is False and lease.exclusive() is False
+    monkeypatch.setenv(hll.KILL_SWITCH_ENV, "0")
+    assert lease.held() is False  # a retiring process runs no host pass, kill switch or not
+    monkeypatch.delenv(hll.KILL_SWITCH_ENV)
+    assert hll.resume_host_loops("test") is True
+    assert lease.held() is True
+
+
+def test_every_reason_must_clear_before_the_process_competes_again(tmp_path):
+    lease = _held_lease(tmp_path)
+    hll.retire_host_loops("a", "superseded")
+    assert hll.retire_host_loops("b", "code skew") is False  # already retired
+    assert hll.resume_host_loops("a") is False and lease.held() is False
+    assert hll.resume_host_loops("b") is True and lease.held() is True
+
+
+# ── the watchdogs ─────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_superseded_backend_releases_the_lease_on_the_first_observation_while_it_drains(tmp_path):
+    lease = _held_lease(tmp_path)
+    server = _Server()
+    states = []
+
+    def superseded(port):
+        states.append((hll.host_loops_retired(), _lock_is_free(lease)))
+        return True
+
+    skew.start_superseded_watchdog(server, port=9148, superseded=superseded, fence=_BusyFence(), poll_s=0.001,
+                                   max_polls=3, http_connections=lambda: 2, skew_fn=lambda: None,
+                                   stale_check_s=0).join(10)
+    assert states[0] == (None, False)  # held until the switch is seen
+    assert states[1][0] and states[1][1] is True  # from the next poll on: retired, lock free, still draining
+    assert server.should_exit is False and skew.draining() is True
+    assert lease.held() is False
+
+
+def test_an_aborted_roll_gives_the_host_loops_back(tmp_path):
+    lease = _held_lease(tmp_path)
+    flips = iter([True, True, False])
+    skew.start_superseded_watchdog(_Server(), port=9148, superseded=lambda p: next(flips, False),
+                                   fence=_BusyFence(), poll_s=0.001, max_polls=3, http_connections=lambda: 2,
+                                   skew_fn=lambda: None, stale_check_s=0).join(10)
+    assert hll.host_loops_retired() is None and lease.held() is True
+
+
+def test_an_always_on_backend_behind_the_checkout_gives_the_lease_up_before_it_is_superseded(tmp_path):
+    """:9148 took the lease at 19:10:13, ten seconds after the checkout moved past its boot commit."""
+    lease = _held_lease(tmp_path)
+    reads = iter([None, ("17f28630e4", "0068f2ca86"), ("17f28630e4", "0068f2ca86")])
+    skew.start_superseded_watchdog(_Server(), port=9148, superseded=lambda p: False, fence=_BusyFence(),
+                                   poll_s=0.001, max_polls=3, skew_fn=lambda: next(reads, None),
+                                   stale_check_s=0).join(10)
+    assert "17f28630e4" in (hll.host_loops_retired() or "")
+    assert _lock_is_free(lease) and lease.held() is False
+
+
+def test_a_single_skew_blip_keeps_the_lease():
+    reads = iter([("a", "b"), None, ("a", "b"), None])
+    skew.start_superseded_watchdog(_Server(), port=9148, superseded=lambda p: False, fence=_BusyFence(),
+                                   poll_s=0.001, max_polls=4, skew_fn=lambda: next(reads, None),
+                                   stale_check_s=0).join(10)
+    assert hll.host_loops_retired() is None
+
+
+def test_a_code_skewed_backend_waiting_for_its_fence_runs_no_host_pass(tmp_path):
+    lease = _held_lease(tmp_path)
+    reads = iter([("aaa", "bbb")] * 3 + [None])
+    skew.start_code_skew_watchdog(_Server(), skew_fn=lambda: next(reads, None), update_probe=lambda: False,
+                                  runtime_probe=lambda: True, fence=_BusyFence(), poll_s=0.001,
+                                  max_polls=3).join(10)
+    assert "aaa" in (hll.host_loops_retired() or "") and lease.held() is False
+    stale = skew.StaleCodeLoops(lambda: None)
+    stale.retired = True
+    stale.observe()  # the checkout reads as the boot commit again
+    assert hll.host_loops_retired() is None and lease.held() is True
+
+
+# ── no new wake on stale code ─────────────────────────────────────────────────────────────────────────
+
+
+def test_a_retired_backend_starts_no_sweep_wake_and_runs_no_residual_pass(tmp_path, monkeypatch):
+    from tui_gateway import kanban_unloaded as ku
+
+    ran = []
+    monkeypatch.setattr(ku, "host_pass", lambda *a, **k: ran.append("host"))
+    monkeypatch.setattr(ku, "residual_pass", lambda: ran.append("residual"))
+    lease = _held_lease(tmp_path)  # it held the lease when the switch came, as :9148 did
+    hll.retire_host_loops("test", "always-on backend :9148 superseded")
+    assert ku.run_pass(lease) == "retired" and ran == []
+
+
+def test_a_retired_backend_refuses_the_wake_before_resuming_or_building(monkeypatch):
+    from tui_gateway import server
+
+    touched = []
+    monkeypatch.setattr(server, "_find_live_session_by_key", lambda key: touched.append(key), raising=False)
+    monkeypatch.setitem(server._methods, "session.resume", lambda rid, p: touched.append(rid) or {})
+    hll.retire_host_loops("test", "always-on backend :9148 superseded")
+    verdict = server._wake_session_turn("20261031_064851_d0f106", "card done", display_kind="kanban_notice",
+                                        label="kanban-sweep-wake")
+    assert verdict == "busy" and touched == []
+
+
+# ── a build failure on stale code never waits for the wall ────────────────────────────────────────────
+
+
+def _replay_due(monkeypatch, resets_at: float) -> float:
+    from tui_gateway import automation_replay as ar
+    from tui_gateway import server
+
+    booked = []
+    monkeypatch.setattr(ar, "schedule", lambda key, **k: booked.append(k["due"]) or True)
+    session = {"agent_error": "SubscriptionQuotaUnavailable: openai-codex/gpt-6-astra",
+               "agent_failure": {"failure_resets_at": resets_at}}
+    monkeypatch.setattr(server, "_find_live_session_by_key", lambda key: ("sid", session), raising=False)
+    ar.replay_failed_wake("20261031_064851_d0f106", "card done", session, "kanban_notice",
+                          {"task_id": "t_01a1d628cfa66230"}, "kanban-sweep-wake")
+    assert len(booked) == 1
+    return booked[0]
+
+
+def test_a_wall_failure_on_current_code_still_waits_for_the_reset(monkeypatch):
+    from gateway import code_skew
+    from tui_gateway import notice_guarantee as ng
+
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: None)
+    now = time.time()
+    reset = now + 4 * 86400
+    assert _replay_due(monkeypatch, reset) == reset
+    assert ng._retry_at("20261031_064851_d0f106", now) == reset + ng.DEFER_SLACK_S
+
+
+@pytest.mark.parametrize("stale", ["retired", "skew"])
+def test_a_wall_failure_on_stale_code_replays_after_the_short_delay(monkeypatch, stale):
+    from gateway import code_skew
+    from tui_gateway import automation_replay as ar
+    from tui_gateway import notice_guarantee as ng
+
+    if stale == "retired":
+        monkeypatch.setattr(code_skew, "detect_code_skew", lambda: None)
+        hll.retire_host_loops("test", "always-on backend :9148 superseded")
+    else:
+        monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("17f28630e4", "0068f2ca86"))
+    now = time.time()
+    due = _replay_due(monkeypatch, now + 4 * 86400)
+    assert now + ar.REPLAY_MIN_DELAY_S <= due <= time.time() + ar.REPLAY_MIN_DELAY_S
+    # the durable close-out deferral follows the replay, not the wall
+    assert ar.trusted_resets_at(now + 4 * 86400) is None
+    assert ng._retry_at("20261031_064851_d0f106", now) == ar.replay_due(now) + ng.DEFER_SLACK_S

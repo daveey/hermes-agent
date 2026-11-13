@@ -1,5 +1,9 @@
 """``hermes kanban quiet-hold --max-s N --reason TEXT -- OBSERVER_COMMAND...``
 
+``hermes kanban quiet-hold --check`` is the read-only preflight: it asks the gateway what
+``quiet-observe-start`` would refuse apart from the lease and prints one JSON document; it takes no
+lease and writes no cooldown record (exit 0 admitted, 3 refused or gateway unavailable).
+
 Takes the root-scoped claim-quiet lease (:mod:`agent.claim_quiet`), runs the observer command under
 it and releases the lease on every path. Root-scoped: it never opens or initialises a Kanban board
 and never writes configuration; ``--board`` has no effect here.
@@ -51,6 +55,7 @@ from collections.abc import Sequence
 
 EXIT_OK = 0
 EXIT_USAGE = 2
+EXIT_CHECK_REFUSED = 3  # --check: start would refuse (apart from the lease)
 EXIT_UNAVAILABLE = 69
 EXIT_OBSERVER_FAILED = 70
 EXIT_RELEASE_FAILED = 71
@@ -260,9 +265,38 @@ def _kill_leftovers(pgid: int) -> bool:
     return True
 
 
+def check(home=None, *, query=None) -> int:
+    """``--check``: one JSON document on stdout with what ``quiet-observe-start`` would refuse
+    apart from the lease (registry unknowns, launch route, reasons). Takes no lease, writes no
+    cooldown record and reserves no work (``quiet-observe-check`` is a bookkeeping verb)."""
+    import json
+    from pathlib import Path
+
+    if query is None:
+        from gateway.control_socket import query_gateway_control as query
+    if home is None:
+        from gateway.status import _get_process_hermes_home
+        home = _get_process_hermes_home()
+    result = query(Path(home), "quiet-observe-check", params={"schema": 1}, report_unsupported=True)
+    if isinstance(result, dict) and result.get("unsupported"):
+        doc = {"admitted": False, "reasons": ["check_unsupported_by_gateway"]}
+    elif not isinstance(result, dict) or type(result.get("admitted")) is not bool:
+        doc = {"admitted": False, "reasons": ["gateway_unavailable"]}
+    else:
+        doc = result
+    doc = {"home": str(home), **doc}
+    print(json.dumps(doc, sort_keys=True, default=str))
+    return EXIT_OK if doc["admitted"] is True and not doc.get("reasons") else EXIT_CHECK_REFUSED
+
+
 def cmd_quiet_hold(args) -> int:
     """Entry point from the ``hermes kanban`` parser."""
     argv = list(getattr(args, "observer_argv", None) or [])
+    if getattr(args, "check", False):
+        if argv or getattr(args, "max_s", None) is not None or getattr(args, "reason", None) is not None:
+            _err("usage: hermes kanban quiet-hold --check  (takes no lease arguments or observer)")
+            return EXIT_USAGE
+        return check()
     if not argv or argv[0] != "--":
         _err("usage: hermes kanban quiet-hold --max-s N --reason TEXT -- OBSERVER_COMMAND...")
         return EXIT_USAGE

@@ -3619,6 +3619,7 @@ cli:
     removed: "➖ Supprimés : {names}"
     tools_available: "🔧 {tools} outil(s) disponible(s) depuis {servers} serveur(s)"
     agent_updated: "✅ Agent mis à jour — {count} outil(s) disponible(s)"
+    agent_updated_count_unknown: "✅ MCP rechargé — nombre d'outils inconnu ({error})"
   reload_skills:
     reloading: "🔄 Rechargement des skills..."
     total: "📚 {count} skill(s) disponible(s)"

@@ -224,7 +224,7 @@ def test_replica_rows_are_reread_only_when_their_content_moves(home, monkeypatch
         assert len(queries) == 1 and again[0]["synced_at"] == 12345.0  # the stamp is still read every time
         with kbc.write_txn(conn):
             conn.execute("UPDATE tasks SET status = 'done' WHERE id = 't_hub'")
-        assert links.replica_cards(["s1"], ME, replicas=[("default", path)])[0]["status"] == links.UNKNOWN
+        assert links.replica_cards(["s1"], ME, replicas=[("default", path)])[0]["status"] == links.DONE_PENDING_RELEASE
         assert len(queries) == 2
     finally:
         conn.close()

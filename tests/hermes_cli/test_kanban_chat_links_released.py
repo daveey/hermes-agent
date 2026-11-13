@@ -70,7 +70,8 @@ def test_a_closed_card_reader_lists_no_other_profiles_released_link(rep):
     got = {c["id"]: c for c in links.replica_cards(["s1"], ME, CLOSED, replicas=[("default", rep)])}
     assert sorted((t, c["status"], c["released"]) for t, c in got.items()) == [
         ("t_arch", "archived", True), ("t_open", "running", False), ("t_released", "done", True),
-        ("t_unreleased", "unknown", False)]
+        # Done on the replica, link not yet released by the owner: pending release, not unknown (#2433).
+        ("t_unreleased", "done_pending_release", False)]
     assert {c["origin_profile"] for c in got.values()} == {"default"}
 
 

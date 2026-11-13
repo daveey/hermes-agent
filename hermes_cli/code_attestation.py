@@ -39,6 +39,11 @@ SEED_MAIN = {"hermes_cli.main": "hermes_cli/main.py"}
 SEED = {**SEED_COMMON, **SEED_MAIN}
 ROUTE_MANAGED_STUB = "managed-stub"
 ROUTE_CONSOLE = "console-main-first"
+# A ``venv_sync.relaunch_command`` child of the managed stub (the MacBook gateway).
+ROUTE_MANAGED_STUB_RELAUNCH = "managed-stub-relaunch"
+STUB_ROUTES = (ROUTE_MANAGED_STUB, ROUTE_MANAGED_STUB_RELAUNCH)
+# Seed for the relaunch route ONLY: the stdlib modules its prefix imports before the hook.
+RELAUNCH_PREFIX_MODULES = ("runpy", "importlib.util", "pathlib")
 # Reviewed launcher-head digests (sha256 of the script before the pin marker with the
 # checkout-root literal replaced by ``@ROOT@``). Anything else => unsupported-stub-head.
 # Reproduce: split a stub's script at ``sys._hermes_pin_default_home = True\n``, replace
@@ -363,10 +368,14 @@ def _detect_route(core_root, template, own_file):
     """Derive the launch route from evidence only: argv, the __main__ frame, template.
 
     Nothing the caller passes (or any ``sys`` flag such as the pin marker) participates.
-    Returns a dict for the supported managed-stub route; raises ``_Refuse`` otherwise.
+    Returns a dict for a supported managed-stub route; raises ``_Refuse`` otherwise.
     """
     orig = list(getattr(sys, "orig_argv", ()))
     argv = list(sys.argv)
+    if _relaunch_shaped(orig, template):
+        # A ``venv_sync.relaunch_command`` child: its own route, proven byte-exact below.
+        # The routing test reads argv bytes only; everything it admits is re-proven in full.
+        return _detect_relaunch_route(core_root, template, own_file, orig, argv)
     if getattr(sys, "_hermes_relaunched", False) or LAUNCH_HANDOFF_ENV in os.environ:
         raise _Refuse("relaunched-launch")
     if len(orig) < 4 or orig[1:3] != ["-I", "-c"]:
@@ -381,6 +390,19 @@ def _detect_route(core_root, template, own_file):
     script = orig[3]
     if argv[:1] != ["-c"] or argv[1:] != orig[4:]:
         raise _Refuse("unsupported-route:argv-mismatch")
+    head, tail, head_digest, current_digest = _check_stub_script(core_root, template, script, argv)
+    if "hermes_cli.main" in sys.modules:
+        raise _Refuse("unexpected-prehook:hermes_cli.main")
+    frame = _verify_frame_chain(core_root, own_file, script, head)
+    return {"route": ROUTE_MANAGED_STUB, "stub_head_digest": head_digest,
+            "head_sha256": head_digest, "tail_sha256": _sha(tail.encode()),
+            "script_sha256": _sha(script.encode()), "launcher_argv0": orig[0],
+            "current_template_head_digest": current_digest, "code": frame.f_code}
+
+
+def _check_stub_script(core_root, template, script, argv):
+    """The managed stub script's identity, shared unchanged by both stub routes: argv
+    refusals, pin marker, byte-exact tail, root literal, reviewed head digest."""
     if argv[1:2] == ["--run-module"]:
         raise _Refuse("unsupported-route:run-module")
     if argv[1:2] == ["--print-runtime-command"]:
@@ -402,19 +424,91 @@ def _detect_route(core_root, template, own_file):
     head_digest = _sha(template.normalized_head(head, root).encode())
     if head_digest not in STUB_HEAD_DIGESTS | {current_digest}:
         raise _Refuse("unsupported-stub-head")
+    return head, tail, head_digest, current_digest
+
+
+def _relaunch_shaped(orig, template):
+    """Routing only: the source after the first ``-c`` starts with the relaunch head."""
+    if "-c" not in orig[1:]:
+        return False
+    index = orig.index("-c", 1)
+    source = orig[index + 1] if index + 1 < len(orig) else None
+    return isinstance(source, str) and source.startswith(template.RELAUNCH_HEAD)
+
+
+def _detect_relaunch_route(core_root, template, own_file, orig, argv):
+    """Route ``managed-stub-relaunch``: ``orig_argv == [exe, "-I" (one or more, nothing else),
+    "-c", src]`` with ``src == relaunch_prefix(core_root, sys.argv) + "exec(" + repr(script) + ")"``
+    byte for byte, and ``script`` passing the unchanged managed-stub checks. Flags and env are
+    never evidence; ``_hermes_relaunched`` is set by these very bytes."""
+    index = orig.index("-c", 1)
+    options = orig[1:index]
+    if not options or any(option != "-I" for option in options):
+        raise _Refuse("unsupported-route:relaunch-options")
+    if len(orig) != index + 2 or argv[:1] != ["-c"]:
+        raise _Refuse("unsupported-route:relaunch-argv")
+    source = orig[index + 1]
+    if len(source) > MAX_SOURCE:
+        raise _Refuse("unsupported-route:relaunch-source")
+    # Byte-exact: the prefix for (core_root, sys.argv), then exactly the canonical exec body.
+    prefix = template.relaunch_prefix(str(core_root), argv)
+    if not source.startswith(prefix):
+        raise _Refuse("unsupported-route:relaunch-source")
+    script = _relaunch_embedded_script(source[len(prefix):])
+    if source != prefix + "exec(" + repr(script) + ")":
+        raise _Refuse("unsupported-route:relaunch-source")
+    _, tail, head_digest, current_digest = _check_stub_script(core_root, template, script, argv)
     if "hermes_cli.main" in sys.modules:
         raise _Refuse("unexpected-prehook:hermes_cli.main")
-    frame = _verify_frame_chain(core_root, own_file, script, head)
-    return {"route": ROUTE_MANAGED_STUB, "stub_head_digest": head_digest,
+    prefix_modules = _relaunch_prefix_modules()
+    frame = _verify_relaunch_frames(core_root, own_file, source)
+    return {"route": ROUTE_MANAGED_STUB_RELAUNCH, "stub_head_digest": head_digest,
             "head_sha256": head_digest, "tail_sha256": _sha(tail.encode()),
             "script_sha256": _sha(script.encode()), "launcher_argv0": orig[0],
-            "current_template_head_digest": current_digest, "code": frame.f_code}
+            "current_template_head_digest": current_digest, "code": frame.f_code,
+            "relaunch_source_sha256": _sha(source.encode()), "relaunch_options": len(options),
+            "prefix_modules": prefix_modules, "script_code": _compile(script, "<string>"),
+            # Data, not evidence (traced): venv_sync.exec_launch sets it for the exec'd child
+            # and prepare_launch pops it after this install, so a POSIX relaunch has it here.
+            "launch_handoff_env": LAUNCH_HANDOFF_ENV in os.environ}
 
 
-def _verify_frame_chain(core_root, own_file, script, head):
-    """Return the outermost ``<string>`` frame proven to be ``script``; raise ``_Refuse`` otherwise."""
-    # Frame chain: install <- (one bootstrap helper) <- hermes_bootstrap module frame <-
-    # importlib frames only <- the outermost ``<string>`` frame that is this script.
+def _relaunch_embedded_script(body):
+    """The literal inside ``exec(...)``, recovered by ``ast.literal_eval`` (never evaluated)."""
+    if not (body.startswith("exec(") and body.endswith(")")):
+        raise _Refuse("unsupported-route:relaunch-body")
+    try:
+        script = ast.literal_eval(body[len("exec("):-1])
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        raise _Refuse("unsupported-route:relaunch-body") from None
+    if not isinstance(script, str):
+        raise _Refuse("unsupported-route:relaunch-body")
+    return script
+
+
+def _relaunch_prefix_modules():
+    """Finite seed for this route only: the stdlib modules the relaunch prefix imports before
+    the hook must be installed-stdlib source files; each is reported with its content digest."""
+    stdlib = Path(sysconfig.get_path("stdlib")).resolve()
+    found = []
+    for name in RELAUNCH_PREFIX_MODULES:
+        filename = getattr(sys.modules.get(name), "__file__", None)
+        path = Path(filename).resolve() if filename else None
+        if (path is None or not path.is_relative_to(stdlib) or path.suffix != ".py"
+                or "site-packages" in path.parts or "dist-packages" in path.parts):
+            raise _Refuse("unsupported-route:relaunch-prefix-module:" + name)
+        try:
+            digest = _sha(_read_bounded(path, MAX_SOURCE))
+        except (OSError, ValueError):
+            raise _Refuse("unsupported-route:relaunch-prefix-module:" + name) from None
+        found.append({"module": name, "path": str(path), "sha256": digest,
+                      "kind": "relaunch_prefix_stdlib"})
+    return found
+
+
+def _outer_launch_frame(core_root, own_file):
+    """install <- (one bootstrap helper) <- hermes_bootstrap module frame <- importlib frames
+    only <- the outermost ``__main__`` ``<string>`` frame, which is returned."""
     frame = _caller_frames(own_file)
     boot_file = str(core_root / "hermes_bootstrap.py")
     if (frame is not None and frame.f_code.co_name == "_install_code_attestation"
@@ -432,12 +526,29 @@ def _verify_frame_chain(core_root, own_file, script, head):
     if (frame is None or frame.f_back is not None or frame.f_code.co_filename != "<string>"
             or frame.f_code.co_name != "<module>" or frame.f_globals.get("__name__") != "__main__"):
         raise _Refuse("unsupported-route:frame-chain")
+    return frame
+
+
+def _verify_frame_chain(core_root, own_file, script, head):
+    """Return the outermost ``<string>`` frame proven to be ``script``; raise ``_Refuse`` otherwise."""
+    frame = _outer_launch_frame(core_root, own_file)
     if not _same(frame.f_code, _compile(script, "<string>")):
         raise _Refuse("unsupported-route:frame-code")
     marker_line = head.count("\n") + 1  # the pin marker line; try: and import follow
     lines = script.splitlines()
     if (frame.f_lineno != marker_line + 2 or lines[frame.f_lineno - 1].strip() != "import hermes_bootstrap"
             or lines[frame.f_lineno - 2].strip() != "try:"):
+        raise _Refuse("unsupported-route:frame-line")
+    return frame
+
+
+def _verify_relaunch_frames(core_root, own_file, source):
+    """Relaunch: the prefix ran the bootstrap through ``spec.loader.exec_module``, so the outermost
+    frame must be exactly ``compile(source)`` at its single line."""
+    frame = _outer_launch_frame(core_root, own_file)
+    if not _same(frame.f_code, _compile(source, "<string>")):
+        raise _Refuse("unsupported-route:frame-code")
+    if "\n" in source or "\r" in source or frame.f_lineno != 1:
         raise _Refuse("unsupported-route:frame-line")
     return frame
 
@@ -454,6 +565,7 @@ class Attestation:
         self.route = None
         self.stub_head_digest = None
         self._launcher = None
+        self._launcher_exec = None  # relaunch: (prefix frame code, embedded script code), one-shot
         self._refused = False
         self._pid = os.getpid()
         self._lock = threading.RLock()
@@ -518,6 +630,15 @@ class Attestation:
                 "script_sha256": route["script_sha256"],
                 "orig_argv0": route["launcher_argv0"],
                 "interpreter_binary_sha256": self.interpreter_identity["binary_sha256"]}
+            if route["route"] == ROUTE_MANAGED_STUB_RELAUNCH:
+                self._launcher.update(
+                    relaunch_source_sha256=route["relaunch_source_sha256"],
+                    relaunch_options=route["relaunch_options"],
+                    launch_handoff_env=route["launch_handoff_env"])
+                # The prefix later exec()s the embedded script: exactly that code object, from
+                # exactly the proven prefix frame, is the trusted launcher (_launcher_event).
+                self._launcher_exec = (route["code"], route["script_code"])
+                self._seed.extend(route["prefix_modules"])
             self._seed.append(dict(self._launcher))
         # Reviewed stdlib generator descriptors must exist before the hook sees the
         # first post-hook namedtuple/dataclass generation (e.g. concurrent.futures).
@@ -818,6 +939,20 @@ class Attestation:
                      interpreter_sha256=descriptor.distribution.get("binary_sha256"))
         return True
 
+    def _launcher_event(self, code, frame):
+        """Relaunch route: the one ``exec`` the proven prefix frame makes is the embedded stub
+        script, attributed to the trusted launcher only when it is that exact code object."""
+        pending = self._launcher_exec
+        if pending is None or frame is None or frame.f_code is not pending[0]:
+            return False
+        self._launcher_exec = None  # one-shot: any later exec from that frame is observed as usual
+        if not _same(code, pending[1]):
+            self.mark_unknown("relaunch-exec-mismatch")
+            return True
+        self._generation += 1
+        self._launcher["script_exec_observed"] = True  # route_report's launcher, not the seed copy
+        return True
+
     def _module_file(self, name, filename):
         if not filename:
             return
@@ -866,6 +1001,8 @@ class Attestation:
                 if self._pth_event(event, args, sys._getframe(1)):
                     return
                 if self._generated_event(event, args, sys._getframe(1)):
+                    return
+                if event == "exec" and self._launcher_event(args[0], sys._getframe(1)):
                     return
                 if event == "exec":
                     self._observe(args[0], sys._getframe(1))
@@ -1218,12 +1355,17 @@ class Attestation:
         return {"route": self.route, "stub_head_digest": self.stub_head_digest,
                 "launcher": dict(self._launcher) if self._launcher else None,
                 "seed_required": sorted(SEED_COMMON if self.route else SEED),
-                "main_is_seed": False if self.route == ROUTE_MANAGED_STUB else None,
+                "main_is_seed": False if self.route in STUB_ROUTES else None,
                 "interpreter": dict(self.interpreter_identity)}
 
     def unknowns(self):
         with self._lock:
             self._inventory_modules()
+            return tuple(sorted(self._unknown))
+
+    def latched_unknowns(self):
+        """The latched unknowns without a module inventory (cheap: polled while measuring)."""
+        with self._lock:
             return tuple(sorted(self._unknown))
 
     def generation(self):
@@ -1240,9 +1382,11 @@ def install(core_root, boot_sha):
     The route comes only from ``sys.orig_argv``/``sys.argv``, the ``__main__`` frame
     chain and the boot-tree blobs; no parameter, environment value or ``sys`` flag
     participates. Provenance-pending is cleared only by this function's own path when
-    the supported route was verified and the seed inventory is clean. Any other launch
-    (console, ``-m``, relaunch, ``--run-module``, runtime_command ``-c`` ...) latches a
-    sticky ``unsupported-route:*`` unknown and installs no hook.
+    the supported route was verified and the seed inventory is clean. Supported routes: the
+    direct managed stub and its ``venv_sync.relaunch_command`` child (``managed-stub-relaunch``,
+    proven byte-exact). Any other launch (console, ``-m``, a relaunch differing in any byte,
+    ``--run-module``, runtime_command ``-c`` ...) latches a sticky ``unsupported-route:*`` (or
+    ``relaunched-launch``) unknown and installs no hook.
     """
     global _installed
     if _installed is None:

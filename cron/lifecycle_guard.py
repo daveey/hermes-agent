@@ -22,6 +22,7 @@ from typing import Callable, Iterator, Optional
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
+from cron.lifecycle_guard_lines import _split_logical_lines  # newlines outside quotes
 from cron.lifecycle_guard_printf import _printf_format_lines  # what `printf FORMAT …` prints
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
@@ -696,31 +697,6 @@ def _refuse_unreadable(budget: _LifecycleScanBudget, path: Path, reason: str) ->
 
 # --- shell tokenization -----------------------------------------------------------------------
 
-def _split_logical_lines(text: str) -> list[str]:
-    """Split on newlines outside quotes (a quoted newline is data, not a separator); honors
-    escapes."""
-    lines: list[str] = []
-    current: list[str] = []
-    in_single = in_double = escape = False
-    for ch in text:
-        if escape:
-            escape = False
-        elif ch == "\\":
-            escape = True
-        elif ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch == "\n" and not in_single and not in_double:
-            lines.append("".join(current))
-            current = []
-            continue
-        current.append(ch)
-    if current:
-        lines.append("".join(current))
-    return lines
-
-
 def _shlex_tokens(line: str) -> list[str]:
     """POSIX-tokenize one shell line, honoring quotes and `#` comments; raises ValueError."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
@@ -834,7 +810,8 @@ def _iter_segment_contexts(
         return _opens_call_arguments(segment) and alias_names.isdisjoint(segment)
     for tokens in _iter_command_token_lists(command):
         yield from iter_line_segment_contexts(
-            tokens, cat_operands=_cat_operands, opens_call_arguments=opens_call,
+            tokens, cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
+            opens_call_arguments=opens_call,
             peel_reserved_words=_peel_reserved_words,
             stdin_redirections=lambda words: _split_redirections(words)[1])
 
@@ -959,6 +936,27 @@ def _cat_operands(segment: Optional[list[str]]) -> list[str]:
             arguments, stdin = _split_redirections(view[index + 1 :])
             return [argument for argument in arguments if not argument.startswith("-")] + stdin
     return []
+
+
+def _cat_relays_stdin(segment: list[str]) -> bool:
+    """Whether a ``cat`` segment writes the stdin it is fed (``… | cat | bash``, ``{ cat; } <
+    f``): no file operand or a ``-`` one, and no redirection, heredoc or here-string of its own
+    on fd 0 (``cat < x``, ``cat <<< x`` and ``cat x.txt`` ignore the feed)."""
+    for view in _command_segment_views(segment):
+        index = _executed_command_index(view)
+        if index is not None and _executable_name(view[index]) == "cat":
+            words, arguments = iter(view[index + 1 :]), []
+            for word in words:
+                match = _REDIRECTION.match(word)
+                if match is None:
+                    arguments.append(word)
+                    continue
+                fd, operator, target = match.groups()
+                target = target or next(words, "")
+                if fd in ("", "0") and operator.startswith("<") and (operator, target) != ("<&", "0"):
+                    return False  # `cat < x`, `cat <<< x`, `cat <&3` read their own stdin
+            return "-" in arguments or all(argument.startswith("-") for argument in arguments)
+    return False
 
 
 def contains_launchctl_submit_command(command: str) -> bool:

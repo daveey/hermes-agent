@@ -23,6 +23,7 @@ from gateway.run import GatewayRunner
 from gateway.runtime_ownership import ProfileOwnership
 from gateway.turn_lease import SessionTurnLeaseRegistry
 from hermes_cli import kanban_deploy_window as window
+from hermes_cli import code_attestation
 from hermes_cli import local_work
 from tests.waiting import wait_until
 
@@ -31,6 +32,23 @@ PEER = "uid:1000"
 
 class Runner(GatewayRunner):
     session_runtime_descriptor = {"instance_id": "inst-1", "state": "ready"}
+
+
+class CleanLedger:
+    """A code-attestation ledger with no unknowns on the direct managed-stub route."""
+
+    def __init__(self, unknowns=(), route="managed-stub"):
+        self._unknowns = tuple(unknowns)
+        self._route = route
+
+    def unknowns(self):
+        return self._unknowns
+
+    def latched_unknowns(self):
+        return self._unknowns
+
+    def route_report(self):
+        return {"route": self._route}
 
 
 @pytest.fixture
@@ -46,6 +64,10 @@ def env(tmp_path, monkeypatch):
     ownership.reserve([root])
     monkeypatch.setitem(quiet_control._boot, "registry", None)
     monkeypatch.setitem(quiet_control._boot, "captured", False)
+    # The executed-code ledger the bootstrap installs beside the registry: clean on a supported
+    # route (route-specific ledgers are exercised from real launches in
+    # tests/hermes_cli/test_code_attestation_relaunch.py).
+    monkeypatch.setattr(code_attestation, "_installed", CleanLedger())
     quiet_control.capture_bootstrap_registry()  # the registry predates every runner: bootstrap provenance
     runner = object.__new__(Runner)
     runner._turn_leases = SessionTurnLeaseRegistry()
@@ -115,7 +137,7 @@ def attest(env):
 
 def test_three_private_handlers_registered_and_authenticated(env):
     assert set(env.server.private_handlers) == {
-        "quiet-observe-start", "quiet-observe-snapshot", "quiet-observe-end"}
+        "quiet-observe-start", "quiet-observe-snapshot", "quiet-observe-end", "quiet-observe-check"}
     response = call(env, "quiet-observe-start", start_params(env), peer=None)
     assert not response["ok"] and "authenticated private request required" in response["error"]
 

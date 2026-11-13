@@ -448,6 +448,30 @@ def test_desktop_wall_still_refuses_when_the_pin_must_not_move(home, case):
                                        'openai-codex', overrides, session)
 
 
+@pytest.mark.parametrize('session', [None, ''], ids=['none', 'empty'])
+def test_sessionless_desktop_build_keeps_the_wall_quietly(home, monkeypatch, caplog, session):
+    """A build with no session identity (the readiness probe) owns no durable route, so even a router-picked
+    pin behind a far wall is not deferred, an ambient routing session does not lend it one, and the refusal
+    stays quiet: no per-episode ``reason=no-session`` warning, which is for a gateway turn missing its session."""
+    from agent.model_routing_runtime import routing_session
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from tui_gateway.class_routing import walled_pin_deferral
+    from tui_gateway.server import _resolve_runtime_or_defer_wall
+    monkeypatch.setattr('agent.model_routing_walls._NOT_DEFERRED_SEEN', set())
+    _router_picks_astra(home)
+    reset = _wall(home, 'openai-codex', ASTRA, 33)
+    wall = SubscriptionQuotaUnavailable('openai-codex', ASTRA, reset)
+    with caplog.at_level(logging.WARNING):
+        assert walled_pin_deferral(wall, ASTRA, 'openai-codex', session) is None
+        with routing_session(SID):
+            assert walled_pin_deferral(wall, ASTRA, 'openai-codex', session) is None
+        with pytest.raises(SubscriptionQuotaUnavailable):
+            _resolve_runtime_or_defer_wall({'requested': 'openai-codex', 'target_model': ASTRA}, ASTRA,
+                                           'openai-codex', {}, session)
+    assert _not_deferred(caplog) == []
+    assert _state(home).peek(SID, 'deep')['selected_model'] == ASTRA  # the session's route was not touched
+
+
 def test_desktop_wall_refuses_when_nothing_else_in_the_class_can_serve(home):
     from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     from tui_gateway.server import _resolve_agent_model_runtime  # agent_factory binds into the server namespace

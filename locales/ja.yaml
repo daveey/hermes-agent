@@ -3309,6 +3309,7 @@ cli:
     removed: "➖ 削除: {names}"
     tools_available: "🔧 {servers} 台のサーバーから {tools} 個のツールが利用可能"
     agent_updated: "✅ エージェントを更新しました — {count} 個のツールが利用可能"
+    agent_updated_count_unknown: "✅ MCP を再読み込みしました — ツール数は不明です ({error})"
   reload_skills:
     reloading: "🔄 スキルを再読み込みしています..."
     total: "📚 {count} 件のスキルが利用可能"

@@ -752,6 +752,11 @@ def run_pass(lease, grace: float = GRACE_S) -> str:
         finally:
             lease.beat()
         return "host"
+    from hermes_cli.host_loop_lease import host_loops_retired
+    if host_loops_retired():
+        # [daveey] A superseded or code-skewed backend starts no wake on its stale code, not even for the chats
+        # it still holds: they move to its successor, whose passes deliver them (t_01a1d65520e78e7d).
+        return "retired"
     residual_pass()
     return "residual"
 

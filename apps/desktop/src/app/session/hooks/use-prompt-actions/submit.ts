@@ -224,13 +224,30 @@ function isPreAdmissionRefusal(error: unknown): boolean {
   return code === 4094 || (code === 4000 && typeof message === 'string' && /submission_id/.test(message))
 }
 
+/** The legacy sidecar's stale-runtime refusal: `prompt.submit` looked its runtime id up
+ *  (tui_gateway/session_registry.py `_sess_nowait`) and answered 4001 "session not found" before
+ *  claiming, queueing or writing anything. A backend roll drops every runtime, so the first send
+ *  after it meets exactly this; the resume that follows must be free to resend. Only the bare
+ *  legacy frame matches: a codeless error, a canonical refusal carrying a reason, or prose that
+ *  merely mentions the phrase stays ambiguous. */
+function isStaleRuntimeRefusal(error: unknown): boolean {
+  if (!(error instanceof JsonRpcGatewayError) || error.code !== 4001) {
+    return false
+  }
+
+  const reason = (error.data as { reason?: unknown } | undefined)?.reason
+
+  return reason === undefined && /^session not found$/i.test(error.message.trim())
+}
+
 /** The server answered that it admitted nothing: session busy (4009), an ownership refusal (4090)
  *  other than an unconfirmed owner hand-off (SESSION_OWNER_UNCONFIRMED: the owner may already hold
- *  the send), or a pre-admission capability refusal. Resending it cannot run a second copy.
+ *  the send), a stale runtime id (4001, see isStaleRuntimeRefusal), or a pre-admission capability
+ *  refusal. Resending it cannot run a second copy.
  *  Timeouts, disconnects and malformed ACKs are not answers and never match. */
 function isDefiniteSubmitRefusal(error: unknown): boolean {
   if (error instanceof JsonRpcGatewayError) {
-    if (error.code === 4009) {
+    if (error.code === 4009 || isStaleRuntimeRefusal(error)) {
       return true
     }
 

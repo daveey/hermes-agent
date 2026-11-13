@@ -140,14 +140,27 @@ class Progress:
 
 def pr_target(ref: str, hint: str = "") -> Optional[tuple[str, int, Optional[str]]]:
     """``(owner/repo, PR number, head sha or None)`` for a ref naming ``<owner>/<repo>/pull/<n>``, else None. The
-    sha is ``@<7-40 hex>`` in the ref, else a 40-hex sha in the ref or ``hint`` (the park's wake check and reason).
-    A ref that names a run is a run (:func:`run_target`), not a PR."""
+    sha is ``@<7-40 hex>`` in the ref, else the one 40-hex sha the ref holds, else the one 40-hex sha in ``hint``
+    (the park's wake check and reason). Several distinct shas there give None, so the PR's current head is read:
+    a guess could pick an old head or a base sha, which never matches the head, and every sweep would then read
+    the PR as "head moved" (``ok``) and miss its conflict or missing run. A ref that names a run is a run
+    (:func:`run_target`), not a PR."""
     ref = (ref or "").strip()
     m = _PR_PATH.search(ref)
     if m is None or run_target(ref, hint) is not None:
         return None
-    sha = _AT_SHA.search(ref) or _FULL_SHA.search(f"{ref} {hint or ''}")
-    return m.group(1), int(m.group(2)), sha.group(1).lower() if sha else None
+    at = _AT_SHA.search(ref)
+    return m.group(1), int(m.group(2)), at.group(1).lower() if at else _only_sha(ref, hint or "")
+
+
+def _only_sha(ref: str, hint: str) -> Optional[str]:
+    """The 40-hex sha a PR ref without ``@<sha>`` names: the ref's own when it holds exactly one, else the hint's
+    when the ref holds none and the hint exactly one (case-insensitive, repeats counted once), else None."""
+    for text in (ref, hint):
+        found = {s.lower() for s in _FULL_SHA.findall(text)}
+        if found:
+            return found.pop() if len(found) == 1 else None
+    return None
 
 
 def run_target(ref: str, hint: str = "") -> Optional[tuple[str, str]]:

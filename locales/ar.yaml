@@ -3309,6 +3309,7 @@ cli:
     removed: "➖ أُزيل: {names}"
     tools_available: "🔧 {tools} أداة متاحة من {servers} خادم"
     agent_updated: "✅ تم تحديث الوكيل — {count} أداة متاحة"
+    agent_updated_count_unknown: "✅ تمت إعادة تحميل MCP — عدد الأدوات غير معروف ({error})"
   reload_skills:
     reloading: "🔄 جارٍ إعادة تحميل المهارات..."
     total: "📚 {count} مهارة متاحة"

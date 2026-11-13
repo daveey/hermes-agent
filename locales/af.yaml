@@ -3309,6 +3309,7 @@ cli:
     removed: "➖ Verwyder: {names}"
     tools_available: "🔧 {tools} gereedskap beskikbaar van {servers} bediener(s)"
     agent_updated: "✅ Agent opgedateer — {count} gereedskap beskikbaar"
+    agent_updated_count_unknown: "✅ MCP herlaai — gereedskaptelling onbekend ({error})"
   reload_skills:
     reloading: "🔄 Herlaai vaardighede..."
     total: "📚 {count} vaardigheid(e) beskikbaar"

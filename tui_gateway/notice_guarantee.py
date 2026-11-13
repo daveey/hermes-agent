@@ -297,7 +297,7 @@ def _retry_at(sid: str, now: float) -> float:
         live = server._find_live_session_by_key(sid)
         failure = live[1].get("agent_failure") if live else None
         resets_at = failure.get("failure_resets_at") if isinstance(failure, dict) else None
-    return automation_replay.replay_due(now, resets_at) + DEFER_SLACK_S
+    return automation_replay.replay_due(now, automation_replay.trusted_resets_at(resets_at)) + DEFER_SLACK_S
 
 
 def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,

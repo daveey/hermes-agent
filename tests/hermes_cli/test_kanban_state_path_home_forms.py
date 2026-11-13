@@ -85,6 +85,11 @@ def test_tilde_root_path_still_clears(attested):
     "pushd ~ && cat .hermes/.env",
     "pushd $HOME >/dev/null; cat .hermes/.env",
     "pushd /home/ubuntu\ncat .hermes/state.db",
+    # PR #2533 review: a redirect that starts with an fd number (or ``&>``) after the home word.
+    "pushd ~ 2>/dev/null && cat .hermes/.env",
+    "cd ~ 2>/dev/null && cat .hermes/.env",
+    "cd $HOME 2>&1 >/dev/null; cat .hermes/.env",
+    "cd ~ &>/dev/null && cat .hermes/.env",
 ])
 def test_pushd_and_commented_cd_home_are_state_paths(body):
     assert _hit(body)
@@ -96,6 +101,9 @@ def test_pushd_and_commented_cd_home_are_state_paths(body):
     "pushd && cat .hermes/.env",
     "cd ~#x && cat .hermes/.env",
     "popd ~ && cat .hermes/.env",
+    # No space: ``~2`` / ``~/2`` is a literal directory word, not home plus a ``2>`` redirect.
+    "cd ~2>x && cat .hermes/.env",
+    "cd ~/2>x && cat .hermes/.env",
 ])
 def test_prose_cd_and_non_home_pushd_stay_portable(body):
     assert not _hit(body)
@@ -111,10 +119,17 @@ def test_many_cd_home_lines_without_a_state_path_scan_in_linear_time():
     assert time.perf_counter() - start < 0.5
 
 
-def test_relative_state_path_hit_is_the_home_path_not_the_cd_span():
+@pytest.mark.parametrize("body, cls, path", [
+    ("cd ~ && make all && cat .hermes/logs/x.log", "b", "~/.hermes/logs/x.log"),
+    # PR #2533 review: ``"\u0130".lower()`` is two code points, so an offset taken on the lowered span shifted.
+    ("cd ~ && make all \u0130 && cat .hermes/kanban/workspaces/t_x/f", "artifact-not-here",
+     "~/.hermes/kanban/workspaces/t_x/f"),
+])
+def test_relative_state_path_hit_is_the_home_path_not_the_cd_span(body, cls, path, tmp_path, monkeypatch):
     from hermes_cli import kanban_home_marker_placement as hm
 
-    match = _hit("cd ~ && make all && cat .hermes/logs/x.log")
-    [(decision, cls, hit, labels, note)] = hm._state_path(kp.HERMES_STATE_PATH, match, "worker-2", hm._Probe())
-    assert (decision, cls, hit, labels) == ("queue", "b", "~/.hermes/logs/x.log", ("capability:hub-write",))
+    monkeypatch.setenv("HOME", str(tmp_path))  # the own-artifact probe must not find a real workspace file
+    match = _hit(body)
+    [(decision, got_cls, hit, labels, note)] = hm._state_path(kp.HERMES_STATE_PATH, match, "worker-2", hm._Probe())
+    assert (decision, got_cls, hit, labels) == ("queue", cls, path, ("capability:hub-write",))
     assert "make all" not in note

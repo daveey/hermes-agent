@@ -88,6 +88,21 @@ def test_a_failing_ref_listing_keeps_the_fail_safe(tmp_path, monkeypatch):
     assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
 
 
+def test_a_ref_listing_that_fails_silently_keeps_the_fail_safe(tmp_path, monkeypatch):
+    """A ``for-each-ref`` killed by a signal (exit -9, no stdout and no stderr) is no proof of an empty repo: the
+    exit code alone must keep the fail-safe, since the stderr check has nothing to see."""
+    from hermes_cli import worktree_ops
+    real = worktree_ops._git
+
+    def git(args, cwd, *a, **kw):
+        if args and args[0] == "for-each-ref" and "refs/remotes" not in args:
+            return subprocess.CompletedProcess(["git", *args], -9, "", "")
+        return real(args, cwd, *a, **kw)
+    monkeypatch.setattr(worktree_ops, "_git", git)
+    tree = _init(tmp_path / "core-fixture")
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+
+
 def _commit_behind_a_broken_ref(tmp_path, ref_text):
     """A clean repo holding commit c1 whose only ref is broken: index and file gone, so status reads clean, HEAD
     does not resolve, and ``for-each-ref`` skips the ref with a stderr warning, exit 0 and no output."""

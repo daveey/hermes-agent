@@ -3326,6 +3326,7 @@ cli:
     removed: "➖ Eltávolítva: {names}"
     tools_available: "🔧 {tools} eszköz érhető el {servers} szerverről"
     agent_updated: "✅ Ügynök frissítve — {count} eszköz érhető el"
+    agent_updated_count_unknown: "✅ MCP újratöltve — az eszközök száma ismeretlen ({error})"
   reload_skills:
     reloading: "🔄 Skillek újratöltése..."
     total: "📚 {count} skill érhető el"

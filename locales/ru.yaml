@@ -3309,6 +3309,7 @@ cli:
     removed: "➖ Удалено: {names}"
     tools_available: "🔧 Доступно инструментов: {tools}, серверов: {servers}"
     agent_updated: "✅ Агент обновлён — доступно инструментов: {count}"
+    agent_updated_count_unknown: "✅ MCP перезагружен — число инструментов неизвестно ({error})"
   reload_skills:
     reloading: "🔄 Перезагрузка навыков..."
     total: "📚 Доступно навыков: {count}"
