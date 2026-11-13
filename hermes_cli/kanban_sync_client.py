@@ -52,7 +52,7 @@ from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-wi
     next_deferred_repair, note_round, reset as reset_repair_window,
 )
 from hermes_cli.kanban_sync_own_writes import credited, reset as reset_own_writes, take as take_credited
-from hermes_cli.kanban_sync_links_inputs import ledger_slices as _ledger_slices, links_signature as _links_signature
+from hermes_cli.kanban_sync_links_inputs import ledger_slices, links_signature
 
 _log = logging.getLogger(__name__)
 
@@ -1195,9 +1195,11 @@ def _links_clock() -> float:
 # A board's links pass logs its duration with its counts (``kanban sync: <board> chat links {...} in <s>s``); a pass
 # with no changes logs only when it took this long, so a slow pass is visible even when it changed nothing; a whole
 # pass this slow (ledger read included) also logs ``kanban sync: chat links pass over N board(s) took <s>s``. A board
-# skipped as unchanged after a slow inputs read logs ``<board> chat links unchanged, skipped in <s>s``, and a failed
-# board's warning carries ``failed after <s>s``. The hub pass ran ~10 min on 2026-11-13 and the line carried no
-# duration to measure it by (t_01a1d35d8d7e22a7). [daveey]
+# skipped as unchanged this slowly logs ``<board> chat links unchanged, skipped in <s>s``, and a failed board's warning
+# carries ``failed after <s>s``. Each board's time runs from before its connection is borrowed, so it counts the
+# connect (any lock wait on it included), ``board_mode`` and the inputs read: lock waits are what it is meant to
+# expose. The hub pass ran ~10 min on 2026-11-13 and the line carried no duration to measure it by
+# (t_01a1d35d8d7e22a7). [daveey]
 LINKS_SLOW_LOG_S = 10.0
 
 
@@ -1211,7 +1213,10 @@ _LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop r
 
 def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float) -> tuple[bool, float]:
     """(whether a board's links-pass inputs equal its last completed pass's, under ``LINKS_MAX_AGE_S`` ago, so the
-    pass is skipped; the pass start to record). A skip whose inputs read took ``LINKS_SLOW_LOG_S`` names its board."""
+    pass is skipped; the pass start to record). Not a pure predicate: it pops ``_LINKS_DONE[key]`` and puts it back
+    only on a skip, so a non-skip drops the stale entry and the caller re-records it after reconcile succeeds. A skip
+    ``LINKS_SLOW_LOG_S`` or more after ``began`` names its board; ``began`` is taken before the board's connection is
+    borrowed, so that time counts the connect (a lock wait included), ``board_mode`` and the inputs read."""
     done = _LINKS_DONE.pop(key, None)
     started = _links_clock()
     if inputs is None or done is None or done[0] != inputs or started - done[1] >= LINKS_MAX_AGE_S:
@@ -1267,7 +1272,7 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
         ledger: Optional[dict[str, frozenset]] = None
         try:
             from hermes_cli.kanban_session_activity import _remote_links
-            ledger = _ledger_slices(_remote_links(), gateway)
+            ledger = ledger_slices(_remote_links(), gateway)
             local = {slug for slug, _path in boards}
             if not skip_unchanged or set(ledger) - local:
                 created = ensure_link_boards(set(ledger), gateway)
@@ -1276,7 +1281,7 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                     boards = board_paths()
         except Exception as exc:  # health: allow BLE001 -- link-only boards are best effort; local links still reconcile
             _log.warning("kanban sync: link-only boards failed (%s: %s)", type(exc).__name__, exc)
-        signature = _links_signature(gateway, placement) if skip_unchanged else None
+        signature = links_signature(gateway, placement) if skip_unchanged else None
         for slug, path in boards:
             key = str(path)
             counts: dict = {}
