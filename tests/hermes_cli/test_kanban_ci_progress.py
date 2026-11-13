@@ -233,12 +233,77 @@ def test_readable_runner_list_without_a_matching_online_runner_refuses(kanban_ho
                                                                        runner) -> None:
     fake_gh.serve(age=20 * 60)
     fake_gh.runners(runner)
+    fake_gh.runners(org=True)
     with kbc.connect_closing() as conn:
         tid = _running(conn)
         _as_worker(monkeypatch, conn, tid)
         out = _park_on_run()
         assert "ci_run_unstartable" in (out.get("error") or ""), out
         assert "no online runner has them" in out["error"], out
+
+
+@pytest.mark.parametrize("unread", ["org", "repo"])
+def test_one_unreadable_runner_list_never_claims_no_online_runner(kanban_home, fake_gh, monkeypatch,
+                                                                  unread) -> None:
+    """PR #2040 reviews 5889677459/5890809735: a repo served only by org runners, read with a token lacking org admin,
+    shows a readable but empty repo list. Nothing says its runners are offline, so the wording falls back; the wake
+    (and the park refusal) stay as they were."""
+    fake_gh.serve(age=2 * 60)
+    if unread == "org":
+        fake_gh.runners(_runner(status="offline"))       # repo list readable, no online match; org list 403
+    else:
+        fake_gh.runners(_runner(status="offline"), org=True)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        fake_gh.serve(age=20 * 60)
+        p = kcp.ci_run_progress(RUN_URL)
+        assert p.state == kcp.NOT_STARTING and not p.runners_readable, p
+        assert fake_gh.calls("orgs/") >= 1
+        assert kcp.sweep(conn) == [tid]
+        notes = [c.body for c in kb.list_comments(conn, tid)]
+        assert "runner list unreadable, so they may be offline or saturated" in notes[-1], notes
+        assert "no online runner has them" not in notes[-1], notes
+
+
+def test_idle_online_runner_that_takes_no_job_wakes_the_card(kanban_home, fake_gh, monkeypatch) -> None:
+    """PR #2040 review 5891212407: only an online runner that is busy means saturated. One that sits idle while the
+    job waits 15 min is stuck, or in a runner group this repo cannot use."""
+    fake_gh.serve(age=2 * 60)
+    fake_gh.runners(_runner(busy=False))
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [tid]
+        notes = [c.body for c in kb.list_comments(conn, tid)]
+        assert "runner ci-fast-3 is online and idle for them yet took no job" in notes[-1], notes
+
+
+@pytest.mark.parametrize("runners", [[_runner(busy=False), {**_runner(), "name": "ci-fast-4"}],
+                                     [{k: v for k, v in _runner().items() if k != "busy"}]],
+                         ids=["one-busy-among-idle", "no-busy-flag"])
+def test_any_busy_runner_reads_as_saturated(kanban_home, fake_gh, runners) -> None:
+    """Control: a runner between two jobs is briefly idle; a runner list without the flag keeps the old reading."""
+    fake_gh.serve(age=20 * 60)
+    fake_gh.runners(*runners)
+    assert kcp.ci_run_progress(RUN_URL).state == kcp.BUSY
+
+
+@pytest.mark.parametrize("age,state", [(kcp.BUSY_LIMIT_SECONDS - 60, kcp.BUSY),
+                                       (kcp.BUSY_LIMIT_SECONDS + 60, kcp.NOT_STARTING)],
+                         ids=["under-cap", "past-cap"])
+def test_busy_runners_hold_a_wake_back_only_up_to_the_cap(kanban_home, fake_gh, monkeypatch, age, state) -> None:
+    """PR #2040 review 5890809735: a busy org runner in a group this repo cannot use would hold the wake forever."""
+    fake_gh.serve(age=2 * 60)
+    fake_gh.runners(_runner(), org=True)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        fake_gh.serve(age=age)
+        assert kcp.ci_run_progress(RUN_URL).state == state
+        assert kcp.sweep(conn) == ([tid] if state == kcp.NOT_STARTING else [])
+        if state == kcp.NOT_STARTING:
+            notes = [c.body for c in kb.list_comments(conn, tid)]
+            assert (f"runner ci-fast-3 is online and busy for them, but the job waited past the "
+                    f"{kcp.BUSY_LIMIT_SECONDS // 60} min busy cap") in notes[-1], notes
 
 
 # --- while parked ---------------------------------------------------------------------------------------------
@@ -350,6 +415,30 @@ def test_release_without_a_run_id_is_spent_by_any_probe_start(kanban_home) -> No
         with kb.write_txn(conn):
             kb._synthesize_ended_run(conn, tid, outcome="crashed", summary="probe crashed")
         assert ksb.shared_blocker_guard(conn, tid) == ksb.GUARD_REASON
+
+
+def test_release_without_a_run_id_needs_no_re_assertion_after_it(kanban_home) -> None:
+    """PR #2040 review 5889677459: before #2040 the guard ignored ``probe_stranded_blockers`` releases, so another
+    card re-asserting the blocker after one held the released card for an interval. It still does."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        other = kb.create_task(conn, title="other", assignee="worker")
+        now = int(time.time())
+        with kb.write_txn(conn):
+            kb._synthesize_ended_run(conn, tid, outcome=kcp.CI_RUN_UNSTARTABLE, summary="no runner",
+                                     metadata={"blocker_id": BLOCKER})
+            conn.execute("UPDATE task_runs SET started_at = ?, ended_at = ? WHERE task_id = ?",
+                         (now - 300, now - 300, tid))
+            kb._append_event(conn, tid, ksb.PROBE_RELEASED_EVENT, {"blocker_id": BLOCKER})
+            conn.execute("UPDATE task_events SET created_at = ? WHERE task_id = ? AND kind = ?",
+                         (now - 200, tid, ksb.PROBE_RELEASED_EVENT))
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert ksb.shared_blocker_guard(conn, tid, now=now) is None   # control: nothing re-asserted it since
+        with kb.write_txn(conn):  # another card hits the wall after the release
+            kb._synthesize_ended_run(conn, other, outcome=kcp.CI_RUN_UNSTARTABLE, summary="no runner",
+                                     metadata={"blocker_id": BLOCKER})
+        assert ksb.blocker_states(conn, now=now)[BLOCKER].asserted_at > now - 200
+        assert ksb.shared_blocker_guard(conn, tid, now=now) == ksb.GUARD_REASON
 
 
 def test_scoped_blocker_card_on_another_provider_does_not_hold_the_woken_card(kanban_home, fake_gh,
@@ -870,6 +959,42 @@ def test_no_second_sweep_of_a_board_while_one_runs(kanban_home, fake_gh, monkeyp
         assert kcp.submit_sweep(conn, Pool()) is pending
 
 
+def test_two_racing_ticks_on_one_board_start_one_sweep(kanban_home, fake_gh, monkeypatch) -> None:
+    """PR #2040 review 5891212407: ``submit_sweep`` releases ``_LOCK`` around ``_has_ci_wait``; both ticks pass the
+    first check there, so the second locked block must check again."""
+    both_in = threading.Barrier(2, timeout=10)
+    real = kcp._has_ci_wait
+
+    def has_ci_wait(conn):
+        both_in.wait()
+        return real(conn)
+
+    class Pool:
+        submitted = 0
+
+        def submit(self, *_a):
+            Pool.submitted += 1
+            return Future()
+
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        _parked(conn, monkeypatch)
+    monkeypatch.setattr(kcp, "_has_ci_wait", has_ci_wait)
+    results: list = []
+
+    def tick() -> None:
+        with kbc.connect_closing() as conn:
+            results.append(kcp.submit_sweep(conn, Pool()))
+
+    threads = [threading.Thread(target=tick) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert len(results) == 2 and Pool.submitted == 1, results
+    assert sum(r is not None for r in results) == 1, results
+
+
 def test_no_sweep_without_a_free_pool_slot(kanban_home, fake_gh, monkeypatch) -> None:
     fake_gh.serve(age=2 * 60)
     with kbc.connect_closing() as conn:
@@ -960,6 +1085,16 @@ def test_unreadable_runners_and_no_recent_job_on_the_labels_is_not_starting(kanb
     fake_gh.recent("completed", 557, updated_age=60, jobs=[job])
     p = kcp.ci_run_progress(RUN_URL)
     assert p.state == kcp.NOT_STARTING and not p.runners_readable, p
+
+
+def test_org_list_unreadable_without_a_repo_match_falls_back_to_recent_jobs(kanban_home, fake_gh) -> None:
+    """A readable repo list with no online match plus a 403 org list counts as unreadable, so the recent-jobs
+    evidence applies there too (not only when both lists 403)."""
+    fake_gh.serve(age=20 * 60)
+    fake_gh.runners(_runner(status="offline"))
+    fake_gh.recent("completed", 558, updated_age=60, jobs=[_taken(run_id=558, started_age=5 * 60)])
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.BUSY and "ci-fast-1 took job 5580" in p.detail, p
 
 
 def test_github_hosted_labels_read_no_recent_runs(kanban_home, fake_gh) -> None:

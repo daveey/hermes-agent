@@ -249,8 +249,10 @@ def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
         return None, None, lane
 
 
-def _task_applies(conn, st: BlockerState, task_id: str) -> bool:
-    """Whether the blocker holds this card's next/current step: unknown routing is conservative."""
+def task_applies(conn, st: BlockerState, task_id: str) -> bool:
+    """Whether the blocker holds this card's next/current step: unknown routing is conservative. The one rule for
+    which cards behind ``st`` count, shared by :func:`shared_blocker_guard`, :func:`probe_stranded_blockers` and the
+    CI sweep (``kanban_ci_progress``)."""
     return not st.blocker_provider or _applies(st, task_route(conn, task_id)[1])
 
 
@@ -446,9 +448,9 @@ def shared_blocker_guard(
     now = int(time.time()) if now is None else int(now)
     states = blocker_states(conn, now=now)
     st = blocker_for_task(states, task_id)
-    if st is None or not st.is_open or not _task_applies(conn, st, task_id):
+    if st is None or not st.is_open or not task_applies(conn, st, task_id):
         return None
-    others = [t for t in st.behind if t != task_id and _task_applies(conn, st, t)]
+    others = [t for t in st.behind if t != task_id and task_applies(conn, st, t)]
     if others:
         marks = ",".join("?" * len(others))
         if conn.execute(
@@ -477,13 +479,21 @@ def _released_as_probe(conn: sqlite3.Connection, st: BlockerState, task_id: str)
     The newest release for ``st`` decides. One that names its asserting run (``after_run``) is spent only by a
     later run of the card: ``probe_starts`` also holds runs from before a re-assertion (a card the sweep wakes a
     second time for the same blocker ran in between, and the wake's own synthesized run is recorded too), so it
-    cannot tell a fresh release from a spent one. A release without ``after_run`` falls back to ``probe_starts``.
+    cannot tell a fresh release from a spent one. A release without ``after_run`` (:func:`probe_stranded_blockers`,
+    older rows) falls back to ``probe_starts`` and also needs no re-assertion of ``st`` after it.
+
+    Before PR #2040 the guard ignored releases: a card :func:`probe_stranded_blockers` unblocked spawned only through
+    the probe interval below, so another card re-asserting ``st`` meanwhile (one that hit the wall after the
+    release) held it for another interval. Honouring a stranded release regardless would let it spawn right
+    behind that fresh evidence, a second probe in one interval; the re-assertion check keeps main's behaviour
+    there. With no re-assertion since, the release differs from the interval rule only when another card's probe
+    run started after it and ended without settling the wall (a crash): the released card may then run at once.
     [daveey]"""
     from hermes_cli import kanban_db as kb
 
     asserted = st.behind[task_id]  # the guard only asks about a card behind st
     for row in conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND created_at >= ? "
+        "SELECT created_at, payload FROM task_events WHERE task_id = ? AND kind = ? AND created_at >= ? "
         "ORDER BY id DESC LIMIT 20", (task_id, PROBE_RELEASED_EVENT, asserted),
     ):
         payload = kb._json_dict(row["payload"])
@@ -493,7 +503,8 @@ def _released_as_probe(conn: sqlite3.Connection, st: BlockerState, task_id: str)
         if type(after) is int:
             return conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND id > ? LIMIT 1",
                                 (task_id, after)).fetchone() is None
-        return task_id not in st.probe_starts
+        released = kb._to_epoch(row["created_at"]) or 0
+        return task_id not in st.probe_starts and st.asserted_at <= released
     return False
 
 
@@ -568,7 +579,7 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
     for st in blocker_states(conn, now=now).values():
         if not st.is_open or not st.behind:
             continue
-        ids = sorted(t for t in st.behind if _task_applies(conn, st, t))
+        ids = sorted(t for t in st.behind if task_applies(conn, st, t))
         if not ids:
             continue
         marks = ",".join("?" * len(ids))

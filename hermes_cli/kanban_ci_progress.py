@@ -10,16 +10,21 @@ morning, and nothing raised it again.
 longer than ``QUEUED_LIMIT_SECONDS`` with no runner assigned.
 
 A job nobody picked up can also mean the runners are online but saturated. When the repo's or org's self-hosted
-runner list is readable (``actions/runners``) and a runner that is ``online`` carries every label the job asks for,
-the run is ``busy`` instead: a park on it is allowed and nothing is woken. When neither list is readable (the token
-lacks admin scope) a self-hosted job is still ``busy`` when a job asking for the same labels is running or a runner
-took it within ``QUEUED_LIMIT_SECONDS`` (this run's jobs, then recent runs of the repo): 2026-11-13, run
-43423320884 waited 15 min behind ~10 min jobs on the one-runner ``hermes-state`` pool, which was online and busy,
-and the card owning an approved PR was woken behind ``runners-offline.hermes-state``. With no such job the run
-stays ``not_starting`` and every message says only that no runner picked it up. The org
-list can include runners in groups this repo may not use, so such a runner online for the labels reads as ``busy``
-and nothing is woken (a false negative, never a false wake); the repo list is read first and decides alone when it
-has an online match.
+runner list is readable (``actions/runners``) and a runner that is ``online`` and ``busy`` carries every label the
+job asks for, the run is ``busy`` instead: a park on it is allowed and nothing is woken, for up to
+``BUSY_LIMIT_SECONDS`` of queueing. Past that cap the run is ``not_starting`` anyway: the org list can include
+runners in groups this repo may not use, and such a runner busy with other repos' jobs would otherwise suppress the
+wake forever. When every matching online runner is idle (``busy`` false) the job should have been taken long ago (a
+stuck runner, or one in a group this repo cannot use), so the run is ``not_starting`` and the message names the idle
+runner; one busy runner among idle ones reads as saturated, since a runner between two jobs is briefly idle. The repo
+list is read first and decides alone when it has an online match. The lists count as unreadable when either read
+fails (listing runners needs admin scope; a repo served only by org runners and a token without org admin show a
+readable but empty repo list) and no online runner matched. A self-hosted job is then still ``busy`` when a job
+asking for the same labels is running or a runner took it within ``QUEUED_LIMIT_SECONDS`` (this run's jobs, then
+recent runs of the repo): 2026-11-13, run 43423320884 waited 15 min behind ~10 min jobs on the one-runner
+``hermes-state`` pool, which was online and busy, and the card owning an approved PR was woken behind
+``runners-offline.hermes-state``. With no such job the run stays ``not_starting`` and every message says only that
+no runner picked it up; a message says no online runner has the labels only when both lists were read.
 
 * Park time (:func:`confirm`, called by ``kanban_awaiting.confirm_remote`` before the write txn): a ``kind=ci``
   park on such a run is refused with ``ci_run_unstartable`` naming the labels.
@@ -66,6 +71,7 @@ CI_RUN_UNSTARTABLE = "ci_run_unstartable"
 NOT_STARTING = "not_starting"
 BUSY = "busy"
 QUEUED_LIMIT_SECONDS = 15 * 60
+BUSY_LIMIT_SECONDS = 8 * QUEUED_LIMIT_SECONDS  # how long busy runners may hold back a wake
 RECHECK_SECONDS = 5 * 60
 FETCH_TIMEOUT_SECONDS = 20
 NO_CREDENTIAL_WARN_SECONDS = 60 * 60
@@ -109,7 +115,9 @@ class Progress:
     no_credential: bool = False
     gh_missing: bool = False
     deferred: bool = False  # unknown: the sweep budget ran out before the runner list was read
-    runners_readable: bool = False  # not_starting: the runner list was read and no online runner matched
+    runners_readable: bool = False  # not_starting: both runner lists were read (or one had an online match)
+    idle_runner: str = ""  # not_starting: an online runner for the labels is idle, yet took no job
+    busy_runner: str = ""  # not_starting: an online runner for the labels is busy, past BUSY_LIMIT_SECONDS
 
 
 def run_target(ref: str, hint: str = "") -> Optional[tuple[str, str]]:
@@ -155,16 +163,18 @@ def _fetch_jobs(repo: str, run_id: str) -> dict:
     return _gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
 
 
-def _fetch_runners(repo: str, labels: Optional[list[str]] = None, *,
-                   deadline: Optional[float] = None) -> Optional[list]:
-    """Self-hosted runners the repo can use (repo-level, then its owner's org-level). None when neither list is
-    readable: listing runners needs admin scope, which a worker's token often lacks. When the repo list already has
-    an online runner for ``labels`` the org list is not read. The org list may hold runners in groups this repo
-    cannot use (a false ``busy``). Raises :class:`OverBudget` when ``deadline`` (monotonic) passed before a read."""
-    found: Optional[list] = None
+def _fetch_runners(repo: str, labels: list[str], *, deadline: Optional[float] = None) -> Optional[list]:
+    """Self-hosted runners the repo can use (repo-level, then its owner's org-level). When the repo list already has
+    an online runner for ``labels`` the org list is not read. None when a list was unreadable and the lists read
+    hold no online runner for ``labels``: listing runners needs admin scope, which a worker's token often lacks, and
+    a repo served only by org runners then shows a readable but empty repo list, which says nothing about the
+    runners. The org list may hold runners in groups this repo cannot use (a false ``busy``, capped by
+    ``BUSY_LIMIT_SECONDS``). Raises :class:`OverBudget` when ``deadline`` (monotonic) passed before a read."""
+    found: list = []
+    unread = False
     for path in (f"repos/{repo}/actions/runners?per_page=100",
                  f"orgs/{repo.split('/', 1)[0]}/actions/runners?per_page=100"):
-        if found and labels is not None and _online_runner(found, labels) is not None:
+        if _online_runner(found, labels) is not None:
             break
         if deadline is not None and time.monotonic() >= deadline:
             raise OverBudget(f"sweep budget spent before {path.split('?', 1)[0]} was read")
@@ -172,21 +182,41 @@ def _fetch_runners(repo: str, labels: Optional[list[str]] = None, *,
             data = _gh_api(path)
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
             logger.debug("ci run progress: %s unreadable: %s", path, exc)
+            unread = True
             continue
-        found = (found or []) + list((data or {}).get("runners") or [])
+        found += list((data or {}).get("runners") or [])
+    if unread and _online_runner(found, labels) is None:
+        return None
     return found
 
 
-def _online_runner(runners: list, labels: list[str]) -> Optional[str]:
-    """Name of an ``online`` runner carrying every label in ``labels`` (case-insensitive), else None."""
+def _online_runners(runners: list, labels: list[str]) -> list[dict]:
+    """The ``online`` runners carrying every label in ``labels`` (case-insensitive)."""
     want = {x.lower() for x in labels}
+    found = []
     for runner in runners:
         if not isinstance(runner, dict) or runner.get("status") != "online":
             continue
         have = {str(x.get("name") or "").lower() for x in runner.get("labels") or [] if isinstance(x, dict)}
         if want <= have:
-            return str(runner.get("name") or "(unnamed)")
-    return None
+            found.append(runner)
+    return found
+
+
+def _name(runner: dict) -> str:
+    return str(runner.get("name") or "(unnamed)")
+
+
+def _online_runner(runners: list, labels: list[str]) -> Optional[str]:
+    """Name of an ``online`` runner carrying every label in ``labels`` (case-insensitive), else None."""
+    found = _online_runners(runners, labels)
+    return _name(found[0]) if found else None
+
+
+def _busy_runner(runners: list, labels: list[str]) -> Optional[str]:
+    """Name of an online runner for ``labels`` that is running a job, else None. Only an explicit ``busy: false``
+    says a runner is free: one without the flag counts as busy (saturated, the pre-flag reading)."""
+    return next((_name(r) for r in _online_runners(runners, labels) if r.get("busy") is not False), None)
 
 
 def _epoch(value) -> Optional[int]:
@@ -238,12 +268,17 @@ def ci_run_progress(ref: str, *, hint: str = "", fetch: Optional[Fetch] = None,
     except OverBudget as exc:
         return Progress("unknown", repo, run_id, labels, age, detail=str(exc), deferred=True)
     if runners is not None:
-        name = _online_runner(runners, labels)
-        if name is not None:
-            logger.info("ci run %s/%s queued %ss: runner %s is online for %s, so the runners are saturated",
-                        repo, run_id, age, name, ",".join(labels))
+        busy = _busy_runner(runners, labels)
+        if busy is not None and age <= BUSY_LIMIT_SECONDS:
+            logger.info("ci run %s/%s queued %ss: runner %s is online and busy for %s, so the runners are saturated",
+                        repo, run_id, age, busy, ",".join(labels))
             return Progress(BUSY, repo, run_id, labels, age,
-                            detail=f"runner {name} is online for those labels; the runners are saturated")
+                            detail=f"runner {busy} is online and busy for those labels; the runners are saturated")
+        if busy is not None:
+            return Progress(NOT_STARTING, repo, run_id, labels, age, runners_readable=True, busy_runner=busy)
+        idle = _online_runner(runners, labels)
+        if idle is not None:
+            return Progress(NOT_STARTING, repo, run_id, labels, age, runners_readable=True, idle_runner=idle)
     elif "self-hosted" in {x.lower() for x in labels}:
         try:
             took = _recent_job_on(repo, labels, (data or {}).get("jobs") or [], now, deadline)
@@ -303,8 +338,16 @@ def _recent_job_on(repo: str, labels: list[str], jobs: list, now: float, deadlin
 
 def describe(p: Progress) -> str:
     labels = ",".join(p.labels) or "(none)"
-    seen = ("no online runner has them" if p.runners_readable
-            else "runner list unreadable, so they may be offline or saturated")
+    if p.idle_runner:
+        seen = (f"runner {p.idle_runner} is online and idle for them yet took no job: a stuck runner, or one in a "
+                "runner group this repo cannot use")
+    elif p.busy_runner:
+        seen = (f"runner {p.busy_runner} is online and busy for them, but the job waited past the "
+                f"{BUSY_LIMIT_SECONDS // 60} min busy cap: that runner may be in a group this repo cannot use")
+    elif p.runners_readable:
+        seen = "no online runner has them"
+    else:
+        seen = "runner list unreadable, so they may be offline or saturated"
     return (f"CI run {p.run_id} queued {p.queued_seconds // 60} min: no runner picked it up in "
             f"{QUEUED_LIMIT_SECONDS // 60} min (labels {labels}, {p.repo}; {seen}), so it may never start")
 
@@ -389,7 +432,7 @@ def _others_behind(conn: sqlite3.Connection, task_id: str, bid: str) -> list[str
     st = ksb.blocker_states(conn).get(bid)
     if st is None or not st.is_open:
         return []
-    return sorted(t for t in st.behind if t != task_id and ksb._task_applies(conn, st, t))
+    return sorted(t for t in st.behind if t != task_id and ksb.task_applies(conn, st, t))
 
 
 def apply(conn: sqlite3.Connection, task_id: str, ref: str, p: Progress) -> Optional[str]:
@@ -521,6 +564,15 @@ def running_sweeps() -> int:
         return sum(1 for fut in _SWEEPS.values() if not fut.done())
 
 
+def _sweep_due(db: str) -> bool:
+    """No sweep of ``db`` is running and ``SWEEP_EVERY_SECONDS`` passed since its last one. Call under ``_LOCK``."""
+    running = _SWEEPS.get(db)
+    if running is not None and not running.done():
+        return False
+    last = _LAST_SWEEP.get(db)
+    return last is None or time.monotonic() - last >= SWEEP_EVERY_SECONDS
+
+
 def submit_sweep(conn: sqlite3.Connection, pool, *, slots_free: int = 1) -> Optional[Future]:
     """Start one :func:`sweep` of this board on ``pool`` when the pool's probe budget has ``slots_free``, no sweep
     of the board is running, ``SWEEP_EVERY_SECONDS`` passed since its last one and some scheduled card's latest park
@@ -535,15 +587,13 @@ def submit_sweep(conn: sqlite3.Connection, pool, *, slots_free: int = 1) -> Opti
             return None
         home = str(get_hermes_home())
         with _LOCK:
-            running = _SWEEPS.get(db)
-            if running is not None and not running.done():
-                return None
-            last = _LAST_SWEEP.get(db)
-            if last is not None and time.monotonic() - last < SWEEP_EVERY_SECONDS:
+            if not _sweep_due(db):
                 return None
         if not _has_ci_wait(conn):
             return None
         with _LOCK:
+            if not _sweep_due(db):  # another tick on this board started one while _LOCK was released
+                return None
             _LAST_SWEEP[db] = time.monotonic()
             fut = pool.submit(_sweep_db, db, home)
             _SWEEPS[db] = fut
