@@ -84,3 +84,45 @@ def test_description_states_timezone_and_byte_cap():
         assert str(hcr.MAX_BYTES) in str(exc)
     else:
         raise AssertionError("over-cap receipt admitted")
+
+
+_DELIVERY = {"request_uid": "r", "target_task_id": "t_x", "board": "default", "caller_task_id": "t_y",
+             "caller_run_uid": "u", "caller_gateway": "a", "executor_gateway": "b", "comment_id": 7,
+             "content_sha256": "0" * 64, "result_event_uid": "e"}
+
+
+def _admits(delivery) -> bool:
+    receipt = {"version": 1, "items": [{
+        "scope": "comment on the foreign card", "disposition": "delivered", "remaining": [],
+        "evidence": [{"ref": "operator comment 7", "observed_at": "2026-11-13T06:40:00+00:00",
+                      "verification": "independently_checked", "operator_delivery": delivery}]}]}
+    try:
+        hcr.validate_completion_receipt(receipt)
+    except ValueError:
+        return False
+    return True
+
+
+def test_operator_delivery_schema_is_the_validators_strict_shape():
+    # PR #1989 review nit: a bare {type: object} lets a strictly validating client build a delivery proof the
+    # writer refuses. The advertised keys, required set and per-field bounds must be what the validator enforces,
+    # read from its behaviour here, not from a shared constant, so either side drifting turns this red.
+    schema = _evidence_schema()["properties"]["operator_delivery"]
+    assert _admits(_DELIVERY)
+    validator_required = {key for key in _DELIVERY if not _admits({k: v for k, v in _DELIVERY.items() if k != key})}
+    assert validator_required == set(_DELIVERY)
+    assert not _admits({**_DELIVERY, "extra": "x"})
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == validator_required
+    assert set(schema["required"]) == validator_required
+    props = schema["properties"]
+    assert props["comment_id"] == {"type": "integer", "minimum": 1}
+    assert not _admits({**_DELIVERY, "comment_id": 0}) and not _admits({**_DELIVERY, "comment_id": "7"})
+    sha = props["content_sha256"]
+    assert sha["type"] == "string" and sha["pattern"] == "^[0-9a-f]{64}$"
+    assert not _admits({**_DELIVERY, "content_sha256": "A" * 64})
+    for key in validator_required - {"comment_id", "content_sha256"}:
+        limit = props[key]["maxLength"]
+        assert props[key]["type"] == "string" and props[key]["minLength"] == 1 and limit < 2000
+        assert _admits({**_DELIVERY, key: "x" * limit}) and not _admits({**_DELIVERY, key: "x" * (limit + 1)})
+        assert not _admits({**_DELIVERY, key: ""})

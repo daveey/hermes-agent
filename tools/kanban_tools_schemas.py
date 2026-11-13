@@ -100,6 +100,19 @@ KANBAN_LIST_SCHEMA = _schema(
     [],
 )
 
+
+def _operator_delivery_schema() -> dict[str, Any]:
+    """evidence.operator_delivery as the validator admits it: exactly hcr.OPERATOR_DELIVERY_FIELDS."""
+    text = {"type": "string", "minLength": 1, "maxLength": hcr.OPERATOR_DELIVERY_TEXT_MAX}
+    special = {"comment_id": {"type": "integer", "minimum": 1},
+               "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+    return {
+        "type": "object", "additionalProperties": False, "required": list(hcr.OPERATOR_DELIVERY_FIELDS),
+        "description": "Optional: the applied operator result's operator_delivery, verbatim",
+        "properties": {key: dict(special.get(key, text)) for key in hcr.OPERATOR_DELIVERY_FIELDS},
+    }
+
+
 def _completion_receipt_schema() -> dict[str, Any]:
     """metadata.completion_receipt v1, from the validator's own limits (hermes_completion_receipt) so the
     advertised shape never drifts from what the card writer admits (self-heal agent-f82d813de9)."""
@@ -146,8 +159,7 @@ def _completion_receipt_schema() -> dict[str, Any]:
                             "observed_at": {"type": "string", "maxLength": 64, "description": (
                                 "ISO-8601 with timezone, e.g. 2026-11-13T06:40:00+00:00")},
                             "verification": {"type": "string", "enum": list(hcr.VERIFICATIONS)},
-                            "operator_delivery": {"type": "object", "description": (
-                                "Optional: the applied operator result's operator_delivery, verbatim")},
+                            "operator_delivery": _operator_delivery_schema(),
                         }}},
                     "remaining": {"type": "array", "maxItems": hcr.MAX_REMAINING, "items": {
                         "type": "object", "additionalProperties": False,
