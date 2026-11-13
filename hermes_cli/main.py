@@ -3073,8 +3073,8 @@ def _advertise_agent_env() -> None:
     other agents set it — earendil-works/pi#7493) so generic tooling can attribute subprocesses to the
     harness that spawned them. Hermes running inside another agent's terminal).
     """
-    os.environ.setdefault("AI_AGENT", "hermes-agent")
-    os.environ.setdefault("HERMES_AGENT", "true")
+    for key, value in (("AI_AGENT", "hermes-agent"), ("HERMES_AGENT", "true"), ("LC_HERMES_AGENT", "1")):
+        os.environ.setdefault(key, value)  # LC_: ssh-forwardable twin (SendEnv/AcceptEnv LANG LC_*)
 
 
 def _attach_plugin_cli_command(subparsers, cmd_info) -> None:

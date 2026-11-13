@@ -172,6 +172,10 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
         child_env["TZ"] = _tz_name
     child_env.pop("HERMES_TIMEZONE", None)
     _bridge_session_identity(child_env)
+    # [daveey] The ssh-forwardable agent marker (this turn's session id, else 1): a script's
+    # `ssh <Mac> hermes kanban comment` must not read as a person's.
+    from hermes_cli.kanban_comment_writer import stamp_ssh_agent_marker
+    stamp_ssh_agent_marker(child_env)
     apply_subprocess_home_env(child_env)
     # Multiplexed gateway/Desktop (#110303): the server process env carries the machine-default
     # HERMES_HOME, but this turn runs under a per-profile override (ContextVar bound per turn).

@@ -313,6 +313,9 @@ def _finalize_child_env(env: dict) -> dict:
     Kanban scrub. Returns the (possibly new) dict."""
     _apply_profile_home(env)
     _inject_session_context_env(env)
+    # [daveey] After the session bridge, so the marker names THIS child's session (ssh-forwardable).
+    from hermes_cli.kanban_comment_writer import stamp_ssh_agent_marker
+    stamp_ssh_agent_marker(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
     strip_supervised_process_identity(env)
     _apply_windows_msys_bash_env_defaults(env)

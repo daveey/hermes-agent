@@ -122,10 +122,11 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
     extra_unset = "".join(f" {shlex.quote(name)}" for name in sorted(safe_names))
     return (
         "{ ( unset ${!HERMES_SESSION_*} ${!HERMES_CRON_AUTO_DELIVER_*} "
-        # AI_AGENT / HERMES_AGENT are per-command attribution markers re-exported
+        # AI_AGENT / HERMES_AGENT / LC_HERMES_AGENT are per-command attribution markers re-exported
         # by every wrapper with ${VAR:-default} semantics; persisting them would
-        # let the FIRST command's value override a later outer-harness value.
-        "AI_AGENT HERMES_AGENT "
+        # let the FIRST command's value override a later outer-harness value (and
+        # LC_HERMES_AGENT carries the session id: a shared snapshot would leak it).
+        "AI_AGENT HERMES_AGENT LC_HERMES_AGENT "
         # Scope markers stamped onto a delegate_task child's / cron run's subprocess
         # env; a snapshot taken inside that window would re-assert them on every
         # later ``source`` and fence the PARENT session's kanban CLI (#90782).
@@ -228,6 +229,9 @@ def _wrap_command_script(
     parts += restore
     parts += [
         'export AI_AGENT="${AI_AGENT:-hermes-agent}" HERMES_AGENT="${HERMES_AGENT:-true}"',
+        # [daveey] The ssh-forwardable agent marker (kanban_comment_writer.SSH_AGENT_MARKER): stock
+        # OpenSSH sends/accepts LC_*, so `ssh <Mac> hermes kanban comment` still reads as an agent's.
+        'export LC_HERMES_AGENT="${HERMES_SESSION_ID:-${LC_HERMES_AGENT:-1}}"',
         'export GIT_PAGER="${GIT_PAGER:-cat}" PAGER="${PAGER:-cat}"',
         # ``--`` keeps hyphen-prefixed directory names from being parsed as options.
         f"builtin cd -- {quoted_cwd} || exit 126",

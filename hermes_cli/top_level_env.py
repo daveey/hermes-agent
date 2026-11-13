@@ -38,7 +38,7 @@ def scrub_leaked_worker_env(environ: Optional[MutableMapping[str, str]] = None) 
 
 
 _AGENT_ATTRIBUTION_KEYS = ("HERMES_AGENT", "AI_AGENT", "HERMES_DESKTOP", "HERMES_SUPERVISED_CHILD",
-                           "HERMES_SESSION_ID")
+                           "HERMES_SESSION_ID", "LC_HERMES_AGENT")
 
 
 def drop_agent_attribution(env: dict[str, str]) -> dict[str, str]:

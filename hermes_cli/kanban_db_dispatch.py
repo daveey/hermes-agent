@@ -2694,11 +2694,10 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
     # assignee's secrets, which replace values but never remove one (kanban_worker_env).
     if routed:
         env = worker_client_env(env, profile_home)
-    # The dispatcher is detached from every conversation; its worker must never
-    # inherit routing mirrored by a previous gateway turn.
+    # The dispatcher is detached from every conversation; its worker must never inherit routing mirrored
+    # by a previous gateway turn (nor its session id in the ssh agent marker its tools re-stamp). [daveey]
     from gateway.session_context import _VAR_MAP
-    for key in _VAR_MAP:
-        env.pop(key, None)
+    env = {k: v for k, v in env.items() if k not in _VAR_MAP} | {"LC_HERMES_AGENT": "1"}
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml:
     # without it the child's get_hermes_home() falls back to the DEFAULT

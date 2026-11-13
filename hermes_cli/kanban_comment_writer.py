@@ -37,11 +37,15 @@ terminal app started from an agent, the TUI's ``!`` shell) labels a person's not
 only withholds operator authority; so does Windows, where an unreadable or exited ancestor (the
 parent of ``explorer.exe``) leaves every walk inconclusive. Out of reach: a same-user process that
 deliberately destroys its marked ancestry (``exec env -i`` replacing the tool shell, double-fork
-daemonizing) or hands its command to a process outside its ancestry (``tmux send-keys``,
-``ssh <host> hermes kanban comment``, whose remote sshd session starts clean) — evasion or a
-handoff, not provenance, which needs real authentication. The dashboard API uses this ancestry
-reader for resolved raw loopback TCP peers (``kanban_http_comment_writer``); remote/unresolvable
-HTTP peers retain the legacy human default, not a claim of authenticated human identity.
+daemonizing) or hands its command to a process outside its ancestry (``tmux send-keys``)
+— evasion or a handoff, not provenance, which needs real authentication. ``ssh <host> hermes
+kanban comment`` is in reach: sshd starts the remote session clean except for ``LANG``/``LC_*``,
+which stock OpenSSH forwards and accepts on every host (``SendEnv``/``AcceptEnv LANG LC_*``), so
+every agent tool subprocess also carries :data:`SSH_AGENT_MARKER` (its session id, else ``1``)
+and the remote login shell starts with it. A person's shell never sets it. The dashboard API uses
+this ancestry reader for resolved raw loopback TCP peers (``kanban_http_comment_writer``);
+remote/unresolvable HTTP peers retain the legacy human default, not a claim of authenticated human
+identity.
 """
 from __future__ import annotations
 
@@ -66,7 +70,38 @@ AGENT_ENV_MARKERS: tuple[str, ...] = (
     "CLAUDECODE",                      # Claude Code's Bash tool
     "HERMES_SUPERVISED_CHILD",         # the systemd/launchd gateway service and all it spawns
     "HERMES_DESKTOP",                  # a Desktop agent backend (`serve`), never the GUI's terminal
+    "LC_HERMES_AGENT",                 # agent marker that stock ssh forwards (SendEnv/AcceptEnv LANG LC_*)
 )
+
+# Exported (session id, else ``1``) into every agent tool subprocess next to HERMES_AGENT, so it
+# survives ``ssh <Mac> hermes kanban comment``, where sshd drops every HERMES_* variable.
+SSH_AGENT_MARKER = "LC_HERMES_AGENT"
+_SAFE_MARKER_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+_HEADLESS_SESSION = re.compile(r"^local-[0-9a-f]{64}$")  # a Kanban worker / one-shot run's session
+
+
+def ssh_agent_marker_value(env: Mapping[str, str]) -> str:
+    """:data:`SSH_AGENT_MARKER`'s value for a child built from ``env``: its ``HERMES_SESSION_ID``,
+    else an inherited marker, else ``1``. A value unsafe to carry (spaces, control bytes) is ``1``."""
+    for name in ("HERMES_SESSION_ID", SSH_AGENT_MARKER):
+        value = str(env.get(name) or "").strip()
+        if value:
+            return value if _SAFE_MARKER_VALUE.match(value) else "1"
+    return "1"
+
+
+def stamp_ssh_agent_marker(env: dict[str, str]) -> dict[str, str]:
+    """Set :data:`SSH_AGENT_MARKER` in an agent tool child's ``env`` (in place) and return it."""
+    env[SSH_AGENT_MARKER] = ssh_agent_marker_value(env)
+    return env
+
+
+def marker_session(env: Mapping[str, str]) -> Optional[str]:
+    """The session id an inherited :data:`SSH_AGENT_MARKER` names when it is session-id shaped
+    (not the ``1`` placeholder): the writer session of a note sent over ssh."""
+    from hermes_state_ids import is_known_session_id
+    value = str(env.get(SSH_AGENT_MARKER) or "").strip()
+    return value if value and (is_known_session_id(value) or _HEADLESS_SESSION.match(value)) else None
 
 MAX_ANCESTRY = 64
 
@@ -270,7 +305,8 @@ def cli_comment_writer(*, read: Optional[ProcReader] = None, env: Optional[Mappi
     path; the real one only with the real reader), or when that can't be ruled out, or when
     ``author`` is an agent handle (:func:`is_agent_handle`); each only ever lowers authority.
     ``human`` only after a complete walk found none. ``writer_session`` is the agent's inherited
-    ``HERMES_SESSION_ID`` when it has one."""
+    ``HERMES_SESSION_ID`` when it has one, else the session an ssh-forwarded
+    :data:`SSH_AGENT_MARKER` names."""
     env = os.environ if env is None else env
     if cgroup is None and (read or _read_proc) is _REAL_READ:
         cgroup = _self_cgroup
@@ -286,5 +322,5 @@ def cli_comment_writer(*, read: Optional[ProcReader] = None, env: Optional[Mappi
         found = "author_handle"
     if found is None:
         return "human", None, "clean-ancestry"
-    session = str(env.get("HERMES_SESSION_ID") or "").strip()[:200] or None
+    session = str(env.get("HERMES_SESSION_ID") or "").strip()[:200] or marker_session(env)
     return "agent", session, found

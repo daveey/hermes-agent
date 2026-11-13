@@ -4938,8 +4938,8 @@ def main():
 
     # Advertise the harness to children (mirrors _advertise_agent_env in hermes_cli/main.py, inlined to
     # avoid its startup side effects). Value must equal registry id ``hermes-agent`` exactly.
-    os.environ.setdefault("AI_AGENT", "hermes-agent")
-    os.environ.setdefault("HERMES_AGENT", "true")
+    for _key, _value in (("AI_AGENT", "hermes-agent"), ("HERMES_AGENT", "true"), ("LC_HERMES_AGENT", "1")):
+        os.environ.setdefault(_key, _value)  # LC_: ssh-forwardable twin (kanban_comment_writer)
 
     def _register_identity() -> None:
         # Ledger registration + Windows job-object attach so update-time reapers can identify this gateway.

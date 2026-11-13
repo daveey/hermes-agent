@@ -225,7 +225,7 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
             env[key] = os.environ[key]
     # [daveey] Harness attribution (non-secret): a stdio server is the agent's tool, so a
     # `hermes kanban comment` it runs must not read as a person's (kanban_comment_writer).
-    for key in ("AI_AGENT", "HERMES_AGENT"):
+    for key in ("AI_AGENT", "HERMES_AGENT", "LC_HERMES_AGENT"):
         if os.environ.get(key):
             env[key] = os.environ[key]
     # Pin the ACTIVE (served) profile's home so a stdio child never falls back to the

@@ -104,6 +104,114 @@ def test_gateway_service_descendant_is_an_agent():
     assert kcw.agent_ancestor(read=_me({}, 700, gw)) == "700:HERMES_SUPERVISED_CHILD"
 
 
+# `ssh <Mac> 'hermes kanban comment …'` from an agent's terminal: macOS sshd (AcceptEnv LANG LC_*)
+# drops every HERMES_* variable, so the remote login shell carries only the LC_ marker; sshd-session
+# and launchd are root's (skipped).
+SID = "local-" + "ab" * 32
+SSH_FROM_AGENT: Table = {800: (700, {"HOME": "/Users/d", "LANG": "en_US.UTF-8", "LC_HERMES_AGENT": SID}),
+                         700: (1, None), 1: (0, None)}
+
+
+def test_ssh_session_from_an_agent_is_an_agent():
+    assert kcw.agent_ancestor(read=_me({"PATH": "/usr/bin"}, 800, SSH_FROM_AGENT)) == "800:LC_HERMES_AGENT"
+    kind, session, evidence = kcw.cli_comment_writer(read=_me({}, 800, SSH_FROM_AGENT),
+                                                     env={"LC_HERMES_AGENT": SID})
+    assert (kind, session, evidence) == ("agent", SID, "800:LC_HERMES_AGENT")
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_blank_ssh_marker_is_human(value):
+    table = {800: (700, {"HOME": "/Users/d", "LC_HERMES_AGENT": value}), 700: (1, None), 1: (0, None)}
+    assert kcw.agent_ancestor(read=_me({}, 800, table)) is None
+    assert kcw.cli_comment_writer(read=_me({}, 800, table), env={"LC_HERMES_AGENT": value})[0] == "human"
+
+
+def test_person_ssh_session_is_human():
+    """A person's own ssh into the Mac forwards LANG/LC_* too, but their shell set no marker."""
+    table = {800: (700, {"HOME": "/Users/d", "LANG": "en_US.UTF-8", "LC_CTYPE": "UTF-8"}), 700: (1, None),
+             1: (0, None)}
+    assert kcw.cli_comment_writer(read=_me({}, 800, table), env={})[0] == "human"
+
+
+@pytest.mark.parametrize("value,session", [(SID, SID), ("20261026_170127_f07c32", "20261026_170127_f07c32"),
+                                           ("1", None), ("true", None), ("", None)])
+def test_ssh_marker_names_the_writer_session_only_when_session_shaped(value, session):
+    assert kcw.marker_session({"LC_HERMES_AGENT": value}) == session
+    # HERMES_SESSION_ID, when the CLI inherited one, still wins.
+    assert kcw.cli_comment_writer(read=_me({}, 800, SSH_FROM_AGENT),
+                                  env={"HERMES_SESSION_ID": "sess-a", "LC_HERMES_AGENT": value})[1] == "sess-a"
+
+
+@pytest.mark.parametrize("env,value", [({"HERMES_SESSION_ID": "sess-a"}, "sess-a"), ({}, "1"),
+                                       ({"LC_HERMES_AGENT": SID}, SID),
+                                       ({"HERMES_SESSION_ID": "sess-a", "LC_HERMES_AGENT": SID}, "sess-a"),
+                                       ({"HERMES_SESSION_ID": "a b\nc"}, "1")])
+def test_ssh_marker_value_is_the_session_id_else_1(env, value):
+    assert kcw.stamp_ssh_agent_marker(dict(env))["LC_HERMES_AGENT"] == value
+
+
+# --- every agent tool subprocess exports the ssh-forwardable marker -----------------------------
+
+def test_terminal_wrapper_exports_ssh_marker_with_the_session_id():
+    """Real bash through the terminal tool's wrapper (every backend, remote ones included)."""
+    from tools.environments.local import LocalEnvironment
+    env = LocalEnvironment.__new__(LocalEnvironment)
+    env._snapshot_ready = False
+    env._session_id = "lcmark0"
+    env._cwd_marker = "__HERMES_CWD_lcmark0__"
+    env._snapshot_path = "/tmp/hermes-snap-lcmark0.sh"
+    env._snapshot_passthrough_names = set()
+    wrapped = env._wrap_command('echo "LC=$LC_HERMES_AGENT"', "/tmp")
+    clean = {k: v for k, v in os.environ.items() if k not in ("LC_HERMES_AGENT", "HERMES_SESSION_ID")}
+    run = lambda e: subprocess.run(["bash", "-c", wrapped], env=e, capture_output=True, text=True,
+                                   timeout=30, check=False).stdout
+    assert "LC=1\n" in run(clean)
+    assert f"LC={SID}\n" in run({**clean, "HERMES_SESSION_ID": SID})
+
+
+def test_terminal_snapshot_does_not_persist_the_ssh_marker():
+    from tools.environments.base_session_env import _export_dump_excluding_session_vars
+    snippet = _export_dump_excluding_session_vars("/tmp/x")
+    assert " LC_HERMES_AGENT " in snippet.split("export -p")[0]
+
+
+def test_local_subprocess_env_exports_ssh_marker(monkeypatch):
+    from tools.environments.local import build_subprocess_env
+    monkeypatch.delenv("LC_HERMES_AGENT", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", SID)
+    assert build_subprocess_env()["LC_HERMES_AGENT"] == SID
+    monkeypatch.delenv("HERMES_SESSION_ID")
+    assert build_subprocess_env()["LC_HERMES_AGENT"] == "1"
+    # The unscrubbed path stays byte-preserving: it carries the marker main() advertised.
+    monkeypatch.setenv("LC_HERMES_AGENT", "1")
+    assert build_subprocess_env(scrub_secrets=False)["LC_HERMES_AGENT"] == "1"
+
+
+def test_execute_code_child_env_exports_ssh_marker(tmp_path, monkeypatch):
+    from tools.code_execution_env import _build_child_env
+    monkeypatch.delenv("LC_HERMES_AGENT", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", SID)
+    env = _build_child_env(rpc_endpoint="fixture", rpc_token="fixture", tmpdir=str(tmp_path),
+                           child_python=sys.executable)
+    assert env["LC_HERMES_AGENT"] == SID
+
+
+def test_entrypoints_advertise_the_ssh_marker(monkeypatch):
+    from hermes_cli.main import _advertise_agent_env
+    monkeypatch.delenv("LC_HERMES_AGENT", raising=False)
+    _advertise_agent_env()
+    assert os.environ["LC_HERMES_AGENT"] == "1"
+    monkeypatch.setenv("LC_HERMES_AGENT", SID)  # an outer agent's (ssh-forwarded) marker is kept
+    _advertise_agent_env()
+    assert os.environ["LC_HERMES_AGENT"] == SID
+
+
+def test_mcp_stdio_server_env_carries_the_ssh_marker(monkeypatch):
+    from tools.mcp_tool_config import _build_safe_env
+    monkeypatch.setenv("LC_HERMES_AGENT", "1")
+    assert _build_safe_env(None)["LC_HERMES_AGENT"] == "1"
+
+
 @pytest.mark.parametrize("table", [
     {10: (11, {}), 11: (10, {})},                    # loop
     {10: (99, {})},                                  # an ancestor vanished mid-walk
@@ -330,7 +438,7 @@ def test_desktop_relaunch_env_drops_agent_markers(monkeypatch):
     """Desktop reopened after an update run from an agent/backend starts its terminal pane clean."""
     from hermes_cli.top_level_env import clean_launch_env
     marked = {k: "1" for k in ("HERMES_AGENT", "AI_AGENT", "HERMES_DESKTOP", "HERMES_SUPERVISED_CHILD",
-                               "HERMES_SESSION_ID")}
+                               "HERMES_SESSION_ID", "LC_HERMES_AGENT")}
     assert kcw.env_agent_marker(clean_launch_env({"HOME": "/h", **marked})) is None
 
 
