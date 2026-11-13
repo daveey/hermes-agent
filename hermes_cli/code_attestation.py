@@ -54,6 +54,7 @@ _ROUTE_SENTINEL_ROOT = "/@attest-root-sentinel@"
 MAX_SOURCE = 2 * 1024 * 1024
 MAX_TREE = 64 * 1024 * 1024
 MAX_UNITS = 16384
+MAX_LOADED_CODE = 1 << 18  # code objects kept for executed-code lookups; the gateway graph uses ~70k
 MAX_CACHE_ENTRIES = 32
 MAX_CACHE_BYTES = 8 * 1024 * 1024
 _FROZEN_ALIASES: dict[str, str] = {"importlib._bootstrap": "_frozen_importlib",
@@ -562,7 +563,7 @@ class Attestation:
 
     def _remember(self, code, component):
         for nested in _codes(code):
-            if len(self._known) >= 65536:
+            if len(self._known) >= MAX_LOADED_CODE:
                 self.mark_unknown("loaded-code-limit")
                 return
             self._known[id(nested)] = (nested, component)

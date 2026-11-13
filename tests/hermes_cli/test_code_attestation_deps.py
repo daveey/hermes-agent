@@ -231,7 +231,8 @@ def test_gateway_runtime_import_graph_has_no_residual_unknowns(tmp_path):
                           "generated": [(u["generator"], u["component"]) for u in a.dependency_receipts()["units"]
                                         if u["kind"] == "generated"],
                           "threads": sorted(t.name for t in threading.enumerate()),
-                          "dists": len(a.dependency_receipts()["dists"])}))
+                          "dists": len(a.dependency_receipts()["dists"]),
+                          "known": len(a._known)}))
     '''))
     result = subprocess.run([sys._base_executable, "-I", str(script), str(ROOT), str(selected),
                              *GATEWAY_GRAPH], cwd=tmp_path, capture_output=True, text=True,
@@ -242,6 +243,10 @@ def test_gateway_runtime_import_graph_has_no_residual_unknowns(tmp_path):
     report = json.loads((tmp_path / "graph.json").read_text(encoding="utf-8"))
     assert report["failed"] == {}, report["failed"]
     assert report["dists"] > 10
+    # The executed-code index must hold the whole runtime graph with room for plugins and
+    # providers loaded later; hitting the cap latches loaded-code-limit and fails every start.
+    from hermes_cli.code_attestation import MAX_LOADED_CODE
+    assert report["known"] * 2 < MAX_LOADED_CODE, (report["known"], MAX_LOADED_CODE)
     assert report["new"] == [], (report["new"], report["producers"])
     # R5: the real producers were receipted with a dependency origin, not latched unknown.
     generators = {g for g, _ in report["generated"]}
