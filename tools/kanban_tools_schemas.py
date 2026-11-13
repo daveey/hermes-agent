@@ -454,7 +454,10 @@ KANBAN_MOVE_SCHEMA = _schema(
     (
         "Move your current task to another machine and end this run. Use it when the work needs something "
         "this machine lacks (a Mac for Xcode/iOS/simulators, a GPU, a specific host's files or logs) or "
-        "belongs on a less loaded machine. It saves your checkpoint, ends this run as 'continued', sets the "
+        "belongs on a less loaded machine. Never move a card to the hub for hub files, logs, databases, cron, "
+        "config, services, `hermes kanban` or the Board admin key: a worker reads them with `ssh hermes-hub` and "
+        "does every routine hub write with `hub-admin '<command>'` (declare hub:write); a machine:hub move is "
+        "judged by hub admission and denied unless only the hub can do the work. It saves your checkpoint, ends this run as 'continued', sets the "
         "card's runs_on to the labels you give and re-queues it, so ONLY a machine carrying every label claims "
         "the next run (the Board enforces it). Refused when no other active machine matches, after "
         "kanban.move.max_moves moves, when moving back to a machine the card already left (pass force), and "
@@ -639,6 +642,11 @@ KANBAN_COMMENT_SCHEMA = _schema(
                 "kanban_list to discover ids."
         )),
         "body": _prop("string", "Markdown-supported comment body."),
+        "relays_user_message": _prop("boolean", (
+                "Set true when this comment passes on the user's reply from this chat to a card that asked "
+                "(e.g. a needs_input block). Counts as a human answer for the card's no-progress budget; "
+                "the comment stays attributed to the agent. Only an interactive chat may set it, once per "
+                "user message per card, and only for a message sent after the card's latest ask.")),
     },
     ["task_id", "body"],
 )
@@ -806,9 +814,11 @@ KANBAN_CREATE_SCHEMA = _schema(
         "distinct_reason": _prop("string", "Why this card is separate work from the distinct_from cards."),
         "hub_reason": _prop("string", (
                 "Only for a card that needs the hub itself: what only the hub has (its signed-in "
-                "Chrome, the Board admin key, instance-role SSM, a Desktop-session interaction, an "
+                "Chrome, a Desktop-session interaction, an "
                 "existing hub worktree with unpushed commits, a hermes-hub command acting with the "
-                "hub's key, or live gateway state hub-admin cannot reach). A Sonnet admission judge "
+                "hub's key, or live gateway state hub-admin cannot reach). Board admin key and "
+                "instance-role SSM steps are not hub needs: run them with hub-admin on a "
+                "capability:hub-write worker. A Sonnet admission judge "
                 "reads it with the card; without admission a hub card goes to the worker pool (pool "
                 "workers have hub ssh + hub-admin) and an explicit hub pin is refused.")),
         "force_hub": _prop("boolean", (
@@ -824,8 +834,9 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "(@session:<profile>@<gateway>/<id>). Defaults to the "
                 "session's $HERMES_ORIGIN_SESSION. The card (and its "
                 "children) then shows in that chat's task list and keeps "
-                "it unfinished; the result's origin_binding says how to "
-                "read the binding back on the origin gateway."
+                "it unfinished; run origin_binding.verify_visible on the origin gateway "
+                "to verify the card appears in that chat's task projection. "
+                "verify_on_origin is only a replica-link diagnostic, not visibility proof."
         )),
         "runs_on": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:._-]{0,63}$"},
                     "description": "Machine labels the card needs (all of them), on a board that syncs to the "
@@ -897,6 +908,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "assignee's profile."
             ),
         },
+        "review_required": _prop("boolean", "Require a reviewer before completion. Defaults to false."),
         "goal_mode": _prop("boolean", (
                 "Run the dispatched worker in a goal loop. When true, "
                 "after each turn an auxiliary judge checks the worker's "

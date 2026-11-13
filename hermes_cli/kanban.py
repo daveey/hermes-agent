@@ -30,6 +30,8 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
+from hermes_cli import kanban_review_contract as _review_contract
+from hermes_cli import kanban_worker_shell as _worker_shell
 from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
 from hermes_cli.kanban_cli_flags import (parse_branch_flag as _parse_branch_flag,
                                          parse_workspace_flag as _parse_workspace_flag)
@@ -155,6 +157,9 @@ def kanban_command(args: argparse.Namespace) -> int:
 
     # Origin obligations are profile-local, not current-board state; do not
     # auto-initialize a board or route by a worker's inherited board override.
+    if action == "chat-tasks":
+        from hermes_cli.kanban_chat_tasks import command
+        return command(args)
     if action == "origin-bind":
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
@@ -475,7 +480,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
                 max_retries=max_retries, model_override=getattr(args, "model_override", None),
                 provider_override=getattr(args, "provider_override", None), pin_mandatory=bool(getattr(args, "pin_mandatory", False)),
-                goal_mode=bool(getattr(args, "goal_mode", False)),
+                goal_mode=bool(getattr(args, "goal_mode", False)), review_required=bool(getattr(args, "review_required", False)),
                 goal_max_turns=getattr(args, "goal_max_turns", None),
                 reasoning_effort=getattr(args, "reasoning_effort", None),
                 completion_contract=getattr(args, "completion_contract", None),
@@ -547,7 +552,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             print(f"⚠  {placement['warning']}", file=sys.stderr)
         if origin_binding:
             print(f"Bound to {origin_binding['origin']} (readback pending: on the origin gateway run "
-                  f"`{origin_binding['verify_on_origin']}`)")
+                  f"`{origin_binding['verify_visible']}`)")
         # Warn only for ready+assigned tasks that would sit without a dispatcher (triage/todo idle
         # by design, unassigned can't dispatch); skipped under --json so stdout stays parseable.
         if task.status == "ready" and task.assignee:
@@ -1245,10 +1250,17 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = f"cannot complete {tid}: {_foreign_card.REJECTION}: {foreign}"
                 return False
             try:
+                own_run, shell_why = _worker_run_id_for(tid), None
+                if own_run is None:  # a worker's terminal shell: its run, once proven [daveey]
+                    own_run, shell_why = _worker_shell.run_for(conn, tid)
+                _review_contract.refuse_outside(conn, tid, metadata, own_run, worker_shell=shell_why)
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         goal_verification=verified[0] if verified else None,
-                                        expected_run_id=_worker_run_id_for(tid),
+                                        expected_run_id=own_run,
                                         force=bool(getattr(args, "force", False)))
+            except _review_contract.IndependenceRefused as outside:  # --force does not override it [daveey]
+                fail_msg[tid] = f"cannot complete {tid}: {outside}"
+                return False
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
@@ -1258,7 +1270,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
                                  f"describing what was done (an empty completion is not evidence).")
                 return False
-            except (kb.ArtifactPreservationError, ValueError) as receipt_err:
+            except (kb.ArtifactPreservationError, ValueError) as receipt_err:  # incl. ReviewRequiredError
                 fail_msg[tid] = receipt_refusal(tid, receipt_err)  # nothing written; re-raises other errors
                 return False
             if not done:
@@ -1276,7 +1288,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
 
 
-_OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id")
+_OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id", "review_required")
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
@@ -1299,8 +1311,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if priority is not None:
         priority = bounded(priority)
     operator = {name: getattr(args, name, None) for name in _OPERATOR_EDIT_FLAGS}
-    if operator["goal_mode"] is not None:
-        operator["goal_mode"] = operator["goal_mode"] == "on"
+    operator.update({k: operator[k] == "on" for k in ("goal_mode", "review_required") if operator[k] is not None})
     has_operator = any(value is not None for value in operator.values())
     has_admission = any(value is not None for value in admission.values())
     if has_operator and has_admission:
@@ -1310,7 +1321,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if all(value is None for value in (title, body, priority, priority_bump, result)) and not (has_operator or has_admission):
         return _err(
             "kanban edit: provide --title, --body, --priority, --result, --max-retries, --goal-mode, "
-            "--goal-max-turns, --max-runtime-seconds, --session-id, or --completion-contract", 2,
+            "--goal-max-turns, --max-runtime-seconds, --session-id, --review-required, or --completion-contract", 2,
         )
     if getattr(args, "force", False) and operator["session_id"] is None:
         return _err("kanban edit: --force only applies to --session-id", 2)

@@ -21,6 +21,12 @@ _HUB_ACTIONS = set(("status pull sync sessions inbox tasks where links request r
                     "inspect-legacy reconcile-legacy inspect-alias retire-alias adopt-task "
                     "create-task depend outcomes install-watch watch diff-shared").split())
 _EXECUTION = re.compile(r"(?:\b(?:run|execute|invoke|call|use|via|with)\s+`?|`|[;$|&]\s*)$", re.IGNORECASE)
+# ``hub-admin '<command>'`` runs the command ON the hub with its write access: a hermes-hub action inside the
+# still-open quote acts with the hub's identity and replica, so it needs ``capability:hub-write`` (the hub-admin
+# attestation), not this worker's own hermes-hub install. A worker's ``hermes-hub outcomes --id`` reads only its
+# OWN sent requests (the hub's request read back as ``state: null`` on worker-1, 11-13), so bare spellings stay home.
+_HUB_ADMIN = re.compile(r"\bhub-admin\s+(['\"])(?:(?!\1).)*$", re.IGNORECASE)
+HUB_WRITE = "capability:hub-write"
 
 
 def _actions(text, tool, known):
@@ -63,12 +69,11 @@ _TOOLS = {
 # describe existing restricted access; they never install credentials or grant writes.
 ACCESS_LABELS = {"ssh:mbp": "capability:ssh-mbp", "ssh:mini": "capability:ssh-mini",
                  "hub:read": "capability:hub-read", "hub:write": "capability:hub-write"}
-# Declared access the Board's pool placement can carry today. It must mirror hermes-hub
-# worker/src/worker_placement.ts ``supportedRequirement`` (terminal/file/git/kanban/hub:write, unchanged
-# on hermes-hub main 2026-11-12): a card the Board cannot place would enroll and then queue for
-# good (``task_requirement_unsupported``), where a home-only card at least runs at home. Add a
-# name here only after the Board maps it to the label in ACCESS_LABELS. [daveey] kanban-1663abf6ab
-BOARD_PLACEABLE_ACCESS: frozenset = frozenset({"hub:write"})
+# Declared access must mirror the Board's worker/src/worker_placement.ts supportedRequirement
+# and requirementLabel contract. Deploy Board support before extending this set: otherwise
+# enrolled cards queue forever with task_requirement_unsupported despite attested access.
+# SSH requirements remain unsupported; read and write each require their own attestation.
+BOARD_PLACEABLE_ACCESS: frozenset = frozenset({"hub:read", "hub:write"})
 BOARD_REASON = "declared access the Board cannot place"
 
 
@@ -93,7 +98,10 @@ def requirements(text):
                  r"\bcreate board replicas\b|\battach primary/pickup subscriptions\b",
                  text, re.IGNORECASE):
         return labels, ACTION_REASON
-    for _, _, action in _actions(text, _HUB, _HUB_ACTIONS):
+    for start, _, action in _actions(text, _HUB, _HUB_ACTIONS):
+        if _HUB_ADMIN.search(text[:start].rsplit("\n", 1)[-1]):
+            labels.add(HUB_WRITE)
+            continue
         if action not in ("status", "pull"):
             return labels, ACTION_REASON
         labels.add("capability:coordination-read")
@@ -107,6 +115,13 @@ def requirements(text):
         if re.search(r"\b" + re.escape(tool) + r"\b", text, re.IGNORECASE):
             labels.add(label)
     return labels, None
+
+
+def requirement_label(name):
+    """The attested label a declared ``requires`` entry needs: access names map through :data:`ACCESS_LABELS`
+    (``hub:write`` -> ``capability:hub-write``; no machine carries ``capability:hub:write``), others to
+    ``capability:<name>``."""
+    return ACCESS_LABELS.get(name, f"capability:{name}")
 
 
 def access_requirements(requires):
@@ -241,8 +256,12 @@ def claim_refusal(card, me):
             return "invalid worker access requirements"
     if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
         return "invalid worker access requirements"
-    return check(text, {}, target=me, skills=_loads(card.get("skills"), []),
-                 requires=requires)
+    if refusal := check(text, {}, target=me, skills=_loads(card.get("skills"), []), requires=requires):
+        return refusal
+    from hermes_cli import kanban_mandatory_pin as mandatory
+    if (pin := mandatory.requirements(card)) and not attested([me], pin):
+        return mandatory.REASON  # this machine's core is not attested to refuse a pin it cannot serve
+    return None
 
 
 def _free_slot(entry):
@@ -259,13 +278,15 @@ def stranded(card, cfg, created_reason):
     needs and has a free slot, and the card is otherwise portable (its full ``portable_reason`` judged against just
     those members is None, so a home marker the early refusal hid still counts), the wait is the stale creation
     verdict, not capacity. Read-only and advisory."""
-    if created_reason != REASON or card.get("placement_policy") or not isinstance(cfg, dict):
+    from hermes_cli.kanban_mandatory_pin import REASON as PIN_REASON
+    if created_reason not in (REASON, PIN_REASON) or card.get("placement_policy") or not isinstance(cfg, dict):
         return []
     from hermes_cli import kanban_capability_registry as reg
     from hermes_cli.kanban_placement import portable_reason
     from hermes_cli.kanban_runs_on_capabilities import _loads
     args = {k: card.get(k) for k in ("title", "body", "assignee", "workspace_kind", "workspace_path", "tenant",
-                                     "project_id", "max_retries")}
+                                     "project_id", "max_retries", "model_override", "provider_override",
+                                     "model_pin_mandatory")}
     args.update(skills=_loads(card.get("skills"), []), requires=_loads(card.get("requires"), []),
                 runs_on=_loads(card.get("runs_on"), None))
     if not isinstance(args["requires"], list):
@@ -296,7 +317,9 @@ def required_labels(args, cfg=None):
     required, refusal = requirements(text)
     if refusal:
         return None
-    return required | skill_requirements(args.get("skills")) | access_requirements(args.get("requires"))
+    from hermes_cli.kanban_mandatory_pin import requirements as pin_requirements
+    return (required | skill_requirements(args.get("skills")) | access_requirements(args.get("requires"))
+            | pin_requirements(args))
 
 
 def legacy_refusal(args, cfg=None):

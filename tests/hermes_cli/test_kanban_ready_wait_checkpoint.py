@@ -117,6 +117,87 @@ def test_card_without_a_prior_run_gets_no_checkpoint(conn, monkeypatch):
     assert "Last checkpoint" not in (json.loads(kanban_show.show({"task_id": tid})).get("queue_hint") or "")
 
 
+@pytest.mark.parametrize("kind", [cw.NOTICE_KIND, pu.NOTICE_KIND])
+@pytest.mark.parametrize("state", ["included", "no_run", "nonpark", "unfinished", "empty_summary", "lookup_error"])
+def test_notice_records_selection_and_emitter_without_summary(conn, monkeypatch, kind, state):
+    from hermes_cli import kanban_core_update_requeue as requeue
+    from hermes_cli import git_fingerprint
+    from hermes_cli import kanban_sync_client as sync
+    from types import SimpleNamespace
+    import os
+
+    tid = _continued(conn)
+    run = conn.execute("SELECT * FROM task_runs WHERE task_id=?", (tid,)).fetchone()
+    if state == "no_run":
+        monkeypatch.setattr(requeue, "latest_run_skipping_requeues", lambda *_: None)
+    elif state == "lookup_error":
+        def fail(*_):
+            raise OSError("private detail must not reach event")
+        monkeypatch.setattr(requeue, "latest_run_skipping_requeues", fail)
+    elif state != "included":
+        updates = {"nonpark": ("completed", run["ended_at"], LANDED),
+                   "unfinished": ("continued", None, LANDED),
+                   "empty_summary": ("continued", run["ended_at"], "")}
+        conn.execute("UPDATE task_runs SET outcome=?,ended_at=?,summary=? WHERE id=?", (*updates[state], run["id"]))
+        conn.commit()
+    monkeypatch.setattr(sync, "load_identity", lambda: SimpleNamespace(gateway="emitting-worker"))
+    monkeypatch.setattr(git_fingerprint, "process_boot_fingerprint", lambda _: "git:HEAD:" + "a" * 40)
+    assert pu.post_notice(conn, tid, tid, wait_key="diagnostic", waited_seconds=1900,
+                          ready_seconds=1900, kind=kind)
+    [payload] = _notices(conn, tid, kind)
+    diagnostic = payload["checkpoint_diagnostic"]
+    assert diagnostic["reason"] == state
+    assert diagnostic["emitter_gateway"] == "emitting-worker"
+    assert diagnostic["emitter_pid"] == os.getpid()
+    assert diagnostic["core_revision"] == "a" * 40
+    if state not in {"no_run", "lookup_error"}:
+        assert diagnostic["run_id"] == run["id"]
+        assert diagnostic["outcome"] == ("completed" if state == "nonpark" else "continued")
+        assert diagnostic["ended_at"] == (None if state == "unfinished" else run["ended_at"])
+    assert ("last_checkpoint" in payload) == (state == "included")
+    assert LANDED not in json.dumps(diagnostic)
+    assert "private detail" not in json.dumps(diagnostic)
+    assert not pu.post_notice(conn, tid, tid, wait_key="diagnostic", waited_seconds=1900,
+                              ready_seconds=1900, kind=kind)
+
+
+@pytest.mark.parametrize("guard", [None, "active_pr"])
+def test_sweep_records_checkpoint_before_or_after_guard_observation(conn, monkeypatch, guard):
+    tid = _continued(conn)
+    _subscribe(conn, tid)
+    _age(conn, tid)
+    monkeypatch.setattr(pu, "_place", lambda *_: {
+        "lane": "respawn_guard" if guard else "skipped_ineligible", "reason": guard,
+        "board": "default", "observed_at": int(time.time()),
+    })
+    assert cw.sweep(conn) == 1
+    [payload] = _notices(conn, tid, cw.NOTICE_KIND)
+    assert payload["checkpoint_diagnostic"]["reason"] == "included"
+    assert payload["last_checkpoint"] == LANDED
+    assert payload["respawn_guard"] == guard
+    assert cw.sweep(conn) == 0
+
+
+def test_unknown_boot_and_unenrolled_emitter_still_posts(conn, monkeypatch):
+    from hermes_cli import git_fingerprint
+    from hermes_cli import kanban_sync_client as sync
+    monkeypatch.setattr(git_fingerprint, "process_boot_fingerprint", lambda _: None)
+    def unavailable():
+        raise sync.SyncUnavailable("private path")
+    monkeypatch.setattr(sync, "load_identity", unavailable)
+    tid = _continued(conn)
+    _subscribe(conn, tid)
+    _age(conn, tid)
+    assert cw.sweep(conn) == 1
+    [payload] = _notices(conn, tid, cw.NOTICE_KIND)
+    diagnostic = payload["checkpoint_diagnostic"]
+    assert diagnostic["core_revision"] is None
+    assert diagnostic["emitter_gateway"] is None
+    assert diagnostic["emitter_host"]
+    assert diagnostic["reason"] == "included"
+    assert "private path" not in json.dumps(diagnostic)
+
+
 @pytest.mark.parametrize("render", [cw.notice_text, pu.notice_text])
 def test_old_payload_without_the_field_renders_unchanged(render):
     old = {"parent": "t_old", "parent_title": "old card", "wait_minutes": 40, "ready_minutes": 35,

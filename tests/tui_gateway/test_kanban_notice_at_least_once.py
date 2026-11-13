@@ -146,6 +146,23 @@ def test_notice_row_is_written_before_the_turn_and_the_claim_acked(gate, sdb):
     assert sub["inflight_from"] is None and sub["inflight_pid"] is None, "acked once durable"
 
 
+def test_storeless_notice_turn_is_still_typed_kanban_notice(gate, monkeypatch):
+    """No session store (the "unkeyed" fallback): the turn writes its own user row, which must still be typed
+    ``kanban_notice``, or a chat's relay check takes the notice text for the person's reply (review 5878871802)."""
+    @contextlib.contextmanager
+    def _no_store(session):
+        yield None
+
+    monkeypatch.setattr(server, "_session_db", _no_store)
+    tid = _task()
+    _complete(tid)
+    server._notif_poll_kanban_scoped("ui", _session())
+    assert len(gate["submitted"]) == 1
+    _sid, text, kwargs = gate["submitted"][0]
+    assert tid in text and kwargs.get("display_kind") == "kanban_notice"
+    assert kwargs["display_metadata"]["display_text"] == text
+
+
 def test_redelivery_after_a_crash_between_write_and_ack_does_not_duplicate(gate, sdb):
     tid = _task()
     before = _sub(tid)["last_event_id"]

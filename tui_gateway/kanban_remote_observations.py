@@ -4,7 +4,9 @@ from __future__ import annotations
 import contextlib
 import json
 import threading
+from collections import OrderedDict
 from pathlib import Path
+from weakref import WeakValueDictionary
 from hermes_cli.kanban_withdrawal_notice import envelope as _withdrawal
 from tui_gateway.kanban_remote_notice_state import state as _notice_state
 
@@ -13,7 +15,7 @@ _memo: dict[tuple, tuple] = {}
 _generation: dict[tuple, int] = {}  # observe key -> ledger writes started, so only the newest publishes its memo
 
 
-def _snapshot(replica: Path, previous=None) -> tuple[bool, list[tuple] | None, tuple | None]:
+def _snapshot(replica: Path, previous, decoded: dict) -> tuple[bool, list[tuple] | None, tuple | None]:
     """Read readiness and ALL canonical terminal states from the same SQLite snapshot.
 
     The hub client sets gateway before pulling and commits each feed page. Until
@@ -48,16 +50,8 @@ def _snapshot(replica: Path, previous=None) -> tuple[bool, list[tuple] | None, t
                     if isinstance(task, dict) and (task.get("status") in _TERMINAL or _withdrawal(task) is not None):
                         cards.append((owner, key, task))
             return ready, cards, signature
-        cards = _changed_rows_cards(conn, replica, meta.get("gateway"))
+        cards = _changed_rows_cards(conn, replica, meta.get("gateway"), decoded)
     return ready, cards, signature
-
-
-# (replica, owner, key) -> (seq, terminal summary or None). The replica holds thousands of
-# task rows (~30 MB of JSON on a busy fleet) and its signature moves whenever any card does,
-# so decoding every row per change kept the notice pollers busy while Desktop sat idle. A row
-# is re-read only when its seq moved; the summary keeps just the fields _persist reads.
-_decoded: dict[tuple, tuple] = {}
-_decoded_files: dict[str, tuple | None] = {}  # replica -> file identity its _decoded rows came from
 
 
 def _summary(task) -> dict | None:
@@ -86,11 +80,18 @@ def _terminal_states():
     return _TERMINAL
 
 
-def _changed_rows_cards(conn, replica: Path, me) -> list[tuple]:
+def _changed_rows_cards(conn, replica: Path, me, decoded: dict) -> list[tuple]:
+    """``decoded`` is the caller's (replica, owner, key) -> (seq, terminal summary or None) map.
+
+    The replica holds thousands of task rows (~30 MB of JSON on a busy fleet) and its signature moves whenever any
+    card does, so decoding every row per change kept the notice pollers busy while Desktop sat idle. A row is
+    re-read only when its seq moved; the summary keeps just the fields _persist reads. ``observe`` owns one map per
+    replica lane (``_ReplicaFlight.decoded``), so no module-level map outlives a lane.
+    """
     from tui_gateway.kanban_remote_notices import _canonical
 
-    # One SQLite result row avoids a GIL reacquisition per task while observe's
-    # shared lock is held; payload point reads remain proportional to changes.
+    # One SQLite result row avoids a GIL reacquisition per task;
+    # payload point reads remain proportional to changes.
     sql = "SELECT json_group_array(json_array(gw, key, seq, NULL)) FROM replica WHERE coll = 'tasks'"
     row = conn.execute(sql + " AND gw != ?", (me,)).fetchone() if me else conn.execute(sql).fetchone()
     rows = _canonical([tuple(item) for item in json.loads(row[0])])
@@ -100,18 +101,18 @@ def _changed_rows_cards(conn, replica: Path, me) -> list[tuple]:
     for owner, key, seq, _ in rows:
         ident = (tag, owner, key)
         seen.add(ident)
-        hit = _decoded.get(ident)
+        hit = decoded.get(ident)
         if hit is None or hit[0] != seq:
             raw = conn.execute("SELECT data FROM replica WHERE gw = ? AND coll = 'tasks' AND key = ?",
                                (owner, key)).fetchone()
             summary = None
             with contextlib.suppress(TypeError, ValueError):
                 summary = _summary(json.loads(raw[0])) if raw else None
-            hit = _decoded[ident] = (seq, summary)
+            hit = decoded[ident] = (seq, summary)
         if hit[1] is not None:
             cards.append((owner, key, hit[1]))
-    for ident in [ident for ident in _decoded if ident[0] == tag and ident not in seen]:
-        del _decoded[ident]
+    for ident in [ident for ident in decoded if ident[0] == tag and ident not in seen]:
+        del decoded[ident]
     return cards
 
 
@@ -197,6 +198,52 @@ def _file_id(path: Path) -> tuple | None:
         return None
 
 
+class _ReplicaFlight:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.decoded = {}
+        self.result = None
+
+    def read(self, replica, stamp, ident):
+        from tui_gateway.kanban_replica_observer import file_identity, fingerprint
+
+        previous = self.result
+        if previous is not None and stamp is not None and previous[3] == stamp:
+            return previous
+        if ident is None or previous is None or previous[4] != ident:
+            self.decoded.clear()
+            previous = None
+        ready, cards, signature = _snapshot(replica, previous[2] if previous else None, self.decoded)
+        if cards is None:
+            cards = previous[1]
+        after = fingerprint(replica)
+        if stamp is None or after != stamp:
+            stamp = None
+            ident = ident if file_identity(after) == ident else None
+        self.result = (ready, cards, signature, stamp, ident)
+        return self.result
+
+
+# Active callers retain their lane even when its idle-cache slot is evicted.
+# Weak indexing prevents a second lane for that replica until all borrowers finish.
+_flights: WeakValueDictionary = WeakValueDictionary()
+_retained: OrderedDict = OrderedDict()
+
+
+def _replica_flight(tag):
+    evicted = []  # Drop large decoded maps only after releasing the publication lock.
+    with _lock:
+        flight = _flights.get(tag)
+        if flight is None:
+            flight = _ReplicaFlight()
+            _flights[tag] = flight
+        _retained[tag] = flight
+        _retained.move_to_end(tag)
+        while len(_retained) > 16:
+            evicted.append(_retained.popitem(last=False))
+    return flight
+
+
 def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
     """Only changed replica snapshots decode cards and touch the observation ledger.
 
@@ -211,40 +258,38 @@ def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
 
     ledger = Path(ledger) if ledger is not None else ledger_path()
     key = (str(replica.resolve()), str(ledger.resolve()))
-    tag = str(replica)
-    with _lock:
+    flight = _replica_flight(key[0])
+    # Wait/read/decode on this replica's lane, never on the publication lock. Keep the lane through generation
+    # assignment: generations then follow snapshot order, so an older snapshot whose ledger write finishes last
+    # cannot publish over a newer one's memo (pinned by test_lane_is_held_through_generation_...).
+    with flight.lock:
         stamp = fingerprint(replica)
         ident = file_identity(stamp)
-        cached = _memo.get(key)  # (signature, fresh, ledger id, key or None, replica file identity)
-        if cached is not None and (cached[2] != _file_id(ledger) or cached[4] != ident):
-            _memo.pop(key)  # a replaced ledger, or a replaced/recreated/unreadable replica
-            cached = None
-        if cached is not None and stamp is not None and cached[3] == stamp:
-            return cached[1]
-        if ident is None or _decoded_files.pop(tag, None) != ident:
-            _forget_decoded(tag)  # another db file may reuse a key at an equal seq with other contents
-        ready, cards, signature = _snapshot(replica, cached[0] if cached else None)
-        after = fingerprint(replica)
-        if stamp is None or after != stamp:
-            stamp = None  # a commit raced the read: keep nothing that would skip the next poll
-            ident = ident if file_identity(after) == ident else None
-        _decoded_files[tag] = ident
-        while len(_decoded_files) > 16:
-            _forget_decoded(next(iter(_decoded_files)))
+        ledger_id = _file_id(ledger)
+        with _lock:
+            cached = _memo.get(key)
+            if cached is not None and (cached[2] != ledger_id or cached[4] != ident):
+                _memo.pop(key)
+                cached = None
+            if cached is not None and stamp is not None and cached[3] == stamp:
+                return cached[1]
+        ready, cards, signature, stamp, ident = flight.read(replica, stamp, ident)
         if not ready:
             return {}
-        if cards is None and cached is not None:
-            fresh = cached[1]
-            _remember(key, (signature, fresh, _file_id(ledger), stamp, ident))
-            return fresh
-        _generation[key] = generation = _generation.get(key, 0) + 1
+        with _lock:
+            if cached is not None and signature is not None and signature == cached[0]:
+                fresh = cached[1]
+                _remember(key, (signature, fresh, ledger_id, stamp, ident))
+                return fresh
+            _generation[key] = generation = _generation.get(key, 0) + 1
     # [daveey] The ledger write runs without ``_lock``: holding it there kept every notice poller waiting on one
     # poller's transaction. ``cards`` is this call's own snapshot, so the answer is the one it would have had under
     # the lock; only the newest snapshot started for ``key`` publishes its memo, and only after its commit.
     fresh = _persist(key[0], cards or [], ledger, now)
+    ledger_id = _file_id(ledger)
     with _lock:
         if _generation.get(key) == generation:
-            _remember(key, (signature, fresh, _file_id(ledger), stamp, ident))
+            _remember(key, (signature, fresh, ledger_id, stamp, ident))
         return fresh
 
 
@@ -257,8 +302,3 @@ def _remember(key: tuple, entry: tuple) -> None:
     while len(_memo) > 16:
         _memo.pop(next(iter(_memo)))
 
-
-def _forget_decoded(tag: str) -> None:
-    _decoded_files.pop(tag, None)
-    for ident in [ident for ident in _decoded if ident[0] == tag]:
-        del _decoded[ident]

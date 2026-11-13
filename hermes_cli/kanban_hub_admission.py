@@ -6,6 +6,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -16,8 +17,9 @@ _log = logging.getLogger(__name__)
 MODEL = "claude-sonnet-5-5"
 PROVIDER = "anthropic"
 TIMEOUT = 30
-NEEDS = frozenset({"hub_chrome", "board_admin_key", "instance_role_ssm", "user_terminal",
-                   "hub_worktree", "gateway_key_cli", "hub_live_process"})
+# The hub-admission-test rubric's allowlist. Board admin key and instance-role SSM are not on it: hub-admin from
+# a capability:hub-write worker reaches both, so a verdict naming either is invalid (deny).
+NEEDS = frozenset({"hub_chrome", "user_terminal", "hub_worktree", "gateway_key_cli", "hub_live_process"})
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,78 @@ def _skill():
     return body, hashlib.sha256(text.encode()).hexdigest()
 
 
+# A card producer's own placement sentence ("Pinned to the gateway that filed it: <why>") is that producer's
+# self-assertion about where its card should run, written before any admission. It is never evidence of an
+# allowlisted hub-only need: t_01a1cf7f8f211403 was admitted `hub_live_process` on exactly that sentence, while a
+# capability:hub-write worker could do every step with ssh and hub-admin. [daveey]
+SELF_ASSERTIONS = ("pinned to the gateway that filed it", "pinned to the machine that filed it")
+SELF_ASSERTION_WHY = "the evidence is the producer's own placement sentence, not a hub-only need"
+
+
+def self_assertion(quote):
+    """True when an admission quote leans on a producer's pin sentence (any case, any surrounding text)."""
+    text = " ".join(str(quote or "").split()).lower()
+    return any(marker in text for marker in SELF_ASSERTIONS)
+
+
+_PIN = re.compile("|".join(r"\s+".join(map(re.escape, m.split())) for m in SELF_ASSERTIONS), re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n[ \t]*\n")
+# A "." ending one of these words, or a dotted run of single letters ("e.g", "U.S"), abbreviates rather than ends
+# the sentence: stopping there let the wrapped rest of a pin escape its span (review 5884663184). Any other dotted
+# token (a filename, version, URL or ellipsis) and "no." do end it, or real evidence on the next line would be
+# denied as pin text (review 5884844910). [daveey]
+_ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "viz", "approx", "incl", "esp", "al", "mr", "mrs",
+                            "ms", "dr", "st"})
+_LETTER_DOTS = re.compile(r"(?:[^\W\d_]\.)+[^\W\d_]")
+_LAST_WORD = re.compile(r"[\w.]*$")
+
+
+def _sentence_end(text, pos):
+    """The first sentence terminator (or blank line) at or after ``pos``, skipping abbreviation dots."""
+    for stop in _SENTENCE_END.finditer(text, pos):
+        if text[stop.start()] == ".":
+            last = _LAST_WORD.search(text, max(0, stop.start() - 32), stop.start())
+            word = last.group().lower() if last else ""
+            if word in _ABBREVIATIONS or _LETTER_DOTS.fullmatch(word):
+                continue
+        return stop
+    return None
+
+
+def _pin_spans(text):
+    """``[start, end)`` of every pin line in ``text``: the marker's whole line, run on to the sentence's end
+    when the producer wrapped it (never past a blank line).
+
+    Deliberately coarse and fail-safe (review 5884663184): the span is the pin's WHOLE line, so other text on that
+    line after the pin sentence counts as pin text, and a pin with no terminator and no blank line runs to the end
+    of the field. A quote found only there is denied as self-assertion; evidence the card also states outside a
+    pin span is still judged on that text (``quotes_pin_sentence``)."""
+    spans = []
+    for match in _PIN.finditer(text):
+        start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        stop = _sentence_end(text, match.end())
+        spans.append((start, max(len(text) if line_end < 0 else line_end, stop.end() if stop else len(text))))
+    return spans
+
+
+def quotes_pin_sentence(quote, fields, hub_reason):
+    """True when ``quote`` is a producer's pin sentence: it names the marker, or every verbatim occurrence of it
+    in the card overlaps a pin line (the rationale tail alone, review t_01a1d24d488edbd9). [daveey]"""
+    if self_assertion(quote):
+        return True
+    quote = str(quote or "")
+    found = False
+    for item in (fields.get("title") or "", fields.get("body") or "", hub_reason or ""):
+        spans, at = _pin_spans(item), item.find(quote) if quote else -1
+        while at >= 0:
+            found = True
+            if not any(at < end and at + len(quote) > start for start, end in spans):
+                return False
+            at = item.find(quote, at + 1)
+    return found
+
+
 def validated(result, fields, hub_reason, sha):
     """The Verdict for a well-formed, evidence-checked ``{admit, need, evidence, why}`` dict, else None."""
     if not isinstance(result, dict) or set(result) != {"admit", "need", "evidence", "why"}:
@@ -63,6 +137,8 @@ def validated(result, fields, hub_reason, sha):
         inputs = (fields.get("title") or "", fields.get("body") or "", hub_reason or "")
         if need is None or not quote.strip() or not any(quote in item for item in inputs):
             return None
+        if quotes_pin_sentence(quote, fields, hub_reason):
+            return None  # a producer's self-assertion: invalid as admission evidence (deny), cached copies too
     return Verdict(**result, skill_sha=sha)
 
 
@@ -71,7 +147,18 @@ def _parse(text, fields, hub_reason, sha):
         result = json.loads(text)
     except (ValueError, TypeError):
         result = None
-    return validated(result, fields, hub_reason, sha) or Verdict(why="invalid admission verdict", skill_sha=sha)
+    verdict = validated(result, fields, hub_reason, sha)
+    if verdict is not None:
+        return verdict
+    if pin_quoting_admit(result, fields, hub_reason):
+        return Verdict(why=f"invalid admission verdict: {SELF_ASSERTION_WHY}", skill_sha=sha)
+    return Verdict(why="invalid admission verdict", skill_sha=sha)
+
+
+def pin_quoting_admit(result, fields, hub_reason):
+    """True when ``result`` admits on a producer's pin sentence (so a deny can carry SELF_ASSERTION_WHY)."""
+    return (isinstance(result, dict) and result.get("admit") is True and isinstance(result.get("evidence"), str)
+            and quotes_pin_sentence(result["evidence"], fields, hub_reason))
 
 
 def _cache(key, verdict=None):

@@ -123,6 +123,9 @@ def current_portable(conn, row, cfg):
         args["project_id"] = row.get("project_id") or created.get("project_id")
         args["board"] = "default"
         args["runs_on"] = None  # Board preserves/rechecks the replacement's other labels.
+        from hermes_cli.kanban_mandatory_pin import worker_first_refusal
+        if worker_first_refusal(args):
+            return False  # recovery assigns through the worker-first lease, which cannot demand the pin label
         for key in ("requires", "skills"):
             args[key] = json.loads(args[key]) if isinstance(args.get(key), str) else args.get(key)
             if args[key] is not None and (not isinstance(args[key], list)

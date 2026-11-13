@@ -327,6 +327,8 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     if not rows:
         return gone
     held = _guard_held(conn, [tid for (tid,) in rows])
+    from hermes_cli import kanban_replica_lag as lag  # never hand a held copy to a replica behind our push
+    held |= lag.held_copies(conn, _replica_path(conn), [tid for (tid,) in rows if tid not in held])
     present = {t for t in (*_CHILD_TABLES, "task_chat_links")
                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone()}
     from hermes_cli.kanban_db_connect import write_txn
@@ -652,8 +654,11 @@ def pickup(conn: sqlite3.Connection, *, budget: Any,
     try:
         picked, skips = _evaluate(conn, replica, own, mode=mode, limit=limit, profile_exists=profile_exists,
                                   full_detail="pickup batch full this tick", held=held)
+        from hermes_cli import kanban_replica_lag as lag  # copied back next tick, once the replica holds our push
+        behind = lag.lagging(_replica_path(conn), picked)
+        skips.update({tid: ("other", "replica behind this gateway's push") for tid in behind})
         # [daveey] The hub judges a hub-bound foreign card before copying it (t_01a1cf65a941bf43).
-        picked, plans, judged = admission.screen(conn, replica, own, picked)
+        picked, plans, judged = admission.screen(conn, replica, own, [tid for tid in picked if tid not in behind])
         skips.update(judged)
         imported = import_cards(conn, replica, picked)
     finally:

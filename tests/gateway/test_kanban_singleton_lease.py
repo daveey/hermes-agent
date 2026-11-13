@@ -392,3 +392,34 @@ def test_lease_acquire_loop_sleeps_the_leases_retry_interval(root, monkeypatch):
     monkeypatch.setattr(runner, "_sleep_between_ticks", between)
     assert asyncio.run(runner._acquire_kanban_lease(Lease())) is True
     assert sleeps == [2.0, 2.0]
+
+
+def test_root_claim_fast_retry_backs_off_against_a_holder_that_never_yields(root):
+    """PR #1519 review nit: against a holder that never yields (another root gateway, or a wedged profile gateway) the
+    root lease retried, and rewrote its root-claim JSON, every 2 s without bound. The fast retry lasts
+    ROOT_CLAIM_FAST_RETRY_WINDOW_SECONDS (~30 s) of contention; after that it falls back to retry_seconds."""
+    clock = Clock()
+    holder = _lease(root, is_root=False, clock=clock, name="sync", grace=0.0)
+    assert holder.try_acquire()
+    rootl = _lease(root, is_root=True, clock=clock, name="sync")
+    start, intervals = clock.now, []
+    while clock.now - start < 150.0:
+        assert not rootl.try_acquire() and rootl.state == "contended"
+        interval = rootl.retry_interval()
+        intervals.append((clock.now - start, interval))
+        clock.now += interval
+    window = ks.ROOT_CLAIM_FAST_RETRY_WINDOW_SECONDS
+    assert 20.0 <= window <= 40.0
+    fast = [i for t, i in intervals if t < window]
+    slow = [i for t, i in intervals if t >= window]
+    assert fast and set(fast) == {ks.ROOT_CLAIM_RETRY_SECONDS}
+    assert slow and set(slow) == {30.0}  # retry_seconds again; bounded claim rewrites
+    assert len(intervals) <= window / ks.ROOT_CLAIM_RETRY_SECONDS + 1 + 120.0 / 30.0 + 1
+    holder.release()
+    assert rootl.try_acquire() and rootl.retry_interval() == 30.0
+    # A later contention episode gets the fast retry again.
+    rootl.release()
+    holder2 = _lease(root, is_root=False, clock=clock, name="sync", grace=0.0)
+    assert holder2.try_acquire()
+    assert not rootl.try_acquire() and rootl.retry_interval() == ks.ROOT_CLAIM_RETRY_SECONDS
+    holder2.release()

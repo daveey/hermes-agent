@@ -22,8 +22,9 @@ starts beside the CPU advisory sampler and closes (bounded join) in the same ``f
   404/405 backoff holds). Not ON: it does nothing that tick.
 - Every send of this thread (CPU-bearing or not, the 400 compatibility retries included) goes through
   ``kanban_sync_client._bounded_call``: a private Hub(ident) and connection per send, a hard 2 s wall budget, never
-  resent. The loop's kept-alive ``hub`` is never touched. A 400 compatibility retry is a second (or third) send, each
-  bounded to 2 s, so one report can take at most 3 x 2 s; ordinary reports make one.
+  resent. The loop's kept-alive ``hub`` is never touched. On eligible 400 responses, compatibility retries drop the
+  model map, then throughput counters, then drain/admission fields; CPU busy fields are stripped on the first retry.
+  This permits four sequential sends, each bounded to 2 s, for at most 4 x 2 s = 8 s of send time; ordinary reports make one.
 - The loop still calls ``sync_timing.report(sender.loop_report)`` every iteration. While this thread is alive, saw
   the root limit ON at its latest tick and finished that tick within :data:`STALL_PERIODS` periods, ``loop_report``
   returns False without collecting or sending (a component-free ``not_sent`` timing record). That check reads

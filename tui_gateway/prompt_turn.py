@@ -233,6 +233,20 @@ def _carry_paused_marker(session: dict, home, marker_key: str) -> bool:
     return True
 
 
+def _carried_pause_key(session: dict) -> str:
+    """[daveey] The paused turn's marker key a synthesized turn runs over (``_carry_paused_marker``), or "".
+
+    Such a turn writes no marker of its own, but it still holds an admission reservation, and hermes-sync's
+    drainer skips ``core_update_pause`` markers, so it never waits on it. Without a step-boundary hook it ran
+    straight through the next drain window, and an instant apply (which refuses a reservation no gateway
+    publishes) deferred until it ended: hermes-hub 2026-11-13, one notification turn ran 12 min and the core
+    update stayed deferred for over an hour (t_01a1d3083b2dae09). With the hook it ends at its next step
+    boundary like any turn; the pause it lands on is the one it carries (``mark_turn_paused`` does not count it
+    again), and ``_rearm_carried_pause_watcher`` continues the paused turn after the window."""
+    with session["history_lock"]:
+        return str(session.get("_paused_marker_carried") or "")
+
+
 def _rearm_carried_pause_watcher(sid: str, session: dict, st) -> None:
     """[daveey] A synthesized turn that ran over a core-update-paused marker re-arms the in-place watcher however
     it ended (complete, raised, refused at prepare): otherwise, on a backend that already restarted, nothing
@@ -1013,11 +1027,12 @@ def _invoke_agent(
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
     # [daveey] Core-update pause: consulted by the agent loop at each step boundary of this turn only.
     from tui_gateway.update_pause import boundary_pause_hook, install_clarify_pause_provider, start_mid_tool_cancel
-    agent.step_boundary_pause = boundary_pause_hook(session, st.marker_key) if st.marker_key else None
+    pause_key = st.marker_key or _carried_pause_key(session)
+    agent.step_boundary_pause = boundary_pause_hook(session, pause_key) if pause_key else None
     _mid_tool_stop = None
-    if st.marker_key:
+    if pause_key:
         install_clarify_pause_provider()  # a blocked clarify is withdrawn so the pause can land
-        _mid_tool_stop = start_mid_tool_cancel(session, st.marker_key, agent)  # so is a long tool call, after a grace
+        _mid_tool_stop = start_mid_tool_cancel(session, pause_key, agent)  # so is a long tool call, after a grace
     try:
         from agent.notification_presentation import notification_turn, event_presentation_muted
         with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
@@ -1351,7 +1366,7 @@ def _run_admitted_prompt(
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
     turn_author: dict | None = None, auto_continue: bool = True,
-    report_ownership_refusal: bool = True) -> bool:
+    report_ownership_refusal: bool = True, input_origin: str = "") -> bool:
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -1369,6 +1384,9 @@ def _run_admitted_prompt(
             settle(session)
         return False
     images, agent = admitted
+    # [daveey] pre_llm_call's input_origin (tui_gateway/human_input.py): set every turn, so an injected turn
+    # (Kanban notice, auto-continue, queued drain) reads "" instead of the last client submit's origin.
+    agent._input_origin = input_origin
     from gateway.warning_notifications import diagnostic_turn_muted
     from agent.notification_presentation import notification_config_snapshot
     with _session_profile_runtime_scope(session):
@@ -1450,9 +1468,10 @@ def _run_admitted_prompt(
                 _emit("message.complete", sid, payload)
                 if paused_for_update:
                     update_pause.start_in_place_watcher(sid, session, st.marker_key)
-            from tui_gateway.turn_outcome import concluding_turn_identity
+            from tui_gateway.turn_outcome import turn_sid, concluding_turn_identity
             concluding = concluding_turn_identity(st.agent, st.own_marker)
-            _schedule_refused_turn_retry(sid, session, st.marker_key, concluding)
+            _schedule_refused_turn_retry(sid, session, st.marker_key, concluding,
+                outcome_sid=turn_sid(session, st.agent))
             if status == "complete":
                 # [daveey] This turn's context carried any failed delivery already in the transcript.
                 automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))
@@ -1471,10 +1490,10 @@ def _run_admitted_prompt(
             automation_replay.schedule_for_turn(session, st)
         finally:
             # Capture before admission reopens: the reused agent may then hold the next turn's lease.
-            from tui_gateway.turn_outcome import concluding_turn_identity
+            from tui_gateway.turn_outcome import turn_sid, concluding_turn_identity
             if concluding is None:
                 concluding = concluding_turn_identity(st.agent, st.own_marker)
-            outcome_sid = str(getattr(st.agent, "session_id", "") or session.get("session_key") or "")
+            outcome_sid = turn_sid(session, st.agent)
             automation_replay.remove_failure_copy(st)
             _release_turn_scopes(sid, session, st)
             try:  # a raising settle step must not skip the trim / HERMES_HOME reset

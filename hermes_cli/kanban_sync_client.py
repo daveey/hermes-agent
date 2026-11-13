@@ -41,14 +41,17 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_replica_lag as lag  # pushed rows the replica holds only after its next pull
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
 from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-window state, re-exported
-    _REPAIR_CREDIT, _REPAIR_DEFERRED, _REPAIRED, _REPAIRED_AT, applies_chain, deferred_repairs_due, next_deferred_repair,
+    _REPAIR_CREDIT, _REPAIR_DEFERRED, _REPAIRED, _REPAIRED_AT, applies_chain, decide, deferred_repairs_due,
+    next_deferred_repair, note_round, reset as reset_repair_window,
 )
+from hermes_cli.kanban_sync_own_writes import credited, reset as reset_own_writes, take as take_credited
 
 _log = logging.getLogger(__name__)
 
@@ -221,7 +224,11 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
     worker.join(max(0.0, deadline - time.monotonic()))
     if worker.is_alive():
         if probe is not None:
-            probe["worker"] = schedstat(worker.native_id)
+            # The worker's socket times out at this same deadline, so it may exit between is_alive() and this read.
+            # Its task entry goes only after run() returned, whose finally already stored its own schedstat.
+            stat = schedstat(worker.native_id)
+            if stat is not None:
+                probe["worker"] = stat
         with expiry:
             box["expired"] = True
             if "conn" in box:
@@ -690,6 +697,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     from hermes_cli.kanban_sync_omissions import acknowledge
                     sent = next(op.get('fields', {}) for op in wire if op['client_op_id'] == op_id)
                     acknowledge(conn, op_id, res.get("row"), sent=sent)
+                    lag.acked(shadow_path(board), lag.acked_task_ids([row]))  # the replica has it after its next pull
                     conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id = ?", (op_id,))
                     if row["table_name"] == "tasks" and row["op"] != "release" and res.get("version"):
                         conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
@@ -824,11 +832,10 @@ def _child_task(conn: sqlite3.Connection, table: str, uid: str) -> Optional[str]
 
 
 def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
-         partition: Optional[str] = None, revisions: Optional[list] = None) -> int:
+         partition: Optional[str] = None) -> int:
     """Apply every feed page after this file's cursor. Returns the number of changes read. On a board with an
     outbox (primary), fields with an unanswered local edit are not overwritten; ``partition`` (a gateway name)
-    keeps only that gateway's cards. ``revisions`` gets each apply's (before, after) repair revision, in order
-    (``_defer_repair`` credits a live change made only by these applies). [daveey]"""
+    keeps only that gateway's cards. [daveey]"""
     from hermes_cli.kanban_sync_stop import checkpoint
     total = 0
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
@@ -848,10 +855,8 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             return total
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
-        applied = sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
-                                            local_pending_wins=True)
-        if revisions is not None:
-            revisions.append((applied.revision_before, applied.revision_after))
+        sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
+                                  local_pending_wins=True)
         total += len(page.get("changes", []))
         cursor = nxt
         if not page.get("more"):
@@ -903,7 +908,7 @@ class RoundResult:
     error: Optional[str] = None
     repaired: dict[str, list[str]] = field(default_factory=dict)  # cards re-pushed by repair_divergence
     rejection_resolutions: list[dict] = field(default_factory=list)
-    repair_deferred: bool = False  # a replica-only change waits for the repair window (see ``_defer_repair``)
+    repair_deferred: bool = False  # a replica-only change waits for the repair window (see ``decide``)
 
 
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
@@ -924,6 +929,7 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
     with ExitStack() as stack:
         replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
         rebuilt = False
+        generation = lag.pull_started(path)  # done only below: a failed pull leaves this gateway's pushes lagging
         try:
             pulled = pull(replica, hub, slug, observers=False)
         except Resync:
@@ -934,6 +940,7 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
             replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
             pulled = resync(replica, hub, slug, observers=False)
+        lag.pull_done(path, generation)
         try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
             sync.mark_pulled(replica)
         except sqlite3.Error as exc:
@@ -972,10 +979,11 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         ensure_identity(live, slug, gateway)
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
-            applies: Optional[list] = []  # (before, after) repair revision of each live apply; None = a rebuild
+            applies: Optional[list] = []  # credited revision steps (kanban_sync_own_writes); None = a rebuild
             if mode == "primary":
                 try:
-                    pull(live, hub, slug, observers=True, partition=gateway, revisions=applies)
+                    with credited(live):
+                        pull(live, hub, slug, observers=True, partition=gateway)
                 except Resync:
                     _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
                     applies = None
@@ -983,9 +991,14 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             from hermes_cli.kanban_sync_repair_revision import ensure_revision
             ensure_revision(live)
             inputs = _repair_inputs(path, replica, mode, gateway)
+            # Every step credited since the last round's read: its acks, mirror and reserves, then this pull.
+            steps = take_credited(live)
+            applies = None if applies is None else steps
             key = str(path)
+            outcome = "unchanged"
             if inputs is None or _REPAIRED.get(key) != inputs:
-                deferred = not rebuilt and _defer_repair(key, inputs, applies)
+                outcome = "rebuilt" if rebuilt else decide(key, inputs, applies, _repair_clock(), REPLICA_REPAIR_MIN_S)
+                deferred = outcome == "deferred"
                 from hermes_cli.kanban_sync_partition_repair import repair_partition_chat_links, repair_partition_links
                 if not deferred:
                     from hermes_cli import kanban_sync_partition_content as partition_content
@@ -994,7 +1007,9 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                         repair_partition_links(live, replica, gateway)
                         repair_partition_chat_links(live, replica, gateway)
                 # The remote-parent mirror is cheap and gates child promotion, so a deferral never delays it.
-                if mode == "primary" and sync.refresh_remote_parents(live, replica):
+                with credited(live):  # copied from the replica (already an input), not a local edit
+                    moved = mode == "primary" and sync.refresh_remote_parents(live, replica)
+                if moved:
                     sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
                 if deferred:
                     result.repair_deferred = True
@@ -1008,18 +1023,21 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                         _REPAIRED[key] = inputs
                         _REPAIRED_AT[key] = _repair_clock()
                     _REPAIR_CREDIT.pop(key, None)
+            note_round(slug, outcome, _repair_clock())
             if mode == "primary":
                 heal_clobbered_completions(live)
                 from hermes_cli.kanban_sync_divergence import heal_running_over_ended_run
                 heal_running_over_ended_run(live)
-        result.push = push(live, hub, slug, gateway, primary=mode == "primary")
+        with credited(live):  # acknowledgements and the Board's merged rows: sync bookkeeping, not local edits
+            result.push = push(live, hub, slug, gateway, primary=mode == "primary")
         from hermes_cli.kanban_sync_attachments import transfer_pending
         transfer_pending(live, hub, slug)
         from hermes_cli.kanban_sync_rejections import resolve_rejections
         result.rejection_resolutions = resolve_rejections(live, hub, slug)
         if mode == "primary":
             from hermes_cli.kanban_worker_placement import reevaluate
-            reevaluate(live, hub, slug, gateway)
+            with credited(live):  # reservation observations and the feed pull after them
+                reevaluate(live, hub, slug, gateway)
         return result
 
 
@@ -1362,39 +1380,9 @@ def reset_board_watch() -> None:
     reset()
     kanban_sync_partition_content.reset()
     _WATCH.reset()
-    _REPAIRED.clear()
-    _REPAIRED_AT.clear()
-    _REPAIR_DEFERRED.clear()
-    _REPAIR_CREDIT.clear()
+    reset_repair_window()
+    reset_own_writes()
     _LINKS_DONE.clear()
-
-
-def _defer_repair(key: str, inputs: Optional[tuple], applies: Optional[Iterable[tuple]] = ()) -> bool:
-    """True when the only repair inputs that changed since the last completed pass are the replica's feed cursor
-    and live revisions made by this round's feed applies (same replica file, schema, mode, gateway and
-    placement), and that pass finished less than ``REPLICA_REPAIR_MIN_S`` ago; records when the deferred pass is
-    due so the sync loop runs it then. Unknown inputs (None) or no completed pass never defer.
-
-    A primary board's pull applies other gateways' writes to its own cards (heartbeats, claims) into the live
-    file, which moves the live revision. ``applies`` is each apply's (before, after) revision, read inside its
-    transaction; they must chain from the credited revision (the last pass's, or the last deferring round's) to
-    this round's without a gap. Any gap is a local write the scans exist to find, so it repairs at once; so does
-    a missing pair (None: a rebuild). [daveey]"""
-    last = _REPAIRED.get(key)
-    if inputs is None or last is None or applies is None:
-        return False
-    (gen, (revision, schema)), (dev, ino, _cursor), *rest = inputs
-    (last_gen, (last_revision, last_schema)), (last_dev, last_ino, _last_cursor), *last_rest = last
-    if (gen, schema) != (last_gen, last_schema) or (dev, ino) != (last_dev, last_ino) or rest != last_rest:
-        return False
-    if not applies_chain(_REPAIR_CREDIT.get(key, last_revision), applies, revision):
-        return False
-    due = _REPAIRED_AT.get(key, float("-inf")) + REPLICA_REPAIR_MIN_S
-    if _repair_clock() >= due:
-        return False
-    _REPAIR_DEFERRED[key] = due
-    _REPAIR_CREDIT[key] = revision
-    return True
 
 
 def _repair_inputs(live_path: Path, replica: sqlite3.Connection, mode: str, gateway: str) -> Optional[tuple]:
@@ -1484,7 +1472,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     from hermes_cli.machine_cpu_sampler import AdvisorySampler
     sampler = AdvisorySampler()
     metrics.cpu_take_fn = sampler.take
-    metrics.cpu_wait_fn = getattr(sampler, "wait_fresh", None)  # the sender's bounded wait; never on this thread
+    metrics.cpu_wait_fn = sampler.wait_fresh  # the sender's bounded wait; never on this thread
     sampler.start()
     # While the CPU gate is on, reports go out on their own anchored thread, each send bounded to 2 s. [daveey]
     from hermes_cli.machine_metrics_sender import MetricsSender, board_post

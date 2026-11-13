@@ -2442,6 +2442,8 @@ def release_unadmitted_fire(
 
 # Failure kinds that never reached the agent: a later gate tick may clear a streak made only of them.
 _PRE_AGENT_ERROR_KINDS = ("fire", "gate")
+# ``last_failure.kind`` of a run its owner gateway's shutdown/restart stopped (shutdown_interrupted).
+LIFECYCLE_INTERRUPT_KIND = "lifecycle_interrupt"
 
 
 def _record_run_outcome(
@@ -2481,8 +2483,10 @@ def _record_run_outcome(
         job["failure_streak"] = 0
         job.pop("last_error_kind", None)
     elif shutdown_interrupted:
-        # Preserve diagnostic evidence without blaming the job for its owner's shutdown.
-        job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
+        # Preserve diagnostic evidence without blaming the job for its owner's shutdown. The typed
+        # ``kind`` lets consumers tell this apart without matching the prose detail.
+        job["last_failure"] = {"at": now, "detail": error or (status or "run failed"),
+                               "kind": LIFECYCLE_INTERRUPT_KIND}
     elif not cancelled:
         prior = job.get("last_error_kind") if int(job.get("failure_streak") or 0) else None
         if not (fire_error or gate_error) or prior not in (None, *_PRE_AGENT_ERROR_KINDS):
@@ -2692,6 +2696,9 @@ def claim_dispatch(job_id: str) -> bool:
         completed = repeat.get("completed", 0)
         label = job.get("name", job.get("id", "?"))
         if completed >= times:
+            from cron.scheduler_authority import admission_holds
+            if admission_holds(job, logger):
+                return False  # settlement owns the record; no dispatch and no retirement
             if job.get("last_run_at") is not None:
                 # A prior run completed normally (mark_job_run raced this tick). Retain the terminal
                 # record, as mark_job_run's repeat-limit branch does, instead of deleting the
@@ -3242,6 +3249,9 @@ def _oneshot_dispatch_limit_reached(job: dict[str, Any], scan: _DueScan) -> bool
     completed = repeat.get("completed", 0)
     if times is None or times <= 0 or completed < times:
         return False
+    from cron.scheduler_authority import admission_holds
+    if admission_holds(job, logger):
+        return True  # a dead firer can still have a canonical receipt awaiting reconciliation
     name = job.get("name", job.get("id", "?"))
     # A live run must never have its job record deleted underneath it (#62002): a run that outlives the
     # run_claim TTL (stream stall, laptop asleep mid-run) satisfies the same completed >= times +

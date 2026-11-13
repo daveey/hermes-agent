@@ -156,15 +156,16 @@ def _check(cond: Any, message: str, rejection: Optional[str] = None) -> None:
 # Stable ``rejection`` classes on every kanban_complete tool_error. Consumers
 # (coach digests, board analytics) key on these strings: add, never rename.
 COMPLETE_REJECTION_CLASSES = frozenset({
-    "goal_judge",     # goal-mode completion judge said not done / blocked
+    "review_required", "goal_judge",  # required review or goal-mode judge refused completion
     "phantom_cards",  # created_cards names ids this worker did not create
     "artifacts",      # declared artifacts could not be preserved
     "empty",          # no summary/result, or an evidence-free completion
     "live_claim",     # another live dispatcher worker owns the card
     "stale_run",      # run superseded, card already terminal, or unknown id
-    "not_running",    # card waits (scheduled/todo/ready) with no run: archive it or re-park it as a watch [daveey]
+    "not_running",    # card waits (triage/todo/scheduled/ready) with no run: archive it or re-park it as a watch [daveey]
     "foreign_card",   # card exists here only as a Board replica copy; its owner gateway must write it [daveey]
     "review_contract",  # ship review card completed without metadata ship can read [daveey]
+    "review_independence",  # ship review verdict recorded outside the card's dispatched worker run [daveey]
     "pr_acceptance",  # completion contract's PR CI acceptance refused (pr_acceptance event ok=false)
     "parents",        # unsatisfied parent dependencies
     "not_owner",      # delegate child / other task / unbound run id
@@ -535,7 +536,7 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
-    "provider_override completion_contract last_failure_error block_kind human_request".split())
+    "provider_override completion_contract review_required last_failure_error block_kind human_request".split())
 _TASK_SUMMARY_FIELDS = tuple(
     "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
     "created_at started_at completed_at current_run_id model_override provider_override block_kind human_request".split())
@@ -872,6 +873,7 @@ def _handle_list(args: dict, **kw) -> str:
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
     carries a ``rejection`` class from ``COMPLETE_REJECTION_CLASSES``."""
+    from hermes_cli.kanban_review_required import ReviewRequiredError
     try:
         tid = _worker_guard("kanban_complete", args)
     except _Reject as e:
@@ -899,10 +901,9 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
-        from hermes_cli import kanban_review_contract as _krc  # [daveey] a review ship cannot read: fix it now
-        unreadable = _krc.refusal(getattr(task, "body", None), metadata)
-        if unreadable:
-            raise _Reject(unreadable, _krc.REJECTION)
+        from hermes_cli import kanban_review_contract as _krc  # [daveey] a review ship would refuse: refuse it now
+        if refused := _krc.completion_refusal(getattr(task, "body", None), metadata, _worker_run_id(tid)):
+            raise _Reject(*refused)
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), conn=conn)
         try:
             run_id = _worker_run_id(tid)
@@ -914,12 +915,10 @@ def _handle_complete(args: dict, **kw) -> str:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
+        except ReviewRequiredError as review_err:
+            return tool_error(str(review_err), rejection="review_required")
         except kb.ArtifactPreservationError as artifact_err:
-            # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
-            # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
-            # gate runs before the write txn), so the worker can simply call kanban_complete again. Spell
-            # that out — without it the model often interprets a tool_error as a terminal failure and either
-            # blocks or crashes the run instead of retrying. See #22923.
+            # Artifact admission runs before writes: keep the worker in-flight for a corrected retry.
             return tool_error(
                 f"kanban_complete could not preserve the declared artifacts: {artifact_err}. "
                 f"Your task is still in-flight and its scratch workspace was kept. Fix the "
@@ -961,10 +960,10 @@ def _handle_complete(args: dict, **kw) -> str:
                 raise _Reject(
                     f"could not complete {tid}: unsatisfied parent dependencies: "
                     f"{detail}; complete the parents first (done or archived)", "parents")
-            if task and task.status in ("scheduled", "todo", "ready") and not _kc.pr_acceptance_refused(
-                    conn, tid, event_mark):
-                from hermes_cli.kanban_watch import NOT_RUNNING_TEMPLATE  # [daveey] not a vague "stale run"
-                raise _Reject(NOT_RUNNING_TEMPLATE.format(tid=tid, status=task.status), "not_running")
+            from hermes_cli.kanban_watch import not_running_reason  # [daveey] not a vague "stale run"
+            named = task and not_running_reason(tid, task.status)
+            if named and not _kc.pr_acceptance_refused(conn, tid, event_mark):
+                raise _Reject(named, "not_running")
             reason = (task.last_failure_error if task else None) or \
                 f"could not complete {tid} (unknown id, stale run, or already terminal)"
             _check(False, reason, "pr_acceptance" if _kc.pr_acceptance_refused(conn, tid, event_mark)
@@ -1355,27 +1354,25 @@ def _handle_comment(args: dict, **kw) -> str:
             "dispatcher-assigned task to default to. Discover task ids with "
             "kanban_list, or pass the task id you mean.")
     body = _redact(_require_text(args, "body"))
-    # Author comes from the worker's runtime identity (``_persisted_identity``), never
-    # caller args: comments are injected into future workers' system prompts, so an
-    # args["author"] override could forge a directive from ``hermes-system``.
-    # Cross-task commenting stays unrestricted — it is the handoff channel between tasks.
-    # Comments are injected into the next worker's system prompt by ``build_worker_context`` as
-    # ``**{author}** (timestamp): {body}`` — accepting an ``args["author"]`` override let a worker forge a
-    # comment from an authoritative-looking name like ``hermes-system`` and poison the future-worker context
-    # with what reads as a system directive. See #19713.
+    # Author comes from the worker's runtime identity (``_persisted_identity``), never caller args: comments are
+    # injected into future workers' system prompts (``build_worker_context``), so an ``args["author"]`` override
+    # could forge a directive from ``hermes-system``. Cross-task commenting stays unrestricted. See #19713.
     author = _persisted_identity()
     with _board(args.get("board")) as (kb, conn):
         from hermes_cli import kanban_foreign_card as _kfc
+        from hermes_cli import kanban_relayed_human as _krh
         foreign = _kfc.refusal(conn, str(tid))  # [daveey] only a replica copy here: name the owner
         if foreign:
             raise _Reject(foreign, _kfc.REJECTION)
         # [daveey] This tool is always an agent: record it, so no reader guesses (agent-261aa31f49).
         from gateway.session_context import get_session_env
+        writer_session = get_session_env("HERMES_SESSION_ID", "") or None
+        relayed = _krh.from_tool_args(conn, str(tid), args, writer_session, reject=_Reject)  # kanban-d1b921f32e
         cid = kb.add_comment(conn, tid, author=author, body=str(body), writer_kind="agent",
-                             writer_session=get_session_env("HERMES_SESSION_ID", "") or None)
+                             writer_session=writer_session, relayed_human=relayed)
         subscribed = _maybe_subscribe_on_touch(conn, str(tid))
         live = kb.live_run_id(conn, str(tid))
-        extra: dict = {"live_run": live is not None}
+        extra: dict = {"live_run": live is not None, **({"relayed_human": relayed} if relayed else {})}
         if live is not None and _worker_run_id(str(tid)) != live:
             extra["delivery"] = (
                 "the card has a live worker run: it gets this note at its next model call "
@@ -1570,9 +1567,9 @@ def _handle_create(args: dict, **kw) -> str:
     # See #67567. ``project=""`` is an explicit "no project" (no ``or`` collapse, #106342).
     project_id = args["project"] if "project" in args else args.get("project_id")
     project_source_task_id = None
-    triage, skills, goal_mode, pin_mandatory = (
+    triage, skills, goal_mode, pin_mandatory, review_required = (
         _parse_bool_arg(args, "triage"), _coerce_str_list(args.get("skills"), "skills", "skill names"),
-        _parse_bool_arg(args, "goal_mode"), _parse_bool_arg(args, "pin_mandatory"))
+        _parse_bool_arg(args, "goal_mode"), _parse_bool_arg(args, "pin_mandatory"), _parse_bool_arg(args, "review_required"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     max_retries = _ca.max_retries_arg(args)
@@ -1687,6 +1684,7 @@ def _handle_create(args: dict, **kw) -> str:
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+                review_required=review_required,
                 completion_contract=args.get("completion_contract"),
                 initial_status=str(args.get("initial_status") or "running"),
                 human_request=kb.redact_review_value(args.get("human_request")),

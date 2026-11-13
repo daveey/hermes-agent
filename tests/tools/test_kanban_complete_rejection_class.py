@@ -185,3 +185,53 @@ def test_success_has_no_rejection(board, monkeypatch):
     _claim(board, monkeypatch)
     out = json.loads(kt._handle_complete({"summary": "really done"}))
     assert out.get("ok") is True and "rejection" not in out
+
+
+# Every status the board can hold, with no run: a refusal names the card's status unless the
+# card is terminal. Classifying refusals by exclusion mislabeled PR acceptance, then
+# scheduled/todo, then triage as "stale run"; this sweep makes a fourth status fail here. [daveey]
+_TERMINAL = {"done", "archived"}
+
+
+def _all_statuses():
+    from hermes_cli.kanban_workflow import DEFAULT_STATUSES
+    return sorted(DEFAULT_STATUSES)
+
+
+@pytest.mark.parametrize("status", _all_statuses())
+def test_refusal_names_status_for_every_status(board, monkeypatch, status):
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+    with kbc.connect() as conn:
+        tid = board.create_task(conn, title="no run", assignee="op")
+        with board.write_txn(conn):
+            conn.execute("UPDATE tasks SET status=?, current_run_id=NULL, claim_lock=NULL, "
+                         "worker_pid=NULL WHERE id=?", (status, tid))
+    out = json.loads(kt._handle_complete({"task_id": tid, "summary": "done"}))
+    if out.get("ok") is True:
+        assert status not in _TERMINAL, out
+        return
+    assert out["rejection"] in kt.COMPLETE_REJECTION_CLASSES
+    if status in _TERMINAL:
+        assert out["rejection"] == "stale_run", out
+    else:
+        assert out["rejection"] == "not_running", out
+        assert f"card is {status}" in out["error"], out
+        assert "stale run" not in out["error"], out
+
+
+def test_triage_refusal_says_promote(board, monkeypatch):
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+    with kbc.connect() as conn:
+        tid = board.create_task(conn, title="spec me", assignee="op", triage=True)
+        assert board.get_task(conn, tid).status == "triage"
+    out = json.loads(kt._handle_complete({"task_id": tid, "summary": "done"}))
+    assert out["rejection"] == "not_running", out
+    assert "triage" in out["error"] and "promote it to ready" in out["error"], out
+
+
+def test_unknown_id_is_stale_run(board, monkeypatch):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_complete({"task_id": "t_doesnotexist00", "summary": "done"}))
+    assert out["rejection"] == "stale_run", out

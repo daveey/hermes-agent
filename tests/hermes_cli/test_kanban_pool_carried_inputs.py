@@ -105,7 +105,7 @@ def test_queue_labels_skip_a_verified_carried_path(carried):
     args = {"title": "Implement plan", "body": carried["body"], "assignee": "default"}
     assert kp.portable_reason(args, cfg) is None
     # Before: runs_on [pool:worker, capability:token-broker], a label no pool machine carries.
-    assert wp.queue_decision(args, cfg, "hub", "", None, machine_ok=lambda _: True) == {
+    assert wp.queue_decision(args, cfg, "hub", "", machine_ok=lambda _: True) == {
         "where": "local", "runs_on": [POOL], "why": wp.QUEUED_WHY.format(label=POOL)}
     assert coord.required_labels(args, cfg) == set()
     # The same path without a covering receipt keeps its label, and a real tool mention still needs one.

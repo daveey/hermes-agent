@@ -33,7 +33,19 @@ def _no_gateway(monkeypatch):
                         lambda **kw: SimpleNamespace(pid=None, probe_error=None))
 
 
-def test_presence_reports_host_dispatcher_held_by_another_home(root, monkeypatch):
+@pytest.mark.parametrize("omit_global_lock", [False, True])
+def test_presence_reports_host_dispatcher_held_by_another_home(root, monkeypatch, omit_global_lock):
+    if omit_global_lock:
+        if not Path("/proc/self/fdinfo").exists():
+            pytest.skip("needs Linux fdinfo")
+        read_text = Path.read_text
+
+        def read_without_global_lock(path, *args, **kwargs):
+            if path == Path("/proc/locks"):
+                return ""  # A changing global lock table can omit a still-held lock.
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_without_global_lock)
     from gateway import kanban_singleton as ks
     from hermes_cli import kanban as cli
     monkeypatch.setenv("HERMES_HOME", str(root))
@@ -96,7 +108,8 @@ def test_at_capacity_names_where_the_cap_came_from(root, monkeypatch, configured
     assert "cap_source=" in kbd.stuck_warning(6, [res])
 
 
-def test_lock_holder_unaffected_by_unheld_sidecar(root, monkeypatch):
+@pytest.mark.parametrize("side_pid", [None, -1, "bad", "self"])
+def test_lock_holder_unaffected_by_unheld_sidecar(root, monkeypatch, side_pid):
     """A stale holder sidecar from a dead gateway is not reported as a holder on Linux."""
     from gateway import kanban_singleton as ks
     if not Path("/proc/locks").exists():
@@ -105,5 +118,7 @@ def test_lock_holder_unaffected_by_unheld_sidecar(root, monkeypatch):
     handle, state = _acquire_singleton_lock(path)
     assert state == "held"
     _release_singleton_lock(handle)
-    ks._write_json(Path(f"{path}.holder.json"), {"pid": 1, "hermes_home": "/x"})
+    import os
+    pid = os.getpid() if side_pid == "self" else side_pid
+    ks._write_json(Path(f"{path}.holder.json"), {"pid": pid, "hermes_home": "/x"})
     assert ks.holder_info(path) is None

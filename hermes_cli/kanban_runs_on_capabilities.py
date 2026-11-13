@@ -244,6 +244,9 @@ def claim_refusal(card: Mapping[str, Any], *, me: str = "") -> Optional[str]:
     from hermes_cli.kanban_placement_coordination import claim_refusal as coordination_refusal
     if refusal := coordination_refusal(card, me):
         return refusal
+    from hermes_cli.kanban_mandatory_pin import refusal as mandatory_pin_refusal
+    if refusal := mandatory_pin_refusal(card, me=me):
+        return refusal  # never claim a mandatory pin to run another model: left for a machine that serves it
     assignee = card.get("assignee")
     if not assignee:
         return None

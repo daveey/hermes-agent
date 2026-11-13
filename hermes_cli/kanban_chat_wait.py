@@ -109,8 +109,9 @@ def notice_text(payload: Any) -> str:
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["hold_until"])))
         hold = f"; dispatcher hold {payload['hold_reason']} until {stamp}"
     return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min with no "
-            f"worker ({payload.get('queue') or 'queue place unknown'}{hold}){pu._observation(payload)}. "
-            + checkpoint + pu._options(tid, payload.get("priority_evidence"), payload) + ".")
+            f"worker ({payload.get('queue') or 'queue place unknown'}{hold}){pu._observation(payload)}."
+            + pu._pool_suffix(payload) + " " + checkpoint + pu._options(tid, payload.get("priority_evidence"), payload)
+            + ".")
 
 
 def _floor_kinds() -> str:

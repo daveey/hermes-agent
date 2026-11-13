@@ -183,6 +183,110 @@ def test_cli_diff_does_not_report_clean_from_failed_refresh(live, svc, kanban_ho
     assert bool(report.get("unavailable")) is offline
 
 
+TASK, RUN = "t_released", "run-reclaimed"
+
+
+def lost_release(live, svc, *, error="lease_lost: this run no longer holds the lease"):
+    """worker-1 11-13 shape: the host's core-update reclaim ended the run on the Board ~3 s before the dead
+    worker's own crash release was pushed, so that release was refused ``lease_lost`` and kept forever."""
+    fields = {"failure_limit": 2, "force_trip": False, "infrastructure": False, "block_kind": "transient",
+              "diagnostic": {"exit_kind": "signaled", "exit_code": 15}, "run_uid": RUN, "outcome": "crashed",
+              "error": "pid 3264955 killed by signal 15"}
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at,state,last_error,"
+                     "attempts) VALUES ('release-op','tasks',?,'release',?,'',1,'rejected',?,1)",
+                     (TASK, json.dumps(fields), error))
+    rows = svc.board(BOARD)["rows"]
+    rows.setdefault("tasks", {})[TASK] = {"uid": TASK, "id": TASK, "status": "done", "version": 66, "created_on": OTHER,
+                                          "current_run_uid": None, "lease_run_uid": None, "lease_holder": None}
+    rows.setdefault("task_runs", {})[RUN] = {"uid": RUN, "task_id": TASK, "status": "reclaimed", "outcome": "reclaimed",
+                                             "ended_at": 1794527437, "version": 4, "origin_gateway": ME}
+    return rows
+
+
+def test_lease_lost_release_of_ended_run_retired_by_normal_sync(live, svc, kanban_home):
+    lost_release(live, svc)
+    shadow = client.open_shadow(BOARD, ME)
+    try:
+        assert client.diff(live, shadow, ME)["rejected_ops"] == 1
+    finally:
+        shadow.close()
+    result = client.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
+    report = result.rejection_resolutions[0]
+    assert (report["classification"], report["action"]) == ("moot", "retired")
+    assert report["run_evidence"]["row"]["ended_at"] == 1794527437
+    assert client.status(live)["rejected"] == 0
+    shadow = client.open_shadow(BOARD, ME)
+    try:
+        assert client.diff(live, shadow, ME)["clean"]
+    finally:
+        shadow.close()
+
+
+RELEASE_BOARD_VETOES = {
+    "run_open": lambda rows: rows["task_runs"][RUN].update(ended_at=None),
+    "lease_held": lambda rows: rows["tasks"][TASK].update(lease_run_uid=RUN),
+    "current_run": lambda rows: rows["tasks"][TASK].update(current_run_uid=RUN),
+    "other_task": lambda rows: rows["task_runs"][RUN].update(task_id="t_other"),
+    "run_missing": lambda rows: rows["task_runs"].pop(RUN),
+    "run_deleted": lambda rows: rows["task_runs"][RUN].update(deleted_at=1),
+    "task_missing": lambda rows: rows["tasks"].pop(TASK),
+}
+
+
+@pytest.mark.parametrize("veto", [*RELEASE_BOARD_VETOES, "not_lease_lost", "local_run_open", "pending_run",
+                                  "evidence_down"])
+def test_release_retirement_needs_ended_run_off_the_lease(live, svc, monkeypatch, veto):
+    rows = lost_release(live, svc, error="not_found: no such card" if veto == "not_lease_lost" else
+                        "lease_lost: this run no longer holds the lease")
+    RELEASE_BOARD_VETOES.get(veto, lambda rows: None)(rows)
+    hub = svc.hub(ME)
+    tid = None
+    if veto in ("local_run_open", "pending_run"):
+        tid = kb.create_task(live, title="local copy", assignee="worker")
+    with kbc.write_txn(live):
+        if veto in ("local_run_open", "pending_run"):
+            live.execute("UPDATE kanban_sync_state SET applying=1")
+            live.execute("INSERT INTO task_runs (id,uid,task_id,status,started_at) VALUES (77,?,?,'running',1)", (RUN, tid))
+            live.execute("UPDATE kanban_sync_state SET applying=0")
+        if veto == "pending_run":
+            live.execute("UPDATE task_runs SET ended_at=2 WHERE uid=?", (RUN,))
+            live.execute("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at) "
+                         "VALUES ('run-pending','task_runs',?,'upsert','{}','',2)", (RUN,))
+    if veto == "evidence_down":
+        original = hub.row_evidence
+
+        def read(board, table, uid):
+            if table == "task_runs":
+                raise OSError("board unreachable")
+            return original(board, table, uid)
+        monkeypatch.setattr(hub, "row_evidence", read)
+    from hermes_cli.kanban_sync_rejections import resolve_rejections
+    report = next(r for r in resolve_rejections(live, hub, BOARD) if r["op_id"] == "release-op")
+    assert (report["classification"], report["action"]) == ("unresolved", "retained")
+    assert live.execute("SELECT state FROM kanban_sync_outbox WHERE op_id='release-op'").fetchone()[0] == "rejected"
+
+
+def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):
+    lost_release(live, svc)
+    hub = svc.hub(ME)
+    original = hub.row_evidence
+
+    def read_then_open_run(board, table, uid):
+        evidence = original(board, table, uid)
+        if table == "task_runs":
+            with kbc.write_txn(live):
+                live.execute("INSERT INTO kanban_sync_tombstones (table_name,row_uid,deleted_at) VALUES ('task_runs',?,1)",
+                             (RUN,))
+        return evidence
+
+    monkeypatch.setattr(hub, "row_evidence", read_then_open_run)
+    from hermes_cli.kanban_sync_rejections import resolve_rejections
+    report = resolve_rejections(live, hub, BOARD)[0]
+    assert report["classification"] == "unresolved"
+    assert client.status(live)["rejected"] == 1
+
+
 def test_concurrent_edit_vetoes_retirement(live, svc, monkeypatch):
     reject_status(live, svc)
     hub = svc.hub(ME)

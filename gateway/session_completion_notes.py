@@ -81,11 +81,17 @@ def _wakes_unviewed_parent(authority, session_id, live, descriptor):
     closed (``_closed_by_user``); a failed delegation not past ``UNATTENDED_WAKE_LIMIT`` (a process
     exit is a resume whatever its exit code)."""
     failed = descriptor.get('wakes_parent')
-    if not (failed or descriptor.get('resumes_parent')) or _closed_by_user(authority, session_id):
+    if not (failed or descriptor.get('resumes_parent')):
         return False
-    if not failed:
+    closed = _closed_by_user(authority, session_id)
+    if not (failed or closed):
         return True
-    if live.unattended_wakes >= UNATTENDED_WAKE_LIMIT:
+    if closed or live.unattended_wakes >= UNATTENDED_WAKE_LIMIT:
+        if failed:
+            import logging
+            logging.getLogger(__name__).warning(
+                'parent %s not woken: failed delegation result kept as a note (%s)', session_id,
+                'its chat was closed' if closed else f'{UNATTENDED_WAKE_LIMIT} unattended wakes in a row')
         return False
     live.unattended_wakes += 1
     return True
@@ -121,6 +127,12 @@ async def note_if_unviewed(authority, ref, row):
         await reopen_for_turn(authority, ref)
         return None
     metadata = note_metadata(descriptor)
+    if descriptor.get('requested_stop'):
+        # Unfinished work someone stopped, and nobody is watching to see it: the parent stays asleep on it.
+        import logging
+        logging.getLogger(__name__).warning(
+            'parent %s not woken: delegation %s stopped on request (%s), kept as a note (no viewer attached)',
+            ref.session_id, descriptor['identity'], ','.join(descriptor['requested_stop']))
     # Keyed by its admission: a claim is never replayed, and this keeps a write retry exact.
     target = await _write_note(authority, ref, lambda target: tracked_write(authority, partial(
         authority.db.append_completion_note, target, row['admission_id'], row['payload']['text'],

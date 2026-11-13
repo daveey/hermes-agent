@@ -67,6 +67,17 @@ WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE = (
     "that stops the loop."
 )
 
+# [daveey] Row kind of the prompt a slash-command tick (``/loop 10m /recap``) submits: the expanded command, not
+# words the user typed. Typed so no reader takes a finished tick for a person's reply (kanban_relayed_human).
+LOOP_TICK_DISPLAY_KIND = "loop_tick"
+
+
+def loop_tick_display(wakeup: str) -> dict:
+    """``display_kind``/``display_metadata`` for a slash tick's submitted prompt row; renderers show the
+    language-neutral ``display_text`` (``↻ /loop /recap``) as a notice, never the expanded prompt."""
+    return {"display_kind": LOOP_TICK_DISPLAY_KIND,
+            "display_metadata": {"display_text": f"↻ /loop {' '.join(str(wakeup or '').split())}".rstrip()}}
+
 
 def parse_interval_token(token: str) -> Optional[int]:
     """Total seconds for ``30s``/``5m``/``2h``/``1h30m``, else None.

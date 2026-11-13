@@ -9,12 +9,13 @@ Real processes and the real close().
 import os
 import subprocess
 import sys
-import time
+from contextlib import suppress
 
 import psutil
 import pytest
 
 from gateway.session_managed_worker import WORKER_POPEN, ManagedWorker
+from tests.waiting import wait_until
 
 _WORKER = (
     "import subprocess, sys, time\n"
@@ -24,8 +25,9 @@ _WORKER = (
 
 
 def _gone(pid):
+    # Reaping walks a pid Z -> X (dead) -> unhashed; counting only Z read a dead pid as alive again.
     try:
-        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+        return psutil.Process(pid).status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD)
     except psutil.NoSuchProcess:
         return True
 
@@ -40,13 +42,11 @@ def test_close_reaps_the_workers_tool_children():
         assert os.getpgid(grandchild) == process.pid
         ManagedWorker(process).close()
         assert process.poll() is not None
-        deadline = time.monotonic() + 5
-        while not _gone(grandchild) and time.monotonic() < deadline:
-            time.sleep(.05)
-        assert _gone(grandchild), "the worker's tool child outlived the owner's close()"
+        wait_until(lambda: _gone(grandchild), what="the worker's tool child to die with the owner's close()")
     finally:
         if not _gone(grandchild):  # an orphan (pre-fix) is reparented out of the test's subtree
-            os.kill(grandchild, 9)
+            with suppress(ProcessLookupError):
+                os.kill(grandchild, 9)
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)

@@ -201,12 +201,20 @@ class _ReplicaReader:
             if self.replica is None:
                 replica.close()
 
-    def resolve(self, creator_task_id: str) -> list[dict]:
+    def open(self):
+        """The guarded replica handle (opened at most once per pass), or None when there is none or it fails."""
         try:
             if not self.attempted:
                 self.attempted = True
                 self._open()
-            return resolve_chats(self.replica, creator_task_id) if self.replica is not None else []
+        except (OSError, sqlite3.Error):
+            return None
+        return self.replica
+
+    def resolve(self, creator_task_id: str) -> list[dict]:
+        try:
+            replica = self.open()
+            return resolve_chats(replica, creator_task_id) if replica is not None else []
         except (OSError, sqlite3.Error):
             return []
 
@@ -262,10 +270,43 @@ def inherit_chats(conn: sqlite3.Connection, task_id: str, creator_task_id: str,
         (_owner_delivery if source else _copy_delivery)(conn, task_id, owner)
 
 
+def _warm_link_provenance(conn: sqlite3.Connection, replica_reader: _ReplicaReader) -> None:
+    """Read each local home's state.db once for the local chat links ``resolve_chats`` may test, BEFORE the caller
+    takes the board write lock: a cold per-row ``is_machine_session`` there reopened every home's state.db with
+    ``BEGIN IMMEDIATE`` held, stalling the dispatcher's pull for minutes (hub, t_01a1d2cc49634a78). Only the
+    300 s source cache is warmed; verdicts are still computed per row, so an expired entry costs a read, never a
+    different answer. [daveey]"""
+    from hermes_cli.kanban_db_notify import prefetch_sources
+    from hermes_cli.kanban_origin import gateway_names, parse_origin, OriginError
+    me = gateway_names()[0]
+    if not me:
+        return
+    sessions: list = []
+    for db in (conn, replica_reader.open()):
+        try:
+            if db is None or not db.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+                continue
+            sessions += [r[0] for r in db.execute(
+                "SELECT chat_session FROM task_chat_links WHERE chat_gateway=? AND released=0", (me,))]
+            for (chat_id,) in db.execute("SELECT DISTINCT chat_id FROM kanban_notify_subs WHERE platform='hub'"):
+                try:
+                    origin = parse_origin(chat_id)
+                except OriginError:
+                    continue
+                if origin.gateway == me:
+                    sessions.append(origin.session)
+        except sqlite3.Error:  # a cold cache only costs reads inside the transaction, never a wrong verdict
+            continue
+    prefetch_sources(sessions)
+
+
 def backfill(conn: sqlite3.Connection) -> dict:
-    """Repair legacy worker creations once; unresolved rows remain discoverable and retryable."""
+    """Repair legacy worker creations once; unresolved rows remain discoverable and retryable.
+
+    Provenance is read before ``write_txn``, in batches: per-row state.db reads under the board write lock held
+    it for minutes on the hub (t_01a1d2cc49634a78). [daveey]"""
     from hermes_cli.kanban_db import write_txn
-    from hermes_cli.kanban_db_notify import is_headless_session
+    from hermes_cli.kanban_db_notify import headless_sessions
     from hermes_cli.kanban_placement import is_placeholder_session
 
     rows = conn.execute(
@@ -273,17 +314,22 @@ def backfill(conn: sqlite3.Connection) -> dict:
         "AND e.kind='created' WHERE NOT EXISTS (SELECT 1 FROM task_events done WHERE done.task_id=t.id "
         "AND done.kind='creator_chats_resolved')").fetchall()
     attempted, unresolved = [], []
-    with _ReplicaReader(conn) as replica_reader, write_txn(conn):
-        for row in rows:
-            if row["session_id"] and not (is_headless_session(row["session_id"])
-                                          or is_placeholder_session(row["session_id"])):
-                continue
-            creator = json.loads(row["payload"] or "{}").get("creator_task_id")
-            if not creator:
-                continue
-            inherit_chats(conn, row["id"], creator, replica_reader=replica_reader)
-            attempted.append(row["id"])
-            if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_resolved'",
-                                (row["id"],)).fetchone():
-                unresolved.append(row["id"])
+    headless = headless_sessions(row["session_id"] for row in rows if row["session_id"])
+    with _ReplicaReader(conn) as replica_reader:
+        if any(not row["session_id"] or str(row["session_id"]) in headless or is_placeholder_session(row["session_id"])
+               for row in rows):
+            _warm_link_provenance(conn, replica_reader)
+        with write_txn(conn):
+            for row in rows:
+                if row["session_id"] and not (str(row["session_id"]) in headless
+                                              or is_placeholder_session(row["session_id"])):
+                    continue
+                creator = json.loads(row["payload"] or "{}").get("creator_task_id")
+                if not creator:
+                    continue
+                inherit_chats(conn, row["id"], creator, replica_reader=replica_reader)
+                attempted.append(row["id"])
+                if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_resolved'",
+                                    (row["id"],)).fetchone():
+                    unresolved.append(row["id"])
     return {"attempted": attempted, "unresolved": unresolved}

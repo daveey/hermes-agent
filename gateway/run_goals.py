@@ -516,7 +516,12 @@ class GatewayGoalsMixin:
             # Under a session authority the tick commits to the FIFO (never a classic turn beside an
             # admitted one); a slash-command loop is a command and keeps the command path.
             if wakeup.lstrip().startswith("/") or not await admit_route_wake(self, adapter, source, wakeup, "loop-tick"):
-                await adapter.handle_message(self._synthetic_prompt_event(source, wakeup, internal=True))
+                event = self._synthetic_prompt_event(source, wakeup, internal=True)
+                if wakeup.lstrip().startswith("/"):  # [daveey] the expanded command's row is typed loop_tick
+                    from hermes_cli.loops import loop_tick_display
+                    display = loop_tick_display(wakeup)
+                    event.metadata.update(display_kind=display["display_kind"], **display["display_metadata"])
+                await adapter.handle_message(event)
             # Slash-command loops dispatch through the command path and never hit the post-turn
             # completion hook — complete the tick immediately (caps + scheduling).
             if wakeup.lstrip().startswith("/"):

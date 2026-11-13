@@ -56,6 +56,21 @@ def test_invalid_verdict_denied(judge, change):
     assert result.why == "invalid admission verdict"
 
 
+@pytest.mark.parametrize("need,quote", [
+    ("board_admin_key", "Rotate the Board admin key"),
+    ("instance_role_ssm", "Read the parameter over instance-role SSM"),
+])
+def test_retired_hub_write_needs_are_not_admitted(judge, need, quote):
+    """Board admin key and instance-role SSM are hub-write work (hub-admin from a capability:hub-write worker),
+    so the rubric no longer offers them: a judge reply naming one, with a real quote, is not a valid admission."""
+    gate, _, reply, _ = judge
+    result = {"admit": True, "need": need, "evidence": quote, "why": "needs the hub"}
+    assert gate.validated(dict(result), {"title": quote, "body": ""}, None, "sha") is None
+    reply.update(result)
+    verdict = gate.admit({"title": quote, "body": ""})
+    assert verdict.admit is False and verdict.why == "invalid admission verdict"
+
+
 def test_cache_and_skill_revision(judge):
     gate, calls, _, skill = judge
     fields = {"title": "Use signed-in Chrome"}
@@ -203,3 +218,124 @@ def test_malformed_json(judge, monkeypatch):
     result = gate.admit({"title": "Use signed-in Chrome"})
     assert result.admit is False
     assert result.why == "invalid admission verdict"
+
+
+# t_01a1cf7f8f211403 (self-heal incident 813792703cb1) was admitted `hub_live_process` quoting its producer's own
+# "Pinned to the gateway that filed it: ..." line. A producer's pin sentence is never hub-only evidence.
+ESCAPE_TITLE = "self-heal: incident 813792703cb1"
+ESCAPE_PIN = ("Pinned to the gateway that filed it: it reads this gateway's own logs, state files and coach store, "
+              "which a worker node does not have.")
+ESCAPE_BODY = ("Self-heal investigation for defect `kanban-310ed068f0`. Nothing here needs a human.\n"
+               f"{ESCAPE_PIN}\n\n## Do this\n1. Reproduce or confirm it LIVE, not from the transcript alone.\n"
+               "- `sqlite3 -readonly ~/.hermes/kanban.db`: the card's `tasks` row.")
+
+
+@pytest.mark.parametrize("quote", [
+    ESCAPE_PIN,
+    "Pinned to the gateway that filed it",
+    "pinned to the gateway that filed it: it reads this gateway's own logs",
+])
+def test_producer_pin_sentence_is_not_admission_evidence(judge, quote):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_live_process", evidence=quote,
+                 why="The card says the investigation needs this gateway's own state files and coach store.")
+    body = ESCAPE_BODY.replace(ESCAPE_PIN, ESCAPE_PIN.lower()) if quote[0] == "p" else ESCAPE_BODY
+    verdict = gate.admit({"title": ESCAPE_TITLE, "body": body})
+    assert verdict.admit is False and verdict.need is None
+    assert gate.SELF_ASSERTION_WHY in verdict.why
+
+
+def test_machine_variant_and_cached_escape_are_denied(judge):
+    gate, _, reply, _ = judge
+    from dataclasses import asdict
+    import sqlite3
+    from hermes_cli.config import get_hermes_home
+    machine = "Pinned to the machine that filed it: the cron output is on this machine."
+    reply.update(admit=True, need="hub_live_process", evidence=machine, why="Local state.")
+    assert gate.admit({"title": "Bluesky notify: repeated cron failures", "body": machine}).admit is False
+    # A verdict cached before this rule (the real escape's) is revalidated on read and denied.
+    fields = {"title": ESCAPE_TITLE, "body": ESCAPE_BODY}
+    reply.update(admit=True, need="hub_chrome", evidence="Reproduce or confirm it LIVE", why="x")
+    gate.admit(fields)
+    escaped = {**asdict(gate.Verdict(admit=True, need="hub_live_process", evidence=ESCAPE_PIN, why="old")),
+               "skill_sha": ""}
+    with sqlite3.connect(get_hermes_home() / "kanban/hub-admission.sqlite") as conn:
+        conn.execute("UPDATE verdicts SET value=?", (json.dumps(escaped),))
+    assert gate.admit(fields).admit is False
+
+
+def test_other_evidence_on_a_card_with_a_pin_sentence_still_admits(judge):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_chrome", evidence="using the hub's signed-in Chrome", why="Browser.")
+    body = f"{ESCAPE_PIN}\nRead the billing page using the hub's signed-in Chrome."
+    assert gate.admit({"title": "billing", "body": body}).admit is True
+
+
+ESCAPE_TAIL = "it reads this gateway's own logs, state files and coach store, which a worker node does not have."
+WRAPPED_PIN = ("Pinned to the machine that filed it: the bsky cron output and its counters live\n"
+               "only on this machine.\n## Do this\n1. Read the counters.")
+# An abbreviation dot on the pin line is not the sentence's end (review 5884663184).
+ABBREV_PIN = ("Pinned to the machine that filed it: its cron output (e.g. the bsky counters, i.e. the\n"
+              "daily totals) lives only on this machine.\n## Do this\n1. Read the counters.")
+
+
+@pytest.mark.parametrize("body, quote", [
+    (ESCAPE_BODY, ESCAPE_TAIL),                       # rationale tail alone (review t_01a1d24d488edbd9)
+    (ESCAPE_BODY, "which a worker node does not have"),
+    (WRAPPED_PIN, "only on this machine."),            # the wrapped continuation of a pin sentence
+    (ABBREV_PIN, "daily totals) lives only on this machine."),
+], ids=["tail", "tail-fragment", "wrapped", "wrapped-abbreviation"])
+def test_quote_from_inside_a_pin_line_is_not_admission_evidence(judge, body, quote):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_live_process", evidence=quote, why="Needs local state.")
+    verdict = gate.admit({"title": ESCAPE_TITLE, "body": body})
+    assert verdict.admit is False and gate.SELF_ASSERTION_WHY in verdict.why
+
+
+# Only abbreviations extend a pin's span: a pin sentence ending in a filename, version, URL, "no." or an ellipsis
+# stops at that line, so evidence the next line states is judged on its own text (review 5884844910).
+@pytest.mark.parametrize("ending", [
+    "it reads foo.py.", "it needs v1.2.", "it reads https://example.com.", "worker access: no.", "it waits...",
+], ids=["filename", "version", "url", "no", "ellipsis"])
+def test_pin_ending_in_a_dotted_token_does_not_swallow_the_next_line(judge, ending):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_chrome", evidence="Renew it in the hub's signed-in Chrome.", why="Browser.")
+    body = (f"Pinned to the gateway that filed it: {ending}\n"
+            "Renew it in the hub's signed-in Chrome. Then report back.")
+    assert gate.admit({"title": "renew", "body": body}).admit is True
+
+
+def test_quote_also_found_outside_the_pin_line_is_judged_on_that_text(judge):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_chrome", evidence="signed-in Chrome", why="Browser.")
+    body = ("Pinned to the gateway that filed it: it needs the signed-in Chrome.\n\n"
+            "## Do this\n1. Renew the dashboard session in the hub's signed-in Chrome.")
+    assert gate.admit({"title": "renew", "body": body}).admit is True
+
+
+@pytest.mark.parametrize("pin, quote", [
+    (ESCAPE_PIN, ESCAPE_PIN),
+    (ESCAPE_PIN, ESCAPE_TAIL),
+    ("Pinned to the machine that filed it: the cron output is on this machine.",
+     "Pinned to the machine that filed it: the cron output is on this machine."),
+], ids=["gateway", "gateway-tail", "machine"])
+def test_stored_owner_verdict_quoting_a_pin_sentence_is_a_final_deny_with_its_why(judge, pin, quote):
+    gate, _, _, _ = judge
+    from hermes_cli.kanban_hub_admission_placement import stored_owner_verdict
+    entry = {"hub_admission": {"admit": True, "need": "hub_live_process", "evidence": quote, "why": "x",
+                               "skill_sha": "abc"}}
+    verdict = stored_owner_verdict(entry, "Capability owner", f"Owner card.\n{pin}\n\nRead the logs.")
+    assert verdict is not None
+    assert verdict["admit"] is False and verdict["invalid"] is True
+    assert gate.SELF_ASSERTION_WHY in verdict["why"]
+    if quote == ESCAPE_TAIL:  # without a pin line around it the same text is ordinary evidence
+        moved = stored_owner_verdict(entry, "Capability owner", f"Owner card.\n{quote}")
+        assert moved is not None and moved["admit"] is True
+
+
+def test_pin_span_ends_at_the_real_sentence_end_after_an_abbreviation():
+    from hermes_cli.kanban_hub_admission import _pin_spans
+    body = ABBREV_PIN
+    (start, end), = _pin_spans(body)
+    assert body[start:end].endswith("lives only on this machine.")
+    assert "## Do this" not in body[start:end]

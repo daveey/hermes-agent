@@ -320,9 +320,38 @@ def advice(skip: dict[str, Any]) -> str:
             "Do not run its work outside the dispatcher")
 
 
-UNRECORDED_ADVICE = (f"{UNRECORDED}: slots are free, yet no tick recorded why it passed this card over. Read the live "
-                     "verdict (`hermes kanban dispatch --dry-run --json`) before changing anything; priority changes "
-                     "are not the fix. Do not run its work outside the dispatcher")
+def sentence_advice(skip: dict[str, Any]) -> str:
+    """:func:`advice` as a sentence of its own, for a join after a full stop (``kanban show``); the notices keep the
+    lowercase clause after their ``NO_FIX: `` prefix. [daveey] PR #1846 review nit."""
+    text = advice(skip)
+    return text[:1].upper() + text[1:]
+
+
+def _wall_lasts(skip: dict[str, Any], now: Optional[float]) -> bool:
+    """True unless the skip's ``until`` is a readable time at or before ``now``; missing or unparseable keeps the
+    wall (conservative)."""
+    try:
+        until = float(skip["until"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return until != until or until > (time.time() if now is None else now)  # NaN is unparseable too
+
+
+def pool_replace_helps(skip: Optional[dict[str, Any]], *, now: Optional[float] = None) -> bool:
+    """False when a pool re-place cannot clear ``skip``, so no surface may offer one. [daveey] PR #1835 review: a
+    ``pinned_quota_wall`` hold follows the pin to any machine, and ``_pool_could_run`` never reads the pool workers'
+    quota; its own advice (wait for the reset, or re-pin) stands. Any other skip's advice is kept after the
+    re-place sentence (``kanban_queue_position.local_words`` and the notices' ``_options`` alike). A wall whose
+    ``until`` has passed suppresses nothing, though no later tick has replaced the skip yet (PR #1846 review)."""
+    return not skip or skip.get("reason") != PINNED_QUOTA_WALL or not _wall_lasts(skip, now)
+
+
+UNRECORDED_FACT = f"{UNRECORDED}: slots are free, yet no tick recorded why it passed this card over."
+UNRECORDED_ADVICE = (f"{UNRECORDED_FACT} Read the live verdict (`hermes kanban dispatch --dry-run --json`) before "
+                     "changing anything; priority changes are not the fix. Do not run its work outside the dispatcher")
+# After a pool re-place hint ("Re-place it ..."), "read the verdict before changing anything" contradicts the named
+# fix, so a notice carrying ``pool_hint`` keeps only the fact and the dispatcher warning (PR #1829 review). [daveey]
+UNRECORDED_POOL_ADVICE = f"{UNRECORDED_FACT} Do not run its work outside the dispatcher"
 
 
 def unrecorded(place: Optional[dict[str, Any]], ready_seconds: Optional[float]) -> bool:
@@ -348,4 +377,6 @@ def notice_advice(payload: dict[str, Any]) -> Optional[str]:
     skip = payload.get("dispatch_skip")
     if isinstance(skip, dict) and skip and not is_ordering(skip):
         return advice(skip)
-    return UNRECORDED_ADVICE if payload.get("skip_unrecorded") else None
+    if not payload.get("skip_unrecorded"):
+        return None
+    return UNRECORDED_POOL_ADVICE if str(payload.get("pool_hint") or "").strip() else UNRECORDED_ADVICE

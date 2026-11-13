@@ -53,6 +53,11 @@ def _is_tree(path: Path) -> bool:
     return (path / ".git").exists()
 
 
+def _trees_home() -> Path:
+    """Root of the card worktree globs (a seam: tests point it away from the developer's real ``~/code/_wt``)."""
+    return Path.home()
+
+
 def _owner(tree: Path) -> Optional[str]:
     """``task_id`` from the worktree-owner marker in a linked worktree's gitdir, else None."""
     try:
@@ -69,9 +74,11 @@ def _owner(tree: Path) -> Optional[str]:
 
 
 def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] = "",
-               extra: Iterable[str] = ()) -> list[str]:
+               extra: Iterable[str] = (), *, linked_text_only: bool = False) -> list[str]:
     """Git trees on this host that hold the card's work: the workspace and its direct children, linked worktrees
-    whose worktree-owner marker names the card, trees the park text names (``~/code/_wt/<slug>``), and ``extra``."""
+    whose worktree-owner marker names the card, trees the park text names (``~/code/_wt/<slug>``), and ``extra``.
+    ``linked_text_only`` keeps only linked worktrees (a ``.git`` file) among the text-named trees: a shared main
+    checkout a card body merely mentions (``~/code/babybear``) is not the card's work."""
     found: list[Path] = []
     root = Path(path).expanduser() if path else None
     if root is not None and root.is_dir():
@@ -81,12 +88,12 @@ def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] 
         except OSError:
             pass
     if task_id:
-        home = Path.home()
+        home = _trees_home()
         for pattern in _WORKTREE_GLOBS:
             found += [p for p in sorted(home.glob(pattern)) if p.is_dir() and _owner(p) == task_id]
     for raw in [*_PATH.findall(text or ""), *extra]:
         p = Path(raw.rstrip(".,;:)]'\"")).expanduser()
-        if p.is_dir() and _is_tree(p):
+        if p.is_dir() and _is_tree(p) and not (linked_text_only and (p / ".git").is_dir()):
             found.append(p)
     out: list[str] = []
     for p in found:
@@ -110,19 +117,30 @@ def pushed_on_remote(tree: str) -> bool:
     its worker (11-12: t_01a1d0a1eaa00371 sat ready on ``machine:worker-2`` while worker-2 was on a Board hold).
     So ask the remote: HEAD is a remote branch tip, or a stale tracking ref HEAD builds on, once refreshed from
     the remote, contains HEAD."""
+    from functools import partial
     from hermes_cli.worktree_ops import _git_out, _worktree_has_unpushed_commits
+    # Keep credential helpers for private remotes, but never consume the caller's stdin.
+    git_out = partial(_git_out, stdin=subprocess.DEVNULL)
     try:
-        head = _git_out(["rev-parse", "HEAD"], tree)
-        remotes = (_git_out(["remote"], tree) or "").split()
+        head = git_out(["rev-parse", "HEAD"], tree)
+        remotes = (git_out(["remote"], tree) or "").split()
         if not head or not remotes:
             return False
+        branch = git_out(["symbolic-ref", "-q", "HEAD"], tree)
+        preferred: set[tuple[str, str]] = set()
+        if branch:
+            destinations = git_out(["for-each-ref", "--format=%(upstream:remotename) %(upstream:remoteref)"
+                                    "%0a%(push:remotename) %(push:remoteref)", branch], tree) or ""
+            preferred = {(remote, ref) for line in destinations.splitlines() if " " in line
+                         for remote, ref in [line.split(" ", 1)]}
         stale: list[tuple[str, str, str]] = []
+        fallback: list[tuple[str, str, str]] = []
         checks = 0
         for remote in remotes:
-            listing = _git_out(["ls-remote", "--heads", remote], tree, timeout=_REMOTE_TIMEOUT)
+            listing = git_out(["ls-remote", "--heads", remote], tree, timeout=_REMOTE_TIMEOUT)
             if not listing:
                 continue
-            tracked = dict(line.split(" ", 1)[::-1] for line in (_git_out(
+            tracked = dict(line.split(" ", 1)[::-1] for line in (git_out(
                 ["for-each-ref", "--format=%(objectname) %(refname)", f"refs/remotes/{remote}"], tree) or ""
             ).splitlines() if " " in line)
             for line in listing.splitlines():
@@ -131,14 +149,25 @@ def pushed_on_remote(tree: str) -> bool:
                     return True
                 tracking = f"refs/remotes/{remote}/{ref[len('refs/heads/'):]}"
                 local = tracked.get(tracking)
-                if not local or local == sha or checks >= _MAX_ANCESTRY_CHECKS:
+                if local == sha:
                     continue
-                checks += 1
-                if _git_out(["merge-base", "--is-ancestor", local, "HEAD"], tree) is not None:
-                    stale.append((remote, ref, tracking))
-        for remote, ref, tracking in stale[:_MAX_REFRESHES]:
-            _git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=_REMOTE_TIMEOUT)
-        return bool(stale) and not _worktree_has_unpushed_commits(tree)
+                candidate = (remote, ref, tracking)
+                if local and checks < _MAX_ANCESTRY_CHECKS:
+                    checks += 1
+                    if git_out(["merge-base", "--is-ancestor", local, "HEAD"], tree) is not None:
+                        stale.append(candidate)
+                        continue
+                # New URL-pushed branches have no tracking ref; rebased URL pushes
+                # can leave a tracking tip unrelated to HEAD. Both need a refresh.
+                fallback.append(candidate)
+        # Spend the bounded refresh budget on this branch's likely destinations first,
+        # not the first five alphabetic heads of a large remote.
+        refresh = sorted(stale + fallback, key=lambda c: (
+            (c[0], c[1]) not in preferred, c[1] != branch,
+        ))[:_MAX_REFRESHES]
+        for remote, ref, tracking in refresh:
+            git_out(["fetch", "--no-tags", "-q", remote, f"+{ref}:{tracking}"], tree, timeout=_REMOTE_TIMEOUT)
+        return bool(refresh) and not _worktree_has_unpushed_commits(tree)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
 
@@ -157,9 +186,9 @@ def tree_state(trees: Iterable[str]) -> Optional[str]:
 
 
 def card_trees_state(task_id: Optional[str], path: Optional[str], text: Optional[str] = "",
-                     extra: Iterable[str] = ()) -> tuple[list[str], Optional[str]]:
+                     extra: Iterable[str] = (), *, linked_text_only: bool = False) -> tuple[list[str], Optional[str]]:
     """``(trees found, unpushed state or None)`` for the card on this host."""
-    trees = card_trees(task_id, path, text, extra)
+    trees = card_trees(task_id, path, text, extra, linked_text_only=linked_text_only)
     return trees, tree_state(trees)
 
 

@@ -153,6 +153,18 @@ _FAILURE_SHAPES = re.compile(
     r"|BUILD FAILED|Build FAILED"             # gradle/msbuild/echoed fallbacks
     r"|FAILED: "                              # ninja
     r"|(?m:^make(?:\[\d+\])?: \*\*\*)"        # make
+    # A missing command: the shell's own message, or a wrapper (timeout/env/nice/...) that
+    # could not exec it. Behind `| tail` the run "passed" without running at all
+    # (agent-dab059c232). A tool's own file argument (`cat: x: No such file`) is not matched.
+    # Both anchored to a `<program>: ` line head, so quoted content carrying the message (a diff
+    # or source line behind `git show | tail`) does not match.
+    # The command name may hold spaces (`./my script.sh`); the line-head anchor does the rejecting.
+    r"|(?m:^[\w./-]+:(?: line \d+:)? [^:\n]+: command not found$)"
+    r"|(?m:^[\w./-]+: failed to run command "
+    r"[\u2018'\"][^\u2019'\"\n]+[\u2019'\"]: No such file or directory)"
+    # The wrapper may be named by path: a `#!/usr/bin/env x` shebang prints `/usr/bin/env: 'x': ...`.
+    r"|(?m:^(?:[\w.-]*/)*(?:env|nice|nohup|stdbuf|xargs|timeout|sudo|ionice|setsid|chrt|taskset): "
+    r"[\u2018'\"][^\u2019'\"\n]+[\u2019'\"]: No such file or directory)"
     r")")
 
 

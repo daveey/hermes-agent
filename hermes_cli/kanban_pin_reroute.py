@@ -238,14 +238,12 @@ def mandatory_column(pin_mandatory: Any, model_override: Optional[str]) -> Optio
 def set_pin_mandatory(conn: Any, task_id: str, mandatory: bool) -> bool:
     """Mark (or unmark) a card's model pin as mandatory: a quota wall never moves a mandatory pin."""
     from hermes_cli import kanban_db as kb
-    if mandatory:
-        row = conn.execute("SELECT model_override FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is not None and not _norm(row[0]):
-            raise ValueError("--mandatory needs a model pin: set a model first")
-    value = 1 if mandatory else None
+    if mandatory:  # also fences the placed card: kanban_mandatory_pin.mark
+        from hermes_cli.kanban_mandatory_pin import mark
+        return mark(conn, task_id)
     return kb._set_task_override(
-        conn, task_id, "UPDATE tasks SET model_pin_mandatory = ? WHERE id = ?", (value,),
-        "model_pin_mandatory_set", {"mandatory": bool(mandatory)}, ("model_pin_mandatory",),
+        conn, task_id, "UPDATE tasks SET model_pin_mandatory = ? WHERE id = ?", (None,),
+        "model_pin_mandatory_set", {"mandatory": False}, ("model_pin_mandatory",),
         archived_msg="cannot change the model pin")
 
 
@@ -256,6 +254,10 @@ def set_model_cli(conn: Any, task_id: str, raw_model: Optional[str], model: Opti
     from hermes_cli import kanban_db as kb
     if raw_model is None and mandatory is not None:
         return set_pin_mandatory(conn, task_id, mandatory), False
+    if mandatory:  # refuse before the model write, so a refused mark changes nothing
+        from hermes_cli.kanban_mandatory_pin import mark_refusal
+        if (why := mark_refusal(conn, task_id)) is not None:
+            raise ValueError(why)
     found = kb.set_model_override(conn, task_id, model, provider=provider)
     if found and mandatory is not None:
         set_pin_mandatory(conn, task_id, mandatory)

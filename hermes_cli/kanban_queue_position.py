@@ -325,6 +325,7 @@ def local_words(place: dict[str, Any]) -> str:
     """``describe`` for the ``local`` lane: the recorded dispatcher skip first, when there is one."""
     from hermes_cli import kanban_dispatch_skip as skips
     skip = place.get("skip")
+    pooled = bool(place.get("pool_could_run")) and skips.pool_replace_helps(skip)
     ahead = place.get("ahead")
     words = (ahead_words(place, "waiting for a local slot: ~{n} ahead") if ahead is not None
              else "waiting for a local slot")
@@ -343,25 +344,47 @@ def local_words(place: dict[str, Any]) -> str:
         words = f"{words}, {census}; class {place['admission_class']}"
         pool_advice = ("Queued, not stuck: check class/placement and available capacity; priority slots are "
                        "marked-only. Do not run its work outside the dispatcher")
+        if pooled:  # a pool worker could start it now: the census must not hide that (#1821)
+            pool_advice = pool_words(place)
         if not skip:
             return f"{words}. {pool_advice}"
         words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
-        return words + ". " + (pool_advice if skips.is_ordering(skip) else skips.advice(skip))
+        return words + ". " + _skip_advice(place, skip, pool_advice, pooled)
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:
         words += f", running count unknown (cap {place['limit']})"
-    pool = place.get("pool_could_run")
-    if pool:
-        from hermes_cli.kanban_placement_coordination import REASON
-        return (words + f". Home-only by a stale creation verdict ({REASON}): pool worker(s) "
-                f"{', '.join(pool)} now carry its access labels and have free slots. Re-place it "
-                f"(`hermes kanban move {place.get('task_id') or '<id>'} --runs-on machine:{pool[0]} --reason \"pool attests its labels\"`) "
-                "instead of waiting for a local slot; do not run its work outside the dispatcher")
+    # One shape with the census branch: a recorded skip is framed first, then its advice. This branch used to
+    # return the pool hint before the skip, dropping the skip reason (PR #1829 review). [daveey]
+    pool_advice = pool_words(place) if pooled else _NOT_STUCK
     if not skip:
-        return words + ". " + _NOT_STUCK
+        return words + ". " + pool_advice
     words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
-    return words + ". " + (_NOT_STUCK if skips.is_ordering(skip) else skips.advice(skip))
+    return words + ". " + _skip_advice(place, skip, pool_advice, pooled)
+
+
+def _skip_advice(place: dict[str, Any], skip: dict[str, Any], ordering_advice: str, pooled: bool) -> str:
+    """The advice after a recorded skip, by the rule the chat notices follow (``kanban_parent_unclaimed._options``):
+    an ordering skip takes the lane's own advice (the pool re-place when a pool worker could run it); any other skip
+    keeps its own advice, after the re-place sentence when one applies. [daveey] PR #1835 review: ``kanban show``
+    replaced that advice with the re-place while the notices kept both."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    if skips.is_ordering(skip):
+        return ordering_advice
+    return (pool_words(place, advice=False) + ". " if pooled else "") + skips.sentence_advice(skip)
+
+
+def pool_words(place: dict[str, Any], *, advice: bool = True) -> str:
+    """The re-place sentence for a local-lane card that ``pool_could_run`` workers could start now. Shared by
+    :func:`local_words` and the chat-wait notices (``kanban_parent_unclaimed._pool_sentence``), which dropped it: a
+    chat told David to wait for hub slots while worker-1 could run the card (kanban-e7a33105a4). ``advice=False``
+    leaves out the dispatcher warning for the notices, whose own advice already ends with it. [daveey]"""
+    from hermes_cli.kanban_placement_coordination import REASON
+    pool = place.get("pool_could_run") or []
+    return (f"Home-only by a stale creation verdict ({REASON}): pool worker(s) {', '.join(pool)} now carry its "
+            "access labels and have free slots. Re-place it (`hermes kanban move "
+            f"{place.get('task_id') or '<id>'} --runs-on machine:{pool[0]} --reason \"pool attests its labels\"`) "
+            "instead of waiting for a local slot" + ("; do not run its work outside the dispatcher" if advice else ""))
 
 
 def read(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:

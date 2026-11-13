@@ -242,3 +242,97 @@ def test_goal_continuation_still_runs_once_the_pause_is_retired(env, monkeypatch
 
     assert session["_test_prompts"] == [typed, "[goal] keep going"]
     assert read_turn_marker(env.home, "session-key") is None
+
+
+# --- A synthesized turn running over the paused marker must itself pause when the next drain window asks.
+# Live, hermes-hub 2026-11-13 (t_01a1d3083b2dae09): a process_complete turn landed on paused session 8d8534 between
+# two drain windows (03:44:20). With no marker of its own it got no step-boundary hook, so it ran 12 minutes through
+# the next windows; hermes-sync's drainer skips core_update_pause markers, so it never waited on it either, and its
+# admission reservation (no gateway publishes Desktop turns) refused every instant apply for over an hour.
+
+def _carried_turn_with_window(env, during_turn):
+    """Pause a turn, then run a notification turn over the paused marker that opens a new drain window
+    mid-turn and returns whatever ``during_turn(agent)`` says the turn ended with."""
+    session = _paused_session(env.home)
+    seen = {}
+
+    def _run(message, **kwargs):
+        af.set_hold(env.home)
+        af.request_pause(env.home, expires_at=time.time() + 120)
+        try:
+            return during_turn(session["agent"], seen)
+        finally:
+            af.clear_pause_request(env.home)
+            af.clear_hold(env.home)
+
+    session["agent"].run_conversation = _run
+    session["running"] = True
+    assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+    return session, seen
+
+
+def test_synthesized_turn_over_a_paused_marker_pauses_at_its_next_step_boundary(env):
+    def _turn(agent, seen):
+        hook = agent.step_boundary_pause
+        seen["hook"] = hook
+        reason = hook() if callable(hook) else None
+        seen["reason"] = reason
+        return {"final_response": "", "messages": [], "interrupted": bool(reason), "completed": not reason,
+                "paused_for_update": reason}
+
+    session, seen = _carried_turn_with_window(env, _turn)
+
+    assert callable(seen["hook"]), "a synthesized turn over a paused marker has no step-boundary pause hook"
+    assert seen["reason"] == up.PAUSE_REASON
+    marker = read_turn_marker(env.home, "session-key")
+    # The paused request is kept as it was: same prompt, still core_update_pause, not counted as a second pause.
+    assert marker is not None and marker["reason"] == up.PAUSE_REASON
+    assert marker["prompt"] == "the long task"
+    assert marker["pauses"] == 1 and marker["attempts"] == 0
+    # The carried turn ended and re-armed the watcher; the paused turn continues once the window is over.
+    assert env.watchers[-1] == ("ui-sid", "session-key")
+    assert not session.get("running")
+    assert up.in_place_resume_action(session, "session-key", skew=lambda: None) == "resume"
+
+
+def test_synthesized_turn_over_a_paused_marker_keeps_running_without_a_pause_request(env):
+    session = _paused_session(env.home)
+    seen = {}
+
+    def _run(message, **kwargs):
+        seen["reason"] = session["agent"].step_boundary_pause()
+        return {"final_response": "noted", "messages": []}
+
+    session["agent"].run_conversation = _run
+    session["running"] = True
+    assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+    assert seen["reason"] is None
+
+
+def test_synthesized_turn_whose_carried_pause_was_retired_meanwhile_does_not_pause(env):
+    from tui_gateway.turn_marker import clear_turn_marker
+
+    def _turn(agent, seen):
+        clear_turn_marker(env.home, "session-key")  # e.g. the user's Stop retired the paused request
+        seen["reason"] = agent.step_boundary_pause()
+        return {"final_response": "noted", "messages": []}
+
+    _session, seen = _carried_turn_with_window(env, _turn)
+    assert seen["reason"] is None
+
+
+def test_synthesized_turn_over_a_paused_marker_arms_the_mid_tool_cancel_and_clarify_withdrawal(env, monkeypatch):
+    # A long tool call (the live turn sat 193 s in one kanban_create) must be cancellable too, or the turn
+    # reaches no step boundary before the drainer gives the window up.
+    armed, stopped, clarify = [], [], []
+    monkeypatch.setattr(up, "start_mid_tool_cancel",
+                        lambda session, key, agent: armed.append(key) or (lambda: stopped.append(key)))
+    monkeypatch.setattr(up, "install_clarify_pause_provider", lambda: clarify.append(True))
+    session = _paused_session(env.home)
+    for seen in (armed, stopped, clarify):  # the paused turn's own
+        seen.clear()
+
+    session["agent"].run_conversation = lambda message, **kw: {"final_response": "noted", "messages": []}
+    session["running"] = True
+    assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+    assert armed == ["session-key"] and stopped == ["session-key"] and clarify == [True]

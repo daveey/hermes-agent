@@ -597,6 +597,25 @@ describe('toChatMessages', () => {
     expect(chatMessageText(messages[1])).toBe('✔ Kanban t_1 done — shipped')
   })
 
+  it('renders a /loop slash tick prompt as its loop line, not a user bubble', () => {
+    // [daveey] hermes_cli/loops.py loop_tick_display: the expanded command is the loop's, not the user's words.
+    const messages = toChatMessages([
+      { role: 'user', content: 'start the loop', timestamp: 1 },
+      {
+        role: 'user',
+        content: 'Run the recap skill now',
+        display_kind: 'loop_tick',
+        display_metadata: { display_text: '↻ /loop /recap' },
+        timestamp: 2
+      },
+      { role: 'user', content: 'Run it again', display_kind: 'loop_tick', timestamp: 3 }
+    ])
+
+    expect(messages.map(message => message.role)).toEqual(['user', 'system', 'system'])
+    expect(chatMessageText(messages[1])).toBe('↻ /loop /recap')
+    expect(chatMessageText(messages[2])).toBe('↻ /loop')
+  })
+
   // [daveey] session-outcome: the backend marks a blocked notice `stale` once its card leaves `blocked`.
   it('flags a kanban notice the backend marked stale, and only that one', () => {
     const messages = toChatMessages([

@@ -37,6 +37,16 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
     from hermes_cli import machine_cpu_metrics as cpu
     from hermes_cli import machine_metrics
 
+    from hermes_cli.worker_resource_admission import refusal
+    from hermes_cli.worker_compute_capacity import worker_enabled, owner_for_connection
+    try:
+        claimant = owner_for_connection(conn, task_id) if conn is not None and worker_enabled() else None
+    except Exception:  # health: allow BLE001 -- malformed worker policy/identity must refuse prelease
+        _defer(task_id, 'worker_resources_unknown')
+        return 'worker_resources_unknown'
+    if reason := refusal(claimant=claimant):
+        _defer(task_id, reason)
+        return reason
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None
@@ -62,7 +72,7 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
     return reason
 
 
-def _root_max_in_progress():
+def _root_max_in_progress(*, root=None):
     """Root ``kanban.max_in_progress`` resolved like the dispatcher (unset → memory-derived default).
 
     ``(ok, cap)``: ok False when the root config is unreadable or the value is invalid (refuses)."""
@@ -71,7 +81,7 @@ def _root_max_in_progress():
     from hermes_cli.kanban_db_dispatch import resolve_max_in_progress
 
     try:
-        doc = read_config_doc_readonly(Path(get_default_hermes_root()) / "config.yaml")
+        doc = read_config_doc_readonly(Path(root if root is not None else get_default_hermes_root()) / "config.yaml")
     except FileNotFoundError:
         doc = None
     except Exception:  # health: allow BLE001 -- unreadable root config refuses the claim
@@ -124,7 +134,15 @@ def _over_budget(started, needed_s=0.0):
     return started is not None and time.monotonic() - started + needed_s > _hold_budget_s()
 
 
-def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
+def _unknown(stage, started, **extra):
+    """``hub_cpu_unknown`` with the branch that refused and the hold so far, so the refusal log tells a hold overrun
+    from an invalid sample, an expired lease or an unreadable limit (they all fail closed the same way)."""
+    hold = {"hold_ms": round((time.monotonic() - started) * 1000), "budget_ms": round(_hold_budget_s() * 1000)} \
+        if started is not None else {}
+    return "hub_cpu_unknown", {"stage": stage, **hold, **extra}
+
+
+def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=None):
     """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network.
 
     Cheap checks (whole-host cap, lease deadline) run BEFORE the ~1 s sample so a claim that must be refused anyway
@@ -136,34 +154,46 @@ def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
     from hermes_cli import machine_cpu_metrics as cpu
 
     echo = getattr(gate, "echo", None)
+    from hermes_cli.worker_resource_admission import refusal
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    try:
+        worker = worker_enabled()
+    except Exception:  # health: allow BLE001 -- malformed worker policy refuses admission
+        return "worker_resources_unknown", None
+    if worker and not getattr(_decision, "worker_fenced", True):
+        return "worker_resources_unknown", None
+    if reason := refusal(echo, enabled=worker, claimant=claimant):
+        return reason, None
+    if worker and (_expired(gate) or _over_budget(started)):
+        return "worker_resources_unknown", None
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None, None
     if state != cpu.ON:
-        return "hub_cpu_unknown", None
+        return _unknown("limit_unknown", started)
     if _cap_full(echo, conn=conn, task_id=task_id):
         return "hub_capacity_full", None
     selected_limit = getattr(_decision, "pool_limit", None) or limit
     if _expired(gate):
-        return "hub_cpu_unknown", None
+        return _unknown("lease_expired_before_sample", started)
     if _over_budget(started, cpu.WINDOW_S):
-        return "hub_cpu_unknown", None  # no room left for even a nominal sample inside the designed hold
+        return _unknown("hold_before_sample", started)  # no room left for even a nominal sample inside the hold
     measured = cpu.sample()
     if not measured or not all(k in measured for k in cpu.FIELDS):
-        return "hub_cpu_unknown", None
+        return _unknown("sample_invalid", started)
     if not cpu.MIN_WINDOW_MS <= measured["cpu_busy_window_ms"] <= cpu.MAX_WINDOW_MS:
-        return "hub_cpu_unknown", None
+        return _unknown("sample_window", started, window_ms=measured["cpu_busy_window_ms"])
     if not cpu.below(measured["cpu_busy_pct"], selected_limit):
         return "hub_cpu_at_or_above_limit", None
     if _expired(gate):
-        return "hub_cpu_unknown", None  # the claim/lease deadline passed while sampling: never start
+        return _unknown("lease_expired_after_sample", started)  # the claim/lease deadline passed while sampling
     if _cap_full(echo, conn=conn, task_id=task_id):  # recount immediately before commit
         return "hub_capacity_full", None
     limit = getattr(_decision, "pool_limit", None) or limit
     if not cpu.below(measured["cpu_busy_pct"], limit):
         return "hub_cpu_at_or_above_limit", None
     if _over_budget(started):
-        return "hub_cpu_unknown", None  # the hold overran its budget: refuse rather than outlast waiting turns
+        return _unknown("hold_after_sample", started)  # the hold overran its budget: refuse, never outlast turns
     counts = getattr(_decision, "counts", None) or {}
     admission = {k: counts[k] for k in ("active_before", "active_after", "excluded_run_uid")} \
         if counts.get("excluded_run_uid") else None
@@ -324,10 +354,29 @@ def claim_transaction(conn, *, task_id=None, gate=None):
     with contextlib.ExitStack() as stack:
         with write_txn(conn):
             try:
-                root = stack.enter_context(admission_lock(get_default_hermes_root(), timeout=0))
+                from hermes_cli import worker_compute_capacity as capacity
+                installation = Path(get_default_hermes_root()).resolve()
                 started = time.monotonic()
-                held = is_held(root)
-                waiting = not held and turns_waiting(root)
+                # Account policy must serialize different HERMES_HOME installs.
+                # Both locks are nonblocking while the DB writer is held; the
+                # stack retains them THROUGH commit/rollback. Preserve each
+                # installation's updater fence and avoid taking one lock twice.
+                roots = [installation]
+                worker = capacity.worker_enabled()
+                from hermes_cli import worker_board_retirement as retirement
+                pending_retirement = retirement.pending(conn)
+                if worker or pending_retirement is not None:
+                    account = capacity.policy_root().resolve()
+                    if account != installation:
+                        roots.insert(0, account)
+                fences = [stack.enter_context(admission_lock(home, timeout=0)) for home in roots]
+                held = any(is_held(root) for root in fences)
+                waiting = not held and any(turns_waiting(root) for root in fences)
+                if not held and not waiting and pending_retirement is not None:
+                    retirement.discard(pending_retirement)
+                if not held and not waiting and worker:
+                    from hermes_cli.worker_account_boards import register
+                    register(conn)
             except AdmissionBusy:
                 # [daveey] Designed contention: another claimer (or hermes-sync) holds admission.lock
                 # through its commit. A normal defer, not a failure: no WARNING/traceback, which the
@@ -335,7 +384,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 logging.getLogger(__name__).info("Update admission lock busy; deferring Kanban claim to the next tick")
                 yield False
                 return
-            except (OSError, TimeoutError):
+            except Exception:  # health: allow BLE001 -- malformed account policy/inventory must fail closed
                 logging.getLogger(__name__).warning("Update admission unavailable; deferring Kanban claim", exc_info=True)
                 yield False
                 return
@@ -354,10 +403,17 @@ def claim_transaction(conn, *, task_id=None, gate=None):
             _bind_echo(conn, task_id, gate)
             _decision.counts = None
             _decision.pool = "regular"
-            reason, evidence = _final_hub_gate(gate, started, conn=conn, task_id=task_id)
+            previous_fenced = getattr(_decision, "worker_fenced", True)
+            _decision.worker_fenced = worker
+            try:
+                claimant = capacity.owner_for_connection(conn, task_id) if worker and task_id is not None else None
+                reason, evidence = _final_hub_gate(gate, started, claimant, conn=conn, task_id=task_id)
+            finally:
+                _decision.worker_fenced = previous_fenced
             if reason is not None:
-                logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s", task_id, reason,
-                                                 getattr(_decision, "counts", None) or {})
+                # ``evidence`` on a refusal names the gate stage and hold (hub_cpu_unknown), never a sample.
+                logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s %s", task_id, reason,
+                                                 getattr(_decision, "counts", None) or {}, evidence or {})
                 _defer(task_id, reason)
                 yield False
                 return

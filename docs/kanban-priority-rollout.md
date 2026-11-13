@@ -55,6 +55,29 @@ fences. The coordinator checks lineage before reading configuration or starting
 SSH; remote staging checks it before reading stdin. SSH is transport for an
 already authorized operator, never a worker authorization mechanism.
 
+**Run 3 prerequisite:** every participating origin, including the local writer,
+must run core containing PR #1623's landed commit
+`abf75b3f2ce7358a2944856c657bd2ea13be9567` before any prepare/stage. Older code
+refuses a no-flag restore outright when the manifest contains above-cap originals,
+even when apply never committed and restore should be a no-op. Having the command
+surface or updating only the coordinator is not enough.
+
+On each origin, identify the installed core used by its actual command (the
+host-map `argv`, or the local coordinator), then perform this read-only check:
+
+```sh
+git -C /absolute/installed-core merge-base --is-ancestor \
+  abf75b3f2ce7358a2944856c657bd2ea13be9567 HEAD
+```
+
+Require exit 0 from every origin and retain its installed HEAD with the run
+report. A missing commit, non-Git install, or nonzero result is not proof: stop
+before staging and resolve the installed-version evidence. Check the executing
+runtime, not an unrelated updated checkout. The runner does not automate this
+version check: its configurable command prefix can wrap a different installation,
+and the host map does not identify the runtime's Git root. The read-only `origins`
+operation below verifies coverage only, not this version prerequisite.
+
 Create an explicit JSON mapping for **every origin in the captured manifest**.
 Entries for other enrolled origins that own no captured row are allowed; the
 coordinator reports them as `skipped` and never contacts them, so a map listing
@@ -95,6 +118,11 @@ above-cap originals exactly (a policy rollback). Without it, recovery restores
 them at the cap (1000), which ranks identically because effective priority is
 capped at read time, so a guarded restore never raises a card above the cap.
 Prefer omitting it.
+
+After a capped restore, a later restore with `--allow-legacy-rollback` is a no-op:
+`at_value(1000, old)` already counts as restored. Adding the flag cannot lift those
+values back to exact originals. Choose the rollback policy before the first
+restore; do not try to force a write or bypass CAS to change that outcome.
 
 Apply and restore treat a stored value of exactly 1000 as holding an above-cap
 manifest original (clamp equivalence, `kanban_priority.at_value`): the sync pull
@@ -241,7 +269,9 @@ Save stdout as the durable operation report. No credentials or lineage are clear
 
    Without `--allow-legacy-rollback` an above-cap original is restored at the cap
    (1000, same effective rank). The explicit flag restores the exact legacy value
-   (policy rollback); the sync pull may clip it again on any replica. Restore
+   (policy rollback) only when a restore write is still needed; after a capped
+   restore, adding the flag is a no-op and cannot recover exact originals.
+   The sync pull may clip an exact restore again on any replica. Restore
    requires exact owned membership and
    target-value CAS, just like apply (new cards also cause refusal). It never
    reverts lifecycle state, lease, parents or runs. Publish and read back restore

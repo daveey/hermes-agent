@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +41,13 @@ def isolated_kanban_home_with_profiles(monkeypatch):
         # The module purge above discards the conftest's memory-sample neutralizer;
         # re-apply it so the host's live memory pressure cannot cap this tick.
         monkeypatch.setattr(kanban_db_dispatch, "_system_memory_sample", dict)
+        # Same for the conftest's host-policy root: the reimported module would
+        # read the real account's worker policy (fail-closed under the guard).
+        from hermes_cli import worker_compute_capacity
+        monkeypatch.setattr(
+            worker_compute_capacity, "policy_root",
+            lambda: Path(test_home) / "host_policy",
+        )
         yield kanban_db
     finally:
         for name in [

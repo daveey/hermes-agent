@@ -140,6 +140,8 @@ def placing_spawn(spawn, policy):
         # scope not ready) refuses without burning the run.
         check_capsule_transport(policy)
         target = resolve_run_scope(policy)  # validated before anything is spawned or consumed
+        from hermes_cli.worker_compute_capacity import managed_target, lower_priority
+        compute = managed_target(policy, target)
         rendezvous = attach_capsule_transport(policy)
         try:
             process = observing_spawn(spawn, rendezvous)(*args, **kwargs)
@@ -152,6 +154,8 @@ def placing_spawn(spawn, policy):
         try:
             if target is not None:
                 migrate(process.pid, target)
+            if compute:
+                lower_priority(process.pid)
             if rendezvous is not None:
                 _deliver(rendezvous, process)
         except BaseException:

@@ -57,6 +57,21 @@ async def test_off_loop_sweep_forwards_restarting(monkeypatch, restarting, sourc
     assert sources == [source]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restarting", [True, False])
+async def test_shutdown_sweep_marks_delegation_stops_as_shutdown(monkeypatch, restarting):
+    """The background subagents the sweep stops carry the shutdown as their stop reason, so their unviewed
+    parents wake instead of filing a requested-stop note (``tools/async_delegation.interrupt_all``)."""
+    calls: list = []
+    _runner(monkeypatch, [], restarting=restarting)
+    monkeypatch.setattr("tools.async_delegation.interrupt_all", lambda *a, **k: calls.append(k) or 0)
+
+    await GatewayShutdownMixin._stop_kill_tool_subprocesses_off_loop("final-cleanup", restarting=restarting)
+
+    assert len(calls) == 1 and calls[0].get("by_shutdown") is True, calls
+    assert calls[0]["reason"].startswith("gateway shutdown"), calls
+
+
 def test_restart_source_is_a_lifecycle_sweep():
     from tools.process_registry import ProcessRegistry
 

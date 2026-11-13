@@ -237,9 +237,12 @@ def stored_owner_verdict(entry, title, body):
         return None  # the judge was unavailable at relay time: retry, never a permanent answer
     sha = audit["skill_sha"] if isinstance(audit.get("skill_sha"), str) else ""
     result = {k: audit.get(k) for k in ("admit", "need", "evidence", "why")}
-    if judge.validated(result, {"title": title, "body": body}, None, sha) is None:
-        return {**asdict(judge.Verdict(why="relay-time admission verdict failed validation (need or verbatim "
-                                           "evidence)", skill_sha=sha)),
+    fields = {"title": title, "body": body}
+    if judge.validated(result, fields, None, sha) is None:
+        detail = (judge.SELF_ASSERTION_WHY if judge.pin_quoting_admit(result, fields, None)
+                  else "need or verbatim evidence")
+        return {**asdict(judge.Verdict(why=f"relay-time admission verdict failed validation ({detail})",
+                                       skill_sha=sha)),
                 "entry": audit.get("entry") or "capability_owner", "capability": audit.get("capability"),
                 "invalid": True}
     return audit
@@ -447,7 +450,7 @@ def _refusal(args, verdict, audit, cfg, *, on_hub, machine_hub, pin, labels):
     out = {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
     if on_hub and not machine_hub and not is_hub(pin, cfg):
         out["remedy"] = hub_stay_remedy(structural_reason({**args, "runs_on": None}, cfg), labels,
-                                        assignee=args.get("assignee"), pool_profiles=_Cfg(cfg).assignees())
+                                        assignee=args.get("assignee") or "default", pool_profiles=_Cfg(cfg).assignees())
     return out
 
 
@@ -501,20 +504,20 @@ def hub_stay_remedy(structural, labels, *, assignee=None, pool_profiles=()):
     tailnet work as ``mac-ops`` and, told only "assignee not allowlisted", kept the hub-only profile
     (sweep slug profile-not-in-pool, t_01a1d09e42e2c4fd). [daveey]
     """
-    if labels is not None:
-        first = "drop runs_on (or name labels a pool worker carries) so the card joins the worker pool"
-    elif structural == ASSIGNEE_KEEP:
+    if structural == ASSIGNEE_KEEP:
         pool = sorted(pool_profiles) or ["default"]
         pick = "default" if "default" in pool else pool[0]
         first = (f"assignee {assignee!r} is a profile no pool worker runs (pool profiles: {', '.join(pool)}); "
-                 f"re-create it with assignee={pick!r}, no placement, and runs_on=['capability:<label>'] for the "
-                 "access the work needs (capability:tailnet-exec for commands on a Mac, capability:hub-write "
-                 "for hub-admin changes, capability:hub-read for hub logs and DBs)")
+                 f"re-create it with assignee={pick!r} and no placement; add access constraints only if the work needs it "
+                 "(runs_on=['capability:tailnet-exec'] for commands on a Mac, requires=['hub:write'] "
+                 "for hub-admin changes, runs_on=['capability:hub-read'] for hub logs and DBs)")
     elif structural:
         first = (f"remove what keeps it on this host ({structural}) and omit placement so the card joins the "
                  "worker pool")
     else:
         first = "omit placement (or pass placement='auto') so the card joins the worker pool"
+    if labels is not None:
+        first = "drop runs_on (or name labels a pool worker carries); " + first
     return (f"On the hub, placement='local' is a hub slot and needs an admit. Instead: {first}; or pass "
             "hub_reason quoting what only the hub can do; or, for a question to David, create it with "
             "initial_status='blocked' and a human_request (it takes no slot and is never judged).")
@@ -529,13 +532,28 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
     """
     from hermes_cli import kanban_placement as kp
     from hermes_cli import kanban_placement_coordination as coordination
+    from hermes_cli.kanban_mandatory_pin import worker_first_refusal
     from hermes_cli.kanban_worker_placement import POLICY, QUEUED_WHY, WAITING
 
     label = kp._Cfg(cfg).queue_label(gateway) if queue else None
-    extra = coordination.required_labels({**args, "requires": requires}, cfg) if label else None
-    if label and extra is not None and (machine_ok or kp._machine_picks_up)(label):
+    extra = coordination.required_labels({**args, "requires": requires}, cfg)
+    if extra is None:
+        # The pickup claim gate (coordination.claim_refusal) refuses this text on EVERY pool worker, so neither
+        # the queue nor worker-first can run it: enrolling it only stranded it ready. t_01a1d267a7e60bc2, a
+        # claim-stall incident whose body says `hermes-hub outcomes --id`, sat 40 min skipped by six workers.
+        # It stays home; ``requires`` stays as declared (the hub:write the deny route adds is for workers).
+        out = {"where": "local", "why": f"hub admission denied, but the text {coordination.ACTION_REASON} "
+                                        "no pool worker is attested for, so it stays here",
+               "hub_admission": {**audit, "home": coordination.ACTION_REASON}}
+        if args.get("requires"):
+            out["requires"] = args["requires"]
+        return out
+    if label and (machine_ok or kp._machine_picks_up)(label):
         out = {"where": "local", "runs_on": [label, *sorted(extra - {label})],
                "why": QUEUED_WHY.format(label=label), "hub_admission": audit}
+    elif why := worker_first_refusal(args):
+        # No attested queue: a denied mandatory pin is refused, as it was while the pin counted as uncarried.
+        return {"where": "refuse", "why": f"hub admission denied, and {why}", "hub_admission": audit}
     else:
         out = {"where": "local", "placement_policy": POLICY, "why": WAITING, "hub_admission": audit}
     if requires is not None:

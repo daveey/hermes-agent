@@ -71,6 +71,23 @@ def _queue_words(place: dict[str, Any]) -> str:
     return words
 
 
+def _pool_sentence(place: dict[str, Any]) -> str:
+    """The pool re-place sentence when a pool worker could start the card now, else ``""``. Kept out of
+    :func:`_queue_words`: the notices print that clause in parentheses, and their advice already says not to run the
+    work outside the dispatcher (PR #1821 review). Dropped from these notices before (kanban-e7a33105a4). [daveey]"""
+    from hermes_cli.kanban_dispatch_skip import pool_replace_helps
+    if not place.get("pool_could_run") or not pool_replace_helps(place.get("skip")):  # a quota wall (PR #1835)
+        return ""
+    from hermes_cli.kanban_queue_position import pool_words
+    return pool_words(place, advice=False)
+
+
+def _pool_suffix(payload: dict[str, Any]) -> str:
+    """``" <pool hint>."`` for a notice payload that carries one, else ``""``."""
+    hint = str(payload.get("pool_hint") or "").strip()
+    return f" {hint}." if hint else ""
+
+
 def _observation(payload: dict[str, Any]) -> str:
     """``board <b>, observed <HH:MM:SSZ>, admission reason <r | unknown>`` for the notice text (empty on an old
     payload without those fields)."""
@@ -100,7 +117,8 @@ def notice_text(payload: Any) -> str:
               if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence"), payload))
     return (f"Waiting {payload.get('wait_minutes', '?')} min on parent {named}, which has been ready "
             f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'})"
-            + _observation(payload) + ". " + last_checkpoint.sentence(payload) + advice + ".")
+            + _observation(payload) + "." + _pool_suffix(payload) + " " + last_checkpoint.sentence(payload) + advice
+            + ".")
 
 
 def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
@@ -118,8 +136,10 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
     if place.get("lane") == "respawn_guard":
         return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}. {checkpoint}".rstrip()
     from hermes_cli.kanban_dispatch_skip import notice_fields
-    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. " + checkpoint
-            + _options(task.id, lane_evidence(conn, task.id), notice_fields(place, waited)) + ".")
+    pool = _pool_sentence(place)
+    fields = {**notice_fields(place, waited), **({"pool_hint": pool} if pool else {})}  # _options defers to it
+    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. " + (f"{pool}. " if pool else "")
+            + checkpoint + _options(task.id, lane_evidence(conn, task.id), fields) + ".")
 
 
 _CANDIDATES = (
@@ -192,7 +212,8 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
-    checkpoint = last_checkpoint.fields(conn, waiting_on)  # what the card already did (kanban-3debc730ab) [daveey]
+    pool_hint = "" if guard else _pool_sentence(place)  # outside the parenthesised queue clause (PR #1821) [daveey]
+    checkpoint = last_checkpoint.notice_fields(conn, waiting_on)  # same lookup supplies fields and evidence [daveey]
     with kb.write_txn(conn):
         if _already_posted(conn, task_id, waiting_on, wait_key, kind):
             return False
@@ -205,6 +226,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
             "queue": kqp.describe(place) if guard else _queue_words(place), **observed, **checkpoint,
+            **({"pool_hint": pool_hint} if pool_hint else {}),
             **(extra or {}),
             "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),

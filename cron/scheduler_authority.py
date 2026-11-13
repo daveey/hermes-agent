@@ -63,6 +63,67 @@ def journal_path(job_id, request_id):
     return get_hermes_home() / 'cron' / 'admissions' / (key + '.json')
 
 
+class CronJournalCorrupt(ValueError):
+    """[daveey] An admission journal is unreadable or does not carry the identity its name
+    encodes. Its owner job cannot be known, so callers hold (never retire) and name ``path``."""
+
+    def __init__(self, path, detail):
+        super().__init__(f'cron journal {detail}: {path}')
+        self.path = path
+
+
+def _job_journals(job_id, *, skip=None):
+    """Yield ``(path, record)`` for each identity-checked admission journal of ``job_id``.
+
+    The one home of the journal identity rule: a journal names its job and request in
+    ``params`` and must live at ``journal_path`` of exactly that pair. An unreadable journal
+    raises CronJournalCorrupt naming its path, because its owner may be this job.
+    """
+    root = journal_path(job_id, '').parent
+    for path in sorted(root.glob('*.json')):
+        if path == skip:
+            continue
+        try:
+            record = json.loads(path.read_text(encoding='utf-8-sig'))
+            params = record['params']
+            owner = params['job_id']
+            mine = owner == job_id and path == journal_path(job_id, params['request_id'])
+        except FileNotFoundError:
+            continue  # reconciliation just retired it
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise CronJournalCorrupt(path, f'unreadable ({type(exc).__name__}: {exc})') from exc
+        if owner == job_id:
+            if not mine:
+                raise CronJournalCorrupt(path, 'identity conflict')
+            yield path, record
+
+
+def has_pending_admission(job_id):
+    """An admission journal owns settlement, even after its firer died. Do not retire its job.
+
+    Only a matching, identity-checked journal holds the job; unrelated journals do not. A damaged
+    journal raises CronJournalCorrupt naming its path, so it cannot turn an uncertain fire into
+    destructive cleanup; callers hold the job (``admission_holds``).
+    """
+    return next(_job_journals(job_id), None) is not None
+
+
+def admission_holds(job, logger):
+    """[daveey] True when an exhausted one-shot must be kept: a journal owns its settlement, or the
+    journal check itself failed. A failure books nothing and blames the journal path (not the
+    healthy job) so an operator can repair or remove that file; it never escapes to the caller's
+    crash path (failure notice + booked failed run on a one-shot whose fire was already spent)."""
+    try:
+        return has_pending_admission(job['id'])
+    except Exception as exc:
+        where = getattr(exc, 'path', None) or journal_path(job['id'], '').parent
+        logger.warning(
+            "Job '%s': one-shot dispatch limit reached but admission journal %s could not be "
+            "checked (%s) — holding the job unretired until that journal is repaired or reconciled",
+            job.get('name') or job['id'], where, exc, exc_info=True)
+        return True
+
+
 def _pause_identity(paused):
     """The exact pause this recovery uncertainty caused, so only that pause is ever lifted."""
     return {'paused_at': paused.get('paused_at'), 'reason': paused.get('paused_reason')} if paused else True
@@ -76,19 +137,8 @@ def replayable_completions(job_id, completions):
 
 def _sibling_pauses(job_id, execution_id):
     """Pause identities still needed by other journaled fires of this job."""
-    own = journal_path(job_id, execution_id)
-    for path in own.parent.glob('*.json'):
-        if path == own:
-            continue
-        try:
-            record = json.loads(path.read_text(encoding='utf-8-sig'))
-        except FileNotFoundError:
-            continue
-        params = record['params']
-        if params['job_id'] == job_id:
-            if path != journal_path(job_id, params['request_id']):
-                raise ValueError('cron journal identity conflict')
-            yield record.get('pause_recorded')
+    for _path, record in _job_journals(job_id, skip=journal_path(job_id, execution_id)):
+        yield record.get('pause_recorded')
 
 
 def pause_for_unknown(job_id, execution_id, reason):

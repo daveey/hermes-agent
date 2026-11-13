@@ -233,3 +233,20 @@ def probe_root(tmp_path):
     """
     (tmp_path / "hermes_bootstrap.py").write_text("", encoding="utf-8")
     return tmp_path
+
+
+# Sync suites that prove WHAT a repair pass heals or credits, under the real clock, one round after a write by
+# another connection. Production batches such passes (``LOCAL_WRITE_REPAIR_MIN_S``); the batching itself is
+# pinned with the real constant in test_kanban_sync_repair_window.py. Listed by name so a new suite gets the
+# production window by default.
+_LOCAL_WRITES_REPAIR_AT_ONCE = frozenset(f"test_kanban_sync_{name}" for name in (
+    "client", "copy_chat_links", "copy_links", "feed_apply_credit", "idle_round", "own_writes",
+    "partition_repair", "placeholder_links", "repair_content", "round_connections"))
+
+
+@pytest.fixture(autouse=True)
+def _sync_repair_local_write_window(request, monkeypatch):
+    if request.module.__name__.rpartition(".")[2] in _LOCAL_WRITES_REPAIR_AT_ONCE:
+        from hermes_cli import kanban_sync_repair_window
+        monkeypatch.setattr(kanban_sync_repair_window, "LOCAL_WRITE_REPAIR_MIN_S", 0.0)
+

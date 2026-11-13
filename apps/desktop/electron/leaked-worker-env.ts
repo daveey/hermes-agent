@@ -61,3 +61,22 @@ export function scrubLeakedWorkerEnv(env: NodeJS.ProcessEnv = process.env): stri
 
   return removed
 }
+
+// Agent tool-child provenance stamps (mirrors hermes_cli/proof_home.py PROVENANCE_KEYS; no test reads
+// the other side's source, so leaked-worker-env.test.ts and tests/hermes_cli/test_serve_proof_home.py
+// each pin these exact literal names and drift on either side fails). A Desktop an agent opened is still the
+// person's app: its own HERMES_DESKTOP=1 backend must not read as an agent-launched restart proof,
+// which the proof-home guard refuses on the production home (gateway-9aaf151a15). Dropped always,
+// not only with a worker marker: a plain chat's terminal tool carries no worker marker.
+export const AGENT_PROVENANCE_KEYS = ['HERMES_AGENT_TOOL_CALL', 'HERMES_AGENT_ORIGIN', 'HERMES_AGENT_HOME'] as const
+
+/** Remove the agent provenance stamps from `env` in place; returns the removed key names. */
+export function dropAgentProvenance(env: NodeJS.ProcessEnv = process.env): string[] {
+  const removed = AGENT_PROVENANCE_KEYS.filter(key => key in env)
+
+  for (const key of removed) {
+    delete env[key]
+  }
+
+  return removed
+}

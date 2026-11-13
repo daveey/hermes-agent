@@ -27,6 +27,7 @@ from agent.delegation_context import (
 
 # First positional argv of a top-level surface (never a worker).
 TOP_LEVEL_COMMANDS = frozenset({"serve", "dashboard", "gui", "desktop", "gateway"})
+_DESKTOP_COMMANDS = frozenset({"gui", "desktop"})
 
 
 def scrub_leaked_worker_env(environ: Optional[MutableMapping[str, str]] = None) -> list[str]:
@@ -54,6 +55,10 @@ def clean_launch_env(base: Optional[MutableMapping[str, str]] = None) -> dict[st
     """A copy of ``base`` (default ``os.environ``) safe to hand to a top-level app launch."""
     env = dict(os.environ if base is None else base)
     scrub_leaked_worker_env(env)
+    # An agent's tool-child stamps must not make the relaunched Desktop's backend agent-originated
+    # (its HERMES_DESKTOP=1 serve would be refused on the production home; gateway-9aaf151a15).
+    from hermes_cli.proof_home import drop_provenance
+    drop_provenance(env)
     return drop_agent_attribution(env)
 
 
@@ -118,6 +123,11 @@ def scrub_for_top_level_launch(argv: Sequence[str]) -> list[str]:
         logging.getLogger(__name__).debug("finished-run identity drop failed", exc_info=True)
     if _first_positional(argv) not in TOP_LEVEL_COMMANDS:
         return []
+    if _first_positional(argv) in _DESKTOP_COMMANDS:
+        # The Desktop is the person's app even when an agent opened it; serve/dashboard keep the
+        # stamps so the proof-home guard and startup recovery still see agent origin.
+        from hermes_cli.proof_home import drop_provenance
+        drop_provenance(os.environ)
     # Name the dead lineage while the pins still exist (the scrub removes them). [daveey]
     diagnosis = leaked_worker_env_diagnosis() if os.environ.get(DELEGATED_CHILD_ENV_MARKER) else None
     removed = scrub_leaked_worker_env()
@@ -263,6 +273,27 @@ def _is_ancestor(pid: int, start: Optional[int] = None) -> bool:
     return False
 
 
+def descends_from_live_pid(pid) -> bool:
+    """Whether this process descends from ``pid`` while it is alive. pid 0/1 never count: every process
+    descends from init, so it vouches for nothing. [daveey]
+
+    ``pid`` must be an integral number or its decimal string: ``4242``, ``"4242"`` and ``4242.0`` are accepted
+    as that pid, and ``None``, ``""``, a non-integral float (``4242.7``, ``inf``, ``nan``) or anything ``int()``
+    refuses is ``False`` rather than an exception. This is deliberate: callers pass pids read from board rows
+    and JSON event payloads (``worker_bound``, ``tasks.worker_pid``), whose type depends on the writer, and the
+    proof is the live-ancestor check on that exact pid, so accepting its string or float spelling vouches for
+    nothing extra. Rejecting those would refuse a real worker's shell (or call it a leaked env) over
+    serialization alone. A non-integral float spells no pid at all, and ``int()`` would truncate it to a
+    different one the caller never named, so it is refused instead."""
+    if isinstance(pid, float) and not pid.is_integer():
+        return False
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return pid > 1 and _pid_alive(pid) and _is_ancestor(pid)
+
+
 def _descends_from_live_agent(env: Mapping[str, str], bound_pid: Optional[int]) -> bool:
     """Whether this process descends from a live agent of the lineage other than the spawn pid:
     the run's ``worker_bound`` interpreter, or the ``HERMES_DELEGATED_CHILD_OWNER`` process that
@@ -271,7 +302,7 @@ def _descends_from_live_agent(env: Mapping[str, str], bound_pid: Optional[int]) 
 
     owner = (env.get(DELEGATED_CHILD_OWNER_ENV) or "").strip().partition(":")[0]
     candidates = [bound_pid] + ([int(owner)] if owner.isdigit() else [])
-    return any(pid and pid > 1 and _pid_alive(pid) and _is_ancestor(pid) for pid in candidates)
+    return any(descends_from_live_pid(pid) for pid in candidates)
 
 
 def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
@@ -298,8 +329,7 @@ def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> 
     if not status:
         reason = f"its worker card {tid} is not on the board"
     elif status in _TERMINAL_STATUSES:
-        if _descends_from_live_agent(env, bound_pid) or (
-                worker_pid and worker_pid > 1 and _pid_alive(worker_pid) and _is_ancestor(worker_pid)):
+        if _descends_from_live_agent(env, bound_pid) or descends_from_live_pid(worker_pid):
             # The worker's own shell after kanban_complete: the env is legitimately its own, the card
             # is just finished. No Desktop is involved (t_01a198dc526bff6e). [daveey]
             return (f"your Kanban card {tid} is {status}: board writes from its worker shell are fenced. "

@@ -273,6 +273,7 @@ _PY_TEST_HARNESS = (
     "scripts/run_tests.sh",
     "scripts/run_tests_parallel.py",
     "scripts/run_tests_host_slots.py",
+    "scripts/worker_test_budget.py",
     "scripts/run_tests_parallel_rss.py",
     "scripts/run_tests_launch.py",
     "scripts/run_tests_fork_child.py",
@@ -410,6 +411,8 @@ _UPDATE_DEPENDENCIES = (
     "agent/deadline.py",  # bounded probes' process-tree timeout cleanup
     "hermes_cli/kanban_db.py",  # update_upstream_conflict files the conflict card
     "hermes_cli/kanban_db_connect.py",
+    "hermes_cli/kanban_capability_routing.py",  # update_pause_siblings names this host's Board gateway
+    "hermes_cli/kanban_foreign_card.py",  # update_pause_siblings reads sibling alarms in the Board replica
     # migrate_all_homes' second-hop provider/profile decisions, run on every update. Its
     # plugin-install branch (plugins_cmd, plugins_cmd_install) runs only for a home whose
     # configured memory provider left core; no update journey's home has one, so those

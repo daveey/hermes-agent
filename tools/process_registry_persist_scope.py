@@ -76,12 +76,19 @@ def persisted_job_scope_argv(session, shell_argv: list[str], unit_suffix: str) -
     unit = run_scope if run_scope is not None else user_unit_cgroup()
     binary = shutil.which("systemd-run") if unit is not None else None
     if unit is None or binary is None or not pr._systemd_run_user_scope_available():
+        from hermes_cli.worker_compute_capacity import worker_enabled
+        if worker_enabled():
+            raise pr.RestartSafeScopeUnavailable('Worker persisted compute requires an available user scope')
         return shell_argv
     raw = _unit_memory_max(unit)
     capped = raw.isdigit() and int(raw) >= pr._MIN_WORKER_MEMORY_MAX_BYTES
     memory_max: int | str
     if run_scope is not None:
         memory_max, slice_name = (int(raw) if capped else 0), KANBAN_SLICE
+        # A persistent command outlives its run, not its card's CPU budget.
+        import re
+        if re.fullmatch(r'hermes-kanban-[0-9a-f]{64}\.slice', run_scope.parent.name):
+            slice_name = run_scope.parent.name
     else:
         # The spawner's own bound; the 4 GiB worker default would OOM a build its uncapped spawner can run.
         memory_max, slice_name = (int(raw) if capped else "infinity"), APP_SLICE

@@ -8,12 +8,13 @@ attempt. From the third consecutive deferral naming the same gateway, this files
 card for an agent to clear it, but only once that streak is ``MIN_STREAK_S`` old: the instant
 hub drainer retries a refused apply several times inside its retry window and then cools off
 10 min, so only a streak older than 15 min has outlived a cool-off and been refused again;
-three quick retries against a gateway busy with a chat turn are not a wall. [daveey]
+three quick retries against a gateway busy with a chat turn are not a wall. The card's key names
+the host, and an open alarm for the same refusal on another host is named as the likely shared
+cause (``update_pause_siblings``). [daveey]
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -161,40 +162,61 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _report(conn, unit: str, count: int, first_at: str, reason: str) -> str:
-    import socket
+def _own_row(conn, key: str, keys: frozenset, legacy: str, own: frozenset):
+    """This host's newest non-archived alarm under its primary ``key``, or under another of its
+    ``keys`` (one per name the host has carried: a host that enrolls in the Board mid-streak keeps its
+    hostname-keyed card) or the pre-host ``legacy`` key when this host created it (a streak open
+    across the upgrade keeps its owner; another host's never, nor one whose hostname merely matches
+    this host's). An empty ``created_on`` is a card this board file created."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    on = "created_on" if "created_on" in cols else "NULL"
+    wanted = sorted(keys | {legacy})
+    for row in conn.execute(
+        f"SELECT id, status, idempotency_key, {on} FROM tasks WHERE idempotency_key IN "
+        f"({','.join('?' * len(wanted))}) AND status != 'archived' ORDER BY created_at DESC, rowid DESC",
+        wanted,
+    ):
+        if row[2] == key or not row[3] or row[3] in own:
+            return row
+    return None
 
+
+def _report(conn, unit: str, count: int, first_at: str, reason: str) -> str:
     from hermes_cli import kanban_db as kb
+    from hermes_cli import update_pause_siblings as sib
     from hermes_cli.update_pause_record import install_root
 
     root = install_root()
-    key = "update-pause-deferred:" + hashlib.sha256(f"{root}\0{unit}".encode()).hexdigest()[:24]
+    host, own = sib.host_identity(conn)
+    # The key names the host: every worker shares the install root and the unit (t_01a1d0a5affda05c).
+    key = sib.alarm_key(host, root, unit)
     evidence = (f"`{unit}` has deferred {count} `hermes update` runs in a row since {first_at}. "
                 f"Latest refusal: {reason}")
     # Serialize lookup + create so overlapping unattended updates cannot create two owners.
     with kb.write_txn(conn, allow_nested=True):
-        row = conn.execute(
-            "SELECT id, status FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (key,),
-        ).fetchone()
+        keys = frozenset({key, *(sib.alarm_key(name, root, unit) for name in own)})
+        row = _own_row(conn, key, keys, sib.legacy_key(root, unit), own)
         if row and row[1] not in {"done", "failed", "cancelled"}:
             if count % REFRESH_EVERY == 0 and not conn.execute(
                 "SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND body = ?",
                 (row[0], AUTHOR, evidence),
             ).fetchone():
                 kb.add_comment(conn, row[0], AUTHOR, evidence)
+            sib.mirror_followers(conn, row[0], unit, own)
             return row[0]
         # A finished owner must not swallow a streak that outlived it; release its stable key atomically.
         if row:
             conn.execute("UPDATE tasks SET idempotency_key = NULL WHERE id = ?", (row[0],))
-        return kb.create_task(
-            conn, title=f"hermes update keeps deferring on gateway {unit}", assignee="default",
+        sibling = sib.find_sibling(conn, unit, reason, own)
+        task_id = kb.create_task(
+            conn, title=f"{sib.TITLE}{unit}", assignee="default",
             created_by=AUTHOR, idempotency_key=key, workspace_kind="scratch", requires=["terminal", "file"],
             completion_contract="local-only",
-            body=f"On `{socket.gethostname()}` (checkout `{root}`) the pre-swap gateway pause refused the "
+            body=f"On `{host}` (checkout `{root}`) the pre-swap gateway pause refused the "
                  f"update {count} times in a row, each time naming the same gateway. The checkout has not "
                  f"moved since {first_at} and every later update defers the same way until this is cleared.\n\n"
                  f"{evidence}\n\n"
+                 + (sib.sibling_section(sibling, host) if sibling else "") +
                  "Find why that gateway cannot take an idle pause, with evidence (its unit definition and "
                  "drop-ins, the code root it runs, its `gateway_state.json`, the update log), then remove the "
                  "cause:\n"
@@ -207,6 +229,9 @@ def _report(conn, unit: str, count: int, first_at: str, reason: str) -> str:
                  "`Update deferred` line naming this gateway) and the checkout HEAD moves. Do not stop a "
                  "gateway that has work in flight.",
         )
+        if sibling:  # one investigation: the sibling hears of this host, this card parks on its fix
+            sib.notify(conn, sibling, task_id, host, _now().isoformat(timespec="seconds"), reason)
+        return task_id
 
 
 if __name__ == "__main__":

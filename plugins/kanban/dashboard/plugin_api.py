@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
+from hermes_cli import kanban_review_contract as _review_contract  # a dashboard "done" is never a worker run
 from hermes_cli import kanban_workflow
 from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli import kanban_db_connect as kbc
@@ -44,7 +45,7 @@ from plugins.kanban.dashboard import board_read
 from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the documented column list
     BOARD_COLUMNS, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
-from plugins.kanban.dashboard.plugin_api_comment_actor import CommentBody, comment_writer
+from plugins.kanban.dashboard.plugin_api_comment_actor import CommentBody, admitted_relay, comment_relay, comment_writer
 from hermes_cli.kanban_db_attachment_names import _collision_free_path, _safe_attachment_name
 
 log = logging.getLogger(__name__)
@@ -689,8 +690,8 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
 # payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
 # detection) and ``done`` pass ``force=True``: a dashboard action is a human override of a live worker claim.
 _STATUS_HANDLERS: dict[str, Any] = {
-    "done": lambda conn, tid, p: kanban_db.complete_task(
-        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
+    "done": lambda conn, tid, p: _review_contract.refuse_outside(conn, tid, p.metadata, None) or (  # [daveey]
+        kanban_db.complete_task(conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True)),
     "blocked": lambda conn, tid, p: kanban_db.block_task(
         conn, tid, kind=p.block_kind, human_request=p.human_request,
         reason=p.block_reason, wake_check=p.wake_check,
@@ -926,11 +927,13 @@ def add_comment(task_id: str, payload: CommentBody, request: Request, board: Opt
     if not payload.body.strip():
         raise HTTPException(status_code=400, detail="body is required")
     writer_kind, writer_session = comment_writer(payload, request.scope)
+    relayed_human = comment_relay(payload, writer_kind)
     with _board_conn(board) as (board, conn):
         _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)
         kanban_db.add_comment(conn, task_id, author=payload.author or "dashboard", body=payload.body,
-                              writer_kind=writer_kind, writer_session=writer_session)
+                              writer_kind=writer_kind, writer_session=writer_session,
+                              relayed_human=admitted_relay(conn, task_id, relayed_human))
         return {"ok": True}
 
 

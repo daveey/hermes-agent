@@ -430,6 +430,7 @@ const NOTICE_KINDS = new Set([
   'failed_turn',
   'turn_stopped',
   'kanban_notice',
+  'loop_tick',
   'hidden'
 ])
 

@@ -94,7 +94,7 @@ def test_other_cards_still_go_to_the_judge(judge, title, body):
 
 @pytest.mark.parametrize("hub_reason", [
     "a Desktop-session interaction",  # tools/kanban_tools_schemas.py hub_reason wording for user_terminal
-    "board_admin_key", "instance_role_ssm", "user_terminal", "hub_worktree", "hub_chrome",
+    "user_terminal", "hub_worktree", "hub_chrome",
     "gateway_key_cli", "hub_live_process",
 ])
 def test_relay_shaped_card_with_an_allowlist_hub_reason_goes_to_the_judge(judge, hub_reason):
@@ -102,6 +102,19 @@ def test_relay_shaped_card_with_an_allowlist_hub_reason_goes_to_the_judge(judge,
     title, body = RELAYS[3]
     assert gate.admit({"title": title, "body": body}, hub_reason=hub_reason).admit is True
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("hub_reason", [
+    "board_admin_key", "instance_role_ssm", "needs the Board admin key", "reads it over instance-role SSM",
+])
+def test_retired_hub_write_needs_do_not_exempt_a_relay(judge, hub_reason):
+    """Board admin key / instance-role SSM are hub-write work now (hub-admin on a capability:hub-write worker), not
+    allowlist contexts: naming one no longer sends a relay card to the judge."""
+    gate, calls = judge
+    title, body = RELAYS[3]
+    verdict = gate.admit({"title": title, "body": body}, hub_reason=hub_reason)
+    assert verdict.admit is False and verdict.why.startswith("comment relay:")
+    assert calls == []
 
 
 @pytest.mark.parametrize("title,body", RELAYS)

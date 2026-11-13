@@ -792,6 +792,8 @@ export interface SessionMessage {
     | 'failed_turn'
     | 'hidden'
     | 'kanban_notice'
+    // A slash-command /loop tick's expanded prompt, shown as its `↻ /loop /cmd` line.
+    | 'loop_tick'
     | 'model_switch'
     | 'personality_switch'
     | 'process_complete'

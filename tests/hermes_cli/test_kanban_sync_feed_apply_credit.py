@@ -213,13 +213,14 @@ def test_a_full_pass_clears_the_credit(live, svc, kanban_home, monkeypatch, cloc
     assert _round(kanban_home, svc).repair_deferred
     path = str(kanban_home / "kanban.db")
     assert path in ksc._REPAIR_CREDIT
-    # A captured local write: the next round runs the pass, and the push after it moves the live file again.
+    # A captured local write: the next round runs the pass and clears the credit.
     with kbc.write_txn(live):
         live.execute("UPDATE tasks SET title = 'local' WHERE id = ?", (child,))
-    for _ in range(3):
-        clock[0] += 1
-        _round(kanban_home, svc)
+    clock[0] += 1
+    assert not _round(kanban_home, svc).repair_deferred
     assert path not in ksc._REPAIR_CREDIT
+    # The push after that pass moved the live file again; its ack is credited, so the chain starts at the
+    # pass's own revision and the next heartbeat round defers.
     calls = _spy(monkeypatch)
     clock[0] += 1
     _heartbeat(svc, parent)
@@ -227,10 +228,10 @@ def test_a_full_pass_clears_the_credit(live, svc, kanban_home, monkeypatch, cloc
     assert not any(calls.values()), calls
 
 
-def test_a_push_ack_after_the_inputs_read_breaks_the_chain(live, svc, kanban_home, monkeypatch, clock):
-    """``push`` runs after the inputs read; an acknowledged push deletes outbox rows (a watched table), so the
-    next round's first apply does not start at the credited revision and the full pass runs. Push acks are
-    deliberately not credited: only feed applies are."""
+def test_a_push_ack_after_the_inputs_read_is_credited(live, svc, kanban_home, monkeypatch, clock):
+    """``push`` runs after the inputs read; an acknowledged push deletes outbox rows (a watched table). That is
+    the sync thread's own bookkeeping (``kanban_sync_own_writes``), so the next apply-only round still defers;
+    before t_01a1d02bf3e0d019 it broke the chain and re-ran the full pass on the hub almost every round."""
     parent, child = _settle(live, svc, kanban_home)
     _heartbeat(svc, parent)
     assert _round(kanban_home, svc).repair_deferred  # credit held
@@ -251,16 +252,12 @@ def test_a_push_ack_after_the_inputs_read_breaks_the_chain(live, svc, kanban_hom
     assert not _round(kanban_home, svc).repair_deferred
     assert marks[-1][2] >= 1 and marks[-1][1] != marks[-1][0], f"the push must ack and move the revision: {marks}"
     assert calls["repair_divergence"] == 1, calls
-    # An apply-only round after the pushing round: the chain breaks at the ack, so the full pass runs.
-    clock[0] += 1
-    _heartbeat(svc, parent)
-    assert not _round(kanban_home, svc).repair_deferred
-    assert calls["repair_divergence"] == 2, calls
-    # Steady again: the next apply-only round defers.
+    # An apply-only round after the pushing round: the ack is credited, so it defers.
     clock[0] += 1
     _heartbeat(svc, parent)
     assert _round(kanban_home, svc).repair_deferred
-    assert calls["repair_divergence"] == 2, calls
+    assert calls["repair_divergence"] == 1, calls
+    assert _board_title(svc, child) == "pushed"
 
 
 @pytest.mark.parametrize("heal", ["heal_clobbered_completions", "heal_running_over_ended_run"])
@@ -359,10 +356,12 @@ def test_an_uncaptured_write_after_the_last_apply_repairs_in_that_round(live, sv
     assert _board_title(svc, child) == "gap after apply"
 
 
-def test_an_unknown_apply_revision_gets_no_credit(live, svc, kanban_home, monkeypatch, clock):
+def test_an_unrecorded_apply_gets_no_credit(live, svc, kanban_home, monkeypatch, clock):
+    """No recorder (``credited`` a no-op, e.g. its TEMP trigger failed to install): the apply's step is a gap."""
+    import contextlib
     parent, _child = _settle(live, svc, kanban_home)
     calls = _spy(monkeypatch)
-    monkeypatch.setattr(sync, "_repair_revision", lambda conn: None, raising=False)
+    monkeypatch.setattr(ksc, "credited", lambda conn: contextlib.nullcontext())
     _heartbeat(svc, parent)
     assert not _round(kanban_home, svc).repair_deferred
     assert calls["repair_divergence"] == 1, calls

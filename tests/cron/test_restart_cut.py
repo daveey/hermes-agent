@@ -77,6 +77,8 @@ def test_direct_run_cut_by_owner_restart_reruns_once_without_a_failure(home, mon
     assert row["status"] == "failed" and "gateway restart" in row["error"]
     assert row["delivery_outcome"] == "suppressed"
     assert delivered == [] and scheduler.drain_delivery_queue({}, None) == 0, "no failure notice"
+    # Typed, so consumers (the coach) need not match the prose detail.
+    assert jobs.get_job(job["id"])["last_failure"]["kind"] == "lifecycle_interrupt"
     _assert_rerun_once(job["id"], execution_id, natural_next=natural_next)
 
 
@@ -95,7 +97,12 @@ def test_rerun_cut_again_is_not_rerun_a_second_time(home, monkeypatch):
     assert isinstance(rerun, dict)
     assert scheduler.run_one_job(rerun) is True
     saved = jobs.get_job(job["id"])
-    assert saved["restart_rerun"]["execution_id"] == first["execution_id"]
+    assert saved["restart_rerun"]["execution_id"] == rerun["execution_id"]
+    assert saved["restart_rerun"]["settled"] is True
+    from cron.restart_rerun import reschedule_interrupted
+
+    assert not reschedule_interrupted(executions.get_execution(rerun["execution_id"]), restart_cut=True)
+    assert jobs.get_job(job["id"]) == saved
     assert not _due(job["id"]), "a rerun cut again waits for its schedule"
     assert int(saved.get("failure_streak") or 0) == 0
 
@@ -107,6 +114,7 @@ def test_an_ordinary_failure_still_counts(home, monkeypatch):
     assert scheduler.run_one_job(claimed) is True
     saved = jobs.get_job(job["id"])
     assert saved["failure_streak"] == 1 and saved.get("restart_rerun") is None
+    assert "kind" not in saved["last_failure"], "an ordinary failure is not a lifecycle interrupt"
     assert not _due(job["id"])
 
 
@@ -285,6 +293,152 @@ def test_restart_safe_worker_cut_is_rerun_by_journal_recovery(home, monkeypatch,
     _assert_rerun_once(job["id"], fire, natural_next=natural_next)
 
 
+@pytest.mark.parametrize("deleted", [False, True])
+def test_oneshot_due_scan_before_journal_recovery(home, monkeypatch, owner_ops, deleted):
+    """A replacement ticker may scan before the canonical owner can reconcile its journal."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job = jobs.create_job(prompt="probe", schedule="in 1m", repeat=1, deliver="local")
+    now += timedelta(minutes=1, seconds=1)
+    assert _due(job["id"])
+    claimed = jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert jobs.claim_dispatch(job["id"])
+    fire = executions.create_execution(job["id"], source="builtin")["id"]
+    executions.mark_execution_running(fire)
+    journal = scheduler_authority.journal_path(job["id"], fire)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps({"params": {"job_id": job["id"], "request_id": fire,
+                                              "extra_prompt": None}, "receipt": None}))
+    _dead_firer(monkeypatch)
+    owner_ops["recover"] = lambda params: {
+        "status": "terminal", "result": [False, "", "", "interrupted"], "job": claimed,
+        "job_flags": {"_restart_cut": True}}
+    if deleted:
+        assert jobs.remove_job(job["id"])
+    # Headless tick cannot dial an absent owner; housekeeping leaves the journal pending,
+    # but still performs its real due scan before the replacement gateway can reconcile.
+    with monkeypatch.context() as headless:
+        headless.setattr("gateway.session_cron.owner_for_home", lambda home: None)
+        headless.setattr(scheduler, "_maybe_run_worktree_maintenance", lambda: None)
+        headless.setattr(scheduler, "_sweep_mcp_orphans", lambda: None)
+        assert scheduler.tick(verbose=False, headless=True) == 0
+    assert not _due(job["id"])
+    if not deleted:
+        assert jobs.get_job(job["id"]) is not None
+        assert not jobs.claim_dispatch(job["id"])
+        assert jobs.get_job(job["id"]) is not None
+    scheduler_authority.reconcile_pending()
+    scheduler_authority.reconcile_pending()
+    if deleted:
+        assert jobs.get_job(job["id"]) is None
+        assert not _due(job["id"])
+        return
+    saved = jobs.get_job(job["id"])
+    assert saved["repeat"] == {"times": 1, "completed": 0}
+    assert int(saved.get("failure_streak") or 0) == 0
+    assert not journal.exists()
+    assert _due(job["id"])
+    rerun = jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert jobs.claim_dispatch(job["id"])
+    assert jobs.mark_job_run(job["id"], True, expected_fire_owner=rerun["fire_claim"]["by"])
+    scheduler_authority.reconcile_pending()
+    saved = jobs.get_job(job["id"])
+    assert saved["repeat"] == {"times": 1, "completed": 1}
+    assert saved["state"] == "completed" and saved["last_status"] == "ok"
+    assert not _due(job["id"])
+
+
+def _corrupt_journal(shape, job_id):
+    """A damaged admission journal: unreadable, or naming this job under the wrong key."""
+    payload = {"json": "{not json", "no-params": json.dumps({"receipt": None}),
+               "not-a-dict": json.dumps([1]), "bad-params": json.dumps({"params": None}),
+               "misnamed": json.dumps({"params": {"job_id": job_id, "request_id": "r1"}})}[shape]
+    path = scheduler_authority.journal_path(job_id, "").parent / f"{shape}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload)
+    return path
+
+
+@pytest.mark.parametrize("shape", ["json", "no-params", "not-a-dict", "bad-params", "misnamed"])
+def test_oneshot_corrupt_journal_holds_and_names_the_journal(home, monkeypatch, owner_ops, caplog,
+                                                             shape):
+    """[daveey] A damaged journal fails closed (the exhausted one-shot is kept, the journal is never
+    deleted) and the due scan names the journal, not the healthy job, as the cause."""
+    from datetime import UTC, datetime, timedelta
+    import logging
+
+    now = datetime.now(UTC)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job = jobs.create_job(prompt="probe", schedule="in 1m", repeat=1, name="probe", deliver="local")
+    now += timedelta(minutes=1, seconds=1)
+    jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert jobs.claim_dispatch(job["id"])
+    fire = executions.create_execution(job["id"], source="builtin")["id"]
+    executions.mark_execution_running(fire)
+    corrupt = _corrupt_journal(shape, job["id"])
+    _dead_firer(monkeypatch)
+    caplog.set_level(logging.INFO)
+    with monkeypatch.context() as headless:
+        headless.setattr("gateway.session_cron.owner_for_home", lambda home: None)
+        headless.setattr(scheduler, "_maybe_run_worktree_maintenance", lambda: None)
+        headless.setattr(scheduler, "_sweep_mcp_orphans", lambda: None)
+        assert scheduler.tick(verbose=False, headless=True) == 0
+    assert jobs.get_job(job["id"]) is not None, "an uncheckable journal must not retire the job"
+    assert not _due(job["id"])
+    messages = [r.getMessage() for r in caplog.records]
+    assert not [m for m in messages if "Skipping malformed cron job" in m], messages
+    assert [m for m in messages if str(corrupt) in m and "holding the job unretired" in m], messages
+    assert not jobs.claim_dispatch(job["id"])
+    assert jobs.get_job(job["id"]) is not None
+    scheduler_authority.reconcile_pending()
+    assert corrupt.exists(), "an uncertain journal is never deleted by recovery"
+    assert jobs.get_job(job["id"]) is not None
+    # Healthy one-shots never reach the journal check; their dispatch is unaffected.
+    other = jobs.create_job(prompt="other", schedule="in 1m", repeat=1, deliver="local")
+    assert jobs.claim_dispatch(other["id"])
+    # Once the operator removes the damaged journal, the old wedged-claim cleanup resumes.
+    corrupt.unlink()
+    assert not jobs.claim_dispatch(job["id"])
+    assert jobs.get_job(job["id"]) is None
+
+
+def test_claim_dispatch_race_with_corrupt_journal_holds_without_bookkeeping(home, monkeypatch, caplog):
+    """[daveey] The scan saw budget left, another process spent it before this claim, and a damaged
+    journal makes the check raise: hold the fire, never book a failed run or send a crash notice."""
+    from datetime import UTC, datetime, timedelta
+    import logging
+
+    now = datetime.now(UTC)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job = jobs.create_job(prompt="probe", schedule="in 1m", repeat=1, name="probe", deliver="local")
+    now += timedelta(minutes=1, seconds=1)
+    claimed = jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert isinstance(claimed, dict) and claimed["repeat"]["completed"] == 0
+    assert jobs.claim_dispatch(job["id"])  # the concurrent firer exhausts the one-shot
+    corrupt = _corrupt_journal("json", job["id"])
+    claimed["execution_id"] = executions.create_execution(job["id"], source="builtin")["id"]
+    booked, notices = [], []
+    monkeypatch.setattr(scheduler, "_launch_external_cron_worker", lambda _job: False)
+    monkeypatch.setattr(scheduler, "mark_job_run", lambda *a, **k: booked.append(a) or True)
+    monkeypatch.setattr(scheduler, "_deliver_crash_failure",
+                        lambda *a, **k: notices.append(a) or (None, "suppressed"))
+    monkeypatch.setattr(scheduler, "run_job", lambda *a, **k: pytest.fail("must not run"))
+    caplog.set_level(logging.WARNING)
+
+    assert scheduler.run_one_job(claimed) is True
+
+    assert booked == [] and notices == []
+    saved = jobs.get_job(job["id"])
+    assert saved["repeat"] == {"times": 1, "completed": 1}
+    assert saved.get("last_status") is None and int(saved.get("failure_streak") or 0) == 0
+    row = executions.get_execution(claimed["execution_id"])
+    assert "Dispatch claim rejected" in row["error"]
+    assert corrupt.exists()
+    assert [r for r in caplog.records if str(corrupt) in r.getMessage()]
+
+
 def test_manual_fire_refused_while_draining_is_deferred_not_failed(home, monkeypatch, owner_ops):
     """Hub sample 2: ``hermes cron run`` while the owner drains: refused, never admitted."""
     from hermes_state_runtime import RuntimeStoreError
@@ -393,12 +547,43 @@ def test_rerun_after_a_deferral_cut_again_is_not_rerun(home, monkeypatch, owner_
     waits for the schedule."""
     job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
     _defer_while_draining(job["id"], monkeypatch, owner_ops)
-    first_cut = _cut_next_attempt(job["id"], monkeypatch)
-    assert _due(job["id"])
     _cut_next_attempt(job["id"], monkeypatch)
+    assert _due(job["id"])
+    rerun_cut = _cut_next_attempt(job["id"], monkeypatch)
     saved = jobs.get_job(job["id"])
-    assert saved["restart_rerun"]["execution_id"] == first_cut
+    assert saved["restart_rerun"]["execution_id"] == rerun_cut
+    assert saved["restart_rerun"]["settled"] is True
     assert not _due(job["id"]), "a rerun cut again waits for its schedule"
+
+
+def test_later_natural_fire_deferred_after_a_skipped_rerun_gets_its_own_rerun(
+        home, monkeypatch, owner_ops):
+    from datetime import datetime, timedelta
+
+    clock = [datetime.fromisoformat("2026-10-28T09:00:00-07:00")]
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: clock[0])
+    monkeypatch.setattr(executions, "_hermes_now", lambda: clock[0])
+    job = jobs.create_job(prompt="probe", schedule="every 60m", name="probe", deliver="local")
+    real_run_job = scheduler.run_job
+    clock[0] += timedelta(minutes=61)
+    _cut_next_attempt(job["id"], monkeypatch)
+    clock[0] += timedelta(minutes=1)
+    _cut_next_attempt(job["id"], monkeypatch)
+    assert not _due(job["id"])
+
+    clock[0] = datetime.fromisoformat(jobs.get_job(job["id"])["next_run_at"])
+    assert _due(job["id"])
+    monkeypatch.setattr(scheduler, "run_job", real_run_job)
+    _defer_while_draining(job["id"], monkeypatch, owner_ops)
+    clock[0] += timedelta(seconds=1)
+    cut = _cut_next_attempt(job["id"], monkeypatch)
+    assert _due(job["id"]), "the later natural fire has not spent its restart rerun"
+    saved = jobs.get_job(job["id"])
+    assert saved["restart_rerun"]["execution_id"] == cut
+    assert not saved["restart_rerun"].get("settled")
+    clock[0] += timedelta(seconds=1)
+    _cut_next_attempt(job["id"], monkeypatch)
+    assert not _due(job["id"]), "the later fire also gets only one rerun"
 
 
 def test_deferring_a_pending_rerun_keeps_it_a_rerun(home, monkeypatch, owner_ops):

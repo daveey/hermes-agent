@@ -96,13 +96,19 @@ def agent_comment_ids(conn: sqlite3.Connection, task_id: str, comment_ids: list[
 
 def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, *,
                 origin_gateway: Optional[str] = None, writer_kind: Optional[str] = None,
-                writer_session: Optional[str] = None) -> int:
+                writer_session: Optional[str] = None, relayed_human: Optional[dict] = None) -> int:
     """Append a comment (moved from ``kanban_db``; re-exported there). ``origin_gateway``: the gateway it came from (the hermes-hub relay passes the
     sender); default: the gateway the author spelling names, else this gateway (kanban_comment_origin). [daveey]
 
     ``writer_kind`` ("agent" | "human") records who typed it on the ``commented`` event, with the
     agent's ``writer_session``: David and his agents share one profile, so the author can't say.
-    Unset (system writers, legacy callers) leaves the payload as before. [daveey]"""
+    Unset (system writers, legacy callers) leaves the payload as before. [daveey]
+
+    ``relayed_human`` (``{session, message_id, at}``, verified by ``kanban_relayed_human``) marks an agent
+    comment that carries the user's reply from a chat: the no-progress budget counts it as a human answer,
+    while ``writer_kind`` stays ``agent`` so it gains no operator authority (kanban-d1b921f32e). [daveey]"""
+    if relayed_human is not None and writer_kind != "agent":
+        raise ValueError("relayed_human marks an agent's relay of the user's message; it needs writer_kind='agent'")
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
@@ -119,6 +125,9 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
     # compose comment writes under one outer commit.
     with _kb.write_txn(conn, allow_nested=True):
         _kb._require_task(conn, task_id)
+        if relayed_human:  # the card holder's own checks, atomic with the write (one relay per user turn)
+            from hermes_cli.kanban_relayed_human import admit
+            admit(conn, task_id, relayed_human)
         cur = conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at, origin_gateway) "
             "VALUES (?, ?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now, origin),
@@ -130,6 +139,8 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
             payload["writer_kind"] = writer_kind
             if writer_session:
                 payload["writer_session"] = str(writer_session)
+        if relayed_human:
+            payload["relayed_human"] = dict(relayed_human)
         _kb._append_event(conn, task_id, "commented", payload)
         return cid
 

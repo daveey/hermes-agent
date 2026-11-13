@@ -75,6 +75,9 @@ def _config_slots() -> int | None:
 
 def host_slot_count() -> int:
     """``HERMES_TEST_HOST_SLOTS`` env, else the host's ``tests.host_slots`` config, else ``os.cpu_count()``."""
+    from hermes_cli.worker_compute_capacity import worker_enabled, effective_cores
+    if worker_enabled():
+        return max(1, int(effective_cores() // 4))
     raw = os.environ.get("HERMES_TEST_HOST_SLOTS", "").strip()
     if raw:
         try:
@@ -95,6 +98,9 @@ def xdist_worker_budget() -> int:
     16-core Mac ran 32+ workers and the load average passed 100 (ready Kanban cards then sat unclaimed).
     Capping each holder's workers at its share of the cores keeps slots x workers <= cores. [daveey]
     """
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    if worker_enabled():
+        return 1
     raw = os.environ.get("HERMES_TEST_XDIST_MAX", "").strip()
     if raw:
         try:
@@ -108,11 +114,18 @@ def xdist_worker_budget() -> int:
 
 
 def host_slot_dir() -> str:
-    return os.environ.get("HERMES_TEST_SLOT_DIR") or f"/tmp/hermes-test-slots-{os.getuid()}"  # windows-footgun: ok — POSIX test host slots  # no-tmp: ok — host-wide shared slot dir must be outside per-run scratch
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    override = None if worker_enabled() else os.environ.get("HERMES_TEST_SLOT_DIR")
+    return override or f"/tmp/hermes-test-slots-{os.getuid()}"  # windows-footgun: ok — POSIX test host slots  # no-tmp: ok — host-wide shared slot dir must be outside per-run scratch
 
 
 def host_slots_enabled() -> bool:
-    return os.name == "posix" and host_slot_count() > 0 and os.environ.get(HELD_ENV) != "1"
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    inherited = os.environ.get(HELD_ENV) == "1" and not worker_enabled()
+    if worker_enabled():
+        from scripts.worker_test_budget import inherited_slot
+        inherited = inherited_slot()
+    return os.name == "posix" and host_slot_count() > 0 and not inherited
 
 
 def slot_max_age_s() -> int:
@@ -144,7 +157,9 @@ def _write_holder(fd: int) -> None:
     except OSError:
         cwd = ""
     pid = os.getpid()
-    record = json.dumps({"pid": pid, "start": _proc_start(pid), "since": time.time(), "cwd": cwd}).encode()
+    import secrets
+    record = json.dumps({"pid": pid, "start": _proc_start(pid), "since": time.time(),
+                         "cwd": cwd, "nonce": secrets.token_hex(16)}).encode()
     with contextlib.suppress(OSError):
         os.ftruncate(fd, 0)
         os.pwrite(fd, record, 0)
@@ -208,6 +223,9 @@ def reclaim_stale_slots(directory: str, count: int, now: float | None = None) ->
     import fcntl
 
     now = time.time() if now is None else now
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    if worker_enabled():
+        return []  # A held inode is capacity, regardless of age or recorded PID.
     max_age = slot_max_age_s()
     notes: list[str] = []
     for n in range(count):
@@ -267,6 +285,10 @@ def acquire_host_slot(on_wait=None) -> int | None:
     """
     if not host_slots_enabled():
         return None
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    from scripts.worker_test_budget import RECEIPT_ENV
+    if worker_enabled() and (os.environ.get(HELD_ENV) or os.environ.get(RECEIPT_ENV)):
+        raise RuntimeError('invalid inherited worker test-slot receipt')
     directory = host_slot_dir()
     os.makedirs(directory, mode=0o700, exist_ok=True)
     order = list(range(host_slot_count()))
@@ -303,10 +325,10 @@ def release_host_slot(fd: int | None) -> None:
 
 
 @contextlib.contextmanager
-def host_test_slot(on_wait=None) -> Iterator[None]:
+def host_test_slot(on_wait=None) -> Iterator[int | None]:
     """Hold one host slot for the body. ``on_wait()`` is called once if every slot is taken."""
     fd = acquire_host_slot(on_wait)
     try:
-        yield
+        yield fd
     finally:
         release_host_slot(fd)

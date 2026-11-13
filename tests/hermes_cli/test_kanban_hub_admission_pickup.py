@@ -262,6 +262,7 @@ def test_dispatch_refuses_a_hub_bound_foreign_copy_without_an_admit_verdict(gws,
     # With pickup back, the copy is evicted, re-copied through the gate, judged, then claimed.
     monkeypatch.setattr(wn, "pickup", real)
     hub.round()  # push what the refused tick wrote, so the copy can be evicted
+    hub.round()  # ... and let the replica take that push: a lagging replica never re-copies it (replica_lag)
     hub.tick()
     assert _claimed_on_hub(svc, tid) and _events(hub.conn, tid, "hub_admission")[-1]["admit"] is True, (
         kb.get_task(hub.conn, tid), hub.conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ?",

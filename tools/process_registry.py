@@ -1149,15 +1149,15 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
     def _track_started(self, session: ProcessSession, reader_target, reader_name: str, extra_args=(), *, ownership_scope=None) -> None:
         """Register before the reader can publish completion, even for an exited child."""
         from contextvars import copy_context
-
         # Reader completion must retain the producer's multiplex profile scope.
         reader = threading.Thread(target=copy_context().run, args=(reader_target, session, *extra_args),
                                   daemon=True, name=reader_name)
         session._reader_thread = reader
         with self._lock:
+            if self._refuse_held_locked(session.id):  # a foreground call still owns it (989239fff3) [daveey]
+                return
             self._prune_if_needed()
-            # Completion takes this lock too. Starting here also leaves no
-            # ghost entry if the interpreter cannot start another thread.
+            # Completion takes this lock too; starting here leaves no ghost entry if no thread can start.
             reader.start()
             self._running[session.id] = session
             if ownership_scope is not None:
@@ -1998,9 +1998,9 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             selected = lines[offset:offset + limit]
             stop = slice(offset, offset + limit).indices(total_lines)[1]
             observed_completion_output = total_lines == 0 or (bool(selected) and stop == total_lines)
-        result = {
-            **self._status_head(session), "output": "\n".join(selected),
-            "total_lines": total_lines, "showing": f"{len(selected)} lines"}
+        result = {  # exit fields as in poll/wait, so an exited-0 log gets the masked-success hint too
+            **self._status_head(session), **(self._exit_fields(session) if exited else {}),
+            "output": "\n".join(selected), "total_lines": total_lines, "showing": f"{len(selected)} lines"}
         if exited and observed_completion_output and not finalizing:
             self._consume_completion(session_id)
         return result
@@ -2646,8 +2646,8 @@ def _handle_process(args, **kw):
         if not session_id:
             return tool_error(f"session_id is required for {action}")
         handler, redact = _SESSION_ACTIONS[action]
-        from tools.process_registry_wait_policy import apply_wait_poll_policy
-        result = apply_wait_poll_policy(action, session_id, handler(session_id, args))
+        from tools.process_registry_wait_policy import apply_wait_poll_policy, with_masked_success_hint
+        result = with_masked_success_hint(apply_wait_poll_policy(action, session_id, handler(session_id, args)))
         return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
     return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff")
 

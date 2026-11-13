@@ -34,9 +34,10 @@ def _json_list(text):
 
 def required_labels(row):
     """The labels a pool worker must attest to run this card (mirrors the Board's ``requiredLabels``)."""
+    from hermes_cli.kanban_placement_coordination import requirement_label
     row = dict(row)
     return ([f"profile:{row.get('assignee') or 'default'}"]
-            + [f"capability:{r}" for r in _json_list(row.get("requires"))]
+            + [requirement_label(r) for r in _json_list(row.get("requires"))]
             + [f"skill:{s}" for s in _json_list(row.get("skills"))])
 
 

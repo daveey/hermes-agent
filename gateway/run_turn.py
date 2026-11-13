@@ -40,7 +40,7 @@ from gateway.session_transcript import TranscriptReadError
 from gateway.run_turn_bubble_cleanup import register_bubble_cleanup, settle_turn_senders
 from gateway.turn_context import TurnContext
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
-from gateway.turn_outcome import refresh_gateway_turn_outcome
+from gateway.turn_outcome import finish_gateway_turn_outcome, run_outcome, run_receipt_scope
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -224,6 +224,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             return prepared
         history, message_text = prepared.history, prepared.message_text
 
+        outcome_token = run_outcome.set({"session_id": session_entry.session_id})
         try:
             hook_ctx = {
                 "platform": source.platform.value if source.platform else "",
@@ -341,8 +342,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         except Exception as e:
             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
         finally:  # [daveey] store the chat's outcome (off the reply path), then restore the session context
-            refresh_gateway_turn_outcome(self, session_entry, event, session_key)
-            self._clear_session_env(_session_env_tokens)
+            finish_gateway_turn_outcome(self, session_entry, event, session_key, outcome_token, _session_env_tokens)
 
     def _profile_scope_for_source(self, source: SessionSource):
         """``_profile_runtime_scope`` for ``source``'s profile when a secret scope is required.
@@ -813,9 +813,9 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         self, message: str, context_prompt: str, history: list[dict[str, Any]],
         source: SessionSource, session_id: str, **turn_kwargs,
     ) -> dict[str, Any]:
-        """Profile-scoping wrapper around ``_run_agent_inner`` (same keyword parameters; pass-through
-        when multiplexing is off)."""
-        with self._profile_scope_for_source(source):
+        """Profile-scoping wrapper around ``_run_agent_inner``; each invocation (a queued follow-up's
+        recursion included) owns its outcome receipt (``gateway.turn_outcome.run_receipt_scope``)."""
+        with run_receipt_scope(session_id), self._profile_scope_for_source(source):
             return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
 
     def _run_agent_display_settings(self, source: SessionSource) -> GatewayRunner._RunAgentDisplay:
@@ -1442,31 +1442,8 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         """Poll the executor future (inactivity timeout + backup interrupt checks); return its result,
         or a synthetic failed run dict on inactivity timeout. Polls even with an unlimited timeout
         so the backup interrupt check runs if monitor_for_interrupt() silently died."""
-        from gateway.run import _abandon_timed_out_gateway_turn
-        agent_holder = turn_ctx.agent_holder
-        _warning_fired = False
-        while True:
-            done, _ = await asyncio.wait({worker.executor_task}, timeout=5.0)
-            if done:
-                # Prefer the real result even if the watchdog fired in the same window (the run already
-                # persisted its reply).
-                return worker.executor_task.result()
-            if worker.agent_timeout is not None:
-                if worker.timeout_fired.is_set():
-                    break
-                _idle_secs = turn_ctx.awake_idle.measure(self._agent_activity_summary(agent_holder[0]).get("seconds_since_activity", 0.0))
-                if not _warning_fired and worker.agent_warning is not None and _idle_secs >= worker.agent_warning:
-                    _warning_fired = True
-                    await self._run_agent_inactivity_warning(worker, turn_ctx.source, turn_ctx._status_thread_metadata)
-                if _idle_secs >= worker.agent_timeout:
-                    threading.Thread(
-                        target=_abandon_timed_out_gateway_turn,
-                        kwargs={"agent_holder": agent_holder, **self._reaper_kwargs(worker)},
-                        name=f"gateway-turn-reaper-{worker.task_id[:12]}", daemon=True,
-                    ).start()
-                    break
-            await self._run_agent_backup_interrupt_check(turn_ctx, _interrupt_detected, interrupt_monitor)
-        return self._run_agent_timeout_result(worker, turn_ctx)
+        from gateway.run_turn_wait import await_turn_worker
+        return await await_turn_worker(self, worker, turn_ctx, _interrupt_detected, interrupt_monitor)
 
     def _run_agent_evict_on_fallback(self, turn_ctx: TurnContext) -> None:
         """Evict the cached agent when a fallback model activated on a SUCCESSFUL run (so /model shows

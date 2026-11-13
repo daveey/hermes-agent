@@ -633,18 +633,19 @@ def test_row_without_admission_column_reads_as_normal():
 
 
 def test_pool_census_uses_one_board_snapshot(board, monkeypatch):
+    """A claim landing between the board's running-row read and its pool count is in neither (one snapshot)."""
     from hermes_cli import kanban_admission_pools as pools
     conn, home = board
     tid = task(conn)
-    original = pools.board_pools
+    original = pools.count_pools
 
-    def concurrent_claim(db, **kwargs):
+    def concurrent_claim(*args, **kwargs):
         with closing(kbc.connect(home / "kanban.db")) as writer:
             with kb.write_txn(writer):
                 writer.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
-        return original(db, **kwargs)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(pools, "board_pools", concurrent_claim)
+    monkeypatch.setattr(pools, "count_pools", concurrent_claim)
     detail = {"pools": {"regular": 0, "priority": 0}}
     total = mm.active_card_runs(detail=detail)
     assert total == 0
@@ -1565,7 +1566,7 @@ def test_pool_note_keeps_non_ordering_dispatcher_skip():
     assert "score 1100 (priority 1000" in note, note
     assert "regular pool full (7/7), a normal card waits for it" in note, note
     assert "class normal" in note, note
-    assert note.endswith(skips.advice(skip)), note
+    assert note.endswith(skips.sentence_advice(skip)), note  # its own sentence after '. ' (PR #1846 review)
     assert "check class/placement" not in note, note
 
 

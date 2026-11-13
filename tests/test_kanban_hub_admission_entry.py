@@ -113,6 +113,22 @@ def test_cli_runs_on_machine_hub(hub_cli, monkeypatch, admit):
             assert rc == 2 and tasks == []  # refused: the creator re-places it
 
 
+def test_cli_hub_reason_help_matches_tool_schema():
+    """`--hub-reason` help and the kanban_create `hub_reason` description must not drift apart."""
+    from hermes_cli.kanban_parser import build_parser
+    from tools.kanban_tools_schemas import KANBAN_CREATE_SCHEMA
+
+    def sub(parser, name):
+        action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        return action.choices[name]
+
+    root = argparse.ArgumentParser()
+    build_parser(root.add_subparsers())
+    create = sub(sub(root, "kanban"), "create")
+    (help_text,) = [a.help for a in create._actions if a.dest == "hub_reason"]
+    assert help_text == KANBAN_CREATE_SCHEMA["parameters"]["properties"]["hub_reason"]["description"]
+
+
 def test_cli_force_hub_outside_worker_is_recorded(hub_cli):
     assert _cli_create(MARKED, "--force-hub") == 0
     assert hub_cli.calls == []

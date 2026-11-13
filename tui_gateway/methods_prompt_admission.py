@@ -129,6 +129,7 @@ def _dispatch(server, rid, sid, session, text, profile):
         # next boot continues the decision instead of dropping it (self-heal desktop-3a6213ce74).
         with session["history_lock"]:
             session["_marker_until_tool"] = True
+            session.pop("_submit_input_origin", None)  # [daveey] never a prior client submit's origin
         server._run_after_agent_ready(rid, sid, session, text, None, None, None, auto_continue=True)
 
     worker = server._start_session_work(run, name="prompt-admission", session=session)

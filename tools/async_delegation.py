@@ -468,6 +468,40 @@ def restore_undelivered_completions(target_queue) -> int:
         return _replay_pending(conn, rows, target_queue, now, startup=True)
 
 
+def unclaimed_pending_completions(*, min_age_s: float, now: Optional[float] = None,
+                                  recover: bool = True) -> list[dict[str, Any]]:
+    """[daveey] This home's terminal completions still pending delivery, not under a live claim, and at least
+    ``min_age_s`` past completion: ``[{"delegation_id", "event"}]``, oldest first. Expired rows are dropped first
+    (as the replay does). For the unloaded-parent waker (``tui_gateway.delegation_unloaded``), which claims each
+    row with ``claim_completion_delivery`` before acting, so a stale read here can never deliver twice. Never
+    creates a ledger; a quiet one (no pending or live rows) is answered without a write."""
+    from agent.runtime_session_store import is_worker_process
+    if is_worker_process() or not _db_path().exists():
+        return []
+    from tools.async_delegation_idle import ledger_quiet
+    if ledger_quiet(_db_path()):
+        return []
+    if recover:  # an owner that died while no poller ran here: classify it first (the caller throttles this)
+        recover_abandoned_delegations()
+    now = time.time() if now is None else now
+    with _DB_LOCK, _transaction() as conn:
+        _expire_pending_completions(conn, now)
+        rows = conn.execute("""SELECT delegation_id, event_json FROM async_delegations
+               WHERE state NOT IN ('running','finalizing') AND delivery_state='pending' AND event_json IS NOT NULL
+                 AND (delivery_claim IS NULL OR delivery_claimed_at < ?)
+                 AND COALESCE(NULLIF(completed_at, 0), dispatched_at) < ?
+               ORDER BY completed_at, delegation_id""", (now - _CLAIM_LEASE_S, now - min_age_s)).fetchall()
+    out = []
+    for delegation_id, payload in rows:
+        try:
+            evt = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(evt, dict):
+            out.append({"delegation_id": delegation_id, "event": redact_completion_event(evt)})
+    return out
+
+
 def _expire_pending_completions(conn, now: float) -> None:
     """Resolve expired terminal rows even if their copies are queued or held; never steal a live claim."""
     rows = conn.execute("""SELECT delegation_id, delivery_attempts,
@@ -1317,7 +1351,8 @@ def _push_completion_event(record: dict[str, Any], result: dict[str, Any], statu
         "status": status, **payload, "dispatched_at": dispatched_at, "completed_at": completed_at,
         **({} if is_batch else {"exit_reason": result.get("exit_reason")}),
         **{k: record[k] for k in _ROUTING_KEYS if record.get(k)},
-        **{k: result[k] for k in _STALL_META_KEYS if k in result}}
+        **{k: result[k] for k in _STALL_META_KEYS if k in result},
+        **({"interrupted_by": record["_interrupted_by"]} if record.get("_interrupted_by") else {})}
     try:
         _persist_completion(evt, result)
     except Exception as exc:
@@ -1563,16 +1598,33 @@ def _interrupt_records(targets: list[dict[str, Any]], caller: str, reason: str, 
     return count
 
 
-def interrupt_all(reason: str = "shutdown", *, resumable: bool = False) -> int:
+def _mark_stop(targets: list[dict[str, Any]], reason: str, *, by_shutdown: bool) -> None:
+    """Record why *targets* were stopped; the first stop's intent wins (caller holds ``_records_lock``).
+    A requested stop (``/stop``, a session ending) marks ``_stop_requested``; a later shutdown sweep that
+    reaches the unit before its runner unwinds must not restamp it as ``interrupted_by`` and wake the
+    parent on work someone chose to stop. A shutdown stop stays stamped if a requested stop follows."""
+    for r in targets:
+        if not by_shutdown:
+            r.setdefault("_stop_requested", reason)
+        elif not r.get("_stop_requested"):
+            r.setdefault("_interrupted_by", reason)
+
+
+def interrupt_all(reason: str = "shutdown", *, resumable: bool = False, by_shutdown: bool = False) -> int:
     """Signal every running async delegation to stop (``/stop``, shutdown). Returns how
     many. The child still emits a completion event (status='interrupted') via the
     normal finalize path. ``resumable`` (gateway shutdown): a restart, not a person, stops
-    them, so each child keeps a resumable record (``delegate_tool_resumable``)."""
+    them, so each child keeps a resumable record (``delegate_tool_resumable``). ``by_shutdown``
+    (the gateway's shutdown sweep) stamps *reason* on each unit's result as ``interrupted_by``:
+    nobody asked for that stop, so its parent wakes to re-dispatch or report
+    (``delegation_wakes_parent``) instead of sleeping on a note. A unit already stopped on request
+    keeps that intent (``_mark_stop``)."""
     if resumable:
         from tools.delegate_tool_resumable import note_gateway_shutdown
         note_gateway_shutdown()
     with _records_lock:
         targets = [r for r in _records.values() if r.get("status") in _ACTIVE_STATES]
+        _mark_stop(targets, reason, by_shutdown=by_shutdown)
     return _interrupt_records(targets, "interrupt_all", reason, "Interrupted %d async delegation(s) (%s)")
 
 
@@ -1582,6 +1634,8 @@ def interrupt_for_session(
     """Signal running async delegations owned by ONE ending session to stop (any
     selector matches, see ``_session_records``). Returns how many."""
     targets = _session_records(_ACTIVE_STATES, session_key, origin_ui_session_id, parent_session_id)
+    with _records_lock:
+        _mark_stop(targets, reason, by_shutdown=False)
     return _interrupt_records(
         targets, "interrupt_for_session", reason, "Interrupted %d async delegation(s) for ending session (%s)")
 

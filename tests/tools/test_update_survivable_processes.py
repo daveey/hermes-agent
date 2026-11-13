@@ -262,6 +262,256 @@ def test_held_foreground_command_is_checkpointed_until_released(tmp_path, monkey
         proc.wait()
 
 
+def _held_sleep(tmp_path, monkeypatch, registry=None):
+    """A held survivable foreground command around an owned ``sleep 30`` child, in an isolated home."""
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(pr, "_checkpoint_path", lambda: tmp_path / "processes.json")
+    registry = registry or ProcessRegistry()
+    proc = subprocess.Popen(["sleep", "30"])
+    session = registry._new_session("sleep 30", "t", "t", "k", str(tmp_path), persist_on_release=True)
+    session.pid, session.host_start_time = proc.pid, registry._safe_host_start_time(proc.pid)
+    session.output_log = str(tmp_path / f"{session.id}.log")
+    session.notify_on_complete, session.watcher_interval = True, 5
+    registry.hold_foreground(session)
+    return registry, session, proc, home
+
+
+def _assert_not_adopted(registry, session, home):
+    assert registry.get(session.id) is None, "a held foreground command was adopted as a background job"
+    assert session.id not in registry._running
+    assert not registry.pending_watchers, "recovery queued a completion watcher for a foreground command"
+    assert not (home / "logs" / "process-results" / f"{session.id}.json").exists()
+
+
+def test_recovery_never_adopts_a_held_foreground_command_of_this_registry(tmp_path, monkeypatch):
+    """989239fff3: a recovery pass while the tool still waits on the command adopted it as a background
+    job; its reader then reported ``lost``/-1 for a call that finished with exit 0."""
+    registry, session, proc, home = _held_sleep(tmp_path, monkeypatch)
+    try:
+        assert registry.recover_from_checkpoint() == 0
+        _assert_not_adopted(registry, session, home)
+        registry.release_foreground(session.id)  # the foreground wait finishes normally
+        _assert_not_adopted(registry, session, home)
+        assert json.loads((tmp_path / "processes.json").read_text()) == []
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_recovery_racing_a_foreground_release_never_adopts_it(tmp_path, monkeypatch):
+    """Recovery that reads processes.json after release dropped the hold but before the checkpoint
+    rewrite must not see an unowned entry: the release settles under the checkpoint file lock."""
+    import threading
+
+    class Holds(dict):
+        def pop(self, *a):
+            value = super().pop(*a)
+            if value is not None and not racer.is_alive():
+                racer.start()
+                in_recovery.wait(0.5)  # pre-fix: recovery owns the file lock now; post-fix: it waits for ours
+            return value
+
+    registry = ProcessRegistry()
+    registry._foreground_holds = Holds()
+    in_recovery = threading.Event()
+    recovered = []
+    real_locked = registry._recover_from_checkpoint_locked
+
+    def locked(owner):
+        in_recovery.set()
+        return real_locked(owner)
+
+    registry._recover_from_checkpoint_locked = locked
+    racer = threading.Thread(target=lambda: recovered.append(registry.recover_from_checkpoint()), daemon=True)
+    registry, session, proc, home = _held_sleep(tmp_path, monkeypatch, registry)
+    try:
+        registry.release_foreground(session.id)
+        racer.join(10)
+        assert recovered == [0]
+        _assert_not_adopted(registry, session, home)
+        assert json.loads((tmp_path / "processes.json").read_text()) == []
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_release_drops_the_entry_even_while_its_log_and_exit_file_remain(tmp_path, monkeypatch):
+    """Release rewrites the checkpoint before the call's .log/.exit are unlinked: the merge must not
+    keep the released entry as an adoptable worker handoff (the next recovery adopted it, then its
+    reader lost the files and reported lost/-1)."""
+    registry, session, proc, _home = _held_sleep(tmp_path, monkeypatch)
+    from tools.process_registry_output_log import _exit_path, output_dir
+    log = output_dir() / f"{session.id}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    session.output_log = str(log)
+    registry.hold_foreground(session)  # re-checkpoint with the profile's real output-log path
+    log.write_text("Thu Nov 12 22:13:44 UTC 2026\n")
+    _exit_path(log).write_text("0\n")
+    import tools.process_registry_profiles as profiles
+    seen_before_cross_profile_drop = []
+    real_drop = profiles.drop_from_every_checkpoint
+
+    def drop(ids):  # the local rewrite must already have dropped it: other processes read the file now
+        seen_before_cross_profile_drop.append(json.loads((tmp_path / "processes.json").read_text()))
+        return real_drop(ids)
+
+    monkeypatch.setattr(profiles, "drop_from_every_checkpoint", drop)
+    try:
+        registry.release_foreground(session.id)
+        assert seen_before_cross_profile_drop == [[]]
+        assert json.loads((tmp_path / "processes.json").read_text()) == []
+        assert ProcessRegistry().recover_from_checkpoint() == 0
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_recovery_racing_a_handoff_tracks_the_command_once(tmp_path, monkeypatch):
+    """A deliberate handoff (update/shutdown interrupt) moves the hold to ``_running`` atomically: a
+    concurrent recovery neither re-adopts it nor finds it unowned."""
+    registry, session, proc, _home = _held_sleep(tmp_path, monkeypatch)
+    started = []
+    monkeypatch.setattr(registry, "_track_started",
+                        lambda s, *a, **k: (started.append(s.id), registry._running.__setitem__(s.id, s)))
+    try:
+        registry.convert_foreground(session)
+        assert registry.recover_from_checkpoint() == 0
+        assert started == [session.id]
+        assert registry._running[session.id] is session
+        assert session.id not in registry.held_foreground()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.mark.parametrize("first", ["handoff", "recovery"])
+def test_recovery_racing_a_real_handoff_tracks_the_command_once(tmp_path, monkeypatch, first):
+    """The real ``convert_foreground`` (log reader start + checkpoint write under the reentrant flock)
+    racing a recovery pass, in both orders: neither deadlocks, the command gets exactly one owner (the
+    handoff's), and its completion is the real exit, never a false lost/-1."""
+    import threading
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(pr, "_checkpoint_path", lambda: tmp_path / "processes.json")
+    registry = ProcessRegistry()
+    tracked = []
+    real_track = registry._track_started
+    racing, popped, decided = threading.Event(), threading.Event(), threading.Event()
+
+    def track(session, *a, **k):  # the real path, plus the race window: the hold is gone, not yet tracked
+        tracked.append(session)
+        if threading.current_thread() is handoff:
+            if first == "handoff":
+                recovery.start()  # fixed: it waits for the checkpoint file lock this handoff holds
+            popped.set()
+            if racing.wait(0.3):  # unfixed: recovery decides now, while the command is in neither table
+                decided.wait(0.3)
+        return real_track(session, *a, **k)
+
+    registry._track_started = track
+    handoff = threading.Thread(target=lambda: registry.convert_foreground(session), daemon=True, name="handoff")
+    recovered = []
+    recovery = threading.Thread(target=lambda: recovered.append(registry.recover_from_checkpoint()),
+                                daemon=True, name="recovery")
+    real_locked = registry._recover_from_checkpoint_locked
+
+    def locked(owner):  # recovery owns the file lock and is about to decide
+        racing.set()
+        if first == "recovery":
+            handoff.start()
+            popped.wait(0.3)  # fixed: the handoff waits for our lock before it drops the hold
+        try:
+            return real_locked(owner)
+        finally:
+            decided.set()
+
+    registry._recover_from_checkpoint_locked = locked
+    trigger, log = tmp_path / "finish", tmp_path / "fg.log"
+    with open(log, "w") as out:
+        proc = subprocess.Popen(["sh", "-c", f"while [ ! -e '{trigger}' ]; do sleep 0.05; done; echo fg-done"],
+                                stdout=out, stderr=subprocess.STDOUT)
+    try:
+        session = registry._new_session("fg", "t", "t", "k", str(tmp_path), persist_on_release=True)
+        session.process, session.pid = proc, proc.pid
+        session.host_start_time = registry._safe_host_start_time(proc.pid)
+        session.output_log = str(log)
+        registry.hold_foreground(session)
+        order = (recovery, handoff) if first == "recovery" else (handoff, recovery)
+        order[0].start()  # it starts the other one while it holds the checkpoint file lock
+        for thread in order:
+            thread.join(10)
+            assert not thread.is_alive(), f"deadlock: {thread.name} still waits ({first} first)"
+        assert recovered == [0]
+        assert tracked == [session], "the command was tracked by more than one owner"
+        assert registry._running[session.id] is session
+        assert session.id not in registry.held_foreground()
+        assert not registry.pending_watchers
+        assert [e["session_id"] for e in json.loads((tmp_path / "processes.json").read_text())] == [session.id]
+        trigger.touch()
+        wait_until(lambda: session.exited, timeout=10)
+        assert (session.exit_code, session.completion_reason) == (0, "exited")
+        assert tracked == [session]
+    finally:
+        trigger.touch()
+        proc.wait(10)
+
+
+def test_release_never_rewrites_the_checkpoint_without_its_lock(tmp_path, monkeypatch):
+    """A release that cannot take the processes.json lock still drops the hold and settles the entry
+    through the cross-profile drop (which takes each file's own lock), but never runs an unlocked
+    read-merge-write that could clobber a concurrent writer's entries."""
+    registry, session, proc, _home = _held_sleep(tmp_path, monkeypatch)
+    import tools.process_registry_profiles as profiles
+
+    def no_lock():
+        raise OSError("lock unavailable")
+
+    rewrites, dropped = [], []
+    monkeypatch.setattr(registry, "_checkpoint_file_lock", no_lock)
+    monkeypatch.setattr(registry, "_write_checkpoint_locked", lambda *a, **k: rewrites.append((a, k)))
+    monkeypatch.setattr(profiles, "drop_from_every_checkpoint", lambda ids: dropped.append(list(ids)))
+    before = (tmp_path / "processes.json").read_bytes()
+    try:
+        registry.release_foreground(session.id)
+        assert rewrites == [], "processes.json was rewritten without its lock"
+        assert (tmp_path / "processes.json").read_bytes() == before
+        assert session.id not in registry.held_foreground()
+        assert dropped == [[session.id]]
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_adoption_boundary_refuses_a_held_foreground_command(tmp_path, monkeypatch, caplog):
+    """Detection: any path that tracks a still-held command as a background job is refused and logged."""
+    registry, session, proc, home = _held_sleep(tmp_path, monkeypatch)
+    try:
+        registry._track_started(session, lambda s: None, "reader")
+        _assert_not_adopted(registry, session, home)
+        assert "a foreground tool call still holds it" in caplog.text
+    finally:
+        registry.release_foreground(session.id)
+        proc.kill()
+        proc.wait()
+
+
+def test_a_dead_owners_held_command_is_still_recovered(tmp_path, monkeypatch):
+    """Control: a held command whose owner registry is gone (a crash mid-wait) is still an orphan the
+    next owner recovers."""
+    _, session, proc, _home = _held_sleep(tmp_path, monkeypatch)
+    successor = ProcessRegistry()
+    try:
+        assert successor.recover_from_checkpoint() == 1
+        assert successor.get(session.id) is not None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
 # ── integration (real transient user service, stopped like the gateway) ──────
 
 

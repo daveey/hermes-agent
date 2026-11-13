@@ -9,7 +9,7 @@ t_01a1cf4778d6d1b1, t_01a1cf4799e84072). Any worker posts that comment itself: t
 
 :func:`verdict` is the hub admission judge's deterministic first rule: such a card is denied with that route and no
 model call, so the refusal the creating worker reads says what to do instead. A card that also names one of the
-admission allowlist's contexts (hub Chrome, Board admin key, instance-role SSM, user terminal, a hub worktree, the hub
+admission allowlist's contexts (hub Chrome, user terminal, a hub worktree, the hub
 gateway's own key for ``hermes-hub`` (gateway_key_cli), in-process hub state (hub_live_process)) is left to the judge,
 and so is a card that names no explicit target card (``on t_<id>``, a ``## t_<id>`` heading, ``task_id=t_<id>``).
 """
@@ -31,7 +31,7 @@ _TARGET = re.compile(r"\b(?:on|onto|to)\s+(?:the\s+)?(?:hub-owned\s+)?(?:(?:task
 _RELAY = re.compile(r"verbatim|hub-owned|foreign_card|board_pinned|read_only_transport|replica|only the hub|"
                     r"owner-only|created on (?:the )?hub", re.IGNORECASE)
 # The hub-admission-test allowlist's contexts: any mention goes to the judge instead.
-_HUB_CONTEXT = re.compile(r"chrome|cloudflare access|admin key|instance[- ]role|\bssm\b|run_in_user_terminal|"
+_HUB_CONTEXT = re.compile(r"chrome|cloudflare access|run_in_user_terminal|"
                           r"user terminal|_wt/|\.worktrees/|unpushed|"
                           # gateway_key_cli: `hermes-hub <subcommand>` with the hub gateway's own key.
                           r"gateway_key_cli|hermes-hub\b|(?:gateway|hub)(?:'s|s)? (?:own )?key|"
@@ -39,8 +39,8 @@ _HUB_CONTEXT = re.compile(r"chrome|cloudflare access|admin key|instance[- ]role|
                           # hub_live_process: in-process hub gateway/serve state.
                           r"hub_live_process|in-process|live process|"
                           # The hub_reason schema's wording and the remaining literal allowlist IDs.
-                          r"desktop[- ]session|signed-in browser|board admin (?:credential|token)|"
-                          r"hub_chrome|board_admin_key|instance_role_ssm|user_terminal|hub_worktree", re.IGNORECASE)
+                          r"desktop[- ]session|signed-in browser|"
+                          r"hub_chrome|user_terminal|hub_worktree", re.IGNORECASE)
 
 WHY = ("comment relay: a card that only posts a comment on another card never needs the hub. Post it from your "
        "own card: kanban_supervisor_request(ops=[{'op': 'operator', 'action': 'comment', 'task_id': <card>, "

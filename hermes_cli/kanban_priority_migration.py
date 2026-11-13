@@ -89,7 +89,11 @@ def save_manifest(path: Path, manifest: dict) -> None:
 
 
 def apply(conn, path: Path, *, undo: bool = False, allow_legacy_rollback: bool = False) -> int:
-    """Apply an already-saved manifest once, or explicitly roll back its values.
+    """Deprecated v1 executor; not used by the supported ``migrate`` coordinator.
+
+    Retains exact-value CAS (no sync-clamp equivalence) and refuses above-cap
+    undo without ``allow_legacy_rollback``, even for a never-applied no-op.
+    Use the attached v2 executor for clamp-aware apply and capped restore.
 
     Run on the board's authorized writer, not a worker replica. The normal edit
     transaction emits sync deltas; no sync flags or leases are bypassed. A second

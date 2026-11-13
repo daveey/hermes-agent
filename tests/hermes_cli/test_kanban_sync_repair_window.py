@@ -3,8 +3,9 @@
 David-MBP, 2026-11-02 (t_01a199a0a5d38255): with no local work the gateway's sync thread used 13.5% of a core.
 The replica's feed cursor is a repair input and moves on every change any gateway makes to the board, so the
 default board ran the full repair pass (0.73 s thread-CPU each: ~6k rows decoded) on 29 rounds in 90 s. A change
-that only moved the replica cursor now waits ``REPLICA_REPAIR_MIN_S`` after the last pass; local writes, a rebuilt
-replica and the foreign-parent mirror are not delayed. [daveey]"""
+that only moved the replica cursor now waits ``REPLICA_REPAIR_MIN_S`` after the last pass, and a write by
+another process waits ``LOCAL_WRITE_REPAIR_MIN_S`` after it (hub 2026-11-13: 80 of 86 full passes in 601 s were
+such writes); a rebuilt replica and the foreign-parent mirror are not delayed. [daveey]"""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import kanban_sync_repair_window as win
 from tests.hermes_cli import kanban_sync_support as support
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 
@@ -137,21 +139,58 @@ def test_a_burst_of_remote_changes_runs_one_repair_pass_per_window(live, svc, ka
     assert all(n == 2 for n in calls.values()), f"an unchanged round repeated the pass: {calls}"
 
 
+def _local_write(live, task, title):
+    with kbc.write_txn(live):
+        live.execute("UPDATE tasks SET title = ? WHERE id = ?", (title, task))
+
+
 @pytest.mark.parametrize("mode", ["shadow", "primary"])
-def test_a_local_write_inside_the_window_still_repairs_at_once(live, svc, kanban_home, monkeypatch, clock, mode):
+def test_a_local_write_after_its_window_repairs_at_once(live, svc, kanban_home, monkeypatch, clock, mode):
     parent, _ = _settle(live, svc, kanban_home, mode)
     calls = _spy(monkeypatch, HEAVY)
-    _remote(svc)
-    assert _round(kanban_home, svc).repair_deferred
-    assert not any(calls.values())
-    with kbc.write_txn(live):
-        live.execute("UPDATE tasks SET title = 'renamed' WHERE id = ?", (parent,))
+    clock[0] += win.LOCAL_WRITE_REPAIR_MIN_S
+    _local_write(live, parent, "renamed")
     assert not _round(kanban_home, svc).repair_deferred
     assert all(n == 1 for n in calls.values()), calls
 
 
 @pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_a_burst_of_local_writes_runs_one_repair_pass_per_window(live, svc, kanban_home, monkeypatch, clock, mode):
+    """Hub 2026-11-13: writes by other processes ran 80 full passes in 601 s on a 5,428-card board."""
+    monkeypatch.setattr(win, "LOCAL_WRITE_REPAIR_MIN_S", 10.0)  # shorter than the feed window: told apart below
+    parent, _ = _settle(live, svc, kanban_home, mode)
+    clock[0] += 60
+    calls = _spy(monkeypatch, HEAVY)
+    _local_write(live, parent, "w0")
+    assert not _round(kanban_home, svc).repair_deferred
+    assert all(n == 1 for n in calls.values()), calls
+    passed_at = clock[0]
+    path = str(kanban_home / "kanban.db")
+    for i in range(5):
+        clock[0] += 1
+        _local_write(live, parent, f"w{i + 1}")
+        if i == 3:
+            _remote(svc)  # a feed change in the same burst must not push the due time out to the feed window
+        assert _round(kanban_home, svc).repair_deferred
+        assert ksc._REPAIR_DEFERRED[path] == pytest.approx(passed_at + 10.0)
+    assert all(n == 1 for n in calls.values()), f"each local write re-ran the full repair pass: {calls}"
+    boards = [(BOARD, kanban_home / "kanban.db")]
+    assert ksc.deferred_repairs_due(boards, clock[0]) == []
+    clock[0] = passed_at + 10.0
+    assert ksc.deferred_repairs_due(boards, clock[0]) == boards
+    assert not _round(kanban_home, svc).repair_deferred
+    assert all(n == 2 for n in calls.values()), calls
+    assert path not in ksc._REPAIR_DEFERRED
+    # The pass cleared the credit: a feed-only round chains from it and defers on the feed window again.
+    clock[0] += 1
+    _remote(svc)
+    assert _round(kanban_home, svc).repair_deferred
+    assert ksc._REPAIR_DEFERRED[path] == pytest.approx(passed_at + 10.0 + ksc.REPLICA_REPAIR_MIN_S)
+
+
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
 def test_an_uncaptured_local_write_inside_the_window_is_healed(live, svc, kanban_home, clock, mode):
+    """A capture gap re-installs the triggers, which moves the schema version: an ``inputs`` pass, never deferred."""
     parent, _ = _settle(live, svc, kanban_home, mode)
     _remote(svc)
     assert _round(kanban_home, svc).repair_deferred
@@ -162,6 +201,15 @@ def test_an_uncaptured_local_write_inside_the_window_is_healed(live, svc, kanban
     _round(kanban_home, svc)
     _round(kanban_home, svc)
     assert svc.board(BOARD)["rows"]["tasks"][parent]["title"] == "gap edit"
+
+
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_a_captured_local_write_is_pushed_by_a_deferred_round(live, svc, kanban_home, clock, mode):
+    parent, _ = _settle(live, svc, kanban_home, mode)
+    clock[0] += 1
+    _local_write(live, parent, "pushed now")
+    assert _round(kanban_home, svc).repair_deferred
+    assert svc.board(BOARD)["rows"]["tasks"][parent]["title"] == "pushed now"
 
 
 def test_a_rebuilt_replica_repairs_at_once(live, svc, kanban_home, monkeypatch, clock):

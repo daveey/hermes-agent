@@ -16,7 +16,7 @@ from tests.agent import test_model_routing_agent as agent_fixtures
 
 routing_home = agent_fixtures.routing_home
 streaming_route = agent_fixtures.streaming_route
-QUOTE = "Rotate the Board admin key"
+QUOTE = "Read the page in the hub's signed-in Chrome"
 RUBRIC = "---\nname: hub-admission-test\ndescription: test rubric\n---\nAnswer with strict JSON.\n"
 
 
@@ -24,8 +24,8 @@ RUBRIC = "---\nname: hub-admission-test\ndescription: test rubric\n---\nAnswer w
 def wire(monkeypatch):
     anthropic = pytest.importorskip("anthropic", reason="native Anthropic wire test needs the SDK")
     import httpx
-    sent, reply = [], {"text": json.dumps({"admit": True, "need": "board_admin_key", "evidence": QUOTE,
-                                           "why": "needs the Board admin key"})}
+    sent, reply = [], {"text": json.dumps({"admit": True, "need": "hub_chrome", "evidence": QUOTE,
+                                           "why": "needs the hub's signed-in Chrome"})}
 
     def respond(request):
         sent.append((dict(request.headers), json.loads(request.content)))
@@ -74,8 +74,8 @@ def test_real_router_reports_subscription_provenance(managed, wire):
 
 def test_real_router_admit_is_honoured(managed, wire):
     sent, _ = wire
-    verdict = judge.admit({"title": QUOTE, "body": "Board admin work"})
-    assert (verdict.admit, verdict.need, verdict.evidence) == (True, "board_admin_key", QUOTE)
+    verdict = judge.admit({"title": QUOTE, "body": "Signed-in browser work"})
+    assert (verdict.admit, verdict.need, verdict.evidence) == (True, "hub_chrome", QUOTE)
     assert verdict.why != "admission unavailable"
     assert len(sent) == 1 and sent[0][1]["model"] == judge.MODEL
 

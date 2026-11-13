@@ -328,6 +328,11 @@ def recover_tui_orphaned_processes(registry=None, *, sweep_interval: float = DET
     if not is_desktop_owned_backend():
         logger.debug("not a Desktop-owned backend: leaving orphaned chat processes for the Desktop backend")
         return 0
+    from hermes_cli.proof_home import recovery_home_allowed
+    from hermes_constants import get_hermes_home
+    if not recovery_home_allowed(get_hermes_home()):
+        logger.warning("process re-adoption skipped: a proof backend never adopts production jobs")
+        return 0
     if registry is None:
         from tools.process_registry import process_registry as registry
     try:

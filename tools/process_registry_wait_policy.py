@@ -188,3 +188,21 @@ def apply_wait_poll_policy(action: str, session_id: str, result: dict) -> dict:
     else:
         result["note"] = note
     return result
+
+
+def with_masked_success_hint(result):
+    """*result* with the foreground terminal's masked-success ``hint`` when an exited-0
+    poll/wait/log shows a hidden failure (`| tail` over "command not found"). Advice only: the
+    exit code is unchanged (agent-dab059c232: a background `timeout ... | tail` reported exit 0
+    without ever running). Results with no output (write/submit/close) pass through."""
+    if not isinstance(result, dict) or result.get("exit_code") != 0 or "hint" in result:
+        return result
+    output = result.get("output") or result.get("output_preview")
+    if isinstance(output, str) and output:
+        try:
+            from tools.terminal_hints import annotate_masked_success
+            if note := annotate_masked_success(str(result.get("command") or ""), output):
+                result["hint"] = note
+        except Exception:
+            logger.debug("masked-success hint failed", exc_info=True)
+    return result

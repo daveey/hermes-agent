@@ -196,6 +196,12 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
 
 
 def _remove_board_locked(slug: str, *, archive: bool = True) -> dict:
+    from hermes_cli.worker_account_boards import removing
+    with removing(_kb.board_dir(slug) / "kanban.db"):
+        return _remove_board_files_locked(slug, archive=archive)
+
+
+def _remove_board_files_locked(slug: str, *, archive: bool = True) -> dict:
     """Archive (to ``boards/_archived/<slug>-<ts>/``) or delete a board;
     ``default`` cannot be removed. Returns ``{"slug", "action", "new_path"}``."""
     _kb._assert_not_delegated_child_mutation()

@@ -133,12 +133,22 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
             "LIMIT 1", (task_id,)).fetchone() is not None:
         return _refuse("not_acknowledged", f"{task_id} has a task edit the Board has not acknowledged yet; "
                                            "retry after the next sync")
+    matches = [me]
+    if pool:
+        from hermes_cli import kanban_move as km
+        from hermes_cli import kanban_worker_node as wn
+        registry = wn.registry(require_fresh=True)
+        if registry is None:
+            return _refuse("registry_unavailable", "the Board machine registry is unreachable; try again")
+        matches = km.matching_machines(labels, registry.get("machines") or {}, me=me, exclude_me=False)
+        if not matches:
+            return _refuse("no_machine", f"no active, unheld machine has every label in {labels}")
     try:
         previous = json.loads(row["runs_on"]) if row["runs_on"] else None
     except (TypeError, ValueError):
         previous = None
     return {"ok": True, "me": me, "board": board, "revision": int(row["sync_version"]), "previous": previous,
-            "labels": labels, "matches": [] if pool else [me], "status": row["status"]}
+            "labels": labels, "matches": matches, "status": row["status"]}
 
 
 def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], reason: str, *,

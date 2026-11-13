@@ -5,6 +5,7 @@ which sqlite-live-guard refuses. [daveey]"""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from typing import Any, Optional
@@ -18,7 +19,7 @@ class KanbanEditRefused(ValueError):
 
 def edit_operator_fields(
     conn: sqlite3.Connection, task_id: str, *, max_retries: Optional[int] = None,
-    goal_mode: Optional[bool] = None, goal_max_turns: Optional[int] = None,
+    goal_mode: Optional[bool] = None, goal_max_turns: Optional[int] = None, review_required: Optional[bool] = None,
     max_runtime_seconds: Optional[int] = None, session_id: Optional[str] = None,
     force: bool = False, board: Optional[str] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
@@ -39,6 +40,11 @@ def edit_operator_fields(
         wanted[field] = int(value)
     if goal_mode is not None:
         wanted["goal_mode"] = 1 if goal_mode else 0
+    if review_required is not None:
+        worker = os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK")
+        if not review_required and worker:
+            raise KanbanEditRefused("review_required can only be disabled by an orchestrator, not a worker")
+        wanted["review_required"] = int(bool(review_required))
     if session_id is not None:
         sid = str(session_id).strip()
         if not sid:
@@ -46,7 +52,7 @@ def edit_operator_fields(
         wanted["session_id"] = sid
     with _kb.write_txn(conn):
         row = conn.execute(
-            "SELECT max_retries, goal_mode, goal_max_turns, max_runtime_seconds, session_id "
+            "SELECT max_retries, goal_mode, goal_max_turns, max_runtime_seconds, session_id, review_required "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:

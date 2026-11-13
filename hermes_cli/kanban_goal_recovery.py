@@ -82,7 +82,8 @@ def recovery_assignee(task):
 
     cfg = load_config_readonly()
     candidates = [task.assignee, (cfg.get('kanban') or {}).get('orchestrator_profile'), 'default']
-    queues = queue_assignees()
+    from hermes_cli.kanban_gate_only import gate_only_assignees
+    queues = queue_assignees() | set(gate_only_assignees())  # gate-only names are refused at create [daveey]
     for name in dict.fromkeys(candidates):
         if not isinstance(name, str) or not name or name in queues:
             continue

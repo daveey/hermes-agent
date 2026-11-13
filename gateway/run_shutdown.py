@@ -25,7 +25,7 @@ from agent.i18n import t
 from gateway.config import Platform
 from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, GATEWAY_SERVICE_RESTART_EXIT_CODE,
-    effective_stop_drain_timeout, effective_stop_watchdog_delay, resolve_cron_drain_budget
+    effective_stop_drain_timeout, effective_stop_watchdog_delay, stop_cron_drain_budget
 )
 from gateway.run_common import _UNSET
 from gateway.run_runtime import interrupt_side_agents, managed_turn_count, stop_managed_turns
@@ -1745,7 +1745,7 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
             from tools.async_delegation import interrupt_all as _interrupt_async
             _count_step(
                 "Shutdown (%s): interrupted %d background delegation(s)",
-                lambda: _interrupt_async(reason=f"gateway shutdown ({phase})", resumable=True),
+                lambda: _interrupt_async(reason=f"gateway shutdown ({phase})", resumable=True, by_shutdown=True),
             )
 
         _step("process_registry.kill_all", _kill_processes)
@@ -1824,15 +1824,7 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
         _deferred_at_start = ctx.deferred_count()
         # Cron floor clamped to the watchdog leash; getattr-guard for bare shutdown-path doubles.
         _cron_drain_cfg = getattr(self, "_cron_drain_timeout", DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT)
-        # Under launchd the real leash is launchd's own exit timeout, not our watchdog
-        # (drain + grace): a signal-driven stop that lets cron work push past it is SIGKILLed
-        # before cleanup runs.
-        # ``timeout`` is already the effective (launchd-capped) drain, so this is the same
-        # leash the thread watchdog is armed with — dump margin included.
-        _cron_leash = effective_stop_watchdog_delay(self, resolve_shutdown_watchdog_delay(timeout))
-        _cron_timeout = resolve_cron_drain_budget(
-            timeout, _cron_drain_cfg, watchdog_delay=_cron_leash, elapsed=ctx.elapsed(),
-        )
+        _cron_timeout = stop_cron_drain_budget(self, timeout, _cron_drain_cfg, ctx.elapsed(), api=_api_at_start)
         if (_cron_at_start or _api_at_start) and _cron_timeout > timeout:
             logger.info(
                 "Shutdown drain: %d in-flight cron job(s), %d api_server run(s) — waiting up to "

@@ -12,8 +12,12 @@ The budget counts trailing closed runs that ended in a wait (``scheduled``, ``bl
 attachment, body/assignee/placement/pin edit, a met wake condition, a human comment, or a completion, archive,
 review or edit on a linked (parent or child) card. Crashes, reclaims, quota releases and other run losses are
 neutral: they neither count nor reset. Agent comments are never progress -- they are what the loop produces --
-and neither is a bare ``unblocked`` (t_7e2ee45c's recovery loop was 11 of them); an unblock that resolved
-something comes with its evidence (a completed parent, a human comment, an edit).
+except a chat's verified relay of the user's reply (``relayed_human`` on the ``commented`` event,
+``kanban_relayed_human``): an answered ask is a human answer, whoever typed it onto the card. Neither is a bare
+``unblocked`` (t_7e2ee45c's recovery loop was 11 of them); an unblock that resolved
+something comes with its evidence (a completed parent, a human comment, an edit). An escalation right after a
+chat unblocked a ``needs_input`` block with no marked relay records ``no_progress_relay_suspect``: most likely
+David answered and the relay was not marked.
 
 At ``kanban.no_progress_runs`` (default 5; 0 disables) such runs, the dispatcher does not spawn. Instead (decided
 again under the write lock, and never under another dispatcher's live claim):
@@ -83,7 +87,8 @@ def progress_marker(conn: sqlite3.Connection, task_id: str, *, before: Optional[
     own = conn.execute(
         f"SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND created_at < ? "
         f"AND (kind IN ({_marks(CARD_PROGRESS_EVENTS)}) "
-        "OR (kind = 'commented' AND json_extract(payload, '$.writer_kind') = 'human'))",
+        "OR (kind = 'commented' AND (json_extract(payload, '$.writer_kind') = 'human' "
+        "OR json_extract(payload, '$.relayed_human') IS NOT NULL)))",
         (task_id, cut, *CARD_PROGRESS_EVENTS),
     ).fetchone()[0]
     linked = conn.execute(
@@ -240,37 +245,61 @@ def _owner_body(task, runs: int, marker: int) -> str:
 
 def _escalate(conn, task, runs: int, marker: int, now: int) -> Optional[str]:
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_relayed_human as krh
     from hermes_cli.kanban_awaiting import _supervisor_profile
 
     note = _note(runs, marker)
+    # Detection for an unmarked relay (kanban-d1b921f32e): the ask was answered in a chat and the chat only
+    # unblocked the card, so nothing here could tell an answered ask from an idle run.
+    suspect = krh.relay_suspect(conn, task.id, now=now)
+    extra: dict[str, Any] = {"relay_suspect": suspect} if suspect else {}
+    if suspect:
+        note += (". Suspect: a chat unblocked its needs_input block just before this, with no comment marked "
+                 "relays_user_message; if David answered, re-post the answer with kanban_comment "
+                 "relays_user_message=true (cross_task: relays_user_message) instead of only unblocking")
+
+    def _flag() -> None:
+        if suspect:
+            logger.warning("kanban: %s on %s: needs_input unblocked by a chat at %s with no marked relay",
+                           krh.SUSPECT_EVENT, task.id, suspect["unblocked_at"])
+            kb._append_event(conn, task.id, krh.SUSPECT_EVENT, {"runs": runs, **suspect})
+
     # Runs inside hold()'s write transaction.
     if task.created_by == CREATED_BY:
         cur = conn.execute("UPDATE tasks SET status = 'triage', claim_lock = NULL, claim_expires = NULL, "
                            "worker_pid = NULL WHERE id = ? AND status IN ('ready', 'review') "
                            "AND current_run_id IS NULL AND " + _UNCLAIMED, (task.id, now))
         if cur.rowcount == 1:
+            _flag()
             kb._append_event(conn, task.id, ESCALATED_EVENT, {"runs": runs, "since": marker, "owner": None,
-                                                              "status": "triage", "reason": note})
+                                                              "status": "triage", "reason": note, **extra})
         return None if cur.rowcount != 1 else ""
     cur = conn.execute("UPDATE tasks SET status = 'todo', claim_lock = NULL, claim_expires = NULL, "
                        "worker_pid = NULL WHERE id = ? AND status IN ('ready', 'review') "
                        "AND current_run_id IS NULL AND " + _UNCLAIMED, (task.id, now))
     if cur.rowcount != 1:
         return None
+    _flag()
     key = f"no-progress:{task.id}:{marker}"
     existing = conn.execute("SELECT id, status FROM tasks WHERE idempotency_key = ?", (key,)).fetchone()
     owner = existing[0] if existing and existing[1] not in ("done", "archived") else None
     if owner is None:
         supervisor = _supervisor_profile(task)
+        body = _owner_body(task, runs, marker)
+        if suspect:
+            body += ("\n\nRelay suspect (`no_progress_relay_suspect`): a chat unblocked this card's needs_input "
+                     "block just before the stop and no comment was marked as carrying David's reply. If he "
+                     "answered, post his answer on the card with `kanban_comment(relays_user_message=true)` "
+                     "(cross-gateway: `cross_task` with `relays_user_message`); that counts as progress.")
         owner = kb.create_task(
             conn, title=f"Unstick {task.id}: {runs} runs with no progress"[:200],
-            body=_owner_body(task, runs, marker), assignee=supervisor, created_by=CREATED_BY,
+            body=body, assignee=supervisor, created_by=CREATED_BY,
             workspace_kind="scratch", triage=supervisor is None, idempotency_key=None if existing else key,
             creator_task_id=task.id, session_id=task.session_id, tenant=task.tenant, priority=task.priority,
         )
     kb._link(conn, owner, task.id)
     kb._append_event(conn, task.id, ESCALATED_EVENT, {"runs": runs, "since": marker, "owner": owner,
-                                                      "status": "todo", "reason": note})
+                                                      "status": "todo", "reason": note, **extra})
     return owner
 
 

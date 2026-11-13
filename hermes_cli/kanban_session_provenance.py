@@ -114,12 +114,32 @@ def scoped_sources(gateway: Any, sessions: Iterable[Any], *, local_gateway=None,
     return out
 
 
+def prefetch_sources(refs: Iterable[Any]) -> None:
+    """Read every local home's state.db ONCE for the bare session ids of ``refs`` (``sid`` or ``gw/profile/sid``),
+    filling the source cache so the classifications that follow in the same pass are cache hits, whatever profile
+    they scope to. Verdicts are unchanged: an entry that expires before use only costs a read. [daveey]"""
+    sids = [p[-1] for r in dict.fromkeys(str(r or "") for r in refs) if len(p := r.split("/")) in (1, 3) and p[-1]]
+    if sids:
+        for home in _local_homes(None):
+            _local_session_sources(sids, home=home)
+
+
+def headless_sessions(chat_ids: Iterable[Any], *, gateway=None, profile=None, local_gateway=None) -> set[str]:
+    """The ``str(chat_id or "")`` refs :func:`is_headless_session` calls headless, from ONE ``scoped_sources`` read.
+
+    A reconcile pass classifies thousands of rows; a per-row call reopened every home's state.db for each one
+    once the 300 s source cache expired (hub sync rounds of 15-28 min, t_01a1d2cc49634a78). [daveey]"""
+    refs = [r for r in dict.fromkeys(str(c or "") for c in chat_ids) if _HEADLESS_SESSION.fullmatch(r.rsplit("/", 1)[-1])]
+    if not refs:
+        return set()
+    sources = scoped_sources(gateway, refs, local_gateway=local_gateway, profile=profile)
+    return {r for r in refs if sources[r] not in _INTERACTIVE_SOURCES}
+
+
 def is_headless_session(chat_id: Any, *, gateway=None, profile=None, local_gateway=None) -> bool:
     """A receipt-shaped destination lacking authoritative interactive provenance."""
     ref = str(chat_id or "")
-    if not _HEADLESS_SESSION.fullmatch(ref.rsplit("/", 1)[-1]):
-        return False
-    return scoped_sources(gateway, (ref,), local_gateway=local_gateway, profile=profile)[ref] not in _INTERACTIVE_SOURCES
+    return ref in headless_sessions((ref,), gateway=gateway, profile=profile, local_gateway=local_gateway)
 
 
 def machine_sessions(gateway: Any, sessions: Iterable[Any], *, local_gateway=None, profile=None) -> set[str]:

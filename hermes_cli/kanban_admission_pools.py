@@ -23,13 +23,19 @@ def board_pools(conn, *, own=None, excluded=(), origins=None):
     if own is not None:
         where += " AND (t.claim_lock IS NOT NULL OR t.lease_holder IS NULL OR t.lease_holder=?)"
         params = (own,)
-    counts = {"regular": 0, "priority": 0}
     klass = "r.admission_class" if "admission_class" in cols else "NULL"
     origin = "r.admission_origin" if "admission_origin" in cols else "NULL"
-    for run_id, pool, admission_class, origin_key in conn.execute(
+    return count_pools(conn.execute(
         f"SELECT t.current_run_id, {receipt}, {klass}, {origin} FROM tasks t LEFT JOIN task_runs r "
         f"ON r.id=t.current_run_id AND r.task_id=t.id WHERE {where}", params,
-    ):
+    ), excluded=excluded, origins=origins)
+
+
+def count_pools(receipts, *, excluded=(), origins=None):
+    """Pool counts for ``(run_id, pool, admission_class, origin)`` receipts of counted running rows (see
+    :func:`board_pools`); ``origins`` collects capacity receipts per origin."""
+    counts = {"regular": 0, "priority": 0}
+    for run_id, pool, admission_class, origin_key in receipts:
         if run_id in excluded:
             continue
         pool = "regular" if pool is None else pool

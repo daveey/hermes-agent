@@ -13,7 +13,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _turn_sid(session: dict, agent=None) -> str:
+def turn_sid(session: dict, agent=None) -> str:
     return str(getattr(agent, "session_id", "") or session.get("session_key") or "")
 
 
@@ -28,7 +28,7 @@ def own_turn_marker(session: dict, marker_key: str) -> Optional[dict]:
 
         return read_turn_marker(server._session_home(session), marker_key)
     except Exception:  # health: allow BLE001 -- unreadable = not named, so the marker reads live (fail safe)
-        logger.debug("own turn marker read failed for %s", marker_key, exc_info=True)
+        logger.warning("own turn marker read failed for %s", marker_key, exc_info=True)
         return None
 
 
@@ -51,7 +51,7 @@ def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[fr
                          *, session_id: Optional[str] = None) -> None:
     """Refresh the outcome of the row this turn wrote (the agent's compression tip, else the session key).
     ``concluding_turn``: the turn's own evidence (``concluding_turn_identity``); omitted = nothing discounted."""
-    sid = _turn_sid(session, agent) if session_id is None else session_id
+    sid = turn_sid(session, agent) if session_id is None else session_id
     if not sid:
         return
     try:

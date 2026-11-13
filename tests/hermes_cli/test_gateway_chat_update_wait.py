@@ -9,6 +9,7 @@ asks again, for at most ``ADMISSION_WAIT_S`` from the first refusal, like the ru
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -121,11 +122,30 @@ async def test_a_refusal_that_is_not_an_update_swap_still_fails_at_once(dials, c
 @pytest.mark.asyncio
 async def test_an_owner_that_never_returns_fails_after_the_window(dials, monkeypatch):
     script, made = dials
-    monkeypatch.setattr(gateway_update_wait, "ADMISSION_WAIT_S", 0.05)
-    script += [_paused() for _ in range(1000)]
-    with pytest.raises(GatewayUnavailableError, match="update_paused"):
+    # Drive only UpdateWait's clock: a descheduled runner can miss an entire
+    # 50ms real-time window after its first retry. Leave asyncio's own clock
+    # and _z's watchdog real, and exercise the production ten-minute window.
+    now, sleeps = 1000.0, []
+
+    async def advance(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+        await asyncio.sleep(0)
+
+    loop = SimpleNamespace(time=lambda: now)
+    monkeypatch.setattr(gateway_update_wait, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: loop, sleep=advance))
+    monkeypatch.setattr(gateway_update_wait, "ADMISSION_RETRY_S", 200.0)
+    script += [_paused() for _ in range(5)]
+    with pytest.raises(GatewayUnavailableError, match="update_paused") as caught:
         await _z()
-    assert 2 < len(made) < 1000
+    # Refusals at t=0, 200, 400 retry; t=600 is exactly the deadline.
+    assert len(made) == 4
+    assert caught.value is made[-1]
+    assert sleeps == [200.0, 200.0, 200.0]
+    assert now == 1600.0
+    assert len(script) == 1
 
 
 @pytest.mark.asyncio

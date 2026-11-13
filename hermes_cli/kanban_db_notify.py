@@ -48,7 +48,8 @@ _SUB_KEY_WHERE = "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_
 
 # Compatibility exports: provenance is shared by link reconciliation and notice delivery.
 from hermes_cli.kanban_session_provenance import (
-    is_headless_session, is_machine_session, machine_sessions, proven_foreign_chats, _source_cache,
+    headless_sessions, is_headless_session, is_machine_session, machine_sessions, prefetch_sources,
+    proven_foreign_chats, _source_cache,
 )
 
 

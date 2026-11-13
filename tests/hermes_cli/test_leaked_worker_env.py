@@ -440,3 +440,30 @@ def test_finished_worker_shell_cli_refusal_points_at_kanban_comment(monkeypatch,
     assert "cannot mutate Kanban tasks via the CLI" in text
     assert f"{tid} is done" in text and "kanban_comment" in text
     assert "leaked worker env" not in text and "Cmd-Q" not in text
+
+
+# descends_from_live_pid coerces with int(): pids come from board rows and JSON event payloads whose type depends
+# on the writer, so a decimal string or an integral float names the same pid (the live-ancestor check is the proof),
+# and an unparseable value is False, never a TypeError. A non-integral float names no pid: int() would truncate it
+# to a different one, so it is refused like any other non-pid.
+
+@pytest.mark.parametrize("spell", [int, str, float], ids=["int", "str", "integral_float"])
+def test_descends_from_live_pid_accepts_a_pid_or_its_decimal_string(spell):
+    if os.getppid() <= 1:  # a pid-1 container child (or a pid-namespace init): its parent is init, which never counts
+        pytest.skip("test process's parent is init; no live non-init ancestor to check")
+    assert tle.descends_from_live_pid(spell(os.getpid())) is True
+    assert tle.descends_from_live_pid(spell(os.getppid())) is True
+    assert tle._descends_from_live_agent({}, spell(os.getppid())) is True
+
+
+@pytest.mark.parametrize("pid", [None, "", "abc", "12.5", 0, 1, "1", True, object()],
+                         ids=["none", "empty", "word", "decimal", "zero", "init", "init_str", "bool", "object"])
+def test_descends_from_live_pid_refuses_init_and_non_numbers_without_raising(pid):
+    assert tle.descends_from_live_pid(pid) is False
+
+
+@pytest.mark.parametrize("offset", [0.5, 0.999, float("inf"), float("-inf"), float("nan")],
+                         ids=["half", "almost_next", "inf", "neg_inf", "nan"])
+def test_descends_from_live_pid_refuses_non_integral_floats_rather_than_truncating(offset):
+    # int(getpid() + 0.5) is this process's own pid: truncating would vouch for a pid the caller never named.
+    assert tle.descends_from_live_pid(os.getpid() + offset) is False

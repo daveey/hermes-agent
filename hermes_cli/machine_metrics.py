@@ -15,6 +15,7 @@ replayed: each sample is reported at most once, and a failed round drops it.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -70,7 +71,37 @@ def _mem_used_pct() -> Optional[float]:
     return None
 
 
-def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[int]:
+# One statement, one result row, whatever the column or running-row count. In the gateway every sqlite3 call and row
+# step releases the GIL and must win it back from busy Python threads (~one 5 ms switch interval each under
+# contention); iterating ``PRAGMA table_info`` and the running rows made ~80 handoffs a board, ~4 s for the hub's
+# 10 boards, so the final hub gate (which runs this census twice under admission.lock) overran its 2.25 s hold.
+_RECEIPTS = ("json_group_array(json_array(t.id, t.current_run_id, r.admission_pool, r.admission_class, "
+             "r.admission_origin)) FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id "
+             "WHERE t.status = 'running'")
+_SYNCED_SQL = (f"SELECT (SELECT gateway_id FROM kanban_sync_state LIMIT 1), (SELECT {_RECEIPTS} AND "
+               "(t.claim_lock IS NOT NULL OR t.lease_holder IS NULL "
+               "OR t.lease_holder = (SELECT gateway_id FROM kanban_sync_state LIMIT 1)))")
+_LOCAL_SQL = f"SELECT (SELECT count(*) FROM pragma_table_info('tasks') WHERE name = 'lease_holder'), (SELECT {_RECEIPTS})"
+
+
+def _running_rows(db) -> Optional[tuple[bool, Any, list]]:
+    """``(synced, own gateway id, [(task_id, run_id, pool, class, origin), ...])`` for the running rows this host
+    counts, read in one statement; ``None`` when the board's schema predates claim receipts, or has lease holders
+    without sync state (read it the long way, which decides those exactly as before)."""
+    for synced, sql in ((True, _SYNCED_SQL), (False, _LOCAL_SQL)):
+        try:
+            head, rows = db.execute(sql).fetchone()
+        except sqlite3.OperationalError as exc:
+            if str(exc).startswith("no such "):
+                continue
+            raise
+        if not synced and head:
+            return None
+        return synced, head if synced else None, [tuple(item) for item in json.loads(rows)]
+    return None
+
+
+def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_output=None, extra_paths=()) -> Optional[int]:
     """All profiles share the kanban root. Count its execution boards, not replicas.
 
     Unreadable/schema-unknown boards invalidate the whole sample. Conservative
@@ -86,8 +117,9 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
 
     try:
         default = kb.kanban_home() / "kanban.db"
-        paths = [default, *(p for _, p in named_board_db_files())]
+        paths = [default, *(p for _, p in named_board_db_files()), *extra_paths]
         total = excluded = 0
+        owners = set()
         seen = set()
         for path in paths:
             try:
@@ -102,38 +134,59 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
             if identity in seen:
                 continue
             seen.add(identity)
-            db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+            # ``absolute()`` not ``resolve()``: realpath lstat()s every path component, each a GIL handoff in the
+            # gateway; sqlite follows a symlinked board file itself, and identity comes from the stat above.
+            db = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=1)
             try:
                 # Count, own-grant matching and receipt grouping must see one WAL snapshot.
                 db.execute("BEGIN")
-                cols = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
-                own, matched = None, []
-                if "lease_holder" in cols:
+                own, matched, receipts = None, [], None
+                if (fast := _running_rows(db)) is not None:
+                    synced, own_id, rows = fast
+                    if synced and not own_id:
+                        return None
+                    own = (own_id,) if synced else None
+                    ids = {row[0] for row in rows}
+                    total += len(rows)
+                    receipts = [row[1:] for row in rows]
+                elif "lease_holder" in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
                     own = db.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
                     if own is None or not own[0]:
                         return None
-                    total += db.execute("SELECT count(*) FROM tasks WHERE status='running' AND "
+                    rows = db.execute("SELECT id FROM tasks WHERE status='running' AND "
                                         "(claim_lock IS NOT NULL OR lease_holder IS NULL OR lease_holder=?)",
-                                        (own[0],)).fetchone()[0]
-                    if exclude is not None and identity == tuple(exclude.db_identity) and own[0] == exclude.gateway_id:
-                        from hermes_cli.kanban_grant_echo import match_rows
-                        matched = match_rows(db, exclude)
-                        if matched and matched != [exclude.run_id]:
-                            return None  # the proven row moved or duplicated under us: unknown, fail closed
-                        total -= len(matched)
-                        excluded += len(matched)
+                                        (own[0],)).fetchall()
+                    ids = {row[0] for row in rows}
+                    total += len(rows)
                 else:
-                    total += db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
+                    ids = {row[0] for row in db.execute("SELECT id FROM tasks WHERE status='running'")}
+                    total += len(ids)
+                if own is not None and exclude is not None and identity == tuple(exclude.db_identity) \
+                        and own[0] == exclude.gateway_id:
+                    from hermes_cli.kanban_grant_echo import match_rows
+                    matched = match_rows(db, exclude)
+                    if matched and matched != [exclude.run_id]:
+                        return None  # the proven row moved or duplicated under us: unknown, fail closed
+                    total -= len(matched)
+                    excluded += len(matched)
+                    if matched:
+                        ids.discard(exclude.task_id)
                 if detail is not None and "pools" in detail:
-                    from hermes_cli.kanban_admission_pools import board_pools
-                    counts = board_pools(db, own=own[0] if own else None, excluded=matched,
-                                         origins=detail.get("capacity_origins"))
+                    from hermes_cli.kanban_admission_pools import board_pools, count_pools
+                    origins = detail.get("capacity_origins")
+                    counts = count_pools(receipts, excluded=matched, origins=origins) if receipts is not None \
+                        else board_pools(db, own=own[0] if own else None, excluded=matched, origins=origins)
                     for pool, count in counts.items():
                         detail["pools"][pool] += count
+                if owner_output is not None:
+                    from hermes_cli.worker_compute_capacity import owner_for_db
+                    owners.update(owner_for_db(path, task) for task in ids)
             finally:
                 db.close()
         if detail is not None:
             detail["excluded"] = excluded
+        if owner_output is not None:
+            owner_output.update(owners)
         return total
     except (OSError, sqlite3.Error, ValueError):
         return None
@@ -143,7 +196,23 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}`` plus the throughput counters
     (``machine_throughput_metrics``); a value that cannot be read is left out."""
     from hermes_cli import machine_admission_metrics, machine_drain_metrics, machine_throughput_metrics
-    out: dict[str, Any] = machine_admission_metrics.collect(active_card_runs)
+    from hermes_cli import worker_compute_capacity as capacity
+    from hermes_cli.worker_resource_admission import occupied_count_for_host
+    out: dict[str, Any]
+    try:
+        worker = capacity.worker_enabled()
+    except Exception:  # health: allow BLE001 -- malformed worker observations must report unknown capacity
+        worker = None
+    if worker is None:
+        out = {"active_card_runs": None}
+    elif worker:
+        # [daveey] Worker occupancy includes parked owners' detached cgroups; hub pool telemetry does not apply.
+        try:
+            out = {"active_card_runs": occupied_count_for_host()}
+        except Exception:  # health: allow BLE001 -- malformed worker observations must report unknown capacity
+            out = {"active_card_runs": None}
+    else:
+        out = machine_admission_metrics.collect(active_card_runs)
     out.update(machine_drain_metrics.collect())
     out.update(machine_throughput_metrics.cached_counters())
     try:
@@ -302,7 +371,7 @@ class Reporter:
             sample = self._sample(sample, measured)
             if now < self.counters_off_until:  # this Board rejected them lately: the normal report only
                 from hermes_cli.machine_throughput_metrics import FIELDS
-                sample = {k: v for k, v in sample.items() if k not in FIELDS}
+                sample = {k: v for k, v in sample.items() if k not in FIELDS and k != "tokens_by_model"}
 
             def counters_rejected() -> None:
                 self.counters_off_until = now + UNSUPPORTED_RETRY_S

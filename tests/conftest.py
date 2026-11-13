@@ -287,6 +287,7 @@ from tests._fixtures.live_system_guard import (
 from tests._fixtures.authority_cwd import authority_cwd_in_tmp  # opt-in cwd for symbolic profile ids
 from tests._fixtures.fake_dns import public_dns  # opt-in offline resolver for SSRF-guard tests
 from tests._fixtures.model_peer import model_peer  # fixture registers here
+from tests._fixtures.card_trees import _card_trees_off_the_real_home  # autouse: no real ~/code/_wt
 from tests._fixtures.offline_catalogs import (
     _offline_metadata_transport, _offline_registry_transport, _offline_video_catalog,
 )
@@ -294,6 +295,7 @@ from tests._fixtures.offline_cli_catalogs import _offline_cli_catalog_transport
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
 from tests._fixtures.session_context_reset import _reset_session_context_vars
 from tests._fixtures.state_monkeypatch import _state_aware_monkeypatch
+from scripts.worker_test_budget import cap_xdist_workers as _cap_xdist_workers
 from tests._fixtures import required_extras as _required_extras
 
 # HERMES_TEST_REQUIRE_EXTRAS (set by the CI lanes that install the extras): a listed optional
@@ -342,6 +344,11 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     import hermes_constants
 
     platform_default = hermes_constants._get_platform_default_hermes_home
+
+    # Per-test host policy is hermetic too. Do not change import-time / session
+    # admission: pytest itself must obey the real account's worker budget.
+    from hermes_cli import worker_compute_capacity
+    monkeypatch.setattr(worker_compute_capacity, "policy_root", lambda: tmp_path / "hermes_test")
 
     def isolated_platform_default() -> Path:
         root = platform_default()
@@ -1473,10 +1480,20 @@ def _take_host_test_slot(config) -> None:
     scripts/run_tests.sh) holds one host-wide test slot for the whole session, like each per-file
     process of the runner does. Runner children inherit HERMES_TEST_SLOT_HELD=1 and skip this; so
     does anything this run spawns. xdist workers skip it (the controller holds the slot)."""
-    if hasattr(config, "workerinput"):
-        return
+    worker = True  # A policy-read failure must not silently disable containment.
     try:
+        from hermes_cli.worker_compute_capacity import worker_enabled
+        from scripts.worker_test_budget import child_environment, THREAD_VARS
+        worker = worker_enabled()
         slots = _host_slots_module()
+        if worker:
+            os.environ.update(dict.fromkeys(THREAD_VARS, '1'))
+            tx = getattr(getattr(config, 'option', None), 'tx', None)
+            if tx and any(spec != 'popen' for spec in tx):
+                raise ValueError('worker test budget requires local popen xdist')
+            _cap_xdist_workers(config, slots.xdist_worker_budget())
+        if hasattr(config, "workerinput") and not worker:
+            return
         if not slots.host_slots_enabled():
             return
 
@@ -1487,25 +1504,11 @@ def _take_host_test_slot(config) -> None:
 
         _cap_xdist_workers(config, slots.xdist_worker_budget())
         config._hermes_host_slot_fd = slots.acquire_host_slot(on_wait=note)
-        os.environ[slots.HELD_ENV] = "1"
+        child_environment(os.environ, config._hermes_host_slot_fd)
     except Exception as exc:  # the cap is advisory; never fail a run on it
+        if worker:
+            raise pytest.UsageError(f'worker host test slot unavailable: {exc}') from exc
         sys.stderr.write(f"(host test slot unavailable: {exc})\n")
-
-
-def _cap_xdist_workers(config, budget: int) -> None:
-    """[daveey] One slot holder runs at most ``budget`` xdist workers (``-n 8`` / ``-n auto`` included).
-
-    xdist turns ``-n`` into ``config.option.tx`` in its tryfirst ``pytest_cmdline_main`` and only reads
-    ``tx`` when ``DSession`` starts its nodes at session start, so trimming it here (pytest_configure)
-    caps the worker count."""
-    option = getattr(config, "option", None)
-    tx = getattr(option, "tx", None)
-    if not tx or len(tx) <= budget or any(spec != "popen" for spec in tx):
-        return
-    sys.stderr.write(f"(host test slots: capping xdist workers {len(tx)} -> {budget}; "
-                     f"HERMES_TEST_XDIST_MAX overrides)\n")
-    option.tx = list(tx[:budget])
-    option.numprocesses = budget
 
 
 def _release_host_test_slot(config) -> None:

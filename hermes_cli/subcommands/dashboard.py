@@ -14,6 +14,8 @@ from typing import Callable
 
 def _add_server_runtime_args(parser) -> None:
     """Runtime flags shared by ``dashboard`` and ``serve`` (same ``web_server.start_server``)."""
+    parser.add_argument("--proof-home", metavar="DIR", default=None,
+                        help="Use an existing disposable home for restart proofs (never production state)")
     parser.add_argument(
         "--port", type=int, default=9119, help="Port (default 9119, 0 for auto-assign by OS)")
     parser.add_argument("--host", default="127.0.0.1", help="Host (default 127.0.0.1)")
@@ -46,7 +48,12 @@ def _add_server_runtime_args(parser) -> None:
 
 
 def _configure_serve_parser(parser, *, cmd_dashboard: Callable) -> None:
-    """Canonical ``serve`` arguments; shared by the full tree and Desktop's lean hot-path parser."""
+    """Canonical ``serve`` arguments; shared by the full tree and Desktop's lean hot-path parser.
+
+    Both callers build ``parser`` with ``allow_abbrev=False``: argv-shape readers
+    (``_startup_fast.is_desktop_ssh_backend_argv``) match exact flags, so a prefix the parser
+    accepted would set ``--ssh-session-token-file`` while the shape check missed it.
+    """
     _add_server_runtime_args(parser)
     # Redundant (serve is always headless) but accepted so legacy callers don't error.
     parser.add_argument("--no-open", action="store_true", help=argparse.SUPPRESS)
@@ -68,7 +75,7 @@ def build_serve_parser(
         description="Run the Hermes backend server - the JSON-RPC/WebSocket gateway the "
             "desktop app and remote clients connect to. Headless: it never opens "
             "a browser UI.",
-        add_help=add_help, exit_on_error=exit_on_error)
+        add_help=add_help, exit_on_error=exit_on_error, allow_abbrev=False)
     _configure_serve_parser(parser, cmd_dashboard=cmd_dashboard)
     return parser
 
@@ -97,7 +104,8 @@ def build_dashboard_parser(
         help="Start the Hermes backend server (headless; powers the desktop app and remote backends)",
         description="Run the Hermes backend server — the JSON-RPC/WebSocket gateway the "
             "desktop app and remote clients connect to. Headless: it never opens "
-            "a browser UI.")
+            "a browser UI.",
+        allow_abbrev=False)
     _configure_serve_parser(serve_parser, cmd_dashboard=cmd_dashboard)
 
     # `register` is nested so bare `hermes dashboard` keeps launching the server.

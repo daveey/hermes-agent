@@ -16,6 +16,8 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.api_error_summary import is_provider_stream_parse_error
+from agent import update_pause_cancel
+from agent.turn_api_call import yield_to_update_pause
 from agent.error_classifier import CODEX_BARE_400_MARKER, RETRYABLE_CLIENT_REASONS, FailoverReason, classify_api_error
 from agent.turn_offline_wait import wait_out_offline
 from agent.route_verdicts import route_visit
@@ -205,6 +207,11 @@ def handle_api_error(
     )
 
     if agent._interrupt_requested:
+        if update_pause_cancel.model_yield_requested(agent):
+            # [daveey] t_01a1d293248f5e12: the core-update pause cancelled this boundary request and the
+            # cancel surfaced as a provider error: yield exactly as an InterruptedError would (turn_api_call).
+            yield_to_update_pause(_retry)
+            return _verdict("break")
         # Preserve a pending redirect: the user is steering, not stopping — rebuild the
         # turn from the correction instead of aborting.
         if agent.clear_interrupt(preserve_redirect=True):

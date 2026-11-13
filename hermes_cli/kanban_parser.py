@@ -244,9 +244,14 @@ _SPECS = [
              help="Machine labels the card needs, comma-separated (synced boards only): linux, "
                   "macos,xcode, machine:<name>; '' or '[]' = any machine; omit for the default placement"),
         _arg("--hub-reason", dest="hub_reason", default=None, metavar="TEXT",
-             help="Why this card needs the hub itself (hub Chrome, Board admin key, ...). Fed to the "
-                  "hub-admission judge; its quote can be the evidence. Without admission a hub card "
-                  "goes to the worker pool (or an explicit hub pin is refused)."),
+             help="Only for a card that needs the hub itself: what only the hub has (its signed-in "
+                  "Chrome, a Desktop-session interaction, an "
+                  "existing hub worktree with unpushed commits, a hermes-hub command acting with the "
+                  "hub's key, or live gateway state hub-admin cannot reach). Board admin key and "
+                  "instance-role SSM steps are not hub needs: run them with hub-admin on a "
+                  "capability:hub-write worker. A Sonnet admission judge "
+                  "reads it with the card; without admission a hub card goes to the worker pool (pool "
+                  "workers have hub ssh + hub-admin) and an explicit hub pin is refused."),
         _arg("--force-hub", dest="force_hub", action="store_true",
              help="Operator override: keep the card on the hub without the admission judge. Refused "
                   "inside a dispatcher worker; recorded as a forced hub_admission event."),
@@ -304,6 +309,7 @@ _SPECS = [
                   "Requires --model."),
         _arg("--completion-contract", metavar="CONTRACT",
              help="local-only (default), OWNER/REPO for publication, or exact GitHub PR URL; required CI gates done."),
+        _arg("--review-required", action="store_true", help="Require a reviewer before completion"),
         _arg("--goal", action="store_true", dest="goal_mode",
              help="Run the worker in a goal loop: after each turn a judge checks the "
                   "response against the card title/body and, if not done, the worker "
@@ -331,6 +337,10 @@ _SPECS = [
         _arg("--idempotency-key", help="Dedup key for the root card"),
         _json_flag(help="Emit JSON output"),
     ], help="Create a Kanban Swarm v1 graph (parallel workers → verifier → synthesizer)"),
+    _cmd("chat-tasks", [
+        _arg("session_id"), _arg("--expect", help="Expected task, board/task or gateway/board/task"),
+        _json_flag(),
+    ], help="Read the chat's task projection; --expect exits 4 if absent, 1 on read error"),
     _cmd("list", [
         _arg("--mine", action="store_true", help="Filter by $HERMES_PROFILE as assignee"),
         _arg("--assignee"),
@@ -421,7 +431,7 @@ _SPECS = [
         _arg("--exception", action="append", default=[], help="Reserved exception ID, low to high"),
         _arg("--attachment-id", type=int, help="Locally owned manifest attachment"),
         _arg("--digest", help="Exact attached manifest SHA256"),
-        _arg("--allow-legacy-rollback", action="store_true", help="Acknowledge above-cap restore"),
+        _arg("--allow-legacy-rollback", action="store_true", help="Restore exact above-cap originals; no effect after a capped restore (already restored)"),
         _arg("--drain", action="store_true",
              help="Execute queued requests as this board's non-worker supervisor executor"),
         _arg("--task", help="Only requests filed by this task id"),
@@ -495,6 +505,7 @@ _SPECS = [
              help="Per-task failure circuit breaker: block on the Nth consecutive failure"),
         _arg("--goal-mode", choices=["on", "off"], dest="goal_mode",
              help="Run the worker in a goal loop (on) or single-shot (off)"),
+        _arg("--review-required", choices=["on", "off"], help="Require review (workers cannot turn it off)"),
         _arg("--goal-max-turns", type=int, metavar="N", dest="goal_max_turns",
              help="Turn budget for goal-mode workers"),
         _arg("--max-runtime-seconds", type=int, metavar="N", dest="max_runtime_seconds",

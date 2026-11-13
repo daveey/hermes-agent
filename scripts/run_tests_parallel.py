@@ -64,7 +64,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.ci.list_os_marked_tests import gated_specs, spec_hosts
 from scripts import run_tests_parallel_rss as _rss  # [daveey] per-file peak RSS
-from scripts.run_tests_host_slots import HELD_ENV as HOST_SLOT_HELD_ENV, host_slot_count, host_slot_dir, host_test_slot
+from scripts.run_tests_host_slots import host_slot_count, host_slot_dir, host_test_slot
+from scripts.worker_test_budget import child_environment, inherited_slot
 from scripts.run_tests_launch import start_pytest
 
 
@@ -799,8 +800,17 @@ def _run_one_file_once(
     targets: list[str] | None = None,
 ) -> tuple[Path, int, str, dict[str, int], float]:
     """One attempt, run while holding a host-wide test slot (scripts/run_tests_host_slots.py)."""
-    with host_test_slot(on_wait=_note_host_slot_wait):
-        return _run_one_file_attempt(file, pytest_args, repo_root, file_timeout, targets)
+    with host_test_slot(on_wait=_note_host_slot_wait) as slot_fd:
+        return _run_one_file_attempt(file, pytest_args, repo_root, file_timeout, targets, slot_fd=slot_fd)
+
+
+def _worker_job_cap(text: str) -> int:
+    """argparse type for -j: a worker host caps file parallelism to its fixed test budget."""
+    jobs = int(text)
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    if worker_enabled():
+        return 1 if inherited_slot() else min(jobs, host_slot_count())
+    return jobs
 
 
 def _run_one_file_attempt(
@@ -809,6 +819,7 @@ def _run_one_file_attempt(
     repo_root: Path,
     file_timeout: float,
     targets: list[str] | None = None,
+    *, slot_fd: int | None = None,
 ) -> tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file).
 
@@ -832,7 +843,7 @@ def _run_one_file_attempt(
     # One root for each subprocess removes the shared directory that the race
     # needs. The parent deletes the root after the attempt.
     env = os.environ.copy()
-    env[HOST_SLOT_HELD_ENV] = "1"  # a run nested in this file must not wait on the slot we hold
+    child_environment(env, slot_fd)
     temproot = tempfile.mkdtemp(prefix="r-", dir=_runner_scratch_root())
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
     # Every tempfile.* call inside the test process lands in the same per-run root, so the
@@ -1462,8 +1473,8 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-j", "--jobs", type=int,
-                        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4)),
+    parser.add_argument("-j", "--jobs", type=_worker_job_cap,  # string default: the cap applies to it too
+                        default=os.environ.get("HERMES_TEST_WORKERS") or str(os.cpu_count() or 4),
                         help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count)")
     parser.add_argument(
         "--paths",

@@ -402,3 +402,54 @@ def test_payload_json_roundtrip(kanban_home):
         raw = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
                            (tid, knp.PARKED_EVENT)).fetchone()[0]
         assert json.loads(raw)["runs"] == knp.DEFAULT_LIMIT
+
+
+# --- kanban-d1b921f32e: David's answers relayed by a chat are human progress ------------------
+
+def _ask_answered_by_relay(conn, tid: str, at: int, msg_id: int, *, relay: bool = True) -> None:
+    """One t_01a1cc1a8bb39958 run: it blocked needs_input, David answered in his chat, the chat relayed it."""
+    _run(conn, tid, "blocked", at=at)
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "blocked", {"kind": "needs_input", "reason": "which ring?"})
+        conn.execute("UPDATE task_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM task_events "
+                     "WHERE task_id = ? AND kind = 'blocked')", (at, tid))
+    kwargs = {"relayed_human": {"session": "chat-1", "message_id": msg_id, "at": at + 5}} if relay else {}
+    kb.add_comment(conn, tid, "default", "David says: the left ring.", writer_kind="agent",
+                   writer_session="chat-1", **kwargs)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM task_events "
+                     "WHERE task_id = ? AND kind = 'commented')", (at + 5, tid))
+
+
+def test_relayed_answers_reset_the_budget(kanban_home):
+    """Five needs_input parks, each answered by a relayed comment: no idle streak, no escalation."""
+    with kbc.connect_closing() as conn:
+        t = _card(conn, "Pebble ring probe")
+        base = int(time.time()) - 10_000
+        for i in range(knp.DEFAULT_LIMIT):
+            _ask_answered_by_relay(conn, t, base + i * 100, msg_id=100 + i)
+        assert knp.streak(conn, t)[0] == 0
+        assert knp.hold(conn, t) is None
+        commented = [json.loads(r[0]) for r in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented'", (t,))]
+        assert all(p["writer_kind"] == "agent" and p["relayed_human"]["session"] == "chat-1" for p in commented)
+
+
+def test_unmarked_relays_still_count_and_flag_a_suspect(kanban_home):
+    """Without the mark the streak still counts (agent comments are not progress), and an escalation right
+    after a chat unblocked a needs_input block logs the relay suspect on the event and the owner card."""
+    with kbc.connect_closing() as conn:
+        t = _card(conn, "Pebble ring probe")
+        base = int(time.time()) - 10_000
+        for i in range(knp.DEFAULT_LIMIT):
+            _ask_answered_by_relay(conn, t, base + i * 100, msg_id=100 + i, relay=False)
+        with kb.write_txn(conn):
+            kb._append_event(conn, t, "unblocked", {})
+        assert knp.streak(conn, t)[0] == knp.DEFAULT_LIMIT
+        out = knp.hold(conn, t)
+        assert out and out.startswith("escalated:")
+        ev = _events(conn, t, knp.ESCALATED_EVENT)[-1]
+        assert ev.payload.get("relay_suspect")
+        assert _events(conn, t, "no_progress_relay_suspect")
+        owner = kb.get_task(conn, out.split(":", 1)[1])
+        assert "relays_user_message" in owner.body

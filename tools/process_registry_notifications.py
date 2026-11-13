@@ -159,6 +159,8 @@ def _is_truncated(entry: dict) -> bool:
 
 # A stop the parent or user asked for is not a failure the parent has to recover from.
 _STOPPED = frozenset({"interrupted", "cancelled"})
+# Public name for the gateway's validation of a requested-stop admission (gateway/session_automation.py).
+DELEGATION_STOPPED_STATUSES = _STOPPED
 
 
 def delegation_wakes_parent(evt: dict) -> bool:
@@ -172,17 +174,42 @@ def delegation_wakes_parent(evt: dict) -> bool:
         return True
     if evt.get("role") == "cron_run":
         return False  # a manual cron run's outcome is finished text, like a scheduled one's: a note
+    stopped = () if _unrequested_stop(evt) else _STOPPED
+    return any(s not in stopped for s in delegation_unfinished_statuses(evt))
+
+
+def _unit_results(evt: dict) -> list[dict]:
+    """No child results (a single child's event, or a crashed batch's ``results=[]``): the unit's own
+    status decides. Otherwise the children do, so an interrupted-only batch's aggregate error stays asleep."""
     raw = evt.get("results")
-    # No child results (a single child's event, or a crashed batch's ``results=[]``): the unit's own
-    # status decides. Otherwise the children do, so an interrupted-only batch's aggregate error stays asleep.
     results = [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
-    results = results or [evt]
-    # The stall monitor stops a stuck unit with the same cooperative stop a user's does; its stall
-    # context on the event is what tells the two apart (``async_delegation._finalize``).
-    stopped = () if evt.get("stalled_after_quiet_seconds") is not None else _STOPPED
-    return any(
-        (r.get("status") or ("failed" if r.get("error") else "completed")) not in (*_DONE, *stopped)
-        for r in results)
+    return results or [evt]
+
+
+def _child_status(r: dict) -> str:
+    return r.get("status") or ("failed" if r.get("error") else "completed")
+
+
+def _unrequested_stop(evt: dict) -> bool:
+    """The stall monitor and the gateway's shutdown sweep stop a unit with the same cooperative stop a
+    user's does; the stall context or ``interrupted_by`` on the event tells them apart
+    (``async_delegation._finalize`` / ``async_delegation.interrupt_all``)."""
+    return evt.get("stalled_after_quiet_seconds") is not None or bool(evt.get("interrupted_by"))
+
+
+def delegation_unfinished_statuses(evt: dict) -> list[str]:
+    """Statuses of an async delegation result's units that did not finish (done ones left out)."""
+    if evt.get("type") != "async_delegation" or evt.get("task_failure_notice"):
+        return []
+    return [s for s in map(_child_status, _unit_results(evt)) if s not in _DONE]
+
+
+def _shutdown_stop_lines(evt: dict, results) -> list[str]:
+    """What the parent should do about work the gateway's shutdown stopped (``interrupt_all``)."""
+    if not evt.get("interrupted_by") or not any(_child_status(r) in _STOPPED for r in results):
+        return []
+    return [f"This work was stopped by {evt['interrupted_by']}, not by you or the user: re-dispatch the "
+            "unfinished part, or tell the user it stopped."]
 
 
 def completion_resumes_parent(evt: dict) -> bool:
@@ -297,6 +324,7 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
     if evt.get("stalled_after_quiet_seconds") is not None and any(r.get("status") in _STOPPED for r in results):
         lines.append(f"The stall monitor stopped this unit after {evt['stalled_after_quiet_seconds']:g}s without "
                      "progress: an interrupted task below was stuck, not stopped by you or the user.")
+    lines += _shutdown_stop_lines(evt, results)
     if evt.get("error") and not results:
         lines += ["--- ERROR ---", f"The batch did not complete successfully: {evt['error']}"]
         return "\n".join(lines)
@@ -381,6 +409,7 @@ def _format_async_delegation(evt: dict) -> str:
     else:
         if status == "interrupted":
             lines.append("The subagent was interrupted before completing" + (f": {error}" if error else "."))
+            lines += _shutdown_stop_lines(evt, [evt])
         else:  # error / timeout / failed / unknown (owner died)
             lines.append(
                 f"The subagent did not complete successfully (status={status})." + (f"\n{error}" if error else ""))

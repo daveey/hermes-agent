@@ -322,7 +322,9 @@ def bind(conn: Any, task_id: str, origin: Origin, *, board: Optional[str] = None
     me, _ = gateway_names()
     target = f"{me}/{board or 'default'}/{task_id}"
     return {"origin": origin.ref, "chat_id": origin.chat_id, "task": target, "readback": "pending",
-            "verify_on_origin": f"hermes-hub links {origin.session} --expect {target}"}
+            "verify_on_origin": f"hermes-hub links {origin.session} --expect {target}",
+            "verify_visible": (f"hermes -p {shlex.quote(origin.profile)} kanban chat-tasks "
+                               f"{shlex.quote(origin.session)} --expect {shlex.quote(target)}")}
 
 
 def preflight(tool_names: Iterable[str]) -> None:

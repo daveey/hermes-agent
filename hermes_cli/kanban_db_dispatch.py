@@ -38,6 +38,7 @@ from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist,
 from hermes_cli import kanban_worker_scope as _worker_scope, kanban_aggregate_scope as _aggregate_scope
 from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
 from hermes_cli import kanban_owner_death as _owner_death, kanban_parent_unclaimed as _parent_unclaimed  # [daveey]
+from hermes_cli import kanban_guard_refusal as _guard_refusal  # [daveey]
 from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [daveey]
 from hermes_cli.kanban_failure_accounting import _record_task_failure
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
@@ -1165,10 +1166,8 @@ _LOG_CHROME = re.compile(r"[─━═╭╮╰╯│┃┌┐└┘]+|☤\s*Herm
 
 
 from hermes_cli.kanban_worker_log import (
-    current_run_log, exit_summary_marker as _exit_summary_marker, log_noise_prefixes as _log_noise_prefixes)
-
-
-from hermes_cli.kanban_worker_log import _worker_final_output, crash_worker_output
+    current_run_log, exit_summary_marker as _exit_summary_marker, log_noise_prefixes as _log_noise_prefixes,
+    _worker_final_output, crash_worker_output)
 
 
 def _classify_dead_worker(
@@ -1358,6 +1357,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
                 dead.event_payload['reconciled_at'] = int(time.time())
                 dead.event_payload['reconciled_by'] = 'observer' if failed_results_only else 'dispatcher'
             _owner_death.note(dead, conn, row["id"], row["current_run_id"])  # owner died under it [daveey]
+            _guard_refusal.note(dead, conn, row["id"], row["current_run_id"])  # host refused its kanban calls [daveey]
             dead.run_id = row["current_run_id"]
             dead.event_payload["retry_status"] = _kb._retry_status_for_run(conn, row["id"])
             from hermes_cli.kanban_failure_release import route_dead_worker
@@ -2685,8 +2685,8 @@ def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[st
         require_restart_safe_scope=True,
         outlives_parent=True,
     ).argv)
-    # OOM recovery raises the cap; bounded_scope adds the shared pool (kanban_aggregate_scope)
-    return _aggregate_scope.bounded_scope(_worker_scope.apply_oom_recovery(argv, task.id, board))
+    argv = _worker_scope.apply_oom_recovery(argv, task.id, board)  # OOM recovery raises the cap
+    return _aggregate_scope.bounded_scope(argv, task_id=task.id, board=str(_kb.kanban_db_path(board=board).resolve()))  # pool + per-card slice
 
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, observation=None) -> Optional[int]:

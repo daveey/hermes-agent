@@ -223,6 +223,109 @@ def test_the_new_machine_needs_the_cards_required_capabilities(board):
     assert board.why(machines=_machines(**{X: {"labels": [*_worker(X)["labels"], "capability:gpu"]}})) is None
 
 
+def test_declared_hub_write_needs_the_hyphenated_label_a_worker_attests(board):
+    """t_01a1d28d2ff68689: ``requires=["hub:write"]`` built ``capability:hub:write``, which no worker carries, so
+    the pool move refused every worker that attests ``capability:hub-write``."""
+    board.set(board.target, requires=json.dumps(["terminal", "hub:write"]))
+    pooled = {"labels": ["linux", "capability:terminal", "capability:hub-write", "profile:default", POOL]}
+    assert board.why(runs_on=[POOL], machines=_machines(**{X: pooled})) is None
+    assert board.why(machines=_machines(**{X: pooled})) is None
+    lacking = {"labels": ["linux", "capability:terminal", "profile:default", POOL]}
+    assert "capability:hub-write" in board.why(runs_on=[POOL], machines=_machines(**{X: lacking}))
+
+
+@pytest.mark.parametrize("access", ["ssh:mbp", "ssh:mini"])
+def test_declared_ssh_access_refuses_the_pool_queue_with_the_board_reason(board, access):
+    """t_01a1d2b4b091e158: workers attest ``capability:ssh-mbp``/``ssh-mini``, but the Board's pool selection cannot
+    place ssh access, so a pool move would leave the card in task_requirement_unsupported."""
+    from hermes_cli import kanban_placement_coordination as coord
+    board.set(board.target, requires=json.dumps([access]))
+    label = coord.requirement_label(access)
+    machines = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, label]})
+    assert rp.pool_refusal(M, machines, rp._need(board.conn.execute(
+        "SELECT * FROM tasks WHERE id = ?", (board.target,)).fetchone()), NOW) is None  # a worker qualifies
+    why = board.why(runs_on=[POOL], machines=machines)
+    assert why is not None and coord.BOARD_REASON in why, why
+
+
+@pytest.mark.parametrize("stored", ['{"a":1}', '"ssh:mbp"', '["terminal", 3]', "null", "not json"])
+def test_a_requires_the_board_cannot_read_refuses_the_pool_queue_only(board, stored):
+    """t_01a1d2d611cfe71d: ``_requires`` maps a stored requires that is not a JSON list of strings to ``[]``, so the
+    pool move looked eligible with only ``profile:<assignee>``; the Board's ``stringList`` answers
+    ``task_metadata_invalid`` for that row and never pool-places it. A move to one machine is unchanged."""
+    board.set(board.target, requires=stored)
+    why = board.why(runs_on=[POOL], machines=_pooled())
+    assert why is not None and "task_metadata_invalid" in why and "not a JSON list of strings" in why, why
+    assert board.why(machines=_pooled()) is None  # machine:<X> still moves
+
+
+@pytest.mark.parametrize("stored", [None, "[]", '["terminal"]'])
+def test_a_requires_the_board_reads_still_takes_the_pool_queue(board, stored):
+    board.set(board.target, requires=stored)
+    machines = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, "capability:terminal"]})
+    assert board.why(runs_on=[POOL], machines=machines) is None
+
+
+@pytest.mark.parametrize("stored", ['{"a":1}', '"kanban-worker"', '["kanban-worker", 3]', "null", "not json"])
+def test_skills_the_board_cannot_read_refuse_the_pool_queue_only(board, stored):
+    """t_01a1d2f66de283de: the Board's ``requiredLabels`` reads ``skills`` through the same ``stringList`` as
+    ``requires`` and answers ``task_metadata_invalid`` for a row it cannot read, so a pool move would stall. A move to
+    one machine is unchanged."""
+    board.set(board.target, skills=stored)
+    why = board.why(runs_on=[POOL], machines=_pooled())
+    assert why is not None and "task_metadata_invalid" in why and "stored skills" in why, why
+    assert board.why(machines=_pooled()) is None  # machine:<X> still moves
+
+
+def test_the_pool_queue_needs_the_cards_skill_labels(board):
+    """t_01a1d2f66de283de: the Board's ``requiredLabels`` adds ``skill:<s>``; a pool worker without it never takes the
+    card, so the pool move is refused until one attests it. A move to one machine does not need the skill label."""
+    board.set(board.target, skills=json.dumps(["kanban-worker", "github"]))
+    why = board.why(runs_on=[POOL], machines=_pooled())
+    assert why is not None and "skill:kanban-worker" in why and "skill:github" in why, why
+    partial = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, "skill:kanban-worker"]})
+    assert board.why(runs_on=[POOL], machines=partial) is not None
+    full = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, "skill:kanban-worker", "skill:github"]})
+    assert board.why(runs_on=[POOL], machines=full) is None
+    assert board.why(machines=_pooled()) is None  # machine:<X> unchanged
+
+
+@pytest.mark.parametrize("stored", [None, "[]"])
+def test_no_skills_still_takes_the_pool_queue(board, stored):
+    board.set(board.target, skills=stored)
+    assert board.why(runs_on=[POOL], machines=_pooled()) is None
+
+
+def test_a_row_without_a_skills_column_reads_as_no_skills():
+    """An older replica row has no ``skills`` column: NULL, as the Board reads a missing value."""
+    row = {"requires": None, "assignee": "default"}
+    assert rp.malformed_skills(row) is None
+    assert rp._pool_need(row) == rp._need(row) == {"profile:default"}
+
+
+@pytest.mark.parametrize("name, label", [("hub:write", "capability:hub-write"), ("hub:read", "capability:hub-read"),
+                                         ("ssh:mbp", "capability:ssh-mbp"), ("ssh:mini", "capability:ssh-mini"),
+                                         ("terminal", "capability:terminal")])
+def test_every_need_site_maps_access_names_to_their_attested_labels(name, label):
+    from hermes_cli import kanban_placement_coordination as coord
+    from hermes_cli import kanban_repin_notice as rn
+    assert coord.requirement_label(name) == label
+    assert label in rp._need({"requires": json.dumps([name]), "assignee": "default"})
+    assert label in rn.required_labels({"requires": json.dumps([name]), "assignee": "default"})
+    machines = {X: {**_worker(X), "labels": ["linux", label, "profile:default"]}}
+    assert kps.alarm_placement(M, machines, assignee="default", requires=(name,), now_ms=NOW)[0] == [f"machine:{X}"]
+
+
+@pytest.mark.parametrize("assignee", [None, ""])
+def test_a_card_with_no_assignee_needs_the_default_profile_like_the_board(assignee):
+    """t_01a1d3123e9d25fd: the Board's ``requiredLabels`` reads ``assignee || "default"``; ``_need`` built
+    ``profile:None`` / ``profile:``, which no worker carries, so the pool move looked ineligible."""
+    from hermes_cli import kanban_repin_notice as rn
+    row = {"requires": None, "assignee": assignee}
+    assert rp._need(row) == {"profile:default"} == set(rn.required_labels(row))
+    assert rp.pool_refusal(M, _pooled(), rp._need(row), NOW) is None
+
+
 def test_the_hub_lane_without_hub_write_is_a_valid_target(board):
     assert board.why(runs_on=["machine:hub"]) is None  # hub-write is the alarm's need, not the card's
 
@@ -330,6 +433,54 @@ def test_the_alarms_run_may_not_move_an_unlisted_card_or_back_onto_the_stalled_m
     out = _move(a, [f"machine:{M}"])
     assert out.get("ok") is not True and f"leave {M}" in out["error"], out
     assert place._pin(hub.conn, unlisted) == place._pin(hub.conn, a) == [f"machine:{M}"]
+
+
+def test_the_alarms_pool_move_keeps_a_mandatory_pins_label(held, monkeypatch):
+    # Review 5878972889 on #1622: the alarm may only ask for exactly [pool:worker]; the move must still carry
+    # capability:mandatory-model-pin, or an old-core pool worker leases a pin it would run on another model.
+    from hermes_cli import kanban_mandatory_pin as mp
+    hub, _worker_gw, _alarm, (a, _b), _unlisted = held
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET model_override = 'claude-opus-5-5', provider_override = 'anthropic', "
+                         "model_pin_mandatory = 1 WHERE id = ?", (a,))
+    pooled = {**support.MACHINES[X], "labels": [*support.MACHINES[X]["labels"], POOL]}
+    monkeypatch.setitem(support.MACHINES, X, pooled)
+    hub.enter()
+    out = _move(a, [POOL])  # worker-2 is on the pool but does not attest the mandatory-pin refusal
+    assert out.get("ok") is not True and mp.LABEL in out["error"], out
+    assert place._pin(hub.conn, a) == [f"machine:{M}"]
+    monkeypatch.setitem(support.MACHINES, X, {**pooled, "labels": [*pooled["labels"], mp.LABEL]})
+    hub.enter()
+    out = _move(a, [POOL])
+    assert out.get("ok") is True, out
+    assert place._pin(hub.conn, a) == sorted([POOL, mp.LABEL])
+
+
+def test_the_alarms_run_leaves_a_card_whose_unpushed_tree_is_on_this_host(held, tmp_path, monkeypatch):
+    """agent-e575f77d7d: the re-place is an ordinary queued move, so ``unpushed_state_here`` refuses it; the card
+    stays pinned and the alarm's run goes on (a refusal, not an error that loops)."""
+    import subprocess
+    from pathlib import Path
+    hub, _worker_gw, alarm, (a, b), _unlisted = held
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    tree = tmp_path / "home" / "code" / "_wt" / "stalled"
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    main = tmp_path / "stalled-main"
+    subprocess.run([*git, "init", "-q", str(main)], check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], cwd=main, check=True, capture_output=True)
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "wt/stalled", str(tree)], cwd=main, check=True,
+                   capture_output=True)
+    gitdir = (tree / ".git").read_text().split(":", 1)[1].strip()
+    (Path(gitdir) / "hermes-owner.json").write_text(json.dumps({"task_id": a}))
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "wip"], cwd=tree, check=True, capture_output=True)
+    out = _move(a, [f"machine:{X}"])
+    # The tool error carries move_queued's message, not its reason_code.
+    assert out.get("ok") is not True and "unpushed commits in" in out["error"], out
+    assert "another machine cannot resume it" in out["error"], out
+    assert place._pin(hub.conn, a) == [f"machine:{M}"]
+    assert not hub.conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'moved'", (a,)).fetchone()
+    assert _move(b, [f"machine:{X}"]).get("ok") is True  # a card with no tree here still moves
+    assert kb.get_task(hub.conn, alarm).status == "running"
 
 
 def test_the_hold_alarm_text_names_the_supported_command():

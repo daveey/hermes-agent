@@ -47,6 +47,7 @@ _state: dict[str, Any] = {}
 
 
 def _reset_for_tests() -> None:
+    """Clears the deadline, the exit target and the phase marks."""
     with _lock:
         _state.clear()
         _done.clear()
@@ -85,11 +86,40 @@ def is_exiting() -> bool:
 
 
 def remaining_s() -> Optional[float]:
-    """Seconds left before the deadline fires; ``None`` when no deadline is set (yet)."""
-    deadline = _state.get("deadline_mono")
-    if deadline is None:
+    """Seconds left before the deadline fires, or before an earlier exit target (:func:`set_exit_target`)
+    if one is set; ``None`` when neither is set (yet)."""
+    ends = [end for end in (_state.get("deadline_mono"), _state.get("target_mono")) if end is not None]
+    if not ends:
         return None
-    return max(0.0, deadline - time.monotonic())
+    return max(0.0, min(ends) - time.monotonic())
+
+
+# Kept between a core update's checkpoint exit target and the updater's own wait: the exit funnel and the
+# updater's 0.2s poll land inside it.
+UPDATE_EXIT_MARGIN_S = 8.0
+
+
+def set_exit_target(target_mono: Optional[float], reason: str = "") -> None:
+    """A soft exit target (monotonic) the stop tail's waits are clamped to; ``None`` clears it.
+
+    Unlike the deadline it never ``os._exit``s: it only shortens the cooperative waits (cron/housekeeping
+    threads, control socket, MCP) so the process exits by then. A core update's checkpoint sets it at
+    ``accept + drain_timeout - margin``: the updater waits ``drain_timeout`` from the ack for the gateway
+    process to EXIT, and the post-stop tail used to have no bound tied to that promise (hermes-hub
+    2026-11-13 01:58-01:59Z: stop() took 12s, the tail 44.5s, the process exited 2s after the updater's
+    70s wait and the update was deferred). [daveey]"""
+    with _lock:
+        if target_mono is None:
+            _state.pop("target_mono", None)
+            _state.pop("target_reason", None)
+        else:
+            _state.update(target_mono=float(target_mono), target_reason=reason)
+
+
+def phases() -> dict[str, float]:
+    """Phase marks (seconds since the stop began) recorded so far, for the tail's timing log line."""
+    with _lock:
+        return dict(_state.get("phases") or {})
 
 
 # Left on the deadline after the cron/housekeeping waits: MCP shutdown (5s) + the exit funnel.

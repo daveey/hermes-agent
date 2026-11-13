@@ -59,7 +59,7 @@ SYNCED_COLUMNS: dict[str, frozenset[str]] = {
         "workflow_template_id", "current_step_key", "skills", "requires", "model_override",
         "provider_override", "model_pin_mandatory", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
         "block_kind", "human_request", "block_recurrences", "completion_contract", "runs_on", "placement_policy",
-        "admission_class", "admission_frees",
+        "admission_class", "admission_frees", "review_required",
     }),
     "task_links": frozenset({"parent_id", "child_id"}),
     "task_comments": frozenset({"task_id", "author", "body", "created_at"}),
@@ -1070,7 +1070,8 @@ def set_runs_on(conn: sqlite3.Connection, task_id: str, runs_on: Any) -> None:
 
 
 def worker_pickup(conn: sqlite3.Connection, budget: Any, dry_run: bool, profile_exists_fn: Any) -> None:
-    """Dispatcher seam: a worker node copies eligible cards other gateways created (``kanban_worker_node``)."""
+    """Dispatcher seam: a worker node copies eligible cards other gateways created (``kanban_worker_node``); the
+    hub then judges its own label-less unjudged ready cards (``kanban_hub_admission_claim``) before the claims."""
     if dry_run or board_mode(conn) != "primary":
         return
     from hermes_cli import kanban_worker_node as wn
@@ -1078,6 +1079,8 @@ def worker_pickup(conn: sqlite3.Connection, budget: Any, dry_run: bool, profile_
         wn.pickup(conn, budget=budget, profile_exists=profile_exists_fn())
     except Exception:  # health: allow BLE001 -- a failed pickup must not stop the tick dispatching local work
         _log.warning("kanban: worker-node pickup failed", exc_info=True)
+    from hermes_cli.kanban_hub_admission_claim import safe_screen
+    safe_screen(conn)  # [daveey] the hub judges its own unjudged ready cards before this tick's claims
 
 
 def worker_pickup_capped(conn: sqlite3.Connection, result: Any, dry_run: bool, profile_exists_fn: Any) -> Any:
