@@ -28,7 +28,7 @@ def repo(tmp_path, monkeypatch):
     for k, v in {"user.email": "t@t", "user.name": "t"}.items(): sh("git", "config", k, v, cwd=live)
     sh("git", "remote", "add", "upstream", str(up), cwd=live)
     (live / "a.txt").write_text("a fork\n"); sh("git", "commit", "-qam", "fork change", cwd=live); sh("git", "push", "-q", "origin", "main", cwd=live)
-    gate.adopt(live)
+    gate.adopt(live, up)
     return up, fork, live, gate
 
 

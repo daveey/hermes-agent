@@ -73,7 +73,7 @@ def test_a_local_branch_named_upstream_main_never_changes_what_the_sync_counts_o
     # hands exactly that commit to the CI gate: staged first, on main once its full suite is green.
     from tests.hermes_cli.upstream_gate_fake import FakeFork
     gate = FakeFork(tmp_path, monkeypatch, origin)
-    gate.adopt(clone)
+    gate.adopt(clone, upstream)
     _push_synced_fork(["git"], clone)
     assert gate.staged() == [commits[2]]
     assert _git(origin, "rev-parse", "refs/heads/main") == commits[0]
