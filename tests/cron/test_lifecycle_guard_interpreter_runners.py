@@ -121,6 +121,39 @@ def test_mentions_and_data_stay_allowed(files, template):
     assert scan_gateway_lifecycle(template.format(**files)) == (False, None)
 
 
+@pytest.mark.parametrize(
+    "template",
+    [
+        # zsh's `-O` is the valueless CORRECT flag, so the next token is the script (PR #2249 nit).
+        "zsh -eO {sh}",
+        "zsh -O {sh}",
+        "zsh +O {sh}",
+        # zsh's `-o NAME` and bash's `-O NAME` still consume their value.
+        "zsh -o errexit {sh}",
+        "zsh -eo errexit {sh}",
+        "bash -eO extglob {sh}",
+    ],
+)
+def test_shell_specific_option_values_find_the_script(files, template):
+    assert scan_gateway_lifecycle(template.format(**files)) == (True, None)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        # Past the script operand `--rcfile` is the script's own argument, never sourced by the
+        # shell (PR #2249 nit).
+        "bash {clean_sh} --rcfile /dev/null",
+        "bash {clean_sh} --rcfile {sh}",
+        "bash -e {clean_sh} --init-file {sh}",
+        "bash -c 'echo hi' --rcfile {sh}",
+        "bash --rcfile",
+    ],
+)
+def test_rcfile_after_the_script_operand_is_not_sourced(files, template):
+    assert scan_gateway_lifecycle(template.format(**files)) == (False, None)
+
+
 def test_python_source_run_under_uv_is_not_shell_walked(tmp_path, files):
     """A Python file is regex-scanned only (#77131): shell-looking lines in it are not walked, even
     when they name a script that would be refused, or a device that would fail closed."""

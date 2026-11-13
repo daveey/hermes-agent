@@ -196,6 +196,10 @@ def test_clustered_option_value_and_rcfile_stay_refused(tmp_path, monkeypatch, t
     ("bash --rcfile /etc/rc /x/hermes-sync", True),
     ("bash --init-file /etc/rc /x/hermes-sync", True),
     ("bash -euo pipefail /x/deploy.sh hermes-sync", False),
+    # PR #2249 review nit: zsh's clustered `-O` (CORRECT) takes no value; its `-o NAME` does.
+    ("zsh -eO /x/hermes-sync", True),
+    ("zsh -eo errexit /x/hermes-sync", True),
+    ("bash -eO extglob /x/hermes-sync", True),
     ("x=1 time hermes-sync", True),
     ("env time -f %e hermes-sync", True),
     ("sudo -u ubuntu time -o /tmp/t -- nohup hermes-sync", True),

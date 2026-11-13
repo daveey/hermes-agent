@@ -1080,13 +1080,16 @@ def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
         yield from _command_segment_views(segment)
 
 
-def _shell_options_end(arguments: list[str]) -> tuple[int, bool, bool]:
-    """``(operand_index, command_string, reads_stdin)`` for a POSIX shell's *arguments*: the index
-    of the first operand past the options, whether a ``-c``/``--command`` flag ends them (inline
-    source follows), and whether a short-option cluster holds ``s`` (commands come from stdin).
-    Each ``o``/``O`` in a short-option cluster (``-o x``, ``-euo pipefail``, ``+O extglob``)
-    consumes the next token, as do ``--rcfile`` and ``--init-file``; a lone ``-`` ends the
-    options like ``--``."""
+def _shell_options_end(arguments: list[str], shell: str) -> tuple[int, bool, bool]:
+    """``(operand_index, command_string, reads_stdin)`` for a POSIX *shell*'s *arguments*: the
+    index of the first operand past the options, whether a ``-c``/``--command`` flag ends them
+    (inline source follows), and whether a short-option cluster holds ``s`` (commands come from
+    stdin). Each ``o`` in a short-option cluster (``-o x``, ``-euo pipefail``) consumes the next
+    token, as does each ``O`` (``+O extglob``) except under zsh, whose ``-O`` is the valueless
+    CORRECT flag; ``--rcfile`` and ``--init-file`` consume one too; a lone ``-`` ends the options
+    like ``--``. Shells without a ``-O`` (dash) reject it, so reading its value there only skips
+    a command that never runs."""
+    value_letters = "o" if shell == "zsh" else "oO"
     index = 0
     reads_stdin = False
     while index < len(arguments):
@@ -1103,16 +1106,16 @@ def _shell_options_end(arguments: list[str]) -> tuple[int, bool, bool]:
             continue
         if argument.startswith(("-", "+")):
             reads_stdin = reads_stdin or (argument[0] == "-" and "s" in argument[1:])
-            index += 1 + sum(letter in "oO" for letter in argument[1:])
+            index += 1 + sum(letter in value_letters for letter in argument[1:])
             continue
         break
     return index, False, reads_stdin
 
 
-def _shell_script_operand(arguments: list[str]) -> Optional[str]:
-    """The script a POSIX shell runs from *arguments*; ``None`` for ``-c`` (inline source) or no
+def _shell_script_operand(arguments: list[str], shell: str) -> Optional[str]:
+    """The script a POSIX *shell* runs from *arguments*; ``None`` for ``-c`` (inline source) or no
     operand. Options and their values are skipped as ``_shell_options_end`` describes."""
-    index, command_string, _ = _shell_options_end(arguments)
+    index, command_string, _ = _shell_options_end(arguments, shell)
     return arguments[index] if not command_string and index < len(arguments) else None
 
 
@@ -1137,7 +1140,7 @@ def executes_command_named(command: str, name: str, *, _depth: int = 0) -> bool:
             return True
         arguments = segment[index + 1 :]
         if executable in _SHELL_EXECUTABLES:
-            script = _shell_script_operand(arguments)
+            script = _shell_script_operand(arguments, executable)
         elif _is_interpreter_image(executable):
             script = next((t for t in arguments if not t.startswith("-")), None)
         else:
@@ -1329,13 +1332,13 @@ def _references_at(
 
     if executable_name in _SHELL_EXECUTABLES:
         arguments, stdin = _split_redirections(segment[index + 1 :])
-        # An rc file a shell may source (`bash --rcfile x.sh -i`) is scanned like its script.
-        for arg_index, argument in enumerate(arguments[:-1]):
-            if argument in _SHELL_COMMAND_FLAGS or argument == "--":
-                break
-            if argument in _SHELL_LONG_OPTIONS_WITH_VALUES:
+        operand_index, command_string, reads_stdin = _shell_options_end(
+            arguments, executable_name)
+        # An rc file a shell may source (`bash --rcfile x.sh -i`) is scanned like its script; past
+        # the options (`bash clean.sh --rcfile x`) it is only the script's argument.
+        for arg_index in range(min(operand_index, len(arguments)) - 1):
+            if arguments[arg_index] in _SHELL_LONG_OPTIONS_WITH_VALUES:
                 yield from _resolved_or_nothing(arguments[arg_index + 1], cwd)
-        operand_index, command_string, reads_stdin = _shell_options_end(arguments)
         if command_string:
             return
         if operand_index < len(arguments):
