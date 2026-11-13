@@ -13,7 +13,8 @@ with one local query.
 - :func:`replica_cards` answers a chat lineage's cards on other gateways from the replicas; ``session_tasks`` AND the
   sidebar counts use it instead of the origin ledger when ``kanban.sync.links_reader`` is ``replica``, so the
   count and the task strip are one projection in each mode.
-- :func:`links_diff` compares the two answers per chat, ``unknown`` unfinished obligations included; readers
+- :func:`links_diff` compares the two answers per chat, ``unknown`` unfinished obligations included, leaving out
+  the chats the writer never links (machine sessions, placeholders: counted in ``machine_links``); readers
   switch only once it is clean.
 """
 
@@ -510,11 +511,13 @@ def _read_replica(path: Path, gateway: str,
     card row is missing), the replica's last successful pull, and the current-run terms of the linked running cards
     (``kanban_replica_execution.read_runs``). Raises ``sqlite3.Error`` when unreadable.
 
-    ``chat_released`` is 1 when another link of the same card and chat (other kind) is released. [daveey] The owner
-    writes a ``created`` link for a remote origin chat (``kanban_creator_chats``) that no gateway ever releases: the
-    owner's reconcile only manages its own chats' links and the origin's only its own board file. The origin's
-    ``shepherd`` link carries the verified release instead, so a done card stayed an ``unknown`` obligation forever
-    (sidebar "4 open" naming none, 2026-11-01)."""
+    [daveey] A released sibling link (same card and chat, other kind) no longer settles a closed card here. That
+    reader rule (9d13eeb47e, 2026-11-01) assumed the released sibling carried a verified release; the writer fix
+    for the same incident (``_owner_written_releases``) releases the owner's unmanaged ``created`` link itself, so
+    the rule only ever fired where the chat's own ledger still held the other link unreleased: a done card whose
+    release is unverified, whose owner-written ``shepherd`` sibling was released because the card closed. It hid 19
+    such hub cards from chat 20261026_170127_f07c32 that the ledger lists as ``unknown`` (David-MBP links_diff,
+    2026-11-13). Each link now carries its own answer, as ``replica_cards`` says: only a released link drops it."""
     from hermes_cli.kanban_activity_revision import SHADOW_TABLES, is_revision
     from hermes_cli.kanban_session_activity import _board_content_key, cached_ro  # lazy: that module imports this one
     # [daveey] The link rows only change with the replica's tasks/task_chat_links content; a pull that only moves
@@ -548,10 +551,7 @@ def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) ->
     return [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
         f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
-        "l.chat_session, l.chat_profile, l.kind, "
-        "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
-        "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
-        "AS chat_released "
+        "l.chat_session, l.chat_profile, l.kind "
         "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
         "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
         "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
@@ -685,10 +685,6 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             unknown = missing or status in TERMINAL_STATUSES or status is None
             if not unknown and status not in statuses:
                 continue
-            # A closed card this chat's other link released is settled for this chat (see ``_read_replica``). Only a
-            # terminal row: an open card keeps every unreleased link, and a missing row stays unknown.
-            if status in TERMINAL_STATUSES and r.get("chat_released"):
-                continue
             tid = str(r["id"])
             owner, owner_profile, named = _owner_of((owners or {}).get((board, tid), []), r["created_on"],
                                                     r["chat_session"])
@@ -739,24 +735,51 @@ def _ledger_obligation(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:
     return card.get("status") in statuses or (card.get("status") == UNKNOWN and bool(card.get("unfinished")))
 
 
+def _unlinked_chats(gateway: str, profiles: dict[str, set[Any]]) -> set[str]:
+    """The chats (``session -> origin profiles``) the link writer never links: a placeholder id, or a machine
+    session of this gateway (``_ledger_links`` skips them, ``reconcile`` releases them). Classified once per
+    profile, as ``_ledger_links`` does."""
+    from hermes_cli.kanban_db_notify import machine_sessions
+    from hermes_cli.kanban_placement import is_placeholder_session
+    out = {s for s in profiles if is_placeholder_session(s)}
+    groups: dict[tuple, tuple[Any, list[str]]] = {}
+    for session, names in profiles.items():
+        if session not in out:
+            for name in names:
+                groups.setdefault((type(name), name), (name, []))[1].append(session)
+    for name, refs in groups.values():
+        out |= {str(s) for s in machine_sessions(gateway, refs, local_gateway=gateway, profile=name)}
+    return out
+
+
 def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
     """Per chat, the remote obligations the origin ledger lists against the ones the replicas list, including
     ``unknown`` unfinished rows (done cards without a verified release). Clean when the two answers match for
-    every chat either side knows."""
+    every chat either side knows.
+
+    [daveey] Chats the link writer never links (``_unlinked_chats``: machine sessions, placeholders) are left out
+    of both sides and counted in ``machine_links``: their ledger rows were differences by construction, never a
+    reader regression. On David-MBP they were 250 of the 270 only-in-ledger links (137 of 140 chats, all kanban
+    worker transcripts, 2026-11-13), which hid the real difference among them."""
     from hermes_cli.kanban_session_activity import _remote_links
     ledger: dict[str, set[tuple[str, str, str]]] = {}
+    profiles: dict[str, set[Any]] = {}
     for card in _remote_links():
         if card.get("origin_gateway") not in (None, gateway) or not card.get("session"):
             continue
         if not _ledger_obligation(card, statuses):
             continue
         ledger.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
+        profiles.setdefault(card["session"], set()).add(card.get("origin_profile"))
     replica: dict[str, set[tuple[str, str, str]]] = {}
     unreadable: list[str] = []
     from hermes_cli import kanban_sync_client as ksc
     replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
     for card in replica_cards(None, gateway, statuses, replicas, ledger_fallback=False, unreadable_out=unreadable):
         replica.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
+        profiles.setdefault(card["session"], set()).add(card.get("origin_profile"))
+    skipped = _unlinked_chats(gateway, profiles)
+    machine_links = sum(len(side.pop(s, ())) for side in (ledger, replica) for s in skipped)
     # A replica that exists but cannot be read, or that is missing while the ledger has cards on its board, answers
     # nothing: the diff is never clean while one does (readers must not switch on it). A missing replica of a board
     # with no ledger cards has nothing to compare.
@@ -771,4 +794,5 @@ def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[
     # An unreadable replica answers nothing (see above).
     return {"clean": not only_ledger and not only_replica and not unreadable, "chats": len(sessions),
             "ledger_links": sum(len(v) for v in ledger.values()), "replica_links": sum(len(v) for v in replica.values()),
-            "only_in_ledger": only_ledger, "only_in_replica": only_replica, "unreadable": unreadable}
+            "machine_links": machine_links, "only_in_ledger": only_ledger, "only_in_replica": only_replica,
+            "unreadable": unreadable}

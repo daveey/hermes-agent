@@ -293,6 +293,38 @@ def test_links_diff_compares_unknown_unfinished_rows(env):
     assert report["only_in_ledger"] == {"s1": [(HUB, "default", "t_done")]}
 
 
+def _unknown_row(tid, session, via="origin"):
+    return {"id": tid, "board": "default", "gateway": HUB, "profile": "default", "key": f"{HUB}/default/default/{tid}",
+            "session": session, "via": via, "origin_gateway": ME, "origin_profile": "default", "released": False,
+            "status": "unknown", "reported_status": "done", "unfinished": True}
+
+
+def test_links_diff_agrees_on_a_done_unverified_card_whose_owner_written_sibling_was_released(env):
+    """[daveey] David-MBP chat 20261026_170127_f07c32, 2026-11-13: 19 done hub cards whose origin ledger holds the
+    ``created`` link unreleased (release unverified) while their owner-written ``shepherd`` link was released when
+    the card closed. The replica dropped them through a released sibling, the ledger listed them ``unknown``."""
+    replica(env, [("t_done", "done", HUB)], [("t_done", "s1", "created", 0), ("t_done", "s1", "shepherd", 1)])
+    env["ledger"].append(_unknown_row("t_done", "s1"))
+    report = links.links_diff(ME)
+    assert report["clean"], report
+    assert [(c["id"], c["status"]) for c in links.replica_cards(["s1"], ME)] == [("t_done", "unknown")]
+
+
+def test_links_diff_leaves_out_chats_the_link_writer_never_links(env):
+    """[daveey] 250 of the 270 only-in-ledger links on David-MBP (2026-11-13) were kanban worker transcripts:
+    ``_ledger_links`` never writes a machine session's link and ``reconcile`` releases one, so the ledger's rows for
+    them differed by construction and hid the one real difference. They are counted, not compared."""
+    worker = "local-" + "a" * 64  # a worker's headless hash: no interactive source proves it a chat
+    replica(env, [("t_cron", "archived", HUB), ("t_hash", "done", HUB), ("t_human", "done", HUB)],
+            [("t_cron", "cron_job_1", "shepherd", 1), ("t_human", "s_human", "shepherd", 1)])
+    env["ledger"].extend([_unknown_row("t_cron", "cron_job_1", "shepherd"), _unknown_row("t_hash", worker),
+                          _unknown_row("t_human", "s_human", "shepherd")])
+    report = links.links_diff(ME)
+    assert report["machine_links"] == 2
+    assert report["only_in_ledger"] == {"s_human": [(HUB, "default", "t_human")]}  # a chat still differs
+    assert not report["clean"] and report["chats"] == 1
+
+
 _ASK = {"action": "Name the build host or say wait", "why_human": "new runner registrations are approval-gated",
         "interaction": "reply", "scope": "one runner registration", "evidence": "runners API lists no canary"}
 
