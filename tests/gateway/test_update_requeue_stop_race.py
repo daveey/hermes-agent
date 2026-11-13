@@ -28,6 +28,12 @@ def _yielded(owner, row):
         'result': {'paused_for_update': True, UNSTARTED_KEY: True}, 'usage': {}}
 
 
+def _cancelled_completions(frames, admission_id):
+    """The ``outcome='cancelled'`` completions the session's event stream published for ``admission_id``."""
+    return [f for f in frames if f['params']['type'] == 'message.complete'
+            and f['params']['admission_id'] == admission_id and f['params']['payload'].get('outcome') == 'cancelled']
+
+
 async def _stop_session(authority):
     task = authority.sessions['s'].task
     if task is not None and not task.done():
@@ -44,7 +50,8 @@ async def test_stop_latched_during_the_requeue_write_cancels_the_head_and_clears
     from gateway.session_update_pause import interrupt_update
     from hermes_state_runtime import admit_session_input, get_session_admission
     db, authority = _authority(tmp_path, monkeypatch)
-    held, calls, stops = [False], [], []
+    held, calls, stops, frames = [False], [], [], []
+    authority.sessions['s'].event_stream.observers.add(frames.append)
     monkeypatch.setattr(session_notifier_drain, 'held', lambda: held[0])
     loop = asyncio.get_running_loop()
     original = hermes_state_update_pause.requeue_unstarted_input
@@ -79,6 +86,7 @@ async def test_stop_latched_during_the_requeue_write_cancels_the_head_and_clears
             row = get_session_admission(db, admission_id=head['admission_id'])
             assert (row['status'], row['outcome']) == ('terminal', 'cancelled'), row  # ... and it does
             assert await asyncio.wait_for(waiter, 5) is None
+            assert len(_cancelled_completions(frames, head['admission_id'])) == 1  # published once, not per settle
             assert head['admission_id'] not in authority.update_stops and not authority.pending_stops
             held[0] = False
             authority.sessions['s'].claim_changed.set()
@@ -104,7 +112,8 @@ async def test_a_failed_cancel_of_the_stopped_head_runs_it_once_after_the_hold_o
     from gateway.session_update_pause import interrupt_update
     from hermes_state_runtime import admit_session_input, get_session_admission
     db, authority = _authority(tmp_path, monkeypatch)
-    held, calls, stops, attempts = [False], [], [], []
+    held, calls, stops, attempts, frames = [False], [], [], [], []
+    authority.sessions['s'].event_stream.observers.add(frames.append)
     monkeypatch.setattr(session_notifier_drain, 'held', lambda: held[0])
     loop = asyncio.get_running_loop()
     original = hermes_state_update_pause.requeue_unstarted_input
@@ -152,11 +161,16 @@ async def test_a_failed_cancel_of_the_stopped_head_runs_it_once_after_the_hold_o
             else:
                 assert (row['status'], row['outcome']) == ('queued', None), row
                 assert not waiter.done(), 'the waiter stays with the queued row'
+            # A committed cancel publishes its completion exactly once (only the waiter is idempotent); an
+            # uncommitted one publishes none.
+            expected_cancelled = 1 if failure == 'commit-then-raise' else 0
+            assert len(_cancelled_completions(frames, head['admission_id'])) == expected_cancelled
             held[0] = False
             authority.sessions['s'].claim_changed.set()
             expected = 1 if failure == 'commit-then-raise' else 2  # yielded once, then (if still queued) ran once
             await _until(lambda: len(calls) >= expected and not mutation_tasks(authority))
             assert [c['admission_id'] for c in calls] == [head['admission_id']] * expected
+            assert len(_cancelled_completions(frames, head['admission_id'])) == expected_cancelled
             assert not authority.update_stops and not authority.pending_stops
         finally:
             held[0] = False
