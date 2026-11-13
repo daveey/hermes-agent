@@ -15,6 +15,8 @@ on nearly every PR and trained reviewers to ignore the scanner; keep it ruthless
 Both diff base...head, from the merge base, so only changes this PR introduces are judged, not
 changes that landed on main after the PR branched off. An added line that the same diff also
 removes from a file of the same name is a moved line and is not judged; see ``numbered_added_lines``.
+When git cannot produce the diff, the subcommand exits 2 with an ``::error::`` and writes no
+``found=``: an unread diff never passes as a clean one.
 """
 
 from __future__ import annotations
@@ -64,11 +66,23 @@ INDICATORS = (
 UNBOUNDED_DEP = re.compile(r'"[a-zA-Z0-9_-]+(?:\[[^\\]\]*\])?>=[ 0-9.]+"')
 
 
+class DiffUnavailable(Exception):
+    """git could not produce the PR's diff, which is not the same as an empty diff."""
+
+
 def pr_diff(*pathspec: str) -> str:
-    """Three-dot diff of the PR; a git failure yields an empty diff, as ``|| true`` did."""
+    """Three-dot diff of the PR; raises ``DiffUnavailable`` when git exits non-zero.
+
+    An empty string means the PR changes nothing under ``pathspec``. A git failure (a bad SHA, a
+    tree missing from a partial clone) prints nothing on stdout too, so treating it as empty would
+    let the blocking guards pass on a diff that was never read.
+    """
     commits = f"{os.environ['_HERMES_PR_BASE_SHA']}...{os.environ['_HERMES_PR_HEAD_SHA']}"
-    result = subprocess.run(("git", "diff", "--no-renames", commits, "--", *pathspec), stdout=subprocess.PIPE,
+    result = subprocess.run(("git", "diff", "--no-renames", commits, "--", *pathspec), capture_output=True,
                             stdin=subprocess.DEVNULL, timeout=300, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", "replace").strip()
+        raise DiffUnavailable(f"git diff {commits} exited {result.returncode}: {stderr or '(no stderr)'}")
     return result.stdout.decode("utf-8", "surrogateescape")
 
 
@@ -130,12 +144,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Scan a PR diff for supply-chain risks.")
     parser.add_argument("scan", choices=("patterns", "dependency-bounds"))
     args = parser.parse_args(argv)
-    if args.scan == "patterns":
-        report = critical_findings(pr_diff(".", *LOCKFILE_EXCLUDES))
-        report_name = "supply-chain-findings.md"
-    else:
-        report = "\n".join(unbounded_dependencies(pr_diff("pyproject.toml")))
-        report_name = "supply-chain-unbounded.txt"
+    try:
+        if args.scan == "patterns":
+            report = critical_findings(pr_diff(".", *LOCKFILE_EXCLUDES))
+            report_name = "supply-chain-findings.md"
+        else:
+            report = "\n".join(unbounded_dependencies(pr_diff("pyproject.toml")))
+            report_name = "supply-chain-unbounded.txt"
+    except DiffUnavailable as exc:
+        # No found= output: the step fails, and a scan that never read the diff publishes no verdict.
+        print(f"::error::Could not diff this PR, so the {args.scan} scan did not run: {exc}", flush=True)
+        return 2
     _set_found(bool(report))
     if report:
         _write_report(report_name, report)
