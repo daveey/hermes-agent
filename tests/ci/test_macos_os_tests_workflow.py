@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import types
 from pathlib import Path
 
 import hermes_yaml
@@ -157,6 +158,28 @@ def test_unreadable_queue_fails_open_to_testing(error):
     run, reason = _gate().decide("schedule", api, REPO, own_run_id=1)
     assert run is True
     assert "running anyway" in reason
+
+
+def test_a_hung_gh_read_is_bounded_and_fails_open_to_testing(monkeypatch):
+    # The real gh_api must bound each `gh api` call: without a timeout a hung read holds the
+    # gate job until its 10-minute cap, the gate fails and the scheduled test job is skipped.
+    gate = _gate()
+    timeouts: list[object] = []
+
+    def run(argv, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+
+    # Patch the gate module's own subprocess name, not the global module.
+    fake = types.SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError,
+                                 TimeoutExpired=subprocess.TimeoutExpired,
+                                 CalledProcessError=subprocess.CalledProcessError)
+    monkeypatch.setattr(gate, "subprocess", fake)
+    run_it, reason = gate.decide("schedule", gate.gh_api, REPO, own_run_id=1)
+    assert run_it is True
+    assert "running anyway" in reason
+    assert timeouts, "gh_api never called subprocess.run"
+    assert all(isinstance(t, (int, float)) and 0 < t <= 120 for t in timeouts), timeouts
 
 
 def test_main_writes_the_step_output(tmp_path, monkeypatch):
