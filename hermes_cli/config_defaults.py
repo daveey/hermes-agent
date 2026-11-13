@@ -1893,7 +1893,7 @@ DEFAULT_CONFIG = {
         "recovery_card_assignee": "default",  # assignee of the card an automatic recovery files [daveey]
         # Opt-in per-profile broker argv before gh (empty = ordinary login); never include tokens.
         "pr_acceptance": {"gh_command_prefix": []},
-        # Terminal worktrees: archive recovery refs before reaping; 0 disables age-based archival/sweeps.
+        # Terminal worktrees: archive before reaping; 0 disables age GC; worktree_retention_hours wins if set.
         "worktree_retention_days": 7,
         # Auto-subscribe the originating gateway/TUI session to completion + block events when
         # kanban_create is called from a session with a persistent delivery channel. Disable for

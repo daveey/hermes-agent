@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -24,10 +25,25 @@ from hermes_cli.kanban_workspace_jobs import defer_owned_job_cleanup
 log = logging.getLogger(__name__)
 
 
-def retention_days() -> int:
+def retention_days() -> float:
+    """Age-based GC window in days; 0 disables it.
+
+    ``kanban.worktree_retention_hours`` (a non-negative number), when set,
+    takes precedence over the whole-day ``kanban.worktree_retention_days`` and
+    is returned as a fraction of a day. An invalid value of the key in effect
+    disables age-based GC and logs a warning; it never falls back to the other
+    key. [daveey]
+    """
     from hermes_cli.config import load_config
     try:
-        value = load_config().get("kanban", {}).get("worktree_retention_days", 7)
+        kanban = load_config().get("kanban", {})
+        hours = kanban.get("worktree_retention_hours")
+        if hours is not None:
+            if (isinstance(hours, bool) or not isinstance(hours, (int, float))
+                    or not math.isfinite(hours) or hours < 0):
+                raise ValueError("invalid worktree_retention_hours")
+            return hours / 24
+        value = kanban.get("worktree_retention_days", 7)
         if isinstance(value, bool) or int(value) != value or value < 0:
             raise ValueError("invalid worktree retention")
         return int(value)
@@ -36,7 +52,7 @@ def retention_days() -> int:
         return 0
 
 
-def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = None) -> int:
+def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: float | None = None) -> int:
     """Retry terminal scratch cleanup, failing closed on any unreadable board.
 
     Only task records establish ownership; never infer it from directory names.
@@ -47,7 +63,8 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
 
     A tree that is kept only because it holds standalone git clones is archived
     and then removed once its card finished more than *older_than_days* ago
-    (default ``kanban.worktree_retention_days``; 0 disables). [daveey]
+    (default ``retention_days()``: ``kanban.worktree_retention_hours`` / 24 when
+    set, else ``kanban.worktree_retention_days``; 0 disables). [daveey]
     """
     import shutil
 
@@ -210,7 +227,7 @@ def _report_unowned_scratch(root: Path, known_paths: set[Path]) -> None:
                         "no deletion deadline", path)
 
 
-def _report_scratch_retention(row: sqlite3.Row, path: Path, days: int) -> None:
+def _report_scratch_retention(row: sqlite3.Row, path: Path, days: float) -> None:
     # Logs, not task events: observing retention must never extend its age.
     since = row["completed_at"] or row["last_event"] or row["created_at"]
     reason = "retention_disabled" if days <= 0 else "retention_pending"
@@ -220,7 +237,7 @@ def _report_scratch_retention(row: sqlite3.Row, path: Path, days: int) -> None:
                 reason, path, row["id"], eligible_at)
 
 
-def _finished_before(row: sqlite3.Row, days: int) -> bool:
+def _finished_before(row: sqlite3.Row, days: float) -> bool:
     if days <= 0:
         return False
     since = row["completed_at"] or row["last_event"] or row["created_at"]
@@ -283,7 +300,7 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
         return 0
 
 
-def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: int = 7,
+def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: float = 7,
                      repo_root: str | None = None) -> int:
     """Reap terminal rows only, retaining active children and cross-board sharers.
 
