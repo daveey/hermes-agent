@@ -19,8 +19,8 @@ without an exec-bit heal, and records the env this checkout's package code
 would record: a stale env makes `pm install` re-record the shared facts.json,
 and a missing or non-executable binary (setup-hermes.sh's uv copy included)
 sends setup or `pm install` into a re-stage whose unlocked remove + publish
-races other runs on the shared store. Read-only: no lock, no install, no
-bytecode; any unreadable record or error means "do not share".
+races other runs on the shared store. Read-only for STORE: no lock, no
+install, no bytecode; any unreadable record or error means "do not share".
 
 One exception to "every tool": an optional default (Chromium, cua-driver) the
 store records at no version at all, because the owner declined it or it failed
@@ -28,6 +28,13 @@ to install (cua-driver on a headless Linux worker lacks libXi). The borrower
 declines it too, so its own `pm install` never stages it into the shared store.
 That decline, written only once every check passed, is this script's one write,
 and it lands in the borrower's install state, never in STORE.
+
+The decline is sticky, like any opt-out in pm/defaults.py: later runs read it
+back through default_packages(), so the package is neither checked nor staged
+again, even after the owner's store gains it. A long-lived borrower root keeps
+skipping it until a successful `hermes pm install NAME` (the opt-back-in,
+which clears the record) or deleting <root>/installs/<key>/declined-packages.json.
+This script never clears it: it cannot tell its own decline from the user's.
 """
 import os
 import sys

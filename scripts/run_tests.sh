@@ -89,8 +89,9 @@ _account_tool_store() {
   py_minor="$(_store_has_pins "$account/.hermes/tools")" || return 1
   printf '%s\n%s\n' "$account" "$py_minor"
 }
-# Read-only check that the store already records this checkout's pins
-# (scripts/tool_store_pins.py says why and what counts); prints the Python minor.
+# Check, read-only for the store, that it already records this checkout's pins
+# (scripts/tool_store_pins.py says why and what counts, and the one write: the
+# borrower's own decline record); prints the Python minor.
 _store_has_pins() {
   local python
   python="$(HERMES_RUNTIME_DIR="$1" hermes_bootstrap_python "$REPO_ROOT")" || return 1
