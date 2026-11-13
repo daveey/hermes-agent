@@ -254,8 +254,12 @@ def _drainer_lock(session: dict) -> Path:
         return fallback
 
 
-def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | None]:
-    """The per-turn ``agent.step_boundary_pause``: one stat per step while no pause is requested."""
+def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False) -> Callable[[], str | None]:
+    """The per-turn ``agent.step_boundary_pause``: one stat per step while no pause is requested.
+
+    ``carried``: the turn wrote no marker of its own and runs over the paused turn's (``effective_pause_key``).
+    The caller decides it from the turn, never from the marker: a turn retrying its own pause also finds
+    ``core_update_pause`` on its marker (the write-ahead mark of a failed attempt) and is not carried."""
     declined: list[str] = []
 
     def hook() -> str | None:
@@ -279,8 +283,10 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
         killed = list(jobs.values())
         # Write-ahead journal: even a crash during kill or a later disk failure leaves an
         # explicit uncertain-outcome record. Never claim an unverified kill succeeded.
-        carried = marker.get("reason") == PAUSE_REASON  # a synthesized turn over the paused marker pays it
-        if not mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=not carried,
+        # Counted already: a synthesized turn over the paused marker pays it, and a turn retrying its own pause
+        # after a failed attempt left the write-ahead mark. Only the former is ``carried`` (the caller's call).
+        increment = marker.get("reason") != PAUSE_REASON
+        if not mark_turn_paused(home, marker_key, PAUSE_REASON, killed_jobs=killed, increment=increment,
                                 carried=carried):
             return None
         def save() -> bool:

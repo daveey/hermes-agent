@@ -78,8 +78,8 @@ def _stop_right_after_the_hook(monkeypatch):
     """The Stop lands after the hook returned its pause verdict, before the agent loop acts on it."""
     real, fired = up.boundary_pause_hook, []
 
-    def _boundary_pause_hook(session, marker_key):
-        hook = real(session, marker_key)
+    def _boundary_pause_hook(session, marker_key, **kwargs):
+        hook = real(session, marker_key, **kwargs)
 
         def _hook():
             verdict = hook()

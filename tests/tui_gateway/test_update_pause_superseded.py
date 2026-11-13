@@ -419,3 +419,34 @@ def test_a_pause_the_paused_turn_paid_itself_does_not_name_a_notification_turn(e
     _paused_session(env.home)
     marker = read_turn_marker(env.home, "session-key")
     assert marker is not None and not marker.get("carried_turn_paused")
+
+
+def test_a_turn_retrying_its_own_pause_after_a_failed_job_stop_is_not_carried(env, monkeypatch):
+    """The write-ahead mark of a failed attempt leaves ``core_update_pause`` on the turn's OWN marker; the retry
+    at the next step boundary must not read that as a carried pause and name a notification turn that never ran."""
+    attempts = iter([False, True])
+    monkeypatch.setattr(up, "stop_owned_jobs_for_update_pause", lambda jobs, save: next(attempts))
+    session = {"session_key": "session-key", "history": [], "history_lock": threading.RLock(),
+               "history_version": 0, "running": True, "attached_images": [], "image_counter": 0, "cols": 80,
+               "slash_worker": None, "show_reasoning": False, "tool_progress_mode": "all", "inflight_turn": None,
+               "profile_home": str(env.home)}
+    seen: dict = {}
+
+    def _run(message, **kwargs):
+        af.set_hold(env.home)
+        af.request_pause(env.home, expires_at=time.time() + 120)
+        seen["first"] = session["agent"].step_boundary_pause()
+        seen["retry"] = session["agent"].step_boundary_pause()
+        return {"final_response": "", "messages": [], "interrupted": True, "completed": False,
+                "paused_for_update": seen["retry"]}
+
+    session["agent"] = types.SimpleNamespace(session_id="session-key", run_conversation=_run,
+                                             clear_interrupt=lambda: None)
+    server._run_prompt_submit("rid", "ui-sid", session, "the long task")
+    af.clear_pause_request(env.home)
+    af.clear_hold(env.home)
+
+    assert seen["first"] is None and seen["retry"] == up.PAUSE_REASON
+    marker = read_turn_marker(env.home, "session-key")
+    assert marker is not None and marker["reason"] == up.PAUSE_REASON and marker["pauses"] == 1
+    assert not marker.get("carried_turn_paused"), "the turn's own retried pause was stamped as carried"

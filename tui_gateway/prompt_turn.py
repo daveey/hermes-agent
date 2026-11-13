@@ -1015,7 +1015,8 @@ def _invoke_agent(
     from tui_gateway.update_pause import boundary_pause_hook, effective_pause_key, install_clarify_pause_provider, \
         start_mid_tool_cancel
     pause_key = effective_pause_key(session, st.marker_key)
-    agent.step_boundary_pause = boundary_pause_hook(session, pause_key) if pause_key else None
+    agent.step_boundary_pause = boundary_pause_hook(session, pause_key, carried=not st.marker_key) \
+        if pause_key else None
     # [daveey] t_01a1d31bf400d56c: a continuation may yield before its first model request (it redoes nothing).
     agent.update_pause_first_request = bool(st.marker_key) and display_kind == "auto_continue"
     _mid_tool_stop = None
