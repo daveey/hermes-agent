@@ -205,3 +205,35 @@ async def test_restart_loss_is_booked_when_worker_teardown_raises(monkeypatch):
     cleanup = await r.close_and_book_restart_loss(object(), policy, SimpleNamespace(stop_cause='restart', close=close))
     assert booked == [policy]
     cleanup()  # the caller's finally must not close the same child again
+
+
+@pytest.mark.platforms("linux")
+def test_lost_worker_stays_unknown_when_worker_teardown_raises(tmp_path, monkeypatch):
+    """A lost worker settled ``unknown`` must raise ManagedExecutionUnknown even when its close
+    raises: a BrokenPipeError out of the finally would send the drain down the ordinary
+    Exception->failed settlement on an admission already marked unknown (stale_generation)."""
+    import asyncio
+    from gateway import session_managed_worker as managed
+    from tests.gateway.test_managed_worker_unknown_status import _authority_with_a_lost_worker
+    authority, ref, policy, claim, _published, db = _authority_with_a_lost_worker(tmp_path, monkeypatch)
+    real_close = managed.ManagedWorker.close
+    closed = []
+
+    def close_then_break(self):
+        real_close(self)
+        closed.append(self)
+        raise BrokenPipeError(32, 'Broken pipe')
+    monkeypatch.setattr(managed.ManagedWorker, 'close', close_then_break)
+
+    async def scenario():
+        row = await claim()
+        authority._stamp_claim(ref, authority.sessions['s'], row)
+        with pytest.raises(managed.ManagedExecutionUnknown):
+            async with asyncio.timeout(30):
+                await managed.execute_managed(authority, ref, row, policy)
+        return row
+    with db:
+        row = asyncio.run(scenario())
+        status = db._read_one('SELECT status FROM session_admissions WHERE admission_id=?', (row['admission_id'],))[0]
+    assert status == 'unknown', 'the lost worker never reached its unknown settlement'
+    assert closed, 'the worker was never torn down'
