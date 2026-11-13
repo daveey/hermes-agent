@@ -845,12 +845,93 @@ describe('SidebarSessionRow own activity stamps', () => {
       expect(stripe(container)).toBe('done')
       act(() => vi.advanceTimersByTime(195_000))
       expect(stripe(container)).toBeNull()
-      expect(container.querySelector('[aria-label="Running in background"]')).not.toBeNull()
+      // Expired evidence is unknown, not running: the dot keeps its claim but says so.
+      expect(container.querySelector('[aria-label="Open work, current status unknown"]')).not.toBeNull()
+      expect(container.querySelector('[aria-label="Running in background"]')).toBeNull()
     } finally {
       cleanup()
       cleanStores($kanbanObservationTick)
       vi.useRealTimers()
     }
+  })
+
+  // [daveey] The background dot's words follow its evidence: unknown-only work never reads as "running".
+  it('labels a row whose only open work is unknown as unknown, not running', () => {
+    const { container } = renderRow(
+      makeSession({
+        execution_observations: [{ source: 'unavailable.work' }],
+        id: 'unknown-only',
+        kanban_active: 1,
+        kanban_observed_at: Date.now() / 1000,
+        kanban_parked: 1,
+        message_count: 4,
+        title: 'Parked remote'
+      } as Partial<SessionInfo> & { title: string })
+    )
+
+    const dot = container.querySelector('[role="status"][aria-label="Open work, current status unknown"]')
+    expect(dot).not.toBeNull()
+    expect(dot?.getAttribute('title')).toBe('Open work, current status unknown')
+    expect(container.querySelector('[aria-label="Running in background"]')).toBeNull()
+  })
+
+  it('keeps the running label when this window polls a live process for the unknown-only row', async () => {
+    const polled = (await import('@/store/composer-status')).$backgroundRunningSessionIds as unknown as {
+      set: (ids: string[]) => void
+    }
+
+    polled.set(['unknown-polled'])
+
+    try {
+      const { container } = renderRow(
+        makeSession({ id: 'unknown-polled', kanban_unknown: true, message_count: 4, title: 'Polled' } as Partial<SessionInfo> & {
+          title: string
+        })
+      )
+
+      expect(container.querySelector('[aria-label="Running in background"]')).not.toBeNull()
+      expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
+    } finally {
+      polled.set([])
+    }
+  })
+
+  it('keeps the running label for a row with a running card', async () => {
+    const fixture = await import('../../../../../../schemas/fixtures/execution-observations-v1.json')
+    vi.useFakeTimers()
+    vi.setSystemTime(1001_000)
+
+    try {
+      const { container } = renderRow(
+        makeSession({
+          execution_observations: [fixture.base],
+          id: 'running-card',
+          kanban_active: 1,
+          kanban_observed_at: 1001,
+          kanban_parked: 0,
+          message_count: 4,
+          title: 'Running card'
+        } as Partial<SessionInfo> & { title: string })
+      )
+
+      expect(container.querySelector('[role="status"][aria-label="Running in background"]')?.getAttribute('title')).toBe(
+        'Running in background'
+      )
+      expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the running label when a live process holds a row with unfresh card evidence', () => {
+    const { container } = renderRow(
+      makeSession({ background_active: 1, id: 'proc-row', kanban_observed_at: undefined, message_count: 4, title: 'Watcher' } as Partial<SessionInfo> & {
+        title: string
+      })
+    )
+
+    expect(container.querySelector('[aria-label="Running in background"]')).not.toBeNull()
+    expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
   })
 
   // [daveey] Open kanban cards: never green and never blank — the grey

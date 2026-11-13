@@ -3,7 +3,7 @@ import { useStore } from '@nanostores/react'
 import { type Translations, useI18n } from '@/i18n'
 import { unreadDotOutcomeLabel, unreadDotOutcomeStripe } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
-import { useSessionDotState } from '@/lib/use-session-dot-state'
+import { useBackgroundDotUnknown, useSessionDotState } from '@/lib/use-session-dot-state'
 import { cn } from '@/lib/utils'
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
 import type { SessionDotState } from '@/store/session-dot-state'
@@ -98,8 +98,18 @@ export const sessionDotClassName = (state: SessionDotState): string => DOT_VARIA
 /** [daveey] The variant a session's dot paints. Unread is emerald only for a chat that is actually done: a stored
  *  outcome that is waiting / running / unresolved / decision / muted repaints the unread dot in that outcome's stripe
  *  colour (still filled, so it still reads as new), because users read emerald as done. Every other state ignores
- *  the outcome: the live-turn states already outrank it, and idle keeps the project colour. */
-export const sessionDotVariant = (state: SessionDotState, outcome?: null | SessionOutcome): DotVariant => {
+ *  the outcome: the live-turn states already outrank it, and idle keeps the project colour.
+ *  [daveey] `backgroundUnknown`: the `background` claim rests only on unknown or unfresh work evidence, so the same
+ *  hollow dot says the status is unknown rather than asserting "running". */
+export const sessionDotVariant = (
+  state: SessionDotState,
+  outcome?: null | SessionOutcome,
+  backgroundUnknown = false
+): DotVariant => {
+  if (state === 'background' && backgroundUnknown) {
+    return { ...DOT_VARIANTS.background, ariaLabel: r => r.backgroundUnknown, title: r => r.backgroundUnknown }
+  }
+
   const stripe = state === 'unread' ? unreadDotOutcomeStripe(outcome) : null
 
   if (!stripe || !outcome) {
@@ -156,8 +166,9 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.
   const dotState = useSessionDotState(storedSessionId, session)
+  const backgroundUnknown = useBackgroundDotUnknown(storedSessionId, session, dotState)
 
-  const variant = sessionDotVariant(dotState, session?.outcome)
+  const variant = sessionDotVariant(dotState, session?.outcome, backgroundUnknown)
 
   return (
     <span className={cn('flex items-center gap-0.5', className)}>

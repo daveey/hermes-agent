@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import type { SessionInfo } from '@/types/hermes'
 
+import fixture from '../../../../schemas/fixtures/execution-observations-v1.json'
+
 import { $queuedPromptsBySession } from './composer-queue'
 import { $kanbanObservationTick } from './kanban-observation'
 import {
@@ -25,6 +27,7 @@ import {
   $kanbanUnseenSessionIds,
   $sessionDotStateById,
   $unreadSessionCount,
+  backgroundDotUnknown,
   hasLiveTurn,
   kanbanStripeCounts,
   markSessionListRefreshReason,
@@ -694,6 +697,44 @@ describe('withRowActivity', () => {
     const after = withRowActivity('idle', row)
     expect(after).toBe('idle')
     expect(sessionStatusStripe(after, true, false, 0, false, null, 0, 0, 0, decision as never)).toBe('stuck')
+  })
+})
+
+// [daveey] The background dot keeps its claim on unknown work, but its label must not assert "running".
+describe('backgroundDotUnknown', () => {
+  const fresh = () => ({ kanban_observed_at: Date.now() / 1000 })
+  const unknownObs = { source: 'unavailable.work' }
+
+  it('is unknown when the claim rests only on unknown or unfresh evidence', () => {
+    const rows = [
+      { ...fresh(), kanban_unknown: true },
+      { ...fresh(), execution_observations: [], kanban_active: 2, kanban_parked: 2, kanban_remote_stale: 2 },
+      { kanban_observed_at: undefined },
+      { ...fresh(), execution_observations: [unknownObs], kanban_active: 1, kanban_parked: 1 },
+      // An older backend's unparked cards are discovered as unknown, never as certain running.
+      { ...fresh(), kanban_active: 1 }
+    ]
+
+    for (const row of rows) {
+      expect(withRowActivity('idle', row as never)).toBe('background')
+      expect(backgroundDotUnknown(row as never)).toBe(true)
+    }
+  })
+
+  it('says running when a process, subagent, goal or running card exists', () => {
+    const now = Date.now() / 1000
+    const running = { ...fixture.base, observed_at: now, valid_until: now + 120 }
+
+    expect(backgroundDotUnknown({ kanban_unknown: true, background_active: 1 })).toBe(false)
+    expect(backgroundDotUnknown({ kanban_unknown: true, goal_active: true })).toBe(false)
+    expect(backgroundDotUnknown({ kanban_unknown: true }, true)).toBe(false)
+    expect(
+      backgroundDotUnknown({ ...fresh(), execution_observations: [running, unknownObs], kanban_active: 2 } as never)
+    ).toBe(false)
+  })
+
+  it('keeps the existing label for known waiting or blocked work', () => {
+    expect(backgroundDotUnknown({ ...fresh(), kanban_active: 0, kanban_blocked: 1 })).toBe(false)
   })
 })
 

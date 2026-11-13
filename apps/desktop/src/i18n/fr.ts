@@ -3723,6 +3723,7 @@ export const frOverrides = {
     messageCount: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
     toolCallCount: count => `${count} ${count === 1 ? "appel d'outil" : "appels d'outil"}`,
     row: {
+      backgroundUnknown: 'Travail non terminé, statut actuel inconnu',
       kanbanUnknown: count => `${count} éléments de travail au statut actuel inconnu : preuves manquantes, expirées ou non vérifiées. Cela ne signifie pas terminé ; aucune nouvelle vérification demandée.`,
       pausedQueue: 'Un message mis en file avant un redémarrage n’a peut-être pas été exécuté : renvoyez-le ou supprimez-le',
       pin: 'Épingler',

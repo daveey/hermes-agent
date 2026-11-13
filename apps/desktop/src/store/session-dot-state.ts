@@ -456,6 +456,31 @@ const rowHasBackgroundWork = (row: RowActivity): boolean =>
   (row.kanban_blocked ?? 0) > 0 ||
   (row.background_active ?? 0) > 0
 
+/** [daveey] Whether a `background` dot must say its work's status is unknown instead of "running". The claim itself
+ *  stays (unknown must never read as done); only the words change. True when nothing positively runs (no process,
+ *  subagent, goal or current running/queued execution) and the claim rests on unknown or unfresh evidence: a failed or
+ *  stale kanban read, an expired/absent observation, or work whose execution evidence is unknown. `liveElsewhere` is
+ *  the store's own running evidence for the row (a renderer-polled process, async subagents). Rows held only by known
+ *  waiting or blocked work keep the existing label. */
+export const backgroundDotUnknown = (row: RowActivity, liveElsewhere = false, nowSeconds: number = Date.now() / 1000): boolean => {
+  if (liveElsewhere || row.goal_active === true || (row.background_active ?? 0) > 0) {
+    return false
+  }
+
+  const exec = rowExecution(row, nowSeconds)
+
+  if ((exec?.live ?? 0) > 0) {
+    return false
+  }
+
+  return (
+    row.kanban_unknown === true ||
+    (row.kanban_remote_stale ?? 0) > 0 ||
+    !hasFreshKanbanObservation(row) ||
+    (exec?.unknown ?? 0) > 0
+  )
+}
+
 export const withRowActivity = (state: SessionDotState, row: RowActivity): SessionDotState => {
   if (row.offline_cached) {
     return 'idle'

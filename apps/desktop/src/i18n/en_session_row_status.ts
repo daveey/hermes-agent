@@ -35,6 +35,7 @@ export const enSessionRowStatus = {
   unreadNotDone: outcome => `Unread — ${outcome}`,
   muteFailed: 'Could not update the parked state',
   backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
+  backgroundUnknown: 'Open work, current status unknown',
   backgroundProcessUnnamed: 'background process',
   stopProcess: 'Stop',
   stoppingProcess: 'Stopping…'

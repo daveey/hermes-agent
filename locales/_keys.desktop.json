@@ -4912,6 +4912,7 @@
     "sidebar.row.backgroundProcessUnnamed",
     "sidebar.row.backgroundProcesses",
     "sidebar.row.backgroundRunning",
+    "sidebar.row.backgroundUnknown",
     "sidebar.row.branchFrom",
     "sidebar.row.copyId",
     "sidebar.row.copyIdFailed",

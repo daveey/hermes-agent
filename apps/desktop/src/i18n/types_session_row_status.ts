@@ -18,6 +18,8 @@ export interface SessionRowStatusCopy {
   unreadNotDone: (outcome: string) => string
   muteFailed: string
   backgroundProcesses: (count: number) => string
+  /** [daveey] The hollow background dot when its only open work has unknown or unfresh status (never "running"). */
+  backgroundUnknown: string
   backgroundProcessUnnamed: string
   stopProcess: string
   stoppingProcess: string
