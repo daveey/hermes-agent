@@ -103,10 +103,18 @@ def _local_scope(gateway: Any, profile: Any, ref: str, me: Any) -> Optional[tupl
     return prof, sid
 
 
+def _resolve_local(local_gateway: Any) -> Any:
+    """This host's gateway name when ``local_gateway`` is None, else ``local_gateway`` unchanged ("" = unnamed host).
+    The one rule every local-scope check here resolves None by, so their answers agree for the same call. [daveey]"""
+    if local_gateway is not None:
+        return local_gateway
+    from hermes_cli.kanban_origin import gateway_names
+    return gateway_names()[0]
+
+
 def scoped_sources(gateway: Any, sessions: Iterable[Any], *, local_gateway=None, profile=None) -> dict[str, Optional[str]]:
     """No network lookup: foreign/ambiguous provenance is unknown, never human proof."""
-    from hermes_cli.kanban_origin import gateway_names
-    me = local_gateway if local_gateway is not None else gateway_names()[0]
+    me = _resolve_local(local_gateway)
     grouped: dict[Optional[str], dict[str, str]] = {}
     out: dict[str, Optional[str]] = {str(s or ""): None for s in sessions}
     for ref in out:
@@ -127,8 +135,7 @@ def prefetch_sources(refs: Iterable[Any], *, local_gateway=None) -> None:
     filling the source cache so the classifications that follow in the same pass are cache hits, whatever profile
     they scope to. Verdicts are unchanged: an entry that expires before use only costs a read. A qualified ref of
     another gateway is skipped: :func:`scoped_sources` never looks it up locally. [daveey]"""
-    from hermes_cli.kanban_origin import gateway_names
-    me = local_gateway if local_gateway is not None else gateway_names()[0]
+    me = _resolve_local(local_gateway)
     sids = [p[-1] for r in dict.fromkeys(str(r or "") for r in refs)
             if (len(p := r.split("/")) == 1 or (len(p) == 3 and me and p[0] == me)) and p[-1]]
     if sids:
@@ -138,10 +145,10 @@ def prefetch_sources(refs: Iterable[Any], *, local_gateway=None) -> None:
 
 def reads_local_store(gateway: Any, session: Any, *, local_gateway: Any, profile: Any = None) -> bool:
     """Whether :func:`scoped_sources` (``local_gateway=local_gateway, profile=profile``) may open a state.db for
-    ``session`` scoped to ``gateway``. It shares that function's routing (:func:`_local_scope`), so a ref answered
-    unknown without a read (another gateway's, or a qualified ref whose outer gateway/profile contradicts the
-    scope) is never reported as a read. [daveey]"""
-    return _local_scope(gateway, profile, str(session or ""), local_gateway) is not None
+    ``session`` scoped to ``gateway``. It shares that function's routing (:func:`_local_scope`) and None
+    resolution (:func:`_resolve_local`), so a ref answered unknown without a read (another gateway's, or a
+    qualified ref whose outer gateway/profile contradicts the scope) is never reported as a read. [daveey]"""
+    return _local_scope(gateway, profile, str(session or ""), _resolve_local(local_gateway)) is not None
 
 
 def machine_verdicts(keys: Iterable[tuple[Any, Any, Any]], *, local_gateway) -> dict[tuple, bool]:

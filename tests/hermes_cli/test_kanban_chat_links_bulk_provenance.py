@@ -641,13 +641,15 @@ _SCOPE_REFS = [*MIXED, f"{GW}/research/{RCHAT}", f"away/research/{RCHAT}", f"{GW
                "", "x/y/z/w"]
 
 
-@pytest.mark.parametrize("local_gateway", [GW, ""])
+@pytest.mark.parametrize("local_gateway", [GW, "", None])
 @pytest.mark.parametrize("gateway", [None, GW, "away"])
 @pytest.mark.parametrize("profile", [None, "default", "research"])
 def test_reads_local_store_is_exactly_when_scoped_sources_reads(home, monkeypatch, local_gateway, gateway, profile):
     """t_01a1d41a82ced7d9 (PR #2013 review nit 2): ``reads_local_store`` answers the same rule as ``scoped_sources``,
     including a qualified ``gw/profile/sid`` ref whose outer gateway or profile contradicts the scope (answered
-    unknown without a read, so not reported as a read either)."""
+    unknown without a read, so not reported as a read either). ``local_gateway=None`` on this named host resolves
+    to its name in both (t_01a1d44128e287b9, PR #2044 review nit)."""
+    me = GW if local_gateway is None else local_gateway
     real = provenance._local_homes
     reads: list[Any] = []
 
@@ -662,7 +664,7 @@ def test_reads_local_store_is_exactly_when_scoped_sources_reads(home, monkeypatc
         claim = provenance.reads_local_store(gateway, ref, local_gateway=local_gateway, profile=profile)
         assert claim == bool(reads), (ref, claim, reads)
         parts = ref.split("/")
-        mismatched += len(parts) == 3 and parts[0] == local_gateway and (
+        mismatched += len(parts) == 3 and parts[0] == me and (
             (gateway is not None and gateway != parts[0]) or (profile is not None and profile != parts[1]))
-    if local_gateway and (gateway == "away" or profile is not None):
+    if me and (gateway == "away" or profile is not None):
         assert mismatched  # the corpus holds the over-approximated case for this scope
