@@ -1,6 +1,7 @@
 """Selective rejection retirement uses authoritative evidence, never replica absence."""
 import copy
 import json
+import math
 
 import pytest
 
@@ -8,6 +9,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as client
+from tests.hermes_cli import kanban_sync_fake_board as fake_board
 from tests.hermes_cli import kanban_sync_support as support
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 
@@ -652,6 +654,104 @@ def test_fake_release_without_run_uid_is_invalid(live, kanban_home, route, lease
            else svc.release_op(svc.board(BOARD), {"op": "release", **body}, ME))
     assert (res["status"], res["reason"]) == ("rejected", "invalid")
     assert svc.board(BOARD) == before
+
+
+# Each expected value is what node prints for ``Number(value)`` (checked on node 22; the review checked node 26).
+@pytest.mark.parametrize("value,expected", [
+    # ASCII digits only: U+0663 (ARABIC-INDIC DIGIT THREE) is a Unicode \d and float() reads it; JS: NaN.
+    ("\u0663", math.nan), ("\u06632", math.nan), ("1_000", math.nan),
+    # StrWhiteSpaceChar, not str.strip(): U+001C-U+001F and U+0085 are not trimmed, U+FEFF is; Zs, LS and PS are.
+    ("\x1c3\x1c", math.nan), ("\x1f3", math.nan), ("\x853", math.nan), ("\u180e3", math.nan), ("3\u200b", math.nan),
+    ("\ufeff3\ufeff", 3.0), ("\u00a03\u3000", 3.0), ("\u20283\u2029", 3.0), (" \t\n\v\f\r3 ", 3.0),
+    ("\u16803", 3.0), ("\u202f3\u205f", 3.0),
+    # Unsigned non-decimal literals.
+    ("0x10", 16.0), ("0X1f", 31.0), ("0o7", 7.0), ("0b11", 3.0), ("-0x10", math.nan), ("0x", math.nan),
+    ("0xg", math.nan), ("0x" + "f" * 300, math.inf),
+    ("1e3", 1000.0), (".5e1", 5.0), ("5.", 5.0), ("+Infinity", math.inf), ("-Infinity", -math.inf),
+    ("infinity", math.nan), ("inf", math.nan), ("nan", math.nan), ("", 0.0), ("  ", 0.0),
+    # Arrays go through String(): [] -> "" -> 0, [x] -> Number(String(x)), [x, y] -> "x,y" -> NaN.
+    ([], 0.0), ([3], 3.0), (["3"], 3.0), ([None], 0.0), ([[2]], 2.0), ([3, 4], math.nan), ([True], math.nan),
+    ({}, math.nan), (None, 0.0), (True, 1.0), (2.5, 2.5),
+], ids=lambda v: repr(v)[:24])
+def test_fake_js_to_number_matches_js_number(value, expected):
+    """``_js_to_number`` is ECMAScript ``Number()`` for a wire value (releaseTask's ``Number(op.failure_limit)``)."""
+    got = fake_board._js_to_number(value)
+    assert (math.isnan(got) and math.isnan(expected)) or got == expected
+
+
+@pytest.mark.parametrize("limit,ok", [("\u0663", False), ("\x1c3", False), ("\ufeff3", True), ("0x3", True),
+                                      (["3"], True), ([], False), ([2, 3], False)], ids=lambda v: repr(v)[:16])
+def test_fake_release_failure_limit_uses_js_number(limit, ok):
+    """The release's ``failure_limit`` check reads the value as releaseTask's ``Number()`` does."""
+    assert (FakeService.release_inputs({"failure_limit": limit}) == {}) is ok
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, "null"), (True, "true"), (False, "false"), (0, "0"), (1.5, "1.5"), (1e21, "1e+21"),
+    (float("nan"), "NaN"), (float("inf"), "Infinity"), (-10**400, "-Infinity"), ("x", "x"), ([], ""),
+    (["transient"], "transient"), ([["transient"]], "transient"), (["transient", "x"], "transient,x"),
+    ([None, 1, [2, None]], ",1,2,"), ({}, "[object Object]"), ([{}], "[object Object]"),
+], ids=lambda v: repr(v)[:24])
+def test_fake_js_string_matches_js_string(value, expected):
+    """``_js_string`` is ECMAScript ``String()`` for a wire value (node: ``String([null, 1, [2, null]])`` is
+    ``",1,2,"``)."""
+    assert fake_board._js_string(value) == expected
+
+
+@pytest.mark.parametrize("block_kind,ok", [
+    (["transient"], True), ([["assignment"]], True), (["capability"], True), (["transient", "x"], False),
+    ([], False), ([None], False), ({}, False), (True, False), ("transient,", False),
+], ids=lambda v: repr(v)[:24])
+def test_fake_release_block_kind_coerced_like_js_string(block_kind, ok):
+    """releaseTask checks ``String(op.block_kind ?? "transient")``, so the Board accepts ``["transient"]`` (an
+    array String()s to its comma join) and refuses ``[]``, ``{}`` and ``true``."""
+    assert (FakeService.release_inputs({"block_kind": block_kind}) == {}) is ok
+
+
+@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("leases", False), ("ops", True)])
+@pytest.mark.parametrize("outcome", ["", 0, False, [], ["crashed", "x"], {}], ids=lambda v: repr(v)[:16])
+def test_fake_release_outcome_without_nullish_default_is_invalid(live, kanban_home, route, lease_runs, outcome):
+    """``String(op.outcome ?? "released")``: only a missing or null outcome defaults, so ``""``, 0 and false stay
+    themselves (``""``, ``"0"``, ``"false"``) and are refused ``invalid``, on both routes, changing nothing."""
+    svc = FakeService(lease_runs=lease_runs)
+    hub, tid = _leased(live, svc)
+    before = copy.deepcopy(svc.board(BOARD))
+    res = _release(route, svc, hub, tid, outcome=outcome)
+    assert (res["status"], res["reason"]) == ("rejected", "invalid")
+    assert svc.board(BOARD) == before
+
+
+@pytest.mark.parametrize("route", ["leases", "ops"])
+@pytest.mark.parametrize("fields,run_outcome,error", [
+    ({"outcome": None}, "released", None),  # null ?? "released"
+    ({}, "released", None),
+    ({"outcome": ["crashed"]}, "crashed", "crashed"),  # String(["crashed"]) is "crashed"
+    ({"outcome": "crashed", "error": None}, "crashed", "crashed"),  # String(op.error ?? outcome)
+    ({"outcome": "crashed", "error": ""}, "crashed", ""),  # "" is not nullish: the run's error is ""
+    ({"outcome": "timed_out", "error": False}, "timed_out", "false"),
+], ids=["null", "absent", "array", "null-error", "empty-error", "false-error"])
+def test_fake_release_outcome_and_error_use_nullish_default(live, kanban_home, route, fields, run_outcome, error):
+    """Both routes read the outcome as ``String(op.outcome ?? "released")`` and the error as ``String(op.error ??
+    outcome)``: a null outcome is a plain release, an explicit ``""`` error is kept."""
+    svc = FakeService(lease_runs=True)
+    hub, tid = _leased(live, svc)
+    assert _release(route, svc, hub, tid, **fields)["status"] == "applied"
+    run = svc.board(BOARD)["rows"]["task_runs"][RUN]
+    assert (run["outcome"], run["error"]) == (run_outcome, error)
+
+
+@pytest.mark.parametrize("max_retries,failure_limit,status", [
+    (0, None, "triage"), (None, "1", "triage"), (None, "0x2", "ready"), (None, None, "ready"), (1, 5, "triage"),
+], ids=["max-retries-0", "limit-1", "limit-hex-2", "default-2", "max-retries-wins"])
+def test_fake_release_op_failure_limit_nullish(live, kanban_home, max_retries, failure_limit, status):
+    """recordTaskFailure's limit is ``row.max_retries ?? (Number(op.failure_limit) ?? 2)``: a card max_retries of 0
+    trips the first crash (not the ``or`` fallback to 2), and the op's limit is read with ``Number()``."""
+    svc = FakeService(lease_runs=True)
+    hub, tid = _leased(live, svc)
+    svc.board(BOARD)["rows"]["tasks"][tid]["max_retries"] = max_retries
+    fields = {} if failure_limit is None else {"failure_limit": failure_limit}
+    assert _release("ops", svc, hub, tid, outcome="crashed", **fields)["status"] == "applied"
+    assert svc.board(BOARD)["rows"]["tasks"][tid]["status"] == status
 
 
 def test_release_local_change_during_read_vetoes(live, svc, monkeypatch):

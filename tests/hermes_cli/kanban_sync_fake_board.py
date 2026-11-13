@@ -60,14 +60,45 @@ def _js_stringify(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-_JS_DECIMAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|[+-]?Infinity")
+def _js_string(value: object) -> str:
+    """ECMAScript ``String(value)`` for a wire JSON value: null -> ``null``, booleans -> ``true``/``false``, numbers
+    as Number::toString (NaN, +-Infinity spelled out), an array as ``Array.prototype.join`` (``,``; null elements
+    are empty), an object -> ``[object Object]``."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        try:
+            x = float(value)
+        except OverflowError:
+            return "Infinity" if value > 0 else "-Infinity"
+        if x != x:
+            return "NaN"
+        return {math.inf: "Infinity", -math.inf: "-Infinity"}.get(x) or _js_number(x)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return ",".join("" if v is None else _js_string(v) for v in value)
+    return "[object Object]"
+
+
+# StrWhiteSpaceChar (what ``Number()`` trims): TAB VT FF ZWNBSP, every Zs (SP NBSP U+1680 U+2000-U+200A U+202F
+# U+205F U+3000) and LineTerminator (LF CR LS PS). Not Python's str.strip(): that also strips U+001C-U+001F and
+# U+0085 (NaN in JS) and keeps U+FEFF (trimmed in JS).
+_JS_WHITESPACE = "\t\v\f\ufeff \u00a0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u202f\u205f\u3000" \
+    + "\n\r\u2028\u2029"
+# StrNumericLiteral with ASCII digits only (``\d`` would take U+0663, NaN in JS) and no ``_`` separators (float()
+# reads "1_000"; JS: NaN).
+_JS_DECIMAL = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[+-]?Infinity")
+_JS_NON_DECIMAL = re.compile(r"0(?:[xX](?P<x>[0-9a-fA-F]+)|[oO](?P<o>[0-7]+)|[bB](?P<b>[01]+))")
 
 
 def _js_to_number(value: object) -> float:
     """ECMAScript ``Number(value)`` for a wire JSON value: null -> 0, booleans -> 0/1, numbers as themselves (an
-    int past the double range -> Infinity), a string trimmed (empty -> 0) and read as a decimal literal or
-    ``Infinity``, anything else NaN. Out of scope: hex/octal/binary strings and arrays (JS coerces ``[]`` to 0 and
-    ``[x]`` through ``String(x)``)."""
+    int past the double range -> Infinity), a string trimmed of StrWhiteSpaceChar (empty -> 0) and read as an
+    unsigned 0x/0o/0b literal, a decimal literal or ``Infinity`` (ASCII digits only), an array through
+    :func:`_js_string` (``[]`` -> 0, ``[x]`` -> ``Number(String(x))``), anything else NaN."""
     if value is None:
         return 0.0
     if isinstance(value, (bool, int, float)):
@@ -75,12 +106,31 @@ def _js_to_number(value: object) -> float:
             return float(value)
         except OverflowError:
             return math.inf if value > 0 else -math.inf
+    if isinstance(value, (list, tuple)):
+        return _js_to_number(_js_string(value))
     if isinstance(value, str):
-        text = value.strip()
+        text = value.strip(_JS_WHITESPACE)
         if not text:
             return 0.0
+        if m := _JS_NON_DECIMAL.fullmatch(text):
+            digits, base = next((d, {"x": 16, "o": 8, "b": 2}[k]) for k, d in m.groupdict().items() if d)
+            try:
+                return float(int(digits, base))
+            except OverflowError:
+                return math.inf
         return float(text.replace("Infinity", "inf")) if _JS_DECIMAL.fullmatch(text) else math.nan
     return math.nan
+
+
+def _js_default_string(value: object, default: str) -> str:
+    """``String(value ?? default)``: only a missing/null value takes ``default`` (``""``, 0 and false do not)."""
+    return _js_string(default if value is None else value)
+
+
+def release_outcome(op: dict) -> str:
+    """releaseTask's ``String(op.outcome ?? "released")``: an explicit null is ``released``; ``""`` stays ``""``
+    (refused ``invalid``) and ``["crashed"]`` is ``crashed``."""
+    return _js_default_string(op.get("outcome"), "released")
 
 
 class FakeService:
@@ -225,16 +275,16 @@ class FakeService:
         """releaseTask's post-fence validation, before any write. releaseTask's full order is the outcome
         (RELEASE_OUTCOMES), ``run_uid`` presence (``invalid`` when absent or null), fence(), then these, each
         ``invalid`` on failure: ``failure_limit`` when present (``Number(op.failure_limit)`` a positive safe
-        integer, so an explicit null is 0 and refused: :func:`_js_to_number`), ``block_kind`` (``op.block_kind ??
-        "transient"`` one of BLOCK_KINDS), ``op.extra ?? {}`` an object ("failure extra must be an object"), then
+        integer, so an explicit null is 0 and refused: :func:`_js_to_number`), ``block_kind`` (``String(op.block_kind
+        ?? "transient")`` one of BLOCK_KINDS, so ``["transient"]`` passes: :func:`_js_string`), ``op.extra ?? {}`` an
+        object ("failure extra must be an object"), then
         :meth:`release_diagnostic`. The callers check the outcome, ``run_uid`` and the fence. Returns the
         diagnostic, or None when the caller refuses the release ``invalid``."""
         if "failure_limit" in op:
             limit = _js_to_number(op["failure_limit"])
             if not (math.isfinite(limit) and limit.is_integer() and 1 <= limit <= cls.MAX_SAFE_INTEGER):
                 return None
-        if op.get("block_kind") is not None and not (isinstance(op["block_kind"], str)
-                                                     and op["block_kind"] in cls.BLOCK_KINDS):
+        if _js_default_string(op.get("block_kind"), "transient") not in cls.BLOCK_KINDS:
             return None
         extra = op.get("extra")
         if extra is not None and not isinstance(extra, dict):
@@ -264,7 +314,8 @@ class FakeService:
         before any write; a spawn_failed release that passes them raises NotImplementedError, as on the leases
         route."""
         task, run = op["task"], op.get("run_uid")
-        if op.get("outcome", "released") not in self.RELEASE_OUTCOMES or run is None:
+        outcome = release_outcome(op)
+        if outcome not in self.RELEASE_OUTCOMES or run is None:
             return {"status": "rejected", "reason": "invalid"}
         lease = b["leases"].get(task)
         if not lease or lease["holder"] != gw or lease["run_uid"] != run:
@@ -274,12 +325,12 @@ class FakeService:
         diagnostic = self.release_inputs(op)
         if diagnostic is None:
             return {"status": "rejected", "reason": "invalid"}
-        if op.get("outcome") == "spawn_failed":
+        if outcome == "spawn_failed":
             raise NotImplementedError("FakeService.release_op: spawn_failed release (endCustody + "
                                       "recordTaskFailure) is not modelled")
-        outcome, op_id = op.get("outcome", "released"), op["client_op_id"]
+        op_id = op["client_op_id"]
         clock = f"{9_999_999_999_999:013d}-0002-board"
-        error = str(op.get("error") or outcome)[:500]
+        error = _js_default_string(op.get("error"), outcome)[:500]
         card = b["rows"]["tasks"][task]
         b["leases"].pop(task, None)
         ended, kind = self.NEUTRAL.get(outcome, ("crashed" if outcome == "terminal_provider" else outcome,) * 2)
@@ -297,7 +348,10 @@ class FakeService:
                         "lease_expires": None}
         if canonical:
             failures = int(card.get("consecutive_failures") or 0) + 1
-            limit = card.get("max_retries") or op.get("failure_limit") or 2
+            # recordTaskFailure: ``row.max_retries ?? (Number(op.failure_limit) ?? DEFAULT_FAILURE_LIMIT)``, so a card
+            # max_retries of 0 trips at once.
+            override, policy = card.get("max_retries"), op["failure_limit"] if "failure_limit" in op else 2
+            limit = _js_to_number(override) if override is not None else _js_to_number(policy)
             tripped = bool(op.get("force_trip")) or outcome == "terminal_provider" or failures >= int(limit)
             fields.update(consecutive_failures=failures, last_failure_error=error,
                           **({"status": "triage"} if tripped else {}))
@@ -446,7 +500,7 @@ class FakeHub:
             if not cur or cur["holder"] != self.gateway or cur["run_uid"] != run:
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
         else:
-            if str(body.get("outcome") or "released") not in self.svc.RELEASE_OUTCOMES or run is None:
+            if release_outcome(body) not in self.svc.RELEASE_OUTCOMES or run is None:
                 # releaseTask checks the outcome, then run_uid presence, before its fence: an unknown outcome (a
                 # test typo) or a missing/null run_uid is ``invalid``.
                 return {"status": "rejected", "reason": "invalid", "lease": cur}
@@ -460,7 +514,7 @@ class FakeHub:
             diagnostic = self.svc.release_inputs(body)
             if diagnostic is None:
                 return {"status": "rejected", "reason": "invalid", "lease": cur}
-            if body.get("outcome") == "spawn_failed":
+            if release_outcome(body) == "spawn_failed":
                 # As release_op: fenced and validated first (releaseTask's order), then refused loudly whatever
                 # lease_runs says, before any write.
                 raise NotImplementedError("FakeHub.leases: spawn_failed release (endCustody + recordTaskFailure) is "
@@ -503,8 +557,8 @@ class FakeHub:
         as releaseTask orders them: the real releaseTask hands it to endCustody + recordTaskFailure(releaseClaim,
         endRun), whose run/event shape is that accounting."""
         gw, svc = self.gateway, self.svc
-        outcome = str(body.get("outcome") or "released")
-        error = str(body.get("error") or outcome)[:500]
+        outcome = release_outcome(body)
+        error = _js_default_string(body.get("error"), outcome)[:500]
         card = b["rows"]["tasks"][task]
         running = card.get("status") == "running"
         neutral = svc.NEUTRAL.get(outcome)
