@@ -180,3 +180,30 @@ def test_never_denies_the_keyword():
 def test_a_contraction_with_a_typographic_apostrophe_denies_the_keyword():
     """U+2019, as pasted from rendered markdown, denies like the ASCII apostrophe."""
     assert dd.sibling_named("Isn\u2019t a duplicate of t_0123456789abcdef.") == []
+
+
+@pytest.mark.parametrize("summary", [
+    "Not started since duplicate of t_0123456789abcdef.",
+    "Never run so duplicate of t_0123456789abcdef.",
+    "Not done but duplicate of t_0123456789abcdef.",
+    "No work due duplicate of t_0123456789abcdef.",
+    "Not started hence duplicate of t_0123456789abcdef.",
+    "Not run thus duplicate of t_0123456789abcdef.",
+    "Not run with duplicate of t_0123456789abcdef.",
+])
+def test_every_joining_word_stops_the_negator_reaching_the_keyword(summary):
+    """Post-merge check of PR #2535: each ``_JOIN`` word means the negator governs another word, not the keyword.
+    ``as`` and ``because`` are pinned by the not-denied cases earlier in this file."""
+    assert dd.sibling_named(summary) == ["t_0123456789abcdef"]
+
+
+@pytest.mark.parametrize("verb", [
+    "marked", "considered", "flagged", "treated", "closed", "counted", "filed", "labeled", "labelled", "tagged",
+    "reported", "listed", "deemed", "regarded", "classified", "recorded", "identified", "confirmed", "resolved",
+    "seen",
+])
+@pytest.mark.parametrize("template", ["Not {} as a duplicate of t_0123456789abcdef.",
+                                      "Never {} as duplicate of t_0123456789abcdef."])
+def test_every_judging_verb_after_a_negator_denies_the_keyword(verb, template):
+    """Post-merge check of PR #2535: each ``_JUDGED`` verb keeps the denial across "as"."""
+    assert dd.sibling_named(template.format(verb)) == []

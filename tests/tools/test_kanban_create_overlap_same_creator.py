@@ -262,3 +262,19 @@ def test_a_moved_marker_beside_a_one_sided_marker_is_not_an_enumeration(mine, th
     card = {"title": theirs, "assignee": "default"}
     assert own.enumerated(mine, theirs) is None
     assert own.own_distinct(mine, "default", card) is None
+
+
+@pytest.mark.parametrize("mine, theirs", [
+    # A dotted counter after a re-issue word is one counter, not a number plus a "1"/"2" index.
+    ("Fix guard, attempt 2.1", "Fix guard, attempt 2.2"),
+    ("Fix guard round 1.1", "Fix guard round 1.2"),
+    # "tries" is a try word like "try"/"take".
+    ("Fix guard, tries 2", "Fix guard, tries 3"),
+])
+def test_a_dotted_or_tries_reissue_counter_is_not_an_enumeration(mine, theirs):
+    """Post-merge check of PR #2535: the dotted cases pin the optional ``.N`` tail of ``_COUNT``; the
+    ``tries`` case pins that alternative of ``_TRY_WORD``."""
+    from hermes_cli import kanban_overlap_own as own
+    card = {"title": theirs, "assignee": "default"}
+    assert own.enumerated(mine, theirs) is None
+    assert own.own_distinct(mine, "default", card) is None
