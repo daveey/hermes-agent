@@ -112,7 +112,8 @@ def released(conn, task_id, pr_urls):
         origin = event["origin_gateway"] if "origin_gateway" in event.keys() else None
         if origin or foreign_copy(conn, task_id):
             home = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
-            if not origin or origin != home:
+            # A foreign copy always has a truthy home, so a missing origin differs.
+            if origin != home:
                 return False
         if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? "
                         "AND kind='descendant_invalidated' LIMIT 1", (task_id, event["id"])).fetchone():
