@@ -346,7 +346,18 @@ def close_all() -> int:
         _retired.clear()
         for generation in generations:
             generation.retired = True
-    return _teardown_swept_generations(generations, teardown_barriers, active_teardowns)
+    closed = _teardown_swept_generations(generations, teardown_barriers, active_teardowns)
+    _close_kept_readers(None)
+    return closed
+
+
+def _close_kept_readers(root: Optional[Path]) -> None:
+    """Kept read-only handles (``hermes_state_kept_reader``) hold the same files: retire them too."""
+    import sys
+
+    kept = sys.modules.get("hermes_state_kept_reader")
+    if kept is not None:
+        kept.close_all_under(root)
 
 
 def close_all_under(directory: str | Path) -> int:
@@ -387,6 +398,7 @@ def close_all_under(directory: str | Path) -> int:
                 _generations.pop(generation.path, None)
             _retired.pop(id(generation.db), None)
     closed = _teardown_swept_generations(generations, teardown_barriers, active_teardowns)
+    _close_kept_readers(root)
     _release_header_probes_under(root)
     return closed
 

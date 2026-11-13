@@ -22,6 +22,7 @@ from gateway.control_socket import GatewayControlServer
 from gateway.run import GatewayRunner
 from gateway.runtime_ownership import ProfileOwnership
 from gateway.turn_lease import SessionTurnLeaseRegistry
+from hermes_cli import admission_fence
 from hermes_cli import kanban_deploy_window as window
 from hermes_cli import code_attestation
 from hermes_cli import local_work
@@ -234,18 +235,37 @@ def test_start_refused_on_update_markers(env):
     assert "update:update_window_unavailable" in ok(env, "quiet-observe-start", start_params(env))["reasons"]
 
 
-@pytest.mark.parametrize("state, age", [("draining", 0), ("batching", 0), ("idle", 500), ("idle", 0), (None, 0)])
-def test_start_preflight_matches_the_start_refusal_from_host_files(env, state, age):
+def write_update_hold(root, kind):
+    """A real core-update hold file: the updater's admission marker, or a live-pid drain hold."""
+    if kind == "admission":
+        admission_fence.set_hold(root)
+    else:
+        path = root / "core-update" / "drain-hold"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": os.getpid(), "started_at": time.time(), "max_s": 600}))
+
+
+@pytest.mark.parametrize("state, age, hold", [
+    ("draining", 0, None), ("batching", 0, None), ("idle", 500, None), ("idle", 0, None), (None, 0, None),
+    # #2591 M2c: a hold alone (fresh idle window) must refuse here too, or quiet-hold spends its cooldown
+    # on a start the gateway then refuses; with a draining window the hold reason still comes first.
+    ("idle", 0, "admission"), ("idle", 0, "drain"), ("draining", 0, "admission"),
+])
+def test_start_preflight_matches_the_start_refusal_from_host_files(env, state, age, hold):
     """quiet-hold's lease-free preflight reads the same files, with the same spellings, as start."""
     attest(env)
     if state is None:
         os.unlink(window.window_path())
     else:
         write_window(env.root, state, age=age)
+    if hold is not None:
+        write_update_hold(env.root, hold)
     result = ok(env, "quiet-observe-start", start_params(env))
     refused = result["reasons"] if result["phase"] != "started" else []
     assert quiet_control.start_preflight_reasons(margin_s=0) == refused
-    assert (result["phase"] == "started") == (state == "idle" and age == 0)
+    assert (result["phase"] == "started") == (state == "idle" and age == 0 and hold is None)
+    if hold is not None:
+        assert refused[0] == "update:update_hold", refused
 
 
 def test_start_preflight_margin_refuses_a_window_about_to_go_stale(env):

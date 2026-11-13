@@ -268,6 +268,8 @@ jobs:
   # Gated on `python` and on each lane it consumes: desktop_updater is set by
   # TypeScript-only changes too (the Electron marker / result readers), and with
   # `python` alone those never reached the Windows hand-off tests below.
+  # Fork: off (`if: false`). Its macOS selection runs on a schedule on the mini
+  # instead: macos-os-tests.yml (not required; kanban t_01a1d5b9382b24ad).
   tests-os:
     name: OS-specific tests
     needs: detect

@@ -5,7 +5,7 @@ Mixin split out of ``cli.py``; bound onto ``HermesCLI`` via the MRO.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import logging
 import os
 import queue
@@ -55,18 +55,31 @@ def _adopt_inventory(cli, info, *, warnings=False):
 def _await_gateway_inventory(cli, store, snapshot):
     """Print the startup notices once the late ``session.info`` (``inventory_pending: false``) settles the
     pending reply, and keep it as the snapshot's banner info. Registered before the check, so a frame the
-    pump applied before this runs is not missed; printed once."""
+    pump applied before this runs is not missed; printed once. The wait belongs to this session: a move
+    to another one (``/new``, ``/resume``, ``/branch``, an end) drops it, and a frame that still lands
+    after the move prints nothing, so the left session's notices never show on the new one."""
     state = store.connection.state(snapshot["stored_session_id"])
-    printed = threading.Lock()
+    claimed = threading.Lock()  # the settle or the switch, whichever comes first, ends the wait once
+
+    def release():
+        state.info_listeners.remove(settled)  # both were appended before the first call
+        with suppress(ValueError):  # a switch already cleared the store's list
+            store.switch_listeners.remove(left)
+
+    def left():
+        if claimed.acquire(blocking=False):
+            release()
 
     def settled(payload):
-        if payload.get("inventory_pending") is not False or not printed.acquire(blocking=False):
+        if payload.get("inventory_pending") is not False or not claimed.acquire(blocking=False):
             return
-        state.info_listeners.remove(settled)  # appended before the first call; the lock runs this once
-        if store.current is snapshot:
-            snapshot["info"] = {**(snapshot.get("info") or {}), **payload}
+        release()
+        if store.current is not snapshot:
+            return
+        snapshot["info"] = {**(snapshot.get("info") or {}), **payload}
         _adopt_inventory(cli, payload, warnings=True)
     state.info_listeners.append(settled)
+    store.switch_listeners.append(left)
     settled(dict(state.info))
 
 

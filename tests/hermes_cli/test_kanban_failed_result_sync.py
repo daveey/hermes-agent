@@ -8,6 +8,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as dispatch
+from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_failed_result_observer as observer
 from tests.hermes_cli import test_kanban_failed_result_reconcile as processes
 from tests.hermes_cli import test_kanban_sync_run_rows as transport
@@ -17,9 +18,13 @@ svc = transport.svc
 live = transport.live
 
 
-@pytest.mark.parametrize('entry', ['observer', 'dispatcher'])
+@pytest.mark.parametrize('entry', ['observer', 'observer_process', 'dispatcher'])
 @pytest.mark.parametrize('rebound', [False, True])
 def test_failed_result_closure_survives_real_sync_echo(live, kanban_home, svc, monkeypatch, tmp_path, entry, rebound):
+    """``observer_process``: the observer is its own process (kanban_failed_result_service), which never ran the
+    board's init, so nothing registered the board as synced there. worker-a1 (2026-11-13, t_01a1d65b80d2e9f4): its
+    ``board_mode`` read ``off``, the rate-limited run was closed in the local mirror (``reconciled_by: observer``)
+    instead of released to the Board, and no release op was queued."""
     monkeypatch.setenv('HERMES_KANBAN_CRASH_GRACE_SECONDS', '0')
     tid, uid = transport._claimed(live, kanban_home, svc, 'failed receipt transport')
     task = kb.get_task(live, tid)
@@ -41,9 +46,12 @@ def test_failed_result_closure_survives_real_sync_echo(live, kanban_home, svc, m
                          run_id=task.current_run_id)
         live.execute('UPDATE task_events SET id=? WHERE id=?', (first['id'] + 1000, first['id']))
     transport._round(kanban_home, svc)
-    if entry == 'observer':
-        observer.observe({**context, 'ready_path': str(tmp_path / 'ready'),
-                          'observer_unit': 'fixture.service'})
+    if entry.startswith('observer'):
+        with monkeypatch.context() as m:
+            if entry == 'observer_process':
+                m.setattr(sync, '_SYNCED_PATHS', set())
+            observer.observe({**context, 'ready_path': str(tmp_path / 'ready'),
+                              'observer_unit': 'fixture.service'})
     else:
         dispatch.detect_crashed_workers(live)
     # A Board-primary failure is released to the Board, never closed in the

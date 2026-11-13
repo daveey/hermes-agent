@@ -418,7 +418,9 @@ def list_triage_ids(*, tenant: Optional[str] = None, skip_awaiting_human: bool =
     """
     del skip_awaiting_human
     cutoff = (time.time() if now is None else now) - max(int(min_age_seconds or 0), 0)
-    with kbc.connect_closing() as conn:
+    # Read-only, every dispatcher tick per board: a kept connection, not an open per call (design t_01a1d563 I).
+    from hermes_cli.kanban_kept_reader import reading
+    with reading() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
         if min_age_seconds:
             # An unparseable stamp (None) stays a candidate: excluding it would strand the card.

@@ -698,7 +698,8 @@ def _sibling_owner(card_title: str, waiting_id: str) -> bool:
 def find(*, title: str, body: str, target_board: str, session_id: Optional[str], self_tid: Optional[str],
          parents: Iterable[str], family: Optional[str] = None) -> list[dict]:
     """Open cards elsewhere that already cover this work, best match first. Never raises. ``family`` (the new
-    card's idempotency-key family) skips cards from the same keyed creator, except singleton jobs."""
+    card's idempotency-key family) skips cards from the same keyed creator, except singleton jobs and the
+    creator task's own keyed cards from an earlier run (:func:`kanban_overlap_own.earlier_run`)."""
     try:
         from hermes_cli import kanban_capability_registry as reg
         return _find(title=title, body=body, target_board=target_board, session_id=session_id, self_tid=self_tid,
@@ -744,7 +745,8 @@ def _find(*, title: str, body: str, target_board: str, session_id: Optional[str]
         if not singleton and (card["id"] in skip
                 or (waiting and _sibling_owner(card.get("title") or "", waiting))
                 or (session_id and card["session_id"] == session_id and not own)
-                or (family and card.get("key_family") == family)):
+                or (family and card.get("key_family") == family
+                    and not (own and _own.earlier_run(card, run_started)))):
             continue
         seen.add((card["gateway"], card["id"]))
         reasons, score = _reasons(card, new_words, title, body, target_board, gateways, failure)

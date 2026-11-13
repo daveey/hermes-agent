@@ -67,13 +67,13 @@ def test_subscriber_is_woken_on_its_due_time_with_no_change():
 
 
 def test_only_subscribers_of_a_moved_topic_wake():
-    src = _Source(**{"board:/b/kanban.db": 1, "replica": 7, "state": 3})
+    src = _Source(**{"board:/b/kanban.db": 1, "replica": 7})
     feed = _feed(src)
     boards = feed.subscribe("boards", ["board:*"])
-    state = feed.subscribe("sessions", ["state"])
-    src.keys["state"] = 4
+    replica = feed.subscribe("remote", ["replica"])
+    src.keys["replica"] = 8
     feed.poll_once()
-    assert state.wait(5.0) == {"state"}
+    assert replica.wait(5.0) == {"replica"}
     assert boards.wait(0.0) == frozenset()
 
 
@@ -98,7 +98,7 @@ def test_first_probe_is_only_a_baseline():
 
 
 def test_unreadable_counter_wakes_on_every_probe():
-    src = _Source(replica=1, state=1)
+    src = _Source(replica=1, other=1)
     feed = _feed(src)
     sub = feed.subscribe("x", ["replica"])
     src.keys["replica"] = hcf.UNKNOWN
@@ -106,7 +106,7 @@ def test_unreadable_counter_wakes_on_every_probe():
     assert "replica" in feed.poll_once()  # still unknown: never proof that nothing moved
     assert sub.wait(0.0) == {"replica"}
     src.fail = True
-    assert feed.poll_once() == {"replica", "state"}  # the probe itself failed: every topic is unknown
+    assert feed.poll_once() == {"replica", "other"}  # the probe itself failed: every topic is unknown
 
 
 def test_appearing_and_disappearing_topics_move():
@@ -158,15 +158,15 @@ def test_async_wait_woken_by_change_and_by_due_time():
 
 
 def test_probe_thread_wakes_subscriber_and_reports_passes():
-    src = _Source(state=1)
+    src = _Source(replica=1)
     feed = hcf.HostChangeFeed(src, interval=0.01)
-    sub = feed.subscribe("sessions", ["state"])  # autostart
+    sub = feed.subscribe("remote", ["replica"])  # autostart
     try:
         from tests.waiting import wait_until
 
         wait_until(lambda: feed.probes >= 2, timeout=10.0)
-        src.keys["state"] = 2
-        assert sub.wait(10.0) == {"state"}
+        src.keys["replica"] = 2
+        assert sub.wait(10.0) == {"replica"}
         counters = la.counters()["change_feed.probe"]
         assert counters["changes"] >= 1 and counters["skips"] >= 1
     finally:
@@ -216,11 +216,128 @@ def test_default_probe_covers_boards_replica_and_state(tmp_path, monkeypatch):
     keys = hcf.default_probe()
     assert keys["board:" + str(board)] == ("revision", str(board), 5)
     assert keys[hcf.REPLICA] is None  # no hub replica on this host
-    assert hcf.STATE in keys
+    assert not any(t == "state" or t.startswith("state:") for t in keys)  # state.db is per subscriber
 
 
 def test_process_feed_never_autostarts_under_pytest():
     feed = hcf.feed()
-    feed.subscribe("x", ["state"])
+    feed.subscribe("x", ["replica"])
     assert feed._thread is None
     assert hcf.feed() is feed
+
+
+# ---- state.db is resolved per subscriber profile (PR #2633 review nit 1) -------------------------------------
+
+
+def _state_db(home):
+    home.mkdir(parents=True, exist_ok=True)
+    db = home / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT)")
+    return db
+
+
+@pytest.fixture
+def per_profile_state(monkeypatch):
+    """Production resolution of state.db: the hermetic conftest re-points ``DEFAULT_DB_PATH`` (which wins over
+    the profile home); restore the import default so ``_default_db_path`` follows the context's home."""
+    import hermes_state
+
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", hermes_state._IMPORT_DEFAULT_DB_PATH)
+
+
+def _subscribe_as(feed: hcf.HostChangeFeed, home, name: str) -> hcf.Subscription:
+    """Subscribe to the bare ``state`` topic from a context bound to ``home`` (another profile's loop)."""
+    import contextvars
+
+    import hermes_scope
+
+    def run() -> hcf.Subscription:
+        token = hermes_scope.push_state(home=str(home))
+        try:
+            return feed.subscribe(name, [hcf.STATE])
+        finally:
+            token.reset()
+
+    return contextvars.Context().run(run)
+
+
+@pytest.mark.usefixtures("per_profile_state")
+def test_state_topic_resolves_in_each_subscribers_profile(tmp_path):
+    a_db, b_db = _state_db(tmp_path / "a"), _state_db(tmp_path / "b")
+    feed = hcf.HostChangeFeed(_Source(), autostart=False)
+    feed.poll_once()  # baseline
+    a = _subscribe_as(feed, tmp_path / "a", "sessions-a")
+    b = _subscribe_as(feed, tmp_path / "b", "sessions-b")
+    assert a.topics == (hcf.state_topic(a_db),)
+    assert b.topics == (hcf.state_topic(b_db),)
+    assert feed.poll_once() == frozenset()  # subscribing records each db's baseline: no spurious wake
+
+    with sqlite3.connect(b_db) as conn:
+        conn.execute("INSERT INTO sessions VALUES ('b1')")
+    assert feed.poll_once() == {hcf.state_topic(b_db)}
+    assert b.wait(5.0) == {hcf.state_topic(b_db)}
+    assert a.wait(0.0) == frozenset()  # profile A's loop never wakes for profile B's state.db
+
+    with sqlite3.connect(a_db) as conn:
+        conn.execute("INSERT INTO sessions VALUES ('a1')")
+    assert feed.poll_once() == {hcf.state_topic(a_db)}
+    assert a.wait(5.0) == {hcf.state_topic(a_db)}
+    assert b.wait(0.0) == frozenset()
+
+
+@pytest.mark.usefixtures("per_profile_state")
+def test_state_db_is_probed_only_while_subscribed(tmp_path):
+    db = _state_db(tmp_path / "a")
+    feed = _feed(_Source(replica=1))
+    sub = _subscribe_as(feed, tmp_path / "a", "sessions")
+    assert hcf.state_topic(db) in feed.keys()
+    sub.close()
+    feed.poll_once()
+    assert hcf.state_topic(db) not in feed.keys()
+
+
+@pytest.mark.usefixtures("per_profile_state")
+def test_unreadable_state_db_wakes_its_subscriber(tmp_path):
+    db = _state_db(tmp_path / "a")
+    reads = {"fail": False}
+
+    def state_probe(path):
+        if reads["fail"]:
+            raise sqlite3.OperationalError("disk I/O error")
+        return hcf.state_key(path)
+
+    feed = hcf.HostChangeFeed(_Source(), autostart=False, state_probe=state_probe)
+    feed.poll_once()
+    sub = _subscribe_as(feed, tmp_path / "a", "sessions")
+    reads["fail"] = True
+    assert feed.poll_once() == {hcf.state_topic(db)}
+    assert sub.wait(0.0) == {hcf.state_topic(db)}
+
+
+def test_probe_thread_is_detached_from_the_first_subscribers_scope(tmp_path):
+    import hermes_scope
+    from hermes_cli.local_work import ACTIVE_SCOPE, Registry
+    from hermes_cli.local_work_threads import TrackedThread
+    from tests.waiting import wait_until
+
+    seen: list[tuple[object, object]] = []
+
+    def probe() -> dict[str, object]:
+        seen.append((ACTIVE_SCOPE.get(), hermes_scope.current_state().home))
+        return {}
+
+    registry = Registry(homes=[str(tmp_path)])
+    feed = hcf.HostChangeFeed(probe, interval=0.01)
+    token = hermes_scope.push_state(home=str(tmp_path / "profile-a"))
+    try:
+        with registry.scope("turn", home=str(tmp_path), source="first-subscriber"):
+            feed.subscribe("x", ["replica"])  # autostart inside an active work scope
+            assert not isinstance(feed._thread, TrackedThread)
+        wait_until(lambda: len(seen) >= 1, timeout=10.0)
+        assert registry.snapshot().active == 0  # the probe thread is not that scope's work
+        assert feed._thread.is_alive()
+        assert seen[0] == (None, None)  # no captured work scope, no captured profile home
+    finally:
+        token.reset()
+        feed.stop()

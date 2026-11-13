@@ -126,6 +126,36 @@ def replica_at_head(slug: str, hub: Any, gateway: str, live_path: Path) -> None:
             waited += BUSY_RETRY_S
 
 
+def pull_live(live: sqlite3.Connection, hub: Any, slug: str, gateway: str) -> bool | None:
+    """Pull a primary board's live file (``gateway``'s partition): True while it is still behind the feed head, None
+    when a cold file was rebuilt from a snapshot instead (the caller's repair treats it as a rebuild).
+
+    A live file that has never pulled (cursor 0) would replay every change the board ever had, at
+    :data:`PULL_PAGE_BUDGET` pages per round, and every round of that replay ends behind the head, so its sends run
+    ``before_head`` and hold the outbox at its first run row. Incident (autoscaled worker-a1, 2026-11-13,
+    t_01a1d65b80d2e9f4): the enroll cold-started the replica from a snapshot, the live file began at 0 against a
+    ~1.93M-change feed (cursor 1586950 after 17 min) and a claimed run's 24 ops never left with ``attempts=0``,
+    including the requeue that ends the Board lease. So a cold file whose first page is not the head rebuilds from
+    the partitioned snapshot, as on a 410, and resumes the feed at its head. Upserts only (``resync``), no absent-row
+    sweep: a just-attached board's local cards are not on the Board yet and are queued by ``import``, not deleted.
+
+    The first page is only peeked, never applied: the cursor stays 0 until ``resync`` writes the head, so a rebuild
+    cut short (a snapshot HubError, a stop) is retried as a rebuild next round instead of leaving a warm-looking file
+    that falls back to the full replay (review of PR #2657).
+    """
+    from hermes_cli import kanban_awaited_card_wake as acw
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as ksc
+    cold = not int((sync.sync_state(live) or {}).get("cursor") or 0)
+    if cold and acw.changes_page(hub, slug, 0, {}).get("more"):
+        _log.warning("kanban sync: %s live file never pulled and the feed is past one page; rebuilding it from a "
+                     "snapshot instead of replaying the board's history", slug)
+        ksc.resync(live, hub, slug, observers=True, partition=gateway)
+        return None
+    with ksc.credited(live):  # the client's name: tests replace it there
+        return ksc.pull(live, hub, slug, observers=True, partition=gateway, max_pages=PULL_PAGE_BUDGET).more
+
+
 def _expedite(live_path: Path, changed: dict) -> None:
     """``kanban_awaited_card_wake.expedite`` on the live board for a standalone replica pull (``reconcile``): the
     sync round's own call never sees these changes, since the replica cursor has moved past them. Never raises."""

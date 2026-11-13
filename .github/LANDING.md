@@ -15,4 +15,11 @@ So every change lands through CI on its exact sha:
 
 `hermes-core-wt ship <slug>` does all three after its local lint, affected-test
 and pre-push gates. Upstream syncs go through `scripts/ci/upstream_sync.py`
-instead.
+instead. A purely mechanical sync (every merge has an empty
+`git show --remerge-diff` and nothing else sits on top of upstream) lands on
+green CI alone. A sync that carries fork-authored content (a conflict
+resolution or fork edit in a merge, or a `[daveey]` fixup commit) is code the
+fork wrote: the gate parks it as NOT YET until an independent exact-head review
+approves it, through the same review card and `review_gate` that
+`hermes-core-wt ship` uses. `upstream_sync.py --classify <sha>` prints which
+kind a head is.

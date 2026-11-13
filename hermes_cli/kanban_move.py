@@ -189,11 +189,12 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         requires = json.loads(row["requires"]) if row["requires"] else []
     except ValueError:
         requires = []
+    source_card = {**dict(row), **({"workspace_source": fresh[0], "workspace_custody": fresh[1]} if fresh else {})}
+    requires = ksm.effective_requires(source_card, requires)  # a portable worktree needs no host checkout
     matches = _requirement_matches(matches, pool, requires, wn._parse(row["skills"]) or [],
                                    me=me, assignee=row["assignee"])
     try:
-        roc.check(labels, assignee=row["assignee"], requires=requires, workspace_kind=ksm.capability_kind(
-                      {**dict(row), **({"workspace_source": fresh[0], "workspace_custody": fresh[1]} if fresh else {})}),
+        roc.check(labels, assignee=row["assignee"], requires=requires, workspace_kind=ksm.capability_kind(source_card),
                   me=me, machines={m: pool[m] for m in matches}, exclude_me=exclude_me)
     except roc.PlacementCapabilityMismatch as exc:
         raise MoveRefused("capability_mismatch", str(exc)) from exc

@@ -48,6 +48,8 @@ REGISTRY_EMPTY = "managed_registry_empty"
 REGISTRY_INVALID = "managed_registry_invalid"
 OWNER_STORAGE_UNAVAILABLE = "owner_storage_unavailable"
 OWNER_CAPSULE_UNAVAILABLE = "owner_capsule_unavailable"
+# A running worker's persistence found no answering owner (``WorkerPersistenceError: owner_unavailable``).
+OWNER_UNREACHABLE = "owner_unreachable"
 STARTUP_KINDS = frozenset({REGISTRY_EMPTY, REGISTRY_INVALID})
 # ``kanban.run`` refusal reasons that name the owner host's own state (``kanban_worker_client``), each raised
 # before the owner creates a session for the claim.
@@ -153,6 +155,9 @@ def _cause(proof: dict, task_id: Optional[str] = None) -> str:
         claim = f"card {task_id}'s claim" if task_id else "the claim"
         return (f"the profile owner kept refusing {claim} with {proof.get('reason') or 'storage_unavailable'} "
                 "(its runtime store or session policy could not be read)")
+    if kind == OWNER_UNREACHABLE:
+        return (f"{whose} running worker could not reach its profile owner to save the turn "
+                "(owner_unavailable: the owner gateway stopped answering)")
     if kind == OWNER_CAPSULE_UNAVAILABLE:
         claim = f"card {task_id}'s claim" if task_id else "the claim"
         return (f"the profile owner kept refusing {claim} with capsule_observation_missing (no live run-bound "

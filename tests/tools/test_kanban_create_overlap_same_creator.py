@@ -12,6 +12,10 @@ work its own earlier card already covered, and each duplicate ran a worker until
 The replay fixture holds those 3 pairs and 14 real legitimate same-creator fan-outs from the same 7 days
 (enumerated legs, implement + exact-head review, one review's distinct follow-ups, cross-repo pairs), plus the
 background cards that name the same code identifiers, so the rarity filter counts what the board held.
+
+A fourth duplicate (macbook 11-13, t_01a1d6505a3d1591 -> t_01a1d6546c5bcdd9) got past the key-family exemption:
+both follow-ups were keyed ``followup:<creator>:...``, the first by a run a core update reclaimed. Four keyed
+fan-outs filed in one run (same family) are in the fixture so that exemption still admits a batch.
 """
 
 from __future__ import annotations
@@ -32,7 +36,8 @@ GATEWAYS = {"hub", "hermes-hub"}
 def _card(c: dict, *, creator, local=True, status="running") -> dict:
     return {"id": c["id"], "board": "default", "gateway": "hub", "status": status, "title": c["title"],
             "body": c["body"], "assignee": c.get("assignee"), "created_at": c.get("created_at"),
-            "session_id": None, "creator_task_id": creator, "local": local, "key_family": None,
+            "session_id": None, "creator_task_id": creator, "local": local,
+            "key_family": ko.key_family(c.get("key")),
             "has_key": c.get("has_key", False), "placed_as": None, "awaits": None, "chats": []}
 
 
@@ -57,7 +62,31 @@ def _cid(case):
 
 def test_fixture_covers_the_incident_and_ten_fan_outs():
     kinds = [c["kind"] for c in CASES]
-    assert kinds.count("duplicate") == 3 and kinds.count("fan-out") >= 10
+    assert kinds.count("duplicate") == 4 and kinds.count("fan-out") >= 10
+    # Same-key-family fan-outs filed in one run (rollout legs, per-plugin batch, two review models) stay admitted.
+    keyed = [c for c in CASES if c["kind"] == "fan-out"
+             and ko.key_family(c["a"].get("key")) == ko.key_family(c["b_key"])]
+    assert len(keyed) >= 4
+
+
+def _incident():
+    return next(c for c in CASES if c["b"]["id"] == "t_01a1d6546c5bcdd9")
+
+
+def test_same_key_family_from_an_earlier_run_is_compared():
+    """macbook 11-13: the creator keyed both follow-ups ``followup:<creator>:...``. The first was filed by a run a
+    core update reclaimed; the next run filed it again. The key-family exemption admitted it (task
+    t_01a1d65c3b4d419f); only a card from this same run is exempt by family."""
+    case = _incident()
+    assert ko.key_family(case["a"]["key"]) == ko.key_family(case["b_key"]) == "followup"
+    assert case["a"]["created_at"] < case["run_started"] <= case["b"]["created_at"]
+    match = _replay(case)
+    assert match is not None and match["why"].startswith("titles share")
+    assert ko.verdict([match], [], "")["code"] == ko.EVENT  # another run: a refusal, never a silent reuse
+    same_run = {**case, "run_started": case["a"]["created_at"]}
+    assert _replay(same_run) is None, "a keyed batch filed in one run stays exempt by family"
+    unknown = {**case, "run_started": None}
+    assert _replay(unknown) is None, "an unknown run start keeps the exemption"
 
 
 @pytest.mark.parametrize("case", [c for c in CASES if c["kind"] == "duplicate"], ids=_cid)

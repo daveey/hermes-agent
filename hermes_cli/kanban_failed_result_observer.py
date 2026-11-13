@@ -109,6 +109,11 @@ def connect_existing(path):
         # Missing/old schema fails visibly instead of being migrated here.
         conn.execute('SELECT current_run_id, claim_lock FROM tasks LIMIT 0')
         conn.execute('SELECT ended_at FROM task_runs LIMIT 0')
+        # This process never ran the board's init, which is what registers a Board-attached file as synced; without
+        # it board_mode() reads "off" and a primary board's failure is closed in the local mirror instead of
+        # released to the Board (worker-a1, t_01a1d65b80d2e9f4). Writes nothing.
+        from hermes_cli import kanban_db_sync as sync
+        sync.register_without_install(conn, sync._db_key(conn) or str(path))
         yield conn
 
 

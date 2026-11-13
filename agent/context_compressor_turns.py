@@ -6,7 +6,7 @@ can be a request answered several turns ago; restating it after a mid-turn compa
 model redo finished work.
 """
 
-from typing import Any
+from typing import Any, Callable
 
 # User-row kinds that start a new turn (persisted notices, not same-turn continuations such as
 # auto_continue or steer): after a completed reply, one of these means the earlier request is done.
@@ -33,3 +33,15 @@ def turn_ended_after(messages: list[dict[str, Any]], idx: int) -> bool:
         elif replied and role == "user" and msg.get("display_kind") in TURN_STARTING_NOTICE_KINDS:
             return True
     return False
+
+
+def newest_live_intent(messages: list[dict[str, Any]], intent_of: Callable[[Any], Any]) -> Any:
+    """The newest row's intent (``intent_of`` truthy), or None when no row has one or its turn already ended.
+
+    Used by the post-compaction anchor pass: a request answered before a notice-started turn is finished
+    work, and every older row's turn ended earlier still, so the scan stops at the newest intent row.
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        if intent := intent_of(messages[idx]):
+            return None if turn_ended_after(messages, idx) else intent
+    return None

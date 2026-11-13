@@ -34,6 +34,13 @@ Removing the exemption outright would have refused 517 pairs.
 
 A card from the same chat but another creator (the session match) keeps the old exemption. Every card in a chat's
 tree inherits that session, and the 10-11 race of two creators is another cause.
+
+The idempotency-key family exemption (one keyed creator's batch) covers the creator's own cards only from its
+current run (:func:`earlier_run`). Replay of 14 days (hub 1721 and macbook 6 same-creator same-family pairs, the
+first card open): 74 had the first card from an earlier run; comparing those refuses the macbook duplicate
+t_01a1d6505a3d1591 -> t_01a1d6546c5bcdd9 and 1 false pair (two ``[selfheal-probe]`` live checks, which
+``distinct_from`` overrides). Comparing every same-family own card instead would have refused 26 more hub
+pairs, nearly all legs of one run's keyed batch.
 """
 
 from __future__ import annotations
@@ -217,6 +224,20 @@ def reissue(card: dict, self_tid: Optional[str], run_started: Optional[int], sco
     return bool(self_tid and card.get("creator_task_id") == self_tid and card.get("local")
                 and not card.get("has_key") and started is not None
                 and (_epoch(card.get("created_at")) or 0) >= started and score >= REISSUE_SCORE)
+
+
+def earlier_run(card: dict, run_started: Optional[int]) -> bool:
+    """The creator made ``card`` in an EARLIER run than the current one (the key-family exemption's limit).
+
+    One creator keys a batch in one family (``rollout:<card>:<leg>``, ``plugin-suites-red:plugins/<name>``,
+    ``review:<card>:<model>:<sha>``) and files it in one run, knowing every leg: those stay exempt. A keyed card
+    from an earlier run is not known to this run (a reclaim or restart drops the transcript), so it is compared:
+    11-13 macbook t_01a1d6505a3d1591 (``followup:t_01a1d6354e5847dd:pr2545-nits``, run reclaimed by a core update)
+    was filed again by the creator's next run as t_01a1d6546c5bcdd9 (``followup:...:pause-config-bounds``).
+    An unknown run start keeps the exemption."""
+    started = _epoch(run_started)
+    created = _epoch(card.get("created_at"))
+    return started is not None and created is not None and created < started
 
 
 def _epoch(value) -> Optional[int]:

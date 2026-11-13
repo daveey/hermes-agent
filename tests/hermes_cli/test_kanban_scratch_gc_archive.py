@@ -216,20 +216,35 @@ def test_live_sharer_on_another_board_keeps_it(board, remote):
     assert not _archive(tid).exists()
 
 
-def test_linked_worktree_inside_keeps_it(board, remote):
+def refuse_forever(path):
+    """Give *path* a shape the archive always refuses: a gitlink whose gitdir does not exist."""
+    (path / "wt").mkdir()
+    (path / "wt" / ".git").write_text("gitdir: /nonexistent/hermes-test-gitdir\n")
+
+
+def test_linked_worktree_inside_is_archived(board, remote):
+    # Used to be kept forever ("left to the worktree GC", which never visits scratch).
     tid, path = _task(remote=remote)
     _run("worktree", "add", "-q", "-b", "side", str(path / "wt"), cwd=path / "repo")
     assert (path / "wt" / ".git").is_file()
     assert _gc() == 0
-    assert (path / "repo" / ".git").is_dir() and (path / "wt").is_dir()
-    assert not _archive(tid).exists()
+    assert not path.exists()
+    assert (_archive(tid) / "wt" / "meta.json").is_file()
 
 
-def test_bare_repo_inside_keeps_it(board, remote):
+def test_bare_repo_inside_is_archived(board, remote):
     tid, path = _task(remote=remote)
     _run("clone", "-q", "--bare", str(remote), str(path / "mirror.git"))
     assert _gc() == 0
-    assert (path / "repo" / ".git").is_dir()
+    assert not path.exists()
+    assert json.loads((_archive(tid) / "mirror.git" / "meta.json").read_text())["bare"] is True
+
+
+def test_dangling_gitlink_keeps_it(board, remote):
+    tid, path = _task(remote=remote)
+    refuse_forever(path)
+    assert _gc() == 0
+    assert (path / "repo" / ".git").is_dir() and (path / "wt" / ".git").is_file()
     assert not _archive(tid).exists()
 
 
@@ -389,11 +404,12 @@ def test_payload_write_failure_keeps_workspace(board, monkeypatch):
     assert not parent.exists() or list(parent.iterdir()) == []
 
 
-def test_special_file_keeps_workspace(board):
+def test_fifo_is_recorded_and_workspace_removed(board):
     tid, path = _plain_task(lambda p: os.mkfifo(p / "pipe"))
     assert _gc() == 0
-    assert (path / "notes.txt").exists()
-    assert not _archive(tid).exists()
+    assert not path.exists()
+    manifest = json.loads((_archive(tid) / PAYLOAD / "manifest.json").read_text())
+    assert manifest["entries"]["pipe"]["type"] == "fifo"
 
 
 def test_reserved_metadata_name_collision_keeps_workspace(board):

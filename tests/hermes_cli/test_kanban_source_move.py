@@ -162,6 +162,64 @@ def test_portable_worktree_is_not_host_only(conn):
     assert ksm.capability_kind({"workspace_kind": "dir"}) == "dir"
 
 
+# create_task stores validate_assignment's merged list, so a worktree card's ``requires`` always holds the implicit
+# ``host_repo`` (LIVE t_01a1d5b1c1798e2a's created event: ["terminal","file","git","host_repo","kanban"]).
+CREATED_WORKTREE_REQUIRES = ["terminal", "file", "git", "host_repo", "kanban"]
+
+
+def _stored_requires(conn, tid, requires):
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET requires=? WHERE id=?", (json.dumps(requires), tid))
+
+
+def test_portable_worktree_moves_to_worker_without_host_repo_label(conn, monkeypatch):
+    """LIVE t_01a1d5b1c1798e2a: published custody at rev 1, yet the move to machine:worker-2 was refused
+    `capability_mismatch: machine worker-2 lacks capability:host_repo`, read from the stored requires."""
+    from hermes_cli import kanban_move as km
+    from hermes_cli import kanban_runs_on_capabilities as roc
+    sync.set_mode(conn, "primary")
+    monkeypatch.setattr(roc, "_remote_tools", lambda name: None)
+    monkeypatch.setattr(ksm, "_local_matches", lambda path, commit: commit == C1)  # holder's tree is clean at C1
+    machines = {"worker-2": {"state": "active", "pickup": "all", "labels": ["pool:worker", "capability:terminal"]}}
+    tid = card(conn, source=manifest(), cust=custody(source_holder="worker-4"))
+    _stored_requires(conn, tid, CREATED_WORKTREE_REQUIRES)
+    plan = km.check(conn, tid, ["machine:worker-2"], machines=machines, me="worker-4", host_reason="registered clone")
+    assert plan["matches"] == ["worker-2"]
+    # Not portable (custody retained): the stored host_repo still binds the card to a host checkout.
+    held = card(conn, source=manifest(), cust=custody(source_holder="worker-4", state="retained"))
+    _stored_requires(conn, held, CREATED_WORKTREE_REQUIRES)
+    with pytest.raises(km.MoveRefused) as err:
+        km.check(conn, held, ["machine:worker-2"], machines=machines, me="worker-4", host_reason="registered clone")
+    assert err.value.code == "custody_retained"
+
+
+def test_effective_requires_drops_host_repo_only_when_portable(conn):  # conn: workspace_source enabled
+    portable = {"workspace_kind": "worktree", "workspace_source": json.dumps(manifest()),
+                "workspace_custody": json.dumps(custody())}
+    assert ksm.effective_requires(portable, CREATED_WORKTREE_REQUIRES) == ["terminal", "file", "git", "kanban"]
+    assert ksm.effective_requires(portable, ["host_repo", "ssh:mini"]) == ["ssh:mini"]
+    retained = {**portable, "workspace_custody": json.dumps(custody(state="retained"))}
+    assert ksm.effective_requires(retained, CREATED_WORKTREE_REQUIRES) == CREATED_WORKTREE_REQUIRES
+    assert ksm.effective_requires({"workspace_kind": "dir"}, ["host_repo"]) == ["host_repo"]
+    assert ksm.effective_requires(portable, None) == []
+
+
+def test_pickup_claims_portable_worktree_on_profile_without_host_repo(conn, monkeypatch):
+    """The pickup gate (claim_refusal) reads the same stored requires: a portable card runs on a profile whose
+    terminal backend is not local (no host_repo); a retained one still needs it."""
+    from hermes_cli import kanban_capabilities as caps
+    from hermes_cli import kanban_runs_on_capabilities as roc
+    monkeypatch.setattr(caps, "_profile_capabilities", lambda assignee, required=None: {"terminal", "file", "git",
+                                                                                          "kanban"})
+    monkeypatch.setattr("hermes_cli.kanban_placement_coordination.claim_refusal", lambda card, me: None)
+    monkeypatch.setattr("hermes_cli.kanban_mandatory_pin.refusal", lambda card, me=None: None)
+    base = {"id": "t_pick", "assignee": "worker", "workspace_kind": "worktree", "skills": None,
+            "requires": json.dumps(CREATED_WORKTREE_REQUIRES), "workspace_source": json.dumps(manifest())}
+    assert roc.claim_refusal({**base, "workspace_custody": json.dumps(custody())}, me="worker-2") is None
+    assert "host_repo" in str(roc.claim_refusal({**base, "workspace_custody": json.dumps(custody(state="retained"))},
+                                                me="worker-2"))
+
+
 # --- CLI --------------------------------------------------------------------------------------------------------
 
 def test_cli_claim_custody_card_refused(conn):

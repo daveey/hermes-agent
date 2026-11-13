@@ -34,6 +34,8 @@ async def test_reattach_gets_head_and_tail_then_future_deltas_once(tmp_path, mon
     assert first['inflight'] == {'assistant': 'HEAD ', 'streaming': True, 'user': '', 'segment_only': True}
     await authority.detach(actor, first['subscription_id'])
     _delta(authority, ref, 'TAIL ')  # published while nobody was attached
+    events = authority.sessions[ref.session_id].event_stream
+    tail_seq = events.watermark()[1]
     seen, got_next = [], threading.Event()  # the fanout writes from its own daemon thread
 
     def write(frame):
@@ -45,9 +47,12 @@ async def test_reattach_gets_head_and_tail_then_future_deltas_once(tmp_path, mon
                                                           'close': staticmethod(lambda: None)})()
     second = await _resume_keeping_transport(authority, actor, ref, omit_messages=omit)
     assert second['inflight']['assistant'] == 'HEAD TAIL '
-    assert second['last_sequence'] == authority.sessions[ref.session_id].event_stream.watermark()[1]
+    # The snapshot covers TAIL. Not pinned to the stream's head: an inventory past the reply budget
+    # (``REPLY_INVENTORY_BUDGET_S``, easily missed on a throttled runner) publishes a late ``session.info``
+    # that can land after the snapshot, while the resume is still building its reply.
+    assert tail_seq <= second['last_sequence'] <= events.watermark()[1]
     _delta(authority, ref, 'NEXT')
-    got_next.wait(10)
+    got_next.wait(30)
     assert got_next.is_set()
     deltas = [f['params']['payload']['text'] for f in seen if f['params']['type'] == 'message.delta']
     assert deltas == ['NEXT']  # the snapshot covers HEAD+TAIL; later frames arrive exactly once

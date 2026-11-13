@@ -64,3 +64,38 @@ def test_a_card_whose_id_only_appears_quoted_in_the_body_is_still_commented(conn
     assert card is not None and dd.note_completion(conn, third, f"duplicate of {first}") == card
     comments = [c.body for c in kb.list_comments(conn, card)]
     assert len(comments) == 1 and comments[0].startswith(f"- {third} closed as a duplicate of {first};")
+
+
+def test_an_id_after_a_dash_mid_line_in_the_body_is_not_an_occurrence(conn):
+    """PR #2547 post-merge mutant M4b (card t_01a1d6bb7e926562): an occurrence line starts at a line break. A
+    handoff quoting ``see also- <id>`` puts ``- <id> `` mid-line in the body; that card's first completion is new."""
+    creator = kb.create_task(conn, title="creator", assignee="default")
+    first, second, third = (kb.create_task(conn, title=t, assignee="default", creator_task_id=creator)
+                            for t in ("first", "second", "third"))
+    card = dd.note_completion(conn, second, f"duplicate of {first}; see also- {third} (old)")
+    assert card is not None
+    task = kb.get_task(conn, card)
+    assert task is not None and f"- {third} " in (task.body or "") and f"\n- {third} " not in (task.body or "")
+    assert dd.note_completion(conn, third, f"duplicate of {first}") == card
+    comments = [c.body for c in kb.list_comments(conn, card)]
+    assert len(comments) == 1 and comments[0].startswith(f"- {third} closed as a duplicate of {first};")
+
+
+def test_an_occurrence_of_a_longer_id_sharing_the_prefix_does_not_count(conn, monkeypatch):
+    """PR #2547 post-merge mutant M4c (card t_01a1d6bb7e926562): the id ends at a space. A legacy short id that
+    prefixes the long id already in the body (``t_237399d4`` vs ``t_237399d4ab12cd34``) is a new occurrence."""
+    from hermes_cli import kanban_db_sync as kbs
+    real = kbs.new_task_id
+    pinned = iter(["t_0000000000000c01", "t_0000000000000f01", "t_237399d4ab12cd34", "t_237399d4"])
+    monkeypatch.setattr(kbs, "new_task_id", lambda c: next(pinned, None) or real(c))
+    creator = kb.create_task(conn, title="creator", assignee="default")
+    first, second, third = (kb.create_task(conn, title=t, assignee="default", creator_task_id=creator)
+                            for t in ("first", "second", "third"))
+    assert (second, third) == ("t_237399d4ab12cd34", "t_237399d4")
+    card = dd.note_completion(conn, second, f"duplicate of {first}")
+    assert card is not None
+    task = kb.get_task(conn, card)
+    assert task is not None and f"\n- {second} closed as a duplicate of {first};" in (task.body or "")
+    assert dd.note_completion(conn, third, f"duplicate of {first}") == card
+    comments = [c.body for c in kb.list_comments(conn, card)]
+    assert len(comments) == 1 and comments[0].startswith(f"- {third} closed as a duplicate of {first};")

@@ -1,0 +1,133 @@
+"""The scheduled macOS OS-marked lane: shape of macos-os-tests.yml and its mini-queue gate.
+
+Decision t_01a1d5b9382b24ad (option B): platforms("macos"/"posix") tests run on the
+Mac mini on a schedule only, never on a pull request, and yield to required mini jobs.
+"""
+from __future__ import annotations
+
+import importlib.util
+import subprocess
+from pathlib import Path
+
+import hermes_yaml
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW = ROOT / ".github/workflows/macos-os-tests.yml"
+GATE = ROOT / "scripts/ci/macos_os_tests_gate.py"
+REPO = "softmax-universe/daveey-hermes"
+
+
+def _gate():
+    spec = importlib.util.spec_from_file_location("macos_os_tests_gate", GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _workflow():
+    return hermes_yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_lane_is_scheduled_and_never_a_pull_request_lane():
+    workflow = _workflow()
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers) == {"schedule", "workflow_dispatch", "push"}
+    assert triggers["schedule"] == [{"cron": "37 0,12 * * *"}]
+    # Probe branches only: ci-probe/** would also start the hermes_state lane on the mini.
+    assert triggers["push"] == {"branches": ["macos-os-probe/**"]}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+    ci = (ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/macos-os-tests.yml" not in ci
+
+
+def test_test_job_waits_for_the_gate_and_runs_the_marked_selection_on_the_mini():
+    jobs = _workflow()["jobs"]
+    gate, job = jobs["gate"], jobs["macos-os-tests"]
+    assert gate["permissions"] == {"actions": "read", "contents": "read"}
+    assert "scripts/ci/macos_os_tests_gate.py" in gate["steps"][-1]["run"]
+    assert gate["outputs"]["run"] == "${{ steps.gate.outputs.run }}"
+    assert job["needs"] == "gate"
+    assert "needs.gate.outputs.run == 'true'" in job["if"]
+    assert f"github.repository == '{REPO}'" in job["if"]
+    assert job["runs-on"] == ["self-hosted", "macOS", "hermes-state"]
+    command = job["steps"][-1]["run"]
+    assert "sys.platform == 'darwin'" in command
+    assert "HERMES_HOME" in command and "mktemp -d" in command
+    assert "scripts/ci/list_os_marked_tests.py macos" in command
+    assert 'test -s "$LIST"' in command
+    assert "taskpolicy -c utility scripts/run_tests.sh --files-from \"$LIST\" -j 2" in command
+    assert '-m "platforms and not integration"' in command
+
+
+def _api(runs: dict[str, list[dict]], jobs: dict[int, list[dict]], calls: list[str] | None = None):
+    def api(path: str):
+        if calls is not None:
+            calls.append(path)
+        if "/jobs" in path:
+            run_id = int(path.split("/runs/")[1].split("/")[0])
+            return {"jobs": jobs.get(run_id, [])}
+        state = path.split("status=")[1].split("&")[0]
+        return {"workflow_runs": runs.get(state, [])}
+    return api
+
+
+def _job(status: str, labels=("self-hosted", "macOS", "hermes-state"), name="hermes_state (macOS) / x"):
+    return {"status": status, "labels": list(labels), "name": name}
+
+
+@pytest.mark.parametrize("status", ["queued", "waiting", "pending", "requested"])
+def test_schedule_skips_while_a_mini_job_waits(status):
+    api = _api({"in_progress": [{"id": 1}]}, {1: [_job("completed"), _job(status)]})
+    run, reason = _gate().decide("schedule", api, REPO, own_run_id=99)
+    assert run is False
+    assert "1 job(s) already waiting" in reason
+
+
+def test_schedule_runs_when_mini_jobs_are_only_running_or_on_other_labels():
+    jobs = {
+        1: [_job("in_progress")],
+        2: [_job("queued", labels=("blacksmith-4vcpu-ubuntu-2404",))],
+    }
+    api = _api({"in_progress": [{"id": 1}], "queued": [{"id": 2}]}, jobs)
+    assert _gate().decide("schedule", api, REPO, own_run_id=99) == (True, "no job waiting for the mini")
+
+
+def test_own_run_is_excluded_and_each_run_is_read_once():
+    calls: list[str] = []
+    jobs = {99: [_job("queued", name="macOS-only tests (mini)")], 1: []}
+    api = _api({"queued": [{"id": 99}, {"id": 1}], "in_progress": [{"id": 1}]}, jobs, calls)
+    run, _ = _gate().decide("schedule", api, REPO, own_run_id=99)
+    assert run is True
+    assert sum("/runs/1/jobs" in c for c in calls) == 1
+    assert not any("/runs/99/jobs" in c for c in calls)
+
+
+@pytest.mark.parametrize("event", ["workflow_dispatch", "push"])
+def test_manual_and_probe_runs_are_never_gated(event):
+    def api(path):
+        raise AssertionError("not read")
+    assert _gate().decide(event, api, REPO, own_run_id=1)[0] is True
+
+
+@pytest.mark.parametrize("error", [subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 502"),
+                                   subprocess.TimeoutExpired(["gh"], 60), ValueError("bad JSON")])
+def test_unreadable_queue_fails_open_to_testing(error):
+    def api(path):
+        raise error
+    run, reason = _gate().decide("schedule", api, REPO, own_run_id=1)
+    assert run is True
+    assert "running anyway" in reason
+
+
+def test_main_writes_the_step_output(tmp_path, monkeypatch):
+    gate = _gate()
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_RUN_ID", "5")
+    monkeypatch.setattr(gate, "gh_api", _api({"queued": [{"id": 6}]}, {6: [_job("queued")]}))
+    assert gate.main() == 0
+    assert out.read_text() == "run=false\n"

@@ -7,8 +7,8 @@
 * A RUNNING card publishes first (§4 steps 1-8) and is checked against that fresh result (:func:`publish_for_move`);
   the ``continue_task`` that ends the run carries the receipt.
 * ``--reclaim`` refuses worktree cards and manifest-bearing cards (``reclaim_source_unsupported``).
-* A portable worktree card is not host-only: its capability needs drop the implicit ``host_repo``
-  (:func:`capability_kind`); an explicit ``host_repo`` in ``requires`` is unchanged.
+* A portable worktree card is not host-only: its capability needs drop ``host_repo`` (:func:`capability_kind`,
+  :func:`effective_requires`), also the copy ``create_task`` stored in ``requires``.
 """
 
 from __future__ import annotations
@@ -110,3 +110,18 @@ def capability_kind(card: Mapping[str, Any]) -> str:
     if kind == "worktree" and portable(card.get("workspace_source"), card.get("workspace_custody")) is None:
         return "worktree_source"
     return kind
+
+
+def effective_requires(card: Mapping[str, Any], requires: Any) -> list:
+    """``requires`` as the move and pickup checks must read it: a portable worktree card drops ``host_repo``.
+
+    ``create_task`` stores ``validate_assignment``'s merged list, so every worktree card's stored ``requires`` holds
+    the implicit ``host_repo`` and an explicit one is indistinguishable from it. Portable custody already proves the
+    source travels (the Board's repo proof gates the grant), so ``host_repo`` is dropped whenever
+    :func:`capability_kind` is ``worktree_source``; any other host need is a gateway need (``ssh:<host>`` ...) or a
+    ``runs_on`` label, which stay. LIVE t_01a1d5b1c1798e2a: a published card was refused
+    ``machine worker-2 lacks capability:host_repo``."""
+    needs = list(requires or [])
+    if capability_kind(card) == "worktree_source":
+        needs = [n for n in needs if n != "host_repo"]
+    return needs

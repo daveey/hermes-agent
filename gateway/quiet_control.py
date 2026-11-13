@@ -211,8 +211,10 @@ def start_preflight_reasons(*, now: int | None = None, margin_s: int = START_PRE
     The same readers and spellings as :meth:`QuietControl.start` (``update:<reason>``, then
     ``update_window_stale``), with the freshness bound tightened by ``margin_s`` so a window that
     would go stale while the observer starts is refused here. Runner-only state (attestation,
-    coverage, drain/restart flags, registry unknowns) is not exposed by any read-only control verb
-    and stays the gateway's own refusal. Advisory: the gateway's start remains authoritative.
+    coverage, drain/restart flags, registry unknowns) is the gateway's: the read-only bookkeeping
+    verb ``quiet-observe-check`` (:meth:`QuietControl.check`) reports it with start's own 120 s
+    window and no margin, and ``quiet-hold`` asks it after this host-file step, before the lease.
+    Advisory: the gateway's start remains authoritative.
     """
     now = int(time.time()) if now is None else now
     status, window_reasons = _window_status(now)

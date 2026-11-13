@@ -62,10 +62,12 @@ def _resolve_busy_timeout_ms() -> int:
     return _kb._env_int("HERMES_KANBAN_BUSY_TIMEOUT_MS", DEFAULT_BUSY_TIMEOUT_MS, minimum=1)
 
 
-def _sqlite_connect(path: Path) -> sqlite3.Connection:
+def _sqlite_connect(path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Open a Kanban SQLite connection via ``connect_tracked``: while registered,
     byte-level probes of the file are refused because an ``open()``/``close()``
-    would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
+    would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``).
+    ``check_same_thread=False`` only for kept readers (``kanban_kept_reader``): generation
+    recovery must be able to close an idle one from another thread."""
     from hermes_cli.kanban_dispatch_owner import connect_with_identity
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
@@ -73,6 +75,7 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
         path,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
+        check_same_thread=check_same_thread,
     )
     try:
         # Explicit PRAGMA (besides connect(timeout=)) so it is observable and
@@ -797,13 +800,13 @@ def _schema_is_present(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
+def _open_configured(path: Path, under_lock, *, check_same_thread: bool = True) -> tuple[sqlite3.Connection, Any]:
     """Open ``path`` with the kanban PRAGMA set, then run ``under_lock(conn)``.
     WAL activation and ``under_lock`` share the ``_INIT_LOCK`` critical section:
     WAL setup can take an exclusive lock while SQLite creates sidecars for a
     fresh DB, and concurrent gateway startup threads must not race before
     ``_INITIALIZED_PATHS`` is populated. Closed if anything raises."""
-    conn = _sqlite_connect(path)
+    conn = _sqlite_connect(path, check_same_thread=check_same_thread)
     try:
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
@@ -894,7 +897,8 @@ def _ensure_activity_revision(conn: sqlite3.Connection, resolved: str) -> None:
                          resolved, exc)
 
 
-def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> sqlite3.Connection:
+def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None,
+            check_same_thread: bool = True) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
     every connection so a re-created file stays robust; the first connection
     per path auto-runs :func:`init_db`, later ones skip via
@@ -938,7 +942,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
         return _schema_owner.open_read_only(path, _schema_owner.READ_ONLY[resolved],
                                             timeout_s=_resolve_busy_timeout_ms() / 1000.0, text_factory=_kb._lossy_text)
     if resolved in _INITIALIZED_PATHS:
-        conn, schema_present = _open_configured(path, _schema_is_present)
+        conn, schema_present = _open_configured(path, _schema_is_present, check_same_thread=check_same_thread)
         if schema_present:
             return conn
         # Cache says "initialized", file says otherwise: it was deleted or
@@ -987,7 +991,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
                 _INITIALIZED_PATHS.add(resolved)
             return None
 
-        conn, refusal = _open_configured(path, _init_if_needed)
+        conn, refusal = _open_configured(path, _init_if_needed, check_same_thread=check_same_thread)
     if refusal:
         conn.close()
         return _schema_owner.open_read_only(path, refusal, timeout_s=_resolve_busy_timeout_ms() / 1000.0,

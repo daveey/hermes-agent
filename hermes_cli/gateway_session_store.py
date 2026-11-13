@@ -79,6 +79,9 @@ class GatewaySessionStore:
         self.connection = connection or GatewayConnection.shared()
         self.snapshots: dict[str, dict] = {}
         self.current: dict | None = None
+        # Called once (then cleared) when ``current`` moves off the session they were registered on
+        # (``/new``, ``/resume``, ``/branch``, an end): a wait for that session's late frame is dropped.
+        self.switch_listeners: list = []
         self._reader = None
         self._create_parameters = None
 
@@ -134,9 +137,17 @@ class GatewaySessionStore:
     def _adopt(self, snapshot):
         sid = snapshot["stored_session_id"]
         self.snapshots[sid] = snapshot
-        self.current = snapshot
+        self.set_current(snapshot)
         self.connection.state(sid).adopt_snapshot(snapshot)
         return sid
+
+    def set_current(self, snapshot):
+        """Open ``snapshot`` (``None``: none); a move off the current one runs the switch listeners."""
+        if snapshot is not self.current:
+            listeners, self.switch_listeners = self.switch_listeners, []
+            for listener in listeners:
+                listener()
+        self.current = snapshot
 
     def attach(self, session_id, *, typed=False):
         """``session.resume`` once per session id this viewer uses (idempotent), carrying this CLI's launch
@@ -350,7 +361,7 @@ class GatewaySessionStore:
             except GatewayClientError as exc:
                 logger.debug("session.detach failed: %s", exc)
         if self.current is snapshot:
-            self.current = None
+            self.set_current(None)
 
     def delete_session_if_empty(self, session_id, sessions_dir=None):
         """Main's quit-immediately prune, as a gateway delete: only a row with no messages, no title

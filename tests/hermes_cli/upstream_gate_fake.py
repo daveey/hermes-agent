@@ -110,7 +110,8 @@ class FakeFork:
         subprocess.run(["git", "-C", str(clone), "remote", "set-url", "origin", URL], check=True)
         gate = clone / "scripts" / "ci" / "upstream_sync.py"
         gate.parent.mkdir(parents=True, exist_ok=True)
-        gate.write_bytes(GATE.read_bytes())
+        for sibling in GATE.parent.glob("upstream_sync*.py"):  # the gate and the helper modules it imports
+            (gate.parent / sibling.name).write_bytes(sibling.read_bytes())
         with open(clone / ".git" / "info" / "exclude", "a") as exclude:
             exclude.write("/scripts/\n")
 

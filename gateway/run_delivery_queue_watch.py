@@ -18,6 +18,16 @@ from typing import Callable, Iterable, Optional
 # How often the housekeeping thread looks at the queue file between its ticks.
 DELIVERY_QUEUE_WATCH_SECONDS = 1.0
 DRAIN_LABEL = "Cron durable delivery queue drain"
+# A file timestamp is only as fine as the clock that wrote it (a kernel jiffy on Linux, 1 s on
+# some filesystems), and the queue's size does not move when a status update rewrites a page in
+# place (each closed connection checkpoints and deletes the WAL). So a write that lands in the
+# same granule as the mtime we last saw leaves the stamp identical. As in git's racy-index rule,
+# a stamp taken this soon after its newest mtime proves nothing about writes after it.
+MTIME_GRANULARITY_NS = 1_000_000_000
+
+
+def _now_ns() -> int:
+    return time.time_ns()
 
 
 class DeliveryQueueWatch:
@@ -26,6 +36,9 @@ class DeliveryQueueWatch:
     The watch never resets itself after draining: the drain's own status writes
     move the stamp once more and cost one empty pass, after which the stamp is
     stable, while a worker that enqueued during the drain still moves it again.
+    A stamp seen within ``MTIME_GRANULARITY_NS`` of its newest mtime is racy: the next
+    look reports a change even when the stamp matches (at worst one empty pass),
+    because a write in the same timestamp granule would not have moved it.
     """
 
     def __init__(self, homes: Callable[[], Iterable[Optional[Path]]], drain: Callable[[], None]) -> None:
@@ -33,6 +46,7 @@ class DeliveryQueueWatch:
         self.drain = drain
         self._served: list = list(homes())
         self._seen = self._stamp()
+        self._seen_racy = self._is_racy(self._seen)
 
     def refresh_homes(self) -> None:
         """Re-resolve the served profiles once per tick (a directory read under multiplex),
@@ -53,11 +67,18 @@ class DeliveryQueueWatch:
                 stamps.append((str(candidate), info.st_mtime_ns, info.st_size))
         return tuple(stamps)
 
+    @staticmethod
+    def _is_racy(stamp: tuple) -> bool:
+        # Read the clock after the stat: any later write carries a timestamp past this granule.
+        newest = max((mtime_ns for _path, mtime_ns, _size in stamp), default=None)
+        return newest is not None and _now_ns() - newest <= MTIME_GRANULARITY_NS
+
     def changed(self) -> bool:
         current = self._stamp()
-        if current == self._seen:
+        if current == self._seen and not self._seen_racy:
             return False
         self._seen = current
+        self._seen_racy = self._is_racy(current)
         return True
 
 
