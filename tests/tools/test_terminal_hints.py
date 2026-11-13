@@ -308,6 +308,9 @@ class TestMaskedMissingCommand:
         "2026-11-13 INFO saw: timeout: failed to run command 'x': No such file or directory\n",
         "[worker] note: the old run printed 'bash: x: command not found'\n",
         "    bash: foo: command not found\n",
+        # A diff line quoting a shebang failure or a spaced-path one.
+        "+/usr/bin/env: 'python': No such file or directory\n",
+        "+bash: ./my script.sh: command not found\n",
     ])
     def test_quoted_missing_command_message_not_flagged(self, output):
         assert annotate_masked_success("git show HEAD | tail -40", output) is None
@@ -317,6 +320,12 @@ class TestMaskedMissingCommand:
         "-bash: hermes-core-wt: command not found\n",
         "/bin/bash: hermes-core-wt: command not found\n",
         "nohup: failed to run command 'hermes-core-wt': No such file or directory\n",
+        # A command path holding a space.
+        "bash: ./my script.sh: command not found\n",
+        "bash: line 2: ./my script.sh: command not found\n",
+        # A `#!/usr/bin/env x` shebang whose interpreter is missing.
+        "/usr/bin/env: 'hermes-core-wt': No such file or directory\n",
+        "/usr/bin/env: \u2018python\u2019: No such file or directory\n",
     ])
     def test_shell_and_wrapper_line_heads_still_flagged(self, output):
         assert "pipeline" in (annotate_masked_success(self.INCIDENT, output) or "")
