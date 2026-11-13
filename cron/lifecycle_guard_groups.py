@@ -29,15 +29,42 @@ PROCESS_SUBSTITUTION = "\x00<(…)"
 Context = tuple[list[str], bool, list[str]]
 
 
+# Bash's `{NAME}>x` / `{NAME}<x` / `{NAME}>&N`: allocate a descriptor into $NAME (a whole word only).
+# NAME may be an array element (`{a[1]}>x`, `{m["k k"]}>&2`, `{a[b[1]]}>x`): bash 5.2 accepts those too.
+FD_VARIABLE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\}", re.DOTALL)
+# The start of an array-element descriptor word that a space, `$(`/`$((` or a backtick cut off
+# (`{a[$((1+1))]}>x`, ``{a[`echo 1`]}>x``); the tail ending in `]}` glued to `<`/`>` is the rest.
+_FD_VARIABLE_HEAD = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\[")
+# Stands where such a tail was: a whole `{NAME}` word, so the redirection stays one word.
+FD_VARIABLE_TAIL = "{_}"
+
+
 def split_glued_redirections(line: str) -> str:
     """*line* with a space before each unquoted, unescaped ``<``/``>`` glued to a word that is
-    not a bare descriptor number (``python3 -<f.py`` is ``python3 - <f.py``; ``2>x`` stays). A
-    quoted ``<`` is text (``bash -c 'python3<f.py'`` keeps one word), and the operator's own
-    second character (``<<``, ``>>``, ``<>``) is never split off."""
+    not a bare descriptor number or ``{NAME}`` (``python3 -<f.py`` is ``python3 - <f.py``; ``2>x``
+    and ``{fd}>x`` stay). A quoted ``<`` is text (``bash -c 'python3<f.py'`` keeps one word), and
+    the operator's own second character (``<<``, ``>>``, ``<>``) is never split off. The ``&``/``|``
+    of an unquoted ``>&``, ``<&`` or ``>|`` is escaped, so the tokenizer keeps the operator one word
+    instead of cutting the command there (``2>&1 bash x.sh`` is not ``2>`` then ``1 bash x.sh``).
+
+    An array-element descriptor whose subscript the tokenizer cuts (``{a[$((1+1))]}>x bash x.sh``,
+    ``{a[`echo 1`]}>x bash x.sh``) fails closed: the text from the command's first unterminated
+    ``{NAME[`` head (or, without one, the word itself) to the word ending in ``]}`` glued to the
+    operator becomes ``{_}`` (still a descriptor-variable redirection, so the command word after it
+    is read). That text is not dropped: it becomes a command of its own at the end of the line
+    (before a ``#`` comment), or at its start when the line ends in a control operator (``|``,
+    ``&&``, ...), so no operand is added and no pipe is cut. A head with no such tail is an
+    ordinary word and changes nothing (``bash -s {a[x < f.sh`` keeps its stdin)."""
     out: list[str] = []
     word = ""
+    word_out = 0  # where *word* starts in *out*
+    head_out: Optional[int] = None  # where this command's first unterminated `{NAME[` head starts
+    carried: list[str] = []  # rewritten descriptor text, re-emitted as commands of their own
+    comment = ""  # the line's trailing `#` comment, verbatim
     in_single = in_double = escape = False
-    for ch in line:
+    operator = False  # the previous character is an unquoted, unescaped `<`/`>`
+    for index, ch in enumerate(line):
+        after_operator, operator = operator, False
         if escape:
             escape = False
         elif ch == "\\" and not in_single:
@@ -47,16 +74,49 @@ def split_glued_redirections(line: str) -> str:
         elif ch == '"' and not in_single:
             in_double = not in_double
         elif not in_single and not in_double:
+            if after_operator and (ch == "&" or (ch == "|" and word[-1] == ">")):
+                out.append("\\" + ch)
+                word += ch
+                continue
             if ch.isspace() or ch in CONTROL_CHARS:
+                if ch in CONTROL_CHARS:
+                    head_out = None
+                elif (head_out is None and _FD_VARIABLE_HEAD.match(word)
+                        and not FD_VARIABLE.match(word)):
+                    head_out = word_out
                 out.append(ch)
                 word = ""
+                word_out = len(out)
                 continue
-            if ch in "<>" and word and not word.isdigit() and word[-1] not in "<>":
-                out.append(" ")
-                word = ""
+            if ch == "#" and not word:
+                comment = line[index:]
+                break
+            if ch in "<>":
+                operator = True
+                if (word and not word.isdigit() and not FD_VARIABLE.fullmatch(word)
+                        and word[-1] not in "<>"):
+                    if word.endswith("]}"):
+                        start = word_out if head_out is None else head_out
+                        carried.append("".join(out[start:]))
+                        out[start:] = [FD_VARIABLE_TAIL]
+                        word = FD_VARIABLE_TAIL
+                        word_out = start
+                        head_out = None
+                    else:
+                        out.append(" ")
+                        word = ""
+                        word_out = len(out)
         out.append(ch)
         word += ch
-    return "".join(out)
+    body = "".join(out)
+    if carried:
+        own = " ; ".join(carried)
+        stripped = body.rstrip()
+        if stripped and stripped[-1] in CONTROL_CHARS and not stripped.endswith("\\|"):
+            body = f"{own} ; {body}"
+        else:
+            body = f"{stripped} ; {own}" + (" " if comment else "")
+    return body + comment
 
 
 @dataclass

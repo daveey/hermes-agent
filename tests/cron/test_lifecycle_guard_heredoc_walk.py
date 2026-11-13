@@ -867,6 +867,7 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
     the sample, and so is every session-alias case (review 5888336995 nit 2: aliases the
     backend's login snapshot defines outside the walked text). Regenerate the main verdicts with
     the CLI in ``heredoc_shape_corpus``."""
+    import itertools
     import time
     import warnings
 
@@ -899,12 +900,23 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
         for c in corpus.SINK_CONSUMERS for line in corpus.SINK_LINES}
     assert {(case.sink, case.wrapper, case.nesting) for case in sink} == {
         (s, w, n) for s in corpus.SINKS for w in corpus.WRAPPERS for n in corpus.SINK_NESTINGS}
+    # Card t_01a1d5f876488f96: every redirection word at every place x target, under every
+    # wrapper and nesting form.
+    redirect = [case for case in cases if case.s_position == "redirect"]
+    assert {(case.words[0], case.place, case.payload) for case in redirect} == set(
+        itertools.product(corpus.REDIRECT_PREFIXES, corpus.REDIRECT_PLACES, corpus.REDIRECT_TARGETS))
+    assert {(case.words[0], case.wrapper) for case in redirect} == set(
+        itertools.product(corpus.REDIRECT_PREFIXES, corpus.WRAPPERS))
+    assert {(case.words[0], case.nesting) for case in redirect} == set(
+        itertools.product(corpus.REDIRECT_PREFIXES, corpus.REDIRECT_NESTINGS))
 
     started = time.monotonic()
     results = corpus.evaluate(tmp_path, cases)
     elapsed = time.monotonic() - started
     bad = corpus.violations(results, main_refuses)
     assert not bad, "\n".join(case.command for case in bad[:10])
+    clean = corpus.false_refusals(results)
+    assert not clean, "\n".join(case.command for case in clean[:10])
     ran = {case.key for case, executed, _refused in results if executed}
     allowed = sum(not refused for _case, _executed, refused in results)
     # Not vacuous: the history review rows run their payload on any bash, and so does the nit-2
@@ -913,6 +925,10 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
     assert all(case.key in ran for case in session
                if case.session == "time" and case.payload == "alias-subshell")
     assert all(case.key in ran for case in sink)  # bash runs every printed line
+    assert all((case.key in ran) == (case.payload != "clean") for case in redirect
+               if case.words[0] not in corpus.REDIRECT_PLAIN_WORDS)
+    assert all((case.key in ran) == (case.place == "operand" and case.payload == "stdin-s")
+               for case in redirect if case.words[0] in corpus.REDIRECT_PLAIN_WORDS)
     # Startup-file rows need a shell that sources the test's `$HOME` files (see
     # corpus.startup_shell_prefix): every one of them must run when there is one.
     prefix, how = corpus.startup_shell_prefix()
