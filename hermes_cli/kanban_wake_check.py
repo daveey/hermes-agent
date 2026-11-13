@@ -375,6 +375,7 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
     from hermes_cli import kanban_continuation as kc
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_terminal_guard import skip_wake
 
     out: dict = {"restored": [], "woken": []}
     now = int(time.time()) if now is None else int(now)
@@ -420,6 +421,8 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
             if silent <= ALIVE_EVERY + 2 * every + SILENT_GRACE:
                 continue
             with kb.write_txn(conn):
+                if skip_wake(conn, tid, LOST_EVENT, park_event_id=park_id):
+                    continue  # held: _wake's skip would reset the episode barrier on every sweep [daveey]
                 if _lost_wake(conn, tid, {**base, "reason": "remote_probe_silent", "silent_seconds": silent},
                               f"Woken: this card's wake_check runs on {host}, the gateway that parked it, and "
                               f"{host} has not reported that probe for {silent // 60} min, so nothing is watching "
@@ -432,7 +435,6 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
             st = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
             if st is None or st[0] != "scheduled" or get_state(conn, tid) is not None:
                 continue
-            from hermes_cli.kanban_terminal_guard import skip_wake
             if skip_wake(conn, tid, RESTORED_EVENT, park_event_id=park_id):
                 continue  # worker-1's six done cards came back through this restore (11-11) [daveey]
             restored = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",

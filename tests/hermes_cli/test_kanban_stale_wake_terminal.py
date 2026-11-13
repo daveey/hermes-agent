@@ -368,6 +368,39 @@ def test_a_probe_dropped_for_a_held_card_comes_back_when_the_hold_lifts(board, r
         assert _status(board, tid) == "scheduled"
 
 
+def test_a_held_card_whose_remote_probe_went_silent_writes_no_barrier_per_sweep(board, monkeypatch, tmp_path):
+    """Review of #2187 (nit 2): the remote-silent restore branch reached ``_lost_wake -> _wake`` before any held
+    check, and ``_wake``'s skip branch advances the episode barrier, so every sweep wrote one barrier upsert for a
+    done card whose probe runs on another gateway until the feed healed the row."""
+    tid = _parked(board, wake_check=f"test -f {tmp_path / 'flag'}")
+    _stale_scheduled_copy_of_a_done_card(board, tid)
+    monkeypatch.setattr(kwc, "own_gateway", lambda conn: ME)
+    with kb.write_txn(board):
+        board.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (tid,))
+        marks = ",".join("?" for _ in kc.SCHEDULED_ENTRY_EVENTS)
+        park_id, payload, parked_at = board.execute(
+            f"SELECT id, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
+            "ORDER BY id DESC LIMIT 1", (tid, *kc.SCHEDULED_ENTRY_EVENTS)).fetchone()
+        board.execute("UPDATE task_events SET payload = ? WHERE id = ?",
+                      (json.dumps({**json.loads(payload), "probe_host": OTHER}), park_id))
+    silent = int(parked_at) + kwc.ALIVE_EVERY + 2 * 300 + kwc.SILENT_GRACE + 5
+
+    def barrier_seq():
+        row = board.execute("SELECT MAX(sequence) FROM task_wake_episode_barriers WHERE task_id = ?",
+                            (tid,)).fetchone()
+        return row[0] or 0
+
+    assert kwc.restore_missing_checks(board, now=silent) == {"restored": [], "woken": []}
+    first = barrier_seq()
+    assert first == 0
+    for i in range(1, 5):
+        assert kwc.restore_missing_checks(board, now=silent + i * 60) == {"restored": [], "woken": []}
+    assert barrier_seq() == first                                      # no barrier write beyond the first sweep
+    assert _status(board, tid) == "scheduled"
+    assert kwc.LOST_EVENT not in _kinds(board, tid)
+    assert len(_ignored(board, tid)) == 1                              # one note, not one per sweep
+
+
 def test_an_implied_wake_on_a_stale_copy_of_a_completed_card_does_nothing(board):
     """A ``scheduled`` row with no park event (``_enforce_wake_invariant``'s implied wake)."""
     tid = kb.create_task(board, title="t", assignee="worker")
