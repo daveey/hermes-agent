@@ -456,28 +456,60 @@ const rowHasBackgroundWork = (row: RowActivity): boolean =>
   (row.kanban_blocked ?? 0) > 0 ||
   (row.background_active ?? 0) > 0
 
-/** [daveey] Whether a `background` dot must say its work's status is unknown instead of "running". The claim itself
- *  stays (unknown must never read as done); only the words change. True when nothing positively runs (no process,
- *  subagent, goal or current running/queued execution) and the claim rests on unknown or unfresh evidence: a failed or
- *  stale kanban read, an expired/absent observation, or work whose execution evidence is unknown. `liveElsewhere` is
- *  the store's own running evidence for the row (a renderer-polled process, async subagents). Rows held only by known
- *  waiting or blocked work keep the existing label. */
-export const backgroundDotUnknown = (row: RowActivity, liveElsewhere = false, nowSeconds: number = Date.now() / 1000): boolean => {
+/** [daveey] What a `background` dot's label may claim about its work. */
+export type BackgroundDotLabel = 'running' | 'unknown' | 'waiting'
+
+/** [daveey] The words on a `background` dot. The claim itself stays (unknown or parked work must never read as done);
+ *  only the label follows the evidence:
+ *  - `running` when something positively runs: a process (renderer-polled or backend `background_active`), async
+ *    subagents, a goal, or current running/queued execution. `liveElsewhere` is the store's own running evidence for
+ *    the row (a renderer-polled process, async subagents).
+ *  - `unknown` when nothing runs and the claim rests on unknown or unfresh evidence: a failed or stale kanban read, an
+ *    expired/absent observation, or work whose execution evidence is unknown.
+ *  - `waiting` when the only open work is known waiting on a fresh read: parked or held cards, or current waiting
+ *    observations, with no unparked card, blocked card, needs-you entry or outstanding ask.
+ *  Anything else (blocked or needs-you work) keeps the existing `running` label. */
+export const backgroundDotLabel = (
+  row: RowActivity,
+  liveElsewhere = false,
+  nowSeconds: number = Date.now() / 1000
+): BackgroundDotLabel => {
   if (liveElsewhere || row.goal_active === true || (row.background_active ?? 0) > 0) {
-    return false
+    return 'running'
   }
 
   const exec = rowExecution(row, nowSeconds)
 
   if ((exec?.live ?? 0) > 0) {
-    return false
+    return 'running'
   }
 
+  if (rowEvidenceUnknown(row, exec)) {
+    return 'unknown'
+  }
+
+  return rowOnlyWaiting(row, exec) ? 'waiting' : 'running'
+}
+
+/** [daveey] The claim rests on unknown or unfresh evidence: a failed or stale kanban read, an expired/absent
+ *  observation, or work whose execution evidence is unknown. */
+const rowEvidenceUnknown = (row: RowActivity, exec: ReturnType<typeof rowExecution>): boolean =>
+  row.kanban_unknown === true ||
+  (row.kanban_remote_stale ?? 0) > 0 ||
+  !hasFreshKanbanObservation(row) ||
+  (exec?.unknown ?? 0) > 0
+
+/** [daveey] The only open work is known waiting: parked/held cards or current waiting observations, and no unparked
+ *  card, blocked card, needs-you entry or outstanding ask. */
+const rowOnlyWaiting = (row: RowActivity, exec: ReturnType<typeof rowExecution>): boolean => {
+  const parked = row.kanban_parked === undefined ? 0 : row.kanban_parked + (row.kanban_held ?? 0)
+
   return (
-    row.kanban_unknown === true ||
-    (row.kanban_remote_stale ?? 0) > 0 ||
-    !hasFreshKanbanObservation(row) ||
-    (exec?.unknown ?? 0) > 0
+    parked + (exec?.waiting ?? 0) > 0 &&
+    liveKanbanCount(row) === 0 &&
+    (row.kanban_blocked ?? 0) === 0 &&
+    (exec?.needsUser ?? 0) === 0 &&
+    (exec?.outstanding ?? 0) === 0
   )
 }
 

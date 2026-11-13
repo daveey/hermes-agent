@@ -3717,6 +3717,7 @@ export const deOverrides = {
     toolCallCount: count => `${count} ${count === 1 ? 'Tool-Aufruf' : 'Tool-Aufrufe'}`,
     row: {
       backgroundUnknown: 'Offene Arbeit, aktueller Status unbekannt',
+      backgroundWaiting: 'Offene Arbeit, wartet',
       kanbanUnknown: count => `${count} Arbeitseinträge mit unbekanntem aktuellem Status: Nachweise fehlen, sind abgelaufen oder nicht verifiziert. Das bedeutet nicht erledigt; es wurde keine neue Prüfung angefordert.`,
       pausedQueue: 'Eine vor einem Neustart eingereihte Nachricht wurde womöglich nicht ausgeführt: erneut senden oder verwerfen',
       pin: 'Anpinnen',

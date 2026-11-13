@@ -1,3 +1,5 @@
+import { computed } from 'nanostores'
+
 import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -109,6 +111,22 @@ export function rowExecution(row: Partial<Stamped> | undefined, nowSeconds: numb
     waiting: counts.waiting
   }
 }
+
+/** [daveey] `rowExecution`'s only read of `$sessionStates` is each runtime's stored id. That store is republished per
+ *  streaming token; this key changes only when a runtime binds to (or leaves) a stored session. */
+const $runtimeBindings = computed($sessionStates, states =>
+  Object.entries(states).map(([runtime, state]) => `${runtime}=${state?.storedSessionId ?? ''}`).join('\n')
+)
+
+/** [daveey] Every store `rowExecution` reads. A hook that evaluates it for a render must subscribe to all of them
+ *  (`useStoresSelector`), or its verdict lags until some unrelated store happens to notify. */
+export const ROW_EXECUTION_STORES = [
+  $liveWorkRoster,
+  $backgroundStatusBySession,
+  $subagentsBySession,
+  $runtimeBindings,
+  $sessions
+] as const
 
 /** Evidence that keeps a row off done: live/waiting/needs-you work, an outstanding ask, or unresolved uncertainty. */
 export const executionHoldsRow = (e: null | RowExecution): boolean =>

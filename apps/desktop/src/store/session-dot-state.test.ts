@@ -27,7 +27,7 @@ import {
   $kanbanUnseenSessionIds,
   $sessionDotStateById,
   $unreadSessionCount,
-  backgroundDotUnknown,
+  backgroundDotLabel,
   hasLiveTurn,
   kanbanStripeCounts,
   markSessionListRefreshReason,
@@ -701,9 +701,22 @@ describe('withRowActivity', () => {
 })
 
 // [daveey] The background dot keeps its claim on unknown work, but its label must not assert "running".
-describe('backgroundDotUnknown', () => {
+describe('backgroundDotLabel', () => {
   const fresh = () => ({ kanban_observed_at: Date.now() / 1000 })
   const unknownObs = { source: 'unavailable.work' }
+
+  const live = () => {
+    const now = Date.now() / 1000
+
+    return { ...fixture.base, observed_at: now, valid_until: now + 120 }
+  }
+
+  // [daveey] A fresh dependency wait (the fixture's `dependency` case) under its own card identity.
+  const waitingObs = () => ({
+    ...live(),
+    ...fixture.cases.find(c => c.id === 'dependency')!.set,
+    identity: { ...fixture.base.identity, work_id: 'task-waiting' }
+  })
 
   it('is unknown when the claim rests only on unknown or unfresh evidence', () => {
     const rows = [
@@ -712,29 +725,49 @@ describe('backgroundDotUnknown', () => {
       { kanban_observed_at: undefined },
       { ...fresh(), execution_observations: [unknownObs], kanban_active: 1, kanban_parked: 1 },
       // An older backend's unparked cards are discovered as unknown, never as certain running.
-      { ...fresh(), kanban_active: 1 }
+      { ...fresh(), kanban_active: 1 },
+      // A known wait beside unknown work does not vouch for the rest.
+      { ...fresh(), execution_observations: [waitingObs(), unknownObs], kanban_active: 2, kanban_parked: 2 }
     ]
 
     for (const row of rows) {
       expect(withRowActivity('idle', row as never)).toBe('background')
-      expect(backgroundDotUnknown(row as never)).toBe(true)
+      expect(backgroundDotLabel(row as never)).toBe('unknown')
     }
   })
 
   it('says running when a process, subagent, goal or running card exists', () => {
-    const now = Date.now() / 1000
-    const running = { ...fixture.base, observed_at: now, valid_until: now + 120 }
-
-    expect(backgroundDotUnknown({ kanban_unknown: true, background_active: 1 })).toBe(false)
-    expect(backgroundDotUnknown({ kanban_unknown: true, goal_active: true })).toBe(false)
-    expect(backgroundDotUnknown({ kanban_unknown: true }, true)).toBe(false)
+    expect(backgroundDotLabel({ kanban_unknown: true, background_active: 1 })).toBe('running')
+    expect(backgroundDotLabel({ kanban_unknown: true, goal_active: true })).toBe('running')
+    expect(backgroundDotLabel({ kanban_unknown: true }, true)).toBe('running')
     expect(
-      backgroundDotUnknown({ ...fresh(), execution_observations: [running, unknownObs], kanban_active: 2 } as never)
-    ).toBe(false)
+      backgroundDotLabel({ ...fresh(), execution_observations: [live(), unknownObs], kanban_active: 2 } as never)
+    ).toBe('running')
+    expect(
+      backgroundDotLabel({ ...fresh(), execution_observations: [live(), waitingObs()], kanban_active: 2, kanban_parked: 1 } as never)
+    ).toBe('running')
   })
 
-  it('keeps the existing label for known waiting or blocked work', () => {
-    expect(backgroundDotUnknown({ ...fresh(), kanban_active: 0, kanban_blocked: 1 })).toBe(false)
+  it('says waiting when the only open work is known waiting (fresh, all parked)', () => {
+    const rows = [
+      { ...fresh(), execution_observations: [waitingObs()], kanban_active: 1, kanban_parked: 1 },
+      { ...fresh(), execution_observations: [], kanban_active: 2, kanban_parked: 2 },
+      { ...fresh(), execution_observations: [], kanban_active: 2, kanban_held: 1, kanban_parked: 1 }
+    ]
+
+    for (const row of rows) {
+      expect(backgroundDotLabel(row as never)).toBe('waiting')
+    }
+  })
+
+  it('keeps the running label for blocked or unparked work (not a known wait)', () => {
+    expect(backgroundDotLabel({ ...fresh(), kanban_active: 0, kanban_blocked: 1 })).toBe('running')
+    expect(
+      backgroundDotLabel({ ...fresh(), execution_observations: [], kanban_active: 2, kanban_blocked: 1, kanban_parked: 2 } as never)
+    ).toBe('running')
+    expect(
+      backgroundDotLabel({ ...fresh(), execution_observations: [waitingObs()], kanban_active: 2, kanban_parked: 1 } as never)
+    ).toBe('running')
   })
 })
 

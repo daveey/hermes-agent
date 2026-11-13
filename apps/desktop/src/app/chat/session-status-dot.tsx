@@ -3,10 +3,10 @@ import { useStore } from '@nanostores/react'
 import { type Translations, useI18n } from '@/i18n'
 import { unreadDotOutcomeLabel, unreadDotOutcomeStripe } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
-import { useBackgroundDotUnknown, useSessionDotState } from '@/lib/use-session-dot-state'
+import { useBackgroundDotLabel, useSessionDotState } from '@/lib/use-session-dot-state'
 import { cn } from '@/lib/utils'
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
-import type { SessionDotState } from '@/store/session-dot-state'
+import type { BackgroundDotLabel, SessionDotState } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 import type { SessionOutcome } from '@/types/session-outcome'
 
@@ -99,15 +99,18 @@ export const sessionDotClassName = (state: SessionDotState): string => DOT_VARIA
  *  outcome that is waiting / running / unresolved / decision / muted repaints the unread dot in that outcome's stripe
  *  colour (still filled, so it still reads as new), because users read emerald as done. Every other state ignores
  *  the outcome: the live-turn states already outrank it, and idle keeps the project colour.
- *  [daveey] `backgroundUnknown`: the `background` claim rests only on unknown or unfresh work evidence, so the same
- *  hollow dot says the status is unknown rather than asserting "running". */
+ *  [daveey] `backgroundLabel`: what the `background` claim rests on. `unknown` (only unknown or unfresh work evidence)
+ *  and `waiting` (only known waiting work) keep the same hollow dot but say so rather than asserting "running". */
 export const sessionDotVariant = (
   state: SessionDotState,
   outcome?: null | SessionOutcome,
-  backgroundUnknown = false
+  backgroundLabel: BackgroundDotLabel = 'running'
 ): DotVariant => {
-  if (state === 'background' && backgroundUnknown) {
-    return { ...DOT_VARIANTS.background, ariaLabel: r => r.backgroundUnknown, title: r => r.backgroundUnknown }
+  if (state === 'background' && backgroundLabel !== 'running') {
+    const label = (r: Translations['sidebar']['row']) =>
+      backgroundLabel === 'unknown' ? r.backgroundUnknown : r.backgroundWaiting
+
+    return { ...DOT_VARIANTS.background, ariaLabel: label, title: label }
   }
 
   const stripe = state === 'unread' ? unreadDotOutcomeStripe(outcome) : null
@@ -166,9 +169,9 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.
   const dotState = useSessionDotState(storedSessionId, session)
-  const backgroundUnknown = useBackgroundDotUnknown(storedSessionId, session, dotState)
+  const backgroundLabel = useBackgroundDotLabel(storedSessionId, session, dotState)
 
-  const variant = sessionDotVariant(dotState, session?.outcome, backgroundUnknown)
+  const variant = sessionDotVariant(dotState, session?.outcome, backgroundLabel)
 
   return (
     <span className={cn('flex items-center gap-0.5', className)}>

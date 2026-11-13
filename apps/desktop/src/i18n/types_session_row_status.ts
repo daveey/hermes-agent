@@ -22,6 +22,8 @@ export interface SessionRowStatusCopy {
   backgroundProcesses: (count: number) => string
   /** [daveey] The hollow background dot when its only open work has unknown or unfresh status (never "running"). */
   backgroundUnknown: string
+  /** [daveey] The hollow background dot when its only open work is known waiting (parked, held or a fresh wait). */
+  backgroundWaiting: string
   backgroundProcessUnnamed: string
   stopProcess: string
   stoppingProcess: string

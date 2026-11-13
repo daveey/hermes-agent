@@ -48,6 +48,7 @@ export const enSessionRowStatus = {
   muteFailed: 'Could not update the parked state',
   backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
   backgroundUnknown: 'Open work, current status unknown',
+  backgroundWaiting: 'Open work, waiting',
   backgroundProcessUnnamed: 'background process',
   stopProcess: 'Stop',
   stoppingProcess: 'Stopping…'
