@@ -251,7 +251,8 @@ def test_wake_runs_off_the_sweeper_thread_and_a_failed_one_writes_the_row_there(
     assert seen == [CHAT] and len(_notices(db)) == 1 and tid in _notices(db)[0]["content"]
 
 
-def test_no_free_wake_slot_writes_the_row_now(db, monkeypatch):
+def test_an_overdue_notice_with_no_free_wake_slot_writes_the_row_now(db, monkeypatch):
+    # LATER is an hour after the event, past OVERDUE_S: a younger one waits for a slot (test_kanban_unloaded_host_lease)
     monkeypatch.setattr(ku, "_wake_slots", ku.threading.BoundedSemaphore(1))
     assert ku._wake_slots.acquire(blocking=False)  # another chat's wake holds the only slot
     try:

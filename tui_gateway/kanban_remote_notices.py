@@ -1227,10 +1227,12 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
             if waiting:  # another consumer holds it in flight: name it, once
                 _note_wait(sid, ref, state, waiting)
             return
+        extra = {"defer": lambda: release(claim, ledger=ledger)} if getattr(waker, "supports_defer", False) else {}
         result = waker.deliver(
             tip, text, metadata, task, now or time.time(),
             persist=lambda: _persist_claimed(session_db, profile, sid, text, metadata, claim, memo_key, ledger),
-            started=lambda: _settle_started(session_db, profile, sid, event_key, claim, memo_key, ledger))
+            started=lambda: _settle_started(session_db, profile, sid, event_key, claim, memo_key, ledger),
+            **extra)
         delivered.append({"task_id": task["id"], "session_id": tip, "wake": result})
     except Exception:
         logger.debug("remote Kanban notice deferred for %s/%s", owner, key, exc_info=True)

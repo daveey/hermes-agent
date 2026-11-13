@@ -11,13 +11,15 @@ Session-outcome contract, "Fan-out" and "Stale notices":
   card's id joins ``display_metadata.stale_tasks``; a row about several cards is stale once all of them moved on.
 - :func:`card_change_pass` (run from the unloaded sweeper's loop, every backend) reads each board's new status
   events since the last pass and, for every chat linked to a changed card, marks those notices and refreshes the
-  chat's stored outcome (trigger ``card_change``). The first pass of a process only seeds its cursor; the other
-  refresh points (turn end, notice write, reap) cover what changed while no backend ran. Every step is
-  idempotent, so two backends running the pass at once write the same result.
+  chat's stored outcome (trigger ``card_change``). The cursors are host-durable (``notice_fanout_state``), so the
+  pass resumes where the last process stopped when the host loop lease moves it (design t_01a1d45d75851804 R3);
+  only the install's very first pass seeds them. Every step is idempotent, so two backends running the pass at
+  once (lease off) write the same result.
 - Remote links have no local events. Each pass also snapshots the shared remote-card projection by chat and
-  (owner-qualified key, status). The first successful read seeds it; additions, removals and status changes
-  refresh the affected chats once each. A failed read preserves the previous snapshot. This refresh does not
-  synthesize notices or change their stale metadata; normal remote notice delivery owns those rows.
+  (owner-qualified key, status), durably like the cursors. The first successful read ever seeds it; additions,
+  removals and status changes refresh the affected chats once each. A failed read preserves the previous
+  snapshot. This refresh does not synthesize notices or change their stale metadata; normal remote notice
+  delivery owns those rows.
 """
 
 from __future__ import annotations
@@ -43,14 +45,11 @@ STATUS_EVENT_KINDS = (
 MAX_EVENTS_PER_PASS = 2000
 _BLOCKED_LINE = re.compile(r"Kanban (t_[0-9A-Za-z_]+) blocked")
 _TASK_ID = re.compile(r"Kanban (t_[0-9A-Za-z_]+)")
-_cursors: dict[str, int] = {}
-_remote_snapshot: Optional[dict[str, frozenset[tuple[str, str]]]] = None
 
 
 def _reset_for_tests() -> None:
-    global _remote_snapshot
-    _cursors.clear()
-    _remote_snapshot = None
+    from tui_gateway import notice_fanout_state
+    notice_fanout_state.reset_for_tests()
 
 
 def chat_skip_reason(db: Any, chat_id: str) -> Optional[str]:
@@ -157,9 +156,11 @@ def _linked_chats(conn: sqlite3.Connection, task_id: str, created_by: Optional[s
 
 
 def _changed_tasks(conn: sqlite3.Connection, ident: str) -> list[str]:
+    from tui_gateway import notice_fanout_state as state
     top = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
-    since = _cursors.get(ident)
-    _cursors[ident] = top
+    since = state.get_cursor(ident)
+    if since != top:
+        state.set_cursor(ident, top)
     if since is None or top <= since:
         return []
     kinds = ",".join("?" * len(STATUS_EVENT_KINDS))
@@ -199,7 +200,7 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
     """Observe the same remote projection as outcomes; failed reads never mean cards finished."""
     from hermes_cli import kanban_session_activity as activity
     from hermes_state_outcome import refresh_outcomes_quietly
-    global _remote_snapshot
+    from tui_gateway import notice_fanout_state as state
     current: dict[str, set[tuple[str, str]]] = {}
     for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=True):
         status = card.get("status")
@@ -208,11 +209,12 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
         for chat in {card.get("session"), card.get("origin_session")} - {None, ""}:
             current.setdefault(chat, set()).add((card["key"], status))
     snapshot = {chat: frozenset(cards) for chat, cards in current.items()}
-    previous = _remote_snapshot
+    previous = state.load_remote()
     if previous is None:
-        _remote_snapshot = snapshot
+        state.seed_remote(snapshot)
         return []
     out = []
+    acked: dict[str, Optional[frozenset[tuple[str, str]]]] = {}
     for chat in sorted(previous.keys() | snapshot.keys()):
         if previous.get(chat) == snapshot.get(chat):
             continue
@@ -227,12 +229,10 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
             logger.warning("remote card-change outcome failed for chat %s", chat, exc_info=True)
             continue
         # Acknowledge only a successful refresh or an intentionally skipped chat.
-        if chat in snapshot:
-            previous[chat] = snapshot[chat]
-        else:
-            previous.pop(chat, None)
+        acked[chat] = snapshot.get(chat)
         out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
                     "status": None, "skipped": skipped, "source": "remote"})
+    state.ack_remote(acked)
     return out
 
 

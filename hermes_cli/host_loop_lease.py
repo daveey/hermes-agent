@@ -87,6 +87,28 @@ def lease_dir(home: str | Path | None = None) -> Path:
     return Path(os.path.realpath(get_default_hermes_root(home=home))) / "run" / "host-loops"
 
 
+def process_role() -> str:
+    """This process's lease priority role: ``gateway`` (the messaging gateway, which mounts the web app too),
+    ``serve`` (a Desktop backend, local or over SSH, and the stdio TUI gateway), else ``dashboard`` (an
+    always-on ``hermes dashboard``). Read when a loop creates its lease, after the process marked its kind."""
+    try:
+        from hermes_cli.observability.shared_metrics_process import current_process_kind
+        kind = current_process_kind()
+    except ImportError:
+        kind = "other"
+    if kind == "gateway":
+        return "gateway"
+    if kind in ("serve", "tui"):
+        return "serve"
+    try:
+        from hermes_cli.process_identity import is_desktop_owned_backend
+        if is_desktop_owned_backend():
+            return "serve"
+    except ImportError:
+        pass
+    return "dashboard"
+
+
 def _start_of(pid: int):
     try:
         from gateway.status import _get_process_start_time

@@ -1,0 +1,190 @@
+"""Host-durable cursors of ``notice_fanout.card_change_pass``. [daveey]
+
+The card-change pass keeps, per board, the last ``task_events`` id it read and, for remote cards, the last
+``chat -> {(owner-qualified key, status)}`` snapshot. In memory, a new process's first pass could only seed them, so
+the changes of one interval were never fanned out. Under the host loop lease (design t_01a1d45d75851804 §2b, R3) the
+pass moves between processes on every hand-off (gateway restart, a Desktop backend taking over), so each hand-off
+would drop an interval. Both now live in ``<kanban home>/kanban/notice-fanout.db``, shared by every process of the
+install; the next holder resumes where the last one stopped.
+
+Writes are last-writer-wins: with the lease off every process runs the pass, and two passes over the same
+interval write the same (idempotent) refreshes. A store that cannot be opened (read-only home, disk error) falls
+back to this process's memory, which is the behaviour before this file existed. Never raises.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Iterator, Optional
+
+logger = logging.getLogger(__name__)
+
+FILENAME = "notice-fanout.db"
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cursors (ident TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS remote_snapshot (chat TEXT PRIMARY KEY, cards TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+"""
+_SEEDED = "remote_seeded"
+
+_mu = threading.Lock()
+# Fallback when the durable store is unavailable (per path, so a test home or HERMES_KANBAN_HOME switch is apart).
+_memory: dict[str, dict] = {}
+_warned: set[str] = set()
+
+Snapshot = dict[str, frozenset[tuple[str, str]]]
+
+
+def path() -> Path:
+    from hermes_cli.kanban_db import kanban_home
+    return kanban_home() / "kanban" / FILENAME
+
+
+def _mem(where: Path) -> dict:
+    return _memory.setdefault(str(where), {"cursors": {}, "remote": None})
+
+
+@contextlib.contextmanager
+def _open() -> Iterator[Optional[sqlite3.Connection]]:
+    where = path()
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        where.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(where), timeout=5.0, isolation_level=None)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(_SCHEMA)
+    except (OSError, sqlite3.Error) as exc:
+        if conn is not None:
+            conn.close()
+            conn = None
+        _warn_once(where, exc)
+    try:
+        yield conn
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _warn_once(where: Path, exc: BaseException) -> None:
+    if str(where) not in _warned:
+        _warned.add(str(where))
+        logger.warning("notice fan-out: %s unavailable (%s); keeping its cursors in this process's memory",
+                       where, exc)
+
+
+def get_cursor(ident: str) -> Optional[int]:
+    with _mu, _open() as conn:
+        if conn is None:
+            return _mem(path())["cursors"].get(ident)
+        try:
+            row = conn.execute("SELECT cursor FROM cursors WHERE ident = ?", (ident,)).fetchone()
+        except sqlite3.Error as exc:
+            _warn_once(path(), exc)
+            return _mem(path())["cursors"].get(ident)
+        return int(row[0]) if row else None
+
+
+def set_cursor(ident: str, cursor: int) -> None:
+    with _mu, _open() as conn:
+        _mem(path())["cursors"][ident] = int(cursor)
+        if conn is None:
+            return
+        try:
+            conn.execute("INSERT INTO cursors (ident, cursor) VALUES (?, ?) "
+                         "ON CONFLICT(ident) DO UPDATE SET cursor = excluded.cursor", (ident, int(cursor)))
+        except sqlite3.Error as exc:
+            _warn_once(path(), exc)
+
+
+def _decode(raw: str) -> frozenset[tuple[str, str]]:
+    try:
+        return frozenset((str(k), str(s)) for k, s in json.loads(raw))
+    except (TypeError, ValueError):
+        return frozenset()
+
+
+def _encode(cards: frozenset[tuple[str, str]]) -> str:
+    return json.dumps(sorted(cards))
+
+
+def load_remote() -> Optional[Snapshot]:
+    """The last remote snapshot, or None when no pass has seeded one yet."""
+    with _mu, _open() as conn:
+        if conn is None:
+            return _mem(path())["remote"]
+        try:
+            if conn.execute("SELECT 1 FROM meta WHERE k = ?", (_SEEDED,)).fetchone() is None:
+                return None
+            return {str(chat): _decode(cards) for chat, cards in conn.execute("SELECT chat, cards FROM remote_snapshot")}
+        except sqlite3.Error as exc:
+            _warn_once(path(), exc)
+            return _mem(path())["remote"]
+
+
+def seed_remote(snapshot: Snapshot) -> None:
+    """Replace the whole snapshot (first pass)."""
+    with _mu, _open() as conn:
+        _mem(path())["remote"] = dict(snapshot)
+        if conn is None:
+            return
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM remote_snapshot")
+            conn.executemany("INSERT INTO remote_snapshot (chat, cards) VALUES (?, ?)",
+                             [(chat, _encode(cards)) for chat, cards in snapshot.items()])
+            conn.execute("INSERT OR REPLACE INTO meta (k, v) VALUES (?, '1')", (_SEEDED,))
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            _warn_once(path(), exc)
+
+
+def ack_remote(acked: dict[str, Optional[frozenset[tuple[str, str]]]]) -> None:
+    """Record the chats a pass refreshed (or skipped on purpose): their new cards, or None when they have none."""
+    if not acked:
+        return
+    with _mu, _open() as conn:
+        mem = _mem(path())
+        if mem["remote"] is not None:
+            for chat, cards in acked.items():
+                if cards is None:
+                    mem["remote"].pop(chat, None)
+                else:
+                    mem["remote"][chat] = cards
+        if conn is None:
+            return
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for chat, cards in acked.items():
+                if cards is None:
+                    conn.execute("DELETE FROM remote_snapshot WHERE chat = ?", (chat,))
+                else:
+                    conn.execute("INSERT OR REPLACE INTO remote_snapshot (chat, cards) VALUES (?, ?)",
+                                 (chat, _encode(cards)))
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            _warn_once(path(), exc)
+
+
+def forget_memory_for_tests() -> None:
+    """Drop this process's memory only (a hand-off to a fresh process keeps the durable state)."""
+    with _mu:
+        _memory.clear()
+
+
+def reset_for_tests() -> None:
+    """Drop both this process's memory and the durable state at the current path."""
+    with _mu:
+        _memory.clear()
+        _warned.clear()
+        with contextlib.suppress(OSError):
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(path()) + suffix).unlink(missing_ok=True)

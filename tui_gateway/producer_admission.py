@@ -218,14 +218,35 @@ def _sweep_owner(server, db, profile: Optional[str], owner: str) -> dict:
     return {**record, "verdict": deliver_pending(sid, session)}
 
 
+LEASE_NAME = "producer-admission"
+
+
+def run_pass(lease) -> bool:
+    """One tick: the cold-chat sweep only while this process holds the ``producer-admission`` host loop lease
+    (design t_01a1d45d75851804 §2b; ``HERMES_HOST_LOOP_LEASE=0`` = every process). The per-chat poller's
+    ``deliver_pending`` is unchanged. True when the sweep ran."""
+    if not lease.held():
+        return False
+    try:
+        sweep_once()
+    finally:
+        lease.beat()
+    return True
+
+
 def _loop(stop: threading.Event) -> None:
+    from hermes_cli.host_loop_lease import HostLoopLease, process_role
+    lease = HostLoopLease(LEASE_NAME, process_role(), interval=INTERVAL_S)
     stop.wait(INTERVAL_S)
-    while not stop.is_set():
-        try:
-            sweep_once()
-        except Exception:
-            logger.warning("producer admission sweep failed", exc_info=True)
-        stop.wait(INTERVAL_S)
+    try:
+        while not stop.is_set():
+            try:
+                run_pass(lease)
+            except Exception:
+                logger.warning("producer admission sweep failed", exc_info=True)
+            stop.wait(INTERVAL_S)
+    finally:
+        lease.release()
 
 
 def start_producer_admission_sweeper() -> Optional[threading.Event]:

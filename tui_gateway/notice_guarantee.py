@@ -32,7 +32,9 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
 
 Ownership follows the unloaded sweeper's: a chat another live backend holds is that backend's (its own pass
 handles it); a chat with a live turn is skipped. The close-out prompt row is itself a notice, stamped as claimed,
-so a close-out never wakes another one.
+so a close-out never wakes another one. Under the host loop lease (``kanban_unloaded``, design t_01a1d45d75851804
+§2b) the full pass runs in the lease holder only; every other backend runs it with ``only=`` its own live session
+ids (an indexed lookup of those chats, not a scan), so a chat live there is still closed out by it.
 
 A notice about a card on another gateway (``gateway`` in its metadata, or only ``remote:`` event keys) is judged
 by the ``blocked_on_human`` flag its writer stored, never by a local board lookup: its ``board`` is the owner's.
@@ -55,6 +57,8 @@ import threading
 import time
 from typing import Any, Callable, Iterator, Optional
 
+from tui_gateway.wake_slots import WakeSlots
+
 logger = logging.getLogger(__name__)
 
 GRACE_S = 300.0
@@ -74,7 +78,7 @@ CLOSEOUT_TEXT = (
     "what the card delivered or why it stopped, fix or follow up on anything an agent can, then end with a short "
     "summary for the user, the decision you need from them, or what you are still waiting on.")
 CLOSEOUT_DISPLAY = "Close-out turn for the Kanban notice above"
-_wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
+_wake_slots = WakeSlots(MAX_PARALLEL_WAKES)
 # (store path, session id, notice row id, branch) this backend already refreshed. Pruned to the current
 # candidates after every pass, so it holds at most one pass's candidates.
 _refreshed: set[tuple[str, str, int, str]] = set()
@@ -101,12 +105,20 @@ SELECT COUNT(*) FROM messages WHERE session_id IN (SELECT id FROM lineage) AND d
 """
 
 
-def candidates(db: Any, now: float) -> list[dict]:
-    """Chats in ``db`` whose last active message is a kanban notice older than ``GRACE_S`` and not yet claimed."""
+def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dict]:
+    """Chats in ``db`` whose last active message is a kanban notice older than ``GRACE_S`` and not yet claimed;
+    with ``only``, just those session ids (a non-holder's residual pass)."""
     from hermes_state_common import _sql_session_last_active
     from tui_gateway.notice_candidates import rows as candidate_rows
     from tui_gateway.notice_fanout import _decode
-    rows = candidate_rows(db, _CANDIDATES_SQL.format(last_active=_sql_session_last_active("s")))
+    sql = _CANDIDATES_SQL.format(last_active=_sql_session_last_active("s"))
+    if only is not None:
+        ids = sorted(only)
+        if not ids:
+            return []
+        rows = db._read_all(sql + f" AND s.id IN ({','.join('?' * len(ids))})", tuple(ids))
+    else:
+        rows = candidate_rows(db, sql)
     out = []
     for row in rows:
         # Cache structure, not age: a notice can become due (or expire) without a commit.
@@ -426,8 +438,10 @@ def _stores() -> Iterator[Any]:
 
 def guarantee_pass(*, now: Optional[float] = None, stores: Callable[[], Iterator[Any]] = _stores,
                    holders: Optional[Callable[[], list]] = None, session_db: Optional[Callable] = None,
-                   wake: Callable[[str, int], str] = _wake, spawn: Callable[[Callable], Any] = _spawn) -> list[dict]:
-    """One pass over every store (see module doc). Returns ``[{session_id, msg_id, result}]``. Never raises."""
+                   wake: Callable[[str, int], str] = _wake, spawn: Callable[[Callable], Any] = _spawn,
+                   only: Optional[set[str]] = None) -> list[dict]:
+    """One pass over every store (see module doc). Returns ``[{session_id, msg_id, result}]``. Never raises.
+    ``only``: just these live session ids (a non-holder's residual pass; the refresh memo is left alone)."""
     from tui_gateway import kanban_unloaded as ku
     now = time.time() if now is None else now
     holders = holders or ku.registry_holders
@@ -436,7 +450,7 @@ def guarantee_pass(*, now: Optional[float] = None, stores: Callable[[], Iterator
     seen: set = set()
     try:
         for db in stores():
-            for cand in candidates(db, now):
+            for cand in candidates(db, now, only):
                 try:
                     result = _handle(db, cand, now, holders=holders, session_db=session_db, wake=wake, spawn=spawn,
                                      seen=seen)
@@ -447,5 +461,6 @@ def guarantee_pass(*, now: Optional[float] = None, stores: Callable[[], Iterator
     except Exception:
         logger.warning("notice guarantee pass failed", exc_info=True)
         return out  # an incomplete pass keeps every memo entry
-    _refreshed.intersection_update(seen)
+    if only is None:
+        _refreshed.intersection_update(seen)
     return out
