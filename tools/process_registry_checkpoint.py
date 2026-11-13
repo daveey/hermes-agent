@@ -48,6 +48,12 @@ class ProcessCheckpointMixin:
         """Write running process metadata to the checkpoint file atomically. ``settled_id``: a job whose
         result was just recorded, dropped from every other profile's checkpoint too (after this one's
         lock is released), so no profile re-attaches it at a restart. [daveey]"""
+        from tools.environments.sandbox_scope import hosted_scope
+
+        # A hosted caller only changes its own agent's records, which are never persisted here, so
+        # it has no host change to write: it neither takes the lock nor rewrites this host's file.
+        if hosted_scope() is not None:
+            return
         try:
             with self._checkpoint_file_lock():
                 self._write_checkpoint_locked(extra_entries)
@@ -171,7 +177,9 @@ class ProcessCheckpointMixin:
             own_ids = set(self._running) | set(self._finished) | set(drop_ids) | {s.id for s in held}
             entries = []
             for s in (*self._running.values(), *held):
-                if s.exited:
+                # A hosted agent's process is not this host's to persist: its record (command,
+                # cwd, owner) stays in memory, whoever triggers the write (scoped or not).
+                if s.exited or s.sandbox_key:
                     continue
                 # One registry serves every profile of a multiplexed gateway: a job goes only in its own
                 # profile's checkpoint, or every other profile re-attaches it after it finished. [daveey]
@@ -481,5 +489,5 @@ class ProcessCheckpointMixin:
         fields.update(
             command=entry.get("command", "unknown"),
             owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""),
-            started_at=entry.get("started_at", time.time()))
+            started_at=entry.get("started_at", time.time()), sandbox_key=entry.get("sandbox_key", ""))
         return ProcessSession(id=entry["session_id"], detached=True, **fields)

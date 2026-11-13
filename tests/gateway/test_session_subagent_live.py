@@ -26,7 +26,7 @@ def receipt(tmp_path_factory):
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1')
     result = subprocess.run([sys.executable, str(root / 'tests/gateway/fixtures/subagent_live_peer.py')],
-                            cwd=root, env=env, capture_output=True, text=True, timeout=150, check=False)
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=150, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads((home / 'receipt.json').read_text())
 
@@ -40,7 +40,9 @@ def test_a_running_child_shows_its_rows_so_far(receipt):
         reply = receipt[name]
         assert reply['available'] and reply['running'], (name, reply)
         # The pending tool-call turn has no text, so the display rows hold only the goal until it ends.
-        assert _shown(reply)[0] == ('user', goal) and not any(m['role'] == 'tool' for m in reply['rows']), reply
+        # The fork's private-scratch note follows the goal on a fresh child's first turn. [daveey]
+        role, text = _shown(reply)[0]
+        assert (role, text.split('\n\nPRIVATE SCRATCH: ')[0]) == ('user', goal) and not any(m['role'] == 'tool' for m in reply['rows']), reply
 
 
 def test_the_cursor_then_brings_the_result_and_the_answer(receipt):

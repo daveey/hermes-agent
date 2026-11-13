@@ -72,7 +72,8 @@ async def _deliver_later(tmp_path, monkeypatch, then):
         seen.append(event.text)
         return 'ok'
     monkeypatch.setattr(runner, '_handle_message', turn)
-    await execute_admission(authority, ref, row)
+    from tests.gateway.session_claims import claim
+    await execute_admission(authority, ref, claim(authority, ref, row))
     assert seen, 'the queued wake never ran as a turn'
     return text, seen[0]
 

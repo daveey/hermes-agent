@@ -5,7 +5,7 @@
       "stable": 1829,
       "volatile": 1297
     },
-    "tool_tokens": 10919,
+    "tool_tokens": 10009,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -13,7 +13,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",
@@ -38,7 +37,7 @@
       "stable": 1225,
       "volatile": 1297
     },
-    "tool_tokens": 10919,
+    "tool_tokens": 10009,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -46,7 +45,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",
@@ -71,7 +69,7 @@
       "stable": 1646,
       "volatile": 1296
     },
-    "tool_tokens": 10919,
+    "tool_tokens": 10009,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -79,7 +77,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",
@@ -104,7 +101,7 @@
       "stable": 2420,
       "volatile": 1293
     },
-    "tool_tokens": 11075,
+    "tool_tokens": 10165,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -112,7 +109,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",
@@ -137,7 +133,7 @@
       "stable": 1225,
       "volatile": 1297
     },
-    "tool_tokens": 10919,
+    "tool_tokens": 10009,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -145,7 +141,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",
@@ -170,7 +165,7 @@
       "stable": 1211,
       "volatile": 1297
     },
-    "tool_tokens": 10919,
+    "tool_tokens": 10009,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -178,7 +173,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",
@@ -200,10 +194,10 @@
   "desktop.claude": {
     "prompt_tokens": {
       "context": 0,
-      "stable": 1587,
+      "stable": 1605,
       "volatile": 1298
     },
-    "tool_tokens": 11575,
+    "tool_tokens": 10665,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -211,7 +205,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "react_to_message",
@@ -237,7 +230,7 @@
       "stable": 1244,
       "volatile": 1298
     },
-    "tool_tokens": 10919,
+    "tool_tokens": 10009,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -245,7 +238,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",
@@ -270,7 +262,7 @@
       "stable": 1330,
       "volatile": 1298
     },
-    "tool_tokens": 10919,
+    "tool_tokens": 10009,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -278,7 +270,6 @@
       "clarify",
       "delegate_task",
       "execute_code",
-      "manage_connections",
       "memory",
       "patch",
       "read_file",

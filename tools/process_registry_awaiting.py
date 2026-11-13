@@ -187,6 +187,7 @@ def completion_event(session) -> dict:
     """The completion event a finished notifying session publishes (exit fields and output as recorded now),
     unredacted: redaction runs hooks and may look the session up in the registry, so it must happen outside
     ``registry._lock`` (``publishable``)."""
+    from tools.environments.sandbox_scope import producer_fields
     from tools.process_registry import ProcessRegistry, _completion_output
     return {
         "type": "completion",
@@ -194,6 +195,7 @@ def completion_event(session) -> dict:
         "session_key": session.session_key,
         "task_id": session.task_id,
         "owner_task_id": session.owner_task_id,
+        **producer_fields(session.sandbox_key),
         "command": session.command,
         **({"handoff_note": session.handoff_note} if session.handoff_note else {}),
         **ProcessRegistry._exit_fields(session),

@@ -18,7 +18,8 @@ _active_subagents_lock = threading.Lock()
 # subagent_id -> mutable record tracking the live child agent.  Stays only
 # for the lifetime of the run; _run_single_child is the owner.
 _active_subagents: dict[str, dict[str, Any]] = {}
-# subagent_id -> {goal, delegation_id, owner_agent_session_id} retained AFTER the child finishes (bounded FIFO).
+# subagent_id -> {goal, delegation_id, owner_agent_session_id, resume?} retained AFTER the child finishes (bounded FIFO;
+# ``resume`` is what action='continue' rebuilds a delegate_task child from, see ``_resume_spec``).
 # Child-started background processes routinely outlive the child (its npm ci with notify_on_complete=true finishes
 # after the summary was delivered); their completion notifications reach the parent via the shared completion_queue
 # and need delegation attribution even though the live registry entry is gone.
@@ -68,8 +69,8 @@ def _ancestor_refs(agent: Any, max_hops: int = 8) -> tuple:
         cur = ancestor
     return tuple(refs)
 
-def _unregister_subagent(subagent_id: str, *, agent: Any = None) -> None:
-    """Drop the live record (exact agent identity when given) and keep a bounded attribution stub."""
+def _unregister_subagent(subagent_id: str, *, agent: Any = None, stopping: bool = False) -> Optional[dict[str, Any]]:
+    """Retain attribution and trusted owners; cleanup callers hold readiness at stopping until resources close."""
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
         if record is None or not (agent is None or record.get("agent") is agent):
@@ -78,15 +79,54 @@ def _unregister_subagent(subagent_id: str, *, agent: Any = None) -> None:
         sid = record.get("subagent_id")
         if not sid:
             return
-        stub = {k: record.get(k) for k in ("goal", "delegation_id", "owner_agent_session_id", "parent_id")}
+        retained = {k: record.get(k) for k in ("goal", "delegation_id", "owner_agent_session_id", "parent_id")}
         # [daveey] Enough to answer a late steer/stop/list from the owning conversation: the finish time and weak
         # refs to the child's spawn ancestors (identity ownership without keeping the child or parent alive).
-        stub["subagent_id"] = sid
-        stub["finished_at"] = time.time()
-        stub["ancestor_refs"] = _ancestor_refs(record.get("agent"))
-        _recent_subagents[sid] = stub
+        retained["subagent_id"] = sid
+        retained["finished_at"] = time.time()
+        retained["ancestor_refs"] = _ancestor_refs(record.get("agent"))
+        owners = set()
+        prev = _recent_subagents.get(sid)
+        if prev is not None:
+            owners.update(owner for owner in prev.get("ancestor_owner_session_ids", ()) if owner)
+            if prev.get("owner_agent_session_id"):
+                owners.add(prev["owner_agent_session_id"])
+        cur = record.get("agent")
+        for _ in range(8):
+            ref = getattr(cur, "_delegate_parent_ref", None)
+            cur = ref() if callable(ref) else None
+            if cur is None:
+                break
+            owner_sid = getattr(cur, "session_id", None)
+            if isinstance(owner_sid, str) and owner_sid:
+                owners.add(owner_sid)
+        retained["ancestor_owner_session_ids"] = owners
+        retained["state"] = "stopping" if stopping else "resumable"
+        _recent_subagents[sid] = retained
+        resume = _resume_spec(record)
+        if resume is not None:
+            _recent_subagents[sid]["resume"] = resume
         while len(_recent_subagents) > _RECENT_SUBAGENTS_CAP:
             _recent_subagents.pop(next(iter(_recent_subagents)), None)
+        return retained
+
+
+def _mark_subagent_resumable(subagent_id: str, retained: Optional[dict[str, Any]]) -> None:
+    """Publish readiness only for this cleanup's retained generation, never a replacement run."""
+    with _active_subagents_lock:
+        if retained is not None and _recent_subagents.get(subagent_id) is retained:
+            retained["state"] = "resumable"
+
+def _resume_spec(record: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Route, toolsets, goal/context (its system prompt), model and the session holding its transcript: what
+    action='continue' rebuilds a finished child from. None for children delegate_task did not build (no route
+    stamped by ``_build_children``) and for children without a session id."""
+    child = record.get("agent")
+    build = getattr(child, "_delegate_resume", None)
+    session_id = getattr(child, "session_id", None)
+    if not isinstance(build, dict) or "route" not in build or not isinstance(session_id, str) or not session_id:
+        return None
+    return {**build, "session_id": session_id, "model": record.get("model")}
 
 def _close_subagent_steering(subagent_id: str, agent: Any) -> Optional[str]:
     """Atomically close steer acceptance and drain its final durable artifact. ``steer_subagent`` holds the same
@@ -234,7 +274,7 @@ def _owns_subagent_record(record: dict[str, Any], parent_agent: Any) -> bool:
 
     Tier 1: identity — the ``_delegate_parent_ref`` weakref chain reaches
     *parent_agent* (fast path while the parent AIAgent survives the run). Tier 2:
-    durable lineage — the record's ``owner_agent_session_id`` matches the caller's
+    durable lineage — the record's immediate or retained ancestor owner matches the caller's
     ``session_id`` after resolving compression-rotation lineage on both sides.
     Tier 2 exists because the identity chain is BRITTLE across parent rebuilds:
     the CLI sets ``self.agent = None`` mid-session (route change, credential
@@ -247,14 +287,17 @@ def _owns_subagent_record(record: dict[str, Any], parent_agent: Any) -> bool:
     # Finished-child stub (``_recent_subagents``): same identity rule over the ancestor weakrefs captured at finish.
     if parent_agent is not None and any(ref() is parent_agent for ref in record.get("ancestor_refs") or ()):
         return True
-    owner_sid = str(record.get("owner_agent_session_id") or "")
+    owners = set(record.get("ancestor_owner_session_ids") or ())
+    owners.add(str(record.get("owner_agent_session_id") or ""))
+    owners.discard("")
     parent_sid = str(getattr(parent_agent, "session_id", "") or "")
-    if not owner_sid or not parent_sid:
+    if not owners or not parent_sid:
         return False
-    if owner_sid == parent_sid:
+    if parent_sid in owners:
         return True
     # Compression rotation on either side: compare lineage tips.
-    return _resolve_session_lineage(owner_sid, parent_agent) in {parent_sid, _resolve_session_lineage(parent_sid, parent_agent)}
+    tips = {parent_sid, _resolve_session_lineage(parent_sid, parent_agent)}
+    return any(_resolve_session_lineage(owner_sid, parent_agent) in tips for owner_sid in owners)
 
 def _list_payload(parent_agent: Any) -> dict[str, Any]:
     with _active_subagents_lock:
@@ -370,7 +413,7 @@ def _handle_control_action(action: str, subagent_id: Optional[str], message: Opt
         return tool_error("action='steer' requires a non-empty 'message' describing the course correction.")
     outcome = _CONTROL_OUTCOMES.get(action)
     if outcome is None:
-        return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, or stop.")
+        return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, stop, or continue.")
     status, note, failure = outcome
     ok = interrupt_subagent(sid) if action == "stop" else steer_subagent(sid, message.strip())
     if ok:
@@ -395,6 +438,6 @@ _CONTROL_OUTCOMES = {
         "never cut. If the child finishes before a delivery boundary remains, the text is reported back as "
         "missed_steer in its completion entry.", "Subagent '{sid}' is no longer accepting steering (finishing or "
         "already finished). Its result arrives as a normal completion "
-        "message; re-delegate a follow-up task if more work is needed.",
+        "message; once it has, action='continue' with this subagent_id gives it a follow-up.",
     ),
 }

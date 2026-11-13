@@ -1,4 +1,4 @@
-"""HX016: a new private API-error predicate on the aux/compressor/turn paths blocks; old ones are grandfathered."""
+"""HX014: a new private API-error predicate on the aux/compressor/turn paths blocks; old ones are grandfathered."""
 
 import ast
 
@@ -22,13 +22,13 @@ _NEW, _AUX = "def _is_quota(exc):\n    return 'quota' in str(exc).lower()\n", "a
     ("def outer(exc):\n    def inner(resp):\n        return resp.status_code\n    return inner\n", False),
 ])
 def test_shapes(src, flagged):
-    assert bool(list(CHECKERS["HX016"](canonical_tree(ast.parse(src)), Ctx()))) is flagged
+    assert bool(list(CHECKERS["HX014"](canonical_tree(ast.parse(src)), Ctx()))) is flagged
 
 
 @pytest.mark.parametrize("path, applies", [(_AUX, True), ("agent/turn_x.py", True), ("agent/run_agent.py", False),
                                            ("agent/context_compressor.py", True), ("tests/agent/turn_x.py", False)])
 def test_scope(path, applies):
-    assert rule_applies(RULES_BY_ID["HX016"], path) is applies
+    assert rule_applies(RULES_BY_ID["HX014"], path) is applies
 
 
 @pytest.mark.parametrize("head, blocks", [({"agent/turn_retry.py": _NEW}, True),

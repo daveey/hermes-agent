@@ -1,6 +1,7 @@
 """A delegated child without git worktree isolation shares its parent's cwd; it
-gets its own private scratch folder, named in its system prompt together with
-the warning that the inherited cwd is SHARED (self-heal agent-c97f5ffde4)."""
+gets its own private scratch folder, named on its goal turn together with the
+warning that the inherited cwd is SHARED (self-heal agent-c97f5ffde4). The system
+prompt is left alone so siblings keep one shared prompt cache."""
 
 import os
 import subprocess
@@ -46,8 +47,10 @@ def test_non_git_children_get_distinct_private_scratch_named_in_prompt(tmp_path,
             assert private and os.path.isdir(private)
             assert Path(private).parent == tmpdir
             assert Path(private).name.startswith(f"subagent-{sid}-")
-            prompt = child.ephemeral_system_prompt
-            assert prompt.startswith(_BASE_PROMPT)
+            assert child.ephemeral_system_prompt == _BASE_PROMPT
+            assert run.goal == "do the thing"
+            prompt = run.private_scratch_note
+            assert prompt.startswith("\n\nPRIVATE SCRATCH: ")
             assert "PRIVATE SCRATCH" in prompt and private in prompt
             assert "SHARED" in prompt and str(shared) in prompt
             # The session cwd stays the parent's: brief paths are relative to it.
@@ -56,8 +59,8 @@ def test_non_git_children_get_distinct_private_scratch_named_in_prompt(tmp_path,
             dirs.append(private)
         assert dirs[0] != dirs[1]
         # Each prompt names only its own private folder.
-        assert dirs[1] not in runs[0][1].ephemeral_system_prompt
-        assert dirs[0] not in runs[1][1].ephemeral_system_prompt
+        assert dirs[1] not in runs[0][0].private_scratch_note
+        assert dirs[0] not in runs[1][0].private_scratch_note
     finally:
         clear_session_cwd("parent-ps-1")
         for run, _ in runs:
@@ -73,8 +76,10 @@ def test_unrecorded_parent_cwd_falls_back_to_workspace_hint(tmp_path, monkeypatc
     run = _ChildRun(child, parent, 0, "goal", "sa-0-eeee5555", None)
     try:
         run.seed_workspace()
-        prompt = child.ephemeral_system_prompt
-        assert prompt.startswith("PRIVATE SCRATCH: ")
+        assert child.ephemeral_system_prompt is None
+        assert run.goal == "goal"
+        prompt = run.private_scratch_note
+        assert prompt.startswith("\n\nPRIVATE SCRATCH: ")
         assert f"Your working directory {hinted} is SHARED" in prompt
     finally:
         clear_session_cwd(run.child_task_id)
@@ -103,6 +108,7 @@ def test_git_isolated_child_gets_no_private_scratch_block(tmp_path, monkeypatch)
         assert run.worktree_info is not None
         assert run.private_scratch is None
         assert child.ephemeral_system_prompt == _BASE_PROMPT
+        assert run.private_scratch_note == ""
         assert list(tmpdir.iterdir()) == []
     finally:
         if run is not None and run.worktree_info is not None:
@@ -124,6 +130,7 @@ def test_non_local_backend_gets_no_host_private_scratch(tmp_path, monkeypatch):
             run, child = _seed("parent-ps-3", "sa-0-dddd4444")
         assert run.private_scratch is None
         assert child.ephemeral_system_prompt == _BASE_PROMPT
+        assert run.private_scratch_note == ""
         assert list(tmpdir.iterdir()) == []
     finally:
         clear_session_cwd("parent-ps-3")

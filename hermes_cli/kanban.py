@@ -41,6 +41,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_notify_identity import _caller_identity_for_target
 from hermes_cli.kanban_cli_metadata import ReceiptEditRefused, parse_metadata_flag as _parse_metadata_flag, receipt_refusal
 from hermes_cli.kanban_cli_park import (
     _REASON_FLAG_HINT, _REASON_WORDS_HINT, _cli_awaiting, _cli_wake_check, _commented, _guarded_park, _ids_error,
@@ -1674,27 +1675,23 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
-    delivery_metadata = {
-        key: value
-        for key, value in (
-            ("parent_chat_id", getattr(args, "parent_chat_id", None)),
-            ("guild_id", getattr(args, "guild_id", None)),
-        )
-        if value
-    }
+    delivery_metadata = {key: value for key, value in (("parent_chat_id", getattr(args, "parent_chat_id", None)),
+                                                       ("guild_id", getattr(args, "guild_id", None))) if value}
     if args.platform in ("tui", "hub"):
         # An explicit subscribe is a shepherd: the chat's sidebar row stays busy until the card
         # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub, never
         # downgrades an owning create/origin sub (add_notify_sub). 'hub' is hermes-hub's shepherd
         # action: stamped so children do not inherit it (_inherit_notify_subs). [daveey]
         delivery_metadata["reason"] = "shepherd"
+    user_id, user_id_alt = _caller_identity_for_target(
+        args.platform, args.chat_id, args.thread_id, args.user_id, getattr(args, "user_id_alt", None))
     with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
             return _err(f"no such task: {args.task_id}")
         kbn.add_notify_sub(
             conn, task_id=args.task_id, platform=args.platform, chat_id=args.chat_id,
-            chat_type=args.chat_type, thread_id=args.thread_id, user_id=args.user_id,
-            user_id_alt=getattr(args, "user_id_alt", None),
+            chat_type=args.chat_type, thread_id=args.thread_id, user_id=user_id,
+            user_id_alt=user_id_alt,
             notifier_profile=args.notifier_profile or _profile_author(),
             delivery_mode=getattr(args, "delivery_mode", None),
             delivery_metadata=delivery_metadata or None,

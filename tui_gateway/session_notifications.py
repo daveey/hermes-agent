@@ -1428,6 +1428,14 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
     ``_session_owns_notification_event`` (the post-turn safety net), so lineage resolves once."""
     queue = registry.completion_queue
     evt_type, is_delegation = evt.get("type", "completion"), evt.get("type") == "async_delegation"
+    from tools.environments.sandbox_scope import event_visible
+    if not event_visible(evt):  # another hosted agent's event: it stays queued for that agent
+        if deferred is not None:
+            deferred.append(evt)
+        else:
+            queue.put(evt)
+            time.sleep(0.1)
+        return True
     owner = None if owned else _notification_event_owner_elsewhere(sid, session, evt)
     if owner is not None:
         if deferred is not None:

@@ -22,5 +22,6 @@ SIDECAR_KEYS = frozenset({
     'codex_thread_id',                # agent/codex_runtime.py
 })
 
-# Lineage/identity markers only the owner writes (session creation, branch, delegate reservation).
-OWNER_RESERVED_KEYS = frozenset({'_delegate_from', '_branched_from'})
+# Lineage/identity markers only the owner writes (session creation, branch, delegate reservation, and
+# the gateway's delegate-row adoption on an explicit repoint: ``gateway.session_lifecycle.CHAT_ADOPTED_MARKER``).
+OWNER_RESERVED_KEYS = frozenset({'_delegate_from', '_branched_from', '_chat_adopted'})

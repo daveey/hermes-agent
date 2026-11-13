@@ -1996,5 +1996,5 @@ for _name, _sch, _handler, _emoji in _TOOLS:
         _gate = _check_kanban_orchestrator_mode
     else:
         _gate = _check_kanban_mode
-    registry.register(name=_name, toolset="kanban", schema=_sch, handler=_handler, emoji=_emoji,
-                      check_fn=_gate)
+    registry.register(name=_name, toolset="kanban", schema=_sch, handler=_handler, emoji=_emoji, check_fn=_gate,  # handler rejects unknown keys, words its own missing-field errors
+                      compat_args=_UNDECLARED_ARGS.get(_name, ()), self_checked_args=_sch["parameters"].get("required", ()))

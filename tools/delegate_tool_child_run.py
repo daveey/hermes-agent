@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from tools import file_state
 from tools.delegate_tool_progress import _quiet, _safe_progress
 from tools.delegate_tool_registry import (
-    _capture_gateway_steer_authority, _close_subagent_steering, _register_subagent, _unregister_subagent,
+    _capture_gateway_steer_authority, _close_subagent_steering, _mark_subagent_resumable, _register_subagent,
+    _unregister_subagent,
 )
 from tools.delegate_tool_results import (
     _extract_output_tail, _looks_like_error_output, _stringify_tool_content, _summarize_tool_arguments,
@@ -350,6 +351,7 @@ class _Heartbeat:
         # Threshold (seconds of frozen activity) the stale verdict fired at; None until it does.
         # ``await_child`` reads it to name the real cause when a configured cap was still pending.
         self.stale_threshold_seconds: Optional[float] = None
+        self.checkpoint: Any = None  # the run's durable cwd checkpoint (``delegate_tool_resumable.checkpoint``)
 
     def start(self) -> None:
         from agent.periodic_scheduler import schedule
@@ -365,6 +367,9 @@ class _Heartbeat:
         """Returning False stops the periodic callback."""
         from tools.delegate_tool import _HEARTBEAT_INTERVAL, _HEARTBEAT_STALE_CYCLES_IDLE, _HEARTBEAT_STALE_CYCLES_IN_TOOL
         child, parent_agent, task_index, last_seen = self.child, self.parent_agent, self.task_index, self.last_seen
+        if self.checkpoint is not None:
+            with _quiet("Durable subagent checkpoint failed: %s"):
+                self.checkpoint()
         touch = getattr(parent_agent, "_touch_activity", None) if parent_agent is not None else None
         if not touch:
             return None
@@ -470,8 +475,8 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
         )
     return None
 
-def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
-    """Hand ``child.close()`` to a Future done-callback and drain its transports.
+def _defer_close_after_timeout(child: Any, child_future: Any, *, cleanup: Any = None) -> None:
+    """Hand close (or the full cleanup tail) to a Future done-callback and drain its transports.
 
     The interrupt is cooperative: the worker still runs its finally path, so closing now could close SQLite under its
     final write — the done-callback is the first safe boundary. The abandoned worker is usually parked in an OpenSSL
@@ -480,7 +485,9 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     sweep + one delayed re-sweep for a connection opened in between; a worker that still won't settle keeps its
     resources until process exit.
     """
-    child_future.add_done_callback(lambda _done: _close_child(child, "Failed to close timed-out child after worker exit"))
+    context = contextvars.copy_context()
+    finish = cleanup or (lambda: _close_child(child, "Failed to close timed-out child after worker exit"))
+    child_future.add_done_callback(lambda _done: context.run(finish))
     # Bounded drain (#94248 native half): the deferred close above only fires once the abandoned worker
     # unwinds, but that worker is typically parked inside an in-flight OpenSSL read (Codex / httpx). Never
     # hard-close that transport from this thread — releasing FDs under a live SSL read is the #29507/#70773
@@ -557,15 +564,16 @@ def _validate_child_output_schema(
     _output_schema = getattr(child, "_delegate_output_schema", None)
     if not isinstance(_output_schema, dict):
         return _SchemaOutcome(_output_schema, None, [], 0)
-    from tools.delegation_output_schema import build_retry_message, validate_output
+    from tools.delegation_output_schema import append_output_contract, build_retry_message, validate_output
     _first_text = result.get("final_response") or ""
     _schema_valid, _schema_errors = validate_output(_first_text, _output_schema)
     if _schema_valid or not _first_text.strip() or result.get("interrupted", False):
         return _SchemaOutcome(_output_schema, _schema_valid, _schema_errors, 0)
 
-    # Exactly one retry turn, carrying the validation errors verbatim (no
-    # schema re-paste — the child already holds the contract in its context).
+    # Exactly one retry turn, continuing the child's conversation. The contract is pasted again:
+    # it lives in the first user turn, which a compaction of a long first turn summarises away.
     _retry_result = None
+    _history = result.get("messages") if isinstance(result.get("messages"), list) else None
     try:
         # Same identity as the main child turn: this runs on the parent worker's thread, and an
         # unmarked turn is misread as the dispatcher-owned worker by every HERMES_KANBAN_* gate.
@@ -573,8 +581,9 @@ def _validate_child_output_schema(
         from tools.delegate_tool_routes import child_profile_scope
         with child_profile_scope(child), delegated_child_context(str(getattr(child, "session_id", "") or "")):
             _retry_result = child.run_conversation(
-                user_message=build_retry_message(_schema_errors), task_id=child_task_id,
-                stream_callback=relay_child_text,
+                user_message=append_output_contract(build_retry_message(_schema_errors), _output_schema),
+                task_id=child_task_id,
+                stream_callback=relay_child_text, conversation_history=_history,
             )
     except Exception as _retry_exc:
         logger.warning("Subagent %d schema-retry turn failed: %s", task_index, _retry_exc)
@@ -587,8 +596,13 @@ def _validate_child_output_schema(
         except (TypeError, ValueError):
             pass
         _retry_messages = _retry_result.get("messages")
-        if isinstance(_retry_messages, list) and isinstance(result.get("messages"), list):
-            result["messages"] = result["messages"] + _retry_messages
+        if isinstance(_retry_messages, list) and _history is not None:
+            # A compaction inside the retry rewrites the history it was given: keep the first turn whole.
+            # The loop exports where the correction turn starts; a steer inside it adds a later user row.
+            _start = _retry_result.get("current_turn_user_idx")
+            if not isinstance(_start, int):
+                _start = max((i for i, m in enumerate(_retry_messages) if m.get("role") == "user"), default=0)
+            result["messages"] = _history + _retry_messages[_start:]
         _schema_valid, _schema_errors = validate_output(_retry_text, _output_schema)
     return _SchemaOutcome(_output_schema, _schema_valid, _schema_errors, 1)
 
@@ -703,6 +717,12 @@ def _build_result_entry(
         _failure_reason = result.get("failure_reason")
         if isinstance(_failure_reason, str) and _failure_reason:
             entry["failure_reason"] = _failure_reason
+        # When the limit resets (and the plan window it hit): what a resume is scheduled from.
+        _resets_at = result.get("failure_resets_at")
+        if isinstance(_resets_at, (int, float)) and not isinstance(_resets_at, bool):
+            entry["failure_resets_at"] = _resets_at
+        if isinstance(result.get("usage_limit"), dict):
+            entry["usage_limit"] = result["usage_limit"]
     elif interrupt_note:
         entry["error"] = interrupt_note
 
@@ -783,6 +803,21 @@ def _build_child_goal_message(goal: str, images: list[str], child) -> Any:
         return goal
 
 
+def _checkpointing(inner: Any, checkpoint: Any) -> Any:
+    """``inner`` plus a durable cwd checkpoint after each finished tool call, so a hard kill between heartbeats
+    still knows where the child was (a write only when the cwd moved). Installed even without an ``inner`` (no
+    parent callback and no live transcript), so that child checkpoints too. Keeps the ``_flush`` contract."""
+    def _cb(event_type, *args, **kwargs):
+        if callable(inner):
+            inner(event_type, *args, **kwargs)
+        if event_type == "tool.completed":
+            with _quiet("Durable subagent checkpoint failed: %s"):
+                checkpoint()
+    if hasattr(inner, "_flush"):
+        _cb._flush = inner._flush
+    return _cb
+
+
 @dataclass
 class _ChildRun:
     """State of one child run, shared by every phase of ``_run_single_child``.
@@ -799,10 +834,22 @@ class _ChildRun:
     child_start: float = field(default_factory=time.monotonic)
     worktree_info: Optional[dict[str, str]] = None
     private_scratch: Optional[str] = None
+    private_scratch_note: str = ""
     child_task_id: str = ""
     parent_task_id: Optional[str] = None
     wall_start: float = 0.0
     parent_reads_snapshot: list = field(default_factory=list)
+    deferred_future: Any = None
+    turn_exit_reason: Optional[str] = None  # the child turn's own exit reason (who stopped it)
+    final_entry: Optional[dict[str, Any]] = None
+
+    def settle(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """The run's result entry, with how this stopped child may resume; kept for the durable record."""
+        from tools.delegate_tool_resumable import stamp_entry
+        with _quiet("Could not classify subagent outcome: %s"):
+            stamp_entry(self, entry)
+        self.final_entry = entry
+        return entry
 
     def elapsed(self) -> float:
         return round(time.monotonic() - self.child_start, 2)
@@ -819,8 +866,11 @@ class _ChildRun:
         if info is None:
             return redact_child_result(entry_dict, getattr(self.child, "_delegate_output_schema", None), force=False)
         from tools import subagent_worktree
+        from tools.delegate_tool_resumable import keeps_worktree
         try:
-            entry_dict["worktree"] = subagent_worktree.finalize_subagent_worktree(info)
+            # A child that may be continued keeps its tree (pinned until its record expires; the sweep then archives).
+            entry_dict["worktree"] = subagent_worktree.finalize_subagent_worktree(
+                info, prune=not keeps_worktree(self, entry_dict))
         except Exception as e:
             # State is unknown: emit the SAME flagged schema the parent expects,
             # via the shared factory so the two producers never drift.
@@ -840,16 +890,22 @@ class _ChildRun:
         # The parent's record is read in the parent's scope; the child's is written in the child's (cwd records
         # are keyed by the active profile, and a profile-routed child looks its own up as that profile).
         from tools.delegate_tool_routes import child_profile_scope
+        # action='continue': the child picks up where it stopped (its last cwd, its own worktree), not the parent's.
+        resumed = getattr(self.child, "_delegate_continue_workspace", None)
+        resumed = resumed if isinstance(resumed, dict) else None
         parent_cwd: Optional[str] = None
         with _quiet("Child cwd seed failed: %s"):
             from tools.terminal_tool import get_session_cwd, record_session_cwd, register_container_alias
             parent_cwd = get_session_cwd(self.parent_task_id)
             with child_profile_scope(self.child):
-                record_session_cwd(self.child_task_id, parent_cwd)
+                record_session_cwd(self.child_task_id, resumed["cwd"] if resumed else parent_cwd)
             register_container_alias(self.child_task_id, self.parent_task_id)
 
-        self.worktree_info = _create_isolated_worktree(self.parent_agent, self.parent_task_id, self.subagent_id)
-        if self.worktree_info is not None:
+        if resumed is not None:
+            self.worktree_info = resumed.get("worktree")
+        else:
+            self.worktree_info = _create_isolated_worktree(self.parent_agent, self.parent_task_id, self.subagent_id)
+        if self.worktree_info is not None and resumed is None:
             with _quiet("worktree cwd seed failed: %s"), child_profile_scope(self.child):
                 from tools.terminal_tool import record_session_cwd as _rsc
                 _rsc(self.child_task_id, self.worktree_info["path"])
@@ -857,16 +913,22 @@ class _ChildRun:
             # the goal message instead (same turn, no system-prompt mutation).
             from tools.subagent_worktree import build_worktree_context_note
             self.goal = self.goal + build_worktree_context_note(self.worktree_info)
-        else:
+        elif resumed is None:  # a continued child's saved first turn already names its folder
             self.attach_private_scratch(parent_cwd)
         self.wall_start = time.time()
         self.parent_reads_snapshot = list(file_state.known_reads(self.parent_task_id)) if self.parent_task_id else []
+        with _quiet("Durable subagent record failed: %s"):
+            from tools.delegate_tool_resumable import checkpoint, record_start
+            record_start(self)
+            if self.heartbeat is not None:
+                self.heartbeat.checkpoint = lambda: checkpoint(self)
+            self.child.tool_progress_callback = _checkpointing(self.child.tool_progress_callback, lambda: checkpoint(self))
 
     def attach_private_scratch(self, parent_cwd: Optional[str]) -> None:
         """Without git isolation the child shares its parent's cwd with the parent and its siblings: give it a
-        private folder under TMPDIR (pruned with the rest of scratch) and name both in its system prompt. The session
-        cwd stays the parent's, since brief paths are relative to it. The ephemeral prompt is injected at API-call
-        time, so setting it before ``run_conversation`` reaches the first call. Local backend only: a host folder is
+        private folder under TMPDIR (pruned with the rest of scratch) and name both after the brief on its first turn
+        (``self.goal`` stays the parent's words): the system prompt stays byte-identical across siblings so they share one prompt cache. The
+        session cwd stays the parent's, since brief paths are relative to it. Local backend only: a host folder is
         invisible to a docker/ssh child's tools."""
         from tools import subagent_worktree
         from tools.delegate_tool_progress import _build_private_scratch_block, _resolve_workspace_hint
@@ -878,9 +940,7 @@ class _ChildRun:
                 dir=os.environ.get("TMPDIR") or tempfile.gettempdir(),
             )
             shared = parent_cwd or _resolve_workspace_hint(self.parent_agent)
-            block = _build_private_scratch_block(self.private_scratch, shared)
-            base = getattr(self.child, "ephemeral_system_prompt", None) or ""
-            self.child.ephemeral_system_prompt = "\n\n".join(filter(None, (base, block)))
+            self.private_scratch_note = "\n\n" + _build_private_scratch_block(self.private_scratch, shared)
 
     def finish_failed(
         self, entry: dict[str, Any], late_steer: Optional[str], *, preview: str, summary: str = "", status: Optional[str] = None,
@@ -963,7 +1023,15 @@ class _ChildRun:
         worker_thread_holder: dict[str, Optional[threading.Thread]] = {"t": None}
         # Resolved after seed_workspace so a multimodal goal's text part carries the worktree note too.
         _images = list(getattr(child, "_delegate_images", None) or [])
-        user_message: Any = _build_child_goal_message(self.goal, _images, child) if _images else self.goal
+        # action='continue': the child's saved transcript, so ``self.goal`` (the follow-up) is its next turn,
+        # sent bare. Building the brief still registers its context prefix: the saved first turn starts with
+        # it, so the rebuilt child keeps the cache breakpoint its first run wrote.
+        _history = getattr(child, "_delegate_continue_history", None)
+        resume = {"conversation_history": _history} if isinstance(_history, list) else {}
+        from tools.delegate_tool_progress import child_task_message
+        _brief = child_task_message(self.goal, getattr(child, "_delegate_context", None)) + self.private_scratch_note
+        task_text = self.goal if resume else _brief
+        user_message: Any = _build_child_goal_message(task_text, _images, child) if _images else task_text
 
         def _run_with_thread_capture():
             worker_thread_holder["t"] = threading.current_thread()
@@ -972,7 +1040,7 @@ class _ChildRun:
             # A profile-routed child converses as that profile (config, secrets, skills, terminal policy).
             with child_profile_scope(child), delegated_child_context(str(getattr(child, "session_id", "") or "")):
                 return child.run_conversation(
-                    user_message=user_message, task_id=self.child_task_id, stream_callback=self.relay_text,
+                    user_message=user_message, task_id=self.child_task_id, stream_callback=self.relay_text, **resume,
                 )
 
         future = executor.submit(contextvars.copy_context().run, _run_with_thread_capture)
@@ -1083,7 +1151,7 @@ class _ChildRun:
         _error_entry = self.finish_failed(_error_entry, _late_pending_steer, preview=f"Timed out after {duration}s" if is_timeout else str(exc))
         close_deferred = is_timeout and not future.done()
         if close_deferred:
-            _defer_close_after_timeout(child, future)
+            self.deferred_future = future
         return None, _error_entry, close_deferred
 
     def append_sibling_write_reminder(self, entry: dict[str, Any]) -> None:
@@ -1173,8 +1241,7 @@ class _ChildRun:
         heartbeat.stop()
 
         # Safe even if the child was never registered (ID missing on test doubles).
-        if self.subagent_id:
-            _unregister_subagent(self.subagent_id, agent=child)
+        retained = _unregister_subagent(self.subagent_id, agent=child, stopping=True) if self.subagent_id else None
 
         if child_pool is not None and leased_cred_id is not None:
             with _quiet("Failed to release credential lease: %s"):
@@ -1189,10 +1256,25 @@ class _ChildRun:
 
         _detach_child(self.parent_agent, child)
 
-        # Close tool resources (terminal sandboxes, browser daemons, background
-        # processes, httpx clients) so subagent subprocesses don't outlive the delegation.
-        if not close_deferred:
-            _close_child(child, "Failed to close child agent after delegation")
+        # All session/task cleanup must finish before the same IDs can be reused by continue.
+        def finish():
+            self.close_resources()
+            with _quiet("Durable subagent stop record failed: %s"):
+                from tools.delegate_tool_resumable import record_stop, release_unstarted
+                record_stop(self, self.final_entry)
+                release_unstarted(child)  # a continue that failed before record_start: its claim goes back
+            if self.subagent_id:
+                _mark_subagent_resumable(self.subagent_id, retained)
+
+        if close_deferred:
+            _defer_close_after_timeout(child, self.deferred_future, cleanup=finish)
+        else:
+            finish()
+
+    def close_resources(self) -> None:
+        """Close only after the worker exits; continuation stays blocked through the entire tail."""
+        child = self.child
+        _close_child(child, "Failed to close child agent after delegation")
         # The child's execute_code kernels live exactly as long as the child (pinned against the LRU
         # cap while it runs); dispose them here so they never squat the cap after the child is gone.
         with _quiet("Failed to dispose child execute_code kernels: %s"):

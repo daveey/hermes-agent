@@ -60,6 +60,11 @@ async def _rig(tmp_path, monkeypatch, *, secondary=True):
         rig.served_ref = create_local_session(rig.served, _actor(sec_home), dict(
             request_id="served", source="cli", model="fixture", toolsets=[]))
     monkeypatch.setattr(runner, "_handle_message", _refuse_turn)
+    # Upstream runs an unviewed final result as the parent's turn (``resumes_parent``,
+    # test_unviewed_completion_resumes_parent.py). These cases cover legacy ROUTE resolution, so keep the
+    # outcome a note: its row lands in the resolved session, where the assertions can see which one.
+    import tools.process_registry_notifications as notifications
+    monkeypatch.setattr(notifications, "completion_resumes_parent", lambda evt: False)
     return rig
 
 

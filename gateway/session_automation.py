@@ -431,7 +431,8 @@ def automation_display_metadata(metadata):
 _AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
     'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category',
     'display_kind', 'display_text', 'gateway_proven_session_id', 'gateway_completion_ids', 'heartbeat_tick',
-    'completion_wakes_parent', 'completion_requested_stop', 'kanban_cards', 'kanban_event_keys'})
+    'completion_wakes_parent', 'completion_resumes_parent', 'completion_requested_stop', 'kanban_cards',
+    'kanban_event_keys'})
 
 
 def admission_display(payload):
@@ -580,6 +581,12 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
         if event.metadata['completion_wakes_parent'] is not True:
             raise RuntimeStoreError('invalid_params')
         descriptor['wakes_parent'] = True
+    if 'completion_resumes_parent' in event.metadata:
+        # A result the parent carries on from (a finished delegation, a process exit): a turn with no
+        # viewer attached too, as with one, unless the user closed the chat. Only ``True`` is stored.
+        if event.metadata['completion_resumes_parent'] is not True:
+            raise RuntimeStoreError('invalid_params')
+        descriptor['resumes_parent'] = True
     descriptor.update(requested_stop_metadata(event.metadata))
     if event.metadata.get('turn_author') is not None:
         from agent.turn_author import parse_turn_author

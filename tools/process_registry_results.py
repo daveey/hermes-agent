@@ -61,6 +61,8 @@ def _owed(path) -> bool:
 def save_completed_result(session, obligation: dict | None = None) -> None:
     """``obligation``: the completion is still owed to a gateway watcher (``process_registry_obligations``);
     it rides this same atomic write, so it is durable before the checkpoint entry goes. [daveey]"""
+    if session.sandbox_key:
+        return  # Hosted command/output belong to the tenant, never this host's logs.
     from agent.redact import redact_sensitive_text, redact_terminal_output
     from tools.process_registry import MAX_OUTPUT_CHARS
 
@@ -105,9 +107,11 @@ def load_completed_results(prefix: str = "") -> dict:
     from tools.process_registry import ProcessSession
 
     from gateway.session_context import get_session_env
+    from tools.environments.sandbox_scope import hosted_scope
 
     owner = get_session_env("HERMES_SESSION_ID", "")
-    if not owner:
+    # A hosted agent's processes leave no receipt here and it sees no local one: never read or prune them.
+    if not owner or hosted_scope() is not None:
         return {}
     results = {}
     try:
@@ -126,7 +130,8 @@ def load_completed_results(prefix: str = "") -> dict:
                 continue
             session = ProcessSession(
                 **{key: record[key] for key in _RESULT_FIELDS},
-                exited=True, output_buffer=record["output"],
+                # Receipts written before processes carried a sandbox are a local activity's.
+                sandbox_key=record.get("sandbox_key", ""), exited=True, output_buffer=record["output"],
             )
             session._completion_event.set()
             results[session.id] = session
