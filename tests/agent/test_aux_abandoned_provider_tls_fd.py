@@ -221,6 +221,67 @@ def test_release_closes_at_once_when_the_daemon_already_finished():
     assert closed == ["client"]
 
 
+def _sweep_finishing_the_daemon(attempt, log, *, raise_after=False):
+    """A ``force_close_tcp_sockets`` stand-in that lets the abandoned daemon finish mid-sweep, the interleaving
+    where the daemon's close and the owner's shutdown() could otherwise hit the same socket at once."""
+    daemon = threading.Thread(target=attempt.finish, name="hermes-protected-aux-provider", daemon=True)
+
+    def sweep(client) -> int:
+        log.append("sweep-start")
+        daemon.start()
+        daemon.join(1.0)  # ungated, the daemon closes within this window; gated, it waits for the sweep
+        log.append("sweep-end")
+        if raise_after:
+            raise RuntimeError("sweep failed")
+        return 1
+    return daemon, sweep
+
+
+def test_daemon_finishing_during_the_owner_sweep_closes_only_after_it(monkeypatch):
+    from agent import agent_runtime_helpers
+    log: list = []
+    attempt = handoff.ProviderAttempt()
+    daemon, sweep = _sweep_finishing_the_daemon(attempt, log)
+    monkeypatch.setattr(agent_runtime_helpers, "force_close_tcp_sockets", sweep)
+    with handoff.client_scope("client", lambda c: log.append(("close", threading.current_thread().name))):
+        handoff.note_abandoned(attempt)
+    daemon.join(5)
+    assert not daemon.is_alive()
+    assert log == ["sweep-start", "sweep-end", ("close", "hermes-protected-aux-provider")]
+
+
+def test_a_failing_owner_sweep_still_releases_the_gated_daemon(monkeypatch):
+    from agent import agent_runtime_helpers
+    log: list = []
+    attempt = handoff.ProviderAttempt()
+    daemon, sweep = _sweep_finishing_the_daemon(attempt, log, raise_after=True)
+    monkeypatch.setattr(agent_runtime_helpers, "force_close_tcp_sockets", sweep)
+    with pytest.raises(RuntimeError, match="sweep failed"):
+        with handoff.client_scope("client", lambda c: log.append("close")):
+            handoff.note_abandoned(attempt)
+    daemon.join(5)
+    assert not daemon.is_alive()
+    assert log == ["sweep-start", "sweep-end", "close"]
+
+
+def test_mixed_finished_and_reading_daemons_close_once_on_the_last_reader(monkeypatch):
+    """One daemon already finished (the owner runs its share), one still reading (deferred): nothing closes on
+    the owner thread; the still-reading daemon, finishing last, closes once."""
+    from agent import agent_runtime_helpers
+    log: list = []
+    finished, reading = handoff.ProviderAttempt(), handoff.ProviderAttempt()
+    finished.finish()
+    monkeypatch.setattr(agent_runtime_helpers, "force_close_tcp_sockets", lambda c: log.append("sweep") or 1)
+    with handoff.client_scope("client", lambda c: log.append("close")):
+        handoff.note_abandoned(finished)
+        handoff.note_abandoned(reading)
+    assert log == ["sweep"]
+    daemon = threading.Thread(target=reading.finish)
+    daemon.start()
+    daemon.join(5)
+    assert log == ["sweep", "close"]
+
+
 def test_note_abandoned_outside_a_scope_is_a_no_op():
     handoff.note_abandoned(handoff.ProviderAttempt())
 

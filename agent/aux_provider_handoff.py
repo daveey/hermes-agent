@@ -87,6 +87,7 @@ def release_client(client: Any, close: Callable[[Any], None], abandoned: list[Pr
     from agent.agent_runtime_helpers import force_close_tcp_sockets
     remaining = [len(abandoned)]
     lock = threading.Lock()
+    swept = threading.Event()
 
     def one_done() -> None:
         with lock:
@@ -95,12 +96,21 @@ def release_client(client: Any, close: Callable[[Any], None], abandoned: list[Pr
         if last:
             close(client)
 
+    def daemon_done() -> None:
+        # A daemon that finishes between the defer and the sweep below must not close while this thread still
+        # shuts the same sockets down: shutdown() reads the fd outside the GIL and could hit a recycled number.
+        swept.wait()
+        one_done()
+
     # Defer before the shutdown wakes the daemon: shutting down first let a woken daemon finish before the
     # defer, so the close fell back to this thread (FD-safe then, but no longer the daemon's).
-    deferred = sum(attempt.defer(one_done) for attempt in abandoned)
+    deferred = sum(attempt.defer(daemon_done) for attempt in abandoned)
+    try:
+        shutdown_count = force_close_tcp_sockets(getattr(client, "_real_client", None) or client) if deferred else 0
+    finally:
+        swept.set()
     for _ in range(len(abandoned) - deferred):
         one_done()
-    shutdown_count = force_close_tcp_sockets(getattr(client, "_real_client", None) or client) if deferred else 0
     if deferred:
         logger.info("auxiliary client close handed to %d abandoned provider daemon(s) (tcp_shutdown=%d)",
                     deferred, shutdown_count)

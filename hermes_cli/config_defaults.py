@@ -2089,8 +2089,8 @@ DEFAULT_CONFIG = {
     },
     "logging": {  # File logging to ~/.hermes/logs/: agent.log captures INFO+, errors.log WARNING+.
         "level": "INFO",       # minimum level for agent.log: DEBUG, INFO, WARNING
-        "max_size_mb": 5,      # max size per log file before rotation
-        "backup_count": 3,     # rotated backups to keep
+        "max_size_mb": 5, "backup_count": 3,  # rotate each log file at max_size_mb, keeping backup_count backups
+        "debug_ssl_close": False,  # debug: log a stack when a TLS socket is closed under another thread's read
     },
     # Remote model-catalog manifest: curated OpenRouter / Nous Portal model lists fetched from this
     # URL (falls back to the in-repo snapshot on network failure), so picker lists update without a

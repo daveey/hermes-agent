@@ -155,6 +155,28 @@ processes currently holding the database (`<db> is held by PID <n> (<command>)`)
 so you know what to stop; when the holder scan is partial or unavailable it says
 `cannot prove the database is quiet` instead of giving an all-clear.
 
+## Logging
+
+Hermes writes rotating log files under `~/.hermes/logs/` (`agent.log` at
+`logging.level` and above, `errors.log` at WARNING and above):
+
+```yaml
+logging:
+  level: INFO            # minimum level for agent.log: DEBUG, INFO, WARNING
+  max_size_mb: 5         # rotate a log file once it reaches this size
+  backup_count: 3        # rotated backups to keep per file
+  debug_ssl_close: false # debug tripwire, see below
+```
+
+`logging.debug_ssl_close: true` installs a debug tripwire on `ssl.SSLSocket`:
+when one thread closes a TLS socket while another thread is still reading
+it, Hermes logs a WARNING with the closing thread's stack. Such a close frees
+the file descriptor under the reader's live TLS session; the kernel can then
+hand the number to the next file opened, and the reader's TLS alert lands in
+that file (for example a SQLite header). Leave it off unless you are chasing
+that class of bug: every TLS read pays a small Python-level wrapper while it
+is on. It is read when logging starts, so restart Hermes after changing it.
+
 ## Environment Variable Substitution
 
 You can reference environment variables in `config.yaml` using `${VAR_NAME}` syntax:
