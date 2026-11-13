@@ -146,6 +146,55 @@ def test_an_interrupted_cold_rebuild_is_retried_as_a_rebuild(live, svc, kanban_h
     assert svc.board(BOARD)["rows"]["task_runs"][uid]["status"] == "running"
 
 
+@pytest.mark.parametrize("cold", [True, False], ids=["cold-rebuild", "warm-control"])
+def test_rebuild_repairs_capture_gap_inside_previous_repair_window(live, svc, kanban_home, monkeypatch, cold):
+    """A warm replica must not hide the live rebuild signal behind first-pass repair.
+
+    Snapshot upserts keep an uncaptured local edge, but only repair publishes it.
+    The warm control proves the same gap normally waits for the repair window.
+    """
+    from hermes_cli import kanban_sync_repair_window as window
+
+    now = [1000.0]
+    monkeypatch.setattr(ksc, "_repair_clock", lambda: now[0])
+    parent = kb.create_task(live, title="parent", assignee="worker")
+    child = kb.create_task(live, title="child", assignee="worker")
+    _other_creates(svc, BACKLOG_PAGES)
+    assert _round(kanban_home, svc.hub(ME)).error is None
+    key = str(kanban_home / "kanban.db")
+    assert ksc._REPAIRED_AT[key] == now[0]
+    replica = ksc.open_shadow(BOARD, ME)
+    try:
+        replica_cursor = _cursor(replica)
+        assert replica_cursor > BACKLOG_PAGES
+    finally:
+        replica.close()
+    assert _cursor(live) == replica_cursor
+    uid = f"{parent}>{child}"
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying = 1")
+        live.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent, child))
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
+        if cold:
+            live.execute("UPDATE kanban_sync_state SET cursor = 0")
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending'").fetchone()
+    assert uid not in svc.board(BOARD)["rows"].get("task_links", {})
+    now[0] += 1
+    result = _round(kanban_home, PagedHub(svc, ME))
+    assert result.error is None
+    assert not result.behind
+    assert _cursor(live) >= replica_cursor
+    if cold:
+        assert uid in svc.board(BOARD)["rows"].get("task_links", {})
+        assert not result.repair_deferred
+    else:
+        assert uid not in svc.board(BOARD)["rows"].get("task_links", {})
+        assert result.repair_deferred
+        now[0] = 1000.0 + max(window.LOCAL_WRITE_REPAIR_MIN_S, ksc.REPLICA_REPAIR_MIN_S)
+        assert _round(kanban_home, svc.hub(ME)).error is None
+        assert uid in svc.board(BOARD)["rows"].get("task_links", {})
+
+
 def test_a_warm_live_file_behind_the_head_still_pulls_its_budget(live, svc, kanban_home):
     """Control: only a cursor-0 file rebuilds; a warm file behind the head drains the feed over rounds (its run
     rows held meanwhile, test_kanban_sync_push_starvation)."""
