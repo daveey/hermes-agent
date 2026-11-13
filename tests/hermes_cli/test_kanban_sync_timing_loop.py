@@ -36,9 +36,11 @@ def _config(root: Path, until: float | None) -> None:
 
 
 def _records(path: Path) -> list[dict]:
+    """The complete records so far. The loop appends while the test polls, so a read can end inside a record."""
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    text = path.read_text(encoding="utf-8")
+    return [json.loads(line) for line in text[:text.rfind("\n") + 1].splitlines()]
 
 
 @pytest.mark.platforms("linux")  # the reporter's real CPU busy sample reads /proc/stat
