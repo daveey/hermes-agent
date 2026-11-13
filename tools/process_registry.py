@@ -1982,9 +1982,9 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             selected = lines[offset:offset + limit]
             stop = slice(offset, offset + limit).indices(total_lines)[1]
             observed_completion_output = total_lines == 0 or (bool(selected) and stop == total_lines)
-        result = {
-            **self._status_head(session), "output": "\n".join(selected),
-            "total_lines": total_lines, "showing": f"{len(selected)} lines"}
+        result = {  # exit fields as in poll/wait, so an exited-0 log gets the masked-success hint too
+            **self._status_head(session), **(self._exit_fields(session) if exited else {}),
+            "output": "\n".join(selected), "total_lines": total_lines, "showing": f"{len(selected)} lines"}
         if exited and observed_completion_output and not finalizing:
             self._consume_completion(session_id)
         return result
