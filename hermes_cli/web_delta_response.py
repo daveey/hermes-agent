@@ -50,6 +50,7 @@ import math
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Optional
@@ -73,6 +74,8 @@ MAX_BYTES = 8 * 1024 * 1024
 STORE_MAX_BYTES = 64 * 1024 * 1024
 FRAMES_MAX_BYTES = 8 * 1024 * 1024
 FRAMES_MAX_ENTRIES = 512
+# A base served from memory refreshes its file's place in the disk budget at most this often.
+DISK_TOUCH_S = 60.0
 ZSTD_LEVEL = 3
 CREDENTIAL_HEADERS = ("x-hermes-session-token", "authorization", "cookie")
 VARY_ON = ("X-Hermes-Delta-Accept", "X-Hermes-Delta-Base")
@@ -115,7 +118,9 @@ class BodyStore:
 
     With ``disk_dir`` every body is also written there (one 0600 file per key, LRU by mtime, the same byte budget),
     so a backend started later (an always-on roll, a restart) can still decode against a base an earlier backend
-    sent. A file is used only when its bytes hash to the digest in its key; anything else is removed and the read
+    sent. A base memory keeps serving stays most recently used on disk too (its file is touched, or rewritten
+    if the budget already dropped it, at most every DISK_TOUCH_S), so the bases polled most survive a roll.
+    A file is used only when its bytes hash to the digest in its key; anything else is removed and the read
     goes whole. ``disk_dir`` may be a callable resolved on first use (the home is not final at import time).
     Frames are memory-only."""
 
@@ -133,6 +138,7 @@ class BodyStore:
         self._frames_bytes = 0
         self._lock = threading.Lock()
         self._disk_dir = disk_dir
+        self._touched: dict[str, float] = {}  # held key -> monotonic time its file was last written or touched
 
     def frame(self, key: str) -> tuple[bool, Optional[bytes]]:
         """(remembered, frame); a remembered ``None`` is an encode that came out no smaller than its body."""
@@ -161,7 +167,9 @@ class BodyStore:
             body = self._bodies.get(digest)
             if body is not None:
                 self._bodies.move_to_end(digest)
-                return body
+        if body is not None:
+            self._disk_touch(digest, body)
+            return body
         body = self._disk_get(digest)
         if body is not None:
             self._remember(digest, body)
@@ -170,6 +178,8 @@ class BodyStore:
     def put(self, digest: str, body: bytes) -> None:
         if self._remember(digest, body):
             self._disk_put(digest, body)
+        else:
+            self._disk_touch(digest, body)
 
     def _remember(self, digest: str, body: bytes) -> bool:
         """Hold ``body`` in memory; False when it already was."""
@@ -179,9 +189,11 @@ class BodyStore:
                 return False
             self._bodies[digest] = body
             self._bytes += len(body)
+            self._touched[digest] = time.monotonic()  # the caller writes or has just read its file
             while self._bytes > self._max_bytes and self._bodies:
-                _, dropped = self._bodies.popitem(last=False)
+                gone, dropped = self._bodies.popitem(last=False)
                 self._bytes -= len(dropped)
+                self._touched.pop(gone, None)
             return True
 
     def __len__(self) -> int:
@@ -222,6 +234,17 @@ class BodyStore:
         with contextlib.suppress(OSError):
             os.utime(path)  # most recently used
         return body
+
+    def _disk_touch(self, key: str, body: bytes) -> None:
+        """A base served from memory is in use: keep its file last out of the disk budget (rate-limited)."""
+        if self._disk_dir is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if key not in self._touched or now - self._touched[key] < DISK_TOUCH_S:
+                return
+            self._touched[key] = now
+        self._disk_put(key, body)  # touches the file, or writes it again when the budget dropped it
 
     def _disk_put(self, key: str, body: bytes) -> None:
         root, name = self._dir(), self._file_name(key)

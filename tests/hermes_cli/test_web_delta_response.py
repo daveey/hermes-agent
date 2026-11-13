@@ -580,6 +580,52 @@ def test_the_disk_is_bounded_least_recently_used_first(tmp_path):
     assert sum(p.stat().st_size for p in tmp_path.iterdir()) <= 3000
 
 
+def test_a_base_memory_keeps_serving_stays_on_disk_for_the_next_backend(tmp_path, monkeypatch):
+    """The disk budget must not drop the base polled most while newer bodies churn past it."""
+    import os
+
+    root = tmp_path / "bases"
+    monkeypatch.setattr(wdr, "DISK_TOUCH_S", 0.0)
+    store = wdr.BodyStore(max_bytes=3000, disk_dir=root)
+    bodies = {name: name.encode() * 1000 for name in "habcdef"}
+    keys = {name: f":{wdr.body_hash(body)}" for name, body in bodies.items()}
+
+    def file(name):
+        return root / f"_-{keys[name][1:]}"
+
+    store.put(keys["h"], bodies["h"])
+    for at, name in enumerate("abcdef", start=1):
+        os.utime(file("h"), ns=(0, 0))  # as old as a file gets: only a refresh keeps it
+        assert store.get(keys["h"]) == bodies["h"]  # the poll: a memory hit
+        store.put(keys[name], bodies[name])
+        os.utime(file(name), ns=(at * 10**9, at * 10**9))
+    assert file("h").exists()
+    assert wdr.BodyStore(max_bytes=3000, disk_dir=root).get(keys["h"]) == bodies["h"]  # the rolled backend
+    # dropped by the budget anyway (another backend's churn): the next use writes it again
+    file("h").unlink()
+    store.put(keys["h"], bodies["h"])  # served again, unchanged
+    assert file("h").read_bytes() == bodies["h"]
+    assert sum(p.stat().st_size for p in root.iterdir()) <= 3000
+
+
+def test_the_disk_refresh_is_rate_limited_and_forgets_bases_memory_dropped(tmp_path):
+    import os
+
+    root = tmp_path / "bases"
+    store = wdr.BodyStore(max_bytes=3000, disk_dir=root)
+    body = b"h" * 1000
+    key = f":{wdr.body_hash(body)}"
+    store.put(key, body)
+    os.utime(root / f"_-{key[1:]}", ns=(0, 0))
+    store.get(key)
+    store.put(key, body)
+    assert (root / f"_-{key[1:]}").stat().st_mtime_ns == 0  # within DISK_TOUCH_S: no syscall per poll
+    for fill in b"abc":
+        other = bytes([fill]) * 1000
+        store.put(f":{wdr.body_hash(other)}", other)
+    assert key not in store._touched and len(store._touched) == len(store) == 3
+
+
 @pytest.mark.parametrize("key", ["../../etc:" + "a" * 32, "ns:" + "../x", ":" + "A" * 32, "x" * 32 + "/y:" + "a" * 32])
 def test_a_key_that_is_not_two_hex_hashes_is_never_a_path(tmp_path, key):
     store = wdr.BodyStore(disk_dir=tmp_path / "d")

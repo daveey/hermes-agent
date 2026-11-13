@@ -42,6 +42,8 @@ export const DELTA_COPIES_PER_READ = 2
 export const DELTA_MAX_DECODED_BYTES = 16 * 1024 * 1024
 // How long a new copy waits before it is written to disk: a burst of reads costs one write per read.
 export const DELTA_DISK_FLUSH_MS = 2_000
+// An unchanged copy is not written again; its file is only marked recently used, at most this often.
+export const DELTA_DISK_TOUCH_MS = 60_000
 const DISK_FORMAT = 'hermes-delta-base/1'
 const DISK_SUFFIX = '.base'
 
@@ -72,6 +74,8 @@ interface Copy {
 interface Disk {
   dir: string
   dirty: Set<string>
+  // What each read's file holds (the hash last written or loaded) and when it was last written or touched.
+  saved: Map<string, { at: number; hash: string }>
   tried: Set<string>
   timer: null | ReturnType<typeof setTimeout>
 }
@@ -133,7 +137,7 @@ export class DeltaBodyStore {
    * read until a read asks for its copy; nothing is written on the request path.
    */
   persistTo(dir: string): void {
-    this.#disk = { dir, dirty: new Set(), tried: new Set(), timer: null }
+    this.#disk = { dir, dirty: new Set(), saved: new Map(), tried: new Set(), timer: null }
   }
 
   /**
@@ -192,7 +196,39 @@ export class DeltaBodyStore {
     }
 
     this.#hold(key, hash, body)
-    this.#markDirty(key)
+
+    if (!this.#alreadyOnDisk(key, hash)) {
+      this.#markDirty(key)
+    }
+  }
+
+  /**
+   * The read's file already holds this copy (an unchanged poll, or the copy just loaded from it): nothing to write.
+   * Its file is marked recently used now and then, so the disk budget drops it last; if the file is gone (trimmed,
+   * removed), the next copy is written again.
+   */
+  #alreadyOnDisk(key: string, hash: string): boolean {
+    const disk = this.#disk
+    const saved = disk?.saved.get(key)
+
+    if (!disk || !saved || saved.hash !== hash || disk.dirty.has(key)) {
+      return false
+    }
+
+    const now = Date.now()
+
+    if (now - saved.at >= DELTA_DISK_TOUCH_MS) {
+      const at = new Date(now)
+
+      saved.at = now
+      fs.utimes(path.join(disk.dir, diskName(key)), at, at, error => {
+        if (error && disk.saved.get(key) === saved) {
+          disk.saved.delete(key)
+        }
+      })
+    }
+
+    return true
   }
 
   #hold(key: string, hash: string, body: Buffer): void {
@@ -227,6 +263,7 @@ export class DeltaBodyStore {
 
     if (disk) {
       disk.dirty.delete(key)
+      disk.saved.delete(key)
       disk.tried.add(key)
       fs.rm(path.join(disk.dir, diskName(key)), { force: true }, () => undefined)
     }
@@ -269,6 +306,7 @@ export class DeltaBodyStore {
 
           await fs.promises.writeFile(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
           await fs.promises.rename(tmp, target)
+          disk.saved.set(key, { at: Date.now(), hash: copy.hash })
         }
       }
 
@@ -307,6 +345,7 @@ export class DeltaBodyStore {
 
           fs.writeFileSync(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
           fs.renameSync(tmp, target)
+          disk.saved.set(key, { at: Date.now(), hash: copy.hash })
         }
       }
     } catch {
@@ -387,6 +426,7 @@ export class DeltaBodyStore {
     const now = new Date()
 
     fs.utimes(file, now, now, () => undefined) // recently used: last out of the disk budget
+    disk.saved.set(key, { at: now.getTime(), hash: copy.hash })
     this.#hold(key, copy.hash, copy.body)
 
     return this.#copies.get(key)

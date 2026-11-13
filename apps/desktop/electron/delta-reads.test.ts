@@ -14,6 +14,7 @@ import {
   DELTA_ACCEPT_HEADER,
   DELTA_BASE_HEADER,
   DELTA_DISK_FLUSH_MS,
+  DELTA_DISK_TOUCH_MS,
   DELTA_RETRY_CODE,
   DELTA_STORE_MAX_BYTES,
   DELTA_STORE_MAX_ENTRIES,
@@ -559,6 +560,71 @@ describe('persisted copies (persistTo): a relaunch still holds the bases', () =>
 
     expect(relaunched.get('a')).toBeUndefined()
     expect(relaunched.get('d')?.hash).toBe(bodyHash(big(4)))
+  })
+
+  it('an unchanged copy is not written again: polls of a held or just-loaded body leave its file alone', async () => {
+    const dir = tmpDir()
+    const store = reopened(dir)
+    const v1 = cards(3000)
+    const same = delta(v1, v1)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, store)
+    await store.flush()
+
+    const [file] = files(dir)
+    const inode = () => fs.statSync(file!).ino // a rewrite is a rename of a new file
+
+    const written = inode()
+
+    for (const target of [store, reopened(dir)]) {
+      expect(decodeDeltaBody(BOARD, same.response, same.body, target)).toBe(v1.toString('utf8'))
+      await target.flush()
+      expect(inode()).toBe(written)
+    }
+
+    // a changed body is still written
+    const v2 = cards(3000, 7)
+    const changed = delta(v1, v2)
+
+    decodeDeltaBody(BOARD, changed.response, changed.body, store)
+    await store.flush()
+    expect(inode()).not.toBe(written)
+    expect(reopened(dir).get(store.keyFor(BOARD)!)?.hash).toBe(bodyHash(v2))
+  })
+
+  it('an unchanged copy stays recently used on disk, and is written again once its file is gone', async () => {
+    const dir = tmpDir()
+    const store = reopened(dir)
+    const body = Buffer.alloc(4096, 1)
+    const hash = bodyHash(body)
+    const realNow = Date.now
+    let ahead = 0
+
+    Date.now = () => realNow() + ahead
+
+    try {
+      store.put('k', hash, body)
+      await store.flush()
+
+      const [file] = files(dir)
+
+      fs.utimesSync(file!, new Date(0), new Date(0))
+      store.put('k', hash, body)
+      await store.flush()
+      expect(fs.statSync(file!).mtimeMs).toBe(0) // within DELTA_DISK_TOUCH_MS: not even a touch per poll
+
+      ahead = DELTA_DISK_TOUCH_MS + 1
+      store.put('k', hash, body)
+      await expect.poll(() => fs.statSync(file!).mtimeMs).toBeGreaterThan(0)
+
+      fs.rmSync(file!) // trimmed by the budget (or removed): the touch fails, so the next poll writes it again
+      ahead *= 2
+      store.put('k', hash, body)
+      await expect.poll(() => (store.put('k', hash, body), store.flushSync(), fs.existsSync(file!))).toBe(true)
+      expect(reopened(dir).get('k')?.hash).toBe(hash)
+    } finally {
+      Date.now = realNow
+    }
   })
 
   it('persistDeltaBases (main.ts) keeps the copies under userData and writes the pending ones on will-quit', () => {
