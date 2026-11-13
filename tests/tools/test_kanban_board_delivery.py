@@ -306,9 +306,14 @@ CHAT = "20261026_235722_bef6c6"
 SHOWS_PROMISE = "shows in this chat's tasks."
 
 
-def _place_on_worker(home, monkeypatch, *, task_id, chat=CHAT):
+OWNER_ANSWER = {"ok": False, "created": True, "code": "origin_bind_pending", "status": "ready",
+                "origin_chat_link": "owner_written"}  # the owner wrote this chat's link and its sync runs
+
+
+def _place_on_worker(home, monkeypatch, *, task_id, chat=CHAT, owner_result=OWNER_ANSWER):
     """kanban_create from a chat, placed on worker-4 (01:09 PT: t_01a1d42acdce8e23 and three more). ``task_id``
-    None = the target has not answered yet (the queued-request note)."""
+    None = the target has not answered yet (the queued-request note). ``owner_result`` is the owner's courier
+    answer that reaches this gateway with the id (None: an owner on older core, no ``origin_chat_link``)."""
     from hermes_cli import kanban_capability_registry as reg
     from hermes_cli import kanban_placement as kp
     from hermes_state import SessionDB
@@ -321,19 +326,25 @@ def _place_on_worker(home, monkeypatch, *, task_id, chat=CHAT):
     monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "worker-4", "why": "explicit placement"})
     monkeypatch.setattr(kp, "create_remote", lambda args, **kw: {
         "ok": True, "request_id": "placement:macbook:t1", "queued_only": task_id is None})
-    monkeypatch.setattr(kp, "await_task_id", lambda rid, **kw: (task_id, "running"))
+
+    def await_task_id(rid, result_out=None, **kw):
+        assert task_id is not None, "a queued-only request is not awaited"
+        if result_out is not None:
+            result_out["result"] = {**(owner_result or {}), "task_id": task_id}
+        return task_id, "running"
+    monkeypatch.setattr(kp, "await_task_id", await_task_id)
     return json.loads(kt._handle_create({"title": "core update", "assignee": "default", "placement": "worker-4",
                                          "body": "runs on worker-4", "requires": []}))
 
 
 def test_create_placed_elsewhere_while_the_sync_role_is_given_up_says_only_this_gateways_copy_lags(home, monkeypatch):
-    """The owner writes this chat's link to the Board (``_link_origin``), so the link does not wait in this
-    gateway's outbox; only this gateway's replica, which the chat's task list reads, may lag."""
+    """The owner answered that it wrote this chat's link to the Board (``origin_chat_link``), so the link does not
+    wait in this gateway's outbox; only this gateway's replica, which the chat's task list reads, may lag."""
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
     out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23")
     assert out["ok"] is True and out["task_id"] == "t_01a1d42acdce8e23" and out["runs_where"] == "worker-4", out
-    assert out["placed"]["origin_session"] == CHAT
+    assert out["placed"]["origin_session"] == CHAT and out["placed"]["chat_link"] == "owner_written"
     assert out["chat_link"] == "owner_written" and "board_delivery" not in out  # the card itself is on worker-4
     assert "queued locally" not in json.dumps(out)
     assert SHOWS_PROMISE not in out["note"]
@@ -344,31 +355,49 @@ def test_create_placed_elsewhere_while_the_sync_role_is_given_up_says_only_this_
     assert "gave up the sync role" in out["board_sync"] and "may not refresh until it recovers" in out["board_sync"]
 
 
-def test_create_queued_on_a_target_while_stopped_says_this_gateways_copy_lags(home, monkeypatch):
+@pytest.mark.parametrize("owner_result", [
+    None,  # an owner on core before _link_origin: its answer has no origin_chat_link and it wrote no link
+    {"ok": False, "created": True, "status": "ready"},  # its Board sync off or stopped: nothing reaches the Board
+])
+def test_create_placed_on_an_owner_that_did_not_write_the_link_says_the_link_waits_here(
+        home, monkeypatch, owner_result):
+    """[daveey] PR #2079 review: the note said ``owner_written`` from the chat id's shape alone, untrue for an
+    owner on older core or with its sync off while the fleet is mixed. Only the owner's answer decides it."""
+    path, _conn = home
+    _give_up_the_sync_role(path, monkeypatch)
+    out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23", owner_result=owner_result)
+    assert out["chat_link"] == "queued_local" and "chat_link" not in out["placed"], out
+    assert "shows in this chat's tasks once this gateway's Board sync recovers" in out["note"]
+    assert "queued locally: this gateway's Board sync has been stopped since " in out["note"]
+
+
+def test_create_queued_on_a_target_while_stopped_says_the_link_waits_here(home, monkeypatch):
+    """No owner answer yet: whether it will write the link is unknown, so the note promises only this gateway."""
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
     out = _place_on_worker(path, monkeypatch, task_id=None)
-    assert out["ok"] is True and out["status"] == "queued" and out["chat_link"] == "owner_written", out
-    assert "(this chat's tasks once this gateway's copy of the Board refreshes, " in out["note"]
+    assert out["ok"] is True and out["status"] == "queued" and out["chat_link"] == "queued_local", out
+    assert "(this chat's tasks once this gateway's Board sync recovers, " in out["note"]
 
 
 def test_create_placed_from_a_desktop_hash_chat_while_stopped_says_the_link_waits_here(home, monkeypatch):
-    """The owner writes no link for a ``local-<sha256>`` chat (it cannot tell it from a worker's hash), so that
-    link still waits for this gateway's sync: #2033's ``queued_local`` note stays true for it."""
+    """The owner writes no link for an unproven ``local-<sha256>`` chat (it cannot tell it from a worker's hash) and
+    says so by leaving ``origin_chat_link`` out, so that link still waits for this gateway's sync."""
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
-    out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23", chat="local-" + "9c" * 32)
+    out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23", chat="local-" + "9c" * 32,
+                           owner_result={"ok": False, "created": True, "status": "ready"})
     assert out["chat_link"] == "queued_local", out
     assert "shows in this chat's tasks once this gateway's Board sync recovers" in out["note"]
     assert "queued locally: this gateway's Board sync has been stopped since " in out["note"]
 
 
-@pytest.mark.parametrize("task_id", ["t_01a1d42acdce8e23", None], ids=["created", "queued"])
-@pytest.mark.parametrize(("chat", "chat_link", "later"), [
-    (CHAT, "owner_written", "once this gateway's copy of the Board refreshes"),
-    ("local-" + "9c" * 32, "queued_local", "once this gateway's Board sync recovers"),
-], ids=["owner-written", "hash-chat"])
-def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home, monkeypatch, task_id, chat,
+@pytest.mark.parametrize(("task_id", "owner_result", "chat_link", "later"), [
+    ("t_01a1d42acdce8e23", OWNER_ANSWER, "owner_written", "once this gateway's copy of the Board refreshes"),
+    ("t_01a1d42acdce8e23", None, "queued_local", "once this gateway's Board sync recovers"),
+    (None, OWNER_ANSWER, "queued_local", "once this gateway's Board sync recovers"),
+], ids=["owner-written", "older-owner", "queued"])
+def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home, monkeypatch, task_id, owner_result,
                                                                            chat_link, later):
     """Review 5888858852: the rewrite anchored on literals kanban_tools also spelled out, so rewording the note
     there made it silently do nothing. Reworded at the one source, both rewrites (owner-written and queued) land."""
@@ -377,30 +406,37 @@ def test_create_note_wording_and_its_stopped_sync_rewrite_share_one_source(home,
     monkeypatch.setattr(kbd, "CHAT_TASKS_HEAD", "(listed under this chat")
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
-    out = _place_on_worker(path, monkeypatch, task_id=task_id, chat=chat)
+    out = _place_on_worker(path, monkeypatch, task_id=task_id, owner_result=owner_result)
     assert out["chat_link"] == chat_link, out
     expected = (f" and is listed under this chat {later}." if task_id else f"(listed under this chat {later}, ")
     assert expected in out["note"], out["note"]
     assert "this chat's tasks" not in out["note"]
 
 
-@pytest.mark.parametrize(("chat", "chat_link", "later"), [
-    (CHAT, "owner_written", "once this gateway's copy of the Board refreshes"),
-    ("local-" + "9c" * 32, "queued_local", "once this gateway's Board sync recovers"),
-], ids=["owner-written", "hash-chat"])
-def test_queued_rewrite_lands_after_the_exact_head_for_any_separator(home, monkeypatch, chat, chat_link, later):
+def test_queued_rewrite_lands_after_the_exact_head_for_any_separator(home, monkeypatch):
     """Review 5889250891: the anchor was the queued wording .rstrip(", "), a character set, so wording ending in
-    ": " kept its colon before the inserted text. The rewrite now goes right after the exact head constant (both the
-    owner-written and the queued rewrite)."""
+    ": " kept its colon before the inserted text. The rewrite now goes right after the exact head constant. A queued
+    request has no owner answer yet, so it is always ``queued_local``."""
     from tools import kanban_tools_board_delivery as kbd
     monkeypatch.setattr(kbd, "CHAT_TASKS_HEAD", "(see this chat's tasks")
     monkeypatch.setattr(kbd, "CHAT_TASKS_SEP", ": ")
     path, _conn = home
     _give_up_the_sync_role(path, monkeypatch)
-    out = _place_on_worker(path, monkeypatch, task_id=None, chat=chat)
-    assert out["chat_link"] == chat_link, out
+    out = _place_on_worker(path, monkeypatch, task_id=None)
+    assert out["chat_link"] == "queued_local", out
+    later = "once this gateway's Board sync recovers"
     assert f"(see this chat's tasks {later}: `hermes-hub requests`)" in out["note"], out["note"]
     assert f": {later}" not in out["note"]
+
+
+def test_create_placed_from_a_proven_desktop_hash_chat_says_the_owner_wrote_the_link(home, monkeypatch):
+    """[daveey] PR #2079 review: the owner DOES link a ``local-<sha256>`` chat an ancestor's ``created`` link proves
+    (``proven_foreign_chats``); the note read the hash shape and said ``queued_local`` anyway."""
+    path, _conn = home
+    _give_up_the_sync_role(path, monkeypatch)
+    out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23", chat="local-" + "9c" * 32)
+    assert out["chat_link"] == "owner_written", out
+    assert "shows in this chat's tasks once this gateway's copy of the Board refreshes" in out["note"]
 
 
 def test_create_placed_elsewhere_while_the_sync_runs_is_unchanged(home, monkeypatch):

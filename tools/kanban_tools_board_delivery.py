@@ -14,9 +14,13 @@ BOARD_WRITE_TOOLS = frozenset({
     "kanban_link", "kanban_unlink", "kanban_archive",
 })
 
-# A create placed on another gateway for this chat: the card's owner writes this chat's ``created`` link to the Board
-# (``kanban_origin_creation._link_origin``), so the link no longer waits in this gateway's outbox. What still depends
-# on this gateway is its replica of the Board, which this chat's task list reads and the stopped sync no longer pulls.
+# A create placed on another gateway for this chat: when the owner answers that it wrote this chat's ``created`` link
+# (``placed.chat_link: owner_written``, from ``kanban_origin_creation.origin_link_fields``), the link no longer waits
+# in this gateway's outbox; what still depends on this gateway is its replica of the Board, which this chat's task
+# list reads and the stopped sync no longer pulls. Only an owner on this core or newer whose Board sync is on (it has
+# a task_chat_links table) and running gives that answer. Without it the link waits here: no answer yet (a queued
+# request, whose owner_written would only be the expected outcome, not a fact, so it is never claimed), an owner on
+# older core (it writes no link), an owner with its sync off, or a ``local-<sha256>`` chat it does not link.
 # kanban_tools builds its placed-create notes from these fragments, so the rewrites below always find them. The
 # queued note is CHAT_TASKS_HEAD + CHAT_TASKS_SEP; the rewrites insert after the exact head, whatever the separator.
 CHAT_TASKS_SHOWS = " and shows in this chat's tasks"
@@ -33,11 +37,10 @@ def _placed_for_this_chat(payload: dict) -> bool:
 
 
 def _owner_links(payload: dict) -> bool:
-    """False for a receipt-shaped chat id (``local-<sha256>``): the owner cannot tell it from a worker's own hash,
-    so it writes no link (``_link_origin``) and the link still waits for this gateway's ledger reconcile."""
-    from hermes_cli.kanban_session_provenance import _HEADLESS_SESSION
-    session = str(payload["placed"]["origin_session"]).rsplit("/", 1)[-1]
-    return not _HEADLESS_SESSION.fullmatch(session)
+    """True only when the owner itself said it wrote this chat's link (``placed.chat_link``). The chat id's shape
+    cannot decide it: the owner writes one for a ``local-<sha256>`` chat an ancestor's ``created`` link proves
+    (``proven_foreign_chats``), and none at all on older core or with its Board sync off."""
+    return payload["placed"].get("chat_link") == OWNER_WRITTEN
 
 
 def _chat_link_queued(payload: dict, board_sync: str) -> None:
@@ -70,9 +73,9 @@ def _chat_link_by_owner(payload: dict) -> None:
 def annotate(board: Callable[..., Any], tool_name: str, args: dict, out: str) -> str:
     """``out`` plus ``board_delivery: queued_local`` when the write stayed local; a comment on a card another
     gateway runs loses its live-run ``delivery`` promise, and a create placed elsewhere for this chat says its link
-    is on the Board but this gateway's copy of it may lag (``chat_link: owner_written``), or, for a ``local-<sha256>``
-    chat the owner writes no link for, that the link waits here (``chat_link: queued_local``). Unchanged while the
-    sync runs (or on any read error)."""
+    is on the Board but this gateway's copy of it may lag (``chat_link: owner_written``) when the owner answered that
+    it wrote that link, else that the link waits here (``chat_link: queued_local``). Unchanged while the sync runs
+    (or on any read error)."""
     if (tool_name not in BOARD_WRITE_TOOLS and tool_name != "kanban_create") or not out.startswith('{"ok": true'):
         return out
     from hermes_cli import kanban_sync_runstate as runstate
@@ -91,7 +94,7 @@ def annotate(board: Callable[..., Any], tool_name: str, args: dict, out: str) ->
         return out
     if not note:
         return out
-    if tool_name == "kanban_create":  # the card is on the Board; its owner writes this chat's link unless headless
+    if tool_name == "kanban_create":  # the card is on the Board; its link is too only if the owner says it wrote it
         if _owner_links(payload):
             _chat_link_by_owner(payload)
         else:

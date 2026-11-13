@@ -114,6 +114,10 @@ def test_courier_create_writes_the_origin_chats_created_link_once(synced_owner):
 
 @pytest.mark.parametrize("origin", [
     {"gateway": "hub", "profile": "default", "session": CHAT},  # a chat on the owner: its own reconcile links it
+    # [daveey] PR #2079 review: another profile's chat on the owner's gateway gets none either. The owner's reconcile
+    # is that chat's gateway and releases any created row of it it does not derive (a courier card has no
+    # creator_chats_resolved event), measured: written, then {'released': 1} on the next pass. The hub sub reaches it.
+    {"gateway": "hub", "profile": "other", "session": CHAT},
     {"gateway": "macbook", "profile": "default", "session": "kanban-placement-macbook"},  # attribution, no chat
     # a receipt-shaped hash: maybe a worker's own $HERMES_SESSION_ID; only macbook can prove it is a Desktop chat
     {"gateway": "macbook", "profile": "default", "session": "local-" + "9c" * 32},
@@ -123,6 +127,41 @@ def test_courier_create_writes_no_link_for_a_chat_on_the_owner_or_a_placeholder(
     res = json.loads(str(registry.dispatch("kanban_create", args, origin_intent={**synced_owner, "origin": origin})))
     assert res.get("created") is True, res
     assert _links(res["task_id"]) == []
+    assert "origin_chat_link" not in res  # the origin is told the link still waits for its own reconcile
+
+
+def test_courier_create_tells_the_origin_it_wrote_the_link(synced_owner):
+    """[daveey] PR #2079 review: the origin's ``chat_link: owner_written`` note read the chat id's shape; the owner's
+    answer now carries what it did, so a mixed fleet (older owner, sync off) never gets that promise wrongly."""
+    args = {"title": "Build", "assignee": "default"}
+    res = json.loads(str(registry.dispatch("kanban_create", args, origin_intent=synced_owner)))
+    assert res.get("created") is True and res.get("origin_chat_link") == "owner_written", res
+    again = json.loads(str(registry.dispatch("kanban_create", args, origin_intent=synced_owner)))
+    assert again["task_id"] == res["task_id"] and again.get("origin_chat_link") == "owner_written"
+
+
+def test_courier_create_on_an_owner_whose_sync_is_stopped_does_not_claim_the_link(synced_owner, monkeypatch):
+    from hermes_cli import kanban_sync_runstate as runstate
+    monkeypatch.setattr(runstate, "down", lambda: {"running": False, "reason": "gave up the sync role"})
+    res = json.loads(str(registry.dispatch("kanban_create", {"title": "Build", "assignee": "default"},
+                                           origin_intent=synced_owner)))
+    assert res.get("created") is True and "origin_chat_link" not in res, res
+
+
+def test_courier_create_on_an_owner_without_board_sync_does_not_claim_the_link(owner):
+    res = json.loads(str(registry.dispatch("kanban_create", {"title": "Build", "assignee": "default"},
+                                           origin_intent=owner)))
+    assert res.get("created") is True and "origin_chat_link" not in res, res
+
+
+def test_courier_adoption_tells_the_origin_it_wrote_the_link(synced_owner):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Existing", assignee="default")
+    intent = {"request_id": "adopt:0123456789", "origin": synced_owner["origin"],
+              "owner": {**synced_owner["owner"], "task_id": tid}}
+    res = json.loads(str(registry.dispatch("kanban_origin_adopt", {"task_id": tid, "board": "default"},
+                                           origin_intent=intent)))
+    assert res.get("adopted") is True and res.get("origin_chat_link") == "owner_written", res
 
 
 # --- origin side: kanban_create auto placement and the deferred forward ----------------------------------------

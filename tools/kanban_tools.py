@@ -22,7 +22,7 @@ from hermes_cli.goals import handoff_judge_goal, judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
-from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
+from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc, kanban_origin_creation
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
                                           _effective_board_args, _origin_enrollment, _landing_placement, _pinned_note,
@@ -1510,12 +1510,13 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         # A chat model reads task_id null as "not created" and calls kanban_create again, which made a
         # duplicate card (10-27 drill). Fetch the target's answer for a bounded wait so the id comes
         # back like a local create's; otherwise say plainly that the card exists. [daveey]
+        owner: dict = {}  # the owner's courier answer: did it write this chat's link to the Board?
         tid, remote_status = (None, None) if placed.get("queued_only") else kp.await_task_id(
-            rid, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), budget=float(cfg.get("wait_seconds", 10) or 0))
+            rid, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), budget=float(cfg.get("wait_seconds", 10) or 0), result_out=owner)
         retry = ("This identical kanban_create call was already made, so no second card was sent; this is "
                  "the same card. " if placed.get("retry") else "")
         fields = {"placed": {"gateway": target, "request_id": rid, "task_id": tid, "origin_session": session_id,
-                             "queued_only": bool(placed.get("queued_only")), "retry": bool(placed.get("retry"))}}
+                             "queued_only": bool(placed.get("queued_only")), "retry": bool(placed.get("retry")), **kp.owner_chat_link(owner.get("result"))}}
         from tools import kanban_tools_board_delivery as kbd_words  # [daveey] the stopped-sync rewrite's anchors
         if tid:
             shows = kbd_words.CHAT_TASKS_SHOWS if session_id else ""
@@ -1711,7 +1712,7 @@ def _handle_create(args: dict, **kw) -> str:
                 "request_id": origin_intent["request_id"],
                 "binding": json.loads(row["binding_json"]),
                 "child_request_id": row["child_request_id"],
-            }}
+            }, **kanban_origin_creation.origin_link_fields(conn, new_tid, origin_intent["origin"])}  # chat_link [daveey]
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
         extra.update(_marker_placement_fields(conn, new_tid, marker_placement, **place_origin))
@@ -1935,7 +1936,7 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
         return tool_error(f"authenticated origin courier context required. {message}".strip().rstrip("."),
                           code="origin_context_required", handoff_complete=False, **hint)
     from hermes_cli.kanban_origin import OriginError
-    from hermes_cli.kanban_origin_creation import adopt_with_origin
+    from hermes_cli.kanban_origin_creation import adopt_with_origin, origin_link_fields
     if (not isinstance(intent, dict) or not isinstance(intent.get("owner"), dict)
             or intent["owner"].get("task_id") != args.get("task_id")
             or intent["owner"].get("board") != args.get("board")):
@@ -1948,7 +1949,8 @@ def _handle_origin_adopt(args: dict, **kw) -> str:
                            "code": "origin_bind_pending", "handoff_complete": False,
                            "origin_creation": {"request_id": intent["request_id"],
                                                "binding": json.loads(row["binding_json"]),
-                                               "child_request_id": row["child_request_id"]}})
+                                               "child_request_id": row["child_request_id"]},
+                           **origin_link_fields(conn, tid, intent["origin"])})
 
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---

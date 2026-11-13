@@ -45,8 +45,12 @@ def _link_origin(conn, task_id: str, origin: dict, owner_gateway: str) -> None:
     saw the cards it placed. The owner's capture triggers push this row through the owner's sync. The uid is the one
     the origin's ledger reconcile writes (``kanban_chat_links.link_uid``), so when that sync recovers it upserts the
     same Board row rather than adding one; the owner's reconcile manages only its own chats' rows and never releases
-    it, and the origin releases it when the card closes (``_owner_written_releases``). A chat on the owner itself
-    gets none: there the owner's reconcile is the chat's gateway and keeps only links it derives itself.
+    it, and the origin releases it when the card closes (``_owner_written_releases``). A chat on the owner's
+    gateway gets none, whatever its profile: there the owner's reconcile is the chat's gateway, and it releases on
+    its next pass any ``created`` row of that gateway it does not derive itself (a courier card has no
+    ``creator_chats_resolved`` event, so ``_local_links`` does not keep it), so a row for another profile's chat
+    would only be written to be released. Such a chat is reached by its ``hub`` subscription (``_subscribe_origin``);
+    its task-list link is left to its own ledger reconcile, as before this link existed.
 
     A receipt-shaped origin (``local-<sha256>``, ``is_headless_session``) gets none either, unless an ancestor
     already proves it, as in ``kanban_creator_chats.initialize_ownership``: an unreleased ``created`` link proves a
@@ -70,6 +74,28 @@ def _link_origin(conn, task_id: str, origin: dict, owner_gateway: str) -> None:
         "released, created_at) VALUES (?, ?, ?, ?, ?, 'created', 0, ?)",
         (link_uid(task_id, origin["gateway"], origin["profile"], origin["session"], "created"), task_id,
          origin["gateway"], origin["profile"], origin["session"], int(time.time())))
+
+
+OWNER_WRITTEN = "owner_written"
+
+
+def origin_link_fields(conn, task_id: str, origin: dict) -> dict:
+    """``{"origin_chat_link": "owner_written"}`` for the courier result when this owner holds the origin chat's
+    unreleased ``created`` link and its Board sync runs, so the link reaches the Board without the origin; ``{}``
+    otherwise. [daveey] The origin reads this answer instead of guessing from the chat id's shape: an owner on older
+    core (no ``_link_origin``) or with its sync off or stopped writes nothing that reaches the Board, and a
+    ``local-<sha256>`` chat an ancestor already proves does get a link. Never raises."""
+    try:
+        from hermes_cli import kanban_db_sync as sync
+        from hermes_cli import kanban_sync_runstate as runstate
+        from hermes_cli.kanban_chat_links import link_uid
+        if not sync.sync_enabled() or runstate.down():
+            return {}
+        uid = link_uid(task_id, origin["gateway"], origin["profile"], origin["session"], "created")
+        row = conn.execute("SELECT 1 FROM task_chat_links WHERE uid = ? AND released = 0", (uid,)).fetchone()
+    except Exception:  # health: allow BLE001 -- an unreadable answer is "not written", never a failed create
+        return {}
+    return {"origin_chat_link": OWNER_WRITTEN} if row else {}
 
 
 def _insert_intent(conn, row: tuple) -> None:
