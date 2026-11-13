@@ -752,6 +752,7 @@ def _real(path):
     return os.path.realpath(str(path))
 
 
+@pytest.mark.platforms("posix")  # macOS lane runs _fd_path's F_GETPATH branch
 def test_archive_fsyncs_all_artifacts_bottom_up_before_publication_and_detach(board, monkeypatch):
     from hermes_cli import kanban_scratch_archive as sa
 
@@ -834,23 +835,28 @@ def test_ancestor_fsync_failure_preserves_workspace(board, monkeypatch, ancestor
     assert not _archive(tid).exists()
 
 
+@pytest.mark.platforms("posix")  # macOS lane runs _fd_path's F_GETPATH branch
 @pytest.mark.parametrize("target", ["file", "directory", "publication_parent"])
 def test_fsync_failure_fails_closed_without_publication(board, monkeypatch, target):
     from hermes_cli import kanban_scratch_archive as sa
 
     tid, path = _plain_task(lambda p: None)
     real_fsync = os.fsync
+    hits = []
 
     def flaky(fd):
         link = _fd_path(fd)
         hit = {"file": link.endswith("manifest.json"), "directory": link.endswith(sa.PAYLOAD_DIR),
                "publication_parent": link == _real(_archive(tid).parent)}[target]
         if hit:
+            hits.append(link)
             raise OSError(5, "EIO")
         return real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", flaky)
     assert _gc() == 0
+    # The injected EIO, not a broken _fd_path (whose own OSError also fails closed), stopped the archive.
+    assert hits
     assert (path / "notes.txt").read_text() == "scratch"
     parent = _archive(tid).parent
     assert not parent.exists() or list(parent.iterdir()) == []
