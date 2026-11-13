@@ -124,6 +124,8 @@ def test_many_cd_home_lines_without_a_state_path_scan_in_linear_time():
     # PR #2533 review: ``"\u0130".lower()`` is two code points, so an offset taken on the lowered span shifted.
     ("cd ~ && make all \u0130 && cat .hermes/kanban/workspaces/t_x/f", "artifact-not-here",
      "~/.hermes/kanban/workspaces/t_x/f"),
+    # The state-path rule is case-insensitive, so an upper-case relative path is still named as its ``~/`` path.
+    ("cd ~ && cat .HERMES/logs/x.log", "b", "~/.HERMES/logs/x.log"),
 ])
 def test_relative_state_path_hit_is_the_home_path_not_the_cd_span(body, cls, path, tmp_path, monkeypatch):
     from hermes_cli import kanban_home_marker_placement as hm
