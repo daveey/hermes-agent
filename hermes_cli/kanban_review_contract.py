@@ -127,13 +127,28 @@ def refusal(body: Optional[str], metadata: Any) -> Optional[str]:
             "\"reviewed_pr\": \"https://github.com/<owner>/<repo>/pull/<n>\"}.")
 
 
+def reviewed_core_pull(metadata: Any) -> Optional[str]:
+    """The completion's own ``reviewed_pr`` when it names a core-fork pull, else None.
+
+    Review card t_01a1cd9ac1af23fa (defect agent-8a7de4b89f) named PR #1123 only in prose ("softmax-universe/
+    daveey-hermes PR #1123"), so ``core_pull(body)`` is None; the chat's completion still recorded
+    ``reviewed_pr`` = the core pull URL with a verdict, and ship refused that record at land time.
+    """
+    pr = metadata.get("reviewed_pr") if isinstance(metadata, dict) else None
+    if not isinstance(pr, str):
+        return None
+    m = _PULL.search(pr) or re.fullmatch(r"(?P<repo>[\w.-]+/[\w.-]+)#\d+", pr.strip())
+    return pr.strip() if m and m.group("repo").lower() in CORE_REPOS else None
+
+
 def independence_refusal(body: Optional[str], metadata: Any, worker_run_id: Optional[int], *,
                          worker_shell: Optional[str] = None) -> Optional[str]:
     """The refusal text for a ship review verdict recorded outside the card's own dispatched worker run, else None.
 
     ``worker_run_id`` is the caller's dispatcher run id for this card (None for a chat, an orchestrator, the CLI or
     the dashboard; a worker's terminal shell gets it only once ``kanban_worker_shell.run_for`` proves the run). A ship
-    review card is one whose body names a core-fork pull (``states_contract`` implies it). Landing handoffs
+    review card is one whose body names a core-fork pull (``states_contract`` implies it); when the body names none,
+    the verdict's own ``reviewed_pr`` naming a core-fork pull makes it one (``reviewed_core_pull``). Landing handoffs
     (``published_pr``), completions with no verdict key and other cards are left alone. ``worker_shell`` is why the
     proof failed when the caller's ``HERMES_KANBAN_WORKER_TASK`` names this card: the card's own worker, for which
     "leave it for a worker" is the wrong advice.
@@ -143,9 +158,13 @@ def independence_refusal(body: Optional[str], metadata: Any, worker_run_id: Opti
     if not is_review_result(metadata) or not any(key in metadata for key in _VERDICT_KEYS):
         return None
     pull = core_pull(body)
-    if pull is None:
+    if pull is not None:
+        card = (f"this is a ship review card for {pull}" if states_contract(body)
+                else f"this card names core pull {pull}")
+    elif (pull := reviewed_core_pull(metadata)) is not None:
+        card = f"this completion reviews core pull {pull}"
+    else:
         return None
-    card = f"this is a ship review card for {pull}" if states_contract(body) else f"this card names core pull {pull}"
     if worker_shell:
         return (f"{card}, and this shell names it in HERMES_KANBAN_WORKER_TASK, but {worker_shell}. "
                 "`hermes-core-wt ship` accepts only a review completed by the card's own dispatched run with its "

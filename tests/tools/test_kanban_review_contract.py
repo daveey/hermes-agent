@@ -27,6 +27,8 @@ HEAD_BODY = ("Exact-head review of https://github.com/daveey/hermes/pull/1123 at
              "Complete with `reviewed_pr=https://github.com/daveey/hermes/pull/1123`, `reviewed_head=<sha>`, "
              "`verdict` approve or request_changes.")
 GOOD = {"verdict": "approve", "reviewed_sha": SHA, "reviewed_pr": PR}
+# A full review of a pull outside the core fork: no ship review, whoever completes it.
+NOT_CORE_GOOD = {**GOOD, "reviewed_pr": "https://github.com/daveey/babybear/pull/3730"}
 
 
 # --- contract detection --------------------------------------------------------------------------------------
@@ -315,9 +317,9 @@ def test_independence_refuses_outside_verdict_on_ship_review(body, md):
     (SHIP_BODY, {"reviewed_sha": SHA, "reviewed_pr": PR, "landed_sha": SHA}),  # no verdict key
     (PR_KEY_BODY, LANDING_MDS[0]),
     (SHIP_BODY, {"changed_files": ["a.py"]}), (SHIP_BODY, {}), (SHIP_BODY, None),
-    ("Fix the sidebar scroll.", dict(GOOD)),  # not a ship review card
+    ("Fix the sidebar scroll.", NOT_CORE_GOOD),  # not a ship review card
     (PR_KEY_BODY.replace(PR_KEY_PULL, "https://github.com/daveey/babybear/pull/3730"), dict(PR_KEY_MD)),
-    (None, dict(GOOD)),
+    (None, NOT_CORE_GOOD),
 ], ids=["landing", "no_verdict", "pr_key_landing", "no_review_key", "empty", "none", "not_ship", "babybear", "no_body"])
 def test_independence_leaves_non_reviews_alone(body, md):
     assert krc.independence_refusal(body, md, None) is None
@@ -364,7 +366,7 @@ def test_tool_dispatched_worker_completes_same_card(board, monkeypatch):
 
 
 @pytest.mark.parametrize("body,md", [
-    ("Fix the sidebar scroll. Done when its tests pass.", dict(GOOD)),  # not a ship review card
+    ("Fix the sidebar scroll. Done when its tests pass.", NOT_CORE_GOOD),  # not a ship review card
     (PR_KEY_BODY, dict(LANDING_MDS[0])),  # a verdictless landing handoff on a core-pull card
     (SHIP_BODY, {"changed_files": ["a.py"]}),  # no review key at all
 ], ids=["not_ship", "verdictless_landing", "no_review_key"])
@@ -558,3 +560,66 @@ def test_independence_names_a_core_pull_card_softly():
     msg = krc.independence_refusal(PR_KEY_BODY, dict(PR_KEY_MD), None) or ""
     assert msg.startswith(f"this card names core pull {PR_KEY_PULL}; ")
     assert krc.independence_refusal(SHIP_BODY, dict(GOOD), None).startswith(f"this is a ship review card for {PR};")
+
+
+# --- a brief that names the core pull only in prose (agent-8a7de4b89f) ---------------------------------------
+# Review card t_01a1cd9ac1af23fa named PR #1123 only as "softmax-universe/daveey-hermes PR #1123", so core_pull(body)
+# was None and independence never applied; the orchestrator chat completed it with reviewed_pr = the core pull URL
+# and a delegate_task verdict, and ship refused the synthesized run at land time.
+PROSE_BODY = ("Independent exact-head delta review of softmax-universe/daveey-hermes PR #1123 (review_required flag).\n"
+              "Done when: an approve or request_changes verdict that names the exact full SHA reviewed (reviewed_sha).")
+
+
+@pytest.mark.parametrize("pr", [PR, "softmax-universe/daveey-hermes#1349", " https://github.com/Daveey/Hermes/pull/9 "])
+def test_independence_refuses_outside_verdict_named_only_by_reviewed_pr(pr):
+    md = {**GOOD, "reviewed_pr": pr}
+    assert krc.core_pull(PROSE_BODY) is None
+    msg = krc.independence_refusal(PROSE_BODY, md, None) or ""
+    assert msg.startswith(f"this completion reviews core pull {pr.strip()}; `hermes-core-wt ship` accepts only")
+    assert krc.independence_refusal(PROSE_BODY, md, 7) is None  # the card's own dispatched worker run
+    assert krc.refusal(PROSE_BODY, md) is None  # the shape gate on such a card is unchanged
+
+
+@pytest.mark.parametrize("md", [
+    {**GOOD, "reviewed_pr": "https://github.com/daveey/babybear/pull/3730"},  # another repository
+    {**GOOD, "reviewed_pr": "softmax-universe/babybear#12"},
+    {**GOOD, "reviewed_pr": 1123}, {**GOOD, "reviewed_pr": "PR #1123"}, {**GOOD, "reviewed_pr": None},  # no pull
+    {"reviewed_sha": SHA, "reviewed_pr": PR},  # no verdict: a landing/cleanup handoff
+    {"published_pr": PR, "verdict": "approve", "reviewed_pr": PR},  # a landing handoff
+    {"verdict": "approve", "reviewed_sha": SHA},  # names no pull anywhere
+], ids=["babybear_url", "babybear_ref", "int", "prose", "none", "no_verdict", "landing", "no_pr"])
+def test_independence_reviewed_pr_rule_needs_a_core_pull_verdict(md):
+    assert krc.independence_refusal(PROSE_BODY, md, None) is None
+
+
+@pytest.mark.parametrize("md,want", [
+    ({"reviewed_pr": PR}, PR), ({"reviewed_pr": "softmax-universe/daveey-hermes#3"}, "softmax-universe/daveey-hermes#3"),
+    ({"reviewed_pr": "https://github.com/daveey/babybear/pull/1"}, None), ({"reviewed_pr": "x#1"}, None),
+    ({}, None), (None, None), ("reviewed_pr", None),
+])
+def test_reviewed_core_pull(md, want):
+    assert krc.reviewed_core_pull(md) == want
+
+
+def test_tool_refuses_outside_approval_named_only_by_reviewed_pr(board):  # RED before agent-8a7de4b89f
+    from tools import kanban_tools as kt
+    tid = _outside_card(board, PROSE_BODY)
+    out = json.loads(kt._handle_complete({"task_id": tid, "summary": "APPROVE (subagent verdict)",
+                                          "metadata": {**GOOD, "reviewed_pr": PR}}))
+    assert out.get("error") and out["rejection"] == "review_independence", out
+    assert f"this completion reviews core pull {PR}" in out["error"]
+    assert _status(board, tid) == "ready" and _runs(board, tid) == 0  # nothing changed, no synthesized run
+
+
+def test_cli_refuses_outside_approval_named_only_by_reviewed_pr(board, capsys):
+    tid = _outside_card(board, PROSE_BODY)
+    assert _cli_complete(tid, {**GOOD, "reviewed_pr": PR}, force=True) != 0
+    assert "review_independence" in capsys.readouterr().err
+    assert _status(board, tid) == "ready" and _runs(board, tid) == 0
+
+
+def test_tool_dispatched_worker_completes_prose_review_card(board, monkeypatch):
+    tid = _claim(board, monkeypatch, PROSE_BODY)
+    out = _complete({**GOOD, "reviewed_pr": PR})
+    assert not out.get("error"), out
+    assert _status(board, tid) == "done"
