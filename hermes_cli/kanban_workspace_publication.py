@@ -160,7 +160,15 @@ def publication_guard(fn):
             return fn(conn, task_id, *args, **kwargs)
         finally:
             _receipt.reset(token)
-    return wrapped
+    from hermes_cli.kanban_source_preflight import source_receipt_preflight as preflight
+    return preflight(wrapped)  # workspace_source: stacked outside the guard (v3 §2)
+
+
+def source_receipt_preflight(fn):
+    """The workspace_source ending preflight alone (``complete_task``/``request_changes``, which PR1133 does not
+    guard): see :mod:`hermes_cli.kanban_source_preflight`."""
+    from hermes_cli.kanban_source_preflight import source_receipt_preflight as preflight
+    return preflight(fn)
 
 
 def closed_metadata(conn, task_id, run_id, metadata):

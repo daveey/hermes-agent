@@ -18,7 +18,7 @@ import contextlib
 import json
 
 from hermes_cli.kanban_published_worktree import publication_scope
-from hermes_cli.kanban_workspace_publication import publication_guard
+from hermes_cli.kanban_workspace_publication import publication_guard, source_receipt_preflight
 import os
 import re
 import secrets
@@ -2450,19 +2450,13 @@ class LiveClaimError(ValueError):
 
 
 def _claim_is_live(trow) -> bool:
-    """True when a ``running`` task's claim still protects a run: the worker process
-    it spawned exists (PID + start-time fingerprint). A claim whose worker is gone,
-    or a library/CLI claim that never spawned one, has no run to protect. TTL expiry
-    is deliberately not consulted: ``reclaim_stale_tasks`` extends, not reclaims, the
-    claim of a live worker, so the process is the liveness authority here too."""
-    return bool(
-        trow["status"] == "running"
-        and trow["claim_lock"] is not None
-        and trow["worker_pid"]
-        and _worker_alive(trow["worker_pid"], trow["worker_started_at"])
-    )
+    """True when a ``running`` task's claim still protects a run: its spawned worker exists (PID + start-time
+    fingerprint). TTL is not consulted: the process is the liveness authority (``reclaim_stale_tasks`` extends it)."""
+    return bool(trow["status"] == "running" and trow["claim_lock"] is not None
+                and trow["worker_pid"] and _worker_alive(trow["worker_pid"], trow["worker_started_at"]))
 
 
+@source_receipt_preflight  # workspace_source: the ending's receipt (published/unchanged/retained), S6
 def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
@@ -3193,6 +3187,7 @@ def _nonblank_str(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value.strip() else None
 
 
+@source_receipt_preflight
 def request_changes(
     conn: sqlite3.Connection, task_id: str, *, reason: str, expected_run_id: Optional[int] = None,
 ) -> tuple[bool, Optional[str]]:
