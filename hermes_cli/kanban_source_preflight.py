@@ -17,6 +17,7 @@ ending's transaction ``with_source_receipt`` only reads it.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import sqlite3
 from functools import wraps
@@ -26,6 +27,11 @@ from hermes_cli import kanban_source_board as board_calls
 from hermes_cli import kanban_source_receipt as carrier
 
 _log = logging.getLogger(__name__)
+# (task_id, run_id, [(code, detail)]) for the ending being preflighted: the agent-facing ``unpublished_workspace``
+# refusal names the publish refusal, so its fix (e.g. registering the clone) is visible, not only in an event.
+_REFUSALS: contextvars.ContextVar[Optional[tuple]] = contextvars.ContextVar("kanban_source_refusals", default=None)
+_HINTS = {"source_clone_unregistered": "register the worktree's clone under kanban.workspace_source.clones "
+                                       "({\"<owner>/<name>\": \"<clone root>\"})"}
 
 
 def _retained(run: board_calls.AttachedRun, reason: str) -> dict:
@@ -71,10 +77,28 @@ def compute_receipt(conn: sqlite3.Connection, task_id: str, run: board_calls.Att
     except pub.PublishRefused as exc:
         _log.warning("workspace_source: %s not published (%s); custody stays here", task_id, exc)
         _event(conn, task_id, run, exc.code, exc.detail)
+        _note_refusal(task_id, run.run_id, exc.code, exc.detail)
         return _retained(run, f"publish_error={exc.code}")
     except Exception as exc:  # health: allow BLE001 -- a preflight must never refuse an ending; fail closed (retained)
         _log.warning("workspace_source: preflight of %s failed", task_id, exc_info=True)
         return _retained(run, f"preflight_error={type(exc).__name__}")
+
+
+def _note_refusal(task_id: str, run_id: int, code: str, detail: str) -> None:
+    scope = _REFUSALS.get()
+    if scope and scope[0] == task_id and scope[1] == run_id:
+        scope[2].append((code, detail))
+
+
+def refusal_hint(task_id: str, run_id: Optional[int]) -> str:
+    """`` (workspace_source publish refused: <code>: <detail>; <fix>)`` for this run's preflight, else ``""``."""
+    scope = _REFUSALS.get()
+    if not scope or scope[0] != task_id or scope[1] != run_id or not scope[2]:
+        return ""
+    code, detail = scope[2][-1]
+    text = f"{code}: {detail[:1000]}" if detail else code
+    fix = _HINTS.get(code)
+    return f" (workspace_source publish refused: {text}" + (f"; {fix})" if fix else ")")
 
 
 def _event(conn: sqlite3.Connection, task_id: str, run: board_calls.AttachedRun, code: str, detail: str) -> None:
@@ -110,9 +134,13 @@ def source_receipt_preflight(fn: Callable) -> Callable:
         row = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None or row[0] is None or carrier.staged_receipt(task_id, row[0]) is not None:
             return fn(conn, task_id, *args, **kwargs)
-        _run_id, receipt = receipt_for_current_run(conn, task_id)
-        if receipt is None:
-            return fn(conn, task_id, *args, **kwargs)
-        with carrier.staged(task_id, int(row[0]), receipt):
-            return fn(conn, task_id, *args, **kwargs)
+        token = _REFUSALS.set((task_id, int(row[0]), []))
+        try:
+            _run_id, receipt = receipt_for_current_run(conn, task_id)
+            if receipt is None:
+                return fn(conn, task_id, *args, **kwargs)
+            with carrier.staged(task_id, int(row[0]), receipt):
+                return fn(conn, task_id, *args, **kwargs)
+        finally:
+            _REFUSALS.reset(token)
     return wrapped

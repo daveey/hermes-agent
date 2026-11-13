@@ -513,6 +513,62 @@ def test_rejected_push_classified(card, monkeypatch):
     assert card.remote() is None
 
 
+def test_unpublished_park_refusal_names_the_publish_refusal(card, monkeypatch):
+    """The worktree's clone is not registered (a second checkout of the same repo): the agent-facing
+    ``unpublished_workspace`` refusal names ``source_clone_unregistered``, the clone and the config key, not only the
+    ``workspace_source_publish_refused`` event."""
+    commit(card.path, "x.txt")
+    cfg = kws.Settings(**{**card.cfg.__dict__, "clones": {}})
+    monkeypatch.setattr(kws, "settings", lambda config=None: cfg)
+    with kbc.write_txn(card.conn):
+        card.conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(card.path), card.id))
+    with pytest.raises(ValueError) as refused:
+        kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+                         expected_run_id=card.run_id)
+    text = str(refused.value)
+    assert text.startswith("unpublished_workspace:")
+    assert "workspace_source publish refused: source_clone_unregistered:" in text
+    assert f"its clone is {card.world.homes['hub'].clone}" in text
+    assert "kanban.workspace_source.clones" in text
+    task = kb.get_task(card.conn, card.id)
+    assert task is not None and task.status == "running"  # refused: run ownership intact
+    assert card.remote() is None
+
+
+def test_publish_refusal_hint_is_scoped_to_the_preflighted_run():
+    """Only the run being preflighted gets its refusal named; another card or run (a nested ending) gets none."""
+    assert pre.refusal_hint("t_a", 7) == ""
+    token = pre._REFUSALS.set(("t_a", 7, []))
+    try:
+        assert pre.refusal_hint("t_a", 7) == ""
+        pre._note_refusal("t_b", 7, "dirty_source", "x")
+        pre._note_refusal("t_a", 8, "dirty_source", "x")
+        assert pre.refusal_hint("t_a", 7) == ""
+        pre._note_refusal("t_a", 7, "dirty_source", "untracked files")
+        assert pre.refusal_hint("t_a", 7) == " (workspace_source publish refused: dirty_source: untracked files)"
+        assert pre.refusal_hint("t_b", 7) == "" and pre.refusal_hint("t_a", 8) == ""
+        pre._note_refusal("t_a", 7, "source_clone_unregistered", "")
+        assert pre.refusal_hint("t_a", 7).startswith(
+            " (workspace_source publish refused: source_clone_unregistered; register the worktree's clone under "
+            "kanban.workspace_source.clones")
+    finally:
+        pre._REFUSALS.reset(token)
+    assert pre.refusal_hint("t_a", 7) == ""
+
+
+def test_unpublished_park_refusal_without_publish_refusal_is_unchanged(card, monkeypatch):
+    """No publish was attempted (publish_on_park off): the refusal carries no publish hint."""
+    commit(card.path, "x.txt")
+    cfg = kws.Settings(**{**card.cfg.__dict__, "publish_on_park": False})
+    monkeypatch.setattr(kws, "settings", lambda config=None: cfg)
+    with kbc.write_txn(card.conn):
+        card.conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(card.path), card.id))
+    with pytest.raises(ValueError) as refused:
+        kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+                         expected_run_id=card.run_id)
+    assert str(refused.value).endswith("to the checkpoint/reason")
+
+
 # --- endings carry the receipt; the ending always proceeds (S6) ------------------------------------------------------
 
 def _leaving_op(conn, tid, status):

@@ -157,7 +157,9 @@ def prove_origin(path: str, cfg: Settings, *, lookup: Optional[Callable[[str], d
         except clones.ProofFailed as exc:
             code = {"wrong_repo": "source_remote_unsupported"}.get(exc.code, exc.code)
             raise PublishRefused(code, exc.detail) from exc
-    raise PublishRefused("source_clone_unregistered", f"{path} is not a worktree of a registered clone")
+    owner = common.parent if common.name == ".git" else common
+    raise PublishRefused("source_clone_unregistered",
+                         f"{path} is not a worktree of a registered clone (its clone is {owner})")
 
 
 # --- step 4: secret scan ----------------------------------------------------------------------------------------

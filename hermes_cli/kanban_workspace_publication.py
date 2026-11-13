@@ -152,8 +152,10 @@ def publication_guard(fn):
         for observed in observations:
             if observed['state'] != 'published':
                 if not reason or not reason[1].strip():
+                    from hermes_cli.kanban_source_preflight import refusal_hint
                     raise ValueError('unpublished_workspace: commit and push the task branch before parking, or add '
-                                     'UNPUBLISHED_WORK_REASON=<why work must remain on this host> to the checkpoint/reason')
+                                     'UNPUBLISHED_WORK_REASON=<why work must remain on this host> to the checkpoint/reason'
+                                     + refusal_hint(task_id, row[1]))
                 observed['retention_reason'] = reason[1].strip()[:1000]
         token = _receipt.set((id(conn), task_id, row[1], observations))
         try:
