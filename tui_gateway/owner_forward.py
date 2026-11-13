@@ -146,7 +146,12 @@ class _Relay:
                 self.admitted.set_result(receipt)
                 return
             admission_id = receipt.get("admission_id")
-            if not isinstance(admission_id, str) or receipt.get("status") not in ("queued", "started", "terminal"):
+            if receipt.get("status") not in ("queued", "started", "terminal"):
+                if isinstance(admission_id, str):  # a named admission is a durable row there: a resend doubles it
+                    raise OwnerUnconfirmed(f"the gateway recorded it (admission {admission_id}) but did not "
+                                           f"confirm it queued (status {receipt.get('status')!r})")
+                raise OwnerUnavailable("the gateway did not admit it")
+            if not isinstance(admission_id, str):
                 raise OwnerUnavailable("the gateway did not admit it")
             self.admitted.set_result(receipt)
             logger.info("forwarded Desktop prompt for %s to the owner FIFO: admission=%s",
@@ -237,7 +242,8 @@ def forward_prompt(sid: str, session: dict, text: str, *, emit=None, home: Path 
 
     Raises ``OwnerNotRunning`` when no gateway serves the home, ``OwnerUnavailable`` (or the
     client's refusal) when the owner did not take it, and ``OwnerUnconfirmed`` when the prompt may
-    be queued there: the receipt timed out, or the owner was lost or failed after the request was sent."""
+    be queued there: the receipt timed out, named an admission in no confirmed state, or the owner was lost
+    or failed after the request was sent."""
     from tui_gateway import server
     key = str(session.get("session_key") or "")
     if not key:

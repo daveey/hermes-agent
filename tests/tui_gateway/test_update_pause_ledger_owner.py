@@ -36,6 +36,7 @@ from tui_gateway.turn_marker import mark_turn_paused, read_turn_marker, record_t
 CFG = {"desktop": {"auto_continue": {"enabled": True, "resume_on_startup": True, "freshness_minutes": 240,
                                      "max_attempts": 2}}}
 PROMPT = "[Kanban notice] t_01a1d3efb167bf46 done"
+REAL_FORWARD = owner_forward.forward_prompt  # the env fixture replaces it; receipt tests drive it
 
 
 class _InlineThread:
@@ -198,7 +199,7 @@ def test_transient_forward_failure_keeps_the_backoff_then_retires_after_the_cap(
         assert read_turn_marker(env.home, "chat") is not None, "a transient owner failure retired the pause"
         assert session["_auto_continue_retry_after"] > time.monotonic() + 20.0
         assert not session.get("_auto_continue_scheduled") and not session.get("running")
-        assert f"retrying after the 30s backoff (attempt {attempt}/{server.OWNER_FORWARD_TRIES})" in caplog.text
+        assert f"kept for a later try after the 30s backoff (attempt {attempt}/{server.OWNER_FORWARD_TRIES})" in caplog.text
         server._maybe_schedule_auto_continue("sid", session, "chat")  # inside the backoff: no forward
         assert len(tries) == attempt
         session["_auto_continue_retry_after"] = 0.0  # the backoff passed
@@ -232,6 +233,49 @@ def test_transient_forward_failure_then_success_hands_over_once(env, monkeypatch
     assert len(env.forwarded) == 1 and env.ran == [] and answers == []
     assert read_turn_marker(env.home, "chat") is None
     assert "queued in the FIFO of the gateway that owns the chat (admission adm-2)" in caplog.text
+
+
+@pytest.mark.parametrize("receipt, retried", [({"admission_id": "adm-9", "status": "unknown"}, False),
+                                               ({"status": "unknown"}, True)])
+def test_a_receipt_naming_an_admission_is_never_resent(env, monkeypatch, caplog, receipt, retried):
+    """PR #2265 review: an owner receipt outside queued/started/terminal that still names an admission_id proves a
+    durable row there (AdmissionReceipt.status allows 'unknown'); a resend carries a fresh submission_id and would
+    queue a second copy. So it is unconfirmed (retired at once), and only a receipt naming no admission is the
+    transient 'did not admit it'. Real forward_prompt and relay; only the owner's discovery and socket are fakes."""
+    import contextlib
+    caplog.set_level(logging.INFO)
+    submits = []
+
+    class _Owner:
+        events = None
+
+        async def rpc(self, method, **params):
+            if method == "session.resume":
+                return {"session_id": "chat"}
+            submits.append(params["submission_id"])
+            return dict(receipt)
+
+    @contextlib.asynccontextmanager
+    async def connect(_home, _endpoint):
+        yield _Owner()
+    monkeypatch.setattr(owner_forward, "forward_prompt", REAL_FORWARD)
+    monkeypatch.setattr(owner_forward, "discover_owner", lambda _home: "ready-owner")
+    monkeypatch.setattr(owner_forward, "connect_owner", connect)
+    session = _session(env.home)
+
+    server._maybe_schedule_auto_continue("sid", session, "chat")
+
+    assert len(submits) == 1 and env.ran == []
+    if retried:
+        assert read_turn_marker(env.home, "chat") is not None
+        assert "did not admit it" in caplog.text and "kept for a later try" in caplog.text
+    else:
+        assert read_turn_marker(env.home, "chat") is None
+        retired = [r for r in caplog.records if "retired the paused turn of chat" in r.getMessage()]
+        assert len(retired) == 1 and "may be queued there" in retired[0].getMessage()
+        session["_auto_continue_retry_after"] = 0.0
+        server._maybe_schedule_auto_continue("sid", session, "chat")
+        assert len(submits) == 1, "a forward the owner recorded was sent again"
 
 
 def test_a_new_pause_gets_a_fresh_forward_budget(env, monkeypatch):

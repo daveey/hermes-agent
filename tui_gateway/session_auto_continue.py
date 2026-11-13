@@ -387,10 +387,12 @@ def _paused_turn_to_ledger_owner(sid: str, session: dict, session_key: str, mark
     finish (``unknown``, no owner) retires the pause with the reason logged. Either way the marker goes.
     False for any other refusal (a sibling backend mid-turn): the caller's backoff applies, as before.
     A forward the owner refused before queuing anything for a passing reason (``_owner_forward_transient``: it
-    did not admit it, draining, queue full, a dropped dial) also returns False, so the 30 s backoff retries it,
-    up to OWNER_FORWARD_TRIES forwards per pause; then, and on a definitive refusal (no owner running, permission,
-    profile, not found), the pause is retired with the reason logged. An unconfirmed forward is never retried:
-    it may already be queued there, and a resend would run it twice."""
+    did not admit it, draining, queue full, a dropped dial) also returns False and keeps the pause: the 30 s
+    backoff only gates the next try, which the next resume, boot sweep or refused-turn retry makes (nothing
+    polls), up to OWNER_FORWARD_TRIES forwards per pause; then, and on a definitive refusal (no owner running,
+    permission, profile, not found), the pause is retired with the reason logged. An unconfirmed forward
+    (including a receipt naming an admission in no confirmed state) is never retried: it may already be queued
+    there, and a resend would run it twice."""
     status = getattr(refusal, "ledger_status", None)
     if status is None:
         return False
@@ -423,7 +425,7 @@ def _paused_turn_to_ledger_owner(sid: str, session: dict, session_key: str, mark
                 session["_owner_forward_failures"] = (pause_id, count)
             if count < OWNER_FORWARD_TRIES:
                 logger.warning("core-update pause: the gateway that owns %s did not take the continuation (%s); "
-                               "retrying after the 30s backoff (attempt %d/%d)", session_key, why, count,
+                               "kept for a later try after the 30s backoff (attempt %d/%d)", session_key, why, count,
                                OWNER_FORWARD_TRIES)
                 return False
             why = f"{why} ({count} attempts)"
