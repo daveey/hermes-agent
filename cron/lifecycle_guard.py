@@ -1411,6 +1411,24 @@ _QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r"(?=\"([^\"]+)\
 _PRINTED_ESCAPE_RE = re.compile(r"\\[ntrvf]")
 # Producers that print their own arguments, quoted or not (`echo bash /x/a.sh | bash`).
 _ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
+# bash's builtin echo options (`echo -n`, `echo -ne`): they are not printed, so left in the line
+# the walk would read `-n` as the executed command and the script path as its argument.
+_ECHO_OPTION_RE = re.compile(r"-[neE]+")
+
+
+def _printed_argument_lines(name: str, arguments: list[str]) -> Iterator[str]:
+    """The line(s) an ``echo``/``printf`` with *arguments* may print: as written, without
+    ``echo``'s leading option words, and (fail closed) without every leading ``-word``."""
+    yield " ".join(arguments)
+    if name == "echo":
+        index = 0
+        while index < len(arguments) and _ECHO_OPTION_RE.fullmatch(arguments[index]):
+            index += 1
+        yield " ".join(arguments[index:])
+    index = 0
+    while index < len(arguments) and arguments[index].startswith("-"):
+        index += 1
+    yield " ".join(arguments[index:])
 
 
 def _with_escapes_decoded(text: str) -> Iterator[str]:
@@ -1423,7 +1441,8 @@ def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
     """When some output in *command* is run as shell code (``python3 - <<'PY' | bash``,
     ``eval "$(…)"``, ``bash <(…)``), yield what a producer may print as the shell's command:
     every quoted string literal (``print('bash /x/big.sh')``) and the argument line of every
-    ``echo``/``printf`` (``echo bash /x/big.sh``), each also with ``\\n``-style escapes turned into
+    ``echo``/``printf`` (``echo bash /x/big.sh``, also without leading option words:
+    ``echo -n bash /x/big.sh``), each also with ``\\n``-style escapes turned into
     newlines. Their paths are executed, not mentions. Single and double quotes are matched
     independently, so a literal nested in the other kind (``python3 -c "print('bash x')"``) is
     yielded too, and every span between two consecutive quotes of a kind is yielded, so a stray
@@ -1455,8 +1474,12 @@ def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
         while segment and segment[0] in _SUBSHELL_OPENING_WORDS:  # `{ echo …; }`, `then echo …`
             segment = segment[1:]
         index = _executed_command_index(segment)
-        if index is not None and _executable_name(segment[index]) in _ARGUMENT_PRINTERS:
-            yield from unseen(" ".join(segment[index + 1 :]))
+        if index is None:
+            continue
+        name = _executable_name(segment[index])
+        if name in _ARGUMENT_PRINTERS:
+            for line in _printed_argument_lines(name, segment[index + 1 :]):
+                yield from unseen(line)
 
 
 # --- referenced-script reading ----------------------------------------------------------------

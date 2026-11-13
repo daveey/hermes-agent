@@ -45,6 +45,13 @@ _SINK_SHAPES = {
     "echo-eval": "eval \"$(echo bash {big})\"\n",
     "echo-function": "f() { echo bash {big}; }; f | bash\n",
     "echo-then": "if true; then echo bash {big}; fi | bash\n",
+    # Echo options are not printed: `-n` must not be read as the executed command.
+    "echo-n": "echo -n bash {big} | bash\n",
+    "echo-ne": "echo -ne bash {big} | bash\n",
+    "echo-n-e": "echo -n -e bash {big} | bash\n",
+    "echo-E-eval": "eval \"$(echo -E bash {big})\"\n",
+    "echo-n-wrapped": "timeout 5 echo -n bash {big} | sudo bash\n",
+    "printf-dashdash": "printf -- bash\\ {big} | bash\n",
     # Nit 3 (intended, fails closed): any later pipe word counts as the shell, a grep pattern too.
     "pipe-grep-bash": "python3 - <<'PY' | grep bash\n" + _PRINT + "PY\n",
     "pipe-grep-c-bash": "echo bash {big} | grep -c bash\n",

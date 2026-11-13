@@ -111,13 +111,15 @@ SESSION_FORMS = ("plain", "function", "subshell")
 # Review 5890784121: ``python-apostrophe`` holds a stray ``'`` in a double-quoted literal before
 # the print (it must not shift the single-quote pairing; it is not printed, or bash would stop on
 # the unterminated quote and never run the line); ``printf``/``echo`` are one-line producers
-# with no heredoc (body ``None``): an escaped ``\n`` and unquoted words.
+# with no heredoc (body ``None``): an escaped ``\n`` and unquoted words; ``echo-n`` puts an
+# unprinted option word before the line (it must not be read as the executed command).
 SINK_CONSUMERS = {
     "python": ("python3 - <<'PY'", "print('{line}')\n"),
     "cat": ("cat <<'PY'", "{line}\n"),
     "python-apostrophe": ("python3 - <<'PY'", "s = \"it's\"\nprint('{line}')\n"),
     "printf": ("printf '{line}\\n'", None),
     "echo": ("echo {line}", None),
+    "echo-n": ("echo -n {line}", None),
 }
 SINK_LINES = {"big": "bash ./big.sh", "direct": 'hermes gateway "restart"'}
 SINKS = {
