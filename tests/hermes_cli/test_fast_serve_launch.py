@@ -26,6 +26,20 @@ def test_lean_serve_parser_matches_full_subcommand_parser() -> None:
     assert vars(lean.parse_args(argv)) == vars(root.parse_args(["serve", *argv]))
 
 
+def test_serve_parsers_reject_abbreviated_token_file_flag() -> None:
+    """argv-shape readers (``is_desktop_ssh_backend_argv``) match the exact flag; no prefix may parse."""
+    root = argparse.ArgumentParser()
+    subparsers = root.add_subparsers(dest="command")
+    build_dashboard_parser(subparsers, cmd_dashboard=_capture, cmd_dashboard_register=_capture)
+    lean = build_serve_parser(cmd_dashboard=_capture, add_help=False, exit_on_error=False)
+
+    for argv in (["--ssh-session-tok=/f"], ["--ssh-session", "/g"], ["--ssh-session-token-fil", "/h"]):
+        args, unknown = lean.parse_known_args(argv)
+        assert args.ssh_session_token_file is None and unknown, argv
+        args, unknown = root.parse_known_args(["serve", *argv])
+        assert args.ssh_session_token_file is None and unknown, argv
+
+
 def test_fast_serve_launch_dispatches_only_unambiguous_serve(monkeypatch) -> None:
     captured = []
     monkeypatch.setattr(config_mod, "get_container_exec_info", lambda: None)

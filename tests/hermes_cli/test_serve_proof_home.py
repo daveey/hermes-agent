@@ -133,6 +133,42 @@ def test_desktop_backend_shape_without_isolated_still_rejected(sentinel, extra, 
     _assert_refused(result, sentinel, before)
 
 
+_PARSE_BOUNDARY = '''
+import argparse, runpy, sys
+_parse = argparse.ArgumentParser.parse_known_args
+def parse_known_args(self, *a, **k):
+    ns, rest = _parse(self, *a, **k)
+    if getattr(ns, 'ssh_session_token_file', None):
+        print('PARSED_TOKEN_FILE=' + ns.ssh_session_token_file, flush=True)
+        raise SystemExit(87)
+    return ns, rest
+argparse.ArgumentParser.parse_known_args = parse_known_args
+sys.argv = ['hermes'] + sys.argv[1:]
+runpy.run_module('hermes_cli.main', run_name='__main__')
+'''
+
+
+@pytest.mark.parametrize('args', [
+    ['serve', '--ssh-session-tok=/fixture/token'],
+    ['serve', '--ssh-session', '/fixture/token'],
+])
+def test_abbreviated_token_file_flag_is_rejected_by_parser(sentinel, args):
+    """The bootstrap shape check matches the exact flag, so no parser may accept a prefix of it: an
+    agent-stamped abbreviated form would otherwise set the token file while skipping the guard.
+    (``hermes_cli.main`` imports config at module level, so the parser rejects it after that import;
+    the tripwire here is the first parse that yields a token file, before ``cmd_dashboard``.)"""
+    before = _snapshot(sentinel)
+    env = _clean_env(sentinel, 'HERMES_AGENT_TOOL_CALL', {'HERMES_DESKTOP': '1'})
+    result = subprocess.run([sys.executable, '-c', _PARSE_BOUNDARY, *args], env=env, cwd=ROOT,
+                            capture_output=True, text=True, encoding='utf-8', timeout=30, check=False)
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert 'PARSED_TOKEN_FILE=' not in result.stdout
+    assert 'unrecognized arguments' in result.stderr
+    # main's startup seeds default home files for every command; the recovery state is untouched.
+    after = _snapshot(sentinel)
+    assert {name: after.get(name) for name in before} == before
+
+
 @pytest.mark.parametrize('args', [['dashboard', '--port', '0', '--no-open'], ['serve', '--port', '0']])
 def test_desktop_chat_tool_child_may_run_plain_backend(sentinel, args):
     """A Desktop chat's tool children inherit HERMES_DESKTOP=1 (and never the session token):
