@@ -51,7 +51,9 @@ async def test_receipted_wakes_wait_for_core_drain_but_human_bypasses(monkeypatc
             lambda: all(status == "terminal" for _, status, _ in admissions(runner, authority, source)),
             what="deferred wakes released after core drain",
         )
-        assert executed == [("owner", text) for text in ("A", "human", "wake-1", "wake-2")]
+        # Both released wakes are pending at one boundary, so they ride one turn in admission order
+        # (gateway/session_fold_pending.py, t_01a1d663082aa53a).
+        assert executed == [("owner", text) for text in ("A", "human", "wake-1\n\nwake-2")]
     finally:
         hold.finish.set()
         marker.unlink(missing_ok=True)
