@@ -13,6 +13,7 @@ import stat
 import sqlite3
 import threading
 import time
+import urllib.parse
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -1228,12 +1229,15 @@ def test_unreadable_run_list_is_not_remembered(kanban_home, monkeypatch) -> None
 
 
 def _scan_api(monkeypatch, runs: int, jobs_for) -> None:
-    """Fake ``_gh_api`` for a repo scan: ``runs`` in-progress runs (ids 900..), each run's jobs from ``jobs_for``."""
+    """Fake ``_gh_api`` for a repo scan: ``runs`` in-progress runs (ids 900..), each run's jobs from ``jobs_for``.
+    Like GitHub, a run list returns at most ``per_page`` runs (default 30)."""
     def api(path: str) -> dict:
         if "actions/runs?" in path:
             if "status=completed" in path:
                 return {"workflow_runs": []}
-            return {"workflow_runs": [{"id": 900 + i, "status": "in_progress"} for i in range(runs)]}
+            query = urllib.parse.parse_qs(path.split("?", 1)[1])
+            per_page = int(query.get("per_page", ["30"])[0])
+            return {"workflow_runs": [{"id": 900 + i, "status": "in_progress"} for i in range(min(runs, per_page))]}
         return {"jobs": jobs_for(int(path.split("/runs/", 1)[1].split("/", 1)[0]))}
 
     monkeypatch.setattr(kcp, "_gh_api", api)
@@ -1254,6 +1258,17 @@ def test_job_lists_of_a_scan_are_read_concurrently(kanban_home, monkeypatch) -> 
     _scan_api(monkeypatch, kcp.POOL_SCAN_READERS, jobs_for)
     p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
     assert p.state == kcp.BUSY and "took job 9050" in p.detail, p
+
+
+def test_scan_lists_more_than_ten_in_progress_runs(kanban_home, monkeypatch) -> None:
+    """On 2026-11-13 the run holding the one ``hermes-state`` runner sat at index 23 of 24 in-progress runs: a
+    run list read with ``per_page=10`` never sees it and answers ``not_starting`` for a busy pool."""
+    def jobs_for(run_id: int) -> list:
+        return [_taken(run_id=run_id, started_age=60, status="in_progress")] if run_id == 921 else []
+
+    _scan_api(monkeypatch, 23, jobs_for)
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: _QUEUED, fetch_runners=lambda _r: None)
+    assert p.state == kcp.BUSY and "took job 9210" in p.detail, p
 
 
 @pytest.mark.parametrize("match,state", [(True, kcp.BUSY), (False, kcp.NOT_STARTING)], ids=["match", "no-match"])
