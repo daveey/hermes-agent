@@ -863,21 +863,47 @@ export async function fetchBoard(archived: boolean): Promise<KanbanBoard> {
 }
 
 /** [daveey] One opening of a task detail view. Its reads of each kind (`kind` names the query) go out as priority
- *  'foreground' until one has answered, so a slow link's poll thinner never skips the user's read: not on a re-open
- *  within the thinning gap, and not on React Query's retry of a failed first read (a kind counts as delivered only
- *  after a successful read). Every later read of that kind (interval or socket refetch) is a background poll again
- *  and may be thinned (electron/slow-link.ts). */
-export function userOpenReads(): <T>(kind: string, read: (options: PluginRestOptions) => Promise<T>) => Promise<T> {
+ *  'foreground' until that kind's open read has settled, so a slow link's poll thinner never skips the user's read:
+ *  not on a re-open within the thinning gap, and not on React Query's retry of a failed first read (`retry`: this
+ *  call retries a failed read of the same fetch). The open read settles when a read answers, or when a fetch whose
+ *  reads all failed has spent its retries: the next fetch then starts with `retry` false. Every later read of that
+ *  kind (interval or socket refetch) is a background poll again and may be thinned (electron/slow-link.ts), so a kind
+ *  whose reads keep failing (gateway unreachable, task gone, timeouts on a very slow link) stops bypassing the
+ *  thinner after its first fetch. */
+export function userOpenReads(): <T>(
+  kind: string,
+  read: (options: PluginRestOptions) => Promise<T>,
+  retry?: boolean
+) => Promise<T> {
   const delivered = new Set<string>()
+  const failed = new Set<string>()
 
-  return async (kind, read) => {
-    const result = await read(delivered.has(kind) ? {} : { priority: 'foreground' })
+  return async (kind, read, retry = false) => {
+    if (failed.has(kind) && !retry) {
+      delivered.add(kind)
+    }
 
-    delivered.add(kind)
+    try {
+      const result = await read(delivered.has(kind) ? {} : { priority: 'foreground' })
 
-    return result
+      delivered.add(kind)
+
+      return result
+    } catch (error) {
+      failed.add(kind)
+
+      throw error
+    }
   }
 }
+
+/** [daveey] What `retryingFetch` reads of a React Query function context. */
+export type ReadFetchContext = { client: typeof queryClient; queryKey: readonly unknown[] }
+
+/** [daveey] Whether React Query is calling a query function to retry a failed read of the same fetch: it counts the
+ *  fetch's failures before each retry and resets the count when a new fetch starts. */
+export const retryingFetch = ({ client, queryKey }: ReadFetchContext) =>
+  (client.getQueryState(queryKey)?.fetchFailureCount ?? 0) > 0
 
 export const fetchTask = async (id: string, owner?: TaskOwner, read: PluginRestOptions = {}) => {
   const downloadAttachment = captureGatewayFileDownload(owner ? { connectionId: owner.gateway, profile: owner.profile } : undefined)

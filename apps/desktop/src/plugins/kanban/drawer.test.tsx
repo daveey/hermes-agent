@@ -34,9 +34,11 @@ let disposeApi: () => void
 let disposeLocales: () => void
 // A GET path whose next read fails once (a dropped first read that React Query then retries).
 let failOnce = new Set<string>()
+// A GET path whose every read fails (gateway unreachable, task gone, a very slow link timing out).
+let failAlways = new Set<string>()
 
 const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<unknown> => {
-  if (!options?.method && failOnce.delete(path)) {
+  if (!options?.method && (failOnce.delete(path) || failAlways.has(path))) {
     throw new Error(`dropped read: ${path}`)
   }
 
@@ -81,6 +83,7 @@ beforeEach(() => {
 
 afterEach(() => {
   failOnce = new Set()
+  failAlways = new Set()
   setApiRequestConnection(null)
   setApiRequestProfile(null)
   clearNotifications()
@@ -318,10 +321,34 @@ describe('task modal dialog', () => {
     expect(taskReads()).toEqual(['foreground', 'foreground'])
   })
 
+  it('makes the refetches of a kind whose reads all fail polls once its first fetch spent its retries', async () => {
+    detail = { ...legacyDetail, attachments: [] }
+    client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+    failAlways = new Set(['/tasks/t_example'])
+
+    const taskReads = () =>
+      rest.mock.calls
+        .filter(([path, options]) => path === '/tasks/t_example' && !options?.method)
+        .map(([, options]) => options?.priority)
+
+    openDrawer()
+    // The open's read and its retry are the user's.
+    await waitFor(() =>
+      expect(client.getQueryCache().findAll({ predicate: q => q.state.status === 'error' })).toHaveLength(1)
+    )
+    expect(taskReads()).toEqual(['foreground', 'foreground'])
+
+    // The interval refetch after the retries ran out (and its own retry) is a background poll, thinned on a slow link.
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['kanban'] })
+    })
+    await waitFor(() => expect(taskReads()).toEqual(['foreground', 'foreground', undefined, undefined]))
+  })
+
   it('sends a foreground read when a task is re-opened while its cache is still fresh', async () => {
     detail = { ...legacyDetail, attachments: [] }
     // The shared client's staleTime (60 s): without a mount refetch a warm re-open sends nothing, and its first
-    // request is the interval refetch 15-30 s later.
+    // request is the task query's interval refetch 30 s later.
     client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000 } } })
 
     const taskReads = () =>

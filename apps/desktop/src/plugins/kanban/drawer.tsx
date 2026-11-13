@@ -51,8 +51,10 @@ import {
   logKey,
   patchTask,
   profilesKey,
+  type ReadFetchContext,
   reassignTask,
   reclaimTask,
+  retryingFetch,
   routedToScope,
   taskKey,
   type TaskOwner,
@@ -860,15 +862,17 @@ export function TaskDrawer({
   const scope = useKanbanScope()
   const slug = useValue($boardSlug)
   // [daveey] The drawer mounts once per open (keyed by its task): the task and log reads of this open are the user's
-  // (foreground, never thinned on a slow link, retries included) until each has answered; the interval and socket
-  // refetches after that are polls. refetchOnMount 'always': the shared staleTime (60 s) would otherwise skip the
-  // mount read of a re-open with warm cache, leaving its first request the interval refetch 3-30 s later.
+  // (foreground, never thinned on a slow link, retries included) until each has settled: answered, or failed with
+  // React Query's retries spent. The interval and socket refetches after that are polls. refetchOnMount 'always': the
+  // shared staleTime (60 s) would otherwise skip the mount read of a re-open with warm cache, leaving its first
+  // request the interval refetch 3-30 s later (log 3-15 s, task 30 s).
   const [openRead] = useState(userOpenReads)
 
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => openRead(`task:${id}`, read => fetchTask(id!, owner, read)),
+    queryFn: (context: ReadFetchContext) =>
+      openRead(`task:${id}`, read => fetchTask(id!, owner, read), retryingFetch(context)),
     queryKey: taskKey(scope, slug, id ?? '', owner),
     refetchInterval: 30_000,
     refetchOnMount: 'always'
@@ -880,7 +884,8 @@ export function TaskDrawer({
 
   const { data: log } = useQuery({
     enabled: query => !!id && (!!owner || routedToScope(query)),
-    queryFn: () => openRead(`log:${id}`, read => fetchLog(id!, owner, read)),
+    queryFn: (context: ReadFetchContext) =>
+      openRead(`log:${id}`, read => fetchLog(id!, owner, read), retryingFetch(context)),
     queryKey: logKey(scope, slug, id ?? '', owner),
     refetchInterval: running ? 3_000 : 15_000,
     refetchOnMount: 'always'
