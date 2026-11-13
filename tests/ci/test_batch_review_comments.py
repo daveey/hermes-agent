@@ -765,7 +765,11 @@ def test_ci_and_docker_failures_on_one_head_queue_one_re_refresh(monkeypatch, tm
     # The re-refresh itself fails: still one dispatch, and the queued mark is kept for any later CI/Docker failure.
     f.comments = {1: [{"id": 77, "body": body}]}
     assert b.run_batch("t", REPO, NOW + timedelta(minutes=6), head_sha=sha, trigger_workflow="") == 1
-    f.comments = {1: [{"id": 77, "body": f.posted.pop("1")}]}
+    body = f.posted.pop("1")
+    # Its footer points at the hourly sweep (the queued re-refresh was this run), and the state line keeps the mark.
+    assert "next refresh: hourly sweep" in body and "already queued" not in body
+    assert b.requeued_at(body, sha) is not None
+    f.comments = {1: [{"id": 77, "body": body}]}
     assert b.run_batch("t", REPO, NOW + timedelta(minutes=7), head_sha=sha, trigger_workflow="CI") == 1
     assert len(d.dispatches) == 1
 

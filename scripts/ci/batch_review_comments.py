@@ -380,10 +380,12 @@ def mark_refresh_failed(token: str, repo: str, pr: dict, now: datetime, error: s
         return "marker skipped: completed snapshot of this head kept; no re-refresh queued"
     notes = []
     requeued = requeued_at(existing, sha)
-    if requeued:
+    if not re_refresh:  # the re-refresh itself (or a sweep): the mark is carried, the hourly sweep is next
+        next_refresh = "next refresh: hourly sweep"
+    elif requeued:
         next_refresh = f"a re-refresh already queued at {requeued:%H:%M} UTC, then hourly"
         notes.append(f"re-refresh already queued at {requeued:%H:%M:%S}Z; not queued again")
-    elif re_refresh:
+    else:
         try:
             at = queue_re_refresh(token, repo, sha, run_id)
             requeued = datetime.now(UTC)
@@ -392,8 +394,6 @@ def mark_refresh_failed(token: str, repo: str, pr: dict, now: datetime, error: s
         except (OSError, ValueError, RuntimeError) as e:
             next_refresh = "next refresh: hourly sweep"
             notes.append(f"ERROR queueing re-refresh: {e}")
-    else:
-        next_refresh = "next refresh: hourly sweep"
     body = failed_refresh_body(existing, pr, sha, repo, now, run_id, datetime.now(UTC), error, next_refresh,
                                requeued=requeued)
     if body is None:  # unreachable: keeps_completed_snapshot was checked above
