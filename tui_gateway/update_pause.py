@@ -320,14 +320,13 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
                 session.pop("_update_pause_parked_stamp", None)  # a new pause starts unparked
                 if stamps:  # pause_stands takes it back if the turn does not end paused (a later Stop won)
                     session["_carried_pause_stamped"] = marker_key
+                # Settled by pause_stands once the pause has finally stood: a later Stop still beats it.
+                session["_update_pause_settle"] = (marker_key, [
+                    job["session_id"] for job in killed if job.get("kill_state") == "killed"])
         if stopped:
             logger.info("core-update pause: session %s was stopped by the user; not pausing it", marker_key)
             take_back()
             return None
-        # Custody transfer, as at backend exit: the marker now reports each kill, so the killed receipt's owed
-        # notice must not be re-armed beside it after an unclean death of this backend.
-        from tui_gateway.completion_obligation import settle_journaled
-        settle_journaled(job["session_id"] for job in killed if job.get("kill_state") == "killed")
         logger.info("core-update pause: session %s paused at a step boundary for a Hermes update", marker_key)
         return PAUSE_REASON
 
@@ -344,6 +343,7 @@ def _drop_pause(session: dict) -> None:
     """Under ``history_lock``: the session no longer keeps its turn's marker for a continuation."""
     session.pop("_update_pause_marker_key", None)
     session.pop("_update_pause_drainer_lock", None)
+    session.pop("_update_pause_settle", None)
 
 
 def publication_lock(session: dict):
@@ -404,6 +404,7 @@ def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
         exiting = bool(session.get("_exit_keeps_turn_marker"))
         if mine and not stands and not exiting:
             _drop_pause(session)
+        settle = session.pop("_update_pause_settle", None) if mine and (stands or exiting) else None
         stamped = session.pop("_carried_pause_stamped", None) == marker_key
         # Only a turn the exit's interrupt actually landed on was cut short: one that completed normally after
         # the exit began (before its interrupt) ran to completion, so it takes the stamp back like any other.
@@ -412,6 +413,13 @@ def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
     if stamped and not stands and not cut_short_by_exit:  # its hook paid the pause but the turn ended otherwise
         from tui_gateway.turn_marker import clear_carried_turn_paused
         clear_carried_turn_paused(_home(session), marker_key)
+    if settle and settle[0] == marker_key:
+        # Custody transfer, as at backend exit: the kept marker now reports each kill, so a killed receipt's owed
+        # notice must not be re-armed beside it after an unclean death. Only once the pause has stood: a Stop that
+        # beat it (user_stop_wins) retires the marker, leaving the obligation the notice's only durable custody.
+        # A death between the hook and here can still re-arm a duplicate, never lose the notice.
+        from tui_gateway.completion_obligation import settle_journaled
+        settle_journaled(settle[1])
     return stands
 
 

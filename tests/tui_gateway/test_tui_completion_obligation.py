@@ -396,8 +396,9 @@ def test_update_pause_kill_is_reported_once_from_the_marker(home, registry, back
     assert (armed, wakes, reg.has_parked_events()) == (0, [], False)
 
 
-def _pause(home, backend, stands=True):
-    """A chat's turn reaches a step boundary while a core update asks for the pause."""
+def _pause(home, backend, stands=True, *, end_turn=True):
+    """A chat's turn reaches a step boundary while a core update asks for the pause, then (``end_turn``) ends
+    paused the way ``prompt_turn`` ends it (``pause_stands``)."""
     import time
 
     from hermes_cli import admission_fence as af
@@ -407,7 +408,30 @@ def _pause(home, backend, stands=True):
     af.request_pause(home, expires_at=time.time() + 120)
     session = backend.sessions["sid"] = _session(home, _notif_held=[])
     assert up.boundary_pause_hook(session, "session-key")() == (up.PAUSE_REASON if stands else None)
+    if stands and end_turn:
+        assert up.pause_stands(session, "session-key", {"paused_for_update": True}) is True
     return session
+
+
+def test_update_pause_a_later_stop_beats_keeps_the_obligation(home, registry, backend, monkeypatch):
+    """The hook paid the pause (jobs killed, marker stamped), but the user's Stop lands before the turn ends
+    (``user_stop_wins``): the pause never stands and the stopped turn's marker retires with its killed_jobs. The
+    receipt's obligation is then the notice's only durable custody, so it must survive until the turn's end and
+    an unclean death after it re-arms the notice once, never loses it."""
+    from tui_gateway import update_pause as up
+    _as_dead_writer(monkeypatch)
+    job = _job(registry)
+    session = _pause(home, backend, end_turn=False)
+    assert job.exited and job.termination_source == up.PAUSE_REASON
+    assert _receipt(home)[OBLIGATION_KEY]["owner"] == "tui", "settled before the pause stood"
+    session.update(running=True, _active_turn_marker_key="session-key")
+    assert up.user_stop_wins(session) is True
+    assert up.pause_stands(session, "session-key", {"interrupted": True}) is False
+    assert _receipt(home)[OBLIGATION_KEY]["owner"] == "tui", "a pause a later Stop beat settled the notice"
+
+    registry.completion_queue.queue.clear()  # unclean death: the in-memory completion goes with the backend
+    reg, armed, _wakes = _next_backend(monkeypatch)
+    assert armed == 1 and reg.has_parked_events(), "the killed job's notice was lost"
 
 
 @pytest.mark.parametrize("race", ["exited_before_kill", "user_stop_won"])
