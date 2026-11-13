@@ -225,6 +225,10 @@ def test_holder_republishes_on_replica_change_only_while_leased(tmp_path):
         wait_until(lambda: kri.published_key(ledger) == kri.replica_key(replica), what="holder publish")
         _add(replica, _linked("t_new", CHAT), 50)
         wait_until(lambda: kri.published_key(ledger) == kri.replica_key(replica), what="change-driven publish")
+        # The key is on disk before ``publish`` counts it: let the publishing pass end (it beats after
+        # ``refresh`` returns) before reading the counter, or a starved runner reads it one short.
+        beats = lease.beats
+        wait_until(lambda: lease.beats > beats, what="publishing pass done")
         publishes = kri.stats["publishes"]
         beats = lease.beats
         wait_until(lambda: lease.beats > beats + 5, what="idle passes")
