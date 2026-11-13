@@ -1474,9 +1474,14 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
         _log.warning("%s; kanban sync not started", exc)
         runstate.record_down(f"not starting: {exc}")
         return
+    from hermes_cli.kanban_sync_schema_alert import note_start
+    note_start()
     ahead = _schema_ahead_boards(board_paths())
     if ahead:
-        runstate.record_down("not starting: " + "; ".join(f"board {slug}: {why}" for slug, why in ahead))
+        why = "; ".join(f"board {slug}: {refusal}" for slug, refusal in ahead)
+        runstate.record_down("not starting: " + why)
+        from hermes_cli.kanban_sync_schema_alert import on_give_up
+        on_give_up(ident.gateway, why)  # one hub card per host incident [daveey]
         return  # give the host sync role up: a current core's gateway can take it [daveey]
     hub = Hub(ident)
     sync.set_lease_client(HubLeaseClient(hub))
@@ -1518,7 +1523,10 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
             if ahead:
                 _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
-                runstate.record_down("gave up the sync role: " + "; ".join(f"board {r.board}: {r.error}" for r in ahead))
+                why = "; ".join(f"board {r.board}: {r.error}" for r in ahead)
+                runstate.record_down("gave up the sync role: " + why)
+                from hermes_cli.kanban_sync_schema_alert import on_give_up
+                on_give_up(ident.gateway, why)  # one hub card per host incident [daveey]
                 return
             runstate.clear()  # a completed round: the loop runs
             for r in results:

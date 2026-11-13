@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_run_end_lease as _run_end_lease
+from hermes_cli import kanban_schema_owner as _schema_owner
 import contextlib
 import json
 import os
@@ -931,6 +932,9 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     # the gateway dispatcher's next-tick connect() forever, and steady-state has
     # nothing for it to protect (no schema/migration writes).
     resolved = str(path.resolve())
+    if resolved in _schema_owner.READ_ONLY:  # a non-installed core found this board's schema not its own
+        return _schema_owner.open_read_only(path, _schema_owner.READ_ONLY[resolved],
+                                            timeout_s=_resolve_busy_timeout_ms() / 1000.0, text_factory=_kb._lossy_text)
     if resolved in _INITIALIZED_PATHS:
         conn, schema_present = _open_configured(path, _schema_is_present)
         if schema_present:
@@ -962,10 +966,17 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
         _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())
 
-        def _init_if_needed(conn: sqlite3.Connection) -> None:
+        def _init_if_needed(conn: sqlite3.Connection) -> Optional[str]:
             # Idempotent; runs under _INIT_LOCK so same-process dispatcher
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
+                # Only the home's installed core changes its board's schema (kanban_schema_owner). [daveey]
+                refusal = _schema_owner.check(conn, path)
+                if refusal:
+                    return refusal
+                if refusal == "":
+                    _INITIALIZED_PATHS.add(resolved)
+                    return None
                 conn.executescript(_kb.SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 from hermes_cli.kanban_wake_episode import ensure_schema
@@ -975,8 +986,13 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
                 _kb._sync.install_or_remove(conn, resolved)
                 _ensure_activity_revision(conn, resolved)
                 _INITIALIZED_PATHS.add(resolved)
+            return None
 
-        conn, _ = _open_configured(path, _init_if_needed)
+        conn, refusal = _open_configured(path, _init_if_needed)
+    if refusal:
+        conn.close()
+        return _schema_owner.open_read_only(path, refusal, timeout_s=_resolve_busy_timeout_ms() / 1000.0,
+                                            text_factory=_kb._lossy_text)
     return conn
 
 

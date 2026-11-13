@@ -1,0 +1,243 @@
+"""Only a home's installed core changes its boards' schema; a SchemaAhead give-up opens one hub card. [daveey]
+
+Incident (2026-11-12): a checkout of origin/main (95fed77843) launched against David-MBP's live ``~/.hermes`` at
+23:53:41 PST (daveey-mini: 23:58:38) while the installed core was older. Its board connect added
+``tasks.review_required``, ``task_events.origin_gateway`` and the ``admission_*`` columns; three seconds later
+the gateway found columns its core does not declare (``SchemaAhead``) and gave up the Board sync role for hours.
+Nothing opened a card. Cases (card t_01a1d3fb5bab541f):
+
+(a) a non-installed checkout leaves an older board's ``PRAGMA table_info`` unchanged and refuses writes with a
+    line naming the installed core and a scratch home;
+(b) the installed core (or a tree at its commit) migrates as before;
+(c) boot home maintenance from a non-installed checkout skips board migrations;
+(d) a SchemaAhead give-up opens one hub card per host incident and comments on it while it is open.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_schema_owner as owner
+from hermes_cli import kanban_sync_schema_alert as alert
+from hermes_cli import post_update
+from tests.hermes_cli import kanban_sync_support as support
+
+DROPPED = ("tasks", "review_required")
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    for var in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(var, raising=False)
+    h = support.kanban_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(owner, "_DECISIONS", {})
+    monkeypatch.setattr(owner, "READ_ONLY", {})
+    yield h
+    for path in (h / "kanban.db",):
+        kbc._INITIALIZED_PATHS.discard(str(path.resolve()))
+
+
+def _older_board(home: Path) -> Path:
+    """A board made by an older core: the current schema minus ``tasks.review_required``."""
+    db = home / "kanban.db"
+    conn = kbc.connect(db)
+    kb.create_task(conn, title="older card", assignee="default")
+    for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'").fetchall():
+        conn.execute(f'DROP TRIGGER "{name}"')  # the older core's own init recreates its triggers
+    conn.execute(f"ALTER TABLE {DROPPED[0]} DROP COLUMN {DROPPED[1]}")
+    conn.close()
+    kbc._INITIALIZED_PATHS.discard(str(db.resolve()))
+    return db
+
+
+def _columns(db: Path, table: str = "tasks") -> list[str]:
+    raw = sqlite3.connect(db)
+    try:
+        return [r[1] for r in raw.execute(f"PRAGMA table_info({table})")]
+    finally:
+        raw.close()
+
+
+def _foreign_install(home: Path) -> Path:
+    """``<home>/hermes-agent``: an installed core that is not the tree these tests run from."""
+    core = home / "hermes-agent"
+    (core / "hermes_cli").mkdir(parents=True)
+    (core / "install-stamp.json").write_text(json.dumps({"commit": "2cc7101849" + "0" * 30}))
+    return core
+
+
+# --- (a) a non-installed checkout ---------------------------------------------------------------------------
+
+def test_non_installed_checkout_leaves_the_schema_and_refuses_writes(home):
+    db = _older_board(home)
+    before = _columns(db)
+    core = _foreign_install(home)
+
+    conn = kbc.connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1  # reads work
+        with pytest.raises(owner.BoardSchemaNotOwned) as err:
+            kb.create_task(conn, title="from a worktree", assignee="default")
+    finally:
+        conn.close()
+    assert _columns(db) == before
+    assert DROPPED[1] not in _columns(db)
+    line = str(err.value)
+    assert str(core.resolve()) in line and "2cc7101849" in line
+    assert "HERMES_HOME=$(mktemp -d)" in line and "review_required" in line
+    assert "\n" not in line
+    # The same process keeps the board read-only on later connects.
+    again = kbc.connect(db)
+    try:
+        with pytest.raises(owner.BoardSchemaNotOwned):
+            again.execute("UPDATE tasks SET title = 'x'")
+    finally:
+        again.close()
+    assert _columns(db) == before
+
+
+def test_non_installed_checkout_opens_a_current_board_normally(home):
+    db = home / "kanban.db"
+    kbc.connect(db).close()  # created by "the installed core" (no install yet)
+    kbc._INITIALIZED_PATHS.discard(str(db.resolve()))
+    _foreign_install(home)
+    conn = kbc.connect(db)
+    try:
+        tid = kb.create_task(conn, title="compatible board", assignee="default")
+        assert conn.execute("SELECT id FROM tasks WHERE id = ?", (tid,)).fetchone()
+    finally:
+        conn.close()
+
+
+# --- (b) the installed core ---------------------------------------------------------------------------------
+
+def test_installed_core_migrates_as_before(home):
+    db = _older_board(home)
+    (home / "hermes-agent").symlink_to(owner.running_core(), target_is_directory=True)
+    conn = kbc.connect(db)
+    try:
+        kb.create_task(conn, title="installed core writes", assignee="default")
+    finally:
+        conn.close()
+    assert DROPPED[1] in _columns(db)
+
+
+def test_a_tree_at_the_installed_commit_migrates(home, monkeypatch):
+    db = _older_board(home)
+    _foreign_install(home)
+    monkeypatch.setattr(owner, "_identity", lambda root: "a" * 40)
+    kbc.connect(db).close()
+    assert DROPPED[1] in _columns(db)
+
+
+def test_home_without_an_installed_core_migrates(home):
+    db = _older_board(home)
+    kbc.connect(db).close()
+    assert DROPPED[1] in _columns(db)
+
+
+# --- (c) boot home maintenance ------------------------------------------------------------------------------
+
+def test_boot_home_maintenance_from_a_non_installed_checkout_skips_board_migration(home, caplog):
+    db = _older_board(home)
+    before = _columns(db)
+    _foreign_install(home)
+    steps = [step for step in post_update.BOOT_HOME_STEPS if step[0] == "kanban_board_schema"]
+    assert steps, "boot home maintenance has no board-schema step"
+    with caplog.at_level("INFO", logger=post_update.logger.name):
+        results = post_update.run_steps(steps)
+    assert results["kanban_board_schema"]["skipped"] == "not-installed-core"
+    assert results["kanban_board_schema"]["installed"] == str((home / "hermes-agent").resolve())
+    assert any("skipping board migrations" in r.getMessage() for r in caplog.records)
+    assert _columns(db) == before
+
+
+def test_boot_home_maintenance_of_the_installed_core_leaves_migration_to_first_connect(home):
+    (home / "hermes-agent").symlink_to(owner.running_core(), target_is_directory=True)
+    assert post_update.step_kanban_board_schema()["skipped"] == "first-connect"
+
+
+# --- (d) the hub card ---------------------------------------------------------------------------------------
+
+class FakeHubCli:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.open: list[dict] = []
+
+    def __call__(self, argv: list[str]):
+        self.calls.append(argv)
+        if argv[1] == "tasks":
+            return 0, json.dumps(self.open), ""
+        return 0, "queued", ""
+
+    def sent(self, verb: str) -> list[list[str]]:
+        return [c for c in self.calls if c[1] == verb]
+
+
+INFO = {"installed": "/Users/daveey/.hermes/hermes-agent", "installed_sha": "2cc7101849", "newest_sha": "95fed77843",
+        "origin_main_sha": "95fed77843"}
+WHY = "board default: SchemaAhead: this core does not declare columns a newer core added (tasks: review_required)"
+
+
+def test_schema_ahead_give_up_opens_one_card_per_incident_and_comments_while_open(home):
+    hub = FakeHubCli()
+
+    rid = alert.report("macbook", WHY, 900.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_000.0)
+    creates = hub.sent("create-task")
+    assert len(creates) == 1 and rid == "kanban-sync-schema-ahead:macbook:900"
+    argv = creates[0]
+    assert argv[2] == "hub" and "macbook" in argv[3]
+    body = argv[argv.index("--body") + 1]
+    assert "review_required" in body and "2cc7101849" in body and "95fed77843" in body
+    assert 'idempotency_key="kanban-sync-schema-ahead:macbook:900"' in argv
+
+    # The same incident again (a respun refusal): nothing new.
+    assert alert.report("macbook", WHY, 900.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_000.0) is None
+    assert len(hub.sent("create-task")) == 1 and not hub.sent("request")
+
+    # A new incident while the card is open: a comment on it, not a second card.
+    hub.open = [{"id": "t_open", "status": "ready", "idempotency_key": "kanban-sync-schema-ahead:macbook:900"}]
+    assert alert.report("macbook", WHY, 2_000.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_000.0) == "kanban-sync-schema-ahead:macbook:2000:comment"
+    assert len(hub.sent("create-task")) == 1
+    (comment,) = hub.sent("request")
+    assert comment[2:6] == ["hub", "tasks", "default/default/t_open", "comment"]
+    assert "review_required" in comment[comment.index("--arg") + 1]
+
+    # Once that card is done, the next incident opens a new card.
+    hub.open = []
+    alert.report("macbook", WHY, 3_000.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_000.0 + 7 * 3600)
+    assert len(hub.sent("create-task")) == 2
+
+
+def test_another_hosts_open_card_does_not_absorb_this_hosts_incident(home):
+    hub = FakeHubCli()
+    hub.open = [{"id": "t_mini", "status": "ready", "idempotency_key": "kanban-sync-schema-ahead:mini:5"}]
+    alert.report("macbook", WHY, 900.0, runner=hub, hub_cli="hermes-hub", info=INFO, now=1_000.0)
+    assert len(hub.sent("create-task")) == 1 and not hub.sent("request")
+
+
+def test_run_forever_give_up_opens_the_hub_card(home, monkeypatch):
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli import kanban_sync_client as ksc
+    from tests.hermes_cli.kanban_sync_fake_board import FakeService
+    support.write_sync_config(home, True)
+    conn = kbc.connect(home / "kanban.db")
+    ksc.ensure_identity(conn, "default", "macbook")
+    conn.close()
+    monkeypatch.setitem(sync.SYNCED_COLUMNS, "tasks", sync.SYNCED_COLUMNS["tasks"] - {"review_required"})
+    hub_cli = FakeHubCli()
+    monkeypatch.setattr(kp, "hub_runner", hub_cli)
+    svc_hub = FakeService().hub("macbook")
+    monkeypatch.setattr(ksc, "load_identity", lambda: svc_hub.ident)
+    monkeypatch.setattr(ksc, "Hub", lambda ident: svc_hub)
+    monkeypatch.setattr(ksc, "board_paths", lambda: [("default", home / "kanban.db")])
+    ticks = iter(range(3))
+    ksc.run_forever(lambda: next(ticks, None) is not None, sleep=lambda _s: None)
+    (create,) = hub_cli.sent("create-task")
+    assert "review_required" in create[create.index("--body") + 1]
