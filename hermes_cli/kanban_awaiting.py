@@ -13,7 +13,9 @@ Each park now carries ``awaiting = {kind, ref, why}`` on its parking event:
 * ``card``: ``ref`` is a task id (``gateway`` names another board's host). The card must exist
   (cross-gateway: ``confirm_remote`` runs ``hermes kanban wait-check`` before the write txn) and
   must not itself be an orphan.
-* ``ci`` / ``deploy``: ``ref`` is a run / job / release id or URL.
+* ``ci`` / ``deploy``: ``ref`` is a run / job / release id or URL. A GitHub Actions ci run with a job queued
+  over 15 min and no runner is refused (``ci_run_unstartable``), and a card parked on one is woken
+  (``kanban_ci_progress``).
 * ``external``: ``ref`` names the vendor or ticket and ``why`` gives the evidence.
 * ``clock``: a real window (a soak, a cooldown, a release slot).
 * ``resource``: an internal resource gate (a governor's pool or host-pressure hold) whose own
@@ -65,7 +67,9 @@ INVALID_AWAITING = "invalid_awaiting"
 OPAQUE_PROBE_WAIT = "opaque_probe_wait"
 # The declared producer card is already done: what the park waits for has been produced (it would wake at once).
 PRODUCER_DONE = "producer_done"
-CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE)
+# The CI run the park names has a job queued past the limit with no runner (``kanban_ci_progress``).
+CI_RUN_UNSTARTABLE = "ci_run_unstartable"
+CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE, CI_RUN_UNSTARTABLE)
 # Parks in a row on one premise before the next one escalates instead (the 3rd park = 2nd re-park).
 REPARK_LIMIT = 2
 # Fires of one opaque probe, each followed by a re-park on it, before the next park escalates: a probe
@@ -362,9 +366,15 @@ def _completed_at(conn: sqlite3.Connection, ref: str) -> Optional[str]:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(row[1])))
 
 
-def confirm_remote(awaiting: Optional[dict]) -> None:
+def confirm_remote(awaiting: Optional[dict], *, hint: str = "") -> None:
     """Confirm a cross-gateway producer card exists, BEFORE any write txn (ssh can take 40 s).
-    ``resolve`` then accepts the card from the process-local confirmation."""
+    ``resolve`` then accepts the card from the process-local confirmation. A CI wait's run is read from GitHub
+    here too (``kanban_ci_progress``: refused when it is not starting); ``hint`` is the park's wake check and
+    reason, which may name the repo of a bare run id."""
+    if awaiting and awaiting.get("kind") == "ci":
+        from hermes_cli import kanban_ci_progress
+        kanban_ci_progress.confirm(awaiting, hint=hint)
+        return
     if not awaiting or awaiting.get("kind") != "card" or not awaiting.get("gateway"):
         return
     ref = awaiting.get("ref") or ""

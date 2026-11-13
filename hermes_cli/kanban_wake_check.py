@@ -1023,6 +1023,10 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         with _LOCK:
             for k in [k for k, f in _IN_FLIGHT.items() if f.done()]:
                 _IN_FLIGHT.pop(k, None)
+        from hermes_cli import kanban_ci_progress  # [daveey] a card parked on a CI run that never starts
+        sweep = kanban_ci_progress.submit_sweep(conn, _pool())
+        if sweep is not None:
+            futures.append(sweep)
     except Exception:
         logger.warning("kanban wake checks: tick failed", exc_info=True)
     if wait and futures:

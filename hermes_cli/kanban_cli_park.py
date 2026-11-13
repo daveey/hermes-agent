@@ -77,7 +77,8 @@ def _cli_awaiting(args: argparse.Namespace, wake):
     if probe:
         from hermes_cli import kanban_wake_check as kwc
         wake = (probe, kwc.normalize_every(None), wake[2])
-    kaw.confirm_remote(awaiting)  # ssh, so before the park's write txn
+    # ssh/https, so before the park's write txn
+    kaw.confirm_remote(awaiting, hint=f"{wake[0] or ''} {getattr(args, 'reason', None) or ''}")
     return awaiting, wake
 
 

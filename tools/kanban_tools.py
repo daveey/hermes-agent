@@ -1002,7 +1002,7 @@ def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
         from hermes_cli import kanban_wake_check as kwc
         wake = (probe, kwc.normalize_every(None), wake[2])
     try:
-        kaw.confirm_remote(awaiting)  # ssh, so before the park's write txn
+        kaw.confirm_remote(awaiting, hint=" ".join(str(x) for x in (wake[0], args.get("reason"), args.get("checkpoint")) if x))
     except kaw.AwaitingError as exc:
         raise _Reject(str(exc), exc.code) from exc
     return awaiting, wake
