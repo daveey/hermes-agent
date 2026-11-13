@@ -275,7 +275,8 @@ def test_release_window_standby_defers_to_live_want(home):
     directory.mkdir(parents=True)
     waiter = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
     try:
-        want = {"pid": waiter.pid, "start": hll._start_of(waiter.pid), "priority": 3, "role": "gateway"}
+        want = {"pid": waiter.pid, "start": hll._start_of(waiter.pid), "priority": 3, "role": "gateway",
+                "at": time.time()}
         (directory / "win.want").write_text(json.dumps(want))
         thief = hll.HostLoopLease("win", "dashboard", interval=1, home=home)
         assert thief.held() is False
@@ -299,6 +300,149 @@ def test_dead_want_is_ignored(home):
     assert lease.held() is True
     lease.beat()
     assert lease.held() is True
+    lease.release()
+
+
+@pytest.fixture
+def sleeper():
+    """A live process that is not waiting on any lock (a wedged or phantom wanter)."""
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    yield proc
+    proc.communicate(b"")
+
+
+def _want_of(home, name):
+    path = hll.lease_dir(home) / f"{name}.want"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def test_overwritten_want_is_republished_by_its_waiter(spawn, home):
+    """Nit 1: ``.want`` is one slot. A waiter whose ``.want`` was replaced (here by a wanter that then
+    died) must publish it again, or the holder never hands off and the waiter is starved."""
+    dash = spawn("dashboard", interval=1.0)
+    wait_until(lambda: dash.state() == "HELD", timeout=20, what="dashboard holds")
+    gateway = hll.HostLoopLease("test-loop", "gateway", interval=INTERVAL, home=home)
+    try:
+        assert gateway.held() is False  # publishes .want and waits for the hand-off
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        (hll.lease_dir(home) / "test-loop.want").write_text(json.dumps(
+            {"pid": dead.pid, "start": 1, "priority": 3, "role": "gateway", "at": time.time()}))
+        wait_until(gateway.held, timeout=10, what="waiter republishes its .want and gets the hand-off")
+        # (the test never beat()s, so the gateway's watchdog later gives the lease back: read the log)
+        wait_until(lambda: any("handing the lease to gateway" in line for line in dash.stderr), timeout=5,
+                   what="dashboard handed off")
+    finally:
+        gateway.release()
+
+
+def test_stale_want_expires_with_one_warning(home, sleeper, caplog):
+    """Nit 2: a live wanter that never takes the lock (SIGSTOPped, its thread never started) must
+    not make holder and standbys defer forever: a ``.want`` older than 3 intervals is ignored."""
+    directory = hll.lease_dir(home)
+    directory.mkdir(parents=True)
+    old = time.time() - 10 * INTERVAL
+    (directory / "sw.want").write_text(json.dumps({"pid": sleeper.pid, "start": hll._start_of(sleeper.pid),
+                                                   "priority": 3, "role": "gateway", "at": old,
+                                                   "interval": INTERVAL}))
+    lease = hll.HostLoopLease("sw", "dashboard", interval=INTERVAL, home=home)
+    with caplog.at_level(logging.WARNING, logger=hll.__name__):
+        assert lease.held() is True
+        lease.beat()  # the holder does not hand off to the stale wanter either
+        assert lease.held() is True
+        lease.beat()
+    warnings = [r for r in caplog.records if "stale" in r.getMessage() and ".want" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    lease.release()
+
+
+def test_fresh_want_from_a_live_wanter_still_defers(home, sleeper):
+    directory = hll.lease_dir(home)
+    directory.mkdir(parents=True)
+    (directory / "fw.want").write_text(json.dumps({"pid": sleeper.pid, "start": hll._start_of(sleeper.pid),
+                                                   "priority": 3, "role": "gateway", "at": time.time(),
+                                                   "interval": 60}))
+    lease = hll.HostLoopLease("fw", "dashboard", interval=INTERVAL, home=home)
+    assert lease.held() is False
+    lease.release()
+
+
+def test_want_spawn_failure_clears_waiting(home, monkeypatch):
+    """Nit 2: a ``.want`` published by a process whose waiting thread never started would hold
+    every other process off; a failed spawn clears ``_waiting`` and the ``.want``."""
+    dash = hll.HostLoopLease("sf", "dashboard", interval=60, home=home)
+    assert dash.held() is True
+    gateway = hll.HostLoopLease("sf", "gateway", interval=60, home=home)
+
+    def no_threads(target, name):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(hll, "_spawn", no_threads)
+    assert gateway.held() is False
+    assert gateway._waiting is False
+    assert _want_of(home, "sf") is None
+    gateway._next_probe = 0.0
+    assert gateway.held() is False  # competes again (and fails again) instead of sitting in _waiting
+    monkeypatch.undo()
+    gateway.release()
+    dash.release()
+
+
+def test_release_during_pending_handoff_lets_held_compete_again(spawn, home):
+    """Nit 3: ``release()`` while the hand-off thread is still blocked must not leave ``_waiting``
+    set: a later ``held()`` on the same object asks for the lease again and gets it."""
+    dash = spawn("dashboard")
+    wait_until(lambda: dash.state() == "HELD", timeout=20, what="dashboard holds")
+    gateway = hll.HostLoopLease("test-loop", "gateway", interval=60, home=home)
+    try:
+        dash_pid = dash.proc.pid
+        dash.proc.send_signal(signal.SIGSTOP)  # no beat(), so no hand-off while we release
+        try:
+            assert gateway.held() is False
+            assert (_want_of(home, "test-loop") or {}).get("pid") == os.getpid()
+            gateway.release()
+            assert _want_of(home, "test-loop") is None
+            assert gateway._waiting is False
+            gateway._next_probe = 0.0
+            assert gateway.held() is False  # the holder is still there, but this call competed
+            assert (_want_of(home, "test-loop") or {}).get("pid") == os.getpid()
+        finally:
+            os.kill(dash_pid, signal.SIGCONT)
+        wait_until(gateway.held, timeout=10, what="gateway gets the lease after the re-ask")
+        wait_until(lambda: dash.state() == "STANDBY", timeout=5, what="dashboard handed off")
+    finally:
+        gateway.release()
+
+
+def test_meta_is_fixed_length_so_rewrites_never_leave_a_tail(home):
+    """Nit 4: a lock-free reader must never see the old record's tail after a shorter rewrite."""
+    lease = hll.HostLoopLease("fl", "serve", interval=1, home=home)
+    assert lease.held()
+    path = hll.lease_dir(home) / "fl.lock"
+    held_size = path.stat().st_size
+    lease.release()  # adds released_at
+    assert path.stat().st_size == held_size
+    assert json.loads(path.read_bytes())["held"] is False
+
+
+def test_torn_meta_read_is_retried(home, monkeypatch):
+    """Nit 4: a reader that catches the writer mid-write retries once instead of showing no holder."""
+    lease = hll.HostLoopLease("tr", "serve", interval=60, home=home)
+    assert lease.held()
+    real = Path.read_bytes
+    torn = {"left": 1}
+
+    def read_bytes(self):
+        data = real(self)
+        if self.name == "tr.lock" and torn["left"]:
+            torn["left"] -= 1
+            return data[: len(data) // 3]
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    rows = {m["name"]: m for m in hll.holders(home)}
+    assert rows["tr"]["live"] is True and torn["left"] == 0
+    monkeypatch.undo()
     lease.release()
 
 

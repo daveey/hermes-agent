@@ -31,7 +31,14 @@ home, so profile processes of one install share one owner.
   ``<name>.want`` (pid + start time, verified alive) and blocks on ``LOCK_EX`` in a daemon thread, so it
   gets the lock the moment it is released (no polling gap). The holder reads ``.want`` in ``beat()`` at
   the end of each pass and releases. Any other standby that wins the lock in that release window drops
-  it again while a live ``.want`` of priority >= its own exists.
+  it again while a live ``.want`` of priority >= its own exists. ``.want`` is one slot: while it waits,
+  the wanter rewrites it once per interval from ``held()`` (refreshing ``at``, or republishing it when
+  another wanter's record replaced it), so a replaced record cannot starve it. A ``.want`` whose ``at``
+  is older than ``3 × interval`` is expired (one WARNING per wanter): a wanter that is alive but never
+  takes the lock (SIGSTOPped, its waiting thread failed to start) cannot make every process defer.
+* **Torn metadata.** The holder rewrites the record in place (``pwrite``), padded with spaces to a
+  fixed block so a shorter record never leaves the old one's tail; lock-free readers (standby probe,
+  :func:`holders`) still retry a read once when it does not parse.
 * **Kill switch** ``HERMES_HOST_LOOP_LEASE=0``: ``held()`` is always True (every process runs its own
   pass, the behaviour before this lease).
 * **Unavailable lock** (no ``fcntl``, a directory nobody can create the file in, a filesystem without
@@ -64,6 +71,7 @@ logger = logging.getLogger(__name__)
 
 KILL_SWITCH_ENV = "HERMES_HOST_LOOP_LEASE"  # health: allow HX002 -- the card's required kill switch
 WATCHDOG_FACTOR = 3
+META_BLOCK = 1024  # metadata is space-padded to a multiple of this, so rewrites keep the file length
 ROLE_PRIORITY = {"gateway": 3, "serve": 2, "dashboard": 1}
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 _LEASES: weakref.WeakSet = weakref.WeakSet()
@@ -115,12 +123,19 @@ def _alive(pid, start) -> bool:
         return False
 
 
-def _read_json(path: Path) -> dict | None:
-    try:
-        raw = json.loads(path.read_bytes() or b"null")
-    except (OSError, ValueError):
-        return None
-    return raw if isinstance(raw, dict) else None
+def _read_json(path: Path, *, retries: int = 1) -> dict | None:
+    """The JSON object in ``path``; a read that does not parse (caught mid-write) is retried once."""
+    for attempt in range(retries + 1):
+        try:
+            raw = json.loads(path.read_bytes() or b"null")
+        except OSError:
+            return None
+        except ValueError:
+            if attempt < retries:
+                continue
+            return None
+        return raw if isinstance(raw, dict) else None
+    return None
 
 
 _ME: tuple | None = None
@@ -170,8 +185,7 @@ class HostLoopLease:
         self._fd: int | None = None
         self._writable = False
         self._held = False
-        self._waiting = False        # a daemon thread blocks on LOCK_EX for a .want hand-off
-        self._cancel_wait = False    # release() while waiting: drop the lock when the thread gets it
+        self._waiting = False        # a daemon thread blocks on LOCK_EX on self._fd for a .want hand-off
         self._stop: threading.Event | None = None  # the current holding's watchdog stop flag
         self._last_beat = 0.0
         self._acquired_at = 0.0
@@ -179,6 +193,7 @@ class HostLoopLease:
         self._next_open = 0.0
         self._unavailable_logged = False
         self._stale_warned: tuple | None = None
+        self._stale_want_warned: tuple | None = None
         _LEASES.add(self)
 
     # -- public API ----------------------------------------------------------------------------
@@ -188,6 +203,10 @@ class HostLoopLease:
         if not enabled() or self._held:
             return True
         if self._waiting:
+            if time.monotonic() >= self._next_probe:
+                with self._mu:
+                    if self._waiting:
+                        self._keep_want()
             return False
         with self._mu:
             if self._held:
@@ -234,7 +253,10 @@ class HostLoopLease:
                 self._drop()
             self._clear_own_want()
             if self._waiting:
-                self._cancel_wait = True  # the blocked thread drops the lock and closes the fd
+                # The hand-off thread is blocked in flock() on self._fd and cannot be interrupted: leave
+                # that fd to it (it unlocks and closes it on wake-up) and start this object afresh.
+                self._waiting = False
+                self._fd = None
                 return
             if self._fd is not None:
                 os.close(self._fd)
@@ -313,6 +335,7 @@ class HostLoopLease:
         if not held:
             meta["released_at"] = now
         data = json.dumps(meta).encode()
+        data += b" " * (-len(data) % META_BLOCK)  # fixed length: a shorter record leaves no old tail
         try:
             os.pwrite(self._fd, data, 0)
             os.ftruncate(self._fd, len(data))
@@ -320,8 +343,22 @@ class HostLoopLease:
             logger.debug("host loop %s: metadata write failed: %s", self.name, exc)
 
     def _live_want(self) -> dict | None:
+        """The ``.want`` record, unless its wanter is gone or it is older than 3 of its intervals."""
         want = _read_json(self.want_path)
         if want is None or not _alive(want.get("pid"), want.get("start")):
+            return None
+        try:
+            age = time.time() - float(want["at"])
+            limit = WATCHDOG_FACTOR * float(want.get("interval") or self.interval)
+        except (KeyError, TypeError, ValueError):
+            age, limit = float("inf"), 0.0
+        if age > limit:
+            wanter = (want.get("pid"), want.get("start"))
+            if self._stale_want_warned != wanter:
+                self._stale_want_warned = wanter
+                logger.warning("host loop %s: ignoring stale %s.want of %s pid %s (last refreshed %.0fs ago, "
+                               "> %d x interval): the wanter is alive but not taking the lease", self.name,
+                               self.name, want.get("role"), wanter[0], age, WATCHDOG_FACTOR)
             return None
         return want
 
@@ -356,23 +393,43 @@ class HostLoopLease:
             return  # another process of at least our priority is already next
         self._want()
 
-    def _want(self) -> None:
-        """Publish ``.want`` and block on LOCK_EX in a daemon thread (caller holds ``_mu``)."""
-        if not self._writable or self._fd is None:
-            return
-        record = {"pid": _me()[0], "start": _me()[1], "role": self.role,
-                  "priority": self.priority, "at": time.time()}
+    def _publish_want(self) -> bool:
+        """Write (or refresh) this process's ``.want`` atomically."""
+        record = {"pid": _me()[0], "start": _me()[1], "role": self.role, "priority": self.priority,
+                  "interval": self.interval, "at": time.time()}
         tmp = self.want_path.with_name(f".{self.want_path.name}.{os.getpid()}")
         try:
             tmp.write_text(json.dumps(record), encoding="utf-8")
             os.replace(tmp, self.want_path)
         except OSError as exc:
             logger.debug("host loop %s: cannot write %s: %s", self.name, self.want_path, exc)
+            return False
+        return True
+
+    def _want(self) -> None:
+        """Publish ``.want`` and block on LOCK_EX in a daemon thread (caller holds ``_mu``)."""
+        if not self._writable or self._fd is None or not self._publish_want():
             return
-        self._waiting, self._cancel_wait = True, False
+        self._waiting = True
         fd = self._fd
         logger.info("host loop %s: %s outranks the holder; waiting for its hand-off", self.name, self.role)
-        _spawn(lambda: self._wait_for_lock(fd), f"host-loop-want-{self.name}")
+        try:
+            _spawn(lambda: self._wait_for_lock(fd), f"host-loop-want-{self.name}")
+        except RuntimeError as exc:  # can't start new thread: a .want nobody waits on would stall the pass
+            logger.warning("host loop %s: cannot start the hand-off thread (%s); not waiting", self.name, exc)
+            self._waiting = False
+            self._clear_own_want()
+
+    def _keep_want(self) -> None:
+        """While waiting, once per interval (caller holds ``_mu``): refresh our ``.want``, or publish it
+        again when another record replaced it, unless a live wanter of at least our priority is next."""
+        self._next_probe = time.monotonic() + self.interval
+        want = self._live_want()
+        if want is not None and want.get("pid") != os.getpid() and want.get("priority", 0) >= self.priority:
+            return
+        if want is None or want.get("pid") != os.getpid():
+            logger.info("host loop %s: republishing this %s process's .want", self.name, self.role)
+        self._publish_want()
 
     def _wait_for_lock(self, fd: int) -> None:
         try:
@@ -380,18 +437,18 @@ class HostLoopLease:
         except OSError as exc:
             logger.debug("host loop %s: blocking acquire failed: %s", self.name, exc)
             with self._mu:
+                if self._fd != fd:  # release() left this fd to us
+                    os.close(fd)
+                    return
                 self._waiting = False
                 self._clear_own_want()  # a live .want nobody waits on would hold every standby off
             return
         with self._mu:
-            self._waiting = False
-            if self._fd != fd:  # forked child state reset or fd replaced: not ours any more
-                return
-            if self._cancel_wait:
+            if self._fd != fd:  # release() while we waited: the fd is ours alone to drop and close
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
-                self._fd = None
                 return
+            self._waiting = False
             self._become_holder()
             self._clear_own_want()
 
