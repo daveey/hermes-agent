@@ -82,6 +82,31 @@ def _retryable_owner_errors():
     return (TimeoutError, ConnectionError, ConnectionClosed)
 
 
+#: Wire code for a final resend whose owner link dropped. The raw ConnectionClosed/ConnectionError text
+#: (owner-chosen close reasons, errno strings) is not a stable code the dispatcher can match exactly.
+OWNER_LINK_CLOSED = 'owner_link_closed'
+#: Close codes that say the owner went away or failed (going away, abnormal, internal error, service
+#: restart, try again later). Any other code (1009 message too big, 1008 policy) may answer THIS frame,
+#: so its text is kept and the card still owns the failure.
+_OWNER_GONE_CLOSE_CODES = frozenset({1001, 1006, 1011, 1012, 1013})
+
+
+def exhausted_resend_code(exc) -> str:
+    """The wire code a final unknown-outcome resend latches (one ``is_retryable_owner_error`` accepted):
+    ``worker_receipt_timeout`` for a silent owner, ``owner_link_closed`` for a link the owner dropped,
+    else the raw text. The dispatcher books the first two as the owner's fault (kanban_owner_storage_refusal)."""
+    if isinstance(exc, TimeoutError):
+        return str(exc)
+    from websockets.exceptions import ConnectionClosed
+    if isinstance(exc, ConnectionClosed):
+        # The owner's close frame, else the one this side sent failing the link (1009 for an oversized
+        # reply); none at all is a dropped socket.
+        close = exc.rcvd or exc.sent
+        if close is not None and close.code not in _OWNER_GONE_CLOSE_CODES:
+            return str(exc)
+    return OWNER_LINK_CLOSED
+
+
 def is_retired_generation_error(exc) -> bool:
     """True for the store's ``stale_generation`` fence: the owner retired this worker generation
     (gateway restart / core update), so every later write is refused by design. Matches only the
@@ -495,7 +520,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                 if send >= _RETRYABLE_ATTEMPTS:
                     logger.error('worker receipt outcome still unknown after %d sends (op=%s): %s',
                                  send, entry['operation'], exc)
-                    raise WorkerPersistenceError(str(exc)) from exc
+                    raise WorkerPersistenceError(exhausted_resend_code(exc)) from exc
                 stalled = time.monotonic()  # the recovery log measures from the last stall
                 logger.warning('worker receipt outcome unknown (op=%s, send %d/%d): %s; re-sending it',
                                entry['operation'], send, _RETRYABLE_ATTEMPTS, exc)

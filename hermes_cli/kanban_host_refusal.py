@@ -157,7 +157,7 @@ def _cause(proof: dict, task_id: Optional[str] = None) -> str:
                 "(its runtime store or session policy could not be read)")
     if kind == OWNER_UNREACHABLE:
         return (f"{whose} running worker could not reach its profile owner to save the turn "
-                "(owner_unavailable: the owner gateway stopped answering)")
+                f"({proof.get('reason') or 'owner_unavailable'}: the owner gateway stopped answering)")
     if kind == OWNER_CAPSULE_UNAVAILABLE:
         claim = f"card {task_id}'s claim" if task_id else "the claim"
         return (f"the profile owner kept refusing {claim} with capsule_observation_missing (no live run-bound "
