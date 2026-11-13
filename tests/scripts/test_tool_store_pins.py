@@ -7,6 +7,7 @@ differs from what this checkout's package code records makes `pm install`
 re-record the shared facts.json.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -52,10 +53,16 @@ def _matching_store(store: Path) -> Path:
     return _executable(store / f"uv-{lock.version('uv')}-{'-'.join(target.split('-')[:2])}" / "uv")
 
 
-def _shares(store: Path) -> bool:
+def _shares(store: Path, *, hermes_home: Path | None = None, home: Path | None = None) -> bool:
+    """Run the check as run_tests.sh does; by default from a borrowing HERMES_HOME beside STORE's root."""
+    env = {k: v for k, v in os.environ.items() if k not in ("HERMES_HOME", "HERMES_DATA_DIR_SUFFIX")}
+    if home is not None:
+        env["HOME"] = str(home)
+    else:
+        env["HERMES_HOME"] = str(hermes_home or store.parent / "borrower")
     result = subprocess.run(
         [sys.executable, "-I", "-B", str(ROOT / "scripts/tool_store_pins.py"), str(ROOT), str(store)],
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True, text=True, timeout=60, check=False, env=env,
     )
     return result.returncode == 0
 
@@ -95,3 +102,42 @@ def test_store_running_from_which_would_write_to_it_is_not_shared(tmp_path, brea
     after = sorted((p.relative_to(store), p.is_file() and p.read_bytes(), p.stat().st_mode)
                    for p in store.rglob("*"))
     assert after == before, "the check must stay read-only (no heal, no re-record, no .corrupt)"
+
+
+def _account_store(tmp_path: Path) -> Path:
+    store = tmp_path / "account" / ".hermes" / "tools"
+    _matching_store(store)
+    return store
+
+
+@pytest.mark.platforms("posix")
+def test_a_custom_hermes_home_borrows_the_account_store(tmp_path):
+    """A card's fake HERMES_HOME (outside the account root) used to download the whole toolchain."""
+    store = _account_store(tmp_path)
+    assert _shares(store, hermes_home=tmp_path / "card" / "hh")
+    assert _shares(store, hermes_home=tmp_path / "card" / "hh" / "profiles" / "p"), "a profile of a borrower"
+
+
+@pytest.mark.platforms("posix")
+def test_a_faked_home_borrows_the_account_store(tmp_path):
+    store = _account_store(tmp_path)
+    assert _shares(store, home=tmp_path / "fake-home")
+
+
+@pytest.mark.platforms("posix")
+def test_the_stores_own_root_never_borrows_it(tmp_path):
+    """The owner (or one of its profiles) provisions its own store: no borrowed sharing decision."""
+    store = _account_store(tmp_path)
+    assert not _shares(store, hermes_home=store.parent)
+    assert not _shares(store, hermes_home=store.parent / "profiles" / "work")
+    assert not _shares(store, home=tmp_path / "account"), "HERMES_HOME unset under the account HOME"
+
+
+@pytest.mark.platforms("posix")
+def test_a_root_with_its_own_store_keeps_it(tmp_path):
+    store = _account_store(tmp_path)
+    borrower = tmp_path / "card" / "hh"
+    assert _shares(store, hermes_home=borrower), "control"
+    (borrower / "tools").mkdir(parents=True)
+    (borrower / "tools" / "facts.json").write_text('{"packages": {}, "schema": 1}')
+    assert not _shares(store, hermes_home=borrower)

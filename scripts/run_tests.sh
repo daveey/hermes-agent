@@ -54,9 +54,11 @@ _has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/nul
 # shellcheck source=scripts/_activation.sh
 . "$SCRIPT_DIR/_activation.sh"
 
-# A test run under a faked HOME (worktree lanes, probe homes) provisions its
-# test environment from the OS account's tool store instead of downloading
-# ~1 GB of tools into every temporary home, but only while that store already
+# A test run whose Hermes root is not the account's -- a faked HOME (worktree
+# lanes, probe homes) or a HERMES_HOME outside the account root (a card's fake
+# home for a cloned checkout) -- provisions its test environment from the OS
+# account's tool store instead of downloading ~1.5 GB of tools into every
+# temporary home, but only while that store already
 # records this checkout's pins (_store_has_pins). The check runs unlocked
 # before `pm install` takes the store's install lock, so it keeps runs that
 # START on different pins apart; it does not cover the window in between, where
@@ -67,17 +69,22 @@ _has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/nul
 # install or update resolve their own stores. Their PATH still holds the
 # account store's tool dirs, so a test writing through a PATH tool
 # (`pip install`, `npm -g`) would write into the account store. An explicit
-# HERMES_RUNTIME_DIR, a custom HERMES_HOME, a home that already holds a store,
-# or an account without a usable store keep today's per-home layout.
+# HERMES_RUNTIME_DIR, the account's own root (or a profile of it), a root that
+# already holds a store, or an account without a usable store keep today's
+# per-home layout; tool_store_pins.py resolves the root exactly as PM does.
 # Prints the account home, then the pinned Python minor.
 _account_tool_store() {
   local account py_minor
   [ -z "${HERMES_RUNTIME_DIR:-}" ] || return 1
-  case "${HERMES_HOME:-}" in "" | "$HOME/.hermes" | "$HOME/.hermes/"*) ;; *) return 1 ;; esac
-  [ ! -f "$HOME/.hermes/tools/facts.json" ] || return 1
   account="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
   [ -n "$account" ] || account="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')"
-  [ -n "$account" ] && [ -d "$account" ] && [ ! "$account" -ef "$HOME" ] || return 1
+  [ -n "$account" ] && [ -d "$account" ] || return 1
+  # Fast path for the owner's own runs, which never borrow: no Python spawn.
+  if [ -z "${HERMES_HOME:-}" ]; then
+    [ ! "$account" -ef "$HOME" ] || return 1
+  else
+    [ ! "$HERMES_HOME" -ef "$account/.hermes" ] || return 1
+  fi
   [ -f "$account/.hermes/tools/facts.json" ] && [ -w "$account/.hermes/tools" ] || return 1
   py_minor="$(_store_has_pins "$account/.hermes/tools")" || return 1
   printf '%s\n%s\n' "$account" "$py_minor"
@@ -98,7 +105,7 @@ if _shared="$(_account_tool_store)"; then
       && compgen -G "$_account/.local/share/uv/python/cpython-${_shared#*$'\n'}[.-]*" >/dev/null; then
     export UV_PYTHON_INSTALL_DIR="$_account/.local/share/uv/python"
   fi
-  echo "▶ faked HOME: using the account's tool store $HERMES_RUNTIME_DIR"
+  echo "▶ borrowed Hermes root: using the account's tool store $HERMES_RUNTIME_DIR"
 fi
 unset _account _shared
 if [ -z "${__HERMES_ACTIVATED:-}" ] && _has_pytest "${HERMES_PYTHON:-}"; then

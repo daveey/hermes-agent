@@ -1,10 +1,16 @@
-"""Exit 0 only when a tool store already holds this checkout's pins.
+"""Exit 0 only when this run borrows a tool store that already holds this checkout's pins.
 
 Usage: python -I -B scripts/tool_store_pins.py REPO STORE
 (on success prints the pinned Python major.minor)
 
 scripts/run_tests.sh asks this before sharing the account's tool store with a
-faked HOME. facts.json selects ONE entry per package, not one per version:
+run whose Hermes root is not the account's: a faked HOME, or a HERMES_HOME
+outside the account root (a card's fake home, a probe home). Such a root holds
+no store of its own, so without sharing setup-hermes.sh downloads the whole
+toolchain (~1.5 GB) into it. The root is the one PM resolves for this process
+(HERMES_HOME's root, else HOME's). It borrows only when it is not STORE's own
+root and holds no store: the owner provisions its own store, and a root with a
+store keeps it. facts.json selects ONE entry per package, not one per version:
 provisioning a checkout with other pins re-points the account's own runtime at
 them and pulls the selection from under a concurrent run on the store's pins.
 So share only when every tool `pm install` would provision here (cmd_install's
@@ -27,8 +33,23 @@ def _setup_uv(store: Path, target: str, version: str) -> Path:
     return store / f"uv-{version}-{os_arch}" / ("uv.exe" if os_arch.startswith("win32") else "uv")
 
 
+def borrows(store: Path) -> bool:
+    """Is this process's Hermes root another root than STORE's, with no store of its own?"""
+    from hermes_constants import get_default_hermes_root
+
+    root = get_default_hermes_root()
+    try:
+        if root.resolve() == store.resolve().parent:
+            return False
+    except (OSError, RuntimeError):
+        return False
+    return not (root / "tools" / "facts.json").exists()
+
+
 def main(repo: str, store: Path) -> int:
     sys.path.insert(0, repo)
+    if not borrows(store):
+        return 1
     from pm.defaults import default_packages
     from pm.install import _installed_location
     from pm.lock import Facts, Lockfile
