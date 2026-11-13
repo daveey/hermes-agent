@@ -122,9 +122,10 @@ def test_the_backlog_drains_over_rounds_and_pulled_at_marks_only_the_head(live, 
     log: list = []
     hub = PagedHub(svc, ME, log)
     first = _round(kanban_home, hub)
-    # 20 pages each for the replica and the live file, then the round ended anyway.
+    # 20 pages for the replica, then the round ended anyway; the never-pulled live file read one page and rebuilt
+    # from a snapshot instead of replaying the feed (test_kanban_sync_cold_live).
     assert first.behind and first.pulled == backlog.PULL_PAGE_BUDGET
-    assert sum(1 for kind, _ in log if kind == "changes") == 2 * backlog.PULL_PAGE_BUDGET
+    assert sum(1 for kind, _ in log if kind == "changes") == backlog.PULL_PAGE_BUDGET + 1
     cursor, pulled_at = _replica_state()
     assert cursor == backlog.PULL_PAGE_BUDGET and pulled_at is None  # not at the head: never stamped
     path = kanban_home / "kanban.db"

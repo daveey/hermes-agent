@@ -1038,9 +1038,10 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             acw.expedite(live, pulled.status_changed)  # a park naming a card the pull moved re-probes now [daveey]
             applies: Optional[list] = []  # credited revision steps (kanban_sync_own_writes); None = a rebuild
             if mode == "primary":
-                try:
-                    with credited(live):
-                        result.behind |= pull(live, hub, slug, observers=True, partition=gateway).more
+                try:  # a never-pulled file rebuilds from a snapshot instead of replaying the feed (None)
+                    live_behind = backlog.pull_live(live, hub, slug, gateway)
+                    result.behind |= bool(live_behind)
+                    applies = None if live_behind is None else applies
                 except Resync:
                     from hermes_cli.kanban_sync_resync_sweep import resync_live  # also sweeps the Board's deletes
                     applies = None
