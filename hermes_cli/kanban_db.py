@@ -3716,7 +3716,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
     # One clock reading so every relative age in this rendering agrees.
     now = int(time.time())
     lines: list[str] = []
-    _ctx_header(lines, task)
+    _ctx_header(lines, task, conn=conn)
     _ctx_standing(lines, task, list_comments(conn, task_id))  # [daveey]
     from hermes_cli.kanban_continuation import render_checkpoint_context
     checkpoint = render_checkpoint_context(conn, task_id)

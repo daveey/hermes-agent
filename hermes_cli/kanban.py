@@ -722,6 +722,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         latest_summary = kb.latest_summary(conn, args.task_id)
         from hermes_cli import kanban_wake_check as kwc
         wake_check = kwc.get_state(conn, args.task_id)
+        from hermes_cli import kanban_wake_summary as kws  # [daveey] what wakes a scheduled card, at latest when
+        wakes = kws.wakes(conn, task, wake_check=wake_check, check_loaded=True)
         from hermes_cli import kanban_queue_reason as kqr
         queue_reason = kqr.latest(conn, args.task_id)
         # Same ``queue`` as kanban_show and the REST read (kanban-7d720d4ab8): a ready card says where it waits. [daveey]
@@ -737,7 +739,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
-            "wake_check": wake_check,
+            "wake_check": wake_check, "wakes": wakes,
             "queue_reason": queue_reason,
             **details,
             **_hub_admission_show.show_json(events),
@@ -748,7 +750,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"  {label + ':':<11}{value}")
 
     print(f"Task {task.id}: {task.title}")
-    field("status", task.status)
+    field("status", kws.status_text(task.status, wakes))
     field("assignee", task.assignee or "-")
     kqr.print_field(queue_reason, field)
     field("capacity", details["capacity_note"])
