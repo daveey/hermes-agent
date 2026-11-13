@@ -5,6 +5,7 @@ outbox push, so the replica went 13 min stale and hub cards waiting on worker ca
 """
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -129,3 +130,45 @@ def test_a_restarted_loop_never_runs_a_pass_beside_the_stopped_loops(monkeypatch
     assert second["calls_while_blocked"] == 1, f"the restarted loop ran a pass beside the stopped one: {calls}"
     assert state["max"] == 1, f"{state['max']} concurrent reconcile_links passes"
     assert len(calls) == 2 and calls[1] is not slow, "the restarted loop never ran its own pass"
+
+
+def test_a_pass_refused_behind_a_stopped_loops_pass_warns_once(monkeypatch, caplog):
+    """A stopped runner's hung ``reconcile_links`` refuses every later pass in the process: say so once per hold
+    rather than refusing silently (review nit on PR #2006)."""
+    from hermes_cli.kanban_sync_links_pass import LinksPass
+    monkeypatch.setattr(LinksPass, "JOIN_S", 0.05)
+    release, entered = threading.Event(), threading.Event()
+    calls: list[threading.Thread] = []
+
+    def reconcile(boards, gateway, **kwargs):
+        calls.append(threading.current_thread())
+        entered.set()
+        release.wait(10)
+
+    first = {"n": 0}
+
+    def first_wait(*args):
+        first["n"] += 1
+        assert entered.wait(10), "the first loop's pass never started"
+
+    try:
+        _run_loop(monkeypatch, reconcile=reconcile, sync_all_once=lambda *a, **k: [], wait=first_wait,
+                  keep_running=lambda: first["n"] < 1)
+        assert len(calls) == 1 and calls[0].is_alive(), "the first pass must outlive its loop"
+        caplog.clear()
+        second = {"n": 0}
+
+        def second_wait(*args):
+            second["n"] += 1
+
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_sync_client"):
+            _run_loop(monkeypatch, reconcile=reconcile, sync_all_once=lambda *a, **k: [], wait=second_wait,
+                      keep_running=lambda: second["n"] < 2)  # two iterations: two refused requests
+        assert second["n"] == 2 and len(calls) == 1, f"the restarted loop's requests were not refused: {calls}"
+        held = [r for r in caplog.records if "held the pass lock" in r.getMessage()]
+        assert len(held) == 1, f"expected one warning for the hold, got {[r.getMessage() for r in held]}"
+        assert held[0].levelno == logging.WARNING
+    finally:
+        release.set()
+        for thread in calls:
+            thread.join(10)
