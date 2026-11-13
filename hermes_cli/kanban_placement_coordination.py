@@ -121,7 +121,11 @@ def _ends_word(text, start, end) -> bool:
     if q and start >= 2 and not text[start - 2].isspace():
         q = ""
     i = end
-    if q and text.startswith(q, i):
+    if q:
+        # An opening quote must close right here: whitespace inside the quoted word (``"~/.hermes/logs/a b/../.env"``)
+        # is part of the path, so a later close may hide a ``..`` (review 5892779312).
+        if not text.startswith(q, i):
+            return False
         i += 1
     if text.startswith(")", i):
         i += 1
@@ -167,7 +171,14 @@ def without_read_paths(text, cfg, *, target=None, requires=None):
     return _strip_read_paths(text, roots)
 
 
+# A standalone ``..`` path segment anywhere (``cd ~/.hermes/logs && cat ../.env``) can walk out of a root that
+# per-token stripping already cleared, so such text keeps every path (review 5892779312).
+_DOTDOT = re.compile(r"(?<![\w.~-])\.\.(?![\w.~-])")
+
+
 def _strip_read_paths(text, roots):
+    if _DOTDOT.search(text):
+        return text
     # Keep a separator so surrounding backtick runs cannot merge and hide later markers.
     return _STATE_PATH.sub(
         lambda m: " " if _ends_word(text, m.start(), m.end()) and _under_roots(m.group(1), roots) else m.group(0),

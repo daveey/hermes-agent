@@ -123,6 +123,14 @@ def test_malformed_roots_clear_nothing(attested, roots):
     # glued to the path hides its ``..`` (both resolve to ~/.hermes/.env).
     "chmod -R 777 ~/.hermes/logs/`x`/../.env",
     "chmod -R 777 ~/.hermes/logs/`echo ..`/.env",
+    # An opening quote must close right after the path: whitespace inside the quoted word is part of it
+    # (review 5892779312).
+    'cat "~/.hermes/logs/a b/../../.env"',
+    "cat '~/.hermes/logs/a b/../../.env'",
+    'cat "/home/ubuntu/.hermes/logs/a b/../../.env"',
+    # A relative ``..`` after a cd into a root walks out of it (review 5892779312 nit).
+    "cd ~/.hermes/logs && cat ../.env",
+    "cd ~/.hermes/logs; chmod -R 777 ../state",
 ])
 def test_controls_still_pin(attested, body):
     cfg, _, _ = attested
