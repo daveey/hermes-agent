@@ -42,7 +42,7 @@ def _card(c: dict, *, creator, local=True, status="running") -> dict:
 
 
 def _replay(case: dict):
-    a = _card(case["a"], creator=case["creator"])
+    a = _card(case["a"], creator=case.get("a_creator", case["creator"]))
     background = [_card({"id": f"t_bg{i:012x}", "title": "background", "body": body}, creator=None, local=False)
                   for i, body in enumerate(case["background"])]
     b = case["b"]
@@ -87,6 +87,27 @@ def test_same_key_family_from_an_earlier_run_is_compared():
     assert _replay(same_run) is None, "a keyed batch filed in one run stays exempt by family"
     unknown = {**case, "run_started": None}
     assert _replay(unknown) is None, "an unknown run start keeps the exemption"
+
+
+def test_another_creators_same_family_card_from_before_this_run_stays_exempt():
+    """Only the creator's OWN keyed cards from an earlier run lose the key-family exemption. Another creator's
+    same-family card from before this run stays skipped, or any keyed batch of another creator would become a
+    refusal source (post-merge check of PR #2605, mutant D2)."""
+    case = _incident()
+    assert _replay(case) is not None, "the creator's own earlier-run card is compared"
+    other = {**case, "a_creator": "t_0000000000000000"}
+    assert other["a_creator"] != case["creator"]
+    assert _replay(other) is None, "another creator's same-family card stays exempt"
+
+
+def test_an_own_same_family_card_with_no_created_at_stays_exempt():
+    """An own same-family card whose created_at is unknown is not provably from an earlier run, so it keeps the
+    exemption, as :func:`kanban_overlap_own.earlier_run` documents (post-merge check of PR #2605, mutant D5)."""
+    case = _incident()
+    no_time = {**case, "a": {**case["a"], "created_at": None}}
+    assert _replay(no_time) is None, "an own card with no created_at stays exempt by family"
+    assert not ko._own.earlier_run({"created_at": None}, case["run_started"])
+    assert ko._own.earlier_run({"created_at": case["a"]["created_at"]}, case["run_started"])
 
 
 @pytest.mark.parametrize("case", [c for c in CASES if c["kind"] == "duplicate"], ids=_cid)
