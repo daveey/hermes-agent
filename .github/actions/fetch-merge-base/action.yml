@@ -7,7 +7,15 @@ description: >-
   required aggregate. The history is complete, so merge-base, `base..HEAD` ranges and
   `git log --author` answer exactly as on a full clone. Trees and blobs of other commits are fetched
   lazily on first use (git diff / archive / worktree), which needs credentials: keep the
-  checkout's default persist-credentials, or pass a token to those commands yourself. Use it
+  checkout's default persist-credentials, or pass a token to those commands yourself. If the
+  filtered fetch fails (git 2.55.0 on the runners can abort it with "BUG: builtin/pack-objects.c:
+  should_include_obj ..." / "fatal: index-pack failed", exit 128, in index-pack's promisor-mode
+  "repack local links"; seen on the second call of a job, in an existing partial clone), the
+  script logs "fetch-merge-base: filtered fetch failed (rc=N): ...; full-history fallback",
+  drops the partial-clone config for one unfiltered fetch of the same two refs, then restores
+  that config as it was before the attempt, so a repo that already was a partial clone can still
+  lazy-fetch its base trees. The step fails only if that fetch fails, or if the merge base's tree
+  cannot be read afterwards. Use it
   right after actions/checkout (default fetch-depth) with `base` set to the PR's base branch;
   the merge base is in `steps.<id>.outputs.sha`.
 
