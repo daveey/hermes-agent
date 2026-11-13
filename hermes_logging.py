@@ -473,6 +473,8 @@ def setup_logging(
     if root.level == logging.NOTSET or root.level > level:
         root.setLevel(level)
     _quiet_noisy_loggers()
+    from agent.ssl_close_tripwire import install_from_env  # lazy: debug-only, HERMES_DEBUG_SSL_CLOSE=1
+    install_from_env()
     _logging_initialized = True
     return log_dir
 

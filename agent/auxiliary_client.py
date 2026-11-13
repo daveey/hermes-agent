@@ -36,6 +36,7 @@ from agent.error_classifier import (
 from agent.errors import InvalidProviderResponseError
 from agent.auxiliary_fallback_recovery import reapply_repairs
 from agent.auxiliary_managed_local import _is_managed_local_endpoint
+from agent.aux_provider_handoff import ProviderAttempt, note_abandoned as note_abandoned_provider_call
 from agent.auxiliary_reasoning_floor import remember_reasoning_floor, with_reasoning_floor
 from agent.auxiliary_profile_gates import (
     PROFILE_REASONING_KEYS, contains_profile_reasoning_fields, profile_forwards_max_tokens,
@@ -452,10 +453,9 @@ def aux_stream_deadline(deadline: float | Callable[[], float | None] | None):
 def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any], kwargs: dict[str, Any]) -> Any:
     """Run one protected provider callback in an attempt-isolated daemon thread.
 
-    Aux clients are process-shared and cannot be closed to wake one request, so the callback (incl.
-    stream aggregation) runs in a daemon while the owner polls cancellation; on cancel the owner
-    unwinds at once; the daemon stops at its next streamed chunk, else under the provider timeout in ``kwargs``
-    (it owns no transcript/commit state, never holds the session lock). Unprotected / no cancel source: direct.
+    The callback (incl. stream aggregation) runs in a daemon while the owner polls cancellation; on cancel the
+    owner unwinds at once and the daemon, which owns the client's socket, closes a per-call client itself
+    (``aux_provider_handoff``: an owner close recycled its TLS fd into a SQLite header). Unprotected: direct.
     """
     source_cancel_check = _capture_aux_cancel_check()
     if not _aux_interrupt_protected() or not callable(source_cancel_check):
@@ -476,8 +476,7 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
     # owner-thread-only deadline would leave the fix inert on exactly the path large-session compression
     # takes (protected call + hard-cancel source installed).
     provider_context = contextvars.copy_context()
-    done = threading.Event()
-    outcome: dict[str, Any] = {}
+    done, outcome, attempt = threading.Event(), {}, ProviderAttempt()
 
     def _provider_worker() -> None:
         try:
@@ -493,6 +492,7 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
             outcome["exception"] = exc
         finally:
             done.set()
+            attempt.finish()  # deferred client closes run here, on the thread that owns the socket
 
     threading.Thread(
         target=provider_context.run, args=(_provider_worker,), name="hermes-protected-aux-provider",
@@ -500,11 +500,11 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
     while True:
         # Check cancel before AND after each wait so it wins when result publication and the
         # host Event land in the same polling interval.
-        if _captured_aux_cancel_requested(cancel_check):
-            raise AuxiliaryExplicitCancellation()
-        if not done.wait(0.02):
+        cancelled = _captured_aux_cancel_requested(cancel_check)
+        if not cancelled and not done.wait(0.02):
             continue
-        if _captured_aux_cancel_requested(cancel_check):
+        if cancelled or _captured_aux_cancel_requested(cancel_check):
+            note_abandoned_provider_call(attempt)
             raise AuxiliaryExplicitCancellation()
         exception = outcome.get("exception")
         if exception is not None:

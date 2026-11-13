@@ -7,6 +7,7 @@ from functools import wraps
 from types import SimpleNamespace
 from uuid import uuid4
 
+from agent.aux_provider_handoff import client_scope
 from agent.model_routing import ModelRoutingError, is_class_selector
 from agent.model_routing_runtime import resolve_class_runtime
 
@@ -306,12 +307,13 @@ def class_routed_sync(callback):
         while True:
             runtime, client, kwargs = _prepare(task, options, request, failed)
             terminal = None
-            try:
-                return _complete(task, runtime, client, kwargs)
-            except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
-                terminal = _recover(runtime, client, exc, attempted, failed)
-            finally:
-                aux._close_cached_client(client, close_async=True)
+            # A hard cancel can leave the provider daemon reading this client: the scope then shuts its
+            # sockets down and the daemon closes it, never this thread (TLS fd recycled into SQLite).
+            with client_scope(client, lambda c: aux._close_cached_client(c, close_async=True)):
+                try:
+                    return _complete(task, runtime, client, kwargs)
+                except Exception as exc:  # health: allow BLE001 -- classified once, then recovered or re-raised below
+                    terminal = _recover(runtime, client, exc, attempted, failed)
             if terminal is not None:
                 raise terminal
     return wrapped
