@@ -129,8 +129,11 @@ def test_stale_records_are_ignored(env):
     (pool / 'old-job.scope' / 'cpu.weight').unlink()
     (pool / 'old-job.scope').rmdir()
     assert legacy.lookup(pool, 'old-job.scope') is None
-    scope(pool)
-    data['ino'] += 1
+    # The recreated directory's inode is up to the filesystem and can be the old
+    # one + 1 (a freed child inode reused under parallel load), so derive the
+    # stale identity from the scope that actually exists now.
+    recreated = scope(pool)
+    data['ino'] = recreated.lstat().st_ino + 1
     path.write_text(json.dumps(data))
     assert legacy.register('old-job.scope', db, 't2', pool=pool)['owner'][1] == 't2'
 
