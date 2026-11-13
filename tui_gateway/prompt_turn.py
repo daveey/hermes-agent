@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from .exit_job_receipts import USER_STOP_AT_EXIT
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -301,7 +302,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
             # [daveey] The backend exit's own interrupt is not a Stop: like _retire_turn_marker, keep the marker
             # it raced (only a user Stop before the exit drops it). That marker's prompt now carries any notice
             # this turn was started with, so the exit journal stops reporting those separately.
-            exit_keeps = session.get("_exit_keeps_turn_marker") and not session.get("_user_stop_at_exit")
+            exit_keeps = session.get("_exit_keeps_turn_marker") and not session.get(USER_STOP_AT_EXIT)
             marker_cancelled = bool(session.get("_turn_cancel_requested")) and not exit_keeps
             if recorded:  # only verified persistence secures the carried notices; a failed write keeps custody
                 unsecured = session.get(COMPLETION_UNSECURED) or {}

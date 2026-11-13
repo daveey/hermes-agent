@@ -559,6 +559,8 @@ def test_a_carried_pause_whose_job_stop_raises_does_not_name_the_completed_notif
 
 
 def test_a_carried_turn_that_raises_after_its_hook_paid_keeps_naming_it(env):
+    # Regression pin: green before PR #2064 too (a turn that raises never reaches pause_stands to take the stamp
+    # back); it guards that path rather than proving a change.
     def _turn(agent, seen):
         seen["reason"] = agent.step_boundary_pause()
         raise RuntimeError("boom after the pause was paid")
@@ -609,4 +611,29 @@ def test_a_user_stop_before_a_backend_exit_of_a_carried_turn_still_takes_the_sta
     assert seen["reason"] == up.PAUSE_REASON
     marker, note = _continuation_note(env)
     assert not marker.get("carried_turn_paused"), "a notification turn the user stopped is named by the continuation"
+    assert up.CARRIED_TURN_NOTE not in note
+
+
+# --- PR #2064 review nit (t_01a1d4568dd55405): a carried turn that completed normally just after the backend exit
+# began (``_exit_keeps_turn_marker`` set before the exit's interrupt landed) was not cut short by the exit, so it
+# takes the stamp back: the continuation must not name a notification turn that ran to completion.
+
+def test_a_carried_turn_that_completes_normally_while_the_backend_exits_takes_the_stamp_back(env):
+    def _turn(agent, seen):
+        seen["reason"] = agent.step_boundary_pause()
+        seen["stamped"] = bool((read_turn_marker(env.home, "session-key") or {}).get("carried_turn_paused"))
+        with session["history_lock"]:  # the exit began, but the turn ended before its interrupt landed
+            session["_user_stop_at_exit"] = False
+            session["_exit_keeps_turn_marker"] = True
+        return {"final_response": "noted", "messages": [], "completed": True}
+
+    session = _paused_session(env.home)
+    seen: dict = {}
+    session["agent"].run_conversation = lambda message, **kw: _run_with_window(env, session, _turn, seen)
+    session["running"] = True
+    assert server._notif_run_submit("__notif__1", "ui-sid", session, "[Background process proc_1 finished]")
+
+    assert seen["reason"] == up.PAUSE_REASON and seen["stamped"]
+    marker, note = _continuation_note(env)
+    assert not marker.get("carried_turn_paused"), "a notification turn that completed during the exit is named"
     assert up.CARRIED_TURN_NOTE not in note
