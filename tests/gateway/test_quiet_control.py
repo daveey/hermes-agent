@@ -20,23 +20,13 @@ from gateway import quiet_control
 from gateway.control_dispatch import ControlRequestDispatcher, verb_is_work_bearing
 from gateway.control_socket import GatewayControlServer
 from gateway.run import GatewayRunner
+from gateway.runtime_ownership import ProfileOwnership
 from gateway.turn_lease import SessionTurnLeaseRegistry
 from hermes_cli import kanban_deploy_window as window
 from hermes_cli import local_work
 from tests.waiting import wait_until
 
 PEER = "uid:1000"
-
-
-class MembershipRegistry(local_work.Registry):
-    """The real ledger plus the membership generation the INGRESS API supplies."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.generation = 1
-
-    def membership_generation(self):
-        return self.generation
 
 
 class Runner(GatewayRunner):
@@ -48,8 +38,12 @@ def env(tmp_path, monkeypatch):
     root = tmp_path / "hermes"
     root.mkdir(mode=0o700)
     monkeypatch.setenv("HERMES_HOME", str(root))
-    registry = MembershipRegistry(homes=[str(root)])
+    # The production registry, unseeded exactly as hermes_bootstrap installs it; membership comes from
+    # the production seeding path (the tracked process reservation of the launch home).
+    registry = local_work.Registry()
     monkeypatch.setattr(local_work, "_registry", registry)
+    ownership = ProfileOwnership(track_membership=True)
+    ownership.reserve([root])
     monkeypatch.setitem(quiet_control._boot, "registry", None)
     monkeypatch.setitem(quiet_control._boot, "captured", False)
     quiet_control.capture_bootstrap_registry()  # the registry predates every runner: bootstrap provenance
@@ -66,6 +60,7 @@ def env(tmp_path, monkeypatch):
     yield type("Env", (), dict(root=root, registry=registry, runner=runner, server=server,
                                control=control, lease=lease, monkeypatch=monkeypatch))
     owner.close()
+    ownership.close()
 
 
 def write_window(root, state, *, age=0):
@@ -169,7 +164,7 @@ def test_start_refused_with_unknown_registry_state(env):
 
 def test_start_refused_when_membership_api_missing(env):
     attest(env)
-    env.monkeypatch.setattr(MembershipRegistry, "membership_generation", None)
+    env.monkeypatch.setattr(local_work.Registry, "membership_generation", None)
     result = ok(env, "quiet-observe-start", start_params(env))
     assert "membership_unsupported" in result["reasons"]
 
@@ -271,7 +266,9 @@ def test_clean_cycle_reports_registry_predicates_and_update_status(env):
         assert snap["valid"] is True and snap["reasons"] == []
         assert snap["active_count"] == 0 and snap["unknowns"] == []
         assert snap["activity_epoch"] == env.registry.snapshot().epoch
-        assert snap["membership_generation"] == 1
+        assert snap["membership_generation"] == env.registry.membership_generation() > 0
+        assert snap["pending_transitions"] == 0
+        assert snap["membership"] == {local_work.canonical_home(env.root): ["ready", ["owned"]]}
         assert snap["predicates"] == {"active_agents": 0, "workers": 0, "held_turn_leases": 0}
         assert snap["update"]["collision"] is False and snap["update"]["window_state"] == "idle"
         assert snap["gateway"]["pid"] == os.getpid() and snap["registry_provenance"] == "bootstrap"
@@ -314,12 +311,37 @@ def test_membership_generation_change_during_read_is_not_clean(env):
     token = ok(env, "quiet-observe-start", start_params(env))["observer_token"]
     real = env.runner._active_work_count
 
-    def churn():
-        env.registry.generation += 1
+    def churn():  # a served profile joins mid-read through the real membership API
+        env.registry.membership_commit(env.registry.membership_begin(
+            str(env.root / "profiles" / "late"), role="owned", transition="add"), state="ready")
         return real()
 
     env.monkeypatch.setattr(env.runner, "_active_work_count", churn)
     assert "epoch_moved_during_read" in ok(env, "quiet-observe-snapshot", follow_params(env, token))["reasons"]
+
+
+def test_open_membership_transition_is_not_clean(env):
+    attest(env)
+    token = ok(env, "quiet-observe-start", start_params(env))["observer_token"]
+    joining = env.registry.membership_begin(str(env.root / "profiles" / "joining"), role="owned",
+                                            transition="add")
+    snap = ok(env, "quiet-observe-snapshot", follow_params(env, token))
+    assert snap["valid"] is False and snap["pending_transitions"] == 1
+    assert "membership_transition_pending" in snap["reasons"]
+    env.registry.membership_commit(joining, state="ready")
+    assert ok(env, "quiet-observe-snapshot", follow_params(env, token))["valid"] is True
+
+
+def test_production_registry_start_is_not_refused_for_membership(env):
+    """RED on 95089d00fb: the production Registry had no membership_generation (every start refused
+    ``membership_unsupported``) and nothing seeded membership (first reservation latched unknown-home)."""
+    attest(env)
+    assert type(env.registry) is local_work.Registry
+    held = env.registry.reserve("agent", home=str(env.root), source="test")
+    env.registry.finish(held)
+    started = ok(env, "quiet-observe-start", start_params(env))
+    assert "membership_unsupported" not in started["reasons"]
+    assert started["valid"] is True and started["unknowns"] == []
 
 
 def test_original_predicates_are_read_from_their_real_sources(env):

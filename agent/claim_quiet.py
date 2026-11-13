@@ -530,13 +530,16 @@ def _check_cooldown(dir_fd: int, wall: float, ns: int, boot: str) -> None:
         raise QuietUnavailableError(f"cooldown record unusable, refusing: {exc}") from exc
     if last is None:
         return
-    ages = [wall - last.started_at]
+    # Same boot: the monotonic age alone is authoritative, so a wall clock that was ahead when the
+    # record was written (and later corrected) cannot refuse every start until real time catches up.
+    # Other boot: only the wall age exists.
     if last.boot_id == boot:
-        ages.append((ns - last.started_ns) / _NS)
-    if min(ages) < 0:
+        age = (ns - last.started_ns) / _NS
+    else:
+        age = wall - last.started_at
+    if age < 0:
         raise QuietUnavailableError("cooldown clocks are incoherent, refusing")
-    # The smaller age is the longer remaining cooldown: a clock step can never shorten it.
-    remaining = COOLDOWN_S - min(ages)
+    remaining = COOLDOWN_S - age
     if remaining > 0:
         raise QuietCooldownError(remaining)
 

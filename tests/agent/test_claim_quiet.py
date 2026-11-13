@@ -285,11 +285,25 @@ def test_backwards_clocks_refuse_rather_than_shorten_cooldown(home, backwards):
     clock = FakeClock()
     cq.acquire(max_s=30, reason="first", clock=clock).close()
     if backwards == "wall":
+        # Same boot: the elapsed clock is authoritative, so a wall step back cannot shorten it either.
         clock.now_wall -= 100
-    else:
-        clock.now_ns -= 100 * NS
+        with pytest.raises(cq.QuietCooldownError):
+            cq.acquire(max_s=30, reason="second", clock=clock)
+        return
+    clock.now_ns -= 100 * NS
     with pytest.raises(cq.QuietUnavailableError, match="incoherent"):
         cq.acquire(max_s=30, reason="second", clock=clock)
+
+
+def test_corrected_future_wall_time_does_not_wedge_cooldown_on_same_boot(home):
+    """A record written while the wall clock was ahead (later corrected) must not refuse every start
+    until real time catches up: on the same boot the elapsed clock alone decides."""
+    clock = FakeClock()
+    clock.now_wall += 10 * 24 * 3600  # wall clock 10 days ahead at the first start
+    cq.acquire(max_s=30, reason="first", clock=clock).close()
+    clock.now_wall -= 10 * 24 * 3600  # NTP corrects it
+    clock.now_ns += (records.COOLDOWN_S + 1) * NS
+    cq.acquire(max_s=30, reason="second", clock=clock).close()
 
 
 @pytest.mark.parametrize("payload", [b"{", b"[]", b'{"schema": 1}', b"\xff\xfe", b""])

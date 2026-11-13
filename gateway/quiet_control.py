@@ -236,7 +236,8 @@ class QuietControl:
         unknowns = sorted(set(snap.unknowns) | set(getattr(self._runner, "_quiet_local_unknowns", ())))
         view = {"activity_epoch": snap.epoch, "active_count": snap.active,
                 "per_kind": dict(snap.per_kind), "unknowns": unknowns,
-                "membership_generation": gen}
+                "membership_generation": gen,
+                "pending_transitions": getattr(snap, "pending_transitions", 0)}
         membership = getattr(registry, "membership_snapshot", None)
         if callable(membership):
             view["membership"] = membership()
@@ -335,6 +336,8 @@ class QuietControl:
             reasons += [f"update:{r}" for r in update_reasons]
         if view["unknowns"]:
             reasons += [f"unknown:{u}" for u in view["unknowns"]]
+        if view["pending_transitions"]:
+            reasons.append("membership_transition_pending")  # a served home is joining or leaving
         if full:
             for name in ("active_agents", "workers", "held_turn_leases"):
                 if predicates.get(name):
@@ -463,6 +466,11 @@ class QuietControl:
             with self._lock:  # token authority expires with the lease
                 if any(r.startswith("lease_") for r in reasons) and self._episode is episode:
                     self._episode = None
+                    # Remember it as ended so the observer's best-effort end gets "ended", not a
+                    # foreign-episode error.
+                    self._ended[episode_id] = (episode["token"], episode["peer"])
+                    while len(self._ended) > _ENDED_KEPT:
+                        self._ended.pop(next(iter(self._ended)))
             return self._refuse(episode_id, "refused", reasons)
         return self._measure(episode_id, "snapshot")
 

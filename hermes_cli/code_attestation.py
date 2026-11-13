@@ -472,7 +472,9 @@ class Attestation:
         self._modules = {}  # bounded strong identity inventory, including replacements
         self._stdlib = Path(sysconfig.get_path("stdlib")).resolve()
         self._blobs = {}
-        self._deps = _DependencyIndex(sys.prefix, sys.path)
+        # Route detection runs first: a refused route latches unsupported-route without paying for
+        # the interpreter hash or the dependency root scan (an empty index keeps reports total).
+        self._deps = _DependencyIndex(sys.prefix, ())
         self._dep_units = {}  # executed/loaded receipts only, never audited units
         self._native_loads = []
         self._unknown_detail = {}
@@ -480,7 +482,7 @@ class Attestation:
             "executable": str(Path(sys.executable).resolve()),
             "version": sys.version, "cache_tag": sys.implementation.cache_tag,
             "prefix": sys.prefix, "base_prefix": sys.base_prefix,
-            "binary_sha256": _binary_sha(Path(sys.executable)),
+            "binary_sha256": None,
         }
         route = None
         required = SEED  # direct construction: the full allowed inventory, still pending
@@ -497,6 +499,8 @@ class Attestation:
             self.route = route["route"]
             self.stub_head_digest = route["stub_head_digest"]
             required = SEED_COMMON
+        self._deps = _DependencyIndex(sys.prefix, sys.path)
+        self.interpreter_identity["binary_sha256"] = _binary_sha(Path(sys.executable))
         try:
             self._blobs = _boot_blobs(self.core_root, boot_sha)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:

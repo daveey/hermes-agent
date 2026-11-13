@@ -76,12 +76,27 @@ async def _run_reserved(source: str, fn, *, copy_context: bool = True):
     from tools import code_kernel_scope
 
     handle = code_kernel_scope.reserve("audio", source)
+    custody = threading.Lock()
+    state = ["pending"]  # pending -> running (worker owns release) | abandoned (never ran)
 
     def _held():
+        with custody:
+            if state[0] != "pending":
+                return None  # the awaiting request was cancelled while queued: already released
+            state[0] = "running"
         try:
             return fn()
         finally:
             code_kernel_scope.finish(handle)
+
+    def _abandoned(fut):
+        # A cancelled waiter cancels a still-queued job: it will never run _held, so release here.
+        # A job that already started keeps custody until its own finally.
+        if fut.cancelled():
+            with custody:
+                if state[0] == "pending":
+                    state[0] = "abandoned"
+                    code_kernel_scope.finish(handle)
 
     target = _held
     if copy_context:  # what asyncio.to_thread does: the request context reaches the worker
@@ -91,6 +106,7 @@ async def _run_reserved(source: str, fn, *, copy_context: bool = True):
     except BaseException:
         code_kernel_scope.finish(handle)
         raise
+    future.add_done_callback(_abandoned)
     return await future
 
 

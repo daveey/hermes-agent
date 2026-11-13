@@ -5,7 +5,6 @@ refresher thread and liveness watchdog (``agent.turn_facade_lease``), relay/acco
 balanced start/finish marks. Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s
 MRO unchanged.
 """
-import functools
 import logging
 import uuid
 from contextlib import suppress
@@ -227,7 +226,8 @@ class TurnFacadeMixin:
             # Through the class, not self: callers drive this on stand-in agents (tests, relays).
             return TurnFacadeMixin._run_conversation_scoped(self, *args, **kwargs)
 
-    run_conversation = functools.wraps(_run_conversation_scoped)(run_conversation)
+    # Signature (inspect/autospec) follows the scoped body; __name__/__qualname__ stay run_conversation.
+    run_conversation.__dict__["__wrapped__"] = _run_conversation_scoped
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """Final response string of one turn; ``stream_callback`` receives each text delta."""

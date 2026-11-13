@@ -154,6 +154,15 @@ def submit_tracked(executor, function, /, *args, registry=None, home=None,
     return _submit_owned(executor, function, args, kwargs, owner, kind)
 
 
+def _refused_before_enqueue(executor):
+    """True when a stdlib ThreadPoolExecutor is shut down or broken (its submit refuses pre-enqueue)."""
+    if not isinstance(executor, ThreadPoolExecutor):
+        return False
+    from concurrent.futures import thread as _thread
+    return bool(getattr(executor, "_shutdown", False) or getattr(executor, "_broken", False)
+                or getattr(_thread, "_shutdown", False))
+
+
 def _submit_owned(executor, function, args, kwargs, owner, kind):
     reservation = _Reservation(owner, kind, copy_context())
     try:
@@ -165,7 +174,13 @@ def _submit_owned(executor, function, args, kwargs, owner, kind):
         else:
             future = executor.submit(reservation.run, function, args, kwargs)
     except BaseException:
-        owner.registry.mark_unknown("submit-outcome-uncertain")
+        if _refused_before_enqueue(executor):
+            # A stdlib pool refuses a shut-down/broken submit under its lock BEFORE enqueuing.
+            # Even if it had raced an enqueue, never_started makes the wrapper a no-op, so
+            # releasing here can never undercount physical work.
+            reservation.never_started()
+        else:
+            owner.registry.mark_unknown("submit-outcome-uncertain")
         raise
     # done + pending proves this wrapper never began (cancelled or broken pool).
     # A running wrapper owns its release even if an async waiter was canceled.

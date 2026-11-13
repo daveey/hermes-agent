@@ -1,7 +1,11 @@
 """Process-local physical work ledger. Stdlib only; no runtime coverage claim.
 
-Homes are explicit, already-canonical ownership keys supplied by the caller.
-This foundation does not discover profiles, attest code or establish readiness.
+Homes are ownership keys supplied by the caller; the registry canonicalizes every one
+(``canonical_home``: the same expanduser/realpath/normcase form as
+``hermes_constants.hermes_home_key``), so a symlinked or relative spelling of a member home
+is the member, never a sticky ``unknown-home``. This foundation does not discover profiles,
+attest code or establish readiness: membership is seeded by the process profile reservation
+(``gateway.runtime_ownership.process_ownership``).
 A directly constructed Registry is useful for isolated consumers/tests; installing
 one at bootstrap is a separate integration responsibility.
 """
@@ -11,6 +15,31 @@ import os
 import threading
 from types import MappingProxyType
 import weakref
+
+
+_HOME_KEYS = {}
+_HOME_KEYS_MAX = 256
+
+
+def canonical_home(home):
+    """Canonical membership key for ``home`` (None stays None: an unbound home).
+
+    Mirrors ``hermes_constants.hermes_home_key`` without importing it (stdlib-only seed module):
+    expanduser + realpath + normcase. Only an existing directory's answer is cached, because a
+    path that does not exist yet can resolve differently once created.
+    """
+    if home is None:
+        return None
+    raw = os.fspath(home)
+    cached = _HOME_KEYS.get(raw)
+    if cached is not None:
+        return cached
+    key = os.path.normcase(os.path.realpath(os.path.expanduser(raw)))
+    if os.path.isdir(key):
+        if len(_HOME_KEYS) >= _HOME_KEYS_MAX:
+            _HOME_KEYS.clear()
+        _HOME_KEYS[raw] = key
+    return key
 
 
 ACTIVE_SCOPE: ContextVar["WorkScope | None"] = ContextVar(
@@ -89,7 +118,7 @@ class Registry:
 
     def __init__(self, *, homes=()):
         # home -> (state, roles). Seeds are ready launch homes.
-        self._members = {os.fspath(h): ("ready", frozenset({"launch"})) for h in homes}
+        self._members = {canonical_home(h): ("ready", frozenset({"launch"})) for h in homes}
         self._retired = set()
         self._transitions = {}
         self._membership_generation = 0
@@ -132,7 +161,7 @@ class Registry:
             raise ValueError("kind must be a nonempty string")
         if not isinstance(source, str) or not source:
             raise ValueError("source must be a nonempty string")
-        home = os.fspath(home) if home is not None else None
+        home = canonical_home(home)
         token = object()
         with self._lock:
             if home not in self._members:
@@ -168,7 +197,7 @@ class Registry:
             raise ValueError("unknown membership transition")
         if not isinstance(role, str) or not role:
             raise ValueError("role must be a nonempty string")
-        home = os.fspath(home)
+        home = canonical_home(home)
         token = MembershipToken(home, role, transition)
         with self._lock:
             roles = self._members.get(home, (None, frozenset()))[1]
@@ -210,6 +239,26 @@ class Registry:
             self._membership_generation += 1
             self._epoch += 1
             return True
+
+    def membership_generation(self):
+        """Current membership generation (also on every ``Snapshot``); observers bracket reads with it."""
+        with self._lock:
+            return self._membership_generation
+
+    def membership_snapshot(self):
+        """Detached ``{home: (state, roles)}`` view of the served-home membership."""
+        with self._lock:
+            return {h: (m[0], tuple(sorted(m[1]))) for h, m in self._members.items()}
+
+    def coverage_pending(self):
+        """Reasons membership coverage is not established (observers refuse to start on any)."""
+        with self._lock:
+            reasons = []
+            if not any(state == "ready" for state, _roles in self._members.values()):
+                reasons.append("membership_unseeded")
+            if self._transitions:
+                reasons.append("membership_transition_pending")
+            return reasons
 
     def attest_component(self, component, *, implementation_id, runtime_instance,
                          capabilities=()):
