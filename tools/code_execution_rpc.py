@@ -64,12 +64,14 @@ def _wire_bytes(text: str) -> bytes:
     a size cap must measure. Tool results can hold lone surrogates (file reads decode
     undecodable bytes with surrogateescape), which strict UTF-8 refuses: each becomes its
     ``\\uXXXX`` escape, which inside a JSON string (where ``json.dumps`` puts every one)
-    decodes back to the same text. Only for RPC results: a shipped file (script, env file)
-    stays strict, since there the escape would be literal text."""
+    decodes back to the same text (a lone surrogate exactly; a high+low pair, see below).
+    Only for RPC results: a shipped file (script, env file) stays strict, since there the
+    escape would be literal text."""
     # Exact for lone surrogates only: a high+low pair held as two code points ships as two
     # escapes that json.loads joins into one astral char. A file read never holds such a
     # pair (surrogateescape yields only low surrogates, U+DC80..U+DCFF), but an MCP or
-    # plugin tool result could; the only effect is that lossless join on the remote side.
+    # plugin tool result could. The remote str then holds one char where this side held two:
+    # the UTF-16 meaning survives, the code-point sequence (and len) does not.
     return text.encode("utf-8", "backslashreplace")
 
 
