@@ -133,28 +133,61 @@ class FakeService:
     RELEASE_OUTCOMES = frozenset({"released", *NEUTRAL, "crashed", "timed_out", "spawn_failed", "terminal_provider"})
     # transitions.ts MAX_DIAGNOSTIC_CHARS: a larger holder diagnostic is replaced by ``{diagnostic_truncated: true}``.
     MAX_DIAGNOSTIC_CHARS = 8000
+    CANONICAL = frozenset({"crashed", "timed_out", "terminal_provider"})
+
+    @classmethod
+    def release_diagnostic(cls, value: object) -> Optional[dict]:
+        """As transitions.ts releaseDiagnostic: absent -> ``{}``; anything but an object -> None (the caller
+        refuses the release ``invalid``); past MAX_DIAGNOSTIC_CHARS of ``JSON.stringify`` (UTF-16 code units, no
+        ASCII escaping) -> ``{diagnostic_truncated: true}``; else a copy."""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return None
+        text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+        return {"diagnostic_truncated": True} if len(text.encode("utf-16-le")) // 2 > cls.MAX_DIAGNOSTIC_CHARS \
+            else dict(value)
+
+    @classmethod
+    def release_evidence(cls, outcome: str, op: dict, diagnostic: dict) -> tuple[dict, dict]:
+        """releaseTask's (run metadata, event evidence) for ``outcome``, shared by the ops and leases routes (the
+        real releaseTask is one function for both). Neutral: the holder's ``extra`` (+ ``owner_restart: true``)
+        for both. Otherwise the diagnostic is evidence only for a canonical failure, and a ``crashed`` release
+        with ``protocol_violation: true`` also marks the run metadata. ``unused_grant`` is the caller's."""
+        if outcome in cls.NEUTRAL:
+            meta = {**(op.get("extra") or {}), **({"owner_restart": True} if outcome == "owner_restart" else {})}
+            return meta, meta
+        evidence = diagnostic if outcome in cls.CANONICAL else {}
+        protocol = outcome == "crashed" and op.get("protocol_violation") is True
+        return {**evidence, **({"protocol_violation": True} if protocol else {})}, evidence
 
     def release_op(self, b: dict, op: dict, gw: str) -> dict:
         """As transitions.ts releaseTask: only the lease holder's run is released; the Board ends that run, emits
-        its one outcome event (carrying the holder's ``diagnostic``) and books a charged outcome exactly once."""
+        its one outcome event (carrying :meth:`release_evidence`) and books a charged outcome exactly once.
+        Not modelled: the protocol-violation streak (a ``protocol_violation`` crash is charged like any crash)."""
         task, run = op["task"], op["run_uid"]
         if op.get("outcome", "released") not in self.RELEASE_OUTCOMES:
             return {"status": "rejected", "reason": "invalid"}
         lease = b["leases"].get(task)
         if not lease or lease["holder"] != gw or lease["run_uid"] != run:
             return {"status": "rejected", "reason": "lease_lost"}
+        # releaseDiagnostic runs after fence(), before any write, for every outcome.
+        diagnostic = self.release_diagnostic(op.get("diagnostic"))
+        if diagnostic is None:
+            return {"status": "rejected", "reason": "invalid"}
         outcome, op_id = op.get("outcome", "released"), op["client_op_id"]
         clock = f"{9_999_999_999_999:013d}-0002-board"
         error = str(op.get("error") or outcome)[:500]
         card = b["rows"]["tasks"][task]
         b["leases"].pop(task, None)
         ended, kind = self.NEUTRAL.get(outcome, ("crashed" if outcome == "terminal_provider" else outcome,) * 2)
-        canonical = outcome in ("crashed", "timed_out", "terminal_provider")
-        diag = dict(op.get("diagnostic") or {}) if canonical else {}
+        canonical = outcome in self.CANONICAL
+        meta, evidence = self.release_evidence(outcome, op, diagnostic)
         self._put(b, "task_runs", run, {"status": ended, "outcome": ended, "ended_at": int(time.time()),
                                         "error": None if outcome == "released" else error,
-                                        "metadata": json.dumps(diag) if diag else None}, "server", op_id, clock)
-        payload = {**diag, **({"failure_notice": "canonical"} if canonical else {}), "error": error, "retry_status": "ready"}
+                                        "metadata": json.dumps(meta) if meta else None}, "server", op_id, clock)
+        payload = {**evidence, **({"failure_notice": "canonical"} if canonical else {}), "error": error,
+                   "retry_status": "ready"}
         self._put(b, "task_events", f"ev-{op_id}-{kind}", {"task_id": task, "run_uid": run, "kind": kind,
                                                             "payload": json.dumps(payload), "created_at": int(time.time())},
                   "server", op_id, clock)
@@ -280,12 +313,17 @@ class FakeHub:
                 # releaseTask's fence(): a release that does not name this gateway's live lease run is refused and
                 # changes nothing (the card keeps its lease and mirror).
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
+            # releaseDiagnostic runs after fence(), before any write: a non-object diagnostic is ``invalid`` for
+            # every outcome and changes nothing.
+            diagnostic = self.svc.release_diagnostic(body.get("diagnostic"))
+            if diagnostic is None:
+                return {"status": "rejected", "reason": "invalid", "lease": cur}
             b["leases"].pop(task, None)
             runs, card = b["rows"].get("task_runs", {}), b["rows"].get("tasks", {}).get(task)
             if self.svc.lease_runs and card is not None:
                 retry = self.svc.retry_status_for_run(b, card.get("current_run_uid"))
                 if run in runs and runs[run].get("ended_at") is None:
-                    self._release_run(b, task, run, body, retry, op_id, hlc)
+                    self._release_run(b, task, run, body, retry, op_id, hlc, diagnostic)
                 else:
                     # clearLease drops the lease mirror; a still-running card goes back to retryStatusForRun; endRun
                     # clears current_run_uid even when the holder already ended its run row.
@@ -296,12 +334,14 @@ class FakeHub:
         return {"status": "applied", "lease": b["leases"][task], "version": version}
 
     def _release_run(self, b: dict, task: str, run: str, body: dict, retry: str, op_id: Optional[str],
-                     hlc: str) -> None:
+                     hlc: str, diagnostic: dict) -> None:
         """As transitions.ts releaseTask (via board.ts ``leases`` release) for the holder's live run: the run ends,
         a running card goes back to ``retry`` (retryStatusForRun) and the run-outcome event always carries it as
         ``retry_status``.
 
-        Modelled outcomes (anything outside ``FakeService.RELEASE_OUTCOMES`` is refused ``invalid`` before this):
+        Modelled outcomes (anything outside ``FakeService.RELEASE_OUTCOMES``, or a non-object ``diagnostic``, is
+        refused ``invalid`` before this); run metadata and event evidence come from
+        :meth:`FakeService.release_evidence`, shared with :meth:`FakeService.release_op`:
         - neutral (``FakeService.NEUTRAL`` = NEUTRAL_RELEASES): the run ends as its mapped outcome and emits its
           mapped event; the holder's ``extra`` (plus ``owner_restart: true``) is merged into run metadata and payload.
         - ``released``, ``crashed``, ``timed_out``, ``terminal_provider`` (-> ``crashed``): the run ends as that
@@ -320,25 +360,20 @@ class FakeHub:
         card = b["rows"]["tasks"][task]
         running = card.get("status") == "running"
         neutral = svc.NEUTRAL.get(outcome)
+        meta, evidence = svc.release_evidence(outcome, body, diagnostic)
         if neutral:
             ended, kind = neutral
-            meta = {**(body.get("extra") or {}), **({"owner_restart": True} if outcome == "owner_restart" else {})}
             run_fields = {"error": error, "metadata": json.dumps(meta, separators=(",", ":")) if meta else None}
-            payload: dict = {**meta, "error": error, "retry_status": retry}
+            payload: dict = {**evidence, "error": error, "retry_status": retry}
             task_fields = {"status": retry, "last_failure_error": error} if running else {}
         else:
             ended = kind = "crashed" if outcome == "terminal_provider" else outcome
             unused = bool(body.get("unused_grant")) and outcome == "released" and running
-            canonical = outcome in ("crashed", "timed_out", "terminal_provider")
+            canonical = outcome in svc.CANONICAL
             err = None if outcome == "released" else error
-            diag = dict(body.get("diagnostic") or {}) if canonical else {}
-            if len(json.dumps(diag, separators=(",", ":"))) > svc.MAX_DIAGNOSTIC_CHARS:
-                diag = {"diagnostic_truncated": True}
-            meta = {**diag, **({"protocol_violation": True}
-                               if outcome == "crashed" and body.get("protocol_violation") is True else {}),
-                    **({"unused_grant": True} if unused else {})}
+            meta = {**meta, **({"unused_grant": True} if unused else {})}
             run_fields = {"error": err, **({"metadata": json.dumps(meta, separators=(",", ":"))} if meta else {})}
-            payload = {**diag, **({"failure_notice": "canonical"} if canonical else {}), "error": err,
+            payload = {**evidence, **({"failure_notice": "canonical"} if canonical else {}), "error": err,
                        "retry_status": retry, **({"terminal_provider": True} if outcome == "terminal_provider" else {}),
                        **({"unused_grant": True} if unused else {})}
             task_fields = {"status": retry, **({"last_failure_error": error} if outcome == "rate_limited" else {})} \
