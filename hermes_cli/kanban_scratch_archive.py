@@ -34,6 +34,14 @@ refused so the metadata can never collide with archived content.
 about 14% more archive bytes for ~7x faster reclaim (see the constant for the
 measurements and how to reverse it).
 
+When a repo's remote-tracking refs (of a remote with a network URL) cover its
+history, the payload leaves out what that remote already holds: the files under
+``.git/objects/`` (replaced by one pack of the local-only objects) and clean
+tracked files (recorded by blob id and hash). The manifest is then version 2,
+the repo's meta.json says ``objects_omitted: "remote"`` with the restore steps,
+and ``kanban_scratch_archive_omit.restore`` rebuilds the tree from the remote.
+A full core clone archived to 0.7 % of its bytes this way (was 57-80 %).
+
 Anything it cannot prove safe keeps the workspace: a linked worktree or
 submodule (a ``.git`` gitlink file or symlink: the worktree GC owns those; a
 regular ``.git`` file with no ``gitdir:`` line, such as uv's empty cache
@@ -253,8 +261,14 @@ def _write_remote_base(repo: Path, dest: Path, entries: list[dict]) -> list[str]
     return ["remote_base.json", "remote_base.tar"]
 
 
-def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional[int]) -> dict:
-    """Write one repo's archive into *dest* (created). Raises on any failure."""
+def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional[int],
+                 omitted: Optional[dict] = None) -> dict:
+    """Write one repo's archive into *dest* (created). Raises on any failure.
+
+    *omitted* is this repo's ``kanban_scratch_archive_omit`` record when the
+    payload leaves out objects the remote holds; meta.json then says so and
+    lists the restore steps.
+    """
     env = _env(repo)
     dest.mkdir(parents=True, exist_ok=True)  # the root repo archives into the fresh partial dir
     head = _text(_git(repo, env, "rev-parse", "--verify", "-q", "HEAD^{commit}", ok=(0, 1))) or None
@@ -297,6 +311,10 @@ def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional
         (dest / "tracked.diff").write_bytes(diff)
         files.append("tracked.diff")
     extra: dict = {}
+    if omitted is not None:
+        from hermes_cli.kanban_scratch_archive_omit import RESTORE_STEPS
+        extra.update(objects_omitted=omitted["reason"], objects_restore=RESTORE_STEPS,
+                     omitted_remote_refs=omitted["remote_refs"], supplement_pack=omitted["pack"])
     if remote_base:
         files.extend(_write_remote_base(repo, dest, remote_base))
         extra["remote_base_count"] = len(remote_base)
@@ -321,6 +339,9 @@ def archive_repo(repo: Path, dest: Path, *, task_id: str, completed_at: Optional
 
 PAYLOAD_DIR = ".hermes-complete-archive-v1"
 PAYLOAD_VERSION = 1
+# Version 2: objects the remote holds are left out (kanban_scratch_archive_omit). An older
+# verify_complete_archive refuses it rather than calling a payload with omissions complete.
+PAYLOAD_VERSION_OMITTED = 2
 _TREE = "tree.tar.gz"
 _MANIFEST = "manifest.json"
 # Level 1 trades size for reclaim speed: archives are ~14% larger than at level 9
@@ -379,6 +400,7 @@ class _HashingReader:
 def _scan(root: Path, tar: Optional[tarfile.TarFile] = None,
           entries: Optional[dict] = None, *,
           on_git_file: Optional[Callable[[int, str, os.stat_result], None]] = None,
+          omit: Optional[Callable[[int, str, str, os.stat_result], bool]] = None,
           ) -> dict[str, os.stat_result]:
     """lstat of every entry below *root* (``"."`` is the root), by directory descriptor.
 
@@ -387,7 +409,9 @@ def _scan(root: Path, tar: Optional[tarfile.TarFile] = None,
     symlink swapped in for any ancestor is refused rather than followed. With
     *tar*/*entries* the content is archived during the same traversal.
     *on_git_file(dfd, rel, lstat)* is called for each regular ``.git`` file
-    while its directory's descriptor *dfd* is still open.
+    while its directory's descriptor *dfd* is still open. *omit(dfd, name, rel,
+    lstat)* returning True leaves that regular file out of *tar* (it records the
+    file itself; see ``kanban_scratch_archive_omit.Omitter``).
     """
     found: dict[str, os.stat_result] = {}
     seen_inodes: dict[tuple[int, int], str] = {}
@@ -426,6 +450,8 @@ def _scan(root: Path, tar: Optional[tarfile.TarFile] = None,
                     rec["link"] = info.linkname
                     entries[erel] = rec
             elif info is not None:
+                if omit is not None and omit(dfd, name, erel, st):
+                    continue
                 key = (st.st_dev, st.st_ino)
                 if st.st_nlink > 1 and key in seen_inodes:
                     info.type, info.linkname = tarfile.LNKTYPE, seen_inodes[key]
@@ -494,8 +520,14 @@ def check_snapshot(workspace: Path, snapshot: dict[str, list[int]], *, renamed: 
         raise ArchiveRefused("workspace changed after it was archived")
 
 
-def _write_payload(workspace: Path, dest: Path) -> dict[str, list[int]]:
-    """Write ``tree.tar.gz`` + ``manifest.json`` into *dest*; return the source signatures."""
+def _write_payload(workspace: Path, dest: Path, omitter=None,
+                   omitted_repos: Optional[list[dict]] = None) -> dict[str, list[int]]:
+    """Write ``tree.tar.gz`` + ``manifest.json`` into *dest*; return the source signatures.
+
+    With *omitter* (``kanban_scratch_archive_omit.Omitter``) the files it drops
+    are listed under ``omitted`` and *omitted_repos* records how to get them
+    back; that manifest is version 2.
+    """
     entries: dict[str, dict] = {}
     tree = dest / _TREE
     with open(tree, "wb") as raw:
@@ -504,11 +536,13 @@ def _write_payload(workspace: Path, dest: Path) -> dict[str, list[int]]:
         # Any level reads back through the same "r:gz" path.
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=_GZIP_LEVEL) as gz:
             with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
-                before = _scan(workspace, tar, entries)
+                before = _scan(workspace, tar, entries, omit=omitter)
     manifest = {
         "version": PAYLOAD_VERSION, "tree": _TREE, "tree_sha256": _sha256_file(tree),
         "entries": entries,
     }
+    if omitted_repos and omitter is not None:
+        manifest.update(version=PAYLOAD_VERSION_OMITTED, omitted=omitter.omitted, omitted_repos=omitted_repos)
     (dest / _MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     snapshot = _signatures(before)
     if _signatures(_scan(workspace)) != snapshot:
@@ -529,8 +563,11 @@ def verify_complete_archive(archive: Path) -> dict:
     base = Path(archive) / PAYLOAD_DIR
     try:
         manifest = json.loads((base / _MANIFEST).read_text(encoding="utf-8-sig"))
-        if manifest.get("version") != PAYLOAD_VERSION:
+        if manifest.get("version") not in (PAYLOAD_VERSION, PAYLOAD_VERSION_OMITTED):
             raise ArchiveRefused(f"unsupported payload version {manifest.get('version')!r}")
+        if manifest["version"] == PAYLOAD_VERSION_OMITTED:
+            from hermes_cli.kanban_scratch_archive_omit import verify_omissions
+            verify_omissions(base, manifest)
         if _sha256_file(base / _TREE) != manifest["tree_sha256"]:
             raise ArchiveRefused("payload hash mismatch")
         want, seen = manifest["entries"], set()
@@ -555,7 +592,7 @@ def verify_complete_archive(archive: Path) -> dict:
                         raise ArchiveRefused(f"payload content mismatch for {m.name!r}")
         if seen != set(want):
             raise ArchiveRefused("payload is missing members")
-    except (OSError, ValueError, KeyError, tarfile.TarError, EOFError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, tarfile.TarError, EOFError) as exc:
         raise ArchiveRefused(f"payload unreadable: {exc!r}") from exc
     return manifest
 
@@ -674,6 +711,25 @@ class ArchivedPath(type(Path())):
     snapshot: dict
 
 
+def _omission_plans(workspace: Path, repos: list[Path], payload: Path) -> tuple[list[dict], dict]:
+    """Per repo, what the payload may leave out because the remote holds it (see kanban_scratch_archive_omit).
+
+    Returns (plans, {repo: manifest record}) in *repos* order; a plan's index is
+    its record's index in the manifest's ``omitted_repos``. Supplement packs are
+    written into *payload* here, before the payload scan.
+    """
+    from hermes_cli import kanban_scratch_archive_omit as om
+    plans, records = [], {}
+    for repo in repos:
+        env = _env(repo)
+        plan = om.plan_repo(repo, workspace, env, _git, partial=_is_partial_clone(repo, env))
+        if plan is None:
+            continue
+        records[repo] = om.write_supplement(repo, env, plan, payload, len(plans))
+        plans.append(plan)
+    return plans, records
+
+
 def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
                       completed_at: Optional[int]) -> ArchivedPath:
     """Archive every standalone repo in *workspace* to *archive_dir*; return the final dir (an :class:`ArchivedPath`
@@ -694,16 +750,25 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
     shutil.rmtree(partial, ignore_errors=True)
     try:
         partial.mkdir(parents=True)
+        payload = partial / PAYLOAD_DIR
+        payload.mkdir()
+        plans, records = _omission_plans(workspace, repos, payload)
         for repo in repos:
             rel = repo.relative_to(workspace)
             archive_repo(repo, partial / rel if rel.parts else partial,
-                         task_id=task_id, completed_at=completed_at)
-        payload = partial / PAYLOAD_DIR
-        payload.mkdir()
+                         task_id=task_id, completed_at=completed_at, omitted=records.get(repo))
+        omitter = None
+        if plans:
+            from hermes_cli.kanban_scratch_archive_omit import Omitter
+            omitter = Omitter(plans)
         # Last, so nothing (including git's own index refresh) mutates the tree after the scan.
-        snapshot = _write_payload(workspace, payload)
+        snapshot = (_write_payload(workspace, payload, omitter, [records[r] for r in repos if r in records])
+                    if plans else _write_payload(workspace, payload))
         if any(snapshot.get(rel) != sig for rel, sig in markers.items()):
             raise ArchiveRefused("a .git data file changed after it was judged not a gitlink")
+        if plans:
+            from hermes_cli.kanban_scratch_archive_omit import check_files_unchanged
+            check_files_unchanged(plans, snapshot)
         verify_complete_archive(partial)
         _fsync_tree(partial)  # payload, manifest, repo bundles and all directories, before publication
         final = archive_dir
