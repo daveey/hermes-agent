@@ -349,7 +349,12 @@ def _picker_auth_store() -> dict:
         return _load_auth_store()
     from utils import file_cache_version
     path = _auth_file_path()
-    version = (str(path), file_cache_version(path))
+    try:
+        version = (str(path), file_cache_version(path))
+    except OSError:
+        # A missing/unstatable file must retain the loader's normal fallback behavior.
+        # Without a trustworthy version, do not memoize that fallback.
+        return _load_auth_store()
     cached = memo.get(_AUTH_STORE_MEMO_KEY)
     if cached is not None and cached[0] == version:
         return cached[1]
