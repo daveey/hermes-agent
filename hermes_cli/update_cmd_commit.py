@@ -96,6 +96,7 @@ POST_MOVE_MODULES = (
     "hermes_cli.gateway_runtime_start",
     "hermes_cli.gateway_windows",
     "hermes_cli.github_api",
+    "hermes_cli.kanban_comment_writer",  # [daveey] tools.environments.local stamps the ssh agent marker
     "hermes_cli.plugins_session_env",
     "hermes_cli.source_check",
     "hermes_cli.update_cmd_fleet_unit_budget",
