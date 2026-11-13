@@ -17,9 +17,16 @@
 // A backend that predates this ignores the request headers and answers as before.
 //
 // Copies are kept per remote scope and path (not per tunnel port), so the full refetch after a tunnel rebuild,
-// which is when a slow link hurts most, is a delta too. Memory only: a relaunch starts with whole bodies.
+// which is when a slow link hurts most, is a delta too. With persistTo() (main.ts: <userData>/delta-bodies) each
+// read's newest copy also outlives a relaunch: written a moment after it arrives (never on the request path), one
+// 0600 file per read, the same byte budget, least recently written out; read back lazily on the first use of that
+// read. A file is a base only when its body hashes to the hash it records and it names the same scope and path;
+// anything else is removed and that read goes whole, as it would have anyway. A copy only ever names a base: every
+// read still reaches the backend.
 
 import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
 import { decodeResponseBody, displayTranscriptHeaders } from './display-transcript'
@@ -33,6 +40,10 @@ export const DELTA_STORE_MAX_ENTRIES = 96
 export const DELTA_COPIES_PER_READ = 2
 // A decoded body larger than this is never a delta we asked for (the gateway caps what it encodes).
 export const DELTA_MAX_DECODED_BYTES = 16 * 1024 * 1024
+// How long a new copy waits before it is written to disk: a burst of reads costs one write per read.
+export const DELTA_DISK_FLUSH_MS = 2_000
+const DISK_FORMAT = 'hermes-delta-base/1'
+const DISK_SUFFIX = '.base'
 
 export const bodyHash = (body: Buffer) => createHash('sha256').update(body).digest('hex').slice(0, 32)
 
@@ -58,6 +69,51 @@ interface Copy {
   hash: string
 }
 
+interface Disk {
+  dir: string
+  dirty: Set<string>
+  tried: Set<string>
+  timer: null | ReturnType<typeof setTimeout>
+}
+
+const diskName = (key: string) => `${createHash('sha256').update(key).digest('hex').slice(0, 32)}${DISK_SUFFIX}`
+
+/** One persisted copy: a JSON header line naming the read and the body's hash, then the body's exact bytes. */
+function encodeDiskCopy(key: string, copy: Copy): Buffer {
+  return Buffer.concat([Buffer.from(`${JSON.stringify({ format: DISK_FORMAT, hash: copy.hash, key })}\n`), copy.body])
+}
+
+function decodeDiskCopy(key: string, data: Buffer): Copy | null {
+  const eol = data.indexOf(0x0a)
+
+  if (eol < 0) {
+    return null
+  }
+
+  try {
+    const meta = JSON.parse(data.subarray(0, eol).toString('utf8')) as {
+      format?: unknown
+      hash?: unknown
+      key?: unknown
+    }
+
+    const body = Buffer.from(data.subarray(eol + 1))
+
+    if (
+      meta.format !== DISK_FORMAT ||
+      meta.key !== key ||
+      typeof meta.hash !== 'string' ||
+      bodyHash(body) !== meta.hash
+    ) {
+      return null
+    }
+
+    return { body, hash: meta.hash }
+  } catch {
+    return null
+  }
+}
+
 /**
  * The copies deltas are decoded against, and which tunnel baseUrl belongs to which remote scope.
  *
@@ -70,6 +126,15 @@ export class DeltaBodyStore {
   readonly #copies = new Map<string, Copy[]>()
   readonly #scopes = new Map<string, string>()
   #bytes = 0
+  #disk: Disk | null = null
+
+  /**
+   * Keep each read's newest copy in `dir` as well, so a relaunch still holds the bases (module comment). Nothing is
+   * read until a read asks for its copy; nothing is written on the request path.
+   */
+  persistTo(dir: string): void {
+    this.#disk = { dir, dirty: new Set(), tried: new Set(), timer: null }
+  }
 
   /**
    * A remote (SSH-tunnelled) backend now answers at baseUrl for this pool scope. A scope has one tunnel, so one
@@ -111,12 +176,12 @@ export class DeltaBodyStore {
 
   /** The newest copy of a read: the base to name in the next request. */
   get(key: string): Copy | undefined {
-    return this.#touch(key)?.at(-1)
+    return (this.#touch(key) ?? this.#load(key))?.at(-1)
   }
 
   /** The held copy with this hash, newest or previous: the base a delta response says it was encoded against. */
   find(key: string, hash: string): Copy | undefined {
-    return this.#touch(key)?.find(copy => copy.hash === hash)
+    return (this.#touch(key) ?? this.#load(key))?.find(copy => copy.hash === hash)
   }
 
   put(key: string, hash: string, body: Buffer): void {
@@ -126,9 +191,14 @@ export class DeltaBodyStore {
       return
     }
 
+    this.#hold(key, hash, body)
+    this.#markDirty(key)
+  }
+
+  #hold(key: string, hash: string, body: Buffer): void {
     const kept = (this.#copies.get(key) ?? []).filter(copy => copy.hash !== hash)
 
-    this.delete(key)
+    this.#drop(key)
 
     const copies = [...kept, { body, hash }].slice(-DELTA_COPIES_PER_READ)
 
@@ -144,17 +214,182 @@ export class DeltaBodyStore {
         this.#copies.set(key, rest)
         this.#bytes -= previous.body.length
       } else {
-        this.delete(oldest)
+        this.#drop(oldest) // memory only: the disk keeps its own budget
       }
     }
   }
 
+  /** Forget a read, on disk too: its copy failed (or is too large to keep), so no relaunch may name it again. */
   delete(key: string): void {
+    this.#drop(key)
+
+    const disk = this.#disk
+
+    if (disk) {
+      disk.dirty.delete(key)
+      disk.tried.add(key)
+      fs.rm(path.join(disk.dir, diskName(key)), { force: true }, () => undefined)
+    }
+  }
+
+  #drop(key: string): void {
     for (const copy of this.#copies.get(key) ?? []) {
       this.#bytes -= copy.body.length
     }
 
     this.#copies.delete(key)
+  }
+
+  /** Write every read's newest copy that changed since the last flush, then trim the directory to the budget. */
+  async flush(): Promise<void> {
+    const disk = this.#disk
+
+    if (!disk) {
+      return
+    }
+
+    if (disk.timer) {
+      clearTimeout(disk.timer)
+      disk.timer = null
+    }
+
+    const keys = [...disk.dirty]
+
+    disk.dirty.clear()
+
+    try {
+      await fs.promises.mkdir(disk.dir, { mode: 0o700, recursive: true })
+
+      for (const key of keys) {
+        const copy = this.#copies.get(key)?.at(-1)
+
+        if (copy) {
+          const target = path.join(disk.dir, diskName(key))
+          const tmp = `${target}.${process.pid}.tmp`
+
+          await fs.promises.writeFile(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
+          await fs.promises.rename(tmp, target)
+        }
+      }
+
+      await this.#trimDisk(disk.dir)
+    } catch {
+      // Persistence is an optimisation: an unwritable directory leaves the copies in memory only.
+    }
+  }
+
+  /** The same flush, synchronously, for quit (an async write would not finish before the process exits). */
+  flushSync(): void {
+    const disk = this.#disk
+
+    if (!disk) {
+      return
+    }
+
+    if (disk.timer) {
+      clearTimeout(disk.timer)
+      disk.timer = null
+    }
+
+    const keys = [...disk.dirty]
+
+    disk.dirty.clear()
+
+    try {
+      fs.mkdirSync(disk.dir, { mode: 0o700, recursive: true })
+
+      for (const key of keys) {
+        const copy = this.#copies.get(key)?.at(-1)
+
+        if (copy) {
+          const target = path.join(disk.dir, diskName(key))
+          const tmp = `${target}.${process.pid}.tmp`
+
+          fs.writeFileSync(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
+          fs.renameSync(tmp, target)
+        }
+      }
+    } catch {
+      // as flush()
+    }
+  }
+
+  #markDirty(key: string): void {
+    const disk = this.#disk
+
+    if (!disk) {
+      return
+    }
+
+    disk.dirty.add(key)
+    disk.tried.add(key) // memory now holds a newer copy than any file
+
+    if (!disk.timer) {
+      disk.timer = setTimeout(() => void this.flush(), DELTA_DISK_FLUSH_MS)
+      disk.timer.unref?.()
+    }
+  }
+
+  async #trimDisk(dir: string): Promise<void> {
+    const files: { at: number; file: string; size: number }[] = []
+
+    for (const name of await fs.promises.readdir(dir)) {
+      if (name.endsWith(DISK_SUFFIX)) {
+        try {
+          const stat = await fs.promises.stat(path.join(dir, name))
+
+          files.push({ at: stat.mtimeMs, file: path.join(dir, name), size: stat.size })
+        } catch {
+          // gone already
+        }
+      }
+    }
+
+    let total = files.reduce((sum, file) => sum + file.size, 0)
+
+    for (const file of files.sort((a, b) => a.at - b.at)) {
+      if (total <= DELTA_STORE_MAX_BYTES) {
+        break
+      }
+
+      await fs.promises.rm(file.file, { force: true })
+      total -= file.size
+    }
+  }
+
+  /** A read's persisted copy, held from now on; once per read and process, and only for a read memory lacks. */
+  #load(key: string): Copy[] | undefined {
+    const disk = this.#disk
+
+    if (!disk || disk.tried.has(key)) {
+      return undefined
+    }
+
+    disk.tried.add(key)
+
+    const file = path.join(disk.dir, diskName(key))
+    let data: Buffer
+
+    try {
+      data = fs.readFileSync(file)
+    } catch {
+      return undefined
+    }
+
+    const copy = data.length <= DELTA_STORE_MAX_BYTES + 4096 ? decodeDiskCopy(key, data) : null
+
+    if (!copy) {
+      fs.rm(file, { force: true }, () => undefined) // truncated, damaged or another read's: never a base
+
+      return undefined
+    }
+
+    const now = new Date()
+
+    fs.utimes(file, now, now, () => undefined) // recently used: last out of the disk budget
+    this.#hold(key, copy.hash, copy.body)
+
+    return this.#copies.get(key)
   }
 
   get size(): number {
@@ -186,6 +421,15 @@ function originOf(baseUrl: null | string | undefined): string {
 }
 
 export const deltaBodyStore = new DeltaBodyStore()
+
+/** main.ts: the shared store keeps its copies under userData, and writes what is still pending as the app quits. */
+export function persistDeltaBases(
+  app: { getPath(name: 'userData'): string; on(event: 'will-quit', listener: () => void): unknown },
+  store: DeltaBodyStore = deltaBodyStore
+): void {
+  store.persistTo(path.join(app.getPath('userData'), 'delta-bodies'))
+  app.on('will-quit', () => store.flushSync())
+}
 
 /** Request headers that ask a remote backend for a delta. Empty for a non-GET and for a backend that is not bound. */
 export function deltaRequestHeaders(

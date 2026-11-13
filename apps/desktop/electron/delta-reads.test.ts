@@ -1,8 +1,11 @@
+import fs from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
+import os from 'node:os'
+import path from 'node:path'
 import { gzipSync, zstdCompressSync } from 'node:zlib'
 
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 
 import { destroyKeepaliveAgents, shouldRetryRequest, withRetry } from './api-transport'
 import {
@@ -10,6 +13,7 @@ import {
   decodeDeltaBody,
   DELTA_ACCEPT_HEADER,
   DELTA_BASE_HEADER,
+  DELTA_DISK_FLUSH_MS,
   DELTA_RETRY_CODE,
   DELTA_STORE_MAX_BYTES,
   DELTA_STORE_MAX_ENTRIES,
@@ -17,6 +21,7 @@ import {
   deltaBodyStore,
   deltaRequestHeaders,
   DeltaRetryError,
+  persistDeltaBases,
   readEncodingHeaders
 } from './delta-reads'
 import { fetchJsonWith, type JsonFetchDeps } from './json-fetch'
@@ -382,6 +387,211 @@ describe('the copy store', () => {
     expect(pair.get('r')?.hash).toBe('h4')
     expect(pair.find('r', 'h3')).toBeUndefined()
     expect(pair.bytes).toBe(DELTA_STORE_MAX_BYTES / 2 + 1)
+  })
+})
+
+describe('persisted copies (persistTo): a relaunch still holds the bases', () => {
+  const dirs: string[] = []
+
+  const tmpDir = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-bases-'))
+
+    dirs.push(dir)
+
+    return path.join(dir, 'delta-bodies')
+  }
+
+  const reopened = (dir: string, scope = SCOPE) => {
+    const store = new DeltaBodyStore()
+
+    store.persistTo(dir)
+    store.bindRemote(`${HUB}/`, scope)
+
+    return store
+  }
+
+  const files = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir).map(name => path.join(dir, name)) : [])
+
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) {
+      fs.rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
+  it('a copy survives a store re-open and the next read is a verified delta against it', async () => {
+    const dir = tmpDir()
+    const first = reopened(dir)
+    const v1 = cards(3000)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, first)
+    expect(files(dir)).toEqual([]) // written after the debounce, never on the request path
+    await first.flush()
+
+    const relaunched = reopened(dir)
+
+    expect(deltaRequestHeaders('GET', BOARD, relaunched)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd', [DELTA_BASE_HEADER]: bodyHash(v1) })
+
+    const v2 = cards(3000, 7)
+    const { body, response } = delta(v1, v2)
+
+    expect(body.length).toBeLessThan(v1.length / 50)
+    expect(decodeDeltaBody(BOARD, response, body, relaunched)).toBe(v2.toString('utf8'))
+  })
+
+  it('writes on its own a moment after the read, and on quit synchronously', async () => {
+    const dir = tmpDir()
+    const store = reopened(dir)
+    const v1 = cards(500)
+
+    store.put('k', bodyHash(v1), v1)
+    await new Promise(resolve => setTimeout(resolve, DELTA_DISK_FLUSH_MS + 300))
+    expect(files(dir)).toHaveLength(1)
+
+    store.put('q', bodyHash(v1), v1)
+    store.flushSync()
+    expect(files(dir)).toHaveLength(2)
+  })
+
+  it.each(['truncate', 'flip', 'empty', 'header only'])('a %s file is dropped and the read goes whole', async damage => {
+    const dir = tmpDir()
+    const first = reopened(dir)
+    const v1 = cards(3000)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, first)
+    await first.flush()
+
+    const [file] = files(dir)
+    const data = fs.readFileSync(file)
+    const flipped = Buffer.from(data)
+
+    flipped[data.length - 10] ^= 1
+    fs.writeFileSync(
+      file,
+      {
+        empty: Buffer.alloc(0),
+        flip: flipped,
+        'header only': data.subarray(0, data.indexOf(0x0a) + 1),
+        truncate: data.subarray(0, data.length / 2)
+      }[damage]!
+    )
+
+    const relaunched = reopened(dir)
+
+    expect(deltaRequestHeaders('GET', BOARD, relaunched)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(files(dir)).toEqual([])
+  })
+
+  it('another scope cannot read a persisted copy, even renamed to its own file', async () => {
+    const dir = tmpDir()
+    const first = reopened(dir)
+    const v1 = cards(3000)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, first)
+    await first.flush()
+
+    const other = reopened(dir, 'conn:other-host::default')
+
+    expect(deltaRequestHeaders('GET', BOARD, other)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
+
+    // Same bytes under the other scope's file name: the header names the read it was written for.
+    const [file] = files(dir)
+    const probe = reopened(dir, 'conn:other-host::default')
+    const otherKey = probe.keyFor(BOARD)!
+    const { createHash } = await import('node:crypto')
+    const otherFile = path.join(dir, `${createHash('sha256').update(otherKey).digest('hex').slice(0, 32)}.base`)
+
+    fs.copyFileSync(file, otherFile)
+    expect(deltaRequestHeaders('GET', BOARD, probe)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
+  })
+
+  it('files are 0600 in a 0700 directory and never hold a request credential', async () => {
+    const dir = tmpDir()
+    const store = reopened(dir)
+    const v1 = cards(3000)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, store)
+    await store.flush()
+
+    const [file] = files(dir)
+
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700)
+    expect(fs.readFileSync(file).includes(Buffer.from('session-token'))).toBe(false)
+  })
+
+  it('a failed delta removes the persisted copy too, so no relaunch names it again', async () => {
+    const dir = tmpDir()
+    const store = reopened(dir)
+    const v1 = cards(3000)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, store)
+    await store.flush()
+    expect(files(dir)).toHaveLength(1)
+
+    const { response } = delta(v1, cards(3000, 2))
+
+    expect(() => decodeDeltaBody(BOARD, response, Buffer.from('damaged'), store)).toThrow(DeltaRetryError)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(files(dir)).toEqual([])
+    expect(deltaRequestHeaders('GET', BOARD, reopened(dir))).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
+  })
+
+  it('the directory keeps the same byte budget, least recently written out first', async () => {
+    const dir = tmpDir()
+    const store = reopened(dir)
+    const big = (fill: number) => Buffer.alloc(DELTA_STORE_MAX_BYTES / 3, fill)
+
+    for (const [index, name] of ['a', 'b', 'c', 'd'].entries()) {
+      const body = big(index + 1)
+
+      store.put(name, bodyHash(body), body)
+      await store.flush()
+      await new Promise(resolve => setTimeout(resolve, 20)) // distinct mtimes
+    }
+
+    const total = files(dir).reduce((sum, file) => sum + fs.statSync(file).size, 0)
+
+    expect(total).toBeLessThanOrEqual(DELTA_STORE_MAX_BYTES)
+    expect(files(dir)).toHaveLength(2)
+
+    const relaunched = reopened(dir)
+
+    expect(relaunched.get('a')).toBeUndefined()
+    expect(relaunched.get('d')?.hash).toBe(bodyHash(big(4)))
+  })
+
+  it('persistDeltaBases (main.ts) keeps the copies under userData and writes the pending ones on will-quit', () => {
+    const userData = path.dirname(tmpDir())
+    const quit: (() => void)[] = []
+    const app = { getPath: () => userData, on: (_event: 'will-quit', listener: () => void) => quit.push(listener) }
+    const store = new DeltaBodyStore()
+
+    persistDeltaBases(app, store)
+    store.bindRemote(`${HUB}/`, SCOPE)
+
+    const v1 = cards(3000)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, store)
+    expect(files(path.join(userData, 'delta-bodies'))).toEqual([])
+    quit.forEach(listener => listener())
+    expect(files(path.join(userData, 'delta-bodies'))).toHaveLength(1)
+    expect(reopened(path.join(userData, 'delta-bodies')).get(store.keyFor(BOARD)!)?.hash).toBe(bodyHash(v1))
+  })
+
+  it('an unwritable directory leaves the copies in memory', async () => {
+    const parent = tmpDir()
+
+    fs.mkdirSync(path.dirname(parent), { recursive: true })
+    fs.writeFileSync(parent, 'not a directory')
+
+    const store = reopened(path.join(parent, 'sub'))
+    const v1 = cards(3000)
+
+    decodeDeltaBody(BOARD, whole(v1), v1, store)
+    await store.flush()
+    store.flushSync()
+    expect(store.get(store.keyFor(BOARD)!)?.hash).toBe(bodyHash(v1))
   })
 })
 
