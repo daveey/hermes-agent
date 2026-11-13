@@ -71,6 +71,20 @@ def test_promotion_does_not_trust_creation_portability(setup):
     assert kb.get_task(conn, tid).requires == ["host_repo"]
 
 
+@pytest.mark.parametrize("probe, promoted", [
+    ("test -f ~/.hermes/cache/ready.flag", False),  # hub-local: the claim screen keeps it, so promotion must too
+    ("git -C ~/code/_wt/fix merge-base --is-ancestor abc HEAD", False),
+    ("gh pr view 1 --json state", True),
+])
+def test_promotion_applies_the_claim_screens_keep_reasons(setup, probe, promoted):
+    conn, hub = setup
+    tid = make(conn)
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "scheduled", {"wake_check": probe})
+    assert wp.reevaluate(conn, hub, "default", "hub") == int(promoted)
+    assert [body["mode"] for _board, body in hub.calls] == (["promote"] if promoted else [])
+
+
 def test_promotion_preserves_explicit_local_intent(setup):
     conn, hub = setup
     tid = make(conn)

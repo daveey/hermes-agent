@@ -157,4 +157,21 @@ def promotion_mode(conn, row, cfg):
     if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind IN "
                     "('moved','placement_repinned') LIMIT 1", (row["id"],)).fetchone():
         return None
-    return "promote" if current_portable(conn, row, cfg) else None
+    if not current_portable(conn, row, cfg):
+        return None
+    return None if hub_keep_reason(conn, row, cfg) else "promote"
+
+
+def hub_keep_reason(conn, row, cfg):
+    """The hub claim screen's reason to keep this card here (``kanban_hub_admission_claim.keep_reason``: a
+    hub-local wake_check, a hub worktree in the brief, host_repo, ...), or None.
+
+    Promotion must not move a card the claim screen would keep: whichever of the two reaches a legacy-routed hub
+    card first decides it, so both read the same rules. An unreadable card keeps it (no promotion).
+    """
+    from hermes_cli.kanban_hub_admission_claim import keep_reason
+    from hermes_cli.kanban_hub_admission_pickup import _fields
+    try:
+        return keep_reason(conn, row, _fields(row, "default"), cfg)
+    except (KeyError, TypeError, ValueError):
+        return "card fields unreadable"

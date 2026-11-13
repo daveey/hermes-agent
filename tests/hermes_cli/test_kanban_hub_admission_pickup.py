@@ -39,7 +39,7 @@ CFG = {"worker_queue": {HUB: POOL}, "worker_pools": {HUB: [WORKER]}}
 
 @pytest.fixture
 def gws(tmp_path, monkeypatch):
-    svc = FakeService(lease_runs=True, machines=MACHINES)
+    svc = FakeService(lease_runs=True, machines=MACHINES, recover=True)  # a real Board serves recovery
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
     monkeypatch.setattr(kp, "config", lambda: CFG)
     sync.consume_dispatcher_wake()

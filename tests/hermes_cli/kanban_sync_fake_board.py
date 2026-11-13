@@ -60,7 +60,9 @@ def _js_stringify(value: object) -> str:
 
 
 class FakeService:
-    def __init__(self, *, lease_runs: bool = False, machines: Optional[dict] = None) -> None:
+    def __init__(self, *, lease_runs: bool = False, machines: Optional[dict] = None, recover: bool = False) -> None:
+        # Serve ``FakeHub.recover`` (placement recovery assigns the card); off = a Board without the route (404).
+        self.recover = recover
         self.boards: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str, Any]] = []
         self.offline = False
@@ -279,6 +281,32 @@ class FakeHub:
     def _check(self) -> None:
         if self.svc.offline:
             raise OSError("hub unreachable")
+
+    def recover(self, board: str, *, task_id: str, expected_revision: int, mode: str, candidates: list) -> dict:
+        """``POST /placement/recover`` (worker/src/board.ts): off by default, answered like a Board without the
+        route (404, so the origin backs off recovery). With ``FakeService(recover=True)`` it assigns the card at
+        ``expected_revision`` to the first candidate: ``promote`` sets ``runs_on=[machine:<it>]`` and the worker
+        placement policy, ``stale_pin`` swaps the machine label; both write a ``moved`` event the feed carries."""
+        self._check()
+        if not self.svc.recover:
+            raise ksc.HubError(404, "not found")
+        from hermes_cli.kanban_worker_placement import POLICY
+        self.svc.calls.append(("recover", board, {"task_id": task_id, "mode": mode, "candidates": candidates}))
+        b = self.svc.board(board)
+        row = b["rows"].get("tasks", {}).get(task_id)
+        if row is None or row["version"] != expected_revision or not candidates:
+            raise ksc.HubError(409, json.dumps({"error": "not_claimable"}))
+        old = json.loads(row["runs_on"]) if isinstance(row.get("runs_on"), str) else (row.get("runs_on") or [])
+        labels = [f"machine:{candidates[0]}"] + ([x for x in old if not x.startswith("machine:")]
+                                                 if mode == "stale_pin" else [])
+        hlc = f"{9_999_999_999_997:013d}-0000-board"
+        updated = self.svc._put(b, "tasks", task_id, {"runs_on": json.dumps(labels), "placement_policy": (
+            POLICY if mode == "promote" else row.get("placement_policy"))}, "board", None, hlc)
+        self.svc._put(b, "task_events", f"recover-{task_id}-{updated['version']}", {
+            "task_id": task_id, "kind": "moved", "created_at": int(time.time()),
+            "payload": json.dumps({"repinned": True, "runs_on": labels, "reason": "recovery:" + mode})},
+            "board", None, hlc)
+        return {"state": "assigned", "machine": candidates[0], "task_version": updated["version"]}
 
     def ops(self, board: str, ops: list[dict]) -> dict:
         self._check()

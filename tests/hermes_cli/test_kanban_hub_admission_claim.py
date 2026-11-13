@@ -121,6 +121,40 @@ def test_a_denied_card_that_must_stay_is_claimed_and_kept_recorded(gws, hub_judg
     assert _events(hub.conn, tid, "moved") == []
 
 
+def _recovered(svc, tid):
+    return [body for kind, _board, body in svc.calls if kind == "recover" and body["task_id"] == tid]
+
+
+@pytest.mark.parametrize("admit", [False, True])
+def test_promotion_keeps_a_card_with_a_hub_local_wake_check_on_the_hub(gws, hub_judge, admit):
+    """The Board serves recover(mode=promote): the sync round's reevaluate reaches the legacy-routed card before
+    the claim screen does, and must apply the screen's keep reasons (t_01a1d4125c1130dc)."""
+    hub, _worker, svc = gws
+    hub_judge.admit_next = admit
+    tid = _hub_card(hub)
+    with kb.write_txn(hub.conn):
+        kb._append_event(hub.conn, tid, "scheduled", {"wake_check": "test -f ~/.hermes/cache/ready.flag"})
+    hub.round()  # push: the Board acks the hub-created card
+    _tick(hub)  # the feed echo stamps created_on, so this round's reevaluate sees it; then the claim screen
+    assert _recovered(svc, tid) == [] and _events(hub.conn, tid, "moved") == []
+    assert _holder(svc, tid) == HUB
+    [verdict] = _events(hub.conn, tid, "hub_admission")
+    assert verdict["admit"] is admit and verdict.get("kept") == (None if admit else "wake_check reads a hub-local path")
+
+
+def test_promotion_still_moves_a_portable_hub_card_to_the_pool(gws, hub_judge):
+    hub, _worker, svc = gws
+    tid = _hub_card(hub)
+    hub.round()
+    hub.round()  # the echo stamps created_on; reevaluate promotes, and the feed carries the Board's placement
+    assert [b["mode"] for b in _recovered(svc, tid)] == ["promote"]
+    assert json.loads(svc.board(BOARD)["rows"]["tasks"][tid]["runs_on"]) == [f"machine:{WORKER}"]
+    hub.tick()
+    assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]) == [
+        f"machine:{WORKER}"]  # the round's feed pull applied the Board's placement
+    assert _holder(svc, tid) != HUB and hub_judge.calls == []  # labelled: never screened, never claimed here
+
+
 @pytest.mark.parametrize("probe", ["git -C ~/code/hermes merge-base --is-ancestor abc HEAD",
                                    "gh api repos/o/r/tags --jq '.[].name' | grep -q v2"])
 def test_a_portable_wake_check_does_not_keep_a_denied_card(gws, hub_judge, probe):
