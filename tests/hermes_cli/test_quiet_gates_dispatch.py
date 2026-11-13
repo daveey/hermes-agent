@@ -6,9 +6,11 @@ destinations are never gated; the dispatcher keeps its normal branch (health pub
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -154,3 +156,44 @@ def test_stuck_diagnostics_recognize_quiet_narrowly():
     assert not kbd.all_quiet_deferred([kbd.DispatchResult(quiet_deferred=[("t_a", ep)], spawned=[("t_a", "p", "w")])])
     assert not kbd.all_quiet_deferred([kbd.DispatchResult(quiet_deferred=[("t_a", ep)], skipped_locked=True)])
     assert not kbd.all_quiet_deferred([None])
+
+
+def _truthy(f) -> Any:
+    """A set value for any DispatchResult field: what a real tick would record there."""
+    default = f.default_factory() if f.default_factory is not dataclasses.MISSING else f.default
+    if isinstance(default, bool):
+        return True
+    if isinstance(default, int):
+        return 1
+    if isinstance(default, dict):
+        return {"t_b": ("x", 1)}
+    if isinstance(default, list):
+        return [("t_b", "x")]
+    return "x"
+
+
+def test_every_dispatch_result_field_is_classified_for_quiet():
+    """A new DispatchResult field must be placed in QUIET_COMPATIBLE_FIELDS or QUIET_HOLD_FIELDS (#1806 review)."""
+    from hermes_cli import kanban_db_dispatch_stuck as stuck
+    names = {f.name for f in dataclasses.fields(kbd.DispatchResult)}
+    assert not stuck.QUIET_COMPATIBLE_FIELDS & stuck.QUIET_HOLD_FIELDS
+    assert names - stuck.QUIET_COMPATIBLE_FIELDS - stuck.QUIET_HOLD_FIELDS == set(), "classify the new field"
+    assert (stuck.QUIET_COMPATIBLE_FIELDS | stuck.QUIET_HOLD_FIELDS) - names == set(), "drop the removed field"
+
+
+def test_quiet_with_any_hold_field_keeps_stuck_accounting():
+    ep = "episode-1"
+    quiet = kbd.DispatchResult(quiet_deferred=[("t_a", ep)], quiet_deadlines={ep: 5.0})
+    # The two holds the hand-kept denylist missed: a non-spawnable lane card and a crashed worker.
+    assert not kbd.all_quiet_deferred([quiet, kbd.DispatchResult(skipped_nonspawnable=["t_b"])])
+    assert not kbd.all_quiet_deferred([quiet, kbd.DispatchResult(crashed=["t_b"])])
+    assert not kbd.all_quiet_deferred([dataclasses.replace(quiet, crashed=["t_b"])])
+    from hermes_cli import kanban_db_dispatch_stuck as stuck
+    by_name = {f.name: f for f in dataclasses.fields(kbd.DispatchResult)}
+    for name in sorted(stuck.QUIET_HOLD_FIELDS):
+        row = dataclasses.replace(quiet, **{name: _truthy(by_name[name])})
+        assert not kbd.all_quiet_deferred([row]), name
+        assert not kbd.all_quiet_deferred([quiet, kbd.DispatchResult(**{name: _truthy(by_name[name])})]), name
+    for name in sorted(stuck.QUIET_COMPATIBLE_FIELDS - {"skipped_locked", "skipped_owned"}):
+        row = dataclasses.replace(quiet, **{name: _truthy(by_name[name])})
+        assert kbd.all_quiet_deferred([row]), name
