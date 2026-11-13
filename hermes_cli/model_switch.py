@@ -1802,11 +1802,11 @@ def switch_model(
     *, allow_network: bool = True) -> ModelSwitchResult:
     """Core model-switching pipeline shared between CLI and gateway.
 
-    Route (PATH A with ``--provider``, else PATH B) -> credentials -> validation -> result; each
-    step returns a failure :class:`ModelSwitchResult` to stop the chain, or ``None`` to continue.
-    ``user_providers`` / ``custom_providers`` are the config.yaml ``providers:`` dict and
-    ``custom_providers:`` list. ``allow_network=False`` makes every models.dev lookup (provider and
-    alias resolution included) cache-only; provider endpoint validation is unchanged."""
+    Route (PATH A with ``--provider``, else B) -> managed-pin verdict -> credentials -> validation -> result;
+    a step's failure :class:`ModelSwitchResult` stops the chain. ``user_providers`` / ``custom_providers``
+    are config.yaml's ``providers:`` / ``custom_providers:``; ``allow_network=False`` makes models.dev
+    lookups (provider and alias resolution included) cache-only; endpoint validation is unchanged."""
+    from hermes_cli.model_switch_managed import refuse_unregistered_pin
     st = _Switch(
         raw_input=raw_input, current_provider=current_provider, current_model=current_model,
         current_base_url=current_base_url, current_api_key=current_api_key, is_global=is_global,
@@ -1814,7 +1814,7 @@ def switch_model(
         new_model=raw_input.strip(), target_provider=current_provider)
     route = _route_explicit_provider if explicit_provider else _route_from_model_input
     with models_dev_network_scope(allow_network=allow_network):
-        for step in (route, _resolve_switch_credentials, _validate_switch):
+        for step in (route, refuse_unregistered_pin, _resolve_switch_credentials, _validate_switch):
             fail = step(st)
             if fail is not None:
                 return fail
