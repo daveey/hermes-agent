@@ -19,7 +19,11 @@ read back: pickup kept no record of why a pass skipped a candidate.
   whose pin is stranded is re-pinned. Its body carries this host's machine-local evidence (pickup skips, registry
   entry, replica path). Host-wide causes share
   ONE card per host naming the oldest card: ``budget_exhausted`` (the queue is simply full), ``hold`` and an
-  unreadable machine registry. A ``hold`` that states ``release by HH:MMZ`` (or is the core rollout's own,
+  unreadable machine registry. A ``hold`` repair needs the hold in the live registry entry the pass reads (a
+  lifted hold files nothing; the card's next pickup skip classifies it), and every pass closes an open host-wide
+  repair whose cards have all left ``ready`` (or, for ``hold``, whose hold lifted):
+  :mod:`hermes_cli.kanban_pickup_stall_resolve`. A ``hold`` that states ``release by HH:MMZ`` (or is the core
+  rollout's own,
   :func:`expected_hold`) files nothing until that release plus the stall threshold has passed; nor does a card's own
   ``quota_hold`` (local dispatch would hold it on its quota wall) before its stated deadline. Missing evidence gets
   one additional stall interval of durable grace, then one
@@ -225,6 +229,9 @@ def _covering_repair(conn, key: str, now_ms: int) -> Optional[str]:
         return None
     if row["status"] not in ("done", "archived"):
         return row["id"]
+    from hermes_cli import kanban_pickup_stall_resolve as resolve
+    if resolve.resolved_by_detector(conn, row["id"]):
+        return None  # this detector closed it once its cards left ready: a later stall is a new incident
     return row["id"] if now_ms - int(row["closed"] or 0) * 1000 < REPLACE_AFTER_SECONDS * 1000 else None
 
 
@@ -488,6 +495,20 @@ def _hold_expected(own: str, now_ms: int) -> bool:
     return True
 
 
+def _hold_lifted(own: str) -> bool:
+    """``own``'s live registry entry is readable and holds nothing: a ``hold`` skip predates the pass, so it files no
+    hold repair (the card's next pickup skip classifies it). An unreadable registry fails toward alerting.
+
+    t_01a1d5b42df173d3 (2026-11-13): worker-6 filed "Pickup held on worker-6" at 15:45:09Z from hold skips last
+    recorded at 15:43:45Z while the entry quoted in its own body read hold=False; :func:`expected_hold` returns
+    None for a lifted hold, which read as "alert as usual"."""
+    from hermes_cli import kanban_pickup_stall_resolve as resolve
+    lifted = resolve._hold_lifted(own)
+    if lifted:
+        _log.debug("pickup-stall: %s hold has lifted (%s); no hold repair", own, lifted)
+    return lifted is not None
+
+
 _QUOTA_UNTIL = re.compile(r" until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)Z")
 
 
@@ -535,19 +556,10 @@ def _open_coverage(conn, own: str) -> dict[str, str]:
 
     t_01a1cfdfb6f3f7ea (2026-11-12): worker-2 filed "Pickup evidence missing" for t_01a1cfa91548dad7 at 12:50:44Z;
     pickup recorded budget_exhausted 0.3 s later, and the next tick filed "Pickup queue full" for the same card."""
-    prefix = f"{KEY_PREFIX}{own}:"
-    slugs = {spec[0] for spec in _HOST_GROUPS.values()}
+    from hermes_cli import kanban_pickup_stall_resolve as resolve
     out: dict[str, str] = {}
-    for row in conn.execute("SELECT id, body, idempotency_key FROM tasks WHERE idempotency_key >= ? "
-                            "AND idempotency_key < ? AND status NOT IN ('done', 'archived')",
-                            (prefix, prefix + "\U0010ffff")).fetchall():
-        slug = row["idempotency_key"][len(prefix):].split(":", 1)[0]
-        if slug not in slugs:
-            continue
-        text = (row["body"] or "") + "\n" + "\n".join(
-            r[0] for r in conn.execute("SELECT body FROM task_comments WHERE task_id = ? AND author = ?",
-                                       (row["id"], DETECTOR)))
-        for tid in re.findall(r"^- (\S+) \(", text, re.MULTILINE):
+    for _, slug, targets in resolve.open_host_repairs(conn, own):
+        for tid in targets:
             out.setdefault(tid, slug)
     return out
 
@@ -601,7 +613,7 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
                   f"it.\n\nLast pickup skip recorded on {own}: {describe(card['skip'])}.")))
     for group, members in groups.items():
         slug, title, why = _HOST_GROUPS[group]
-        if group == "hold" and _hold_expected(own, now_ms):
+        if group == "hold" and (_hold_expected(own, now_ms) or _hold_lifted(own)):
             continue
         oldest = members[0]
         listed = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min, "
@@ -637,10 +649,22 @@ def sweep(conn, *, now: Optional[float] = None) -> list[str]:
     if replica is None:
         return stranded
     try:
+        resolve_sweep(conn, replica, own, now_ms=_now_ms(now))
         cards = stalled(conn, replica, own, now=now)
     finally:
         replica.close()
     return stranded + (file_repairs(conn, own, cards, now=now) if cards else [])
+
+
+def resolve_sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
+    """:func:`hermes_cli.kanban_pickup_stall_resolve.sweep`: close host-wide repairs with nothing left to repair,
+    every pass and before filing, so a closed hold repair never hides the next reason's alarm."""
+    from hermes_cli import kanban_pickup_stall_resolve as resolve
+    try:
+        return resolve.sweep(conn, replica, own, now_ms=now_ms)
+    except Exception:  # health: allow BLE001 -- closing a moot alarm must never stop the detector
+        _log.warning("kanban dispatcher: pickup-stall resolve failed", exc_info=True)
+        return []
 
 
 def safe_sweep(conn) -> list[str]:

@@ -318,6 +318,10 @@ def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, reaso
     from hermes_cli import kanban_pickup_stall as kps
     _, worker = gws
     worker.enter()
+    if reason == "hold":  # a hold repair needs the hold in the live registry entry (t_01a1d5b42df173d3)
+        machines = {**support.MACHINES, WORKER: {**support.MACHINES[WORKER], "hold": True}}
+        wn.set_registry_fetch(lambda: {"me": WORKER, "machines": support.seen_now(machines.values())})
+        wn._REGISTRY.update(at=None, value=None, retry=False)
     cards = [{"id": f"target-{i:03}", "title": "waiting", "tenant": None, "since_ms": 1,
               "skip": {"reason": reason, "first_at": 1, "last_at": 1, "passes": 1,
                        "detail": "machine registry unavailable" if reason == "other" else None}}
