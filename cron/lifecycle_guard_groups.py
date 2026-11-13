@@ -162,12 +162,19 @@ class _LineWalk:
         self.feed = group.feed
 
     def word(self, token: str) -> None:
-        if not self.segment and token in _CLOSERS and self.groups \
+        # A closer right after the closers that started this segment closes the next group too
+        # (`{ bash; { true; } } < f`, `… { true; } fi`): bash ends a compound command at its
+        # closer, so the run's redirection belongs to the outermost group it closed.
+        run = self.closing[1] if self.closing is not None else 0
+        if len(self.segment) == run and token in _CLOSERS and self.groups \
                 and self.groups[-1].closer == token:
+            if run:
+                # What the group closed just before wrote is its enclosing group's output.
+                self.pending = self.closed or []
             self.route()
             group = self.groups.pop()
             self.closed = group.output
-            self.closing = (group.ordinal, 1)
+            self.closing = (group.ordinal, run + 1)
             self.feed = self.enclosing_feed()
         self.segment.append(token)
 
