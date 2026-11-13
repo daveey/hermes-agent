@@ -431,10 +431,35 @@ def _quoted(text: str) -> str:
     return text.replace(EVIDENCE_CLOSE, "<!-- /placement-evidence (quoted) -->")
 
 
+def _own_text(body: str) -> str:
+    """The card's own body, safe above the footer's fence: an open marker after its last close marker is
+    unclosed and would pair with the footer's close, so ``without_evidence`` would strip the card's own
+    text (its home commands included) up to the footer. Neutralise those; complete fences stay."""
+    from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN
+    cut = body.rfind(EVIDENCE_CLOSE)
+    cut = 0 if cut < 0 else cut + len(EVIDENCE_CLOSE)
+    return body[:cut] + body[cut:].replace(EVIDENCE_OPEN, "<!-- placement-evidence (quoted) -->")
+
+
+def opened_board(conn: sqlite3.Connection) -> str:
+    """Slug of the board file ``conn`` opened. ``connect_closing()`` resolves ``HERMES_KANBAN_DB`` before
+    ``HERMES_KANBAN_BOARD`` but ``get_current_board()`` ignores the DB pin, so read the slug off the file;
+    a pinned file outside the board layout (or no file) falls back to the active board."""
+    from pathlib import Path
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_sync as sync
+    path = sync._db_key(conn)
+    if path:
+        slug = sync.board_slug_for_path(path)
+        if slug != kb.DEFAULT_BOARD or Path(path).resolve() == kb.board_own_db_path(None).resolve():
+            return slug
+    return kb.get_current_board()
+
+
 def remote_args(conn: sqlite3.Connection, task, *, self_gw: str, board: Optional[str] = None) -> dict:
     """The ``kanban_create`` view of the local card sent to the target: its options, and the body with
     the parents' handoffs (the target cannot read this board). ``board`` is the source card's board slug
-    (default: the active board), named in the footer's read target."""
+    (default: the board ``conn`` opened), named in the footer's read target."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN
     parents = kb.parent_ids(conn, task.id)
@@ -444,9 +469,9 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str, board: Optional
         p = kb.get_task(conn, pid)
         handoff = (summaries.get(pid) or (p.result if p else None) or "(no handoff)").strip()
         lines.append(_quoted(f"- {pid} ({p.title if p else '?'}): {handoff[:1500]}"))
-    body = (task.body or "").rstrip()
+    body = _own_text((task.body or "").rstrip())
     if lines:
-        board = board or kb.get_current_board()
+        board = board or opened_board(conn)
         # Spell the tool's read call: "with cross_task @task:..." parses as an unknown explicit invocation in
         # kanban_placement_coordination._actions (ACTION_REASON), which kept such forwarded cards on the
         # target's home instead of the pool (t_01a1d49003c65ca4). A read only needs coordination-read.
@@ -482,8 +507,7 @@ class Forwarder:
         self.sleep = time.sleep
         self.cfg = kp.config()
         self.self_gw = reg.self_gateway() or "local"
-        from hermes_cli import kanban_db as kb
-        self.board = kb.get_current_board()  # main() opened this board's DB through the same resolution
+        self.board = opened_board(conn)  # the board whose DB main() opened, HERMES_KANBAN_DB pin included
         self.hub_cli = reg.hub_cli_path(self.cfg.get("hub_cli"))
         self.live = lambda t: kp.target_live(t, now=self.now(), live_seconds=kp._Cfg(self.cfg).live_seconds())
         self.create = kp.create_remote

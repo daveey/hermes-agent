@@ -141,3 +141,51 @@ def test_forwarder_passes_its_board(home, monkeypatch):
     monkeypatch.setattr(kb, "get_current_board", lambda: "ops")
     with kbc.connect_closing() as conn:
         assert forward.Forwarder(conn, "t_x", None).board == "ops"
+
+
+# PR #2210 review: a stray unclosed open marker in the card's own body paired with the footer's close, so
+# without_evidence stripped the card's own home command and the card looked portable.
+def test_unclosed_open_marker_in_child_body_does_not_swallow_its_own_text(home, monkeypatch):
+    from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN, without_evidence
+    with kbc.connect_closing() as conn:
+        pid = kb.create_task(conn, title="Parent", assignee="default")
+        kb.complete_task(conn, pid, summary="ok", force=True)
+        child = kb.create_task(conn, title="Fix", assignee="default", parents=[pid],
+                               body=f"{EVIDENCE_OPEN} stray marker\nThen run hermes-hub restart.")
+        body = forward.remote_args(conn, kb.get_task(conn, child), self_gw="macbook")["body"]
+    assert "hermes-hub restart" in without_evidence(body)
+    assert body.count(EVIDENCE_OPEN) == 1 and body.count(EVIDENCE_CLOSE) == 1  # only the footer's fence
+    reason, labels, _ = _portable(body, monkeypatch)
+    assert reason == coord.ACTION_REASON
+    assert labels is None
+
+
+def test_complete_fence_in_child_body_is_kept(home):
+    from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN, without_evidence
+    own = f"Spec.\n{EVIDENCE_OPEN}\nold handoff: hermes-hub restart\n{EVIDENCE_CLOSE}\nDo {EVIDENCE_OPEN} it."
+    assert forward._own_text(own).startswith(f"Spec.\n{EVIDENCE_OPEN}\nold handoff: hermes-hub restart\n{EVIDENCE_CLOSE}")
+    assert "hermes-hub" not in without_evidence(forward._own_text(own) + f"\n{EVIDENCE_OPEN}\nx\n{EVIDENCE_CLOSE}")
+    assert "Do " in without_evidence(forward._own_text(own) + f"\n{EVIDENCE_OPEN}\nx\n{EVIDENCE_CLOSE}")
+
+
+def test_board_follows_the_kanban_db_pin_alone(home, monkeypatch):
+    """Only HERMES_KANBAN_DB pins the board: the footer and the forwarder name the board of the file opened."""
+    kb.create_board("ops")
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kb.board_own_db_path("ops")))
+    assert kb.get_current_board() == "default"  # the drift this guards against
+    _, body = _forward_with_handoff("ok")
+    assert "@task:ops@macbook/<id>" in body
+    with kbc.connect_closing() as conn:
+        assert forward.Forwarder(conn, "t_x", None).board == "ops"
+
+
+def test_board_pin_outside_the_board_layout_falls_back_to_the_active_board(home, monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "pinned.db"))
+    monkeypatch.setattr(kb, "get_current_board", lambda: "research")
+    with kbc.connect_closing() as conn:
+        assert forward.opened_board(conn) == "research"
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    monkeypatch.setattr(kb, "get_current_board", lambda: "default")
+    with kbc.connect_closing() as conn:
+        assert forward.opened_board(conn) == "default"
