@@ -159,7 +159,10 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
         return {"where": "local", "defer": decision["defer"], "why": why}
     if decision.get("runs_on"):
         logger.info("kanban placement: local, runs_on %s (%s)", decision["runs_on"], why)
-        return {"where": "local", "runs_on": decision["runs_on"], "why": why}
+        placement = {"where": "local", "runs_on": decision["runs_on"], "why": why}
+        if decision.get("note"):  # a pool worker's unmet local marker: where the real need is met
+            placement["note"] = decision["note"]
+        return placement
     logger.info("kanban placement: local (%s)", why)
     if why.startswith("local marker"):
         return {"where": "local", "why": why, "remedy": kp.marker_remedy(why, None, view)}
@@ -216,7 +219,10 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
                          f"forwards it there and this card completes when that one does.")}
     if (marker_placement.get("runs_on") or marker_placement.get("placement_policy")
             or marker_placement.get("hub_admission")):
-        return {"placement": dict(marker_placement)}
+        enrolled = {"placement": dict(marker_placement)}
+        if marker_placement.get("note"):
+            enrolled["note"] = marker_placement["note"]  # a pool worker's unmet local marker (queue_decision)
+        return enrolled
     out: dict = {"placement": {"where": marker_placement["where"], "why": marker_placement["why"]}}
     if marker_placement.get("remedy"):
         out["remedy"] = marker_placement["remedy"]

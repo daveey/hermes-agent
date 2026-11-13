@@ -53,6 +53,45 @@ def _notice_from_stored(conn, task_id, gateway, pool):
 
 QUEUED_WHY = ("portable: queued for any machine labelled {label} (kanban.placement.worker_queue); the first one "
               "with a free slot claims it through the Board lease")
+UNMET_WHY = " (local marker {hit} not met on {gateway})"
+TAILNET_LABEL = "capability:tailnet-exec"
+# Labels a built-in local-marker group adds on a pool worker (kanban_placement.LOCAL_MARKER_GROUPS).
+UNMET_GROUP_LABELS = {"mac": (TAILNET_LABEL,), "desktop": (TAILNET_LABEL,)}
+_MAC_NOTE = ("{hit}: no Board machine this card can lease runs macOS (the Macs take no Board leases); it joins the "
+             "pool with capability:tailnet-exec, so a run that needs the Mac reaches it with tailnet_exec/ssh, and a "
+             "GUI-only step (a TCC or Keychain prompt, a signing UI) is a human_request.")
+UNMET_GROUP_NOTES = {
+    "mac": _MAC_NOTE, "desktop": _MAC_NOTE,
+    "browser": ("{hit}: pool workers have a headless browser without sign-in; work that needs the hub's signed-in "
+                "Chrome must be created with runs_on=['machine:hub'] and hub_reason (admission-judged)."),
+    "sso": "{hit}: credentials come from token-broker; an SSO login only David can do is a human_request.",
+    "context": "{hit}: a context skill every pool worker carries.",
+}
+
+
+def _hit_name(why):
+    return why.removeprefix("mentions ")
+
+
+def unmet_markers(args, cfg, gateway):
+    """``{labels, note, hit}`` when this gateway cannot meet any of the card's local markers better than the pool and
+    nothing else keeps the card here; else None (t_01a1d2662553185d). [daveey]"""
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli.kanban_placement_diagnostics import portability
+
+    groups = placement.builtin_marker_groups(args, cfg)
+    if not groups or not placement.markers_unmeetable_here(gateway, cfg):
+        return None
+    if portability(args, cfg, local_markers=False)[0]:
+        return None
+    labels, notes = set(), []
+    for group, why in groups.items():
+        labels.update(UNMET_GROUP_LABELS.get(group, ()))
+        note = UNMET_GROUP_NOTES[group].format(hit=_hit_name(why))
+        if note not in notes and not (group == "desktop" and "mac" in groups):
+            notes.append(note)
+    first = next(iter(groups.values()))
+    return {"labels": labels, "note": " ".join(notes), "hit": _hit_name(first)}
 
 
 def queue_decision(args, cfg, gateway, pin, machine_ok=None):
@@ -61,7 +100,8 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     One queue instead of a machine pin: no worker is chosen at creation, so a held or full worker never strands the
     card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``,
     non-portable work, or when no active, unheld machine carries the label. Courier and origin-bound creates queue
-    too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). [daveey]
+    too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). On a pool worker a built-in local-marker
+    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`). [daveey]
     """
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
@@ -69,12 +109,22 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     label = placement._Cfg(cfg).queue_label(gateway)
     if not label or pin not in ("", "auto") or args.get("runs_on") is not None:
         return None
-    if placement.portable_reason(args, cfg):
+    unmet = None
+    reason = placement.portable_reason(args, cfg)
+    if reason == "local marker":
+        unmet = unmet_markers(args, cfg, gateway)
+        if unmet is None:
+            return None
+    elif reason:
         return None
     extra = coordination.required_labels(args, cfg)
     if extra is None or not (machine_ok or placement._machine_picks_up)(label):
         return None
-    return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}
+    if unmet is None:
+        return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}
+    extra = extra | unmet["labels"]
+    return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "note": unmet["note"],
+            "why": QUEUED_WHY.format(label=label) + UNMET_WHY.format(hit=unmet["hit"], gateway=gateway)}
 
 
 def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, queue=True):

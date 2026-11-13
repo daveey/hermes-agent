@@ -51,6 +51,14 @@ automatic card is enrolled in the worker pool with ``requires: [hub:write]`` (Bo
 non-default board, uncarried options, assignee) are unchanged and never call the judge, and non-hub
 gateways make zero judge calls unless the caller names the hub.
 
+On a pool worker (a gateway whose Board registry entry carries ``linux`` and which is not the hub) a built-in
+local-marker hit is not a reason to keep the card: no Board machine a card can lease runs macOS, and every pool
+worker has the same capabilities, so keeping it on its creator only made it a one-worker pin (workers pick up only
+``runs_on`` cards). Such a card joins the ``worker_queue`` like any portable card, with the labels its marker group
+needs (:data:`LOCAL_MARKER_GROUPS`; Mac and Desktop markers add ``capability:tailnet-exec``) and a note naming the
+route to the real need (:func:`markers_unmeetable_here`, :func:`hermes_cli.kanban_worker_placement.queue_decision`).
+Operator patterns, every other portability reason, an unreadable registry, the hub and the Macs are unchanged.
+
 Heavy work (tests, builds, benchmarks, installs: :data:`DEFAULT_HEAVY_MARKERS`, replaced by
 ``kanban.placement.heavy_markers``) with no local-only need goes to a worker node instead of the target
 when ``kanban.placement.heavy_route`` maps this gateway to one (``{"macbook": "worker-1"}``): the card is
@@ -186,6 +194,26 @@ DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
 )
+# Who can meet each built-in local marker (t_01a1d2662553185d), read from the Board registry on 2026-11-13:
+# mac / desktop: only the Macs, which take no Board leases; a pool worker reaches them over tailnet_exec/ssh.
+# browser: the hub's signed-in Chrome; pool workers have a headless one. sso: the MacBook's SSO profile; pool workers
+# get credentials from token-broker. context: a product/repo skill any pool worker carries. Every built-in marker
+# and skill marker has a group (a test enforces it), so a new marker cannot ship unclassified.
+LOCAL_MARKER_GROUPS = {
+    **dict.fromkeys((
+        r"\bkeychain\b", r"\bcodesign", r"\bnotari[sz]", r"\btcc\b", r"\bosascript\b", r"\bapple ?script\b",
+        r"\bapple (photos|notes|reminders|contacts|calendar|music)\b", r"\bphotos\.app\b", r"\bimessage\b",
+        r"\bfind ?my\b", r"\bremindctl\b", r"\bshortcuts? app\b", r"\blaunchd\b", r"\blaunchctl\b", r"launchagents",
+        r"~/library/", r"\bmacbook\b", MACOS_MARKER, r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
+        BABYBEAR_MARKER, r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",
+        r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^computer-use$", r"^ios-"), "mac"),
+    **dict.fromkeys((r"\bhermes\.app\b", HERMES_DESKTOP_MARKER, DESKTOP_SURFACE_MARKER, LIVE_DESKTOP_MARKER,
+                     DESKTOP_ACTION_MARKER, r"\bdesktop\s+dom\b"), "desktop"),
+    **dict.fromkeys((r"\bchrome\b", r"\bcdp\b", r"^invisible-chrome-agent$", r"^local-chrome-remote-debugging$"),
+                    "browser"),
+    **dict.fromkeys((r"\bsoftmax-org\b", r"\bdavid-bloomin-sso\b", r"--profile softmax"), "sso"),
+    **dict.fromkeys((r"^babybear", r"^bb-"), "context"),
+}
 # Skill markers that only say what a card is about (a Baby Bear repo skill on a Python fix), not that it drives this
 # machine: an explicit placement='auto' drops them from the local-marker scan. Device-bound skills (apple-*, macos-,
 # computer-use, ios-, a local Chrome) stay local even then, since 'auto' is also the routine default callers spell
@@ -418,8 +446,9 @@ def is_placeholder_session(value: str, *, placement_config: Optional[dict] = Non
     return bool(session) and session in values
 
 
-def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
-    """The first local-only hit, or None. Host-name markers (see
+def _local_marker_hits(title: str, body: str, skills, cfg: _Cfg) -> Iterator[tuple[str, str]]:
+    """Every local-only hit in scan order, as ``(why, pattern)``; ``pattern`` is the marker or skill-marker string
+    that matched (the key of :data:`LOCAL_MARKER_GROUPS` for a built-in). Host-name markers (see
     :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list.
     A product name (:data:`PRODUCT_NAME_MARKERS`) does not pin a card whose text names Linux
     and no Apple or device-bound work (same exception: not with a replaced list)."""
@@ -435,12 +464,59 @@ def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
         text = (title or "") if (not replaced and rx.pattern in TITLE_ONLY_LOCAL_MARKERS) else full
         m = rx.search(text)
         if m:
-            return f"mentions {m.group(0).lower()!r}"
+            yield f"mentions {m.group(0).lower()!r}", rx.pattern
     for s in skills or []:
         for rx in cfg.skill_markers():
             if rx.search(str(s)):
-                return f"skill {s}"
-    return None
+                yield f"skill {s}", rx.pattern
+
+
+def _local_marker_match(title: str, body: str, skills, cfg: _Cfg) -> Optional[tuple[str, str]]:
+    """The first local-only hit as ``(why, pattern)``, or None."""
+    return next(_local_marker_hits(title, body, skills, cfg), None)
+
+
+def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
+    """The first local-only hit (``mentions '<text>'`` or ``skill <name>``), or None."""
+    hit = _local_marker_match(title, body, skills, cfg)
+    return hit[0] if hit else None
+
+
+def builtin_marker_groups(args: dict, cfg: Optional[dict] = None) -> Optional[dict[str, str]]:
+    """``{group: first hit}`` over every local-marker hit of ``args``, or None when there is no hit or any hit is not
+    a classified built-in: a replaced ``local_markers``/``local_skill_markers`` list or an ``extra_local_markers``
+    hit is the operator's own pattern, which nothing here can classify, so it keeps its card. [daveey]"""
+    c = _Cfg(config() if cfg is None else cfg)
+    if any(isinstance(c.raw.get(k), list) for k in ("local_markers", "local_skill_markers")):
+        return None
+    title, body = args.get("title") or "", args.get("body") or ""
+    extra = c.raw.get("extra_local_markers")
+    if isinstance(extra, list) and extra and _local_marker(
+            title, body, None, _Cfg({"local_markers": [], "extra_local_markers": extra})):
+        return None
+    builtin = _Cfg({k: v for k, v in c.raw.items() if k != "extra_local_markers"})
+    groups: dict[str, str] = {}
+    for why, pattern in _local_marker_hits(title, body, marker_skills(args, builtin), builtin):
+        group = LOCAL_MARKER_GROUPS.get(pattern)
+        if group is None:
+            return None
+        groups.setdefault(group, why)
+    return groups or None
+
+
+def markers_unmeetable_here(self_gw: Optional[str], cfg: Optional[dict], machines: Optional[dict] = None) -> bool:
+    """True when this gateway is a Linux Board machine other than the hub: no built-in local marker can be met here
+    better than by any pool worker (see :data:`LOCAL_MARKER_GROUPS`). Reads the attested registry labels, not
+    ``sys.platform`` (Linux CI simulates the MacBook gateway); an unreadable registry or no entry for this gateway
+    is False, which keeps today's local keep. [daveey]"""
+    from hermes_cli.kanban_hub_admission_placement import is_hub
+    if not self_gw or is_hub(self_gw, cfg or {}):
+        return False
+    if machines is None:
+        from hermes_cli import kanban_worker_node as wn
+        machines = dict((wn.registry() or {}).get("machines") or {})
+    entry = machines.get(self_gw)
+    return isinstance(entry, dict) and "linux" in (entry.get("labels") or [])
 
 
 def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:

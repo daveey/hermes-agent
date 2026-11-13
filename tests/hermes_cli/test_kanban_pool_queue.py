@@ -684,3 +684,162 @@ def test_a_callers_runs_on_beats_a_queued_landing(monkeypatch):
     assert ktp._landing_placement(None, {}, object(), None, None, ["machine:worker-2"], title="t") == (
         queued, ["machine:worker-2"])
     assert ktp._landing_placement(None, {}, object(), None, None, None, title="t") == (queued, [POOL])
+
+
+# --- local markers a pool worker cannot meet (t_01a1d2662553185d) ----------------------------------------------
+# 11-13: on a pool worker a built-in local-marker hit (Keychain, Chrome, a Desktop chat, a ship review's CI line
+# naming the macOS check) kept the card as a local row only its creating worker could claim (workers pick up only
+# runs_on cards). No Board machine a card can lease runs macOS, so the creator was never better than the pool.
+# Observed: t_01a1d2434cf3676c, and t_01a1d2662553185d itself (its spec names Chrome).
+
+TAILNET = "capability:tailnet-exec"
+SHIP_TITLE = "Independent exact-head review PR #1789 @370a13d80c (core-wt ship review required)"
+SHIP_BODY = (
+    "Independent exact-head review of https://github.com/softmax-universe/daveey-hermes/pull/1789 at "
+    "**370a13d80c0000000000000000000000000000ab**.\n"
+    "CI at filing: green: All required checks pass (v2): success; macOS state required (v1): success.\n"
+    "Required CI passed before filing.\n\n"
+    "An independent exact-head review was explicitly requested before landing.\n"
+    "The ship gate lands only a head approved at its exact sha. This card was filed by ship; the landing session "
+    "must not be the one reviewing.\n\n"
+    "Finish with kanban_complete metadata exactly:\n"
+    '  {"verdict": "approve" | "request_changes", "reviewed_sha": "370a13d80c0000000000000000000000000000ab", '
+    '"reviewed_pr": "https://github.com/softmax-universe/daveey-hermes/pull/1789"}\n')
+
+
+def _pool_machines():
+    w1 = {**W1, "labels": ["linux", POOL, TAILNET]}
+    w2 = {**W2, "labels": ["linux", POOL, TAILNET]}
+    return {m["name"]: m for m in (MACHINES[HUB], w1, w2, MACHINES["macbook"])}
+
+
+def _on(monkeypatch, gateway, cfg, machines):
+    from hermes_cli import kanban_skill_check
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: gateway)
+    monkeypatch.setattr(kp, "config", lambda: cfg)
+    monkeypatch.setattr(kanban_skill_check, "check_task_skills", lambda *a, **k: None)  # no skills dir here
+    wn.set_registry_fetch(lambda: {"me": gateway, "machines": list(machines.values())})
+
+
+@pytest.fixture
+def on_w2(w2, monkeypatch):
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}}, _pool_machines())
+    return w2
+
+
+def _create(**card):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"assignee": "default", "requires": [], **card}))
+    assert out.get("ok"), out
+    return out
+
+
+def test_a_keychain_card_from_a_pool_worker_joins_the_pool_with_the_mac_reach_label(on_w2):
+    out = _create(title="rotate the CI token in the Keychain")
+    # The Board stores labels normalized (sorted): the label set is the contract; the reply keeps the queue first.
+    assert _runs_on(on_w2.conn, out["task_id"]) == sorted([POOL, TAILNET]), out
+    assert out["placement"]["runs_on"] == [POOL, TAILNET], out
+    assert "tailnet_exec" in out["note"] and out["placement"]["note"] == out["note"], out
+    assert "remedy" not in out, out
+    why = out["placement"]["why"]
+    assert why.startswith("portable: queued for any machine labelled pool:worker"), why
+    assert why.endswith("(local marker 'keychain' not met on worker-2)"), why
+    # Any pool worker may claim it, not only the creator.
+    card = dict(on_w2.conn.execute("SELECT * FROM tasks WHERE id = ?", (out["task_id"],)).fetchone())
+    assert wn.eligible(card, "worker-1", _pool_machines()) is None
+    # The audit stays truthful: the card did hit a local marker.
+    assert _created(on_w2.conn, out["task_id"])["portable_reason"] == "local marker"
+
+
+def test_a_chrome_card_from_a_pool_worker_joins_the_pool_and_names_the_hub_route(on_w2):
+    out = _create(title="read the dashboard in Chrome")
+    assert _runs_on(on_w2.conn, out["task_id"]) == [POOL], out
+    assert "machine:hub" in out["note"] and "hub_reason" in out["note"], out
+
+
+def test_a_desktop_chat_card_from_a_pool_worker_carries_the_mac_reach_label(on_w2):
+    out = _create(title="Fix Desktop chat sidebar ordering")
+    assert TAILNET in (_runs_on(on_w2.conn, out["task_id"]) or []), out
+
+
+def test_a_device_skill_card_from_a_pool_worker_carries_the_mac_reach_label(on_w2):
+    out = _create(title="Click through the Settings pane", skills=["computer-use"])
+    assert TAILNET in (_runs_on(on_w2.conn, out["task_id"]) or []), out
+
+
+def test_a_ship_review_card_naming_the_macos_check_joins_the_pool(on_w2):
+    out = _create(title=SHIP_TITLE, body=SHIP_BODY)
+    assert POOL in (_runs_on(on_w2.conn, out["task_id"]) or []), out
+
+
+def test_cli_create_of_a_keychain_card_on_a_pool_worker_joins_the_pool(on_w2):
+    from hermes_cli import kanban as kcli
+    out = kcli.run_slash('create "rotate the Keychain token" --assignee default --json')
+    assert _runs_on(on_w2.conn, json.loads(out)["id"]) == sorted([POOL, TAILNET]), out
+
+
+def test_direct_create_task_of_a_keychain_card_on_a_pool_worker_joins_the_pool(on_w2):
+    tid = kb.create_task(on_w2.conn, title="rotate the CI token in the Keychain", assignee="default", requires=[])
+    assert _runs_on(on_w2.conn, tid) == sorted([POOL, TAILNET])
+
+
+def test_every_built_in_local_marker_has_a_group():
+    assert set(kp.DEFAULT_LOCAL_MARKERS) | set(kp.DEFAULT_LOCAL_SKILL_MARKERS) <= set(kp.LOCAL_MARKER_GROUPS)
+    assert set(kp.LOCAL_MARKER_GROUPS.values()) <= {"mac", "desktop", "browser", "sso", "context"}
+
+
+def test_markers_are_unmeetable_only_on_a_linux_non_hub_registry_entry():
+    machines = _pool_machines()
+    assert kp.markers_unmeetable_here("worker-2", {}, machines) is True
+    assert kp.markers_unmeetable_here(HUB, {}, machines) is False  # linux, but the hub (admission judge path)
+    assert kp.markers_unmeetable_here("macbook", {}, machines) is False
+    assert kp.markers_unmeetable_here("worker-9", {}, machines) is False  # no registry entry
+    assert kp.markers_unmeetable_here(None, {}, machines) is False
+
+
+# Controls: green before and after.
+
+def test_hub_keychain_card_still_asks_the_admission_judge(hub, judge):
+    from tools import kanban_tools as kt
+    _registry()
+    out = json.loads(kt._handle_create({"title": "rotate the CI token in the Keychain", "assignee": "default",
+                                        "requires": []}))
+    assert out.get("task_id") and len(judge.calls) == 1, out
+
+
+def test_macbook_keychain_card_stays_local(w2, monkeypatch):
+    _on(monkeypatch, "macbook", {"route": {"macbook": HUB}, "worker_queue": {"macbook": POOL}}, _pool_machines())
+    d = kp.decide({"title": "rotate the CI token in the Keychain"}, live=lambda _t: None, carries=True)
+    assert d["where"] == "local" and "runs_on" not in d and d["why"].startswith("local marker"), d
+
+
+def test_pool_worker_keeps_a_marker_card_when_the_registry_is_unreadable(w2, monkeypatch):
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}}, _pool_machines())
+
+    def down():
+        raise OSError("board unreachable")
+    wn.set_registry_fetch(down)
+    out = _create(title="rotate the CI token in the Keychain")
+    assert _runs_on(w2.conn, out["task_id"]) is None and out["placement"]["why"].startswith("local marker"), out
+
+
+@pytest.mark.parametrize("cfg,title", [
+    ({"extra_local_markers": [r"\bgrafana\b"]}, "fix the grafana panel"),
+    ({"extra_local_markers": [r"\bgrafana\b"]}, "rotate the Keychain token the grafana panel reads"),  # + built-in
+    ({"local_markers": [r"\bkeychain\b"]}, "rotate the CI token in the Keychain"),  # a replaced list
+])
+def test_pool_worker_keeps_an_operator_marker(w2, monkeypatch, cfg, title):
+    _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}, **cfg}, _pool_machines())
+    out = _create(title=title)
+    assert _runs_on(w2.conn, out["task_id"]) is None and out["placement"]["why"].startswith("local marker"), out
+
+
+@pytest.mark.parametrize("card", [
+    {"title": "systemctl " + "restart x"},
+    {"title": "rotate the CI token in the Keychain", "placement": "local"},
+    {"title": "rotate the CI token in the Keychain", "workspace_kind": "dir", "workspace_path": "/srv/x"},
+])
+def test_pool_worker_leaves_other_keeps_unchanged(on_w2, card):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"assignee": "default", "requires": [], **card}))
+    assert out.get("task_id") and _runs_on(on_w2.conn, out["task_id"]) is None, out

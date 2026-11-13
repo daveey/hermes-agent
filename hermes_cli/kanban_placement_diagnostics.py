@@ -4,11 +4,13 @@ from __future__ import annotations
 import re
 
 
-def portability(args: dict, cfg=None) -> tuple[str | None, str | None]:
+def portability(args: dict, cfg=None, *, local_markers: bool = True) -> tuple[str | None, str | None]:
     """Return the stable reason and its actual marker evidence in one classifier pass.
 
     Keep ordering and exemptions identical for admission and diagnostics. In particular,
     never rescan raw text for an explanation after evidence/coordination filtering.
+    ``local_markers=False`` skips only the local-marker step (a pool worker re-checks a card whose built-in markers
+    it cannot meet: every other reason still applies, in the same order). [daveey]
     """
     from hermes_cli import kanban_placement as p
     from hermes_cli import kanban_placement_coordination as coordination
@@ -23,7 +25,7 @@ def portability(args: dict, cfg=None) -> tuple[str | None, str | None]:
     if refusal := coordination.board_refusal(reqs):
         return refusal, None
     title, body = p.marker_work_text(args.get("title")), p.marker_work_text(args.get("body"))
-    if hit := p._local_marker(title, body, p.marker_skills(args, c), c):
+    if local_markers and (hit := p._local_marker(title, body, p.marker_skills(args, c), c)):
         return "local marker", hit
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
     if refusal := coordination.check(full, c.raw, skills=args.get("skills"), requires=reqs):
