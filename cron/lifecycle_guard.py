@@ -373,7 +373,7 @@ _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON_RUNNER_RE = re.compile(r"^(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?$|^py(?:\.exe)?$")
 _PYTHON_SOURCE_SUFFIXES = (".py", ".pyw")
 # A redirection word: optional fd or `{NAME}` (NAME may be an array element, `{a[1]}`),
-# operator, optional glued target (`<f`, `0<f`, `2>>log`, `{fd}>&2`, `{a[1]}>/dev/null`).
+# operator, optional glued target (`<f`, `0<f`, `2>>log`, `{fd}>&2`, `{a[1]}>/dev/null`, `&>f`).
 _REDIRECTION = re.compile(
     r"^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\})(<<<|<<-|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)(.*)$", re.DOTALL)
 
@@ -923,9 +923,11 @@ def _runs_under_uv(segment: list[str], index: int) -> bool:
 
 def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
     """``(arguments without redirections, files redirected to stdin)``. A heredoc, here-string or
-    descriptor duplication is stripped but feeds no file; ``<`` and ``<>`` on fd 0 do."""
+    descriptor duplication is stripped but feeds no file; ``<`` and ``<>`` on fd 0 do, and so does
+    ``<&N`` after ``N<f`` opened a file on that descriptor (``bash 3<f.sh <&3``)."""
     kept: list[str] = []
     stdin: list[str] = []
+    opened: dict[str, str] = {}
     index = 0
     while index < len(arguments):
         match = _REDIRECTION.match(arguments[index])
@@ -937,6 +939,10 @@ def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
         if not target and index < len(arguments):
             target = arguments[index]
             index += 1
+        if operator in ("<", "<>") and target:
+            opened[fd or "0"] = target
+        elif operator == "<&" and fd in ("", "0") and target in opened:
+            operator, target = "<", opened[target]
         if operator in ("<", "<>") and fd in ("", "0") and target:
             stdin.append(target)
     return kept, stdin
@@ -1182,7 +1188,7 @@ def _mask_data_sink_arguments(text: str) -> str:
             lines_out.append(line)
             continue
         try:
-            tokens = _shlex_tokens(line)
+            tokens = _shlex_tokens(split_glued_redirections(line))
         except ValueError:
             lines_out.append(line)
             continue

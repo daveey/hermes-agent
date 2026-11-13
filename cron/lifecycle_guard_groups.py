@@ -55,6 +55,8 @@ def split_glued_redirections(line: str) -> str:
     the operator's own second character (``<<``, ``>>``, ``<>``) is never split off. The ``&``/``|``
     of an unquoted ``>&``, ``<&`` or ``>|`` is escaped, so the tokenizer keeps the operator one word
     instead of cutting the command there (``2>&1 bash x.sh`` is not ``2>`` then ``1 bash x.sh``).
+    An unquoted ``&>``/``&>>`` starts its own redirection word; its ``&`` is escaped too.
+    ``cmd & bash``, ``&&`` and ``|&`` remain control operators.
 
     An array-element descriptor whose subscript the tokenizer cuts (``{a[$((1+1))]}>x bash x.sh``,
     ``{a[`echo 1`]}>x bash x.sh``) fails closed: the text from the command's first unterminated
@@ -73,8 +75,10 @@ def split_glued_redirections(line: str) -> str:
     comment = ""  # the line's trailing `#` comment, verbatim
     in_single = in_double = escape = False
     operator = False  # the previous character is an unquoted, unescaped `<`/`>`
+    last = ""  # previous unquoted, unescaped character (else empty)
     for index, ch in enumerate(line):
         after_operator, operator = operator, False
+        previous, last = last, ""
         if escape:
             escape = False
         elif ch == "\\" and not in_single:
@@ -84,12 +88,18 @@ def split_glued_redirections(line: str) -> str:
         elif ch == '"' and not in_single:
             in_double = not in_double
         elif not in_single and not in_double:
+            last = ch
             if after_operator and (ch == "&" or (ch == "|" and word[-1] == ">")):
                 out.append("\\" + ch)
                 word += ch
                 continue
-            if ch == "&" and word and word[-1] not in "<>" and line[index + 1: index + 2] == ">":
-                out.append(" ")
+            if ch == "&" and line[index + 1:index + 2] == ">" and previous not in ("&", "|"):
+                if word:
+                    out.append(" ")
+                word_out = len(out)
+                out.append("\\&")
+                word = "&"
+                continue
             if ch.isspace() or ch in CONTROL_CHARS:
                 if ch in CONTROL_CHARS:
                     head_out = None
@@ -106,7 +116,7 @@ def split_glued_redirections(line: str) -> str:
             if ch in "<>":
                 operator = True
                 if (word and not word.isdigit() and not FD_VARIABLE.fullmatch(word)
-                        and word[-1] not in "<>"):
+                        and word[-1] not in "<>" and not (word == "&" and previous == "&")):
                     if word.endswith("]}"):
                         start = word_out if head_out is None else head_out
                         carried.append("".join(out[start:]))
