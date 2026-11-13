@@ -116,6 +116,59 @@ def set_exit_target(target_mono: Optional[float], reason: str = "") -> None:
             _state.update(target_mono=float(target_mono), target_reason=reason)
 
 
+# After the tail resolved its verdict, the steps left are asyncio.run's own shutdown (cancelling leftover
+# tasks, the default-executor join: up to 300s on a wedged executor thread) and start_gateway's outer
+# finally (drain_gateway_runtime, a second runner.stop). None of them is a cooperative wait the exit
+# target can clamp, so a checkpointed stop takes the exit funnel this long after the target instead: still
+# inside UPDATE_EXIT_MARGIN_S, i.e. before the updater's wait (accept + CHECKPOINT_DRAIN_S) ends.
+POST_TAIL_GRACE_S = 3.0
+# Least time left for those steps when the tail itself ended past the target (normally milliseconds).
+POST_TAIL_MIN_S = 0.5
+POST_TAIL_THREAD_NAME = "gateway-post-tail-exit"
+
+
+def bound_post_tail(exit_code: int, exit_fn: Callable[[int], None], *,
+                    grace_s: Optional[float] = None) -> bool:
+    """Bound everything after the shutdown tail to the exit target; False when no target is set.
+
+    A daemon thread calls ``exit_fn(exit_code)`` (the graceful exit funnel, which ``os._exit``s) at
+    ``target + grace_s`` unless the funnel disarmed first. The tail's verdict is already resolved and
+    its teardown done, so this exit is graceful (clean ledger stamp, PID/lock release, log drain), not
+    the hard deadline's forced one. Without a target only the hard exit deadline covers these steps.
+    """
+    target = _state.get("target_mono")
+    if target is None:
+        return False
+    grace = POST_TAIL_GRACE_S if grace_s is None else grace_s
+    fire_at = max(target + grace, time.monotonic() + min(grace, POST_TAIL_MIN_S))
+
+    def _watch() -> None:
+        if _done.wait(timeout=max(0.0, fire_at - time.monotonic())):
+            return
+        with _lock:
+            if _done.is_set() or _state.get("exit_owner") is not None:
+                return
+            _state["exit_owner"] = threading.get_ident()  # the main thread's funnel now parks (disarm)
+        mark_phase("post_tail_bound")
+        with contextlib.suppress(Exception):
+            logger.warning("Shutdown still running %.1fs after the core update exit target (%s): asyncio.run "
+                           "shutdown / outer finally did not finish; exiting %s now (phase marks: %s)",
+                           time.monotonic() - target, _state.get("target_reason"), exit_code, phases())
+        try:
+            exit_fn(exit_code)
+        except Exception:  # health: allow BLE001 -- hand the exit back to the main thread's funnel
+            logger.exception("Post-tail exit bound: the exit funnel failed")
+            with _lock:
+                _state.pop("exit_owner", None)
+
+    try:
+        threading.Thread(target=_watch, daemon=True, name=POST_TAIL_THREAD_NAME).start()
+    except Exception:
+        logger.debug("Failed to start the post-tail exit bound", exc_info=True)
+        return False
+    return True
+
+
 def phases() -> dict[str, float]:
     """Phase marks (seconds since the stop began) recorded so far, for the tail's timing log line."""
     with _lock:
@@ -213,9 +266,25 @@ def arm_for_stop(runner: Any, stop_leash_s: float, snapshot_fn: Callable[[], dic
         min_budget_s=None if by_signal else stop_leash_s + TAIL_RESERVE_S, snapshot_fn=snapshot_fn)
 
 
-def disarm() -> None:
-    """Called by the graceful exit funnel just before ``os._exit``."""
-    _done.set()
+def disarm() -> bool:
+    """Called by the graceful exit funnel just before ``os._exit``. False when the post-tail bound
+    (:func:`bound_post_tail`) already took the exit on another thread: that thread runs the funnel and
+    ``os._exit``s, so the caller must not run it a second time."""
+    with _lock:
+        owner = _state.get("exit_owner")
+        if owner is not None and owner != threading.get_ident():
+            return False
+        _done.set()
+        return True
+
+
+def enter_exit_funnel() -> None:
+    """The graceful exit funnel's disarm: marks ``exit_funnel`` and disarms. When the post-tail bound
+    already took the exit on another thread, the caller parks for good instead: that thread is running
+    the same funnel and ``os._exit``s."""
+    mark_phase("exit_funnel")
+    if not disarm():
+        threading.Event().wait()
 
 
 def _exit_diag_record() -> dict[str, Any]:

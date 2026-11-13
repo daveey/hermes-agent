@@ -95,7 +95,7 @@ def ctx_workspace_span(task: Task) -> list:
     return [len("\n".join(lines[:k])) + 1, lines[k]]
 
 
-def _ctx_header(lines: list[str], task: Task) -> None:
+def _ctx_header(lines: list[str], task: Task, *, conn: Optional[sqlite3.Connection] = None) -> None:
     lines.append(f"# Kanban task {task.id}: {task.title}")
     lines.append("")
     lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
@@ -113,6 +113,10 @@ def _ctx_header(lines: list[str], task: Task) -> None:
             lines.append(f"Terminal timeout: {effective_terminal_timeout}s")
     if task.branch_name:
         lines.append(f"Branch:   {task.branch_name}")
+    if conn is not None:  # after Workspace, so ctx_workspace_span (no conn) keeps the same offset [daveey]
+        from hermes_cli.kanban_wake_summary import context_line
+        if wake := context_line(conn, task):
+            lines.append(wake)
     lines.append("")
     if task.body and task.body.strip():
         lines.append("## Body")

@@ -67,6 +67,7 @@ def test_worker_approving_pending_review_without_claim_names_operator(board, mon
         kb.complete_task(board, tid, summary="approve child", force=True)
     message = str(refused.value)
     assert OPERATOR in message and "without claiming" in message
+    assert "is not its current run" not in message  # no run id was passed
     assert "kanban_request_review" not in message  # the card is already in review
     assert kb.get_task(board, tid).status == "review"
 
@@ -92,6 +93,27 @@ def test_worker_refusal_does_not_offer_operator_escape_hatch(board, monkeypatch)
         kb.complete_task(board, tid, summary="skip", expected_run_id=run)
     assert "kanban_request_review" in str(refused.value)
     assert "--review-required off" not in str(refused.value)
+    assert "A kanban worker run cannot complete" in str(refused.value)  # orchestrators too, not only implementers
+    assert "implementer" not in str(refused.value)
+
+
+# --- PR #1879 review nits: an in-review card is never told it "is not in review" ---
+
+
+@pytest.mark.parametrize("identity", (None, *IDENTITIES))
+def test_in_review_card_with_stale_run_id_is_named_pending_review(board, monkeypatch, identity):
+    tid, run = claimed(board, monkeypatch)
+    assert kb.request_review(board, tid, summary="implemented", expected_run_id=run)
+    as_operator(monkeypatch)
+    if identity:
+        monkeypatch.setenv(identity, "t_orchestrator")
+    with pytest.raises(ValueError) as refused:
+        kb.complete_task(board, tid, summary="approve", expected_run_id=run, force=True)
+    message = str(refused.value)
+    assert "pending review" in message and f"Run {run} is not its current run" in message
+    assert "not in review" not in message
+    assert "kanban_request_review" not in message  # the card is already in review
+    assert kb.get_task(board, tid).status == "review"  # still refused: no permission widened
 
 
 def _dashboard(tmp_path):

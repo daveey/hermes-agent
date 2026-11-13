@@ -274,15 +274,17 @@ def route_labels(dest: str) -> list[str]:
     return [dest] if is_pool_label(dest) else [f"machine:{dest}"]
 
 
-def label_machines(label: str, machines: Optional[dict] = None) -> list[str]:
-    """Active, unheld registry machines that carry ``label`` and pick up other gateways' cards (sorted)."""
+def label_machines(label, machines: Optional[dict] = None) -> list[str]:
+    """Active, unheld registry machines that carry ``label`` (or every label of a list/set) and pick up other
+    gateways' cards (sorted)."""
     from hermes_cli import kanban_worker_node as wn
     if machines is None:
         machines = (wn.registry() or {}).get("machines") or {}
+    wanted = {label} if isinstance(label, str) else set(label)
     return sorted(name for name, entry in machines.items()
                   if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
                   and ("pickup" not in entry or wn.advertises_pickup(entry))
-                  and label in (entry.get("labels") or []))
+                  and wanted <= set(entry.get("labels") or []))
 
 
 class _Cfg:

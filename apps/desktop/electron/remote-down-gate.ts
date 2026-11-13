@@ -18,6 +18,13 @@ export const REMOTE_DOWN_MAX_BACKOFF_MS = 30_000
 // [daveey] A trial (connect, which may redial and probe, plus the request) must settle within this or it is
 // treated as a failed trial: the slot is freed and the backoff escalates. Without it a trial on a slow link held the
 // slot for 3.5 min (2026-11-12) while every other request failed fast with "reconnect in progress".
+//
+// Trade-off, chosen on purpose: this is SHORTER than a trial request's own budget (DEFAULT_FETCH_TIMEOUT_MS = 30 s,
+// stretched further on a slow link, plus the body allowance for uploads). A trial whose request is still in flight at
+// 20 s is rejected to its caller, but the request itself is not cancelled: the server may still receive and apply it,
+// including a non-idempotent POST/PUT/DELETE, so a caller that retries can submit twice. We accept that because the
+// trial is one request per backoff window and freeing the slot is what lets the remote recover; the abandoned
+// request keeps running, and if it answers late (sent in the current epoch) that answer still reopens the gate.
 export const REMOTE_DOWN_TRIAL_DEADLINE_MS = 20_000
 
 export const REMOTE_BACKEND_DOWN_CODE = 'REMOTE_BACKEND_DOWN'

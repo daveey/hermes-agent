@@ -60,8 +60,11 @@ def config_leaves() -> list[str]:
 
 # Sections whose default is an empty dict, so walking DEFAULT_CONFIG finds no leaves: their keys are the
 # ones each reader module takes from its section config (``self.raw.get("key")``). [daveey]
-OPEN_SECTIONS = {"kanban.placement": ("hermes_cli/kanban_placement.py",)}
-_RAW_GET = re.compile(r"""\bself\.raw\.get\(\s*["']([A-Za-z_]\w*)["']""")
+# section -> modules that read its keys: ``self.raw.get("k")`` (kanban_placement._Cfg) or ``cfg.get("k")`` in a
+# module handed the section dict (the claim screen's ``portable_wake_probes`` shipped undocumented when only
+# kanban_placement.py was scanned).
+OPEN_SECTIONS = {"kanban.placement": ("hermes_cli/kanban_placement.py", "hermes_cli/kanban_hub_admission_claim.py")}
+_RAW_GET = re.compile(r"""\b(?:self\.raw|cfg)\.get\(\s*["']([A-Za-z_]\w*)["']""")
 
 
 def open_section_keys() -> list[str]:

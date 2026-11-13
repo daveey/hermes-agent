@@ -1,8 +1,10 @@
 """Tool schemas for tools.kanban_tools (model-facing; strings are byte-frozen)."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import hermes_completion_receipt as hcr
 from hermes_cli.kanban_workflow import ARCHIVED, DEFAULT_WORKFLOW
 
 _DESC_TASK_ID_DEFAULT = (
@@ -98,6 +100,63 @@ KANBAN_LIST_SCHEMA = _schema(
     [],
 )
 
+def _completion_receipt_schema() -> dict[str, Any]:
+    """metadata.completion_receipt v1, from the validator's own limits (hermes_completion_receipt) so the
+    advertised shape never drifts from what the card writer admits (self-heal agent-f82d813de9)."""
+    example = {"version": 1, "items": [{
+        "scope": "README install section from the card body",
+        "disposition": "delivered",
+        "evidence": [{"ref": "commit 1a2b3c4 on origin/main; test_install passed",
+                      "observed_at": "2026-11-13T06:40:00+00:00", "verification": "independently_checked"}],
+        "remaining": [{"scope": "Windows install notes", "state": "deferred", "owner": None,
+                       "reason": "not in this card's scope"}]}]}
+    # No maxLength: llama.cpp's grammar converter rejects any bound >= 2000 (MAX_TEXT, MAX_REF) and refuses the
+    # whole request; the card writer enforces the caps, and the description states them.
+    text = {"type": "string", "minLength": 1}
+    ref = {"type": "string", "minLength": 1}
+    return {
+        "type": "object", "additionalProperties": False, "required": ["version", "items"],
+        "description": (
+            "Optional v1 per-scope receipt. Include it when this completion claims delivery of a scoped "
+            "artifact or ask (a fix, file, PR, reply, setting): one item per scope with its disposition "
+            "(delivered, superseded with superseded_by, contained = mitigated not fixed, rejected), evidence "
+            "refs with the ISO8601 time you observed each and verification independently_checked (you re-ran "
+            "or read it back this run) or reported (taken from someone's word), and what remains. Remaining "
+            "pending work needs an open owner card you created or linked, as @task:<board>@<gateway>/<id>; "
+            "deferred work may have owner null with a reason. Chat close-outs relay this instead of guessing "
+            f"from the summary. Text fields hold at most {hcr.MAX_TEXT} characters, refs and owners "
+            f"{hcr.MAX_REF}. Example: " + json.dumps(example, separators=(",", ":"))),
+        "properties": {
+            "version": {"type": "integer", "enum": [1]},
+            "items": {"type": "array", "minItems": 1, "maxItems": hcr.MAX_ITEMS, "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["scope", "disposition", "evidence", "remaining"],
+                "properties": {
+                    "scope": text,
+                    "disposition": {"type": "string", "enum": list(hcr.DISPOSITIONS)},
+                    "superseded_by": ref,
+                    "evidence": {"type": "array", "minItems": 1, "maxItems": hcr.MAX_EVIDENCE, "items": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["ref", "observed_at", "verification"],
+                        "properties": {
+                            "ref": ref,
+                            "observed_at": {"type": "string", "maxLength": 64},
+                            "verification": {"type": "string", "enum": list(hcr.VERIFICATIONS)},
+                        }}},
+                    "remaining": {"type": "array", "maxItems": hcr.MAX_REMAINING, "items": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["scope", "state", "owner", "reason"],
+                        "properties": {
+                            "scope": text,
+                            "state": {"type": "string", "enum": ["pending", "deferred"]},
+                            "owner": {"type": ["string", "null"]},
+                            "reason": text,
+                        }}},
+                }}},
+        },
+    }
+
+
 KANBAN_COMPLETE_SCHEMA = _schema(
     "kanban_complete",
     (
@@ -122,7 +181,9 @@ KANBAN_COMPLETE_SCHEMA = _schema(
         "and every review comment (bots too) answered (standing approval), or create the landing card. "
         "The hub batch only installs merged main; it never merges PRs. A review-only card cites the "
         "reviewed PR in metadata.pr or metadata.reviewed_pr, never metadata.published_pr (it binds "
-        "this card's completion contract to that PR permanently)."
+        "this card's completion contract to that PR permanently). When the completion claims delivery "
+        "of a scoped artifact or ask, add metadata.completion_receipt (shape in the metadata schema): "
+        "what each scope's disposition is, with evidence and remaining work."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -131,12 +192,12 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "Run History on the dashboard and in downstream "
                 "workers' context."
         )),
-        "metadata": _prop("object", (
+        "metadata": {**_prop("object", (
                 "Free-form dict of structured facts about this "
                 "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
                 "\"findings\": [...]}. Surfaced to downstream "
                 "workers alongside ``summary``."
-        )),
+        )), "properties": {"completion_receipt": _completion_receipt_schema()}},
         "result": _prop("string", (
                 "Short result log line (legacy field, maps to "
                 "task.result). Use ``summary`` instead when "

@@ -393,6 +393,31 @@ describe('remote down gate: trial deadline', () => {
     ).resolves.toBe('back')
   })
 
+  it('a late success from the abandoned trial still reopens the gate (it was sent in the current epoch)', async () => {
+    const h = downHarness()
+
+    let answerLate: (value: string) => void = () => {}
+
+    const hung = h.runTrial(
+      async () => ({ baseUrl: BASE_URL }),
+      () => new Promise<string>(resolve => (answerLate = resolve))
+    )
+
+    const outcome = await settleWithin(hung, 1_000)
+    expect(String(outcome.error?.message)).toMatch(/down-gate trial deadline/)
+    // The deadline marked the trial failed: still down, and the slot is free but behind the escalated backoff.
+    expect(h.gate.isDown(KEY)).toBe(true)
+    await expect(h.run(async () => 'x')).rejects.toSatisfy(isRemoteBackendDownError)
+
+    // The abandoned request answers after its caller gave up: the remote is back, so the gate reopens at once,
+    // without waiting out the backoff for another trial.
+    answerLate('late')
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(h.gate.isDown(KEY)).toBe(false)
+    await expect(h.run(async () => 'open')).resolves.toBe('open')
+  })
+
   it('a non-trial request is not cut by the trial deadline', async () => {
     const h = harness()
 
@@ -410,17 +435,6 @@ describe('remote down gate: trial deadline', () => {
 
 describe('main.ts wiring', () => {
   const main = readFileSync(join(__dirname, 'main.ts'), 'utf8')
-
-  it('fetchJson and fetchPublicJson start the total deadline before http.request and arm it on the request', () => {
-    for (const name of ['function fetchJson(', 'function fetchPublicJson(']) {
-      const body = main.slice(main.indexOf(name), main.indexOf(name) + 9000)
-      const start = body.indexOf('startRequestDeadline(timeoutMs)')
-
-      expect(start).toBeGreaterThan(0)
-      expect(start).toBeLessThan(body.indexOf('client.request('))
-      expect(body).toMatch(/deadline\.arm\(req, reject\)/)
-    }
-  })
 
   it('fetchJson picks the probe pool when asked and fetchJsonForBackend forwards it', () => {
     expect(main).toMatch(/jsonAgentFor\(parsed\.protocol, options\.pool === 'probe' \? 'probe' : 'json'\)/)

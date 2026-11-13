@@ -1269,8 +1269,11 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
         ping_interval, ping_timeout = TUNNEL_WS_PING_INTERVAL_S, TUNNEL_WS_PING_TIMEOUT_S
 
     _uvicorn_console_logging()  # log_config=None: uvicorn's dictConfig would close every live handler
+    from hermes_cli.web_server_skew_exit import wrap_asgi_close_when_draining
     from hermes_cli.web_server_transport import transport_observed_app
 
+    # [daveey] A superseded always-on backend closes keep-alive sockets after each response (drain).
+    served_app = wrap_asgi_close_when_draining(served_app)
     forwarded_allow_ips = _dashboard_forwarded_allow_ips(_dash_cfg)
     served_app = transport_observed_app(
         served_app, proxy_headers=bool(app.state.auth_required), forwarded_allow_ips=forwarded_allow_ips)

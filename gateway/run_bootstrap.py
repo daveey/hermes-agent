@@ -527,6 +527,7 @@ async def _start_gateway_shutdown_tail(
     """Post-``wait_for_shutdown`` teardown; returns the process exit verdict (True = exit 0)."""
     from gateway.run import (_CRON_SHUTDOWN_DRAIN_TIMEOUT, _HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT, _await_thread_exit, _best_effort, _resolve_gateway_exit_verdict, _shutdown_mcp_servers_nonblocking, _stop_cron_provider, exit_deadline)
     tail_started = time.monotonic()
+    exit_deadline.mark_phase("tail_start")  # the slow-tail line's phase marks count from the stop's start
     # Control socket first: once shutdown begins we are no longer a truthful "serving here" answer and a
     # successor must be able to bind. Early-exit paths rely on the atexit cleanup_files hook instead.
     if _control_server is not None:
@@ -574,12 +575,23 @@ async def _start_gateway_shutdown_tail(
     # One line naming where a slow tail went: the stop's own phases are logged by stop(), and a tail that
     # outlived a core update's wait was otherwise unattributable (hermes-hub 2026-11-13 01:58:45-01:59:29Z).
     tail_s = time.monotonic() - tail_started
+    exit_deadline.mark_phase("tail_done")
     if tail_s >= _SLOW_TAIL_LOG_S:
-        exit_deadline.mark_phase("tail_done")
-        logger.warning("Shutdown tail took %.1fs (phase marks since stop began: %s)", tail_s, exit_deadline.phases())
+        logger.warning("Shutdown tail took %.1fs (phase marks since stop began, tail_start..tail_done: %s)",
+                       tail_s, exit_deadline.phases())
     # The failure verdict comes AFTER the cooperative teardown: returning early here leaked the
     # cron ticker + housekeeping threads (and open MCP connections) for embedded callers (#12175).
-    return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
+    # Then asyncio.run's shutdown and start_gateway's outer finally are bounded to a core update's exit
+    # target too: they are no cooperative waits, and a wedged executor join held the exit for 300s.
+    from gateway.run import _exit_after_graceful_shutdown
+    try:
+        verdict = _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
+    except SystemExit as exc:
+        exit_deadline.bound_post_tail(
+            0 if exc.code is None else exc.code if isinstance(exc.code, int) else 1, _exit_after_graceful_shutdown)
+        raise
+    exit_deadline.bound_post_tail(0 if verdict else 1, _exit_after_graceful_shutdown)
+    return verdict
 
 
 
@@ -842,6 +854,7 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
         _run_planned_stop_watcher,
         _start_gateway_make_restart_signal_handler,
         asyncio,
+        exit_deadline,
         load_gateway_config_for_runner,
         os,
         threading,
@@ -1044,6 +1057,7 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
         return verdict
 
     finally:
+        exit_deadline.mark_phase("outer_finally")  # then asyncio.run's own shutdown, then exit_funnel
         try:
             if runner is not None:
                 from gateway.run_runtime import drain_gateway_runtime
@@ -1058,6 +1072,6 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
             if _planned_stop_watcher_stop is not None:
                 _planned_stop_watcher_stop.set()
             if _control_server is not None:
-                await _control_server.stop()
+                await _control_server.stop(close_wait_s=exit_deadline.clamp_wait(_CONTROL_STOP_TIMEOUT_S, 0.0))
             remove_pid_file()
             release_gateway_runtime_lock()

@@ -405,9 +405,19 @@ def _seed_tree(src: Path, dst: Path) -> None:
 
 
 def uv_cache_path() -> Path:
-    """Where the hermes-owned uv cache lives; unlike uv_cache_dir(), never seeds or writes."""
-    from hermes_constants import get_default_hermes_root
+    """Where the hermes-owned uv cache lives; unlike uv_cache_dir(), never seeds or writes.
 
+    A custom ``HERMES_HOME`` on the account home's filesystem shares the account's cache: uv
+    hard-links each environment's files out of its cache, so a per-home cache made every fresh
+    home's environments cost their full size again. uv locks its cache, and entries are
+    content-keyed, so two homes never disagree about one."""
+    from hermes_constants import get_default_hermes_root
+    from pm.environments import account_home_root
+
+    account = account_home_root()
+    shared = account / "cache" / "uv" if account is not None else None
+    if shared is not None and os.access(shared, os.W_OK):
+        return shared
     return get_default_hermes_root() / "cache" / "uv"
 
 

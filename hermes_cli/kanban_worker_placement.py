@@ -106,7 +106,8 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``,
     non-portable work, or when no active, unheld machine carries the label. Courier and origin-bound creates queue
     too: chat ownership pins storage, not execution (t_01a1d0571c2f07d6). On a pool worker a built-in local-marker
-    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`). [daveey]
+    hit queues too, with its group's labels and a ``note`` (:func:`unmet_markers`), but only when one active, unheld
+    machine holds the whole label set (queue, group and coordination labels); else the local keep stands. [daveey]
     """
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
@@ -128,6 +129,8 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     if unmet is None:
         return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}
     extra = extra | unmet["labels"]
+    if not placement.label_machines([label, *extra]):
+        return None  # no live machine holds every label: nobody could claim it, so keep today's local keep
     return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "note": unmet["note"],
             "why": QUEUED_WHY.format(label=label) + UNMET_WHY.format(hit=unmet["hit"], gateway=gateway)}
 
@@ -525,8 +528,12 @@ def _selfcheck_unrefused(key, row, labels, why):
 
 
 def _remember_selfcheck_refusal(key, revision, why, exc):
-    """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead)."""
-    if why is None or rejection_code(exc) == "not_claimable":
+    """Record a Board refusal of a self-check repin (``not_claimable`` is :data:`_refused`'s backoff instead).
+
+    Only a coded 4xx is the Board's answer: a 5xx/429 (an outage) or an uncoded body is retried on the next tick."""
+    status, code = getattr(exc, "status", None), rejection_code(exc)
+    transient = type(status) is not int or not 400 <= status <= 499 or status == 429
+    if why is None or transient or code in (None, "not_claimable"):
         return
     _selfcheck_refused[key] = revision  # popped by _selfcheck_unrefused first, so this is the newest entry
     if len(_selfcheck_refused) > 1024:  # cards that left the query never come back to clear theirs

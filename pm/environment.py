@@ -437,7 +437,9 @@ class PythonEnvironment:
         # uv writes no __pycache__ (pip does): without --compile-bytecode the first import
         # of every module in the foreground of a user request compiles it (#100461).
         command = ["sync", "--locked" if locked else "--frozen", "--all-packages",
-                   "--python", str(self.python), "--compile-bytecode"]
+                   "--python", str(self.python)]
+        if self._compile_bytecode():
+            command.append("--compile-bytecode")
         if no_default_groups:
             command.append("--no-default-groups")
         if all_extras:
@@ -459,6 +461,21 @@ class PythonEnvironment:
             "sync", lambda: self._sync_attempt(command, cwd=source, timeout=timeout))
         if result.returncode:
             raise classify_uv_failure("sync", result.returncode, result.stderr or result.stdout)
+
+    def _compile_bytecode(self) -> bool:
+        """Compile eagerly, except an environment of a home that borrows the account's state.
+
+        Every other file of such an environment is a link into the account's uv cache; its
+        bytecode is the one copy it would own, ~70 MiB per environment, mostly for modules a
+        test or review run never imports. Those compile on first import instead."""
+        from pm.environments import account_home_root, installs_root
+
+        if account_home_root() is None:
+            return True
+        try:
+            return not self.destination.resolve().is_relative_to(installs_root().resolve())
+        except OSError:
+            return True
 
     def _sync_attempt(self, command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess:
         result = self._run(command, cwd=cwd, timeout=timeout)

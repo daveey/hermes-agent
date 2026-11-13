@@ -86,11 +86,53 @@ def _published_store_entries(directory: Path) -> frozenset[str]:
     return frozenset(name for name in names if (directory / name).is_dir())
 
 
+def _snapshot_donor(source: Path) -> Path | None:
+    """A source snapshot the account home already holds for this checkout (or for its own).
+
+    Only a home borrowing the account's state has one (``account_home_root``): its snapshot
+    links the files the donor holds byte-for-byte instead of copying ~70 MiB of source again."""
+    from pm.environments import account_environment, account_home_root
+
+    account = account_home_root()
+    if account is None:
+        return None
+    for project in (source, account / "hermes-agent"):
+        environment = account_environment(project)
+        if environment is not None and (environment.parent / "workspace").is_dir():
+            return environment.parent / "workspace"
+    return None
+
+
+def _snapshot_copier(source: Path, donor: Path | None):
+    """``copytree``'s copy function: a link to the donor's copy of a file when it has the same
+    bytes and mode (snapshots are never written in place), else a real copy."""
+    if donor is None or os.name == "nt":
+        return shutil.copy2
+    import filecmp
+    import stat
+
+    def copy(src, dst, *, follow_symlinks=True):
+        twin = donor / Path(src).relative_to(source)
+        try:
+            mine, theirs = os.stat(src), os.lstat(twin)
+            if (stat.S_ISREG(theirs.st_mode) and theirs.st_size == mine.st_size
+                    and stat.S_IMODE(theirs.st_mode) == stat.S_IMODE(mine.st_mode)
+                    and filecmp.cmp(src, twin, shallow=False)):
+                os.link(twin, dst)
+                return dst
+        except (OSError, ValueError):
+            pass
+        return shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+
+    return copy
+
+
 def _copy_core_inputs(source: Path, destination: Path) -> None:
     """Build from a writable snapshot, never from signed/read-only source."""
     import fnmatch
     import tomllib
 
+    copy = _snapshot_copier(source, _snapshot_donor(source))
     metadata = tomllib.loads((source / "pyproject.toml").read_text(encoding="utf-8-sig"))
     project = metadata.get("project", {})
     setuptools = metadata.get("tool", {}).get("setuptools", {})
@@ -126,7 +168,7 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
                 and (entry.name in where_roots
                      or any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in package_roots))):
             target = destination / entry.name
-            shutil.copytree(entry, target, ignore=ignore)
+            shutil.copytree(entry, target, ignore=ignore, copy_function=copy)
     for name in files:
         entry = source / name
         if not entry.is_file() or entry.is_symlink():

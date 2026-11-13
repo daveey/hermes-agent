@@ -121,13 +121,15 @@ def _pause_when(home, event):
     threading.Thread(target=_issue, daemon=True).start()
 
 
-def _drive(home, tmp_path, monkeypatch, responses, slow):
+def _drive(home, tmp_path, monkeypatch, responses, slow, provider_call=None):
     record_turn_start(home, "session-key", "run the quick job")
     agent = _make_agent(tmp_path)
     session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
                "history_lock": threading.RLock()}
     model = _Model(responses, slow)
     agent.client.chat.completions.create.side_effect = model
+    if provider_call is not None:  # replaces the interruptible transport: how the cancel reaches the request
+        agent._interruptible_api_call = lambda api_kwargs, *a, **k: provider_call(agent, model)
     monkeypatch.setattr("model_tools.handle_function_call", lambda name, *a, **k: "quick result")
     reservation = af.reserve(home)  # the turn's admission reservation, as the Desktop backend takes it
     assert reservation is not None
@@ -168,6 +170,73 @@ def test_a_long_model_request_at_a_step_boundary_yields_and_the_turn_pauses(home
     assert result["messages"][-1]["role"] == "tool"
     assert not agent._interrupt_requested
     assert update_pause_cancel.in_flight(agent) == {}
+
+
+def _wait_for_cancel(agent, model):
+    """The slow request runs until the update's cancel lands on the agent (or ``SLOW_MODEL_S`` passes)."""
+    model.calls += 1
+    if model.calls == model.slow:
+        model.slow_started.set()
+        deadline = time.monotonic() + SLOW_MODEL_S
+        while not agent._interrupt_requested and time.monotonic() < deadline:
+            _TICK.wait(0.02)
+        model.slow_finished = not agent._interrupt_requested
+        return True
+    return False
+
+
+def _assert_paused_at_the_boundary(home, agent, model, result, took):
+    assert model.slow_started.is_set() and not model.slow_finished
+    assert took < SLOW_MODEL_S / 2
+    assert af.state(home)["reservations"] == 0
+    assert result["interrupted"] is True and result["paused_for_update"] == up.PAUSE_REASON
+    assert model.calls == 2  # the yield re-issues nothing: the refunded iteration pauses first
+    assert (read_turn_marker(home, "session-key") or {}).get("reason") == "core_update_pause"
+    assert result["messages"][-1]["role"] == "tool"  # no partial, error or interrupt row after the tool result
+    assert not agent._interrupt_requested
+    assert update_pause_cancel.in_flight(agent) == {}
+
+
+def test_a_cancel_surfacing_as_a_provider_error_yields_without_error_accounting(home, tmp_path, monkeypatch):
+    """[daveey] t_01a1d2bfdf5b5260 (PR #1827 review nits 1+2): a transport that turns the cancel into a provider
+    error (a closed connection, not InterruptedError) reaches handle_api_error. The turn still yields, and the
+    cancel is not an API failure: no request-error hook, offline wait, credential recovery or error-attempt log."""
+    from agent import turn_api_error
+
+    def provider_call(agent, model):
+        if _wait_for_cancel(agent, model):
+            raise ConnectionError("Connection closed by the cancelled request")
+        return model.responses.pop(0)
+
+    accounted = []
+    for name in ("wait_out_offline", "recover_after_classification", "log_api_error_attempt"):
+        real = getattr(turn_api_error, name)
+        monkeypatch.setattr(turn_api_error, name,
+                            lambda *a, _n=name, _real=real, **k: accounted.append(_n) or _real(*a, **k))
+    monkeypatch.setattr(AIAgent, "_invoke_api_request_error_hook",
+                        lambda self, **k: accounted.append("request_error_hook"))
+
+    agent, model, result, took = _drive(home, tmp_path, monkeypatch,
+                                        [_response(_call("call_1")), _response(), _response()], slow=2,
+                                        provider_call=provider_call)
+
+    _assert_paused_at_the_boundary(home, agent, model, result, took)
+    assert accounted == []
+
+
+def test_a_response_that_crosses_the_cancel_is_dropped_and_the_turn_pauses(home, tmp_path, monkeypatch):
+    """[daveey] t_01a1d2bfdf5b5260 (PR #1827 review nit 1): the request answers just as the update's cancel lands
+    (no exception at all). perform_api_call drops the response instead of acting on it with the pause pending."""
+    def provider_call(agent, model):
+        _wait_for_cancel(agent, model)
+        return model.responses.pop(0)  # the slow request's own answer arrives after the cancel
+
+    agent, model, result, took = _drive(home, tmp_path, monkeypatch,
+                                        [_response(_call("call_1")), _response(), _response()], slow=2,
+                                        provider_call=provider_call)
+
+    _assert_paused_at_the_boundary(home, agent, model, result, took)
+    assert len(model.responses) == 1  # the crossed answer was consumed and dropped, not run
 
 
 def test_the_first_model_request_is_not_a_boundary_and_is_left_alone(home, tmp_path, monkeypatch):

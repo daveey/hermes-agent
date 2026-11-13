@@ -205,6 +205,43 @@ def test_a_failed_self_check_still_screens_the_unjudged_cards(gws, hub_judge, po
     assert "denied-card self-check failed" in caplog.text
 
 
+def test_self_check_repins_a_card_whose_only_verdict_is_in_its_created_payload(gws, hub_judge, portable,
+                                                                             monkeypatch):
+    """The screen gates on ``pickup.verdict`` (the ``created`` payload's audit when no ``hub_admission`` event
+    exists), so the self-check reads the same verdict: red when it read only the events. ``record_created`` mirrors
+    the audit as an event (all 136 creation-time denies on the hub, 11-13, have one), so this is the fallback for a
+    card whose event is missing, not the usual path."""
+    import json
+    hub, _worker, _svc = gws
+    tid = _card(hub, wake_check=PROBE)
+    verdict = {k: v for k, v in STALE_KEPT.items() if k != "kept"}
+    with kb.write_txn(hub.conn):
+        (raw,) = hub.conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created'",
+                                  (tid,)).fetchone()
+        hub.conn.execute("UPDATE task_events SET payload = ? WHERE task_id = ? AND kind = 'created'",
+                         (json.dumps({**json.loads(raw), "hub_admission": verdict}), tid))
+    assert _events(hub.conn, tid, "hub_admission") == []
+    _waited(monkeypatch, 3 * 3600)
+    assert hac.screen(hub.conn).repinned == 1 and hub_judge.calls == []
+    [moved] = _events(hub.conn, tid, "moved")
+    assert moved["runs_on"][0] == POOL and moved["self_check"] == "hub_admission_denied"
+
+
+@pytest.mark.parametrize("case", ["dir_workspace", "host_repo"])
+def test_a_structurally_kept_card_skips_the_ready_since_read(gws, hub_judge, portable, monkeypatch, tmp_path, case):
+    """Per tick the self-check runs for every judged card still here; a keep reason that holds is read before the
+    ``ready_since`` events + runs scan, so a card kept for good costs no history read (red: read first)."""
+    hub, _worker, _svc = gws
+    kw, overrides, probe, *_ = _STAY[case]
+    if case == "dir_workspace":
+        kw = {**kw, "workspace_path": str(tmp_path / "ws")}
+    tid = _card(hub, wake_check=probe, verdict={**STALE_KEPT, **overrides}, **kw)
+    reads = []
+    monkeypatch.setattr(unclaimed, "ready_since", lambda conn, t, created_at=None: reads.append(t) or 0)
+    assert hac.screen(hub.conn).repinned == 0 and reads == []
+    assert _events(hub.conn, tid, "moved") == []
+
+
 def test_self_check_skips_a_card_that_changed_while_checked(gws, portable, monkeypatch):
     hub, _worker, _svc = gws
     tid = _card(hub, wake_check=PROBE, verdict=STALE_KEPT)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from datetime import UTC, datetime
@@ -731,6 +732,52 @@ def test_a_healthy_sweep_is_not_cut_short(monkeypatch, tmp_path):
     Clock(monkeypatch, d, 1.0)
     _main_env(monkeypatch)
     assert b.main() == 0 and len(f.posted) == 65
+
+
+def test_no_artifact_download_starts_once_the_budget_cannot_fit_it(monkeypatch, tmp_path):
+    """Two review-status artifacts; the first one's timed-out attempt leaves less than one attempt of budget: the
+    second artifact's download is never started (it would run past the wall-clock budget)."""
+    t = [0.0]
+    started = []
+
+    def download(token, repo, artifact, dest_dir):
+        started.append(artifact["name"])
+        t[0] += b.lc.DOWNLOAD_ATTEMPT_MAX_S
+        b.lc.last_download_error = "blob download timed out"
+
+    monkeypatch.setattr(b.lc, "_list_artifacts",
+                        lambda *a: [{"name": "review-status-ci-timings"}, {"name": "review-status-docker"}])
+    monkeypatch.setattr(b.lc, "_download_artifact", download)
+    monkeypatch.setattr(b.lc.tempfile, "gettempdir", lambda: str(tmp_path))
+    deadline = 1.5 * b.lc.DOWNLOAD_ATTEMPT_MAX_S
+    b.lc.fetch_all_review_statuses("t", "o/r", "1", strict=False, retry_delays=(),
+                                   sleep=lambda s: None, deadline=deadline, clock=lambda: t[0])
+    assert started == ["review-status-ci-timings"]
+    assert t[0] <= deadline
+
+
+def test_strict_refuses_an_artifact_the_budget_cannot_fit_after_a_good_one(monkeypatch, tmp_path):
+    """Strict snapshot: the first artifact downloads, but leaves less than one attempt of budget, so the second is
+    refused as unreadable (never started, never silently dropped from the snapshot)."""
+    t = [0.0]
+    started = []
+
+    def download(token, repo, artifact, dest_dir):
+        started.append(artifact["name"])
+        t[0] += b.lc.DOWNLOAD_ATTEMPT_MAX_S
+        path = Path(dest_dir) / f"{artifact['name']}.json"
+        path.write_text(json.dumps([{"source": artifact["name"], "results": []}]), encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(b.lc, "_list_artifacts",
+                        lambda *a: [{"name": "review-status-ci-timings"}, {"name": "review-status-docker"}])
+    monkeypatch.setattr(b.lc, "_download_artifact", download)
+    monkeypatch.setattr(b.lc.tempfile, "gettempdir", lambda: str(tmp_path))
+    with pytest.raises(RuntimeError, match="review-status-docker.*budget"):
+        b.lc.fetch_all_review_statuses("t", "o/r", "1", strict=True, retry_delays=(),
+                                       sleep=lambda s: None, deadline=1.5 * b.lc.DOWNLOAD_ATTEMPT_MAX_S,
+                                       clock=lambda: t[0])
+    assert started == ["review-status-ci-timings"]
 
 
 def test_a_failed_refresh_that_keeps_a_completed_snapshot_queues_no_re_refresh(monkeypatch, tmp_path):

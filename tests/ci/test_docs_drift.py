@@ -62,3 +62,5 @@ def test_open_section_keys_are_checked(drift, monkeypatch):
     monkeypatch.setattr(drift, "slash_commands", list)
     gaps = drift.find_gaps()["config"]
     assert "kanban.placement.auto_overridable_skill_markers" in gaps and "kanban.placement.route" not in gaps
+    # A placement key read as cfg.get(...) outside kanban_placement.py (the claim screen) counts too.
+    assert "kanban.placement.portable_wake_probes" in keys, keys

@@ -1,0 +1,264 @@
+"""Verified recoveries are scoped, generation-checked store transactions."""
+import time
+
+import pytest
+
+from tests.agent import test_anthropic_model_cooldowns as helpers
+
+pool = helpers.pool
+A, B, KEY = helpers.MODEL_A, helpers.MODEL_B, helpers.KEY
+
+
+def bench(pool, model=A):
+    pool.mark_exhausted_and_rotate(status_code=429, api_key_hint=KEY,
+        model=model, failure_reason="rate_limit", error_context={"reset_at": time.time() + 3600})
+    return pool.entries()[0]
+
+
+def test_healthy_selection_does_not_read_model_state(pool, monkeypatch):
+    from hermes_cli import auth
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("healthy selection must not read model state")
+    monkeypatch.setattr(auth, "read_credential_pool", unexpected_read)
+    assert pool.select(model=A) is not None
+
+
+def test_verified_recovery_clears_only_observed_model(pool):
+    from agent.credential_pool import load_pool
+    from hermes_cli.auth import read_credential_pool
+
+    bench(pool, B)
+    observed = bench(pool)
+    stale = load_pool("anthropic")
+    assert pool.clear_verified_model_cooldown(observed, A)
+    row = read_credential_pool("anthropic")[0]
+    assert A not in row["model_cooldowns"]
+    assert B in row["model_cooldowns"]
+    stale._persist()
+    assert A not in read_credential_pool("anthropic")[0]["model_cooldowns"]
+    assert A not in stale.entries()[0].model_cooldowns
+    assert pool.select(model=A) is not None
+    assert pool.select(model=B) is None
+
+
+def test_new_failure_after_clear_still_benches(pool):
+    from agent.credential_pool import load_pool
+    from hermes_cli.auth import read_credential_pool
+
+    observed = bench(pool)
+    stale = load_pool("anthropic")
+    assert pool.clear_verified_model_cooldown(observed, A)
+    bench(stale)
+    pool._persist()
+    assert A in read_credential_pool("anthropic")[0]["model_cooldowns"]
+    assert pool.select(model=A) is None
+
+
+@pytest.mark.parametrize("change", ["token", "refresh", "until", "stamp", "cooldown_until",
+                                     "dead", "billing", "disabled"])
+def test_verified_recovery_refuses_changed_or_unsafe_row(pool, change):
+    from hermes_cli import auth
+    from agent.credential_pool_disabled import set_credential_disabled
+
+    observed = bench(pool)
+    if change == "disabled":
+        set_credential_disabled("anthropic", observed, True)
+    else:
+        with auth._auth_store_lock():
+            store = auth._load_auth_store()
+            row = store["credential_pool"]["anthropic"][0]
+            updates = {
+                "token": {"access_token": "peer-token"},
+                "refresh": {"refresh_token": "peer-refresh"},
+                "until": {"model_cooldowns": {A: row["model_cooldowns"][A] + 1}},
+                "stamp": {"model_cooldown_recorded_at": {A: row["model_cooldown_recorded_at"][A] + 1}},
+                "cooldown_until": {"cooldown_until": time.time() + 7200},
+                "dead": {"last_status": "dead"},
+                "billing": {"last_status": "exhausted", "last_error_code": 402, "last_error_reason": "billing"},
+            }
+            row.update(updates[change])
+            auth._save_auth_store(store)
+    before = auth.read_credential_pool("anthropic")
+    assert not pool.clear_verified_model_cooldown(observed, A)
+    assert auth.read_credential_pool("anthropic") == before
+
+
+def test_codex_recovery_preserves_other_model_benches(pool):
+    from agent.credential_pool import CredentialPool, PooledCredential
+    from hermes_cli import auth
+
+    row = pool.entries()[0].to_dict()
+    row.update(last_status="exhausted", last_status_at=time.time() - 60,
+               last_error_code=429, last_error_reset_at=time.time() + 3600,
+               model_cooldowns={B: time.time() + 7200})
+    auth.write_credential_pool("openai-codex", [row])
+    codex = CredentialPool("openai-codex", [PooledCredential.from_dict("openai-codex", row)])
+    observed = codex.entries()[0]
+    assert codex.clear_verified_model_cooldown(observed, A)
+    recovered = auth.read_credential_pool("openai-codex")[0]
+    assert recovered["last_status"] == "ok"
+    assert B in recovered["model_cooldowns"]
+    # A stale row cannot resurrect the account-wide 429 either.
+    auth.write_credential_pool("openai-codex", [row])
+    assert auth.read_credential_pool("openai-codex")[0]["last_status"] == "ok"
+    assert B in auth.read_credential_pool("openai-codex")[0]["model_cooldowns"]
+
+
+@pytest.mark.parametrize("unsafe", ["dead", "billing", "billing_unverified", "payment", "disabled"])
+def test_verified_recovery_never_clears_unsafe_observed_generation(pool, unsafe):
+    from agent.credential_pool import CredentialPool, PooledCredential
+    from agent.credential_pool_disabled import set_credential_disabled
+    from hermes_cli import auth
+
+    row = pool.entries()[0].to_dict()
+    row.update(last_status="exhausted", last_status_at=time.time(), last_error_code=429,
+               last_error_reset_at=time.time() + 3600, model_cooldowns={A: time.time() + 3600})
+    if unsafe == "dead":
+        row["last_status"] = "dead"
+    elif unsafe == "payment":
+        row["last_error_code"] = 402
+    elif unsafe != "disabled":
+        row["failure_reason"] = unsafe
+    auth.write_credential_pool("openai-codex", [row])
+    codex = CredentialPool("openai-codex", [PooledCredential.from_dict("openai-codex", row)])
+    observed = codex.entries()[0]
+    if unsafe == "disabled":
+        set_credential_disabled("openai-codex", observed, True)
+    before = auth.read_credential_pool("openai-codex")
+    assert not codex.clear_verified_model_cooldown(observed, A)
+    assert auth.read_credential_pool("openai-codex") == before
+
+
+def test_legacy_model_bench_loses_to_external_reset(pool):
+    from hermes_cli import auth
+    from agent.credential_pool import load_pool
+
+    row = pool.entries()[0].to_dict()
+    row["model_cooldowns"] = {A: time.time() + 3600}
+    auth.write_credential_pool("anthropic", [row])
+    stale = load_pool("anthropic")
+    reset = {**row, "model_cooldowns": {}, "status_cleared_at": time.time()}
+    auth.write_credential_pool("anthropic", [reset], status_cleared_ids=[row["id"]])
+    stale._persist()
+    stale._persist()
+    assert not auth.read_credential_pool("anthropic")[0]["model_cooldowns"]
+    bench(stale)
+    assert stale.entries()[0].model_cooldowns[A] > time.time()
+
+
+def test_new_account_failure_does_not_erase_model_reset_receipt():
+    from hermes_cli.auth_pool_merge import _merge_disk_cooldown_state
+
+    memory = {"id": "seat", "status_cleared_at": 200.0, "model_cooldowns": {}}
+    disk = {"id": "seat", "status_cleared_at": 100.0, "last_status": "dead", "last_status_at": 300.0}
+    merged = _merge_disk_cooldown_state(memory, disk, "anthropic")
+    assert merged["status_cleared_at"] == 200.0
+    stale = {"id": "seat", "model_cooldowns": {A: time.time() + 3600},
+             "model_cooldown_recorded_at": {A: 150.0}}
+    assert not _merge_disk_cooldown_state(stale, merged, "anthropic")["model_cooldowns"]
+
+
+def _borrowed_pool(source, token="sk-ant-oat-live-secret"):
+    from agent.credential_pool import CredentialPool, PooledCredential
+    from hermes_cli import auth
+
+    now = time.time()
+    row = {"id": "borrowed", "label": source, "auth_type": "oauth", "priority": 0, "source": source,
+           "access_token": token, "refresh_token": "rt-live-secret",
+           "model_cooldowns": {A: now + 3600}, "model_cooldown_recorded_at": {A: now}}
+    auth.write_credential_pool("anthropic", [row])
+    stored = auth.read_credential_pool("anthropic")[0]
+    assert "access_token" not in stored and stored["secret_fingerprint"]  # sanitized on disk
+    live = PooledCredential.from_dict("anthropic", row)
+    return CredentialPool("anthropic", [live]), live
+
+
+@pytest.mark.parametrize("source", ["env:ANTHROPIC_TOKEN", "claude_code"])
+def test_sanitized_borrowed_row_recovers_by_fingerprint_without_persisting_secret(pool, source):
+    from hermes_cli import auth
+
+    borrowed, observed = _borrowed_pool(source)
+    assert borrowed.clear_verified_model_cooldown(observed, A)
+    stored = auth.read_credential_pool("anthropic")[0]
+    assert A not in stored["model_cooldowns"]
+    assert "access_token" not in stored and "refresh_token" not in stored
+    assert "live-secret" not in str(auth._load_auth_store())
+    kept = borrowed.entries()[0]  # hydrated secret stays in memory
+    assert kept.runtime_api_key == "sk-ant-oat-live-secret" and kept.refresh_token == "rt-live-secret"
+    assert A not in (kept.model_cooldowns or {})
+
+
+@pytest.mark.parametrize("source", ["env:ANTHROPIC_TOKEN", "claude_code"])
+@pytest.mark.parametrize("change", ["fingerprint", "source", "secret_source", "base_url", "auth_type", "disabled"])
+def test_sanitized_borrowed_row_refuses_changed_identity(pool, source, change):
+    from agent.credential_pool_disabled import set_credential_disabled
+    from hermes_cli import auth
+
+    borrowed, observed = _borrowed_pool(source)
+    if change == "disabled":
+        set_credential_disabled("anthropic", observed, True)
+    else:
+        with auth._auth_store_lock():
+            store = auth._load_auth_store()
+            row = store["credential_pool"]["anthropic"][0]
+            if change == "fingerprint":
+                row["secret_fingerprint"] = "sha256:0000000000000000"
+            elif change == "source":
+                row["source"] = "env:OTHER" if source == "claude_code" else "claude_code"
+            else:
+                row[change] = {"secret_source": "peer-secret-location",
+                               "base_url": "https://peer.example.com/v1", "auth_type": "api_key"}[change]
+            auth._save_auth_store(store)
+    before = auth.read_credential_pool("anthropic")
+    assert not borrowed.clear_verified_model_cooldown(observed, A)
+    assert auth.read_credential_pool("anthropic") == before
+
+
+@pytest.mark.parametrize("source", ["manual", "hermes_pkce"])
+def test_owned_row_without_secret_cannot_recover_by_borrowed_fingerprint(pool, source):
+    from agent.credential_pool import CredentialPool, PooledCredential
+    from agent.credential_persistence import fingerprint_secret_value, is_borrowed_credential_source
+    from hermes_cli import auth
+
+    observed = bench(pool)
+    observed.source = source
+    row = observed.to_dict()
+    # A damaged owned row may retain a fingerprint, but is not a borrowed reference.
+    row.pop("access_token", None)
+    row.pop("refresh_token", None)
+    row["secret_fingerprint"] = fingerprint_secret_value(observed.runtime_api_key)
+    auth.write_credential_pool("anthropic", [row])
+    current = PooledCredential.from_dict("anthropic", auth.read_credential_pool("anthropic")[0])
+    assert not current.runtime_api_key
+    assert not is_borrowed_credential_source(current.source, "anthropic")
+    assert current.source == observed.source
+    assert current.extra["secret_fingerprint"] == fingerprint_secret_value(observed.runtime_api_key)
+    owned = CredentialPool("anthropic", [observed])
+    before = auth._load_auth_store()
+    assert not owned.clear_verified_model_cooldown(observed, A)
+    assert auth._load_auth_store() == before
+    assert A in (owned.entries()[0].model_cooldowns or {})
+
+
+def test_recovery_refuses_disabled_observation_when_current_label_is_enabled(pool):
+    from agent.credential_pool import PooledCredential
+    from agent.credential_pool_disabled import disabled_keys, matches
+    from hermes_cli import auth
+
+    observed = bench(pool)
+    with auth._auth_store_lock():
+        store = auth._load_auth_store()
+        # Label drift is not a CAS identity change. A label-only disable record
+        # matches the verified snapshot but not the renamed persisted row.
+        store["credential_pool"]["anthropic"][0]["label"] = "renamed-seat"
+        store["disabled_credentials"] = {"anthropic": [{"label": observed.label}]}
+        auth._save_auth_store(store)
+    before = auth._load_auth_store()
+    current = PooledCredential.from_dict("anthropic", before["credential_pool"]["anthropic"][0])
+    keys = disabled_keys("anthropic")
+    assert not matches(current, keys)
+    assert matches(observed, keys)
+    assert current.runtime_api_key == observed.runtime_api_key
+    assert not pool.clear_verified_model_cooldown(observed, A)
+    assert auth._load_auth_store() == before
+    assert A in pool.entries()[0].model_cooldowns

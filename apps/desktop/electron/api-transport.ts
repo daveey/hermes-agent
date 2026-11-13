@@ -109,6 +109,16 @@ function multipartBody(upload: any) {
   return { body, contentType: `multipart/form-data; boundary=${boundary}` }
 }
 
+// [daveey] Slowest upload throughput a request body is budgeted for: 1 Mbit/s
+// (125 bytes per ms). The 2026-11-12 guest link ran ~1-2 Mbps, where a 25 MB
+// attachment takes 100-200 s, far past the 30 s JSON deadline.
+const REQUEST_BODY_MIN_BYTES_PER_MS = 125
+
+/** Total deadline for one attempt: the caller's timeout plus the time its body needs at the minimum throughput. */
+function requestDeadlineBudgetMs(timeoutMs: number, bodyBytes = 0): number {
+  return timeoutMs + Math.ceil(Math.max(0, bodyBytes) / REQUEST_BODY_MIN_BYTES_PER_MS)
+}
+
 /**
  * [daveey] Bound one JSON request by a TOTAL deadline, not only an idle one.
  *
@@ -124,26 +134,71 @@ function multipartBody(upload: any) {
  * and retry classification are unchanged: a timeout is not a transient
  * transport error) and only then is the request destroyed, so a socket error
  * raised by the destroy can't win the race. The idle timeout is kept too.
+ *
+ * Pass the request body's size to `arm`: the total budget grows by the time
+ * that body needs at REQUEST_BODY_MIN_BYTES_PER_MS (requestDeadlineBudgetMs),
+ * so a large upload (kanban attachments, up to 25 MB) on a slow link is not
+ * cut at the JSON budget. The idle timer still catches a stalled upload.
  */
 function startRequestDeadline(timeoutMs: number, now: () => number = Date.now) {
   const startedAt = now()
 
   return {
-    arm(req: http.ClientRequest, onTimeout: (error: Error) => void): void {
-      const expire = () => {
-        const error = requestTimeoutError(timeoutMs)
+    arm(req: http.ClientRequest, onTimeout: (error: Error) => void, bodyBytes = 0): void {
+      const budgetMs = requestDeadlineBudgetMs(timeoutMs, bodyBytes)
+
+      const expire = (afterMs: number) => {
+        const error = requestTimeoutError(afterMs)
         onTimeout(error)
         req.destroy(error)
       }
 
-      const timer = setTimeout(expire, Math.max(0, timeoutMs - (now() - startedAt)))
+      const timer = setTimeout(() => expire(budgetMs), Math.max(0, budgetMs - (now() - startedAt)))
       const clear = () => clearTimeout(timer)
 
       req.once('close', clear)
       req.once('response', (res: http.IncomingMessage) => res.once('close', clear))
-      req.setTimeout(timeoutMs, expire)
+      // The idle timer stays at the caller's timeout whatever the body size: a stalled upload still fails fast.
+      req.setTimeout(timeoutMs, () => expire(timeoutMs))
     }
   }
+}
+
+type RequestDeadline = ReturnType<typeof startRequestDeadline>
+
+/**
+ * [daveey] Put one JSON request on the wire under its already-started total deadline (fetchJson / fetchPublicJson).
+ *
+ * Taking the started deadline and an `open` callback (the `http.request` call) makes the ordering structural: the
+ * clock started before the request was created. The body is passed once and used both to arm the deadline (its byte
+ * size grows the total budget) and as what is written, so the budget always matches the bytes sent. Marks
+ * `requestState.bodySent` before writing: from here a transport error can't prove the server didn't process it.
+ */
+function sendWithRequestDeadline(
+  deadline: RequestDeadline,
+  open: () => http.ClientRequest,
+  {
+    body,
+    onError,
+    requestState
+  }: { body?: Buffer; onError: (error: Error) => void; requestState?: { bodySent?: boolean } }
+): http.ClientRequest {
+  const req = open()
+
+  req.on('error', onError)
+  deadline.arm(req, onError, body?.length)
+
+  if (requestState) {
+    requestState.bodySent = true
+  }
+
+  if (body) {
+    req.write(body)
+  }
+
+  req.end()
+
+  return req
 }
 
 // Transient transport errors: retry MAY be safe (subject to verb gating).
@@ -364,7 +419,9 @@ export {
   multipartBody,
   readJsonErrorBody,
   readStatusCode,
+  requestDeadlineBudgetMs,
   requestTimeoutError,
+  sendWithRequestDeadline,
   shouldRetryRequest,
   startRequestDeadline,
   withRetry

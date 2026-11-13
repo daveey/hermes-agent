@@ -2274,11 +2274,8 @@ def _dispatch_once_locked(
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board, dry_run=dry_run,
     )
     if not dry_run:
-        # Agent-owned blocks get one triage respawn after 2h; standing human asks are re-checked every tick.
-        from hermes_cli.kanban_block_policy import sweep_blocked_cards
-        sweep_blocked_cards(conn, result)
-        _guard_notice.sweep_remote_guard_holds(conn, result)
-        _parent_unclaimed.safe_sweep(conn)  # before the spawn cap: a capped host is when a parent starves [daveey]
+        from hermes_cli.kanban_dispatch_maintenance import sweep
+        sweep(conn, result, _guard_notice, _parent_unclaimed)
     from hermes_cli.kanban_gateway_drain import dispatch_paused
     if dispatch_paused():
         _kb._log.info('kanban dispatcher: scheduling paused — gateway draining or restart requested')

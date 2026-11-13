@@ -63,6 +63,7 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
             queue_hint = None
         details = kqp.detail_fields(conn, task, args.get("board"))
     from hermes_cli.kanban_hub_admission_placement import describe, latest_verdict
+    from hermes_cli.kanban_wake_summary import wakes
     verdict = latest_verdict(conn, tid)
     if verdict and details.get("queue_note"):
         details["queue_note"] = f"{details['queue_note']} ({describe(verdict)})"
@@ -71,6 +72,7 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
         "source": "replica" if replica else "live",
         **capsule,
         "queue_reason": kqr.latest(conn, tid),
+        "wakes": wakes(conn, task),  # [daveey] {check, next_probe_at, backstop_at} while scheduled
         **details,
         **({"hub_admission": verdict} if verdict else {}),
         **({"queue_hint": queue_hint} if queue_hint else {}),

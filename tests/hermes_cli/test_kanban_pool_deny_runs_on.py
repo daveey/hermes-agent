@@ -143,8 +143,9 @@ def test_a_crash_or_start_refusal_record_still_waits_for_a_completed_round(hub):
 # --- dispatcher self-check -------------------------------------------------------------------------------------
 
 class RecordingHub:
-    def __init__(self, *, refuse_repin=None):
+    def __init__(self, *, refuse_repin=None, refuse_status=403, refuse_detail=None):
         self.reserves, self.repins, self.refuse_repin = [], [], refuse_repin
+        self.refuse_status, self.refuse_detail = refuse_status, refuse_detail
 
     def reserve(self, board, **body):
         self.reserves.append(body)
@@ -153,7 +154,7 @@ class RecordingHub:
     def repin(self, board, **body):
         self.repins.append(body)
         if self.refuse_repin:
-            raise ksc.HubError(403, json.dumps({"error": self.refuse_repin}))
+            raise ksc.HubError(self.refuse_status, self.refuse_detail or json.dumps({"error": self.refuse_repin}))
         return {"version": 9, "runs_on": body["runs_on"], "placement_policy": None}
 
 
@@ -244,6 +245,28 @@ def test_a_refused_self_check_repin_falls_back_to_the_reserve_until_the_revision
     assert [r["expected_revision"] for r in board.repins] == [4, 5]
     assert len(board.reserves) == 1
     assert (BOARD, tid) not in wp._selfcheck_refused
+
+
+@pytest.mark.parametrize("status,body", [(503, "upstream unavailable"), (502, '{"error": "bad_gateway"}'),
+                                         (429, '{"error": "rate_limited"}')])
+def test_a_transient_board_error_on_a_self_check_repin_is_retried_next_tick(hub, no_pull, status, body):
+    """A 5xx/429 is an outage, not the Board's answer: the next tick asks the repin again instead of reserving."""
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    board = RecordingHub(refuse_repin="transient", refuse_status=status, refuse_detail=body)
+    for _ in range(2):
+        wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert [(r["task_id"], r["expected_revision"]) for r in board.repins] == [(tid, 4)] * 2
+    assert board.reserves == [] and not wp._selfcheck_refused
+
+
+def test_a_forbidden_self_check_repin_still_reserves_at_the_refused_revision(hub, no_pull):
+    _home, conn = hub
+    tid = _stranded(conn, age=36 * 60)
+    board = RecordingHub(refuse_repin="forbidden", refuse_status=403)
+    for _ in range(2):
+        wp.reevaluate(conn, board, BOARD, ME, cfg=CFG)
+    assert len(board.repins) == 1 and [r["task_id"] for r in board.reserves] == [tid]
 
 
 def test_a_refused_explicit_move_repin_is_not_downgraded_to_a_reserve(hub, no_pull):

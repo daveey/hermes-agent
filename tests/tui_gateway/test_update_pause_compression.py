@@ -382,8 +382,8 @@ def test_replayed_prelude_does_not_reuse_previous_turn_call_count(home, tmp_path
 def _release_pause_at_boundary(home, streaming, monkeypatch):
     original = up.boundary_pause_hook
 
-    def factory(*args):
-        hook = original(*args)
+    def factory(*args, **kwargs):
+        hook = original(*args, **kwargs)
 
         def released(**kwargs):
             if streaming.outcome == "cancelled":

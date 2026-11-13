@@ -389,7 +389,14 @@ def kanban_path_is_fenced(path: os.PathLike[str] | str) -> bool:
     """Whether Kanban mutations at *path* (a board DB or board-metadata root) are denied for this
     process: always for an in-process delegate child (the parent's own board); for a spawned
     descendant only when *path* is the dispatcher-pinned ``HERMES_KANBAN_DB`` or lies under the
-    fenced root the marker carries. A legacy ``"1"`` marker fences everything."""
+    fenced root the marker carries. A legacy ``"1"`` marker fences everything.
+
+    One exemption under the root: an entry of the root's auto-pruned scratch dir
+    (``<root>/cache/scratch``, ``hermes_constants.get_scratch_dir(root)``, the worker's ``TMPDIR``), so a
+    throwaway probe home made with ``mktemp -d "$TMPDIR/kanban-probe.XXXX"`` is writable and the 24 h idle
+    pruner removes it. A probe home in ``~`` needed an ``rm -rf`` that unattended runs may not do and leaked
+    0.1-2.3 GB per probe on pool workers (t_01a1d3b5bfc898e7). Symlinks resolve first, and the pinned DB,
+    the legacy marker and in-process delegate children never get the exemption. [daveey]"""
     if _DELEGATED_CHILD_CONTEXT.get():
         return True
     marker = _live_env_marker()
@@ -402,11 +409,14 @@ def kanban_path_is_fenced(path: os.PathLike[str] | str) -> bool:
     pinned = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if pinned and target == Path(pinned).expanduser().resolve():
         return True
+    root = Path(marker).expanduser().resolve()
     try:
-        target.relative_to(Path(marker).expanduser().resolve())
+        target.relative_to(root)
     except ValueError:
         return False
-    return True
+    # Not resolved: a scratch dir that is itself a symlink to elsewhere under the root exempts nothing there.
+    scratch = root / "cache" / "scratch"
+    return target == scratch or not target.is_relative_to(scratch)
 
 
 @overload

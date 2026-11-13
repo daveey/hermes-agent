@@ -244,10 +244,75 @@ def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = 
     return thread
 
 
+# [daveey] Keep-alive drain of a superseded always-on backend. Its clients' keep-alive sockets stay pinned
+# to it through the TCP-splice proxy, and retiring with them open hangs up every in-flight request
+# (Desktop then tears down and redials its SSH transport). While draining, every HTTP response carries
+# ``Connection: close`` so each pinned socket closes cleanly after its next response and the client's next
+# request opens a new proxy connection to the active backend. The watchdog asks the fence only once the
+# backend was superseded for DRAIN_MIN_S (> uvicorn's 5 s keep-alive timeout + one poll, so idle pinned
+# sockets are gone) and has no open HTTP connection, or after DRAIN_CAP_S (a long stream, unreadable state).
+DRAIN_MIN_S = 8.0
+DRAIN_CAP_S = 30.0
+_DRAINING = threading.Event()
+_CLOSE = (b"connection", b"close")
+
+
+def draining() -> bool:
+    return _DRAINING.is_set()
+
+
+def _close_headers(headers) -> list:
+    """Response headers with ``connection: close`` (replacing a keep-alive value; an upgrade is kept)."""
+    out, seen = [], False
+    for name, value in headers or []:
+        if bytes(name).lower() == b"connection":
+            if b"upgrade" in bytes(value).lower():
+                return list(headers)
+            if not seen:
+                out.append(_CLOSE)
+                seen = True
+            continue
+        out.append((name, value))
+    if not seen:
+        out.append(_CLOSE)
+    return out
+
+
+def wrap_asgi_close_when_draining(app, *, is_draining: Callable[[], bool] = draining):
+    """ASGI wrapper: while this backend drains, HTTP responses ask the client to close the connection.
+    WebSocket and lifespan scopes pass straight through; a no-op unless the superseded watchdog drains."""
+
+    async def _app(scope, receive, send):
+        if scope.get("type") != "http":
+            return await app(scope, receive, send)
+
+        async def _send(message):
+            if message.get("type") == "http.response.start" and is_draining():
+                message = {**message, "headers": _close_headers(message.get("headers"))}
+            await send(message)
+
+        return await app(scope, receive, _send)
+
+    return _app
+
+
+def open_http_connections(server) -> Optional[int]:
+    """Open uvicorn HTTP connections (keep-alive or in flight; WebSockets excluded), or None when unreadable.
+    The set is mutated on the event loop thread, so it is copied and a concurrent change reads as unknown."""
+    try:
+        conns = list(server.server_state.connections)
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+    return sum(1 for c in conns if type(c).__module__.startswith("uvicorn.protocols.http"))
+
+
 def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callable[[int], bool]] = None,
                               pending: Optional[Callable[[int], bool]] = None,
                               fence=None, poll_s: float = SUPERSEDED_POLL_S,
-                              max_polls: Optional[int] = None) -> threading.Thread:
+                              max_polls: Optional[int] = None,
+                              http_connections: Optional[Callable[[], Optional[int]]] = None,
+                              drain_min_s: float = DRAIN_MIN_S, drain_cap_s: float = DRAIN_CAP_S,
+                              clock: Callable[[], float] = time.monotonic) -> threading.Thread:
     """[daveey] An always-on blue/green backend (``hermes_cli/always_on_rollover``) runs this INSTEAD of the
     code-skew watchdog: the roller replaces it with a warmed successor, so it must not exit on skew before
     that successor serves. It retires (through the same idle fence) once ``active.json`` names neither its
@@ -259,12 +324,30 @@ def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callabl
 
     check: Callable[[int], bool] = superseded or always_on_rollover.is_superseded
     on_the_way: Callable[[int], bool] = pending or always_on_rollover.successor_pending
+    count: Callable[[], Optional[int]] = http_connections or (lambda: open_http_connections(server))
+    since: list[Optional[float]] = [None]
 
     def _observe() -> Optional[str]:
         if not check(port):
+            if since[0] is not None:
+                _log.info("always-on backend :%s is active again; keep-alive drain stopped", port)
+            since[0] = None
+            _DRAINING.clear()
             return None
+        now = clock()
+        if since[0] is None:
+            since[0] = now
+            _DRAINING.set()
+            _log.info("always-on backend :%s superseded; draining keep-alive connections", port)
+        elapsed = now - since[0]
+        if elapsed < drain_cap_s:
+            if elapsed < drain_min_s:
+                return None
+            open_now = count()
+            if open_now is None or open_now > 0:
+                return None
         return (f"always-on backend :{port} was superseded by a warmed successor (active.json); "
-                "retiring now that it is idle.")
+                f"retiring now that it is idle (drained {elapsed:.0f}s).")
 
     thread = _run_retirement_watchdog(server, observe=_observe, fence=fence, poll_s=poll_s,
                                       max_polls=max_polls, thread_name="always-on-superseded-watchdog",

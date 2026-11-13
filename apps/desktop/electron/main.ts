@@ -54,6 +54,7 @@ import {
   multipartBody,
   readJsonErrorBody,
   readStatusCode,
+  sendWithRequestDeadline,
   startRequestDeadline,
   withRetry
 } from './api-transport'
@@ -5247,98 +5248,92 @@ function fetchJson(url, token, options: any = {}) {
           return
         }
 
-        const req = client.request(
-          parsed,
-          {
-            agent,
-            method: options.method || 'GET',
-            headers: {
-              ...headersForRemoteRequest(url),
-              // [daveey] Transcript pages: slim + gzip when the backend supports it (display-transcript.ts).
-              ...displayTranscriptHeaders(options.method, url),
-              ...(options.headers || {}),
-              'Content-Type': contentType,
-              ...(nativeHeaders || { 'X-Hermes-Session-Token': token }),
-              // RFC 8252 native flow authenticates the gated gateway with a bearer
-              // token instead of the loopback session-token header. When
-              // ``options.bearer`` is set we send Authorization: Bearer <token>;
-              // the gateway's OAuth gate verifies it via the provider stack with
-              // no cookie involved.
-              ...(options.bearer ? { Authorization: `Bearer ${options.bearer}` } : {}),
-              ...(body ? { 'Content-Length': String(body.length) } : {})
-            }
-          },
-          res => {
-            const chunks = []
-            res.on('error', reject)
-            res.on('data', chunk => chunks.push(chunk))
-            res.on('end', () => {
-              let text: string
+        // On the wire from here (api-transport sendWithRequestDeadline): the deadline is armed with the body's size,
+        // and requestState.bodySent is set, so a later transport error no longer proves the server didn't process it
+        // and non-idempotent verbs are not retried.
+        sendWithRequestDeadline(
+          deadline,
+          () =>
+            client.request(
+              parsed,
+              {
+                agent,
+                method: options.method || 'GET',
+                headers: {
+                  ...headersForRemoteRequest(url),
+                  // [daveey] Transcript pages: slim + gzip when the backend supports it (display-transcript.ts).
+                  ...displayTranscriptHeaders(options.method, url),
+                  ...(options.headers || {}),
+                  'Content-Type': contentType,
+                  ...(nativeHeaders || { 'X-Hermes-Session-Token': token }),
+                  // RFC 8252 native flow authenticates the gated gateway with a bearer
+                  // token instead of the loopback session-token header. When
+                  // ``options.bearer`` is set we send Authorization: Bearer <token>;
+                  // the gateway's OAuth gate verifies it via the provider stack with
+                  // no cookie involved.
+                  ...(options.bearer ? { Authorization: `Bearer ${options.bearer}` } : {}),
+                  ...(body ? { 'Content-Length': String(body.length) } : {})
+                }
+              },
+              res => {
+                const chunks = []
+                res.on('error', reject)
+                res.on('data', chunk => chunks.push(chunk))
+                res.on('end', () => {
+                  let text: string
 
-              try {
-                text = decodeResponseBody(Buffer.concat(chunks), res.headers['content-encoding'])
-              } catch (error) {
-                reject(error)
+                  try {
+                    text = decodeResponseBody(Buffer.concat(chunks), res.headers['content-encoding'])
+                  } catch (error) {
+                    reject(error)
 
-                return
+                    return
+                  }
+
+                  if ((res.statusCode || 500) >= 400) {
+                    reject(httpStatusError(res.statusCode, text, res.statusMessage))
+
+                    return
+                  }
+
+                  // http.request never follows redirects, so any 3xx -- with an HTML
+                  // login page, an empty body, whatever -- is the request bouncing
+                  // off a proxy or a scheme/slash mismatch, never JSON.
+                  if (res.statusCode >= 300) {
+                    reject(htmlResponseError(url, res.statusCode, res.headers.location))
+
+                    return
+                  }
+
+                  if (!text) {
+                    resolve(null)
+
+                    return
+                  }
+
+                  // A 2xx response whose body is HTML means the request fell through
+                  // to the SPA index.html (e.g. an unregistered /api path). JSON.parse
+                  // would throw an opaque `Unexpected token '<'` here, so surface a
+                  // clear diagnostic with the offending URL instead.
+                  const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
+                  const contentType = String(res.headers['content-type'] || '')
+
+                  if (looksHtml || contentType.includes('text/html')) {
+                    reject(htmlResponseError(url, res.statusCode))
+
+                    return
+                  }
+
+                  try {
+                    resolve(JSON.parse(text))
+                  } catch {
+                    reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
+                  }
+                })
               }
-
-              if ((res.statusCode || 500) >= 400) {
-                reject(httpStatusError(res.statusCode, text, res.statusMessage))
-
-                return
-              }
-
-              // http.request never follows redirects, so any 3xx -- with an HTML
-              // login page, an empty body, whatever -- is the request bouncing
-              // off a proxy or a scheme/slash mismatch, never JSON.
-              if (res.statusCode >= 300) {
-                reject(htmlResponseError(url, res.statusCode, res.headers.location))
-
-                return
-              }
-
-              if (!text) {
-                resolve(null)
-
-                return
-              }
-
-              // A 2xx response whose body is HTML means the request fell through
-              // to the SPA index.html (e.g. an unregistered /api path). JSON.parse
-              // would throw an opaque `Unexpected token '<'` here, so surface a
-              // clear diagnostic with the offending URL instead.
-              const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
-              const contentType = String(res.headers['content-type'] || '')
-
-              if (looksHtml || contentType.includes('text/html')) {
-                reject(htmlResponseError(url, res.statusCode))
-
-                return
-              }
-
-              try {
-                resolve(JSON.parse(text))
-              } catch {
-                reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
-              }
-            })
-          }
+            ),
+          { body, onError: reject, requestState }
         )
-
-        req.on('error', reject)
-        deadline.arm(req, reject)
-
-        // From here the request goes on the wire: a later transport error can no
-        // longer prove the server didn't process it, so non-idempotent verbs must
-        // not be retried past this point.
-        requestState.bodySent = true
-
-        if (body) {
-          req.write(body)
-        }
-
-        req.end()
       })
     },
     { method: options.method || 'GET' }
@@ -5376,71 +5371,65 @@ function fetchPublicJson(url, options: any = {}) {
           return
         }
 
-        const req = client.request(
-          parsed,
-          {
-            agent,
-            method: options.method || 'GET',
-            headers: {
-              ...headersForRemoteRequest(url),
-              ...(options.headers || {}),
-              'Content-Type': 'application/json',
-              ...(body ? { 'Content-Length': String(body.length) } : {})
-            }
-          },
-          res => {
-            const chunks = []
-            res.on('data', chunk => chunks.push(chunk))
-            res.on('end', () => {
-              const text = Buffer.concat(chunks).toString('utf8')
-
-              if ((res.statusCode || 500) >= 400) {
-                reject(httpStatusError(res.statusCode, text, res.statusMessage))
-
-                return
-              }
-
-              if (res.statusCode >= 300) {
-                reject(htmlResponseError(url, res.statusCode, res.headers.location))
-
-                return
-              }
-
-              if (!text) {
-                resolve(null)
-
-                return
-              }
-
-              const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
-              const contentType = String(res.headers['content-type'] || '')
-
-              if (looksHtml || contentType.includes('text/html')) {
-                reject(htmlResponseError(url, res.statusCode))
-
-                return
-              }
-
-              try {
-                resolve(JSON.parse(text))
-              } catch {
-                reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
-              }
-            })
-          }
-        )
-
-        req.on('error', reject)
-        deadline.arm(req, reject)
-
         // Past this point the request is on the wire — see fetchJson.
-        requestState.bodySent = true
+        sendWithRequestDeadline(
+          deadline,
+          () =>
+            client.request(
+              parsed,
+              {
+                agent,
+                method: options.method || 'GET',
+                headers: {
+                  ...headersForRemoteRequest(url),
+                  ...(options.headers || {}),
+                  'Content-Type': 'application/json',
+                  ...(body ? { 'Content-Length': String(body.length) } : {})
+                }
+              },
+              res => {
+                const chunks = []
+                res.on('data', chunk => chunks.push(chunk))
+                res.on('end', () => {
+                  const text = Buffer.concat(chunks).toString('utf8')
 
-        if (body) {
-          req.write(body)
-        }
+                  if ((res.statusCode || 500) >= 400) {
+                    reject(httpStatusError(res.statusCode, text, res.statusMessage))
 
-        req.end()
+                    return
+                  }
+
+                  if (res.statusCode >= 300) {
+                    reject(htmlResponseError(url, res.statusCode, res.headers.location))
+
+                    return
+                  }
+
+                  if (!text) {
+                    resolve(null)
+
+                    return
+                  }
+
+                  const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
+                  const contentType = String(res.headers['content-type'] || '')
+
+                  if (looksHtml || contentType.includes('text/html')) {
+                    reject(htmlResponseError(url, res.statusCode))
+
+                    return
+                  }
+
+                  try {
+                    resolve(JSON.parse(text))
+                  } catch {
+                    reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
+                  }
+                })
+              }
+            ),
+          { body, onError: reject, requestState }
+        )
       }),
     { method: options.method || 'GET' }
   )

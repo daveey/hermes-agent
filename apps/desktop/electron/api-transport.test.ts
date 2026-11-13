@@ -23,6 +23,9 @@ import {
   isIdempotentMethod,
   isTransientTransportError,
   jsonAgentFor,
+  multipartBody,
+  requestDeadlineBudgetMs,
+  sendWithRequestDeadline,
   shouldRetryRequest,
   startRequestDeadline,
   withRetry
@@ -422,21 +425,22 @@ describe('htmlResponseError', () => {
 // tunnel).
 // ---------------------------------------------------------------------------
 
-/** One GET shaped exactly like main.ts fetchJson: deadline started before http.request, armed right after. */
+/** One GET through fetchJson's send path: deadline started first, then sendWithRequestDeadline opens and arms. */
 function deadlineJsonGet(url: string, agent: http.Agent, timeoutMs: number): Promise<any> {
   return new Promise((resolve, reject) => {
     const deadline = startRequestDeadline(timeoutMs)
 
-    const req = http.request(new URL(url), { agent, method: 'GET' }, res => {
-      const chunks: Buffer[] = []
-      res.on('error', reject)
-      res.on('data', c => chunks.push(c))
-      res.on('end', () => resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null')))
-    })
-
-    req.on('error', reject)
-    deadline.arm(req, reject)
-    req.end()
+    sendWithRequestDeadline(
+      deadline,
+      () =>
+        http.request(new URL(url), { agent, method: 'GET' }, res => {
+          const chunks: Buffer[] = []
+          res.on('error', reject)
+          res.on('data', c => chunks.push(c))
+          res.on('end', () => resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null')))
+        }),
+      { onError: reject }
+    )
   })
 }
 
@@ -541,6 +545,228 @@ describe('live: total request deadline (startRequestDeadline)', () => {
       await new Promise(resolve => setTimeout(resolve, 150))
       // The kept-alive socket survived (no late destroy): the next request reuses it and answers.
       await expect(deadlineJsonGet(`${base}/api/health`, agent, 100)).resolves.toEqual({ ok: true })
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+})
+
+/** One POST through fetchJson's send path (sendWithRequestDeadline), which arms the deadline with the body it writes. */
+function deadlineJsonPost(
+  url: string,
+  agent: http.Agent,
+  timeoutMs: number,
+  body: Buffer,
+  requestState: { bodySent?: boolean } = {}
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const deadline = startRequestDeadline(timeoutMs)
+
+    sendWithRequestDeadline(
+      deadline,
+      () =>
+        http.request(
+          new URL(url),
+          { agent, method: 'POST', headers: { 'Content-Length': String(body.length) } },
+          res => {
+            const chunks: Buffer[] = []
+            res.on('error', reject)
+            res.on('data', c => chunks.push(c))
+            res.on('end', () => resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null')))
+          }
+        ),
+      { body, onError: reject, requestState }
+    )
+  })
+}
+
+/**
+ * /slow-upload reads the whole body, then keeps the connection busy for `busyMs` (a byte every 20 ms, so the idle
+ * timer never fires) before answering with the byte count: on a loopback socket this stands in for an upload whose
+ * transfer outlasts the JSON deadline. /silent-upload reads the body and then never answers. /stall-upload stops
+ * reading after the first chunk and never answers: the client's writes back up in the socket buffers mid-transfer.
+ */
+function uploadServer(busyMs: number) {
+  const received = { stalled: 0 }
+
+  const server = http.createServer((req, res) => {
+    let bytes = 0
+
+    if (req.url === '/stall-upload') {
+      req.once('data', chunk => {
+        received.stalled += chunk.length
+        req.pause()
+      })
+
+      return
+    }
+
+    req.on('data', chunk => (bytes += chunk.length))
+    req.on('end', () => {
+      if (req.url === '/silent-upload') {
+        return
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      const tick = setInterval(() => res.write(' '), 20)
+      setTimeout(() => {
+        clearInterval(tick)
+        res.end(JSON.stringify({ bytes }))
+      }, busyMs)
+    })
+  })
+
+  const close = async () => {
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+  }
+
+  return { close, received, server }
+}
+
+describe('total request deadline: request bodies (uploads)', () => {
+  it('budgets the body at 1 Mbit/s on top of the timeout, so a 25 MB attachment on a 2 Mbps link fits', () => {
+    expect(requestDeadlineBudgetMs(30_000)).toBe(30_000)
+    expect(requestDeadlineBudgetMs(30_000, 0)).toBe(30_000)
+    expect(requestDeadlineBudgetMs(30_000, 1_000)).toBe(30_008)
+
+    const attachment = 25 * 1024 * 1024
+    const secondsAt2Mbps = (attachment * 8) / 2_000_000
+    expect(secondsAt2Mbps).toBeGreaterThan(100)
+    expect(requestDeadlineBudgetMs(30_000, attachment)).toBe(30_000 + Math.ceil(attachment / 125))
+    expect(requestDeadlineBudgetMs(30_000, attachment)).toBeGreaterThan(30_000 + 2 * secondsAt2Mbps * 1_000)
+  })
+
+  it('an upload whose transfer outlasts the JSON timeout completes within its body budget', async () => {
+    const { close, server } = uploadServer(400)
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 4 })
+    const body = Buffer.alloc(256 * 1024, 7) // +2098 ms of budget at 125 bytes/ms
+
+    try {
+      const outcome = await settleWithin(deadlineJsonPost(`${base}/slow-upload`, agent, 150, body), 3_000)
+
+      expect(outcome.error).toBeUndefined()
+      expect(outcome.value).toEqual({ bytes: body.length })
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+
+  it('the same transfer still times out when the request carries no body allowance', async () => {
+    const { close, server } = uploadServer(400)
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 4 })
+
+    try {
+      const outcome = await settleWithin(deadlineJsonPost(`${base}/slow-upload`, agent, 150, Buffer.alloc(0)), 3_000)
+
+      expect(String(outcome.error?.message)).toBe('Timed out connecting to Hermes backend after 150ms')
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+
+  it('a stalled upload is still cut by the idle timer at the caller timeout, not the body budget', async () => {
+    const { close, server } = uploadServer(0)
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 4 })
+    const body = Buffer.alloc(256 * 1024, 7)
+
+    try {
+      const startedAt = performance.now()
+      const outcome = await settleWithin(deadlineJsonPost(`${base}/silent-upload`, agent, 150, body), 3_000)
+
+      expect(String(outcome.error?.message)).toBe('Timed out connecting to Hermes backend after 150ms')
+      expect(performance.now() - startedAt).toBeLessThan(1_500)
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+
+  it('an upload stalled mid-transfer (server stops reading, socket backpressure) is cut by the idle timer', async () => {
+    const { close, received, server } = uploadServer(0)
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 4 })
+    // A 32 MiB multipart attachment: far more than loopback socket buffers hold, so the transfer stalls partway.
+    const { body } = multipartBody({ bytes: Buffer.alloc(32 * 1024 * 1024, 7), filename: 'big.bin' })
+    // Its total budget is ~268 s: only the 150 ms idle timer can settle this inside the test's window.
+    expect(requestDeadlineBudgetMs(150, body.length)).toBeGreaterThan(200_000)
+
+    try {
+      const startedAt = performance.now()
+      const outcome = await settleWithin(deadlineJsonPost(`${base}/stall-upload`, agent, 150, body), 3_000)
+
+      expect(outcome.pending).toBeUndefined()
+      expect(String(outcome.error?.message)).toBe('Timed out connecting to Hermes backend after 150ms')
+      expect(performance.now() - startedAt).toBeLessThan(1_500)
+      // The server really stopped partway: it took one chunk of the body, not the whole upload.
+      expect(received.stalled).toBeGreaterThan(0)
+      expect(received.stalled).toBeLessThan(body.length)
+    } finally {
+      agent.destroy()
+      await close()
+    }
+  })
+})
+
+describe('sendWithRequestDeadline (fetchJson / fetchPublicJson send path)', () => {
+  it('arms the deadline with the byte size of the body it writes, after the deadline started', () => {
+    const order: string[] = []
+    const armed: Array<number | undefined> = []
+    const writes: Buffer[] = []
+
+    const deadline = {
+      arm: (_req: http.ClientRequest, _onTimeout: (error: Error) => void, bodyBytes?: number) => {
+        order.push('arm')
+        armed.push(bodyBytes)
+      }
+    } as ReturnType<typeof startRequestDeadline>
+
+    const fakeRequest = () => {
+      order.push('open')
+
+      return {
+        end: () => order.push('end'),
+        on: () => undefined,
+        write: (chunk: Buffer) => writes.push(chunk)
+      } as unknown as http.ClientRequest
+    }
+
+    const requestState: { bodySent?: boolean } = {}
+    const body = Buffer.from('é'.repeat(10)) // 20 bytes, 10 characters: the budget counts bytes
+    sendWithRequestDeadline(deadline, fakeRequest, { body, onError: () => {}, requestState })
+
+    expect(order).toEqual(['open', 'arm', 'end'])
+    expect(armed).toEqual([20])
+    expect(writes).toEqual([body])
+    expect(requestState.bodySent).toBe(true)
+
+    // No body: armed with no allowance, nothing written.
+    sendWithRequestDeadline(deadline, fakeRequest, { onError: () => {} })
+    expect(armed).toEqual([20, undefined])
+    expect(writes).toHaveLength(1)
+  })
+
+  it('a body sent through it gets its upload allowance end to end; the same wait with no body times out', async () => {
+    const { close, server } = uploadServer(400)
+    const base = await listen(server)
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 4 })
+    const body = Buffer.alloc(256 * 1024, 7) // +2098 ms of budget at 125 bytes/ms
+    const requestState: { bodySent?: boolean } = {}
+
+    try {
+      const sized = await settleWithin(deadlineJsonPost(`${base}/slow-upload`, agent, 150, body, requestState), 3_000)
+      expect(sized.error).toBeUndefined()
+      expect(sized.value).toEqual({ bytes: body.length })
+      expect(requestState.bodySent).toBe(true)
+
+      const empty = await settleWithin(deadlineJsonPost(`${base}/slow-upload`, agent, 150, Buffer.alloc(0)), 3_000)
+      expect(String(empty.error?.message)).toBe('Timed out connecting to Hermes backend after 150ms')
     } finally {
       agent.destroy()
       await close()

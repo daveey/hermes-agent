@@ -166,6 +166,28 @@ def test_profile_scopes_are_restored_on_success_and_failure(profiles):
     assert get_terminal_scope() is original_terminal
 
 
+@pytest.mark.parametrize("assignee", ["default", "coder"])
+def test_profile_policy_resolves_inside_a_bound_worker_scope(profiles, assignee):
+    """A dispatcher-spawned worker runs inside a bound local scope for its own home. The check must
+    read the assignee's policy there, not raise ScopeSwitchRefused (profile_home=None) and turn it
+    into assignee_capability_mismatch (t_01a1d3dfcfabae47). [daveey]"""
+    from agent.runtime_scope import bind_profile_scope
+    from hermes_constants import get_hermes_home
+    from hermes_scope import current_scope
+    from tools.terminal_scope import get_terminal_scope
+
+    home = profiles("default", "terminal: {backend: local}\n")
+    profiles("coder", LOCAL)
+    with bind_profile_scope(home, hydrate_secrets=False) as scope:
+        bound_terminal = get_terminal_scope()
+        assert validate_assignment(assignee, requires=["terminal", "git"]) == ["terminal", "git"]
+        assert validate_assignment(assignee, requires=["host_repo"]) == ["host_repo"]
+        # The worker's own scope is back afterwards: same agent, home and terminal policy.
+        assert current_scope() is scope
+        assert Path(get_hermes_home()) == home
+        assert get_terminal_scope() is bound_terminal
+
+
 def test_skill_names_are_not_guessed_as_capabilities(profiles):
     # Skill capability metadata has no established convention; do not infer from names/prose.
     assert validate_assignment("legacy", skills=["git", "terminal"]) == []

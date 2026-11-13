@@ -596,6 +596,7 @@ def gateway_lifecycle_block(
         HOST_INTERPRETER_KILL_REJECTION,
         contains_host_interpreter_kill,
         contains_launchctl_submit_command,
+        lifecycle_scan_budget_summary,
         lifecycle_scan_root_within_budget,
         scan_gateway_lifecycle,
     )
@@ -632,8 +633,8 @@ def gateway_lifecycle_block(
         return _blocked_json(
             f"Blocked: the lifecycle guard could not scan this command or referenced script: {refusal}. "
             "Nothing in the command is known to contain a gateway lifecycle command, but a "
-            "script the command executes must be scannable (a regular text file under 1 MiB) "
-            "before it can run inside the gateway process.",
+            "script the command executes must be scannable (a regular text file "
+            f"{lifecycle_scan_budget_summary()}) before it can run inside the gateway process.",
             "error",
         )
     if unsafe:

@@ -480,6 +480,7 @@ class _LifecycleScanBudget:
     __slots__ = (
         "bytes_remaining",
         "lines_remaining",
+        "overrun",
         "paths_remaining",
         "refusal",
         "remote_reads_remaining",
@@ -492,22 +493,32 @@ class _LifecycleScanBudget:
         self.paths_remaining = _MAX_LIFECYCLE_SCAN_PATHS
         self.remote_reads_remaining = _MAX_LIFECYCLE_SCAN_REMOTE_READS
         self.refusal: Optional[str] = None
+        # Message-only: which limit the last refused ``charge_text`` hit, e.g. "has 17340 lines,
+        # over the 16384-line scan cap". Never consulted for a verdict.
+        self.overrun: Optional[str] = None
 
     def charge_text(self, text: str) -> bool:
-        """Charge *text* before tokenization; False when it does not fit."""
+        """Charge *text* before tokenization; False when it does not fit (``overrun`` says why)."""
         # UTF-8 is >= one byte per code point, so the char count is a free lower bound.
         if len(text) > self.bytes_remaining:
+            self.overrun = _overrun("is at least", len(text), "byte", self.bytes_remaining, _MAX_LIFECYCLE_SCAN_BYTES)
             return False
         encoded = len(text.encode("utf-8", errors="replace"))
         if encoded > self.bytes_remaining:
+            self.overrun = _overrun("is", encoded, "byte", self.bytes_remaining, _MAX_LIFECYCLE_SCAN_BYTES)
             return False
         lines = text.count("\n") + 1
         if lines > self.lines_remaining:
+            self.overrun = _overrun("has", lines, "line", self.lines_remaining, _MAX_LIFECYCLE_SCAN_LINES)
             return False
         # One huge token is the quadratic shlex case; bound the longest physical line (chars, a
         # lower bound on bytes — tight enough for a DoS bound without a per-line encode).
         longest = max((len(line) for line in text.split("\n")), default=0)
         if longest > _MAX_LIFECYCLE_SCAN_LINE_BYTES:
+            self.overrun = (
+                f"has a {longest}-character line, over the "
+                f"{_MAX_LIFECYCLE_SCAN_LINE_BYTES}-character per-line scan cap"
+            )
             return False
         self.bytes_remaining -= encoded
         self.lines_remaining -= lines
@@ -550,13 +561,48 @@ def lifecycle_scan_root_within_budget(text: str) -> bool:
         return False
 
 
-def _budget_exhausted(budget: _LifecycleScanBudget, what: str, depth: int) -> bool:
-    logger.warning(
-        "lifecycle guard scan budget exhausted (%s at depth %d); "
-        "failing closed — see _MAX_LIFECYCLE_SCAN_* in cron/lifecycle_guard.py",
-        what, depth,
+def lifecycle_scan_budget_summary() -> str:
+    """The walk caps in words, for the "must be scannable" sentence of every caller's refusal."""
+    return (
+        f"within the scan budget ({_format_size(_MAX_LIFECYCLE_SCAN_BYTES)}, "
+        f"{_MAX_LIFECYCLE_SCAN_LINES} lines, {_format_size(_MAX_LIFECYCLE_SCAN_LINE_BYTES)} per line)"
     )
-    budget.refusal = f"the scan budget was exhausted ({what} at depth {depth})"
+
+
+def _format_size(size: int) -> str:
+    for unit, scale in (("MiB", 1024 * 1024), ("KiB", 1024)):
+        if size % scale == 0:
+            return f"{size // scale} {unit}"
+    return f"{size} bytes"
+
+
+def _overrun(verb: str, amount: int, unit: str, remaining: int, cap: int) -> str:
+    """``has 17340 lines, over the 16384-line scan cap``, or ``over the N lines left of`` that cap
+    when the text alone would fit but earlier text in the same walk already spent part of it."""
+    if amount > cap:
+        return f"{verb} {amount} {unit}s, over the {cap}-{unit} scan cap"
+    return f"{verb} {amount} {unit}s, over the {remaining} {unit}s left of the {cap}-{unit} scan cap"
+
+
+def _budget_exhausted(
+    budget: _LifecycleScanBudget, what: str, depth: int, *, source: Optional[str] = None,
+) -> bool:
+    """Fail closed. A ``text`` overrun names the text's *source* (a quoted script path, default
+    "the command") and the cap ``charge_text`` recorded, or the agent cannot tell what to change."""
+    if what == "text":
+        if source:
+            budget.refusal = f"{source} {budget.overrun} (text at depth {depth})"
+        else:
+            budget.refusal = (
+                f"the scan budget was exhausted: the command {budget.overrun} (text at depth {depth})"
+            )
+    else:
+        budget.refusal = f"the scan budget was exhausted ({what} at depth {depth})"
+    logger.warning(
+        "lifecycle guard scan budget exhausted: %s; "
+        "failing closed — see _MAX_LIFECYCLE_SCAN_* in cron/lifecycle_guard.py",
+        budget.refusal,
+    )
     return True
 
 
@@ -1100,22 +1146,24 @@ def _read_script_for_scanning(script_path: str) -> tuple[str, Optional[str]]:
 def _contains_unsafe_gateway_action(
     command: str, *, cwd: Optional[str], depth: int, visited: set[Path], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
+    source: Optional[str] = None,
 ) -> bool:
     """``executed=False`` means *command* is the content of a file that is only MENTIONED in inert
     (masked) text: it is still scanned for a literal lifecycle command, but "could not scan" (budget,
-    depth, size, device, live SQLite, cloud) is "nothing to scan" there, never a block (#113944)."""
+    depth, size, device, live SQLite, cloud) is "nothing to scan" there, never a block (#113944).
+    *source* names where *command* came from (a quoted script path), for budget refusals only."""
     # Charge BEFORE _direct_lifecycle_scan: every scan in it tokenizes with shlex.
     if not budget.charge_text(command):
-        return _budget_exhausted(budget, "text", depth) if executed else False
+        return _budget_exhausted(budget, "text", depth, source=source) if executed else False
     if _direct_lifecycle_scan(command):
         return True
     if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
         return _depth_limit_reached(budget, depth, executed=executed)
 
-    def recurse(text: str, cwd: Optional[str], executed: bool) -> bool:
+    def recurse(text: str, cwd: Optional[str], executed: bool, source: Optional[str]) -> bool:
         return _contains_unsafe_gateway_action(
             text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
-            read_remote_script=read_remote_script, executed=executed,
+            read_remote_script=read_remote_script, executed=executed, source=source,
         )
 
     # The walks below must see the same masked view `_direct_lifecycle_scan` sees (#110422): a
@@ -1126,7 +1174,8 @@ def _contains_unsafe_gateway_action(
     walk_command = strip_inert_heredoc_bodies(command)
 
     for payload in _iter_shell_command_payloads(walk_command):
-        if recurse(payload, cwd, executed):
+        # An `sh -c` payload is text of the same file (or command) it appears in.
+        if recurse(payload, cwd, executed, source):
             return True
 
     # Paths named only inside a masked body are still READ: an interpreter body that hands
@@ -1183,7 +1232,10 @@ def _contains_unsafe_gateway_action(
         if not script_text:
             continue
         # Relative references inside a script resolve against that script's directory, not the cwd.
-        if recurse(script_text, _resolve_script_directory(str(resolved)) or cwd, candidate_executed):
+        if recurse(
+            script_text, _resolve_script_directory(str(resolved)) or cwd, candidate_executed,
+            f"`{script_path}`",
+        ):
             return True
     return False
 
@@ -1191,10 +1243,12 @@ def _contains_unsafe_gateway_action(
 def scan_gateway_lifecycle(
     command: str, *, cwd: Optional[str] = None,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None,
+    source: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """``(unsafe, refusal)``: *refusal* names a non-lifecycle reason the walk failed closed (budget,
     size, device, live SQLite, cloud) so callers can tell the model; ``None`` when the verdict is a
-    real lifecycle command or the command is allowed.
+    real lifecycle command or the command is allowed. *source* names the root text in a budget
+    refusal (default "the command").
 
     Total by construction: never raises. Direct scans are pure string ops; the referenced-script
     walk (filesystem, remote backends, shlex on decoded bytes) is best-effort defense-in-depth — an
@@ -1209,7 +1263,7 @@ def scan_gateway_lifecycle(
     try:
         unsafe = _contains_unsafe_gateway_action(
             command, cwd=cwd, depth=0, visited=set(), budget=budget,
-            read_remote_script=read_remote_script,
+            read_remote_script=read_remote_script, source=source,
         )
         return unsafe, budget.refusal if unsafe else None
     except Exception:
@@ -1243,7 +1297,9 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
     combined = prompt or ""
     python_script = False
     refusal: Optional[str] = None
+    source: Optional[str] = None
     if script:
+        source = f"the job prompt plus `{script}`" if prompt else f"`{script}`"
         resolved_script = _resolve_script_path(script)
         # Attribute the refusal correctly: not a lifecycle command, but a cloud path never opened.
         if resolved_script is not None and _on_cloud_path(resolved_script):
@@ -1276,19 +1332,20 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         # embedded in a .py script is still blocked. See #77131, #78398.
         budget = _LifecycleScanBudget()
         if not budget.charge_text(combined):
-            unsafe = _budget_exhausted(budget, "text", 0)
+            unsafe = _budget_exhausted(budget, "text", 0, source=source)
             refusal = budget.refusal
         else:
             unsafe = _lifecycle_command_scan_with_data_exemption(combined)
     else:
         unsafe, refusal = scan_gateway_lifecycle(
-            combined, cwd=_resolve_script_directory(script) if script else None
+            combined, cwd=_resolve_script_directory(script) if script else None, source=source,
         )
     if unsafe and refusal:
         raise GatewayLifecycleBlocked(
             f"Blocked: the lifecycle guard could not scan this cron job or referenced script: {refusal}. "
             "Nothing in the job is known to contain a gateway lifecycle command, but a script "
-            "the job executes must be scannable (a regular text file under 1 MiB) before it can run."
+            f"the job executes must be scannable (a regular text file {lifecycle_scan_budget_summary()}) "
+            "before it can run."
         )
     if unsafe:
         raise GatewayLifecycleBlocked(

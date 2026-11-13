@@ -723,6 +723,7 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
         hi = rep.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0] if len(rows) < SCAN_BATCH \
             else rows[-1][0]
         handled = 0
+        hold = hi  # below the first call deferred for creation sync lag
         for eid, euid, etask, raw in rows:
             try:
                 payload = json.loads(raw or "{}")
@@ -745,17 +746,23 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             handled += 1
             event = {"id": eid, "uid": euid, "task_id": etask}
             refusal, retry = _caller_refusal(rep, board, event, payload)
-            if refusal is None and not retry:
-                from hermes_cli.kanban_consent import home_refusal
-                refusal, retry = home_refusal(rep, payload, target)  # unsynced created event: retry, then refuse
-            if retry:
+            if retry:  # unreachable Board: every later call would retry too
                 hi = eid - 1
                 break
+            if refusal is None:
+                from hermes_cli.kanban_consent import home_refusal
+                refusal, defer = home_refusal(rep, payload, target)  # unsynced created event: retry, then refuse
+                if defer:
+                    # Only this caller lags: keep the watermark below it (retried next tick) and go on with the
+                    # rest; calls handled meanwhile are logged, so the rescan skips them.
+                    hold = min(hold, eid - 1)
+                    continue
             if labels:
                 done.append((uid, kol.handle(conn, own, event, payload, refusal)))
                 continue
             outcome, _detail = _execute_one(conn, payload, own, refusal)
             done.append((uid, outcome))
+        hi = min(int(hi), hold)
         stored = conn.execute("SELECT last_id, last_uid FROM operator_call_scan WHERE board = ?",
                               (board,)).fetchone()
         new, anchor = _anchor(rep, max(int(hi), last))

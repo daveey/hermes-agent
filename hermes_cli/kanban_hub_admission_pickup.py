@@ -84,6 +84,15 @@ def _fields(card: Mapping[str, Any], board: str) -> dict:
                if k in card.keys()}}
 
 
+def _denied(audit: Mapping[str, Any], replaced: bool) -> str:
+    """The pickup-skip text of a deny: the verdict, plus why it stays put when no worker queue took it."""
+    why = f"hub admission denied: {str(audit.get('why') or '')[:150]}"
+    if replaced:
+        return why
+    kept = f"kept home ({audit['home']})" if audit.get("home") else "no worker queue fits"
+    return f"{why}; {kept}, left for its creator"
+
+
 def _target(fields: dict, own: str, cfg: dict, audit: dict) -> Optional[list[str]]:
     """The worker-queue labels a denied card moves to (the creation-time deny route), or None when none fits."""
     from hermes_cli import kanban_hub_admission_placement as hp
@@ -131,7 +140,7 @@ def screen(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, ids:
         prior = verdict(replica, tid)
         if prior and prior.get("entry") == ENTRY and prior.get("runs_on") == labels:
             # Denied here already and not re-placed (no worker queue fits): never judged again on this placement.
-            skips[tid] = ("other", f"hub admission denied: {str(prior.get('why') or '')[:150]}")
+            skips[tid] = ("other", _denied(prior, False))
             continue
         if down or conn.in_transaction:
             if not down:
@@ -165,7 +174,6 @@ def apply(conn: sqlite3.Connection, own: str, plans: Mapping[str, dict], importe
         if plan is None:
             continue
         audit, target = plan["audit"], plan["target"]
-        why = f"hub admission denied: {str(audit.get('why') or '')[:150]}"
         try:
             with kb.write_txn(conn):
                 row = conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()
@@ -174,8 +182,7 @@ def apply(conn: sqlite3.Connection, own: str, plans: Mapping[str, dict], importe
                 kb._append_event(conn, tid, "hub_admission", audit)
                 if audit["admit"]:
                     continue
-                kept = f"kept home ({audit['home']})" if audit.get("home") else "no worker queue fits"
-                out[tid] = ("other", why + ("" if target else f"; {kept}, left for its creator"))
+                out[tid] = ("other", _denied(audit, target is not None))
                 if target is None:
                     continue  # the backstop (refusals) keeps it unclaimed here
                 previous = wn._parse(row["runs_on"])
