@@ -90,14 +90,18 @@ def listed_targets(conn: sqlite3.Connection, alarm: Any, own: str) -> set:
     return out
 
 
-def _need(target: Any) -> set:
+def _requires(target: Any) -> list:
     import json
     try:
         requires = json.loads(target["requires"]) if target["requires"] else []
     except (TypeError, ValueError):
         requires = []
+    return [r for r in requires if isinstance(r, str)] if isinstance(requires, list) else []
+
+
+def _need(target: Any) -> set:
     from hermes_cli.kanban_placement_coordination import requirement_label
-    return {requirement_label(r) for r in requires if isinstance(r, str)} | {f"profile:{target['assignee']}"}
+    return {requirement_label(r) for r in _requires(target)} | {f"profile:{target['assignee']}"}
 
 
 def eligible_now(name: str, own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], need: set,
@@ -135,6 +139,11 @@ def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: An
     except ValueError as exc:
         return str(exc)
     if labels == [pool_label()]:
+        # A worker may attest ssh access, but the Board's pool selection cannot place it: the card would sit in
+        # task_requirement_unsupported instead of leaving the stalled machine.
+        from hermes_cli.kanban_placement_coordination import board_refusal
+        if why := board_refusal(_requires(target)):
+            return f"{target['id']} cannot go to {pool_label()}: {why}"
         return pool_refusal(own, machines, _need(target), now_ms)
     if len(labels) != 1 or not labels[0].startswith("machine:"):
         return f"runs_on must be exactly [\"{pool_label()}\"] or exactly one machine:<X> label"

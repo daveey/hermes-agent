@@ -234,6 +234,20 @@ def test_declared_hub_write_needs_the_hyphenated_label_a_worker_attests(board):
     assert "capability:hub-write" in board.why(runs_on=[POOL], machines=_machines(**{X: lacking}))
 
 
+@pytest.mark.parametrize("access", ["ssh:mbp", "ssh:mini"])
+def test_declared_ssh_access_refuses_the_pool_queue_with_the_board_reason(board, access):
+    """t_01a1d2b4b091e158: workers attest ``capability:ssh-mbp``/``ssh-mini``, but the Board's pool selection cannot
+    place ssh access, so a pool move would leave the card in task_requirement_unsupported."""
+    from hermes_cli import kanban_placement_coordination as coord
+    board.set(board.target, requires=json.dumps([access]))
+    label = coord.requirement_label(access)
+    machines = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, label]})
+    assert rp.pool_refusal(M, machines, rp._need(board.conn.execute(
+        "SELECT * FROM tasks WHERE id = ?", (board.target,)).fetchone()), NOW) is None  # a worker qualifies
+    why = board.why(runs_on=[POOL], machines=machines)
+    assert why is not None and coord.BOARD_REASON in why, why
+
+
 @pytest.mark.parametrize("name, label", [("hub:write", "capability:hub-write"), ("hub:read", "capability:hub-read"),
                                          ("ssh:mbp", "capability:ssh-mbp"), ("ssh:mini", "capability:ssh-mini"),
                                          ("terminal", "capability:terminal")])
