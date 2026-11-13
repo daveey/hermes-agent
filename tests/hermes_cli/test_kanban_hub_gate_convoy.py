@@ -14,12 +14,15 @@ import pytest
 from hermes_cli import kanban_admission as ka
 from hermes_cli import kanban_queue_reason as qr
 from hermes_cli import machine_metrics as mm
-from tests.hermes_cli import test_kanban_hub_admission as helpers
+from tests.hermes_cli import hub_admission_support as support
+from tests.hermes_cli.hub_admission_support import configure, task
 
 pytestmark = pytest.mark.platforms("posix")
 
-board = helpers.board
-configure, task = helpers.configure, helpers.task
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    yield from support.open_board(tmp_path, monkeypatch)
 
 
 def enable_pools(home):

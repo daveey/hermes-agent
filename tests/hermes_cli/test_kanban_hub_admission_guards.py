@@ -9,13 +9,15 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
-from tests.hermes_cli import test_kanban_hub_admission as helpers
+from tests.hermes_cli import hub_admission_support as support
+from tests.hermes_cli.hub_admission_support import advisory, claim, configure, fake_sample, locked, refused, task
 
 pytestmark = pytest.mark.platforms("posix")
 
-board = helpers.board
-configure, advisory, task, fake_sample, locked = (helpers.configure, helpers.advisory, helpers.task, helpers.fake_sample,
-                                              helpers.locked)
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    yield from support.open_board(tmp_path, monkeypatch)
 
 
 def enable(home, extra=""):
@@ -92,8 +94,8 @@ def test_normal_card_keeps_regular_advisory_ceiling_on_opted_in_hub(board, monke
     advisory(home, pct=70)
     no_lease_or_sample(monkeypatch)
     t = task(conn, review)
-    assert helpers.claim(conn, t, review) is None
-    helpers.refused(conn, t, review, "hub_cpu_at_or_above_limit")
+    assert claim(conn, t, review) is None
+    refused(conn, t, review, "hub_cpu_at_or_above_limit")
 
 
 @pytest.mark.parametrize("review", [False, True])
@@ -105,8 +107,8 @@ def test_invalid_pool_policy_defers_at_advisory_before_lease(board, monkeypatch,
     advisory(home)
     no_lease_or_sample(monkeypatch)
     t = task(conn, review)
-    assert helpers.claim(conn, t, review) is None
-    helpers.refused(conn, t, review, "hub_cpu_unknown")
+    assert claim(conn, t, review) is None
+    refused(conn, t, review, "hub_cpu_unknown")
 
 
 @pytest.mark.parametrize("review", [False, True])
@@ -120,8 +122,8 @@ def test_pool_census_error_at_final_gate_refuses_instead_of_scalar_admit(board, 
         raise ValueError("unknown admission pool receipt")
     monkeypatch.setattr(pools, "candidate_pool", broken)
     t = task(conn, review)
-    assert helpers.claim(conn, t, review) is None
-    helpers.refused(conn, t, review, "hub_capacity_full")
+    assert claim(conn, t, review) is None
+    refused(conn, t, review, "hub_capacity_full")
 
 
 def test_candidate_pool_unknown_census_selects_no_pool(board, monkeypatch):

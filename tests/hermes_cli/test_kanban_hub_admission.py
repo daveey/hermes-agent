@@ -19,7 +19,7 @@ from hermes_cli import kanban_queue_reason as queue
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
 from tests.hermes_cli import hub_admission_support as support
-from tests.hermes_cli.hub_admission_support import advisory, claim, configure, fake_sample, refused, runs, task
+from tests.hermes_cli.hub_admission_support import advisory, claim, configure, fake_sample, locked, refused, runs, task
 from tests.tools import test_kanban_tools as tool_helpers
 
 pytestmark = pytest.mark.platforms("posix")
@@ -28,16 +28,6 @@ pytestmark = pytest.mark.platforms("posix")
 @pytest.fixture
 def board(tmp_path, monkeypatch):
     yield from support.open_board(tmp_path, monkeypatch)
-
-
-def locked(monkeypatch, read):
-    """Feed the final gate's locked read of the sampler sample from ``read()`` (a ``fake_sample`` or a ``pytest.fail``
-    stand-in). The pre-lease advisory (stricter age) still reads the real file written with :func:`advisory`."""
-    real = ka.sampler_sample
-
-    def sampler_sample(max_age_ms=None):
-        return read() if max_age_ms is None else real(max_age_ms)
-    monkeypatch.setattr(ka, "sampler_sample", sampler_sample)
 
 
 tool_worker_env = tool_helpers.worker_env

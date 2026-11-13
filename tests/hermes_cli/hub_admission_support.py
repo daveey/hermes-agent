@@ -1,13 +1,15 @@
 """Shared board and claim helpers for the hub-admission suites. [daveey]
 
-``test_kanban_hub_admission`` and ``test_hub_cpu_gate_contention`` both build a throwaway board, write the admission
-config and drive claims through the CPU gate; they import these helpers from here so neither test module imports the
-other. Each module declares its own ``board`` fixture over :func:`open_board`.
+``test_kanban_hub_admission``, its ``test_kanban_hub_admission_*`` siblings, ``test_kanban_hub_gate_convoy`` and
+``test_hub_cpu_gate_contention`` build a throwaway board, write the admission config and drive claims through the CPU
+gate; they import these helpers from here so no test module imports another. Each module that needs a board declares
+its own ``board`` fixture over :func:`open_board`.
 """
 from __future__ import annotations
 
 import time
 
+from hermes_cli import kanban_admission as ka
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
@@ -70,3 +72,13 @@ def refused(conn, t, review, reason):
     assert kb.get_task(conn, t).status == ("review" if review else "ready")
     assert runs(conn) == 0
     assert sync.pop_claim_deferral(t) == reason
+
+
+def locked(monkeypatch, read):
+    """Feed the final gate's locked read of the sampler sample from ``read()`` (a ``fake_sample`` or a ``pytest.fail``
+    stand-in). The pre-lease advisory (stricter age) still reads the real file written with :func:`advisory`."""
+    real = ka.sampler_sample
+
+    def sampler_sample(max_age_ms=None):
+        return read() if max_age_ms is None else real(max_age_ms)
+    monkeypatch.setattr(ka, "sampler_sample", sampler_sample)
