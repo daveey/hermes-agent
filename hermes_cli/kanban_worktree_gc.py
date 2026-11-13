@@ -175,6 +175,8 @@ def _sweep_detached_trash(root: Path, rows) -> None:
     and only touches names this GC mints."""
     import shutil
 
+    from hermes_cli.kanban_scratch_preserve import preserved
+
     parents = {root}
     for row in rows:
         if row["workspace_path"]:
@@ -188,6 +190,9 @@ def _sweep_detached_trash(root: Path, rows) -> None:
             continue
         for trash in entries:
             if trash.is_symlink() or not trash.is_dir():
+                continue
+            if preserved(None, trash):
+                log.info("Scratch preserved: reason=scratch_gc_preserve path=%s", trash)
                 continue
             shutil.rmtree(trash, ignore_errors=True)
             if os.path.lexists(trash):

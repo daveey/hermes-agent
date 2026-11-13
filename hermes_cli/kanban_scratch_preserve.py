@@ -25,7 +25,10 @@ def preserved_ids() -> frozenset[str] | None:
     try:
         from hermes_cli.config import load_config_readonly
         kanban = load_config_readonly().get("kanban") or {}
-        value = kanban.get("scratch_gc_preserve") if isinstance(kanban, dict) else ()
+        if not isinstance(kanban, dict):
+            _warn(f"invalid kanban section {type(kanban).__name__}")
+            return None
+        value = kanban.get("scratch_gc_preserve")
     except Exception as exc:  # health: allow BLE001 -- unreadable config pins every tree (fail closed)
         _warn(f"unreadable config ({type(exc).__name__})")
         return None

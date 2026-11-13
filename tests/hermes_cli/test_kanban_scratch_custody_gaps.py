@@ -461,3 +461,38 @@ def test_preserve_matches_id_component_and_detached_names(monkeypatch):
     assert not preserve.preserved("t_bbbbbbbbbbbbbbbb", "/w/t_bbbbbbbbbbbbbbbb")
     assert not preserve.preserved(None, "/w/xt_aaaaaaaaaaaaaaaa")
     assert not preserve.preserved(None, None)
+
+
+def test_preserved_row_is_never_walked_by_retention_gc(board, monkeypatch):
+    tid, path = _local_done(board)
+    walked = []
+    real = ws._scratch_tree_removable
+    monkeypatch.setattr(ws, "_scratch_tree_removable", lambda p: walked.append(p) or real(p))
+    _config(board, scratch_gc_preserve=[tid])
+    assert gc.gc_task_scratch(board.conn, older_than_days=7) == 0
+    assert walked == [] and (path / "notes").read_text() == "keep me"
+    _config(board)
+    assert gc.gc_task_scratch(board.conn, older_than_days=7) == 1  # control: unpinned is walked
+    assert walked == [path]
+
+
+def test_detached_trash_of_pinned_id_is_not_swept(board, caplog):
+    root = kb.workspaces_root()
+    root.mkdir(parents=True, exist_ok=True)
+    pinned = root / f".{TID}.gc-rm-{'0' * 32}"
+    other = root / f".t_ffffffffffffffff.gc-rm-{'1' * 32}"
+    for trash in (pinned, other):
+        trash.mkdir()
+        (trash / "notes").write_text("x")
+    _config(board, scratch_gc_preserve=[TID])
+    with caplog.at_level("INFO"):
+        gc._sweep_detached_trash(root, [])
+    assert (pinned / "notes").exists() and not other.exists()
+    assert f"reason=scratch_gc_preserve path={pinned}" in caplog.text
+
+
+@pytest.mark.parametrize("section", ['"oops"', "[t_aaaaaaaaaaaaaaaa]", "3"])
+def test_non_mapping_kanban_section_fails_closed(board, section):
+    (board.home / "config.yaml").write_text(f"kanban: {section}\n")
+    assert preserve.preserved_ids() is None
+    assert preserve.preserved("t_cccccccccccccccc") is True
