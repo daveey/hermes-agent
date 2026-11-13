@@ -22,6 +22,7 @@ from typing import Callable, Iterator, Optional
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
+from cron.lifecycle_guard_lines import _split_logical_lines  # newlines outside quotes
 from cron.lifecycle_guard_printf import _printf_format_lines  # what `printf FORMAT …` prints
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
@@ -695,31 +696,6 @@ def _refuse_unreadable(budget: _LifecycleScanBudget, path: Path, reason: str) ->
 
 
 # --- shell tokenization -----------------------------------------------------------------------
-
-def _split_logical_lines(text: str) -> list[str]:
-    """Split on newlines outside quotes (a quoted newline is data, not a separator); honors
-    escapes."""
-    lines: list[str] = []
-    current: list[str] = []
-    in_single = in_double = escape = False
-    for ch in text:
-        if escape:
-            escape = False
-        elif ch == "\\":
-            escape = True
-        elif ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch == "\n" and not in_single and not in_double:
-            lines.append("".join(current))
-            current = []
-            continue
-        current.append(ch)
-    if current:
-        lines.append("".join(current))
-    return lines
-
 
 def _shlex_tokens(line: str) -> list[str]:
     """POSIX-tokenize one shell line, honoring quotes and `#` comments; raises ValueError."""
