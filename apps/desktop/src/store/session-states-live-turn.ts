@@ -38,12 +38,23 @@ export function liveTurnLastActiveMs(
   return lastActive != null && Number.isFinite(ms) && ms > 0 ? ms : null
 }
 
+/** [daveey] The fields a turn claim is read from. */
+export type TurnClaimFields = Pick<ClientSessionState, 'awaitingResponse' | 'busy' | 'turnLive'>
+
 /** [daveey] Whether `state` holds a turn claim: busy, awaiting a reply, or a
- *  live turn. The single copy of this predicate — reconnect reconcile and the
- *  tile delegate's retireBusyClaim must agree on it (PR #1913). */
-export function holdsTurnClaim(state: ClientSessionState | undefined): state is ClientSessionState {
+ *  live turn. The single copy of this predicate — reconnect reconcile, the
+ *  tile delegate's retireBusyClaim and the update-held idle check
+ *  (`holdsUpdateHeldPromptIdle`) must agree on it (PR #1913). A full
+ *  `ClientSessionState` (or undefined) gets a type guard; a bare field pick
+ *  gets a plain boolean, since its negation must not narrow it to `never`. */
+/* eslint-disable no-redeclare -- overload signatures; the rule predates TS */
+export function holdsTurnClaim(state: ClientSessionState | undefined): state is ClientSessionState
+export function holdsTurnClaim(state: TurnClaimFields | undefined): boolean
+
+export function holdsTurnClaim(state: TurnClaimFields | undefined): boolean {
   return Boolean(state && (state.busy || state.awaitingResponse || state.turnLive))
 }
+/* eslint-enable no-redeclare */
 
 export function isLiveTurnAwaitingEvents(state: ClientSessionState | undefined): boolean {
   return holdsTurnClaim(state) && !state.needsInput

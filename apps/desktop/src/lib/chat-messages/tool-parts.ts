@@ -6,6 +6,7 @@ import { isTodoToolName, parseTodos } from '@/lib/todos'
 import { effectiveToolCall } from '@/lib/tool-media-renderers'
 import { isCardToolName } from '@/lib/tool-render-class'
 import type { ToolResultMetadata } from '@/lib/tool-result-metadata'
+import { holdsTurnClaim } from '@/store/session-states-live-turn'
 import type { SessionMessage, StoredToolCallLabels } from '@/types/hermes'
 
 import type { ChatMessage, ChatMessagePart, GatewayEventPayload } from './types'
@@ -594,8 +595,7 @@ export function holdsUpdateHeldPromptIdle(
   state: { awaitingResponse: boolean; busy: boolean; messages: ChatMessage[]; streamId: null | string; turnLive: boolean },
   queuedHeld = false
 ): boolean {
-  return !state.busy && !state.awaitingResponse && !state.turnLive && !state.streamId &&
-    (queuedHeld || state.messages.some(awaitsUpdate))
+  return !holdsTurnClaim(state) && !state.streamId && (queuedHeld || state.messages.some(awaitsUpdate))
 }
 
 /**
