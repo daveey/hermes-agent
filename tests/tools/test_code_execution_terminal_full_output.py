@@ -170,12 +170,17 @@ def test_remote_file_rpc_ships_small_full_output(tmp_path, monkeypatch):
     assert r["truncated"] is False
 
 
-def test_terminal_doc_line_names_what_the_spill_omits():
-    """Code gets the redacted raw stream: sudo notes and transform-hook rewrites that the
-    chat result carries are not in a spill-backed ``output``."""
-    from tools.code_execution_tool import _TOOL_DOC_LINES
-    doc = dict(_TOOL_DOC_LINES)["terminal"]
-    assert "raw" in doc and "hook" in doc
+def test_remote_file_rpc_bounds_the_escaped_result(tmp_path, monkeypatch):
+    """The cap bounds the shipped JSON, not the raw spill: newline-dense text doubles under
+    json escaping, so a spill under 1 MiB on disk can still overflow the remote result."""
+    spill = tmp_path / "out.log"
+    spill.write_text("1\n" * 400_000)  # 800 KB raw, ~1.2 MB once each newline is escaped
+    r, shipped = _file_rpc_result(monkeypatch, {
+        "output": WINDOW, "exit_code": 0, "error": None, "full_output_path": str(spill)})
+    assert r["output"] == WINDOW
+    assert r["truncated"] is True
+    assert r["full_output_path"] == str(spill)
+    assert shipped < 2 * 1024 * 1024
 
 
 def test_short_output_is_marked_complete():

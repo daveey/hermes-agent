@@ -95,7 +95,8 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
                         where: str, full_output_cap: int | None = None) -> str:
     """Enforce allow-list + budget, then dispatch one authenticated request. Only a dispatched
     call consumes budget and is logged; refusals are free. ``full_output_cap`` bounds the spill
-    a terminal() result may inline (default: the local socket cap)."""
+    a terminal() result may inline and the encoded result that carries it (default: the local
+    socket cap on the spill alone)."""
     tool_name = request.get("tool", "")
     tool_args = request.get("args", {})
     if tool_name not in allowed_tools:
@@ -116,7 +117,8 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
         result = tool_error(str(exc))
     tool_call_counter[0] += 1
     if tool_name == "terminal":
-        result = _complete_terminal_output(result, full_output_cap or _FULL_OUTPUT_READ_CAP_BYTES)
+        result = (_complete_terminal_output(result) if full_output_cap is None else
+                  _complete_terminal_output(result, full_output_cap, encoded_cap=full_output_cap))
     entry = {"tool": tool_name, "args_preview": str(tool_args)[:80],
              "duration": round(time.monotonic() - call_start, 2)}
     error = _result_error(result)
@@ -128,8 +130,11 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
 
 _FULL_OUTPUT_READ_CAP_BYTES = 20 * 1024 * 1024
 # The file-RPC poller ships each result base64 (+33%) through env.execute stdin: Modal's legacy
-# server path caps one stdin buffer at 2 MB and Daytona/Vercel stage it as an uploaded file, so a
-# remote result inlines at most 1 MiB of spill; a bigger one stays truncated with its path.
+# server path caps one stdin buffer at 2 MB and Daytona/Vercel stage it as an uploaded file. A
+# remote result inlines a spill only while the whole JSON result stays within 1 MiB of UTF-8
+# (json escaping can double newline-dense text), so its base64 stays under ~1.4 MB; a bigger one
+# keeps the window, truncated, with its path. One cap covers every file-RPC backend, including
+# ssh/docker pipe mode, which has no 2 MB stdin limit but gets no backend-specific branch.
 _REMOTE_FULL_OUTPUT_READ_CAP_BYTES = 1024 * 1024
 _SPILL_CAPPED_MARK = "[spill capped at "
 
@@ -158,7 +163,8 @@ def _looks_windowed(body: dict) -> bool:
     return bool(body.get("truncation_note")) or contains_truncation_notice(output)
 
 
-def _complete_terminal_output(result, cap: int = _FULL_OUTPUT_READ_CAP_BYTES):
+def _complete_terminal_output(result, cap: int = _FULL_OUTPUT_READ_CAP_BYTES, *,
+                              encoded_cap: int | None = None):
     """Give code the complete stdout of a sandbox ``terminal()`` call. The terminal tool
     renders a head+tail window sized for the chat; a script that writes ``output`` to disk
     as data must not get that window (defect agent-7ac9c5fa93: a checksum manifest shipped
@@ -168,7 +174,8 @@ def _complete_terminal_output(result, cap: int = _FULL_OUTPUT_READ_CAP_BYTES):
     pushed the text over the limit) a windowed ``output`` still reports ``truncated: True``.
     When the spill replaces the window, notes the terminal tool appended after collection
     (timeout/interrupt text, the sudo notice, a transform hook's rewrite) are not carried;
-    ``exit_code`` and ``exit_code_meaning`` still report a timeout or interrupt."""
+    ``exit_code`` and ``exit_code_meaning`` still report a timeout or interrupt. With
+    *encoded_cap*, a spill-backed result whose UTF-8 JSON exceeds it keeps the window."""
     try:
         body = json.loads(result)
     except (TypeError, ValueError):
@@ -180,11 +187,12 @@ def _complete_terminal_output(result, cap: int = _FULL_OUTPUT_READ_CAP_BYTES):
     spill_path = body.get("full_output_path")
     full = _read_full_output(spill_path, cap) if spill_path else None
     if full is not None:
-        body["output"] = full
-        body.pop("truncation_note", None)
-        body["truncated"] = False
-    else:
-        body["truncated"] = bool(spill_path) or _looks_windowed(body)
+        whole = dict(body, output=full, truncated=False)
+        whole.pop("truncation_note", None)
+        text = json.dumps(whole, ensure_ascii=False)
+        if encoded_cap is None or len(text.encode("utf-8", "surrogatepass")) <= encoded_cap:
+            return text
+    body["truncated"] = bool(spill_path) or _looks_windowed(body)
     return json.dumps(body, ensure_ascii=False)
 
 
