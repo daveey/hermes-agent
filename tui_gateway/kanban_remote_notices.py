@@ -126,15 +126,47 @@ def _fresh_at(task: dict) -> Optional[float]:
     return None
 
 
+# Payload pages of ``_task_rows``: at most ``_ROW_PAGE_MAX`` rows and about ``_ROW_PAGE_BYTES`` of row text at the
+# replica's mean row size. One ``json_group_array`` over every payload was a 256 MB string (UCS-4 once any row holds
+# an emoji) plus its decode: a ~450 MB peak per cold read on the mini's 17k-row replica. [daveey]
+_ROW_PAGE_MAX = 4000
+_ROW_PAGE_BYTES = 4 << 20
+
+
 def _task_rows(conn: sqlite3.Connection, me: Optional[str] = None) -> list[tuple]:
-    """``(gw, key, seq, data)`` task rows of the replica, other gateways only when ``me`` is given."""
+    """``(gw, key, seq, data)`` task rows of the replica, other gateways only when ``me`` is given.
+
+    Identities come from one query in the planner's order (as before); payloads from rowid pages, all in one read
+    snapshot (the caller's transaction, else one opened here), so neither crosses the SQLite/Python boundary per
+    task (GIL reacquisition) nor builds one string of every payload. [daveey]"""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(replica)")}
     seq = "seq" if "seq" in cols else "0"
     # Keep data as text: json(data) would let one malformed task poison the entire read.
-    # A single result avoids one GIL reacquisition per task in sqlite3_step.
-    sql = f"SELECT json_group_array(json_array(gw, key, {seq}, data)) FROM replica WHERE coll = 'tasks'"
-    row = conn.execute(sql + " AND gw != ?", (me,)).fetchone() if me else conn.execute(sql).fetchone()
-    return [tuple(values) for values in json.loads(row[0])]
+    where, args = ("coll = 'tasks' AND gw != ?", (me,)) if me else ("coll = 'tasks'", ())
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN")
+    try:
+        packed, count, octets = conn.execute(
+            f"SELECT json_group_array(json_array(rowid, gw, key, {seq})), count(*), total(octet_length(data)) "
+            f"FROM replica WHERE {where}", args).fetchone()
+        ids = json.loads(packed)
+        size = max(50, min(_ROW_PAGE_MAX, int(_ROW_PAGE_BYTES // max(float(octets or 0) / max(count, 1), 1.0))))
+        data: dict = {}
+        after = -1 << 63
+        while len(data) < count:
+            page, last = conn.execute(
+                "SELECT json_group_array(json_array(rowid, data)), max(rowid) FROM (SELECT rowid, data FROM replica"
+                f" WHERE {where} AND rowid > ? ORDER BY rowid LIMIT ?)", (*args, after, size)).fetchone()
+            if last is None:
+                break
+            data.update(json.loads(page))
+            del page
+            after = last
+    finally:
+        if own:
+            conn.rollback()
+    return [(gw, key, s, data.get(rowid)) for rowid, gw, key, s in ids]
 
 
 def _canonical(rows: list[tuple]) -> list[tuple]:

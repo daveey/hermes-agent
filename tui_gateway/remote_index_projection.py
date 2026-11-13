@@ -75,7 +75,9 @@ def snapshot(conn, identity, me):
             if (isinstance(task, dict) and task.get("id")
                     and (task.get("status") in remote._TERMINAL or remote._withdrawal(task) is not None)):
                 chats = remote._linked_chats(task, me)
-            hit = (seq, chats, {"gw": str(owner), "key": str(key), "task": task})
+            # Only a row routed to a chat keeps its card: the rest (all but a few dozen of ~17k on the mini) kept
+            # every decoded task here, ~155 MB and 1.5M GC-tracked objects per gateway. [daveey]
+            hit = (seq, chats or (), {"gw": str(owner), "key": str(key), "task": task} if chats else None)
         updated[(owner, key)] = hit
         for chat in hit[1]:
             index.setdefault(chat, []).append(hit[2])
