@@ -21,7 +21,9 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
   reset goes first), at most ``MAX_ATTEMPTS`` wakes per row; the last failure stamps ``error``. The replay's timer
   dies with its backend and its own failure gives up, so before this a close-out refused by a quota window that a
   restart (or a still-broken store) outlived was never offered again (two hub chats, 2026-11-10). A deferred row
-  is durable: any backend's pass picks it up. [daveey]
+  is durable: any backend's pass picks it up. Long wall bookings include the process's frozen code identity:
+  a different-code successor uses the booking's short-delay deadline instead. Same/unknown code and legacy
+  rows keep the wall deadline; discovery still claims with CAS and preserves the attempt budget. [daveey]
 - a wake that found the chat ``"busy"`` (no live turn, yet admission refused it: a core update's admission hold or
   drain, a paused turn owed to its restarting backend, an exiting backend's fence) is deferred the same way,
   ``BUSY_RETRY_S`` doubling up to ``BUSY_RETRY_MAX_S``, at most ``MAX_BUSY_ATTEMPTS`` busy wakes per row (counted in
@@ -142,7 +144,8 @@ def _deferred_due(meta: dict, now: float) -> bool:
     closeout = meta.get("closeout")
     if not isinstance(closeout, dict) or closeout.get("state") != "deferred":
         return False
-    retry_at = closeout.get("retry_at")
+    from tui_gateway.notice_retry import effective_due
+    retry_at = effective_due(closeout)
     return isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool) and retry_at <= now
 
 
@@ -321,7 +324,10 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
         elif verdict == "error" and attempts - busy_attempts < MAX_ATTEMPTS:
             now = time.time()
             try:
+                from tui_gateway.automation_replay import replay_due
+                from tui_gateway.notice_retry import booking
                 extra = {"retry_at": float((retry_at or _retry_at)(sid, now)), "attempts": attempts}
+                extra.update(booking(extra["retry_at"], replay_due(now) + DEFER_SLACK_S))
                 verdict = "deferred"
             except Exception:
                 logger.warning("notice close-out of %s: no retry time; stamped error", sid, exc_info=True)
