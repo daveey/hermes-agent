@@ -12,6 +12,7 @@ from . import session_notifications_surface as _surface
 from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure
 from .kanban_notice_text import parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode
 from .kanban_notice_text import repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out
+from .kanban_notice_text import left_open_suffix as _kb_left_open
 
 
 def _notif_locked_sessions(fn, default):
@@ -592,12 +593,6 @@ def _kb_completed(task, payload: dict, title: str) -> str:
     return f" done — {title}{handoff}{_kb_left_open(payload)}"
 
 
-def _kb_left_open(payload: dict) -> str:
-    from hermes_cli.kanban_pr_landing import left_open_notice
-    notice = left_open_notice(payload)
-    return f"\n{notice}" if notice else ""
-
-
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
@@ -754,9 +749,8 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
     except Exception:
         return []
     texts: list = []
-    chats: tuple = (session_key,)
-    with contextlib.suppress(Exception):  # the chat's compaction parents: its local rows may sit on the root
-        chats = (session_key, *_session_lineage(session_key))
+    from tui_gateway.kanban_leg_custody import chat_lineage
+    chats = chat_lineage(session_key, _session_lineage)  # its local rows may sit on the lineage root
     with contextlib.closing(conn):
         try:
             subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key)

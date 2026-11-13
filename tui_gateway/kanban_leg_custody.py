@@ -53,6 +53,12 @@ def _lineage(session: dict, session_lineage) -> tuple:
         return ()
 
 
+def chat_lineage(session_key: str, session_lineage) -> tuple:
+    """The chat and its compaction parents (``sibling_chats`` for its tui rows): its ``local`` rows sit on the
+    lineage root. An unreadable lineage leaves the chat's own id."""
+    return (session_key, *_lineage({"session_key": session_key}, session_lineage))
+
+
 def legacy_gateway_owns(session: dict, ledger_refusal, session_lineage, session_db) -> bool:
     """:func:`gateway_owns` for a legacy backend's session: its compaction parents (``session_lineage``) and the
     turn-lease holder read through the session's own store (``session_db``)."""
