@@ -218,6 +218,58 @@ def test_reads_and_refusals_while_stopped_are_unchanged(home, monkeypatch):
     assert "error" in refused and "board_delivery" not in refused
 
 
+CHAT = "20261026_235722_bef6c6"
+SHOWS_PROMISE = "shows in this chat's tasks."
+
+
+def _place_on_worker(home, monkeypatch, *, task_id):
+    """kanban_create from a chat, placed on worker-4 (01:09 PT: t_01a1d42acdce8e23 and three more). ``task_id``
+    None = the target has not answered yet (the queued-request note)."""
+    from hermes_cli import kanban_capability_registry as reg
+    from hermes_cli import kanban_placement as kp
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=home / "state.db")
+    db.create_session(session_id=CHAT, source="desktop")
+    db.close()
+    monkeypatch.setenv("HERMES_SESSION_ID", CHAT)
+    monkeypatch.setattr(reg, "self_gateway", lambda: ME)
+    monkeypatch.setattr(runstate, "placement_runs_on", lambda conn, placement: None)  # worker-4: a gateway pin
+    monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "worker-4", "why": "explicit placement"})
+    monkeypatch.setattr(kp, "create_remote", lambda args, **kw: {
+        "ok": True, "request_id": "placement:macbook:t1", "queued_only": task_id is None})
+    monkeypatch.setattr(kp, "await_task_id", lambda rid, **kw: (task_id, "running"))
+    return json.loads(kt._handle_create({"title": "core update", "assignee": "default", "placement": "worker-4",
+                                         "body": "runs on worker-4", "requires": []}))
+
+
+def test_create_placed_elsewhere_while_the_sync_role_is_given_up_says_the_chat_link_is_queued(home, monkeypatch):
+    path, _conn = home
+    _give_up_the_sync_role(path, monkeypatch)
+    out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23")
+    assert out["ok"] is True and out["task_id"] == "t_01a1d42acdce8e23" and out["runs_where"] == "worker-4", out
+    assert out["placed"]["origin_session"] == CHAT
+    assert out["chat_link"] == "queued_local" and "board_delivery" not in out  # the card itself is on worker-4
+    assert SHOWS_PROMISE not in out["note"]
+    assert "shows in this chat's tasks once this gateway's Board sync recovers" in out["note"]
+    assert "queued locally: this gateway's Board sync has been stopped since " in out["note"]
+    assert "gave up the sync role" in out["board_sync"]
+
+
+def test_create_queued_on_a_target_while_stopped_says_the_chat_link_waits(home, monkeypatch):
+    path, _conn = home
+    _give_up_the_sync_role(path, monkeypatch)
+    out = _place_on_worker(path, monkeypatch, task_id=None)
+    assert out["ok"] is True and out["status"] == "queued" and out["chat_link"] == "queued_local", out
+    assert "(this chat's tasks once this gateway's Board sync recovers, " in out["note"]
+
+
+def test_create_placed_elsewhere_while_the_sync_runs_is_unchanged(home, monkeypatch):
+    path, _conn = home
+    out = _place_on_worker(path, monkeypatch, task_id="t_01a1d42acdce8e23")
+    assert out["ok"] is True and SHOWS_PROMISE in out["note"], out
+    assert "chat_link" not in out and "board_sync" not in out and "board_delivery" not in out
+
+
 def test_a_finished_remote_card_has_no_live_run_host(home):
     from hermes_cli.kanban_board_delivery import remote_runner
     _path, conn = home
