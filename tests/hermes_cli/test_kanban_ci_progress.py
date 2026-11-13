@@ -2,7 +2,8 @@
 
 Replays the 2026-11-11 hub incident: t_01a1c8d66aa29009 parked (awaiting kind=ci) on GitHub Actions run
 42993449998, whose jobs asked for ``self-hosted,ci-fast`` runners that no longer took jobs. The park was accepted
-and the card slept until David asked. The fake ``gh`` on PATH serves the run's jobs as GitHub returns them.
+and the card slept until David asked. The fake ``gh`` on PATH serves the run's jobs as GitHub returns them, and the
+repo/org runner lists when a test provides them (403 otherwise, as for a token without admin scope).
 """
 from __future__ import annotations
 
@@ -10,19 +11,25 @@ import json
 import os
 import stat
 import sqlite3
+import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
 
+from hermes_cli import kanban_ci_progress as kcp
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_shared_blockers as ksb
 from hermes_cli import kanban_wake_check as kwc
 
 REPO = "softmax-universe/daveey-hermes"
 RUN = "42993449998"
 RUN_URL = f"https://github.com/{REPO}/actions/runs/{RUN}"
 LABELS = ["self-hosted", "ci-fast"]
+BLOCKER = "runners-offline.ci-fast"
 
 
 @pytest.fixture
@@ -36,14 +43,19 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     kb.init_db()
     yield home
     kwc._shutdown_for_tests()
+    for state in (kcp._LAST_CHECK, kcp._LAST_SWEEP, kcp._SWEEPS):
+        state.clear()
 
 
 @pytest.fixture
 def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A ``gh`` executable that answers ``gh api repos/<repo>/actions/runs/<id>/jobs`` from a JSON file."""
+    """A ``gh`` executable that answers ``gh api repos/<repo>/actions/runs/<id>/jobs`` from a JSON file, and the
+    repo/org ``actions/runners`` lists from their files when present (HTTP 403 when absent)."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     jobs = tmp_path / "jobs.json"
+    repo_runners = tmp_path / "runners-repo.json"
+    org_runners = tmp_path / "runners-org.json"
     calls = tmp_path / "gh-calls.log"
     script = bindir / "gh"
     script.write_text(
@@ -56,6 +68,12 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "    sys.stderr.write('HTTP 401: Bad credentials (https://api.github.com/)\\n'); sys.exit(1)\n"
         "if os.environ.get('FAKE_GH_FAIL'):\n"
         "    sys.stderr.write('HTTP 502: Bad Gateway (https://api.github.com/)\\n'); sys.exit(1)\n"
+        "path = sys.argv[-1]\n"
+        "if '/actions/runners' in path:\n"
+        f"    src = {str(org_runners)!r} if path.startswith('orgs/') else {str(repo_runners)!r}\n"
+        "    if not os.path.exists(src):\n"
+        "        sys.stderr.write('HTTP 403: Resource not accessible by integration\\n'); sys.exit(1)\n"
+        "    sys.stdout.write(open(src).read()); sys.exit(0)\n"
         f"sys.stdout.write(open({str(jobs)!r}).read())\n")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
@@ -69,10 +87,20 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 "created_at": created, "started_at": started, "labels": LABELS, "runner_name": runner,
                 "runner_id": 7 if runner else None}]}))
 
-        def calls(self) -> int:
-            return len(calls.read_text().splitlines()) if calls.exists() else 0
+        def runners(self, *runners: dict, org: bool = False) -> None:
+            (org_runners if org else repo_runners).write_text(json.dumps({"total_count": len(runners),
+                                                                          "runners": list(runners)}))
+
+        def calls(self, what: str = "") -> int:
+            lines = calls.read_text().splitlines() if calls.exists() else []
+            return sum(1 for line in lines if what in line)
 
     return Gh()
+
+
+def _runner(status: str = "online", labels=("self-hosted", "Linux", "X64", "ci-fast"), busy: bool = True) -> dict:
+    return {"id": 3, "name": "ci-fast-3", "os": "Linux", "status": status, "busy": busy,
+            "labels": [{"id": i, "name": n, "type": "custom"} for i, n in enumerate(labels)]}
 
 
 def _running(conn) -> str:
@@ -100,6 +128,21 @@ def _park_on_run(ref: str = RUN_URL, **extra):
                               "awaiting": {"kind": "ci", "ref": ref, "why": "state CI on the fix"}, **extra})
 
 
+def _parked(conn, monkeypatch) -> str:
+    """A card parked on the run while it was freshly queued (accepted), as the dispatcher sees it afterwards."""
+    tid = _running(conn)
+    _as_worker(monkeypatch, conn, tid)
+    assert _park_on_run().get("status") == "scheduled"
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    return tid
+
+
+def _key(conn, tid) -> tuple[str, str]:
+    return (str(kbc._main_db_file(conn)), tid)
+
+
+# --- park time ------------------------------------------------------------------------------------------------
+
 def test_park_on_a_run_with_no_runner_for_15_min_is_refused(kanban_home, fake_gh, monkeypatch) -> None:
     fake_gh.serve(age=20 * 60)
     with kbc.connect_closing() as conn:
@@ -108,6 +151,8 @@ def test_park_on_a_run_with_no_runner_for_15_min_is_refused(kanban_home, fake_gh
         out = _park_on_run()
         assert "ci_run_unstartable" in (out.get("error") or ""), out
         assert "ci-fast" in out["error"], out
+        assert "no runner picked it up in 15 min" in out["error"], out
+        assert "runner list unreadable, so they may be offline or saturated" in out["error"], out
         assert kb.get_task(conn, tid).status == "running"
 
 
@@ -143,15 +188,48 @@ def test_github_error_fails_open(kanban_home, fake_gh, monkeypatch, caplog) -> N
         assert any("ci run progress" in r.getMessage() for r in caplog.records), caplog.text
 
 
-def test_parked_card_wakes_when_its_run_stops_starting(kanban_home, fake_gh, monkeypatch) -> None:
-    from hermes_cli import kanban_shared_blockers as ksb
+# --- saturated vs offline runners -----------------------------------------------------------------------------
 
-    fake_gh.serve(age=2 * 60)
+@pytest.mark.parametrize("org", [False, True], ids=["repo-runners", "org-runners"])
+def test_saturated_online_runners_are_not_offline(kanban_home, fake_gh, monkeypatch, org) -> None:
+    """Control: every matching runner is online and busy, so the job is only waiting its turn."""
+    fake_gh.serve(age=20 * 60)
+    junk_labels = _runner()
+    junk_labels["labels"].insert(1, "junk")
+    fake_gh.runners("junk", junk_labels, org=org)
     with kbc.connect_closing() as conn:
         tid = _running(conn)
         _as_worker(monkeypatch, conn, tid)
-        assert _park_on_run().get("status") == "scheduled"
+        out = _park_on_run()
+        assert out.get("status") == "scheduled", out
         monkeypatch.delenv("HERMES_KANBAN_TASK")
+        assert kcp.sweep(conn) == []
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert BLOCKER not in ksb.blocker_states(conn)
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.BUSY and "ci-fast-3" in p.detail, p
+
+
+@pytest.mark.parametrize("runner", [_runner(status="offline"), _runner(labels=("self-hosted", "Linux", "ci-slow"))],
+                         ids=["offline", "other-labels"])
+def test_readable_runner_list_without_a_matching_online_runner_refuses(kanban_home, fake_gh, monkeypatch,
+                                                                       runner) -> None:
+    fake_gh.serve(age=20 * 60)
+    fake_gh.runners(runner)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _park_on_run()
+        assert "ci_run_unstartable" in (out.get("error") or ""), out
+        assert "no online runner has them" in out["error"], out
+
+
+# --- while parked ---------------------------------------------------------------------------------------------
+
+def test_parked_card_wakes_when_its_run_stops_starting(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
         # Its own probe says "not yet" (the run never completes); hours pass with no runner.
         fake_gh.serve(age=20 * 60)
         with kb.write_txn(conn):
@@ -163,22 +241,142 @@ def test_parked_card_wakes_when_its_run_stops_starting(kanban_home, fake_gh, mon
         kinds = [e.kind for e in kb.list_events(conn, tid)]
         assert "ci_run_unstartable" in kinds, kinds
         notes = [c.body for c in kb.list_comments(conn, tid)]
-        assert any(f"run {RUN} queued" in n and "no runner for labels self-hosted,ci-fast" in n for n in notes), notes
+        assert any(f"run {RUN} queued" in n and "no runner picked it up in 15 min (labels self-hosted,ci-fast" in n
+                   for n in notes), notes
         states = ksb.blocker_states(conn)
-        assert "runners-offline.ci-fast" in states, states
-        assert tid in states["runners-offline.ci-fast"].behind
+        assert BLOCKER in states, states
+        assert tid in states[BLOCKER].behind
+        # The card that found the wall is its probe: it runs now, not after shared_blocker_probe_seconds.
+        assert ksb.PROBE_RELEASED_EVENT in kinds, kinds
+        assert any(f"is the probe for shared blocker {BLOCKER} and can run now" in n for n in notes), notes
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_second_card_woken_behind_the_same_blocker_is_held_and_told_why(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        first, second = sorted([_parked(conn, monkeypatch), _parked(conn, monkeypatch)])
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [first, second]
+        assert kbd.check_respawn_guard(conn, first) is None
+        assert kbd.check_respawn_guard(conn, second) == ksb.GUARD_REASON
+        assert ksb.PROBE_RELEASED_EVENT not in [e.kind for e in kb.list_events(conn, second)]
+        notes = [c.body for c in kb.list_comments(conn, second)]
+        assert any(f"1 other card(s) ({first}) already wait behind shared blocker {BLOCKER}" in n
+                   and "at most every 30 min" in n for n in notes), notes
+
+
+def test_probe_release_is_spent_by_one_run(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [tid]
+        assert kbd.check_respawn_guard(conn, tid) is None
+        # It ran as the probe and crashed (says nothing about the wall): now it waits the interval like any card.
+        with kb.write_txn(conn):
+            kb._synthesize_ended_run(conn, tid, outcome="crashed", summary="probe crashed")
+        assert kbd.check_respawn_guard(conn, tid) == ksb.GUARD_REASON
+
+
+@pytest.mark.parametrize("stale", ["other-blocker", "before-assertion"])
+def test_probe_release_must_name_this_blocker_after_the_card_asserted_it(kanban_home, stale) -> None:
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        with kb.write_txn(conn):
+            kb._synthesize_ended_run(conn, tid, outcome=kcp.CI_RUN_UNSTARTABLE, summary="no runner",
+                                     metadata={"blocker_id": BLOCKER})
+            kb._append_event(conn, tid, ksb.PROBE_RELEASED_EVENT,
+                             {"blocker_id": "runners-offline.ci-slow" if stale == "other-blocker" else BLOCKER})
+            if stale == "before-assertion":
+                conn.execute("UPDATE task_events SET created_at = created_at - 60 WHERE task_id = ? AND kind = ?",
+                             (tid, ksb.PROBE_RELEASED_EVENT))
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert ksb.shared_blocker_guard(conn, tid) == ksb.GUARD_REASON
+
+
+def test_card_woken_again_for_the_same_blocker_is_the_probe_again(kanban_home, fake_gh, monkeypatch) -> None:
+    """PR #2040 review: the card ran as the probe, re-parked on a freshly queued re-run, and that run stalled too.
+    Its earlier runs (and the wake's synthesized one) are in ``probe_starts``; the new release must still hold."""
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [tid]
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        _as_worker(monkeypatch, conn, tid)
+        fake_gh.serve(age=2 * 60)
+        assert _park_on_run().get("status") == "scheduled"
+        monkeypatch.delenv("HERMES_KANBAN_TASK")
+        kcp._LAST_CHECK.clear()
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [tid]
+        assert tid in ksb.blocker_states(conn)[BLOCKER].probe_starts
+        notes = [c.body for c in kb.list_comments(conn, tid)]
+        assert f"is the probe for shared blocker {BLOCKER} and can run now" in notes[-1], notes
+        assert kbd.check_respawn_guard(conn, tid) is None
+        with kb.write_txn(conn):  # its next run spends this release too
+            kb._synthesize_ended_run(conn, tid, outcome="crashed", summary="probe crashed")
+        assert kbd.check_respawn_guard(conn, tid) == ksb.GUARD_REASON
+
+
+def test_release_without_a_run_id_is_spent_by_any_probe_start(kanban_home) -> None:
+    """A release that names no asserting run (``probe_stranded_blockers``, or written before ``after_run``)."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        with kb.write_txn(conn):
+            kb._synthesize_ended_run(conn, tid, outcome=kcp.CI_RUN_UNSTARTABLE, summary="no runner",
+                                     metadata={"blocker_id": BLOCKER})
+            kb._append_event(conn, tid, ksb.PROBE_RELEASED_EVENT, {"blocker_id": BLOCKER})
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert ksb.shared_blocker_guard(conn, tid) is None
+        with kb.write_txn(conn):
+            kb._synthesize_ended_run(conn, tid, outcome="crashed", summary="probe crashed")
+        assert ksb.shared_blocker_guard(conn, tid) == ksb.GUARD_REASON
+
+
+def test_scoped_blocker_card_on_another_provider_does_not_hold_the_woken_card(kanban_home, fake_gh,
+                                                                              monkeypatch) -> None:
+    """``_others_behind`` counts only the cards ``shared_blocker_guard`` counts (PR #2040 review)."""
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        other = kb.create_task(conn, title="other", assignee="worker")
+        with kb.write_txn(conn):
+            kb._synthesize_ended_run(conn, other, outcome=kcp.CI_RUN_UNSTARTABLE, summary="no runner",
+                                     metadata={"blocker_id": BLOCKER, "blocker_provider": "anthropic"})
+        routes = {other: "openai"}
+        monkeypatch.setattr(ksb, "task_route", lambda _c, t: (None, routes.get(t), "ready"))
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [tid]
+        notes = [c.body for c in kb.list_comments(conn, tid)]
+        assert f"is the probe for shared blocker {BLOCKER} and can run now" in notes[-1], notes
+        assert ksb.PROBE_RELEASED_EVENT in [e.kind for e in kb.list_events(conn, tid)]
+
+
+def test_scoped_blocker_card_on_the_same_provider_holds_the_woken_card(kanban_home, fake_gh, monkeypatch) -> None:
+    """Control for the test above: the other card's route matches the blocker's provider."""
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        other = kb.create_task(conn, title="other", assignee="worker")
+        with kb.write_txn(conn):
+            kb._synthesize_ended_run(conn, other, outcome=kcp.CI_RUN_UNSTARTABLE, summary="no runner",
+                                     metadata={"blocker_id": BLOCKER, "blocker_provider": "anthropic"})
+        monkeypatch.setattr(ksb, "task_route", lambda _c, t: (None, "anthropic", "ready"))
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [tid]
+        notes = [c.body for c in kb.list_comments(conn, tid)]
+        assert f"1 other card(s) ({other}) already wait behind shared blocker {BLOCKER}" in notes[-1], notes
 
 
 def test_ci_sweep_reads_github_at_most_every_5_min_per_card(kanban_home, fake_gh, monkeypatch) -> None:
     fake_gh.serve(age=2 * 60)
     with kbc.connect_closing() as conn:
-        tid = _running(conn)
-        _as_worker(monkeypatch, conn, tid)
-        assert _park_on_run().get("status") == "scheduled"
-        monkeypatch.delenv("HERMES_KANBAN_TASK")
+        tid = _parked(conn, monkeypatch)
         parked = fake_gh.calls()
         for _ in range(3):
-            kwc.run_due_wake_checks(conn, wait=True)
+            kcp.sweep(conn)
         assert fake_gh.calls() == parked + 1
         assert kb.get_task(conn, tid).status == "scheduled", [(e.kind, e.payload) for e in kb.list_events(conn, tid)][-3:]
 
@@ -408,7 +606,7 @@ def test_a_raising_pool_callable_does_not_escape_the_wake_check_tick(kanban_home
     def boom() -> list[str]:
         raise RuntimeError("pool callable blew up")
 
-    monkeypatch.setattr(kcp, "submit_sweep", lambda conn, pool: pool.submit(boom))
+    monkeypatch.setattr(kcp, "submit_sweep", lambda conn, pool, **_kw: pool.submit(boom))
     with kbc.connect_closing() as conn, caplog.at_level("WARNING", logger=kwc.logger.name):
         out = kwc.run_due_wake_checks(conn, wait=True)
     assert out == {"submitted": [], "in_flight": 0}, out
@@ -431,3 +629,266 @@ def test_close_failure_after_a_sweep_keeps_the_result_and_says_close(kanban_home
     msgs = [r.getMessage() for r in caplog.records]
     assert any("closing" in m and "after the sweep" in m for m in msgs), msgs
     assert not any("failed" in m and "sweep of" in m for m in msgs), msgs
+
+
+def test_sweep_forgets_cards_that_stopped_waiting_on_ci(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        kcp.sweep(conn)
+        assert _key(conn, tid) in kcp._LAST_CHECK
+        other_board = ("/elsewhere/kanban.db", tid)
+        kcp._LAST_CHECK[other_board] = time.monotonic()
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        kcp.sweep(conn)
+        assert _key(conn, tid) not in kcp._LAST_CHECK
+        assert other_board in kcp._LAST_CHECK  # another board's sweep owns its own entries
+
+
+def test_card_woken_after_the_blocker_cleared_is_the_new_probe(kanban_home, fake_gh, monkeypatch) -> None:
+    """A card still listed behind a CLEARED blocker is not a probe in flight: the next woken card probes at once."""
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        stale, done = kb.create_task(conn, title="stale", assignee="worker"), kb.create_task(conn, title="d",
+                                                                                           assignee="worker")
+        with kb.write_txn(conn):
+            for card in (stale, done):
+                kb._synthesize_ended_run(conn, card, outcome=kcp.CI_RUN_UNSTARTABLE, summary="no runner",
+                                         metadata={"blocker_id": BLOCKER})
+            kb._synthesize_ended_run(conn, done, outcome="completed", summary="ran on the runner")
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (stale,))
+        st = ksb.blocker_states(conn)[BLOCKER]
+        assert stale in st.behind and not st.is_open
+        fake_gh.serve(age=20 * 60)
+        assert kcp.sweep(conn) == [tid]
+        assert ksb.PROBE_RELEASED_EVENT in [e.kind for e in kb.list_events(conn, tid)]
+
+
+def test_sweep_reads_at_most_max_cards_least_recently_checked_first(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    monkeypatch.setattr(kcp, "MAX_CARDS_PER_SWEEP", 1)
+    with kbc.connect_closing() as conn:
+        first, second = sorted([_parked(conn, monkeypatch), _parked(conn, monkeypatch)])
+        jobs = fake_gh.calls("/jobs")
+        kcp.sweep(conn)
+        assert fake_gh.calls("/jobs") == jobs + 1
+        assert _key(conn, first) in kcp._LAST_CHECK and _key(conn, second) not in kcp._LAST_CHECK
+        monkeypatch.setattr(kcp, "RECHECK_SECONDS", 0)  # both due again: the never-checked one goes first
+        kcp.sweep(conn)
+        assert _key(conn, second) in kcp._LAST_CHECK
+
+
+def test_sweep_starts_no_read_past_its_time_budget(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    monkeypatch.setattr(kcp, "SWEEP_BUDGET_SECONDS", 0)
+    with kbc.connect_closing() as conn:
+        _parked(conn, monkeypatch)
+        jobs = fake_gh.calls("/jobs")
+        kcp.sweep(conn)
+        assert fake_gh.calls("/jobs") == jobs
+
+
+class _Clock:
+    """``kcp.time`` with a monotonic clock that each fake ``gh api`` call advances by ``step`` seconds."""
+
+    def __init__(self, step: float) -> None:
+        self.now, self.step = 1000.0, step
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _slow_gh(monkeypatch, clock: _Clock, repo_runners: list) -> list[str]:
+    """Fake ``_gh_api``: a stuck job, ``repo_runners`` for the repo list; records every path read."""
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 20 * 60))
+    paths: list[str] = []
+
+    def api(path: str) -> dict:
+        paths.append(path.split("?", 1)[0])
+        clock.now += clock.step
+        if path.startswith("orgs/"):
+            return {"runners": [_runner()]}
+        if "/actions/runners" in path:
+            return {"runners": repo_runners}
+        return {"jobs": [{"status": "queued", "runner_name": None, "created_at": created, "labels": LABELS}]}
+
+    monkeypatch.setattr(kcp, "time", clock)
+    monkeypatch.setattr(kcp, "_gh_api", api)
+    return paths
+
+
+@pytest.mark.parametrize("step,reads", [(120, 1), (60, 2)], ids=["before-repo-list", "before-org-list"])
+def test_sweep_starts_no_gh_call_past_its_budget_and_rereads_that_run_first(kanban_home, fake_gh, monkeypatch,
+                                                                            step, reads) -> None:
+    """PR #2040 review: a stuck run makes up to three 20 s calls; the budget must stop the runner-list ones too."""
+    monkeypatch.setattr(kcp, "SWEEP_BUDGET_SECONDS", 100)
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        paths = _slow_gh(monkeypatch, _Clock(step), [_runner(status="offline")])
+        assert kcp.sweep(conn) == []
+        assert len(paths) == reads, paths
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert _key(conn, tid) not in kcp._LAST_CHECK  # first in line next sweep, not 5 min later
+        assert kcp.sweep(conn) == [] and len(paths) == 2 * reads, paths  # re-read at once
+
+
+def test_runner_list_read_needs_budget_left(kanban_home) -> None:
+    def runners(_repo):
+        raise AssertionError("runner list read after the deadline")
+
+    p = kcp.ci_run_progress(RUN_URL, fetch=lambda *_: {"jobs": [{
+        "status": "queued", "runner_name": None, "labels": LABELS,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 20 * 60))}]},
+        fetch_runners=runners, deadline=time.monotonic() - 1)
+    assert p.state == "unknown" and p.deferred and p.labels == LABELS, p
+
+
+@pytest.mark.parametrize("repo_runners,org_read", [([_runner()], False), ([_runner(status="offline")], True)],
+                         ids=["repo-online-match", "repo-offline-only"])
+def test_org_runner_list_is_read_only_without_an_online_repo_match(kanban_home, monkeypatch, repo_runners,
+                                                                   org_read) -> None:
+    paths = _slow_gh(monkeypatch, _Clock(0), repo_runners)
+    p = kcp.ci_run_progress(RUN_URL)
+    assert p.state == kcp.BUSY, p
+    assert any(x.startswith("orgs/") for x in paths) is org_read, paths
+
+
+# --- dispatcher tick cost and pool budget ---------------------------------------------------------------------
+
+def _record_scans(monkeypatch) -> list[threading.Thread]:
+    seen: list[threading.Thread] = []
+    real = kcp._ci_waits
+
+    def scan(conn):
+        seen.append(threading.current_thread())
+        return real(conn)
+
+    monkeypatch.setattr(kcp, "_ci_waits", scan)
+    return seen
+
+
+def test_dispatcher_tick_scans_off_thread_and_at_most_once_a_minute(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        _parked(conn, monkeypatch)
+        seen = _record_scans(monkeypatch)
+        kwc.run_due_wake_checks(conn, wait=True)
+        kwc.run_due_wake_checks(conn, wait=True)
+        assert len(seen) == 1 and seen[0] is not threading.current_thread(), seen
+        monkeypatch.setattr(kcp, "SWEEP_EVERY_SECONDS", 0)
+        kwc.run_due_wake_checks(conn, wait=True)
+        assert len(seen) == 2, seen
+
+
+def test_no_sweep_when_no_card_is_scheduled(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        seen = _record_scans(monkeypatch)
+        kwc.run_due_wake_checks(conn, wait=True)
+        assert seen == []
+
+
+def test_sweep_starts_only_for_a_scheduled_card_whose_latest_park_is_ci(kanban_home, fake_gh, monkeypatch) -> None:
+    """A sweep opens its own connection, which briefly takes the board's dispatch tick lock (a concurrent
+    ``dispatch_once`` then returns ``skipped_locked``), so a board whose scheduled cards wait on anything but a CI
+    run never starts one. [daveey]"""
+    monkeypatch.setattr(kcp, "SWEEP_EVERY_SECONDS", 0)
+    started: Future = Future()
+    started.set_result([])  # done at once, so the next call is not refused as "a sweep is running"
+
+    class Pool:
+        def submit(self, *_a):
+            return started
+
+    def latest(conn, tid, payload) -> None:
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "scheduled", payload)
+
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        assert kcp.submit_sweep(conn, Pool()) is started
+        latest(conn, tid, {"reason": "SCHEDULED_UNTIL=later", "awaiting": {"kind": "clock"}})
+        assert kcp.submit_sweep(conn, Pool()) is None          # re-parked on a clock: its CI park is history
+        latest(conn, tid, {"reason": "back on CI", "awaiting": {"kind": "ci", "ref": RUN_URL}})
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "commented", {"author": "someone"})   # not a park: the CI park stands
+        assert kcp.submit_sweep(conn, Pool()) is started
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert kcp.submit_sweep(conn, Pool()) is None          # not parked any more
+        other = _running(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (other,))
+            conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'scheduled', "
+                         "'{not json', ?)", (other, int(time.time())))
+        assert kcp.submit_sweep(conn, Pool()) is None
+        _parked(conn, monkeypatch)                             # scanned after the malformed one
+        assert kcp.submit_sweep(conn, Pool()) is started       # one malformed park does not hide the CI wait
+
+
+def test_no_second_sweep_of_a_board_while_one_runs(kanban_home, fake_gh, monkeypatch) -> None:
+    monkeypatch.setattr(kcp, "SWEEP_EVERY_SECONDS", 0)
+    pending: Future = Future()
+
+    class Pool:
+        submitted = 0
+
+        def submit(self, *_a):
+            Pool.submitted += 1
+            return pending
+
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        _parked(conn, monkeypatch)
+        assert kcp.submit_sweep(conn, Pool()) is pending
+        assert kcp.submit_sweep(conn, Pool()) is None
+        assert Pool.submitted == 1
+        pending.set_result([])
+        assert kcp.submit_sweep(conn, Pool()) is pending
+
+
+def test_no_sweep_without_a_free_pool_slot(kanban_home, fake_gh, monkeypatch) -> None:
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        _parked(conn, monkeypatch)
+        seen = _record_scans(monkeypatch)
+        assert kcp.submit_sweep(conn, kwc._pool(), slots_free=0) is None
+        # Another board's sweep fills the only slot: this board's waits for it.
+        monkeypatch.setattr(kwc, "MAX_CONCURRENT", 1)
+        monkeypatch.setitem(kcp._SWEEPS, "/elsewhere/kanban.db", Future())
+        kwc.run_due_wake_checks(conn, wait=True)
+        assert seen == []
+
+
+def test_a_running_sweep_counts_against_the_probe_budget(kanban_home, fake_gh, monkeypatch) -> None:
+    monkeypatch.setattr(kwc, "MAX_CONCURRENT", 1)
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow_sweep(_db, _home):
+        started.set()
+        release.wait(30)
+        return []
+
+    monkeypatch.setattr(kcp, "_sweep_db", slow_sweep)
+    fake_gh.serve(age=2 * 60)
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch)
+        with kb.write_txn(conn):  # its own probe is not due yet: this tick only starts the sweep
+            conn.execute("UPDATE task_wake_checks SET next_at = ? WHERE task_id = ?", (int(time.time()) + 3600, tid))
+        kwc.run_due_wake_checks(conn)
+        assert started.wait(10)
+        try:
+            with kb.write_txn(conn):
+                conn.execute("UPDATE task_wake_checks SET next_at = 0 WHERE task_id = ?", (tid,))
+            assert kwc.run_due_wake_checks(conn)["submitted"] == []
+        finally:
+            release.set()
+        kcp._SWEEPS.clear()
+        assert kwc.run_due_wake_checks(conn, wait=True)["submitted"] == [tid]

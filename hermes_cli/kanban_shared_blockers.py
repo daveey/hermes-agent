@@ -455,6 +455,8 @@ def shared_blocker_guard(
             f"SELECT 1 FROM tasks WHERE id IN ({marks}) AND status = 'running' LIMIT 1", others,
         ).fetchone():
             return GUARD_REASON   # a probe is already in flight
+    if _released_as_probe(conn, st, task_id):
+        return None
     if interval is None:
         interval = probe_interval_seconds()
     last = max([st.asserted_at, *st.probe_starts.values()])
@@ -464,6 +466,35 @@ def shared_blocker_guard(
     if _unblocked_since_assertion(conn, task_id, st.blocker_id):
         return None
     return GUARD_REASON
+
+
+def _released_as_probe(conn: sqlite3.Connection, st: BlockerState, task_id: str) -> bool:
+    """True when ``task_id`` was named the probe for ``st`` (a :data:`PROBE_RELEASED_EVENT` for it) at or after
+    the run that put it behind ``st``, and has not started a run since: the release is spent by one run. The CI
+    sweep (``kanban_ci_progress.apply``) names the first card it wakes for a runner blocker this way, since that
+    card discovered the wall and holding it ``shared_blocker_probe_seconds`` would only delay the fix.
+
+    The newest release for ``st`` decides. One that names its asserting run (``after_run``) is spent only by a
+    later run of the card: ``probe_starts`` also holds runs from before a re-assertion (a card the sweep wakes a
+    second time for the same blocker ran in between, and the wake's own synthesized run is recorded too), so it
+    cannot tell a fresh release from a spent one. A release without ``after_run`` falls back to ``probe_starts``.
+    [daveey]"""
+    from hermes_cli import kanban_db as kb
+
+    asserted = st.behind[task_id]  # the guard only asks about a card behind st
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND created_at >= ? "
+        "ORDER BY id DESC LIMIT 20", (task_id, PROBE_RELEASED_EVENT, asserted),
+    ):
+        payload = kb._json_dict(row["payload"])
+        if normalize_blocker_id(payload.get("blocker_id")) != st.blocker_id:
+            continue
+        after = payload.get("after_run")
+        if type(after) is int:
+            return conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND id > ? LIMIT 1",
+                                (task_id, after)).fetchone() is None
+        return task_id not in st.probe_starts
+    return False
 
 
 def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:

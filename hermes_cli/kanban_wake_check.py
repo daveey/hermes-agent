@@ -966,6 +966,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
     """Start every due probe (at most ``MAX_CONCURRENT`` in flight) and return at once;
     ``wait=True`` (tests, one-shot callers) also waits up to ``TICK_BUDGET_SECONDS`` for them.
     Returns ``{"submitted": [task ids], "in_flight": n}``. Never raises."""
+    from hermes_cli import kanban_ci_progress  # [daveey] a card parked on a CI run that never starts
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
@@ -998,8 +999,9 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
             (ts,)).fetchall()
         for task_id, cmd, every, generation, purpose in due:
             key = (db_path, task_id)
+            sweeping = kanban_ci_progress.running_sweeps()  # [daveey] a CI sweep holds a pool worker too
             with _LOCK:
-                busy = sum(1 for f in _IN_FLIGHT.values() if not f.done())
+                busy = sum(1 for f in _IN_FLIGHT.values() if not f.done()) + sweeping
                 running = key in _IN_FLIGHT and not _IN_FLIGHT[key].done()
             if running:
                 continue
@@ -1029,8 +1031,9 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         with _LOCK:
             for k in [k for k, f in _IN_FLIGHT.items() if f.done()]:
                 _IN_FLIGHT.pop(k, None)
-        from hermes_cli import kanban_ci_progress  # [daveey] a card parked on a CI run that never starts
-        sweep = kanban_ci_progress.submit_sweep(conn, _pool())
+            busy = len(_IN_FLIGHT)
+        sweep = kanban_ci_progress.submit_sweep(
+            conn, _pool(), slots_free=MAX_CONCURRENT - busy - kanban_ci_progress.running_sweeps())
         if sweep is not None:
             futures.append(sweep)
     except Exception:
