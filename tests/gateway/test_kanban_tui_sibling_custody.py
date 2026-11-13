@@ -762,12 +762,7 @@ def test_nit3_forwardable_work_on_an_intermediate_parent_alone_is_claimed_by_the
 
 
 def test_the_gateway_walks_as_many_parents_as_the_legacy_lineage(env):
-    import inspect
-
     from tui_gateway import kanban_leg_custody as custody
-    from tui_gateway import session_notifications
-    assert inspect.signature(session_notifications._session_lineage).parameters["limit"].default == \
-        custody.LINEAGE_LIMIT
     _runner, authority, _adapter, _admitted = env
     authority.db.chain(*(f"s{i}" for i in range(custody.LINEAGE_LIMIT + 3)))
     with authority.db._read_ctx() as conn:

@@ -9,11 +9,11 @@ import threading
 
 from .method_ctx import bind_module
 from . import session_notifications_surface as _surface
-from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure
-from .kanban_notice_text import parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode
-from .kanban_notice_text import repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out
-from .kanban_notice_text import left_open_suffix as _kb_left_open
+from .kanban_notice_text import (chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure,
+    left_open_suffix as _kb_left_open, repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out,
+    parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode)
 from .completion_obligation import settle_started as _settle_started, settle_suppressed as _settle_suppressed
+from .kanban_leg_custody import LINEAGE_LIMIT
 
 
 def _notif_locked_sessions(fn, default):
@@ -868,7 +868,7 @@ _LINEAGE_TTL_S = 30.0
 _lineage_memo: dict[tuple, tuple] = {}  # (state.db, session key) -> (monotonic at, lineage)
 
 
-def _session_lineage(session_key: str, limit: int = 8) -> tuple:
+def _session_lineage(session_key: str, limit: int = LINEAGE_LIMIT) -> tuple:
     """Earlier ids of this chat (compaction parents): a remote card stays linked to the id that created it.
 
     Every live chat's poller asked for it every 5 s, opening state.db each time (t_01a1cee98b798343). A chat's

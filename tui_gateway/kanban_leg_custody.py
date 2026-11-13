@@ -142,14 +142,22 @@ def legacy_gateway_owns(session: dict, session_lineage, session_db, now: Optiona
 _LINEAGE_PENDING_SQL = """SELECT status FROM session_admissions WHERE target_session_id=? AND status!='terminal'
     UNION ALL SELECT status FROM worker_executions WHERE session_id=? AND status!='terminal'"""
 
-# Parent hops of a chat's lineage: ``session_notifications._session_lineage``'s default ``limit`` (the legacy ids).
+# Parent hops of a chat's lineage, shared by both legs: ``with_parents`` here and the default ``limit`` of
+# ``session_notifications._session_lineage`` (the legacy ids), so the two walk the same depth by construction.
 LINEAGE_LIMIT = 8
 
 
 def with_parents(conn, ids) -> tuple:
     """``ids`` plus each one's ``sessions.parent_session_id`` chain (up to ``LINEAGE_LIMIT`` hops): the compaction
     parents the legacy leg reads (``session_notifications._session_lineage``), so the gateway's claim reads the
-    same ids, intermediate parents included (review 5889497938 nit 3). A read error keeps ``ids``."""
+    same ids, intermediate parents included (review 5889497938 nit 3). A read error keeps ``ids``.
+
+    Every id's chain is walked, the gateway's lineage root (``logical``) included, so on a chain deeper than
+    ``LINEAGE_LIMIT`` the gateway reads a superset of the legacy ids: the root, which the legacy walk from the chat
+    stops short of. That direction is safe: an ``unknown`` row there only makes the gateway
+    decline the claim (the legacy leg keeps the chat), and a forwardable one sits on the root the gateway read
+    before this walk existed, where the durable per-row claim keeps delivery exactly-once (review 5889960215
+    nit 2)."""
     import sqlite3
     out = list(dict.fromkeys(str(s) for s in ids if s))
     try:
@@ -172,8 +180,10 @@ def lineage_ledger_status(conn, ids) -> Optional[str]:
     key-first here and ``unknown`` sorted there). Order-independent: every non-terminal row of every id is read,
     and any one outside ``owner_forward.FORWARDABLE_LEDGER_STATES`` (an ``unknown`` admission, even beside a
     ``queued`` row on the same id) answers with its status, which owns nothing, so this backend keeps the chat;
-    else the least forwardable status of the first id in sorted order that has one; None when no id has a
-    non-terminal row. The gateway passes its ids through :func:`with_parents`, so both legs read the same lineage."""
+    else the alphabetically first status (deterministic; the forwardable states have no order among themselves)
+    of the first id in sorted order that has one; None when no id has a non-terminal row. The gateway passes its
+    ids through :func:`with_parents`, so both legs read the same lineage up to ``LINEAGE_LIMIT`` hops (beyond it
+    the gateway reads a superset; see :func:`with_parents`)."""
     from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
     first = None
     for sid in sorted({str(s) for s in ids if s}):
