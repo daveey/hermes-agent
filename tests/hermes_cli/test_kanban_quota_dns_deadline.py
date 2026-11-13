@@ -63,10 +63,22 @@ def test_resolver_roundtrips_addresses_without_network():
     assert all(row[0] == socket.AF_INET and row[4] == ('127.0.0.1', 443) for row in rows)
 
 
-def test_resolver_failure_is_closed_and_reaped(monkeypatch):
+@pytest.mark.parametrize('child_exits_first', [False, True])
+def test_resolver_failure_is_closed_and_reaped(monkeypatch, child_exits_first):
     import asyncio
 
     monkeypatch.setattr(recovery, '_DNS_SCRIPT', 'import sys; sys.exit(1)')
+    if child_exits_first:
+        # A starved parent can be scheduled after the child has already exited:
+        # writing the request then hits EPIPE. Force that ordering deterministically.
+        real_popen = subprocess.Popen
+
+        def exited_popen(*args, **kw):
+            process = real_popen(*args, **kw)
+            process.wait(timeout=30)
+            return process
+
+        monkeypatch.setattr(subprocess, 'Popen', exited_popen)
     with pytest.raises(OSError, match='DNS resolution failed'):
         asyncio.run(recovery._getaddrinfo('unused.invalid', 443))
 

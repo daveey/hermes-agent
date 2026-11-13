@@ -38,8 +38,11 @@ async def _getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
             stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
             env=build_subprocess_env(base={}))
         try:
-            process.stdin.write(json.dumps([host, port, family, type, proto, flags]).encode('utf-8'))
-            process.stdin.close()
+            try:
+                process.stdin.write(json.dumps([host, port, family, type, proto, flags]).encode('utf-8'))
+                process.stdin.close()
+            except BrokenPipeError:
+                pass  # the child already exited; its exit status below decides the result
             while process.poll() is None:
                 await asyncio.sleep(0.01)
             if process.returncode != 0:
