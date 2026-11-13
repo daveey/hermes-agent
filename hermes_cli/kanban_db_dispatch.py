@@ -148,10 +148,7 @@ def _is_owner_restart_run(run) -> bool:
 # Within this window a GitHub PR URL in a comment blocks re-spawn.
 _RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
 
-_RESPAWN_GUARD_PR_URL_RE = re.compile(
-    r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+",
-    re.IGNORECASE,
-)
+_RESPAWN_GUARD_PR_URL_RE = re.compile(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+", re.IGNORECASE)
 
 
 @dataclass
@@ -202,6 +199,7 @@ class DispatchResult:
     claim_deferred: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, reason)`` whose claim the Board lease deferred this tick (``lease_held``, ``labels_mismatch``,
     ``offline``). The tick moves on to the next candidate; the stuck warning names these. [daveey]"""
+    admission_deferred: list[str] = field(default_factory=list)  # hub claim screen left unclaimed, unjudged [daveey]
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     capsule_refused: list[tuple[str, str]] = field(default_factory=list)  # (task_id, code): kanban_capsule_admission [daveey]
@@ -2305,6 +2303,7 @@ def _dispatch_once_locked(
     # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
     # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
     all_ready = [row for row in lane_rows(conn, "ready") if row["id"] not in unjudged]  # hub: judged next tick
+    result.admission_deferred = sorted(unjudged)
     from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
     # Review rows are enumerated up front so the budget split can see whether

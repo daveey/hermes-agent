@@ -347,6 +347,68 @@ def test_screen_reports_deferred_ids(gws, hub_judge):
     assert len(hub_judge.calls) == 1 and counts.judged == 1
     assert counts.deferred == 2 and counts.deferred_ids == frozenset(tids[1:])
     assert "deferred=2" in counts.line()
+    assert all(tid in counts.line() for tid in tids[1:]) and tids[0] not in counts.line()
+
+
+def test_deferred_ids_appear_in_the_dispatch_result(gws, hub_judge, monkeypatch, caplog):
+    """A card deferred every tick (kept edited, or a long backlog) must be visible in the tick's diagnostics:
+    ``lane_candidates`` leaves it out, so the result and the log line name it (review of #1811)."""
+    from hermes_cli.kanban_db_dispatch_stuck import held_cards
+    hub, _worker, _svc = gws
+    _no_board_promotion(monkeypatch)
+    tids = [_hub_card(hub, title=f"backlog card {i}") for i in range(hac.MAX_JUDGED_PER_TICK + 2)]
+    with caplog.at_level(logging.INFO, logger=hac.__name__):
+        result = _tick(hub)
+    deferred = [tid for tid in tids if not _events(hub.conn, tid, "hub_admission")]
+    assert len(deferred) == 2 and sorted(result.admission_deferred) == sorted(deferred)
+    assert all(f"{tid}=admission_deferred" in held_cards([result]) for tid in deferred)
+    [line] = [r.getMessage() for r in caplog.records if "claim screen" in r.getMessage()]
+    assert "deferred=2" in line and all(tid in line for tid in deferred)
+    assert _tick(hub).admission_deferred == []  # judged on the next tick: nothing left deferred
+
+
+def test_print_deferred_names_the_cards(capsys):
+    hac.print_deferred([])
+    assert capsys.readouterr().out == ""
+    hac.print_deferred(["t_a", "t_b"])
+    assert capsys.readouterr().out == "Deferred by the hub claim screen (unjudged, judged next tick): t_a, t_b\n"
+
+
+def test_a_write_to_a_later_card_during_an_earlier_judge_call_does_not_defer_it(gws, hub_judge, monkeypatch):
+    """Each card's row is read when its turn comes, not once before the first judge call: a write to card 2
+    during card 1's (up to 30 s) call no longer makes ``_apply`` defer card 2 and waste its judge call."""
+    hub, _worker, _svc = gws
+    first, second = _hub_card(hub, title="card 1"), _hub_card(hub, title="card 2")
+    fake = judge.admit
+
+    def write_card_2_during_card_1(card, hub_reason=None):
+        if not hub_judge.calls:
+            hub.conn.execute("UPDATE tasks SET body = 'edited before its turn' WHERE id = ?", (second,))
+            hub.conn.commit()
+        return fake(card, hub_reason=hub_reason)
+    monkeypatch.setattr(judge, "admit", write_card_2_during_card_1)
+    hub.enter()
+    counts = hac.screen(hub.conn)
+    assert counts.deferred == 0 and counts.judged == 2
+    assert [c["card"]["body"] for c in hub_judge.calls] == ["Portable repo work: edit, test, PR.",
+                                                            "edited before its turn"]
+    assert _events(hub.conn, first, "hub_admission") and _events(hub.conn, second, "hub_admission")
+
+
+def test_a_later_card_that_stops_being_screenable_is_not_judged(gws, hub_judge, monkeypatch):
+    hub, _worker, _svc = gws
+    _first, second = _hub_card(hub, title="card 1"), _hub_card(hub, title="card 2")
+    fake = judge.admit
+
+    def label_card_2_during_card_1(card, hub_reason=None):
+        hub.conn.execute("UPDATE tasks SET runs_on = '[\"linux\"]' WHERE id = ?", (second,))
+        hub.conn.commit()
+        return fake(card, hub_reason=hub_reason)
+    monkeypatch.setattr(judge, "admit", label_card_2_during_card_1)
+    hub.enter()
+    counts = hac.screen(hub.conn)
+    assert [c["card"]["title"] for c in hub_judge.calls] == ["card 1"]
+    assert counts.judged == 1 and counts.deferred == 0 and _events(hub.conn, second, "hub_admission") == []
 
 
 def test_the_judge_budget_follows_dispatch_priority_not_creation_order(gws, hub_judge):

@@ -23,7 +23,8 @@ every hub run passes, so before the hub claims a ready, label-less card with no 
 * deferred (``Counts.deferred_ids``, left out of this tick's claims and judged next tick): a card edited while the
   judge ran (its verdict belongs to a stale snapshot, so none is recorded), and every card past
   :data:`MAX_JUDGED_PER_TICK` judge calls (each may take the judge's 30 s timeout; a ~27-card backlog at rollout
-  would hold that tick's claims for minutes). Neither is ever claimed unjudged.
+  would hold that tick's claims for minutes). Neither is ever claimed unjudged. The log line and the dispatch
+  result (``DispatchResult.admission_deferred``) name them, so a ready card that keeps not starting is traceable.
 
 A card with any verdict (forced or skipped included) makes no model call. :func:`unjudged_claims` is the
 detector: this gateway's claims of a card that had no verdict yet (``hermes doctor`` reports it on the hub). Its
@@ -69,18 +70,31 @@ class Counts:
         self.deferred_ids = self.deferred_ids | {tid}
 
     def line(self) -> str:
+        ids = f" ({', '.join(sorted(self.deferred_ids))})" if self.deferred_ids else ""
         return ("hub admission: claim screen judged={judged} denied={denied} moved={moved} kept={kept} "
-                "home={home} unavailable={unavailable} deferred={deferred} repinned={repinned}").format(**asdict(self))
+                "home={home} unavailable={unavailable} deferred={deferred} repinned={repinned}"
+                ).format(**asdict(self)) + ids
+
+
+_SCREENABLE = ("status = 'ready' AND claim_lock IS NULL AND (runs_on IS NULL OR runs_on IN ('', '[]')) "
+               "AND placement_policy IS NULL")
 
 
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Screenable cards in the claim pass's own dispatch order, so the per-tick judge budget covers the cards the
     claims reach first and never lets lower-priority work jump a deferred higher-priority card."""
     from hermes_cli.kanban_db_dispatch_queries import lane_rows
-    rows = {row["id"]: row for row in conn.execute(
-        "SELECT * FROM tasks WHERE status = 'ready' AND claim_lock IS NULL "
-        "AND (runs_on IS NULL OR runs_on IN ('', '[]')) AND placement_policy IS NULL").fetchall()}
+    rows = {row["id"]: row for row in conn.execute(f"SELECT * FROM tasks WHERE {_SCREENABLE}").fetchall()}
     return [rows[row["id"]] for row in lane_rows(conn, "ready") if row["id"] in rows]
+
+
+def _current(conn: sqlite3.Connection, tid: str) -> tuple[Optional[sqlite3.Row], int]:
+    """The card's row and event head, read together at the top of each judged card: up to
+    :data:`MAX_JUDGED_PER_TICK` judge calls of 30 s each can run before a later card, so a row snapshot from the
+    start of the tick would make :func:`_apply` defer it for any write in between and waste its judge call.
+    The row is ``None`` when the card stopped being screenable meanwhile (claimed, labelled, no longer ready)."""
+    event_head = _event_head(conn, tid)
+    return conn.execute(f"SELECT * FROM tasks WHERE id = ? AND {_SCREENABLE}", (tid,)).fetchone(), event_head
 
 
 def _latest_wake_check(conn: sqlite3.Connection, task_id: str) -> str:
@@ -148,9 +162,10 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
     board = sync.board_slug_for_path(sync._db_key(conn) or "")
     down = False
     calls = 0
-    for card in _candidates(conn):
-        tid = card["id"]
-        event_head = _event_head(conn, tid)
+    for tid in [row["id"] for row in _candidates(conn)]:
+        card, event_head = _current(conn, tid)
+        if card is None:
+            continue
         if pickup.verdict(conn, tid) is not None:
             _self_check(conn, card, own, cfg, board, event_head, counts)
             continue
@@ -250,6 +265,12 @@ def _replace(conn: sqlite3.Connection, own: str, tid: str, target: list[str], re
             "reason": reason, "move_no": len(km.history(conn, tid)) + 1, "forced": False, "matches": [],
             "queued": True, "self_check": "hub_admission_denied"})
     return True
+
+
+def print_deferred(ids: list[str]) -> None:
+    """``hermes kanban dispatch`` text line for ``DispatchResult.admission_deferred``."""
+    if ids:
+        print(f"Deferred by the hub claim screen (unjudged, judged next tick): {', '.join(ids)}")
 
 
 def safe_screen(conn: sqlite3.Connection) -> frozenset:

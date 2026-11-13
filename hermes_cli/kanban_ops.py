@@ -15,6 +15,7 @@ from pathlib import Path
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli.kanban_hub_admission_claim import print_deferred
 from hermes_cli.kanban_no_progress import held_json, print_held
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
@@ -124,6 +125,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             # Cards this machine cannot lease (runs_on / placement) and claims the Board deferred. [daveey]
             "skipped_ineligible": [{"task_id": tid, "reason": reason} for (tid, reason) in res.skipped_ineligible],
             "claim_deferred": [{"task_id": tid, "reason": reason} for (tid, reason) in res.claim_deferred],
+            "admission_deferred": res.admission_deferred,  # hub claim screen: unjudged, judged next tick
             "shared_blocker_released": res.shared_blocker_released,
             "shared_blocker_probed": res.shared_blocker_probed,
             "skipped_locked": res.skipped_locked,
@@ -177,6 +179,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Skipped (this machine cannot lease it: {reason}): {tid}")
     for tid, reason in res.claim_deferred:
         print(f"Claim deferred by the Board ({reason}): {tid}")
+    print_deferred(res.admission_deferred)
     if res.rate_limited:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
     if res.shared_blocker_released:
