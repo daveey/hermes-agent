@@ -8,8 +8,9 @@ background consumer imports, and re-checked in ``web_server`` before the server 
 * ``hermes serve|dashboard --proof-home DIR`` (or ``HERMES_PROOF_HOME``) selects ``HERMES_HOME``.
   DIR must be an existing disposable directory: never the production root, ``<root>/profiles/*``
   or the launching agent's home (``HERMES_AGENT_HOME``), resolved through aliases and symlinks.
-* An agent-originated restart-proof shape (``--isolated`` or ``HERMES_DESKTOP=1``) on a
-  production home exits 2 with a safe recipe.
+* An agent-originated restart-proof shape (``--isolated``, or a Desktop-owned backend shape:
+  ``HERMES_DESKTOP=1`` plus its session token or SSH token-file argv) on a production home exits 2
+  with a safe recipe. An inherited ``HERMES_DESKTOP=1`` alone is not that shape.
 
 Agent origin is any stamp below. Tool spawners stamp it after their env scrubbing; the SSH terminal
 backend re-exports it remotely; the hub-admin forced command stamps every call. Stamps are
@@ -133,8 +134,24 @@ def requested_proof_home(flags: Sequence[str]) -> Optional[str]:
     return selected
 
 
-def _enforce_agent_shape(isolated: bool) -> None:
-    if agent_origin() and (isolated or os.environ.get("HERMES_DESKTOP") == "1"):
+def _desktop_backend_shape(argv: Sequence[str]) -> bool:
+    """Shaped like the backend Desktop owns, not merely run under an inherited ``HERMES_DESKTOP=1``.
+
+    Every Desktop chat's tool children inherit ``HERMES_DESKTOP=1``, so the flag alone would refuse a
+    plain ``hermes dashboard`` an agent runs. Mirrors ``process_identity.is_desktop_owned_backend``
+    (session-token env, or the SSH token-file argv), without its imports on the bootstrap path.
+    """
+    if os.environ.get("HERMES_DESKTOP") != "1":
+        return False
+    if os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "") != "":
+        return True
+    from hermes_cli._startup_fast import is_desktop_ssh_backend_argv
+
+    return is_desktop_ssh_backend_argv(list(argv))
+
+
+def _enforce_agent_shape(isolated: bool, flags: Sequence[str]) -> None:
+    if agent_origin() and (isolated or _desktop_backend_shape(flags)):
         if _production_or_unknown(_current_home()):
             _refuse("an agent-launched restart-proof backend cannot use production recovery state")
 
@@ -151,7 +168,7 @@ def prepare_backend_argv(argv: Optional[Sequence[str]] = None) -> None:
     if selected is None:
         selected = os.environ.get(PROOF_HOME_ENV)
     if selected is None:
-        _enforce_agent_shape("--isolated" in flags)
+        _enforce_agent_shape("--isolated" in flags, flags)
         return
     if not selected.strip():
         _refuse("--proof-home is empty")
@@ -172,7 +189,7 @@ def assert_backend_home(*, isolated: bool, argv: Optional[Sequence[str]] = None)
     flagged = requested_proof_home(scanned[1]) if scanned else None
     selected = flagged if flagged is not None else os.environ.get(PROOF_HOME_ENV)
     if selected is None:
-        _enforce_agent_shape(isolated)
+        _enforce_agent_shape(isolated, scanned[1] if scanned else ())
         return
     home = validate_proof_home(selected)
     try:

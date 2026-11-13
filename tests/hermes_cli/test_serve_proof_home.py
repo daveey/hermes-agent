@@ -121,10 +121,23 @@ def test_wrapped_tool_origin_rejected_without_worker_vars(sentinel, wrapper):
     _assert_refused(result, sentinel, before)
 
 
-def test_desktop_env_without_isolated_still_rejected(sentinel):
+@pytest.mark.parametrize('extra,args', [
+    ({'HERMES_DESKTOP': '1', 'HERMES_DASHBOARD_SESSION_TOKEN': 'fixture-only'}, ['serve']),
+    ({'HERMES_DESKTOP': '1'}, ['serve', '--ssh-session-token-file', '/fixture/token']),
+])
+def test_desktop_backend_shape_without_isolated_still_rejected(sentinel, extra, args):
     before = _snapshot(sentinel)
-    result = _launch(sentinel, ['serve'], 'HERMES_AGENT_TOOL_CALL', extra={'HERMES_DESKTOP': '1'})
+    result = _launch(sentinel, args, 'HERMES_AGENT_TOOL_CALL', extra=extra)
     _assert_refused(result, sentinel, before)
+
+
+@pytest.mark.parametrize('args', [['dashboard', '--port', '0', '--no-open'], ['serve', '--port', '0']])
+def test_desktop_chat_tool_child_may_run_plain_backend(sentinel, args):
+    """A Desktop chat's tool children inherit HERMES_DESKTOP=1 (and never the session token):
+    that alone is not a Desktop-owned backend, so a plain production dashboard still starts."""
+    result = _launch(sentinel, args, 'HERMES_AGENT_TOOL_CALL', extra={'HERMES_DESKTOP': '1'})
+    assert result.returncode == 87, (result.stdout, result.stderr)
+    assert 'Refused proof backend' not in result.stderr
 
 
 def test_profile_alias_of_production_rejected(sentinel, tmp_path):
@@ -341,15 +354,8 @@ def test_backend_launch_keeps_tool_stamps(monkeypatch):
     assert set(_PROVENANCE) <= set(os.environ)
 
 
-def test_electron_drops_the_same_provenance_stamps_at_startup():
-    import re
-
+def test_desktop_drop_list_is_the_provenance_stamps():
+    """Electron's AGENT_PROVENANCE_KEYS mirrors this list; its own vitest pins the same names."""
     from hermes_cli.proof_home import PROVENANCE_KEYS
 
     assert set(PROVENANCE_KEYS) == set(_PROVENANCE)
-    src = (ROOT / 'apps/desktop/electron/leaked-worker-env.ts').read_text()
-    m = re.search(r'export const AGENT_PROVENANCE_KEYS\s*=\s*\[(.*?)\]', src, re.DOTALL)
-    assert m, 'AGENT_PROVENANCE_KEYS missing from leaked-worker-env.ts'
-    assert set(re.findall(r"'([A-Z0-9_]+)'", m.group(1))) == set(PROVENANCE_KEYS)
-    main = (ROOT / 'apps/desktop/electron/main.ts').read_text()
-    assert re.search(r'dropAgentProvenance\(\)', main), 'main.ts must drop the stamps at startup'
