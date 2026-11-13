@@ -869,13 +869,18 @@ class SessionSchemaMixin:
             "FROM gateway_routing_legacy_pk ORDER BY updated_at ASC",
         )
 
-    def _heal_reset_rows_carrying_a_delegate_marker(self, cursor: sqlite3.Cursor) -> None:
+    def _heal_reset_rows_carrying_a_delegate_marker(self, cursor: sqlite3.Cursor) -> bool:
         """Strip ``_delegate_from`` from a chat's /new continuation (``session_key`` set, ``_reset_from``
         set) that picked it up: the marker hides the row from every session list while the gateway keeps
         routing the chat into it (#109073). ``_reset_from`` already says what the row is, so the pair is
         contradictory and the delegate marker is the stray. A keyed row WITHOUT ``_reset_from`` is a real
         delegate child that captured a route (#138210) and keeps its marker: routing moves the chat off
-        it instead. Idempotent; probes first so a clean store takes no write lock on open."""
+        it instead. Idempotent; probes first so a clean store takes no write lock on open.
+
+        The UPDATE and the trigram backfill share one savepoint: on the autocommit writer a failure
+        between them would leave healed rows out of the trigram index, and the next scan could no longer
+        find them. Returns False when a lock or damage stopped it (nothing changed, so a retry finds the
+        same rows), True when the store is clean or healed."""
         polluted = (
             "session_key IS NOT NULL AND session_key != '' AND json_valid(model_config) "
             f"AND {_sql_json_extract('model_config', '$._delegate_from')} IS NOT NULL "
@@ -884,17 +889,51 @@ class SessionSchemaMixin:
         try:
             ids = [row[0] for row in cursor.execute(f"SELECT id FROM sessions WHERE {polluted}").fetchall()]
             if not ids:
-                return
-            healed = cursor.execute(
-                f"UPDATE sessions SET model_config = json_remove(model_config, '$._delegate_from') WHERE {polluted}"
-            ).rowcount
+                return True
+            cursor.execute("SAVEPOINT delegate_marker_heal")
         except sqlite3.DatabaseError as exc:
             # OperationalError (locked/missing column) or a damaged sessions b-tree: the open-time scan
             # must not turn page damage into an open failure; the first write confirms and latches it.
             logger.debug("reset-row delegate-marker heal skipped: %s", exc)
-            return
-        self._index_healed_rows_for_trigram(cursor, ids)
+            return False
+        try:
+            healed = cursor.execute(
+                f"UPDATE sessions SET model_config = json_remove(model_config, '$._delegate_from') WHERE {polluted}"
+            ).rowcount
+            self._index_healed_rows_for_trigram(cursor, ids)
+            cursor.execute("RELEASE delegate_marker_heal")
+        except sqlite3.DatabaseError as exc:
+            with contextlib.suppress(sqlite3.Error):
+                cursor.execute("ROLLBACK TO delegate_marker_heal")
+                cursor.execute("RELEASE delegate_marker_heal")
+            logger.debug("reset-row delegate-marker heal rolled back: %s", exc)
+            return False
         logger.warning("Healed %d chat session(s) hidden by a stray _delegate_from marker (#109073)", healed)
+        return True
+
+    def _heal_null_active_rows(self, cursor: sqlite3.Cursor) -> bool:
+        """Un-hide ``active IS NULL`` messages. Older reconciler builds added ``active`` without NOT NULL
+        DEFAULT 1 (#51646), so INSERTs that omitted it wrote NULL and the ``WHERE active = 1`` loaders hid
+        whole histories; an older-build writer on the same store still can. A ``current_version < 12``
+        gate never re-ran for already-v12+ databases, so this runs with every full init and from the
+        throttled per-store heal (hermes_state_schema_memo). Reads before writing: an UPDATE takes the
+        write lock even when it matches no rows, which blocked opens behind a sibling's write. The probe
+        is short-circuited on the modern NOT NULL column and index-served on legacy ones; deliberately
+        not INDEXED BY (raises "no query solution" on NOT NULL columns). Returns False when a lock
+        stopped it."""
+        try:
+            if cursor.execute("SELECT 1 FROM messages WHERE active IS NULL LIMIT 1").fetchone() is not None:
+                cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
+        except sqlite3.OperationalError as exc:
+            logger.debug("NULL-active heal skipped: %s", exc)
+            return False
+        return True
+
+    def _run_throttled_heals(self, cursor: sqlite3.Cursor) -> bool:
+        """The data repairs a memoized open still owes the store, at most once per interval per store
+        (hermes_state_schema_memo._maybe_heal). True when both completed."""
+        delegate_ok = self._heal_reset_rows_carrying_a_delegate_marker(cursor)
+        return self._heal_null_active_rows(cursor) and delegate_ok
 
     def _index_healed_rows_for_trigram(self, cursor: sqlite3.Cursor, session_ids: list[str]) -> None:
         """The marker kept these sessions' messages out of the external-content trigram index (the triggers
@@ -982,13 +1021,14 @@ class SessionSchemaMixin:
         if memo.try_restore(self):
             return
         before = memo.snapshot(self)
-        self._init_schema_full()
-        memo.record(self, before)
+        healed = self._init_schema_full()
+        memo.record(self, before, healed=healed)
 
-    def _init_schema_full(self):
+    def _init_schema_full(self) -> bool:
         """Create tables and FTS if missing, reconcile columns, run data migrations. Column
         additions are declarative via _reconcile_columns(), so reordered migrations can
-        never skip a column; schema_version remains for data migrations only."""
+        never skip a column; schema_version remains for data migrations only. Returns whether
+        the data heals completed; False lets the next memoized open retry them."""
         # Startup-watchdog lease: on multi-GB files this is I/O-bound (near-zero CPU), which
         # the watchdog's CPU fallback would misread as a parked deadlock.
         # Declare a startup-watchdog progress lease before potentially long synchronous work: on multi-GB
@@ -1018,17 +1058,10 @@ class SessionSchemaMixin:
         # already at v22+ when the column landed — the version-gated rebuild is unreachable there, #73823).
         # Same PK-rebuild constraint as gateway_routing above.
         self._heal_session_model_usage_pk(cursor)
-        self._heal_reset_rows_carrying_a_delegate_marker(cursor)
+        healed = self._heal_reset_rows_carrying_a_delegate_marker(cursor)
 
         # Indexes referencing reconciler-added columns must be created AFTER _reconcile_columns
         # (in SCHEMA_SQL the executescript would fail on legacy DBs).
-        # Heal NULL ``active`` rows unconditionally on every startup. On real-world DBs the reconciler-added
-        # ``active`` column can lack its NOT NULL DEFAULT 1 (older reconciler builds reconstructed the type
-        # without the default — see #51646: PRAGMA shows (17,'active','INTEGER',0,None,0) in the wild), so
-        # INSERTs that omitted the column wrote NULL and the ``WHERE active = 1`` transcript loaders hid the
-        # whole history. The INSERTs now set active=1 explicitly; this idempotent repair un-hides rows
-        # written before the fix. It was previously gated at ``current_version < 12`` which never re-ran for
-        # already-v12+ databases.
         try:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id "
@@ -1039,16 +1072,8 @@ class SessionSchemaMixin:
         self._execute_ddl_skipping_settled_triggers(cursor, DEFERRED_INDEX_SQL)  # same ordering constraint (``active``)
         self._ensure_session_projection(cursor)
 
-        # Heal NULL ``active`` rows on every startup: older reconciler builds added ``active``
-        # without NOT NULL DEFAULT 1, so ``WHERE active = 1`` loaders hid whole histories. A
-        # ``current_version < 12`` gate never re-ran for already-v12+ databases.
-        # Read before writing: an UPDATE takes the write lock even when it matches no rows, so
-        # the unconditional form blocked every open behind a sibling's write transaction. The
-        # probe is short-circuited on the modern NOT NULL column and index-served on legacy
-        # ones. Deliberately not INDEXED BY (raises "no query solution" on NOT NULL columns).
-        with contextlib.suppress(sqlite3.OperationalError):
-            if cursor.execute("SELECT 1 FROM messages WHERE active IS NULL LIMIT 1").fetchone() is not None:
-                cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
+        # After DEFERRED_INDEX_SQL: its partial index on ``active IS NULL`` serves the probe.
+        healed = self._heal_null_active_rows(cursor) and healed
 
         fts5_available = self._sqlite_supports_fts5(cursor)
         stale_row = cursor.execute("SELECT 1 FROM state_meta WHERE key = ? LIMIT 1", (FTS_STALE_KEY,)).fetchone()
@@ -1083,6 +1108,7 @@ class SessionSchemaMixin:
         self._conn.commit()
         # After the commit: the repair takes its own write transaction, and only once per store.
         advance_legacy_refusal_repair(self, self._conn)
+        return healed
 
     def _stamp_settled_fts_layout(self, cursor: sqlite3.Cursor) -> None:
         """Write ``fts_storage_version`` once the stored layout is exactly current and nothing is in flight.

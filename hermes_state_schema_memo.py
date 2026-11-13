@@ -7,18 +7,23 @@ later opens of the SAME file at the SAME schema only restore the per-instance fl
 
 The memo key is the file identity stat'd after connecting (realpath, st_dev, st_ino), SQLite's
 ``PRAGMA schema_version`` (bumped by every DDL, from any process), the ``schema_version`` table value
-(data-migration level), ``store_instance_id`` and a digest of this build's schema code. A hit also
-re-probes the two FTS tables (``LIMIT 0``) and must agree with the memoized flags. Any change, a
-replaced or quarantined file, or a store not yet settled (stale FTS, an unfinished budgeted backfill or
-repair) reruns the full init. ``fts_stale`` is read on every open; set by another handle, it forces the
-full init, whose stale-FTS path is the one that must run.
+(data-migration level) and ``store_instance_id``. It carries no digest of the schema code: the memo lives
+in one process, whose loaded schema code cannot change, and a different build is a different process with
+an empty memo. A hit also re-probes the two FTS tables (``LIMIT 0``) and must agree with the memoized
+flags. Any change, a replaced or quarantined file, or a store not yet settled (stale FTS, an unfinished
+budgeted backfill or repair, a missing unique title index) reruns the full init. ``fts_stale`` is read on
+every open; set by another handle, it forces the full init, whose stale-FTS path is the one that must run.
+A guarded duplicate-title repair that failed leaves the unique title index missing, so the store is not
+memoized and the next open retries the repair, as every open did before the memo.
 
-The delegate-marker heal is data repair, not schema: it runs with the full init (the first open per key
-per process) and otherwise at most once per ``HEAL_INTERVAL_S`` per store, from the memo-hit open.
+The data heals (stray delegate markers, and NULL ``active`` rows an older-build writer on the same store
+can still produce) are repair, not schema: they run with the full init (the first open per key per
+process) and otherwise at most once per ``HEAL_INTERVAL_S`` per store, from a memo-hit open. A heal that
+does not complete (a lock, page damage) is logged at warning and releases its interval claim, so the next
+open retries it.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import sqlite3
@@ -32,40 +37,18 @@ HEAL_INTERVAL_S = 600.0
 # Always restored on a hit, whatever the first init left them at; other changed scalars are found by diff.
 _ALWAYS_RESTORED = ("_fts_enabled", "_trigram_available", "_fts_stale")
 _SIMPLE = (bool, int, float, str, bytes, type(None))
+_TITLE_INDEX = "idx_sessions_title_unique"
 
 _lock = threading.Lock()
 _memo: dict[tuple, dict[str, Any]] = {}  # key -> attributes the full init set on self
-_last_heal: dict[str, float] = {}  # realpath -> monotonic time of the last delegate-marker heal
-_code_digest: Optional[str] = None
+_last_heal: dict[str, float] = {}  # realpath -> monotonic start of the last completed (or running) data heal
 
 
 def clear() -> None:
     """Forget every memoized store (tests; a deliberate in-process reinit)."""
-    global _code_digest
     with _lock:
         _memo.clear()
         _last_heal.clear()
-        _code_digest = None
-
-
-def _schema_code_digest() -> str:
-    global _code_digest
-    if _code_digest is None:
-        import hermes_state_common as common
-        import hermes_state_schema as schema
-
-        h = hashlib.sha256()
-        for part in (common.SCHEMA_SQL, common.DEFERRED_INDEX_SQL, common.FTS_SQL, common.FTS_TRIGRAM_SQL,
-                     str(common.SCHEMA_VERSION), str(common.FTS_STORAGE_VERSION)):
-            h.update(part.encode("utf-8", "surrogatepass"))
-            h.update(b"\0")
-        try:
-            with open(schema.__file__, "rb") as f:  # the migration code itself
-                h.update(f.read())
-        except OSError:
-            pass
-        _code_digest = h.hexdigest()
-    return _code_digest
 
 
 def _settled_meta_keys() -> tuple[str, ...]:
@@ -89,7 +72,7 @@ def _probe(db_path, conn: sqlite3.Connection) -> Optional[tuple[tuple, dict[str,
     except (OSError, sqlite3.Error):
         return None
     key = (real, st.st_dev, st.st_ino, pragma_version, None if row is None else row[0],
-           meta.get("store_instance_id"), _schema_code_digest(),
+           meta.get("store_instance_id"),
            type(conn))  # the connection class decides what this runtime's SQLite can do (tests swap it)
     return key, meta
 
@@ -100,19 +83,31 @@ def _settled(meta: dict[str, Any]) -> bool:
     return FTS_STALE_KEY not in meta and all(k in meta for k in _settled_meta_keys()[2:])
 
 
+def _title_index_present(conn: sqlite3.Connection) -> bool:
+    """The full init's guarded duplicate-title repair either created the index or failed. Only the first
+    may be memoized: a memoized failure would not be retried until DDL or a new process."""
+    try:
+        return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                            (_TITLE_INDEX,)).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
 def snapshot(db) -> dict[str, Any]:
     """Instance attributes before the full init, to diff against afterwards."""
     return dict(vars(db))
 
 
-def record(db, before: dict[str, Any]) -> None:
-    """Remember a successful full init when it left the store settled at this build's schema."""
+def record(db, before: dict[str, Any], *, healed: bool = True) -> None:
+    """Remember a successful full init when it left the store settled at this build's schema. With
+    *healed* False (a data heal did not complete) the heal interval stays unclaimed: the next open retries."""
     probed = _probe(db.db_path, db._conn)
     if probed is None:
         return
     key, meta = probed
     from hermes_state_common import SCHEMA_VERSION
-    if not _settled(meta) or key[4] != SCHEMA_VERSION or db._conn.in_transaction:
+    if (not _settled(meta) or key[4] != SCHEMA_VERSION or db._conn.in_transaction
+            or not _title_index_present(db._conn)):
         return
     after = vars(db)
     changed = {name: value for name, value in after.items()
@@ -121,7 +116,8 @@ def record(db, before: dict[str, Any]) -> None:
         return  # an init that set a mutable object on self is not safely replayable
     with _lock:
         _memo[key] = changed
-        _last_heal[key[0]] = time.monotonic()  # the full init just ran the heal
+        if healed:
+            _last_heal[key[0]] = time.monotonic()  # the full init just ran the heals
 
 
 _MISSING = object()
@@ -164,7 +160,18 @@ def _maybe_heal(db, real: str) -> None:
         if last is not None and now - last < HEAL_INTERVAL_S:
             return
         _last_heal[real] = now  # claimed before running: concurrent openers never double-scan
+    error: Optional[sqlite3.Error] = None
     try:
-        db._heal_reset_rows_carrying_a_delegate_marker(db._conn.cursor())
-    except sqlite3.Error as exc:  # a data repair must never fail an open; the next interval retries
-        logger.debug("throttled delegate-marker heal skipped: %s", exc)
+        ok = db._run_throttled_heals(db._conn.cursor())
+    except sqlite3.Error as exc:  # a data repair must never fail an open
+        ok, error = False, exc
+    if ok:
+        return
+    with _lock:  # release the claim (unless a later heal took it) so the next open retries
+        if _last_heal.get(real) == now:
+            if last is None:
+                _last_heal.pop(real, None)
+            else:
+                _last_heal[real] = last
+    logger.warning("state.db data heal did not complete on %s (%s); the next open retries it",
+                   real, error if error is not None else "locked or damaged, rolled back")
