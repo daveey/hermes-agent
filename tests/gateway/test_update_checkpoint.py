@@ -248,3 +248,32 @@ def test_live_delegation_refusal_says_so(checkpoint, monkeypatch):
     monkeypatch.setattr("gateway.run_active_work_verb._delegation_units", lambda now: [{"id": "d1"}])
     result = invoke(module, runner)
     assert "1 live async delegation(s)" in result["reason"]
+
+
+def test_accepted_checkpoint_sets_the_exit_target_inside_its_drain_timeout(checkpoint):
+    """The ack's drain_timeout is how long the updater waits for the process to EXIT: the tail is bound to it."""
+    from gateway import exit_deadline
+    module, _home, runner, _intent = checkpoint
+    exit_deadline._reset_for_tests()
+    try:
+        before = time.monotonic()
+        result = invoke(module, runner)
+        left = exit_deadline.remaining_s()
+        assert result["pausing"]
+        assert left is not None
+        assert left <= result["drain_timeout"] - exit_deadline.UPDATE_EXIT_MARGIN_S + (time.monotonic() - before)
+        assert left >= result["drain_timeout"] - exit_deadline.UPDATE_EXIT_MARGIN_S - 5
+    finally:
+        exit_deadline._reset_for_tests()
+
+
+def test_refused_or_unaccepted_checkpoint_sets_no_exit_target(checkpoint):
+    from gateway import exit_deadline
+    module, _home, runner, _intent = checkpoint
+    exit_deadline._reset_for_tests()
+    try:
+        runner.request_restart.return_value = False  # already stopping: not this update's promise
+        invoke(module, runner)
+        assert exit_deadline.remaining_s() is None
+    finally:
+        exit_deadline._reset_for_tests()

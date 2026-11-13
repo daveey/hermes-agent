@@ -227,6 +227,8 @@ class GatewayRestartWaitMixin:
         self._restart_update_intent = None
         self._core_update_kanban_cap_spent = False
         self._stop_kanban_leash_s = None
+        from gateway import exit_deadline
+        exit_deadline.set_exit_target(None)  # the update's exit promise went with it
         self._draining = False
         self._restart_task_started = False
         self._scale_to_zero_status("running", "restart cancel: status mark failed")

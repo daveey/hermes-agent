@@ -191,7 +191,14 @@ def checkpoint_for_update(runner, loop, params):
                     return
                 claimed = True
             # The admitted path, not a fresh lookup: a withdrawal during preserve must still cancel.
+            accepted_at = time.monotonic()
             accepted = runner.request_restart(detached=False, via_service=True, update_intent=intent_path)
+            if accepted:
+                # The ack promises the updater this process EXITS within CHECKPOINT_DRAIN_S (it waits that long
+                # from the ack, then defers the update): bound the post-stop tail to that promise too.
+                from gateway import exit_deadline
+                exit_deadline.set_exit_target(
+                    accepted_at + CHECKPOINT_DRAIN_S - exit_deadline.UPDATE_EXIT_MARGIN_S, "core-update checkpoint")
             result.append({"pausing": bool(accepted), "already_stopping": not accepted,
                            "checkpoint": True, "nonce": intent["nonce"], "pid": pid, "drain_timeout": CHECKPOINT_DRAIN_S})
         except (OSError, TimeoutError, ValueError, TypeError, KeyError) as exc:

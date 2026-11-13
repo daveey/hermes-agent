@@ -139,3 +139,15 @@ async def test_real_settle_wait_fits_the_short_leash(monkeypatch):
     except Exception as exc:  # the tail after the wait needs real authorities; only the wait matters
         waited.setdefault("tail_error", repr(exc))
     assert waited["timeout"] <= 40.0 - 2.0 - run_runtime.STOP_TAIL_RESERVE_SECONDS
+
+
+def test_cancelled_restart_clears_the_update_exit_target(tmp_path, monkeypatch):
+    from gateway import exit_deadline
+    runner, _ = _runner(tmp_path, monkeypatch)
+    exit_deadline._reset_for_tests()
+    try:
+        exit_deadline.set_exit_target(time.monotonic() + 5.0, "core-update checkpoint")
+        runner._cancel_restart()
+        assert exit_deadline.remaining_s() is None
+    finally:
+        exit_deadline._reset_for_tests()

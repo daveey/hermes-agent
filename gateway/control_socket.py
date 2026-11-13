@@ -409,8 +409,12 @@ class GatewayControlServer:
         self._pipe_server = NativeControlServer(self._home, self.handle_request_line)
         await asyncio.to_thread(self._pipe_server.start)
         return True
-    async def stop(self) -> None:
-        """Stop serving and remove the socket/pointer files."""
+    async def stop(self, close_wait_s: float | None = None) -> None:
+        """Stop serving and remove the socket/pointer files.
+
+        ``close_wait_s`` bounds the wait for open connections (``Server.wait_closed`` waits for every one
+        since Python 3.12, so a connection held by a slow handler held the gateway's exit with it); the
+        rest of the teardown still runs when it times out. ``None`` waits unbounded (prior behaviour)."""
         if self._loop_watchdog is not None:
             self._loop_watchdog.stop()
             self._loop_watchdog = None
@@ -419,7 +423,10 @@ class GatewayControlServer:
         if self._server is not None:
             self._server.close()
             with contextlib.suppress(Exception):
-                await self._server.wait_closed()
+                if close_wait_s is None:
+                    await self._server.wait_closed()
+                else:
+                    await asyncio.wait_for(self._server.wait_closed(), timeout=max(0.0, close_wait_s))
         if self._pipe_server is not None:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self._pipe_server.close)
