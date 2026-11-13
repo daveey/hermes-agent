@@ -26,6 +26,7 @@ REPO = "softmax-universe/daveey-hermes"
 PR = 2495
 HEAD = "7072089bad288a86dc638ba386e6d12fc5d32e7d"
 OTHER = "6c627f9f0e0000000000000000000000000000ab"
+BASE = "aaaf75adb60000000000000000000000000000cd"
 REF = f"https://github.com/{REPO}/pull/{PR} checks @{HEAD}"  # verbatim from the incident's park
 RUN_ID = "43400000001"
 LABELS = ["self-hosted", "ci-fast"]
@@ -109,23 +110,23 @@ def _running(conn) -> str:
     return tid
 
 
-def _park(monkeypatch, conn, tid, ref: str = REF) -> dict:
+def _park(monkeypatch, conn, tid, ref: str = REF, *, reason: str = f"Waiting for CI on PR #{PR} head {HEAD[:10]}.",
+          wake_check: str = f"false gh pr checks {PR} -R {REPO}") -> dict:
     from tools import kanban_tools as kt
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, tid).current_run_id))
     try:
         return json.loads(kt._handle_schedule({
-            "reason": f"Waiting for CI on PR #{PR} head {HEAD[:10]}.",
-            "wake_check": f"false gh pr checks {PR} -R {REPO}",
+            "reason": reason, "wake_check": wake_check,
             "awaiting": {"kind": "ci", "ref": ref, "why": "state CI on the fix"}}))
     finally:
         monkeypatch.delenv("HERMES_KANBAN_TASK")
 
 
-def _parked(conn, monkeypatch, *, ago: int = 0) -> str:
+def _parked(conn, monkeypatch, *, ago: int = 0, **park) -> str:
     """A card parked on the PR while it read clean (accepted), its park ``ago`` seconds back."""
     tid = _running(conn)
-    out = _park(monkeypatch, conn, tid)
+    out = _park(monkeypatch, conn, tid, **park)
     assert out.get("status") == "scheduled", out
     if ago:
         with kb.write_txn(conn):
@@ -149,6 +150,13 @@ def _runner_blockers(conn) -> list[str]:
     (f"{REPO}/pull/{PR}", "", (REPO, PR, None)),
     (f"https://github.com/{REPO}/pull/{PR}@7072089", "", (REPO, PR, "7072089")),
     (f"https://github.com/{REPO}/pull/{PR}", f"head is {HEAD}", (REPO, PR, HEAD)),
+    (f"https://github.com/{REPO}/pull/{PR}", f"head {HEAD.upper()} (was {HEAD})", (REPO, PR, HEAD)),
+    # several distinct shas: no guess (it could be an old head or the base), so the current head is read
+    (f"https://github.com/{REPO}/pull/{PR}", f"head {HEAD} onto base {BASE}", (REPO, PR, None)),
+    (f"https://github.com/{REPO}/pull/{PR} {OTHER} {HEAD}", "", (REPO, PR, None)),
+    # the ref's own sha wins over others in the hint; an @sha wins over everything
+    (f"https://github.com/{REPO}/pull/{PR} checks {HEAD}", f"rebased from {OTHER}", (REPO, PR, HEAD)),
+    (f"https://github.com/{REPO}/pull/{PR}@{HEAD} (was {OTHER})", f"base {BASE}", (REPO, PR, HEAD)),
     (f"https://github.com/{REPO}/actions/runs/{RUN_ID}", "", None),  # a run keeps the run path
     ("t_01a1d5dae3fe181b", "", None),
 ])
@@ -297,3 +305,35 @@ def test_github_error_allows_the_park_and_wakes_nothing(kanban_home, api, monkey
         assert kb.get_task(conn, tid).status == "scheduled"
         warned = [r for r in caplog.records if r.levelname == "WARNING" and "ci run progress" in r.getMessage()]
         assert len(warned) == 1, caplog.text
+
+
+# --- the ref names no sha: the hint's shas ------------------------------------------------------------------------
+
+NO_SHA_REF = f"https://github.com/{REPO}/pull/{PR}"
+
+
+def test_a_hint_with_two_shas_still_wakes_on_a_conflict(kanban_home, api, monkeypatch) -> None:
+    """Neither sha is taken as the head (the first one, an old head, would read as "head moved" on every sweep):
+    the current head is read, and its conflict wakes the card."""
+    api.run("in_progress", age=60, runner="ci-fast-1")
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch, ref=NO_SHA_REF, reason=f"Rebased onto {BASE} as {HEAD}; waiting for CI.",
+                      wake_check=f"false gh pr checks {PR} -R {REPO} # was {OTHER}")
+        api.dirty()
+        assert kcp.sweep(conn) == [tid]
+        notes = _notes(conn, tid)
+        assert len(notes) == 1 and f"PR #{PR} conflicts with state" in notes[0], notes
+        assert _runner_blockers(conn) == []
+
+
+def test_a_hint_with_one_old_head_sha_reads_the_moved_head_as_ok(kanban_home, api, monkeypatch) -> None:
+    """One sha in the hint is still the head the wait names: once the PR moves off it, the owner's probe answers,
+    even when the new head conflicts."""
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, monkeypatch, ago=30 * 60, ref=NO_SHA_REF,
+                      reason=f"Waiting for CI on PR #{PR} head {HEAD}.")
+        api.dirty()
+        api.pr["head"]["sha"] = OTHER
+        assert kcp.sweep(conn) == []
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert _notes(conn, tid) == []
