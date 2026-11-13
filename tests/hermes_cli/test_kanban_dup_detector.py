@@ -162,3 +162,17 @@ def test_a_closed_detector_card_lets_the_next_occurrence_open_a_new_one(conn):
     third = kb.create_task(conn, title="third", assignee="default", creator_task_id=creator)
     assert kb.complete_task(conn, third, summary=f"Superseded by {first}.")
     assert len(dd.describe(conn)) == 2
+
+
+def test_a_negator_ending_the_previous_line_does_not_deny_the_next_line():
+    """A newline ends the clause: the "not" of "Tests: not run" does not deny the duplicate on the next line."""
+    assert dd.sibling_named("Tests: not run\nDuplicate of t_0123456789abcdef.") == ["t_0123456789abcdef"]
+
+
+def test_never_denies_the_keyword():
+    assert dd.sibling_named("Never a duplicate of t_0123456789abcdef.") == []
+
+
+def test_a_contraction_with_a_typographic_apostrophe_denies_the_keyword():
+    """U+2019, as pasted from rendered markdown, denies like the ASCII apostrophe."""
+    assert dd.sibling_named("Isn\u2019t a duplicate of t_0123456789abcdef.") == []

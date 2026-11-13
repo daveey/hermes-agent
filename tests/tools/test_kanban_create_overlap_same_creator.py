@@ -208,3 +208,15 @@ def test_worker_enumerated_legs_and_distinct_override_still_create(worker):
     second = _tool_create(title=NIT + " (round 2)", distinct_from=[first["task_id"]],
                           distinct_reason="round-2 nits are separate")
     assert second["ok"] and second.get("created", True) and second["task_id"] != first["task_id"]
+
+
+@pytest.mark.parametrize("mine, theirs", [
+    ("Fix guard at 9baf8d8abc follow-up", "Fix guard cleanup follow-up"),
+    ("Fix guard cleanup follow-up", "Fix guard at 9baf8d8abc follow-up"),
+])
+def test_a_replaced_span_with_a_marker_on_one_side_only_is_not_an_enumeration(mine, theirs):
+    """Only a marker on both sides of a replaced span is an index: a sha that replaced a word is a re-issue."""
+    from hermes_cli import kanban_overlap_own as own
+    card = {"title": theirs, "assignee": "default"}
+    assert own.enumerated(mine, theirs) is None
+    assert own.own_distinct(mine, "default", card) is None
