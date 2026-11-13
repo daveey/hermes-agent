@@ -117,6 +117,11 @@ def test_group_and_glued_stdin_feeds_are_scanned(files, template):
         "{{ bash {clean_sh}; {{ true; }} }} < {sh}",
         "{{ {{ true; }} }} < {sh}; bash < {clean_sh}",
         "{{ echo }}; }} < {sh}",
+        # A closed group's redirection ends at the next operator: the next command's `<` is its own.
+        "(bash); grep x < {sh}",
+        "(bash) && cat < {sh}",
+        "(bash) | grep x < {sh}",
+        "{{ bash; }}; grep x < {sh}",
         # Data: the redirection names the file, nothing runs it.
         "echo '{{ bash; }} < {sh}'",
         "grep -c x < {sh}",
