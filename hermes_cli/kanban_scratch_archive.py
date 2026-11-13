@@ -24,7 +24,9 @@ alone. That directory name is reserved: a workspace entry with that name is
 refused so the metadata can never collide with archived content.
 
 Anything it cannot prove safe keeps the workspace: a linked worktree or
-submodule (a ``.git`` FILE: the worktree GC owns those), a bare repository,
+submodule (a ``.git`` gitlink file or symlink: the worktree GC owns those; a
+regular ``.git`` file with no ``gitdir:`` line, such as uv's empty cache
+marker, is plain data), a bare repository,
 a special file (fifo/socket/device), any scan error, source mutation during
 the archive, or any failed archive step. Symlinks are recorded, never
 followed.
@@ -58,9 +60,46 @@ def find_repos(root: Path) -> list[Path]:
 
     Raises :class:`ArchiveRefused` for a linked worktree/submodule, a bare
     repository, a non-directory root, or any scan error. Traverses by directory
-    descriptor (never follows symlinks, ancestors included).
+    descriptor (never follows symlinks, ancestors included). A regular ``.git``
+    file that is not a ``gitdir:`` pointer (uv writes an empty one in each cache
+    dir) is plain data, archived in the payload like any other file.
+    """
+    return _find_repos(root)[0]
+
+
+_GITLINK_PREFIX = b"gitdir:"
+_GITLINK_PROBE = 4096
+
+
+def _is_gitlink(directory: Path, st: os.stat_result) -> bool:
+    """True unless the regular file ``directory/.git`` (lstat *st*) is provably not a gitlink.
+
+    Opened without following links and checked against the scanned lstat, so
+    the bytes read belong to the entry the scan recorded. Git only accepts a
+    file starting ``gitdir: ``; leading whitespace is tolerated here too, so the
+    rule errs towards keeping the tree.
+    """
+    dfd = _open_root(directory)
+    try:
+        fd = os.open(".git", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    with os.fdopen(fd, "rb") as fh:
+        fst = os.fstat(fh.fileno())
+        if not stat.S_ISREG(fst.st_mode) or _signature(fst) != _signature(st):
+            raise ArchiveRefused(f"{directory / '.git'} changed during scan")
+        head = fh.read(_GITLINK_PROBE)
+    return head.lstrip().startswith(_GITLINK_PREFIX)
+
+
+def _find_repos(root: Path) -> tuple[list[Path], dict[str, list[int]]]:
+    """``find_repos`` plus the signatures of the ``.git`` data files it judged.
+
+    The caller re-checks those signatures against the payload snapshot, so a
+    marker rewritten into a gitlink after this judgement is refused.
     """
     found = _scan(root)
+    markers: dict[str, list[int]] = {}
     kids: dict[str, set[str]] = {".": set()}
     for rel, st in found.items():
         if rel == ".":
@@ -76,13 +115,20 @@ def find_repos(root: Path) -> list[Path]:
         directory = root if rel == "." else root / rel
         if ".git" in names:
             gitrel = ".git" if rel == "." else f"{rel}/.git"
-            if stat.S_ISDIR(found[gitrel].st_mode):
+            gst = found[gitrel]
+            if stat.S_ISDIR(gst.st_mode):
                 repos.append(directory)
                 continue
-            raise ArchiveRefused(f"linked worktree or submodule at {directory / '.git'} (left to the worktree GC)")
+            try:
+                gitlink = not stat.S_ISREG(gst.st_mode) or _is_gitlink(directory, gst)
+            except OSError as exc:
+                raise ArchiveRefused(f"scan uncertain: {exc!r}") from exc
+            if gitlink:
+                raise ArchiveRefused(f"linked worktree or submodule at {directory / '.git'} (left to the worktree GC)")
+            markers[gitrel] = _signature(gst)  # plain data (e.g. uv's empty cache marker)
         if {"HEAD", "objects"} <= names and names & {"refs", "reftable"}:
             raise ArchiveRefused(f"bare repository at {directory}")
-    return sorted(repos)
+    return sorted(repos), markers
 
 
 def _env(repo: Path) -> dict[str, str]:
@@ -162,6 +208,7 @@ PAYLOAD_DIR = ".hermes-complete-archive-v1"
 PAYLOAD_VERSION = 1
 _TREE = "tree.tar.gz"
 _MANIFEST = "manifest.json"
+_GZIP_LEVEL = 1
 
 
 def _kind(mode: int) -> str:
@@ -327,8 +374,11 @@ def _write_payload(workspace: Path, dest: Path) -> dict[str, list[int]]:
     entries: dict[str, dict] = {}
     tree = dest / _TREE
     with open(tree, "wb") as raw:
-        # mtime=0 keeps the gzip header deterministic.
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+        # mtime=0 keeps the gzip header deterministic. Level 1, not the default 9:
+        # archive time bounds reclaim throughput, and on a real 547 MB worker tree
+        # level 9 took 59.8 s (180.2 MB), level 6 18.6 s (181.6 MB), level 1 8.3 s
+        # (205.2 MB). Any level reads back through the same "r:gz" path.
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=_GZIP_LEVEL) as gz:
             with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
                 before = _scan(workspace, tar, entries)
     manifest = {
@@ -509,7 +559,7 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
     no half archive that looks complete. Raises :class:`ArchiveRefused` (or
     ``OSError``) on any failure; the caller then keeps the workspace.
     """
-    repos = find_repos(workspace)
+    repos, markers = _find_repos(workspace)
     try:
         reserved = os.path.lexists(workspace / PAYLOAD_DIR)
     except OSError as exc:
@@ -528,6 +578,8 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
         payload.mkdir()
         # Last, so nothing (including git's own index refresh) mutates the tree after the scan.
         snapshot = _write_payload(workspace, payload)
+        if any(snapshot.get(rel) != sig for rel, sig in markers.items()):
+            raise ArchiveRefused("a .git data file changed after it was judged not a gitlink")
         verify_complete_archive(partial)
         _fsync_tree(partial)  # payload, manifest, repo bundles and all directories, before publication
         final = archive_dir
