@@ -231,6 +231,34 @@ def test_continuation_right_after_the_pause_keeps_the_previous_turn_note(env, mo
     assert env.ran == [up.pause_note(PROMPT)]
 
 
+def test_continuation_that_paused_again_is_forwarded_once_and_named_as_a_chain(env, monkeypatch):
+    """David-MBP 03:07-03:29 PST: the 02:24 continuation of the 00:55 pause paused again (``pauses: 2``, the marker
+    keeping the chain's root prompt, the 00:33 notice). The ledger refused it while the gateway continued its own
+    second pause record of the chat (admission fba3e145…), and at 03:29 it was replayed in place as if new."""
+    from tui_gateway.turn_marker import clear_turn_marker
+    clear_turn_marker(env.home, "chat")
+    record_turn_start(env.home, "chat", PROMPT, pauses=1)  # the continuation keeps the root prompt
+    mark_turn_paused(env.home, "chat", up.PAUSE_REASON)  # its own pause: pauses 2, paused_at = the 03:07 stamp
+    marker = read_turn_marker(env.home, "chat")
+    assert marker["pauses"] == 2
+    env.ledger["status"] = "started"  # the gateway is running its own continuation of the chat's other pause
+    env.db.append_message("chat", "user", "[IMPORTANT: 28 Kanban task updates arrived]")  # the gateway's turn
+    env.db.append_message("chat", "assistant", "handled")
+    session = _session(env.home)
+
+    _watch(monkeypatch, session)
+    server._maybe_schedule_auto_continue("sid", session, "chat")  # a later resume: nothing left to continue
+
+    assert env.ran == [] and len(env.forwarded) == 1
+    note = env.forwarded[0]
+    assert note.startswith(up.PAUSE_REPLAY_NOTE_PREFIX) and "interrupted" not in note.split("]")[0]
+    assert up._clock_label(marker["paused_at"]) in note
+    assert "1 later turn ran in this chat since" in note
+    assert "This request is not new: it already ran as a continuation after 1 earlier pause" in note
+    assert note.endswith(PROMPT)
+    assert read_turn_marker(env.home, "chat") is None
+
+
 def test_old_pause_whose_later_turns_cannot_be_counted_is_worded_as_stale(monkeypatch):
     monkeypatch.setattr(up, "_now", lambda: 10_000.0)
     note = up.pause_note(PROMPT, paused_at=10_000.0 - 2 * 3600, later_turns=None)

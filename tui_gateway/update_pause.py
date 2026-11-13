@@ -524,12 +524,14 @@ CARRIED_TURN_NOTE = ("[A notification turn that ran after this pause was itself 
 
 
 def pause_note(prompt: str, killed_jobs: list | None = None, *, carried: bool = False,
-               paused_at: float | None = None, later_turns: int | None = 0, queued: bool = False) -> str:
+               paused_at: float | None = None, later_turns: int | None = 0, queued: bool = False,
+               pauses: int = 0) -> str:
     """The continuation's note. Right after the pause it is the chat's previous turn; once later turns ran over the
     pause (``later_turns``; None = unknown and the pause is older than ``STALE_NOTE_AFTER_S``), or it is
     ``queued`` behind the owner's other turns, it says when the request was paused and that other turns ran (or may
     run) since, so the model checks before redoing anything (t_01a1d4920ce3cbf4: a 2 h old, already handled notice
-    was replayed as "your previous turn was interrupted")."""
+    was replayed as "your previous turn was interrupted"). ``pauses`` >= 2: the marker keeps the chain's root
+    prompt, which earlier continuations already worked on, so the note says so instead of presenting it as new."""
     stale = paused_at is not None and (queued or bool(later_turns) or (
         later_turns is None and _now() - float(paused_at) > STALE_NOTE_AFTER_S))
     if stale and paused_at is not None:
@@ -537,8 +539,11 @@ def pause_note(prompt: str, killed_jobs: list | None = None, *, carried: bool = 
         since = (f"{later_turns} later turn{'s' if later_turns != 1 else ''} ran in this chat since" if later_turns
                  else "it was queued behind other turns in this chat, which may have run first" if queued
                  else "other turns may have run in this chat since")
+        earlier = pauses - 1
+        chain = (f" This request is not new: it already ran as a continuation after {earlier} earlier "
+                 f"pause{'s' if earlier != 1 else ''}, and that work is above." if earlier >= 1 else "")
         note = (f"{PAUSE_REPLAY_NOTE_PREFIX} at {_clock_label(at)} ({_age_label(at)} "
-                f"ago) and only continues now; {since}. Every tool result from the paused turn is complete. "
+                f"ago) and only continues now; {since}.{chain} Every tool result from the paused turn is complete. "
                 "Before doing anything, check the transcript and re-read any PR, CI or card state: a later turn may "
                 "already have handled this request, so don't redo finished work. The paused request was:]"
                 f"\n\n{prompt}")
