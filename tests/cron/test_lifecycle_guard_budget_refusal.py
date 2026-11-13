@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import shlex
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,7 +26,8 @@ def _executable(path: Path, text: str) -> Path:
 
 
 def _wc_l(path: Path) -> int:
-    return int(subprocess.run(["wc", "-l", str(path)], capture_output=True, text=True, check=True).stdout.split()[0])
+    """What `wc -l` prints: the file's newline count."""
+    return path.read_bytes().count(b"\n")
 
 
 def test_line_cap_refusal_names_script_and_cap(tmp_path):
@@ -76,6 +76,20 @@ def test_line_cap_refusal_names_remaining_budget(monkeypatch, tmp_path):
     assert refusal is not None
     assert str(script) in refusal
     assert "has 9 lines, over the 7 lines left of the 10-line scan cap" in refusal
+
+
+def test_cap_line_file_after_earlier_text_is_over_what_is_left(monkeypatch, tmp_path):
+    """A file of exactly cap lines charges cap+1, but its own count is not over the cap: after
+    earlier text spent part of the budget the message names what was left, not the whole cap."""
+    monkeypatch.setattr(lifecycle_guard, "_MAX_LIFECYCLE_SCAN_LINES", 10)
+    script = _executable(tmp_path / "s.sh", "echo ok\n" * 10)
+
+    unsafe, refusal = scan_gateway_lifecycle(f"true\ntrue\n{shlex.quote(str(script))}")
+
+    assert unsafe is True
+    assert refusal is not None
+    assert _wc_l(script) == 10
+    assert "has 10 lines, over the 7 lines left of the 10-line scan cap" in refusal
 
 
 def test_long_line_refusal_names_script_and_cap(monkeypatch, tmp_path):

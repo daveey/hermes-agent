@@ -595,7 +595,9 @@ def _overrun(
     *amount* alone does not exceed what was left."""
     charged = amount if charged is None else charged
     counted = f" ({charged} counted)" if amount <= remaining else ""
-    if charged > cap:
+    # Name the whole cap only when nothing was spent yet or *amount* alone exceeds it; a charged
+    # count over the cap is not enough (a cap-line file after earlier text is over what is left).
+    if amount > cap or remaining >= cap:
         return f"{verb} {amount} {unit}s{counted}, over the {cap}-{unit} scan cap"
     return f"{verb} {amount} {unit}s{counted}, over the {remaining} {unit}s left of the {cap}-{unit} scan cap"
 
