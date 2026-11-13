@@ -107,6 +107,26 @@ def test_refused_run_handoff_is_recorded_and_the_local_run_restored(gws, svc):
     assert hub.conn.execute("SELECT summary FROM task_runs WHERE uid = ?", (uid,)).fetchone()[0] == "worker's handoff"
 
 
+def test_refused_compat_retry_of_a_run_handoff_restores_the_local_run(gws, svc):
+    """The reduced retry ``enqueue_retry`` queues after a ``forbidden_field`` rejection is a ``compat`` op (sent as an
+    upsert); its live_claim refusal restores the local run exactly like the original upsert's."""
+    hub, worker = gws
+    tid = _running_on_worker(hub, worker, svc)
+    run_id = _old_core_complete(hub.conn, tid)
+    uid = hub.conn.execute("SELECT uid FROM task_runs WHERE id = ?", (run_id,)).fetchone()[0]
+    with hub.conn:
+        n = hub.conn.execute("UPDATE kanban_sync_outbox SET op = 'compat' WHERE table_name = 'task_runs'"
+                             " AND row_uid = ? AND state = 'pending'", (uid,)).rowcount
+    assert n == 1
+    hub.round()
+    assert _board_runs(svc, tid)[uid]["summary"] is None
+    assert ("task_runs", "live_claim") in {(r.get("table", "tasks"), r["reason"].split(":")[0])
+                                           for r in _rejections(hub.conn, tid)}
+    run = hub.conn.execute("SELECT status, outcome, ended_at, summary, metadata FROM task_runs WHERE uid = ?",
+                           (uid,)).fetchone()
+    assert tuple(run) == ("running", None, None, None, None)
+
+
 def test_refused_phantom_run_is_removed_and_never_reuploaded(gws, svc):
     hub, worker = gws
     tid = _running_on_worker(hub, worker, svc)

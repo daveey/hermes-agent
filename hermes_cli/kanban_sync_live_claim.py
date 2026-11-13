@@ -48,7 +48,8 @@ def restore_child(conn: sqlite3.Connection, row: dict, res: dict) -> list[sync.R
     """The changes that make a refused child row match the Board (primary boards; the caller applies them in the
     push's authoritative batch). Prepares the local run so the Board's copy is not skipped as already seen."""
     table, uid = row["table_name"], str(row["row_uid"])
-    if table not in CHILD_TABLES or row["op"] != "upsert":
+    # ``compat`` is ``enqueue_retry``'s reduced retry after a forbidden_field rejection, sent as an upsert.
+    if table not in CHILD_TABLES or row["op"] not in ("upsert", "compat"):
         return []
     board_row = res.get("row")
     if board_row:
