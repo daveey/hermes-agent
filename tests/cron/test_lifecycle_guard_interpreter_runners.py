@@ -132,6 +132,11 @@ def test_mentions_and_data_stay_allowed(files, template):
         "zsh -o errexit {sh}",
         "zsh -eo errexit {sh}",
         "bash -eO extglob {sh}",
+        # An rc file right before the script operand or `-c`, and one before a trailing
+        # value-less `--rcfile`, is still sourced, so still scanned (PR #2388 mutants).
+        "bash --rcfile {sh} {clean_sh}",
+        "bash --init-file {sh} -c 'echo hi'",
+        "bash --rcfile {sh} --rcfile",
     ],
 )
 def test_shell_specific_option_values_find_the_script(files, template):
@@ -211,3 +216,12 @@ def test_data_sink_piped_into_python_is_not_masked(files):
         True, None)
     assert scan_gateway_lifecycle(f"grep -h '{LIFECYCLE}' {files['py']} | wc -l") == (False, None)
     assert scan_gateway_lifecycle(f"grep -h '{LIFECYCLE}' {files['py']} | pyright") == (False, None)
+
+
+@pytest.mark.parametrize("command", ["bash --rcfile", "bash -O extglob --rcfile"])
+def test_trailing_valueless_rcfile_does_not_fail_the_walk(caplog, command):
+    """A value-taking option last on the line is walked, not crashed on: the fallback after a
+    failed walk is the direct scan, which fails open on a sourced rc file (PR #2388 mutant)."""
+    with caplog.at_level("WARNING", logger=lifecycle_guard.logger.name):
+        assert scan_gateway_lifecycle(command) == (False, None)
+    assert not [r for r in caplog.records if "referenced-script walk failed" in r.getMessage()]
