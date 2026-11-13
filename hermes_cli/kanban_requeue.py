@@ -117,10 +117,13 @@ def missing_parent_repair_grant(conn, worker_task_id: Optional[str], target_id: 
 # INVARIANT (this grant and ``kanban_operator_call._agent_block`` rely on it): every write that puts a card into
 # ``blocked`` appends a ``blocked`` event (``kanban_db.block_task``, the missing-parent detector,
 # ``kanban_continuation._enforce_wake_invariant``, ``kanban_source_refusal_block``). While it holds, the newest
-# ``blocked`` event of a blocked card describes its current hold. These events are the fallback for a write that
-# breaks it: a ``blocked`` event older than any of them is over, so ``current_block_payload`` returns ``{}`` and
-# every grant refuses. A new path that re-holds a card WITHOUT a ``blocked`` event must append one; if it cannot,
-# the event kind the card left ``blocked`` with must be listed here, or the stale payload (its actor, its
+# ``blocked`` event of a blocked card describes its current hold. This tuple is NOT every way a card leaves
+# ``blocked`` (``reclaimed``, ``kanban_awaiting`` blocked->todo, ``kanban_timed_park`` blocked->scheduled and the
+# ``block_policy`` escalation blocked->triage are other exits, safe while the invariant holds, since any later hold
+# appends a fresh ``blocked`` event). It is the fallback set for a re-hold path that skips the ``blocked`` event: a
+# ``blocked`` event older than any of these is over, so ``current_block_payload`` returns ``{}`` and every grant
+# refuses. A new path that re-holds a card WITHOUT a ``blocked`` event must append one; if it cannot, the event kind
+# the card left ``blocked`` with before that re-hold must be listed here, or the stale payload (its actor, its
 # ``repair_task_id``) grants a release of the new hold. Listed kinds: ``unblocked`` (every unblock path),
 # ``promoted`` (the readiness pass leaves ``blocked`` with no ``unblocked``; ``recovery_held`` keeps it off a card
 # whose newest ``blocked`` event is unreleased today, so this arm only keeps the helper true to its contract),

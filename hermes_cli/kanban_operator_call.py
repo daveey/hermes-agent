@@ -678,6 +678,12 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
             return refusal
         ok = kb.unblock_task(conn, target, comment=(author, f"Unblocked through an operator call: {reason}"),
                              event_extra=extra, precondition=precondition)
+        if ok and extra.get("via") == MISSING_PARENT_VIA:
+            # The same audit row the same-gateway grant writes (``kanban_tools_self_heal._log_requeue``). [daveey]
+            with kb.write_txn(conn):
+                kb._append_event(conn, target, "missing_parent_requeue", {
+                    "by": extra["repair_task_id"], "repair_card": extra["repair_task_id"], "target": target,
+                    "operator_request_uid": uid})
         return ("applied", None) if ok else ("refused", f"cannot unblock {target} (state changed)")
     if action == "move":
         if _marker(conn, target, km.MOVED_EVENT, uid) or _marker(conn, target, MOVE_MARK, uid):

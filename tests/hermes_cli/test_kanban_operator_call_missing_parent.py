@@ -56,6 +56,11 @@ def _execute_row(f, target):
     return next(r for r in _log(f.h, "execute") if r["target_task_id"] == target)
 
 
+def _requeue_audit(f, target):
+    return [json.loads(p or "null") for (p,) in f.h.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'missing_parent_requeue' ORDER BY id", (target,))]
+
+
 def _unblocked(f, target):
     return [json.loads(p or "null") for (p,) in f.h.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'unblocked' ORDER BY id", (target,))]
@@ -73,6 +78,9 @@ def test_repair_card_unblocks_its_child_through_an_operator_call(fleet):
     assert payload["operator_caller"]["task_id"] == repair
     assert payload["operator_caller"]["gateway"] == "worker-5"
     assert payload["repair_task_id"] == repair
+    # Review 5891061855 nit 1: the home writes the same audit row as the same-gateway grant.
+    assert _requeue_audit(f, child) == [{"by": repair, "repair_card": repair, "target": child,
+                                         "operator_request_uid": payload["operator_request_uid"]}]
     assert ksr.get_request(f.w, out["request_id"])["status"] == "done"
 
 
@@ -85,6 +93,24 @@ def test_another_caller_still_cannot_release_the_parent_missing_block(fleet):
     assert row["outcome"] == "refused" and "not blocked by its own agent run" in row["detail"]
     assert kb.get_task(f.h, child).status == "blocked"
     assert not _unblocked(f, child)
+    assert not _requeue_audit(f, child)
+
+
+def test_own_agent_block_released_by_operator_call_writes_no_repair_audit(fleet):
+    """Only a missing-parent repair release writes ``missing_parent_requeue``; an ordinary operator unblock does not."""
+    f = fleet
+    held = f.card(f.h, "own agent block")
+    with kb.write_txn(f.h):
+        f.h.execute("UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ?", (held,))
+        kb._append_event(f.h, held, "blocked", {"reason": "waiting", "kind": "transient",
+                                                "actor": f"agent (task {held})"})
+    f.board()
+    _submit_as(f, f.caller, f.run_id, held)
+    _round(f)
+    assert _execute_row(f, held)["outcome"] == "applied", _execute_row(f, held)
+    [payload] = _unblocked(f, held)
+    assert "via" not in payload and "repair_task_id" not in payload
+    assert not _requeue_audit(f, held)
 
 
 def test_repair_card_cannot_unblock_another_hub_card(fleet):
@@ -224,4 +250,7 @@ def test_worker_kanban_unblock_tool_forwards_to_the_home_end_to_end(fleet, monke
     [payload] = _unblocked(f, child)
     assert payload["operator_caller"] == {**payload["operator_caller"], "task_id": repair, "gateway": "worker-5"}
     assert payload["repair_task_id"] == repair
+    # Review 5891061855 nit 1: the home writes the same audit row as the same-gateway grant.
+    assert _requeue_audit(f, child) == [{"by": repair, "repair_card": repair, "target": child,
+                                         "operator_request_uid": payload["operator_request_uid"]}]
     assert ksr.get_request(f.w, out["request_id"])["status"] == "done"
