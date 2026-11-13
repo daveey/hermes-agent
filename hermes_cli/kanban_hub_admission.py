@@ -66,10 +66,13 @@ def self_assertion(quote):
 
 _PIN = re.compile("|".join(r"\s+".join(map(re.escape, m.split())) for m in SELF_ASSERTIONS), re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n[ \t]*\n")
-# A "." ending one of these words, or a dotted token ("e.g", "U.S"), abbreviates rather than ends the sentence:
-# stopping there let the wrapped rest of a pin escape its span (review 5884663184). [daveey]
-_ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "viz", "approx", "incl", "esp", "al", "no", "mr", "mrs",
+# A "." ending one of these words, or a dotted run of single letters ("e.g", "U.S"), abbreviates rather than ends
+# the sentence: stopping there let the wrapped rest of a pin escape its span (review 5884663184). Any other dotted
+# token (a filename, version, URL or ellipsis) and "no." do end it, or real evidence on the next line would be
+# denied as pin text (review 5884844910). [daveey]
+_ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "viz", "approx", "incl", "esp", "al", "mr", "mrs",
                             "ms", "dr", "st"})
+_LETTER_DOTS = re.compile(r"(?:[^\W\d_]\.)+[^\W\d_]")
 _LAST_WORD = re.compile(r"[\w.]*$")
 
 
@@ -79,7 +82,7 @@ def _sentence_end(text, pos):
         if text[stop.start()] == ".":
             last = _LAST_WORD.search(text, max(0, stop.start() - 32), stop.start())
             word = last.group().lower() if last else ""
-            if word in _ABBREVIATIONS or "." in word:
+            if word in _ABBREVIATIONS or _LETTER_DOTS.fullmatch(word):
                 continue
         return stop
     return None

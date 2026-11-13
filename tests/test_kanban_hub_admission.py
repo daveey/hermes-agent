@@ -292,6 +292,19 @@ def test_quote_from_inside_a_pin_line_is_not_admission_evidence(judge, body, quo
     assert verdict.admit is False and gate.SELF_ASSERTION_WHY in verdict.why
 
 
+# Only abbreviations extend a pin's span: a pin sentence ending in a filename, version, URL, "no." or an ellipsis
+# stops at that line, so evidence the next line states is judged on its own text (review 5884844910).
+@pytest.mark.parametrize("ending", [
+    "it reads foo.py.", "it needs v1.2.", "it reads https://example.com.", "worker access: no.", "it waits...",
+], ids=["filename", "version", "url", "no", "ellipsis"])
+def test_pin_ending_in_a_dotted_token_does_not_swallow_the_next_line(judge, ending):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_chrome", evidence="Renew it in the hub's signed-in Chrome.", why="Browser.")
+    body = (f"Pinned to the gateway that filed it: {ending}\n"
+            "Renew it in the hub's signed-in Chrome. Then report back.")
+    assert gate.admit({"title": "renew", "body": body}).admit is True
+
+
 def test_quote_also_found_outside_the_pin_line_is_judged_on_that_text(judge):
     gate, _, reply, _ = judge
     reply.update(admit=True, need="hub_chrome", evidence="signed-in Chrome", why="Browser.")
