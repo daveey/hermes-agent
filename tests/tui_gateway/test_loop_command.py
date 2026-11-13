@@ -9,6 +9,7 @@ wakeups via ``_maybe_fire_tui_loop_tick``.
 
 from __future__ import annotations
 
+import faulthandler
 import importlib
 import threading
 import time
@@ -16,6 +17,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _diagnose_loop_command_hang():
+    """Keep blocked-thread evidence before the per-file runner's hard timeout."""
+    faulthandler.dump_traceback_later(30)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.fixture()
