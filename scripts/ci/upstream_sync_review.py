@@ -29,9 +29,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+UPSTREAM_REMOTE = "upstream"
 UPSTREAM_REF = "refs/remotes/upstream/main"
+UPSTREAM_SLUG = "NousResearch/hermes-agent"  # the only repository whose commits count as upstream's own
 LAND_ENV = "HERMES_CORE_WT_LAND"
-IMPL_ENV = "HERMES_UPSTREAM_SYNC_IMPL_TASK"
+_GITHUB_URL = re.compile(r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([^/]+/[^/]+?)(?:\.git)?/?")
 
 
 class ClassifyError(Exception):
@@ -54,7 +56,7 @@ def _out(repo, *args) -> str:
 class Classification:
     head: str
     base: str
-    upstream: str  # the upstream/main sha the range excluded ("" when the ref is missing: nothing is upstream's)
+    upstream: str  # the upstream/main sha the range excluded (verified_upstream: fetched from the real upstream)
     resolutions: list = field(default_factory=list)  # [(merge sha, [files])]: non-empty remerge-diff
     commits: list = field(default_factory=list)  # [(sha, subject)]: non-merge commits upstream/main lacks
     clean_merges: list = field(default_factory=list)  # merges whose remerge-diff is empty
@@ -108,11 +110,28 @@ def remerge_files(repo, merge: str) -> list[str]:
     return sorted(files) or ["(unparsed remerge-diff)"]
 
 
+def verified_upstream(repo) -> str:
+    """upstream/main, fetched fresh from github.com/NousResearch/hermes-agent.
+
+    Every commit upstream/main holds is excluded from review, so an ``upstream`` remote naming another repository
+    (a fork holding a conflict-resolution merge), or a local ref moved onto fork commits, would hide fork-authored
+    content and pass the sync as mechanical. The configured URL (read like ``origin_slug`` reads origin's) must
+    name the real upstream, and the ref is re-fetched from it; anything else raises ClassifyError."""
+    urls = _git(repo, "config", "--get-all", f"remote.{UPSTREAM_REMOTE}.url").stdout.split()
+    wrong = [u for u in urls if not ((m := _GITHUB_URL.fullmatch(u)) and m[1].lower() == UPSTREAM_SLUG.lower())]
+    if not urls or wrong:
+        raise ClassifyError(f"the `{UPSTREAM_REMOTE}` remote is {', '.join(urls) or 'not configured'}, not "
+                            f"github.com/{UPSTREAM_SLUG}: its commits cannot be trusted as upstream's own "
+                            f"(git remote set-url {UPSTREAM_REMOTE} https://github.com/{UPSTREAM_SLUG}.git)")
+    _out(repo, "fetch", "-q", "--no-tags", UPSTREAM_REMOTE, f"+refs/heads/main:{UPSTREAM_REF}")
+    return _out(repo, "rev-parse", "--verify", f"{UPSTREAM_REF}^{{commit}}").strip()
+
+
 def classify(repo, head: str, base: str) -> Classification:
     """Classify what ``head`` brings over ``base`` (the fork's main) that upstream/main does not already hold."""
-    upstream = _git(repo, "rev-parse", "-q", "--verify", f"{UPSTREAM_REF}^{{commit}}").stdout.strip()
+    upstream = verified_upstream(repo)
     found = Classification(head, base, upstream)
-    rng = [head, f"^{base}"] + ([f"^{upstream}"] if upstream else [])
+    rng = [head, f"^{base}", f"^{upstream}"]
     for line in _out(repo, "log", "--reverse", "--format=%H%x09%P%x09%s", *rng, "--").splitlines():
         sha, parents, subject = (line.split("\t", 2) + ["", ""])[:3]
         parents = parents.split()
@@ -204,8 +223,7 @@ class ShipReview:
     cannot be read (no ship tool, a failed card filing, an unreadable PR): the caller refuses."""
 
     def __init__(self, repo, *, reply: str = "", impl_task: str = "", tool: str | None = None):
-        self.repo, self.reply, self.tool = str(repo), reply, tool
-        self.impl_task = impl_task or os.environ.get(IMPL_ENV, "")
+        self.repo, self.reply, self.tool, self.impl_task = str(repo), reply, tool, impl_task
 
     def _module(self):
         path = self.tool or land_tool_path()
@@ -214,7 +232,7 @@ class ShipReview:
                                     f"(set ${LAND_ENV}); a fork-authored sync cannot be judged here")
         try:
             mod = load_land_tool(path)
-        except (OSError, SyntaxError, ImportError) as exc:
+        except Exception as exc:  # health: allow BLE001 -- any load fault of the ship tool refuses, named
             raise ReviewUnavailable(f"review gate unavailable: cannot load {path}: {exc!r}") from exc
         errors = contract_errors(mod)
         if errors:
@@ -231,6 +249,10 @@ class ShipReview:
             raise ReviewUnavailable(f"review card not filed: {exc}") from exc
         except quota_brake as exc:
             return False, f"GitHub quota brake ({exc}); run again later"
+        except ReviewUnavailable:
+            raise
+        except Exception as exc:  # health: allow BLE001 -- any other ship-tool fault refuses, named, never a traceback
+            raise ReviewUnavailable(f"review gate failed: {type(exc).__name__}: {exc}") from exc
 
     def _check(self, mod, gh_repo, number, head, branch) -> tuple[bool, str]:
         gh = mod.Gh(self.repo)
