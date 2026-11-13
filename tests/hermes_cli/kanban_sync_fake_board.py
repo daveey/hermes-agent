@@ -9,12 +9,54 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import time
+from decimal import Decimal
 from typing import Any, Optional
 
 from hermes_cli import kanban_sync_client as ksc
 
 FENCED = {"status", "current_run_uid", "result", "started_at", "completed_at"}
+
+
+def _js_number(x: float) -> str:
+    """ECMAScript Number::toString of the wire number ``x`` as JSON.stringify writes it: ``null`` for NaN and
+    +-Infinity (an int past the double range parses to Infinity), else the shortest round-trip digits (the ones
+    Python's ``repr`` picks) laid out by the spec's fixed/exponent rule."""
+    try:
+        x = float(x)
+    except OverflowError:
+        return "null"
+    if x != x or x in (math.inf, -math.inf):
+        return "null"
+    if x == 0:
+        return "0"
+    _, digits, exp = Decimal(repr(abs(x))).normalize().as_tuple()
+    s, k = "".join(map(str, digits)), len(digits)
+    n = int(exp) + k  # x = 0.s * 10**n
+    sign = "-" if x < 0 else ""
+    if k <= n <= 21:
+        return sign + s + "0" * (n - k)
+    if 0 < n <= 21:
+        return sign + s[:n] + "." + s[n:]
+    if -6 < n <= 0:
+        return sign + "0." + "0" * -n + s
+    return f"{sign}{s[0]}{'.' + s[1:] if k > 1 else ''}e{'+' if n > 0 else '-'}{abs(n - 1)}"
+
+
+def _js_stringify(value: object) -> str:
+    """``JSON.stringify(JSON.parse(json.dumps(value)))`` for a wire JSON value: strings as ``json.dumps`` with no
+    ASCII escaping, numbers by :func:`_js_number`. Lone surrogates are out of scope (JS escapes them)."""
+    if value is None or isinstance(value, bool):
+        return json.dumps(value)
+    if isinstance(value, (int, float)):
+        return _js_number(value)
+    if isinstance(value, dict):
+        return "{" + ",".join(json.dumps(str(k), ensure_ascii=False) + ":" + _js_stringify(v)
+                              for k, v in value.items()) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_js_stringify(v) for v in value) + "]"
+    return json.dumps(value, ensure_ascii=False)
 
 
 class FakeService:
@@ -139,14 +181,25 @@ class FakeService:
     def release_diagnostic(cls, value: object) -> Optional[dict]:
         """As transitions.ts releaseDiagnostic: absent -> ``{}``; anything but an object -> None (the caller
         refuses the release ``invalid``); past MAX_DIAGNOSTIC_CHARS of ``JSON.stringify`` (UTF-16 code units, no
-        ASCII escaping) -> ``{diagnostic_truncated: true}``; else a copy."""
+        ASCII escaping, numbers as JS writes them: see :func:`_js_stringify`) -> ``{diagnostic_truncated: true}``;
+        else a copy."""
         if value is None:
             return {}
         if not isinstance(value, dict):
             return None
-        text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+        text = _js_stringify(value)
         return {"diagnostic_truncated": True} if len(text.encode("utf-16-le")) // 2 > cls.MAX_DIAGNOSTIC_CHARS \
             else dict(value)
+
+    @classmethod
+    def release_inputs(cls, op: dict) -> Optional[dict]:
+        """releaseTask's post-fence validation, before any write, in its order: ``op.extra ?? {}`` that is not an
+        object is ``invalid`` ("failure extra must be an object"), then :meth:`release_diagnostic`. Returns the
+        diagnostic, or None when the caller refuses the release ``invalid``."""
+        extra = op.get("extra")
+        if extra is not None and not isinstance(extra, dict):
+            return None
+        return cls.release_diagnostic(op.get("diagnostic"))
 
     @classmethod
     def release_evidence(cls, outcome: str, op: dict, diagnostic: dict) -> tuple[dict, dict]:
@@ -164,15 +217,20 @@ class FakeService:
     def release_op(self, b: dict, op: dict, gw: str) -> dict:
         """As transitions.ts releaseTask: only the lease holder's run is released; the Board ends that run, emits
         its one outcome event (carrying :meth:`release_evidence`) and books a charged outcome exactly once.
-        Not modelled: the protocol-violation streak (a ``protocol_violation`` crash is charged like any crash)."""
+        Not modelled: the protocol-violation streak (a ``protocol_violation`` crash is charged like any crash), and
+        ``spawn_failed`` (endCustody + recordTaskFailure(releaseClaim, endRun)), refused with NotImplementedError
+        as on the leases route."""
         task, run = op["task"], op["run_uid"]
         if op.get("outcome", "released") not in self.RELEASE_OUTCOMES:
             return {"status": "rejected", "reason": "invalid"}
+        if op.get("outcome") == "spawn_failed":
+            raise NotImplementedError("FakeService.release_op: spawn_failed release (endCustody + "
+                                      "recordTaskFailure) is not modelled")
         lease = b["leases"].get(task)
         if not lease or lease["holder"] != gw or lease["run_uid"] != run:
             return {"status": "rejected", "reason": "lease_lost"}
-        # releaseDiagnostic runs after fence(), before any write, for every outcome.
-        diagnostic = self.release_diagnostic(op.get("diagnostic"))
+        # releaseTask's extra check and releaseDiagnostic run after fence(), before any write, for every outcome.
+        diagnostic = self.release_inputs(op)
         if diagnostic is None:
             return {"status": "rejected", "reason": "invalid"}
         outcome, op_id = op.get("outcome", "released"), op["client_op_id"]
@@ -313,9 +371,9 @@ class FakeHub:
                 # releaseTask's fence(): a release that does not name this gateway's live lease run is refused and
                 # changes nothing (the card keeps its lease and mirror).
                 return {"status": "rejected", "reason": "lease_lost", "lease": cur}
-            # releaseDiagnostic runs after fence(), before any write: a non-object diagnostic is ``invalid`` for
-            # every outcome and changes nothing.
-            diagnostic = self.svc.release_diagnostic(body.get("diagnostic"))
+            # releaseTask's extra check and releaseDiagnostic run after fence(), before any write: a non-object
+            # extra or diagnostic is ``invalid`` for every outcome and changes nothing.
+            diagnostic = self.svc.release_inputs(body)
             if diagnostic is None:
                 return {"status": "rejected", "reason": "invalid", "lease": cur}
             b["leases"].pop(task, None)
@@ -339,8 +397,8 @@ class FakeHub:
         a running card goes back to ``retry`` (retryStatusForRun) and the run-outcome event always carries it as
         ``retry_status``.
 
-        Modelled outcomes (anything outside ``FakeService.RELEASE_OUTCOMES``, or a non-object ``diagnostic``, is
-        refused ``invalid`` before this); run metadata and event evidence come from
+        Modelled outcomes (anything outside ``FakeService.RELEASE_OUTCOMES``, a non-object ``extra`` or a
+        non-object ``diagnostic``, is refused ``invalid`` before this); run metadata and event evidence come from
         :meth:`FakeService.release_evidence`, shared with :meth:`FakeService.release_op`:
         - neutral (``FakeService.NEUTRAL`` = NEUTRAL_RELEASES): the run ends as its mapped outcome and emits its
           mapped event; the holder's ``extra`` (plus ``owner_restart: true``) is merged into run metadata and payload.

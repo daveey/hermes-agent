@@ -512,13 +512,56 @@ def test_fake_release_rejects_non_object_diagnostic(live, kanban_home, route, le
     assert svc.board(BOARD) == before
 
 
-def test_fake_lease_release_spawn_failed_is_not_modelled(live, kanban_home):
-    """releaseTask hands spawn_failed to endCustody + recordTaskFailure; the fake refuses it loudly."""
+@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("leases", False), ("ops", True)])
+@pytest.mark.parametrize("outcome", ["released", "crashed", "timed_out", "owner_down"])
+@pytest.mark.parametrize("extra", [[], "", 0, False, "host", [["host", "mini"]]])
+def test_fake_release_rejects_non_object_extra(live, kanban_home, route, lease_runs, outcome, extra):
+    """As releaseTask: ``op.extra ?? {}`` that is not an object is ``invalid`` ("failure extra must be an object")
+    for every outcome, before releaseDiagnostic, and changes nothing."""
+    svc = FakeService(lease_runs=lease_runs)
+    hub, tid = _leased(live, svc)
+    before = copy.deepcopy(svc.board(BOARD))
+    res = _release(route, svc, hub, tid, outcome=outcome, extra=extra, diagnostic={"rc": 1})
+    assert (res["status"], res["reason"]) == ("rejected", "invalid")
+    assert svc.board(BOARD) == before
+
+
+@pytest.mark.parametrize("route", ["leases", "ops"])
+def test_fake_release_null_extra_is_empty(live, kanban_home, route):
+    """``extra: null`` is ``op.extra ?? {}`` = ``{}``: a neutral release applies with no holder metadata."""
     svc = FakeService(lease_runs=True)
     hub, tid = _leased(live, svc)
+    assert _release(route, svc, hub, tid, outcome="owner_down", extra=None)["status"] == "applied"
+    assert svc.board(BOARD)["rows"]["task_runs"][RUN]["metadata"] is None
+
+
+@pytest.mark.parametrize("number,literal", [
+    (1.0, "1"), (-0.0, "0"), (123.456, "123.456"), (1e16, "10000000000000000"), (1e20, "100000000000000000000"),
+    (1e21, "1e+21"), (1.5e300, "1.5e+300"), (1e-7, "1e-7"), (1.25e-7, "1.25e-7"), (0.00001, "0.00001"),
+    (0.000001, "0.000001"), (float("nan"), "null"), (float("inf"), "null"), (float("-inf"), "null"),
+    (10**21, "1e+21"), (2**60, "1152921504606847000"), (10**400, "null"), (True, "true"), (None, "null"),
+    ([1.0, float("nan"), "é"], '[1,null,"é"]'), ({"k": 2.50}, '{"k":2.5}'),
+], ids=lambda v: repr(v)[:24])
+def test_fake_release_diagnostic_counts_numbers_like_json_stringify(number, literal):
+    """releaseDiagnostic measures ``JSON.stringify(value).length``: a number in the diagnostic counts as JS writes
+    it (1.0 -> ``1``, 1e-7 -> ``1e-7``, NaN/Infinity -> ``null``), not as Python's ``json.dumps``."""
+    frame = '{"v":' + literal + ',"tail":""}'
+    fill = FakeService.MAX_DIAGNOSTIC_CHARS - len(frame)
+    kept = FakeService.release_diagnostic({"v": number, "tail": "x" * fill})
+    assert kept is not None and "diagnostic_truncated" not in kept
+    assert FakeService.release_diagnostic({"v": number, "tail": "x" * (fill + 1)}) == {"diagnostic_truncated": True}
+
+
+@pytest.mark.parametrize("route,lease_runs", [("leases", True), ("ops", True)])
+def test_fake_release_spawn_failed_is_not_modelled(live, kanban_home, route, lease_runs):
+    """releaseTask hands spawn_failed to endCustody + recordTaskFailure; the fake refuses it loudly on both
+    routes and changes nothing."""
+    svc = FakeService(lease_runs=lease_runs)
+    hub, tid = _leased(live, svc)
+    before = copy.deepcopy(svc.board(BOARD))
     with pytest.raises(NotImplementedError):
-        hub.leases(BOARD, {"action": "release", "task": tid, "run_uid": RUN, "client_op_id": "r",
-                           "outcome": "spawn_failed"})
+        _release(route, svc, hub, tid, outcome="spawn_failed")
+    assert svc.board(BOARD) == before
     assert svc.board(BOARD)["leases"][tid]["run_uid"] == RUN
 
 
