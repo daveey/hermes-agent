@@ -171,6 +171,13 @@ def test_malformed_roots_clear_nothing(attested, roots):
     "`printf 'c\\x64'` ~/.hermes/logs && cat `printf '\\56\\56'`/.env",
     "c''d ~/.hermes/logs && cat auth.json",
     "c\\d ~/.hermes/logs && cat auth.json",
+    # Bash drops a whole backslash-newline line continuation before it splits words, so it joins the dots of a
+    # ``..`` and the letters of a cd (review 5896219134 nit): the second reads <home>/.hermes/.env. A backslash
+    # before a carriage return only quotes that CR, so the newline after it still starts a new command.
+    "cat ~/.hermes/logs/x.log .\\\n./.env",
+    "c\\\nd ~/.hermes/logs && cat .\\\n./.env",
+    "c\\\nd ~/.hermes/logs && cat auth.json",
+    "cat x\\\r\ncd ~/.hermes/logs && cat .env",
     # One row per exact anchor of the root-clearing guards: a mutant of each passed every other row.
     'ssh hermes-hub cat --file="~/.hermes/logs/a b/c"',
     "ssh hermes-hub cat ~/.hermes/logs/x.log .\\./.env",
