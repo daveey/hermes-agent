@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from hermes_cli import kanban_placement as kp
-from tests.hermes_cli.test_kanban_placement import ROUTE, decide
+from tests.hermes_cli._placement_helpers import ROUTE, decide
 
 
 def test_babybear_skill_or_repo_in_the_body_does_not_pin_the_card():

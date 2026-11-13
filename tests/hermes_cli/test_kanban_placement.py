@@ -18,23 +18,7 @@ import pytest
 
 from hermes_cli import kanban_capability_registry as reg
 from hermes_cli import kanban_placement as kp
-
-
-ROUTE = {"route": {"macbook": "hub"}, "creator_session": {"hub": "20261023_052109_5b3dee"}}
-ALIVE = lambda target: None
-NOWHERE = lambda need: {"need": need, "local": "absent", "holders": [], "stale": []}
-# The target advertises nothing (an older hub client/core): profiles unknown, profile tools unpublished.
-SILENT = lambda target: {"profiles": None, "tools": None}
-
-
-def decide(args, **kw):
-    kw.setdefault("cfg", ROUTE)
-    kw.setdefault("self_gw", "macbook")
-    kw.setdefault("live", ALIVE)
-    kw.setdefault("locate", NOWHERE)
-    kw.setdefault("info", SILENT)
-    kw.setdefault("carries", False)  # a hermes-hub client without create-task --option (< 1.8.0)
-    return kp.decide(args, **kw)
+from tests.hermes_cli._placement_helpers import ALIVE, NOWHERE, ROUTE, SILENT, decide
 
 
 # --- the placement rule -------------------------------------------------------------------------
