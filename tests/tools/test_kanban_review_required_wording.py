@@ -116,6 +116,26 @@ def test_in_review_card_with_stale_run_id_is_named_pending_review(board, monkeyp
     assert kb.get_task(board, tid).status == "review"  # still refused: no permission widened
 
 
+# --- PR #1926 review nit: the operator, who may approve, is told how ---
+
+
+@pytest.mark.parametrize("identity", (None, *IDENTITIES))
+def test_operator_stale_run_refusal_names_the_remedy(board, monkeypatch, identity):
+    tid, run = claimed(board, monkeypatch)
+    assert kb.request_review(board, tid, summary="implemented", expected_run_id=run)
+    as_operator(monkeypatch)
+    if identity:
+        monkeypatch.setenv(identity, "t_orchestrator")
+    with pytest.raises(ValueError) as refused:
+        kb.complete_task(board, tid, summary="approve", expected_run_id=run, force=True)
+    remedy = "without expected_run_id" in str(refused.value)
+    assert remedy is (identity is None)  # worker lanes keep their text: they may not approve unclaimed
+    assert kb.get_task(board, tid).status == "review"  # the refusal itself stands
+    if identity is None:  # and the remedy it names works
+        assert kb.complete_task(board, tid, summary="approve", force=True)
+        assert kb.get_task(board, tid).status == "done"
+
+
 def _dashboard(tmp_path):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
