@@ -62,20 +62,64 @@ def test_schedule_releases_the_run_lease_while_the_outbox_is_stalled(primary, le
     assert req["task_uid"] == tid and req["run_uid"] == run_uid
 
 
-@pytest.mark.parametrize("end", ["block", "complete", "review", "continue"])
-def test_block_complete_review_and_continue_release_the_run_lease(primary, lease_client, end):
-    tid, run_uid = _claimed(primary, lease_client)
+def _review_run(conn, lease_client):
+    """A reviewer run claimed from ``review`` (the run ``request_changes`` ends)."""
+    tid, _impl_uid = _claimed(conn, lease_client, title="reviewed")
+    assert kb.request_review(conn, tid, summary="v1", reviewer="reviewer")
+    assert kb.claim_review_task(conn, tid) is not None
+    assert lease_client.calls[-1][0] == "acquire"
+    return tid, lease_client.calls[-1][1]["run_uid"], None
+
+
+def _reopened_descendant(conn, lease_client):
+    """A running child of a done parent (the run a parent reopen ends); the parent rides along."""
+    parent = kb.create_task(conn, title="parent", assignee="worker")
+    assert kb.claim_task(conn, parent) is not None
+    assert kb.complete_task(conn, parent, summary="done")
+    child = kb.create_task(conn, title="child", assignee="worker", parents=[parent])
+    assert kb.claim_task(conn, child) is not None
+    assert lease_client.calls[-1][0] == "acquire"
+    return child, lease_client.calls[-1][1]["run_uid"], parent
+
+
+def _plain_run(conn, lease_client):
+    return (*_claimed(conn, lease_client), None)
+
+
+def _continue(conn, tid, _ctx):
+    from hermes_cli import kanban_continuation
+    return kanban_continuation.continue_task(conn, tid, checkpoint="halfway")["ok"]
+
+
+def _reopen(conn, tid, parent):
+    result = kb.invalidate_descendants_for_parent_reopen(conn, parent, author="operator")
+    return [i["id"] for i in result["invalidated"]] == [tid]
+
+
+# Every run-ending transition that calls note() (schedule has its own test above): name -> (the run it
+# ends, the transition). Removing any one note() call turns its case red.
+_RUN_ENDS = {
+    "block": (_plain_run, lambda c, t, _: kb.block_task(c, t, reason="needs an answer", kind="time",
+                                                       clock_only=True)),
+    "complete": (_plain_run, lambda c, t, _: kb.complete_task(c, t, summary="done")),
+    "review": (_plain_run, lambda c, t, _: kb.request_review(c, t, summary="please review")),
+    "continue": (_plain_run, _continue),
+    "request_changes": (_review_run, lambda c, t, _: kb.request_changes(c, t, reason="fix it")[0]),
+    "archive": (_plain_run, lambda c, t, _: kb.archive_task(c, t, signal_fn=lambda *a, **k: None)),
+    "reopen": (_reopened_descendant, _reopen),
+}
+
+
+@pytest.mark.parametrize("end", sorted(_RUN_ENDS))
+def test_every_holder_run_end_releases_the_run_lease(primary, lease_client, end):
+    setup, transition = _RUN_ENDS[end]
+    tid, run_uid, ctx = setup(primary, lease_client)
     _stall_outbox(primary)
-    if end == "block":
-        assert kb.block_task(primary, tid, reason="needs an answer", kind="time", clock_only=True)
-    elif end == "complete":
-        assert kb.complete_task(primary, tid, summary="done")
-    elif end == "review":
-        assert kb.request_review(primary, tid, summary="please review")
-    else:
-        from hermes_cli import kanban_continuation
-        assert kanban_continuation.continue_task(primary, tid, checkpoint="halfway")["ok"]
-    assert [r["run_uid"] for r in _releases(lease_client)] == [run_uid]
+    lease_client.calls.clear()
+    assert transition(primary, tid, ctx)
+    run = primary.execute("SELECT ended_at FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()
+    assert run["ended_at"] is not None
+    assert [(r["task_uid"], r["run_uid"]) for r in _releases(lease_client)] == [(tid, run_uid)]
 
 
 @pytest.mark.parametrize("error", [sync.LeaseUnavailable("connection refused"), RuntimeError("bad answer")])

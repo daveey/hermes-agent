@@ -12,13 +12,28 @@ changes, continue, archive, descendant reopen) queues :func:`note` inside its wr
 ``write_txn`` calls :func:`flush` after COMMIT: a direct ``release`` call, best-effort, the way
 operator reclaim already does. A failed release keeps today's fallback (the lease expires on the
 server) and never fails the transition. Crash, timeout and reclaim accounting paths do not queue: they
-release with their own outcome, and a neutral release sent first would hide the charge.
+release with their own outcome, and a neutral release sent first would hide the charge. (Archive and
+descendant reopen close the run ``reclaimed`` too, but as uncharged operator transitions, so they queue.)
 
 Only while the outbox is stalled (:func:`outbox_stalled`). Board ``releaseTask`` returns a card it still
 sees ``running`` to ``ready`` (and drops a placement card's ``runs_on``). On a healthy host the direct
 release would usually beat the row push, so a parked or done card would read ``ready`` on the Board
 until the push lands, open to a claim from another machine. There the row push ends the lease itself,
 so nothing is sent.
+
+The stalled case has the same window, accepted: the direct release makes the Board return the card to
+``ready`` at once (``retryStatusForRun``) and drop a placement card's ``runs_on``, so another machine may
+claim a card that is done or parked here until this host's outbox drains. Without the release the same
+window opened anyway, only later (at lease expiry) and through the stale-lease reaper, which also
+charged the run as a crash.
+
+``_PENDING`` is keyed by ``id(conn)``: ``sqlite3.Connection`` takes no weak references, so a
+``WeakKeyDictionary`` is not an option. Only ``write_txn`` drains it (``flush`` on COMMIT or rollback),
+and every caller of :func:`note` runs inside ``write_txn``; outside a transaction ``note`` releases at
+once. Were an entry ever stranded (a raw ``BEGIN`` caller, a connection closed mid-txn) and its id reused
+by a later connection, that connection's next commit would send at most the release of a run that
+:func:`_release` finds ended in that connection's own ``task_runs`` (a run of another board is not found,
+so nothing is sent), and only while its outbox is stalled.
 """
 from __future__ import annotations
 
@@ -33,7 +48,8 @@ _log = logging.getLogger("hermes_cli.kanban_db_sync")
 # within seconds; a held row with a future ``retry_after`` does not count).
 OUTBOX_STALL_SECONDS = 120
 
-# id(conn) -> [(task_id, run_uid)] queued inside the open write txn of that connection.
+# id(conn) -> [(task_id, run_uid)] queued inside the open write txn of that connection (keying and
+# draining invariant: module docstring).
 _PENDING: dict[int, list[tuple[str, str]]] = {}
 
 
