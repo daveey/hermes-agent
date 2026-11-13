@@ -22,6 +22,11 @@ from gateway.session_runtime_workers import cron_turn_count, kanban_managed_coun
 # Only the update's post-grace Kanban wait: human turns retain their normal budget.
 CORE_UPDATE_KANBAN_WAIT_S = 15.0
 CORE_UPDATE_KANBAN_STOP_LEASH_S = 40.0  # 15 wait + 40 stop + 5 poll allowance = 60s admission
+# Under a checkpoint intent (``"checkpoint": true``) hermes-sync's instant drainer has already spent its own wait
+# on this work and decided to apply over it: the cards are preserved by the checkpoint and the cron runs are cut.
+# hermes-hub 2026-11-13: every instant swap sat the full 15 s here on a managed card that then restarted anyway
+# (journal 21:06:18 -> 21:06:33). A short settle only; the bounds above stay the upper limit.
+CORE_UPDATE_CHECKPOINT_KANBAN_WAIT_S = 2.0
 
 logger = logging.getLogger("gateway.run")
 
@@ -56,14 +61,15 @@ class GatewayRestartWaitMixin:
         if kanban + cron <= 0 or self._awaitable_work_count() != kanban + cron:
             return None, False
         since = now if since is None else since
-        expired = now - since >= CORE_UPDATE_KANBAN_WAIT_S
+        wait_s = CORE_UPDATE_CHECKPOINT_KANBAN_WAIT_S if self._intent_is_checkpoint(intent) else CORE_UPDATE_KANBAN_WAIT_S
+        expired = now - since >= wait_s
         if expired:
             # The after-turn grace is spent. Do not start another full graceful drain in stop().
             self._core_update_kanban_cap_spent = True
             logger.warning(
                 "Core update %s wait capped at %.0fs with %d managed card(s) and %d cron run(s); "
                 "proceeding to restart drain (interrupted attempts requeued uncounted)",
-                "Kanban/cron-only" if cron else "Kanban-only", CORE_UPDATE_KANBAN_WAIT_S, kanban, cron,
+                "Kanban/cron-only" if cron else "Kanban-only", wait_s, kanban, cron,
             )
             if cron:
                 self._log_cut_cron_runs()
@@ -104,6 +110,17 @@ class GatewayRestartWaitMixin:
         with suppress(Exception):
             data = json.loads(Path(intent).read_text(encoding="utf-8-sig"))
             return isinstance(data, dict) and data.get("cron_cut") is True
+        return False
+
+    def _intent_is_checkpoint(self, intent: Optional[Path]) -> bool:
+        """The update intent is a negotiated checkpoint (``"checkpoint": true``): the drainer already waited and
+        applies over the work left. Re-read each poll like ``_intent_cuts_cron``; missing or unreadable is False,
+        which keeps the full wait."""
+        if intent is None:
+            return False
+        with suppress(Exception):
+            data = json.loads(Path(intent).read_text(encoding="utf-8-sig"))
+            return isinstance(data, dict) and data.get("checkpoint") is True
         return False
 
     def _log_cut_cron_runs(self) -> None:
