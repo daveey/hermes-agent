@@ -41,16 +41,89 @@ def test_completion_uses_claude_code_wire(monkeypatch):
         import json
         seen.append((request, json.loads(request.content)))
         return httpx.Response(200, json=MESSAGE)
+    monkeypatch.setattr('agent.anthropic_adapter._claude_code_version_cache', '9.8.7')
     monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(handle)))
     assert recovery.completion_succeeds('anthropic', 'model', _entry(), recovery.time.monotonic() + 5)
     request, body = seen[0]
     assert request.url == 'https://api.anthropic.com/v1/messages'
     assert request.headers['x-app'] == 'cli'
     assert 'oauth-2025-04-20' in request.headers['anthropic-beta']
-    assert request.headers['user-agent'].startswith('claude-code/2.1.280')
+    assert request.headers['user-agent'] == 'claude-code/9.8.7 (external, cli)'
     assert body['max_tokens'] == 1 and body['model'] == 'model'
     assert body['system'][0]['text'] == "You are Claude Code, Anthropic's official CLI for Claude."
     assert len(seen) == 1
+
+
+def test_proof_wire_headers_equal_the_oauth_client(monkeypatch):
+    """The proof sends exactly the identity/beta headers the real OAuth client sends."""
+    from agent import anthropic_adapter
+    from hermes_cli import kanban_quota_recovery as recovery
+    monkeypatch.setattr(anthropic_adapter, '_claude_code_version_cache', '9.8.7')
+    for name in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL'):
+        monkeypatch.delenv(name, raising=False)
+    client = anthropic_adapter.build_anthropic_client('sk-ant-oat01-' + 'x' * 40)
+    real = {k.lower(): v for k, v in client._custom_headers.items() if isinstance(v, str)}
+    seen = []
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: seen.append(request) or httpx.Response(200, json=MESSAGE))))
+    assert recovery.completion_succeeds('anthropic', 'model', _entry(), recovery.time.monotonic() + 5)
+    for header in ('anthropic-beta', 'user-agent', 'x-app'):
+        assert seen[0].headers[header] == real[header], header
+
+
+def _gated_entries(*ids):
+    entries = [_entry(id=i) for i in ids]
+    return entries, SimpleNamespace(entries=lambda: entries, clear_verified_model_cooldown=Mock(return_value=True))
+
+
+def test_failed_proof_cools_down_per_account_across_starts(monkeypatch, tmp_path):
+    """Two quota walls within the cooldown -> one real completion per (provider, model, account)."""
+    from hermes_cli import kanban_quota_recovery as recovery
+    monkeypatch.setattr(recovery, '_proof_gate_path', lambda: str(tmp_path / 'gate.db'))
+    entries, pool = _gated_entries('acct1')
+    monkeypatch.setattr('agent.credential_pool.load_pool', lambda *a, **k: pool)
+    complete = Mock(return_value=False)
+    monkeypatch.setattr(recovery, 'completion_succeeds', complete)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(recovery.time, 'time', lambda: clock[0])
+    assert not recovery.recover('anthropic', 'model')
+    assert not recovery.recover('anthropic', 'model')
+    assert complete.call_count == 1
+    # Another model of the same account is its own proof.
+    assert not recovery.recover('anthropic', 'other')
+    assert complete.call_count == 1  # 'other' is not benched on the fixture entry, so ineligible
+    entries[0].model_cooldowns['other'] = 9999999999
+    assert not recovery.recover('anthropic', 'other')
+    assert complete.call_count == 2
+    clock[0] += recovery.FAILED_PROOF_COOLDOWN_SECONDS + 1
+    assert not recovery.recover('anthropic', 'model')
+    assert complete.call_count == 3
+
+
+def test_verified_proof_releases_its_cooldown(monkeypatch, tmp_path):
+    from hermes_cli import kanban_quota_recovery as recovery
+    monkeypatch.setattr(recovery, '_proof_gate_path', lambda: str(tmp_path / 'gate.db'))
+    monkeypatch.setattr('hermes_cli.kanban_quota_detector.record_contradiction', lambda *a, **k: None)
+    _, pool = _gated_entries('acct1', 'acct2')
+    monkeypatch.setattr('agent.credential_pool.load_pool', lambda *a, **k: pool)
+    complete = Mock(side_effect=lambda p, m, e, d: e.id == 'acct1')
+    monkeypatch.setattr(recovery, 'completion_succeeds', complete)
+    assert recovery.recover('anthropic', 'model')
+    assert recovery.recover('anthropic', 'model')
+    # acct1 proved twice (released on success); acct2's failed proof stays benched.
+    assert sorted(c.args[2].id for c in complete.call_args_list) == ['acct1', 'acct1', 'acct2']
+
+
+def test_broken_proof_gate_fails_open(monkeypatch, tmp_path):
+    from hermes_cli import kanban_quota_recovery as recovery
+    monkeypatch.setattr(recovery, '_proof_gate_path', lambda: str(tmp_path / 'missing-dir' / 'gate.db'))
+    _, pool = _gated_entries('acct1')
+    monkeypatch.setattr('agent.credential_pool.load_pool', lambda *a, **k: pool)
+    complete = Mock(return_value=False)
+    monkeypatch.setattr(recovery, 'completion_succeeds', complete)
+    assert not recovery.recover('anthropic', 'model')
+    assert not recovery.recover('anthropic', 'model')
+    assert complete.call_count == 2
 
 
 @pytest.mark.parametrize('data,ok', [
