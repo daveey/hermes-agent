@@ -52,6 +52,21 @@ _SINK_SHAPES = {
     "echo-E-eval": "eval \"$(echo -E bash {big})\"\n",
     "echo-n-wrapped": "timeout 5 echo -n bash {big} | sudo bash\n",
     "printf-dashdash": "printf -- bash\\ {big} | bash\n",
+    # `function NAME {` is a definition, not the executed command: its body's echo still prints.
+    "echo-function-keyword": "function f { echo bash {big}; }; f | bash\n",
+    "echo-n-function-keyword": "function f { echo -n bash {big}; }; f | bash\n",
+    "echo-function-keyword-parens": "function f() { echo bash {big}; }; f | bash\n",
+    "echo-time-p": "time -p echo bash {big} | bash\n",
+    # A printf format is not printed as written: `%s` must not be read as the executed command.
+    "printf-format-two": "printf '%s %s' bash {big} | bash\n",
+    "printf-format-trailing-space": "printf '%s ' bash {big} | bash\n",
+    "printf-dashdash-format": "printf -- '%s %s' bash {big} | bash\n",
+    "printf-format-split-word": "printf 'ba%s %s' sh {big} | bash\n",
+    "printf-format-function-keyword": "function f { printf '%s %s' bash {big}; }; f | bash\n",
+    "printf-variable-format": "printf \"$f\" bash {big} | bash\n",
+    "printf-format-repeats": "printf '%s%s ' ba sh {big} | bash\n",
+    # Kept from the old opener peel (fails closed): a leading `in` is not read as the command.
+    "echo-after-in": "for w\nin echo bash {big}; do :; done | bash\n",
     # Nit 3 (intended, fails closed): any later pipe word counts as the shell, a grep pattern too.
     "pipe-grep-bash": "python3 - <<'PY' | grep bash\n" + _PRINT + "PY\n",
     "pipe-grep-c-bash": "echo bash {big} | grep -c bash\n",
@@ -101,6 +116,8 @@ _NO_SINK_SHAPES = {
     "printf-no-sink": "printf 'bash {big}\\n'\n",
     "echo-no-sink": "echo bash {big}\n",
     "echo-or-list": "echo bash {big} || bash -c true\n",
+    "echo-function-keyword-no-sink": "function f { echo bash {big}; }; f\n",
+    "printf-format-no-sink": "printf '%s %s' bash {big}\n",
 }
 
 
@@ -175,3 +192,32 @@ def test_shape_corpus_catches_a_guard_that_keeps_masking_sink_bodies(tmp_path, m
     monkeypatch.setattr(shell_heredoc, "output_reaches_shell", lambda command: False)
     bad = corpus.violations(corpus.evaluate(tmp_path / "mutant", cases), lambda case: True)
     assert {case.nesting for case in bad} == set(corpus.SINK_NESTINGS)
+
+
+@pytest.mark.parametrize(("format_text", "arguments", "printed"), [
+    ("%s %s", ["bash", "/x/a.sh"], "bash /x/a.sh"),
+    ("%s ", ["bash", "/x/a.sh"], "bash /x/a.sh "),  # the format repeats over the arguments
+    # Flags, width and precision are dropped: the whole argument stands in (only adds text).
+    ("%-8s|%5.2s|%%", ["ab", "cdef"], "ab|cdef|%"),
+    ("x", ["bash", "/x/a.sh"], "x"),  # no conversion consumes nothing and stops at once
+    ("%s", [], ""),
+])
+def test_printf_output_applies_the_format(format_text, arguments, printed):
+    from cron.lifecycle_guard_printf import _printf_output
+
+    assert _printf_output(format_text, arguments) == printed
+
+
+def test_printf_output_stops_after_the_round_cap():
+    from cron.lifecycle_guard_printf import _PRINTF_MAX_ROUNDS, _printf_output
+
+    printed = _printf_output("%s,", [str(n) for n in range(_PRINTF_MAX_ROUNDS + 10)])
+    assert printed == "".join(f"{n}," for n in range(_PRINTF_MAX_ROUNDS))
+
+
+@pytest.mark.parametrize("printer", ["printf --", "printf", "echo -n"])
+def test_printer_with_no_printed_words_does_not_abort_the_walk(tmp_path, printer):
+    # A crash in the payload walk falls back to the direct scan, which never opens the script.
+    command = f"{printer} | bash\nbash {_big(tmp_path)}\n"
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe is True and refusal is not None and "scan cap" in refusal, refusal

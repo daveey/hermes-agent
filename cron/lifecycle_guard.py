@@ -21,6 +21,7 @@ from typing import Callable, Iterator, Optional
 
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import iter_line_segment_contexts, split_glued_redirections
+from cron.lifecycle_guard_printf import _printf_format_lines  # what `printf FORMAT …` prints
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
 
@@ -1497,6 +1498,8 @@ def _printed_argument_lines(name: str, arguments: list[str]) -> Iterator[str]:
     while index < len(arguments) and arguments[index].startswith("-"):
         index += 1
     yield " ".join(arguments[index:])
+    if name == "printf":  # the format is not printed as written (`printf '%s %s' bash X`)
+        yield from _printf_format_lines(arguments[index:])
 
 
 def _with_escapes_decoded(text: str) -> Iterator[str]:

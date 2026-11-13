@@ -120,6 +120,7 @@ SINK_CONSUMERS = {
     "printf": ("printf '{line}\\n'", None),
     "echo": ("echo {line}", None),
     "echo-n": ("echo -n {line}", None),
+    "printf-format": ("printf '%s ' {line}", None),  # the format is not printed as written
 }
 SINK_LINES = {"big": "bash ./big.sh", "direct": 'hermes gateway "restart"'}
 SINKS = {
@@ -131,7 +132,7 @@ SINKS = {
     "bash <(…)": ("wrap", "bash <( ", " )"),
     ". <(…)": ("wrap", ". <( ", " )"),
 }
-SINK_NESTINGS = ("plain", "function", "subshell", "group", "outer", "ssh")
+SINK_NESTINGS = ("plain", "function", "function-keyword", "subshell", "group", "outer", "ssh")
 # Over the 1 MiB scan cap, so a walk that executes it fails closed; bash runs it to the end.
 BIG_SCRIPT = "# padding\n" * 130000 + 'hermes gateway "restart"\n'
 # Startup file: record that it ran, keep the fake bin on PATH, then rewrite the rest of stdin.
@@ -177,6 +178,8 @@ def build_sink_command(sink: str, wrapper: str, nesting: str, consumer: str, lin
     prelude = ""
     if nesting == "function":
         prelude, head, tail = f"f() {{\n{opener}\n{body}}}\n", "f", "\n"
+    elif nesting == "function-keyword":  # the producer on the `function NAME {` line itself
+        prelude, head, tail = f"function f {{ {opener}\n{body}}}\n", "f", "\n"
     elif nesting in ("subshell", "group"):
         start, end = ("(", ")") if nesting == "subshell" else ("{", "}")
         head, tail = f"{start}\n{opener}\n{body}{end}", "\n"
