@@ -86,7 +86,7 @@ def test_replica_cards_stamp_run_machine(tmp_path, monkeypatch):
                      [("u1", "t_hub"), ("u2", "t_mac")])
     conn.commit()
     conn.close()
-    monkeypatch.setattr(links, "_ledger_owners", lambda stale_ok=False: {})
+    monkeypatch.setattr(links, "_ledger_index", lambda stale_ok=False: ({}, []))
     monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "default")
     got = {c["id"]: c.get("run_machine") for c in links.replica_cards(None, "hub", ksa.LISTED_STATUSES,
                                                                       replicas=[("default", rep)])}

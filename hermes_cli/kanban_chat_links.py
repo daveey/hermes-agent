@@ -15,7 +15,9 @@ with one local query.
   count and the task strip are one projection in each mode.
 - :func:`links_diff` compares the two answers per chat, ``unknown`` unfinished obligations included, leaving out
   the chats the writer never links (machine sessions, placeholders: counted in ``machine_links``); readers
-  switch only once it is clean.
+  switch only once it is clean. A card on a profile's own board (hermes-hub's qualified owner route, e.g. hub
+  ``profiles/bb-tuner/kanban.db``) never reaches the Board, so both the reader and the diff take it from the ledger
+  (``profile_board_links``).
 """
 
 from __future__ import annotations
@@ -564,30 +566,39 @@ def _ledger_owners(stale_ok: bool = False) -> dict[tuple[str, str], list[tuple[s
     synced board is one file per gateway with one row per id, shared by that gateway's profiles, so the replica
     row carries no owner profile: the ledger only labels it (``_owner_of``). ``stale_ok`` is ``_remote_links``'s:
     take the last projection instead of waiting on a rebuild."""
+    return _ledger_index(stale_ok)[0]
+
+
+def _ledger_index(stale_ok: bool = False) -> tuple[dict[tuple[str, str], list[tuple[str, str, str, bool]]],
+                                                   list[dict[str, Any]]]:
+    """``(_ledger_owners, the ledger's profile-board cards)`` from one origin-ledger projection; ``({}, [])`` when it
+    cannot be read (both are additions to the replica's answer, never a reason to hide it)."""
     from hermes_cli.kanban_session_activity import _remote_links
     global _owners_memo
     try:
         cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
     except Exception as exc:  # health: allow BLE001 -- the profile is a label; a failed ledger read must not hide cards
         _log.info("kanban chat links: owner profiles unavailable (%s: %s)", type(exc).__name__, exc)
-        return {}
+        return {}, []
     # [daveey] ``_remote_links`` hands out a new list of the SAME read-only card dicts until it re-projects: the same
     # cards (by identity; the memo holds them, so no id is reused) give the same owners. Rebuilding this index from
     # ~5k cards was ~15 ms of every count recompute on David-MBP.
     memo = _owners_memo
     if memo is not None and len(memo[0]) == len(cards) and all(a is b for a, b in zip(memo[0], cards)):
-        return memo[1]
+        return memo[1], memo[2]
     out: dict[tuple[str, str], list[tuple[str, str, str, bool]]] = {}
     for c in cards:
         if c.get("gateway") and c.get("board") and c.get("id") and c.get("profile"):
             out.setdefault((str(c["board"]), str(c["id"])), []).append(
                 (str(c["gateway"]), str(c["profile"]), str(c.get("session") or ""), bool(c.get("released"))))
-    _owners_memo = (cards, out)
-    return out
+    profile_cards = [c for c in cards if _is_profile_board_card(c)]
+    _owners_memo = (cards, out, profile_cards)
+    return out, profile_cards
 
 
-# (cards, owners) of the last ``_ledger_owners`` build. Callers treat the owners map as read-only.
-_owners_memo: tuple[list[dict[str, Any]], dict[tuple[str, str], list[tuple[str, str, str, bool]]]] | None = None
+# (cards, owners, profile-board cards) of the last ``_ledger_index`` build. Callers treat both as read-only.
+_owners_memo: tuple[list[dict[str, Any]], dict[tuple[str, str], list[tuple[str, str, str, bool]]],
+                    list[dict[str, Any]]] | None = None
 
 
 def _owner_of(known: list[tuple[str, str, str, bool]], owner: Optional[str],
@@ -624,6 +635,42 @@ def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str
     return out
 
 
+PROFILE_BOARD_SOURCE = "ledger-profile-board"
+
+
+def _is_profile_board_card(card: dict[str, Any]) -> bool:
+    """A qualified ledger card whose owner profile is not ``default``: hermes-hub's qualified owner route keeps it
+    in that profile's OWN kanban home (``<root>/profiles/<p>/kanban.db``, e.g. hub bb-tuner's ``t_d3e3f88a``). Board
+    sync carries a gateway's shared kanban home only (``kanban_sync_client.board_paths``, ``kanban_db.kanban_home``),
+    so the Board has no row for such a card and refuses its chat link (``not_found``)."""
+    return card.get("ownership_state") == "qualified" and card.get("profile") not in (None, "", "default")
+
+
+def _profile_board_cards(cards: list[dict[str, Any]], gateway: str, profile: str, statuses: tuple[str, ...],
+                         replicas: list[tuple[str, Path]], read_ok: set[str]) -> list[dict[str, Any]]:
+    """[daveey] This gateway's chats' ledger obligations on a profile-own board (``_is_profile_board_card``) that
+    no replica carries: the reader keeps them from the ledger instead of losing them. A card a readable replica DOES
+    carry stays the replica's answer (its links, its release). ``cards``: ``_ledger_index``'s profile-board cards."""
+    from hermes_cli.kanban_session_activity import cached_ro
+    wanted = [c for c in cards if c.get("session") and c.get("board") and c.get("id")
+              and c.get("origin_gateway") in (None, gateway) and c.get("origin_profile") in (None, profile)
+              and _ledger_obligation(c, statuses)]
+    if not wanted:
+        return []
+    paths = dict(replicas)
+    carried: set[tuple[str, str]] = set()
+    for board in {str(c["board"]) for c in wanted} & read_ok:
+        ids = sorted({str(c["id"]) for c in wanted if c["board"] == board})
+        try:
+            with cached_ro(paths[board]) as conn:
+                carried |= {(board, str(r[0])) for r in conn.execute(
+                    f"SELECT id FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        except sqlite3.Error:  # read a moment ago: treat as carried rather than guess
+            carried |= {(board, i) for i in ids}
+    return [{**c, "session_id": c["session"], "remote": True, "source": PROFILE_BOARD_SOURCE}
+            for c in wanted if (str(c["board"]), str(c["id"])) not in carried]
+
+
 def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES,
                   replicas: Optional[list[tuple[str, Path]]] = None, *, now: Optional[float] = None,
                   ledger_fallback: bool = True, unreadable_out: Optional[list[str]] = None,
@@ -640,6 +687,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
       ``ledger_fallback=False`` (links_diff) skips both, so a diff never compares the ledger with itself;
       ``unreadable_out`` collects the boards whose replica could not be read;
     - one row per (chat, card); the key carries the owner profile the ledger names for it, else ``default``;
+    - a card on a profile's own board (``_is_profile_board_card``), which the Board never carries, comes from the
+      ledger (``source`` ``ledger-profile-board``) while no readable replica has its row, so the chat keeps it;
     - ``stale_ok`` (the Desktop linked-card strip): the owner labels come from the last ledger projection rather
       than waiting behind a rebuild of it. [daveey] Without it the strip's ``stale_ok`` stopped at this call and
       ``/api/session-kanban-tasks`` queued on ``_links_lock`` for every board write (3-7 s in a wake burst)."""
@@ -653,13 +702,15 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
     profile = get_active_profile_name()
     now = time.time() if now is None else now
     stale_after = _stale_after_s()
-    owners: Optional[dict[tuple[str, str], list[tuple[str, str, str, bool]]]] = None
+    index: Optional[tuple[dict[tuple[str, str], list[tuple[str, str, str, bool]]], list[dict[str, Any]]]] = None
     out: dict[tuple[str, str], dict[str, Any]] = {}
+    read_ok: set[str] = set()
     for board, path in replicas:
         memo_key = (str(path), gateway, profile)
         try:
             rows, pulled, runs = _read_replica(path, gateway, profile)
             _last_good[memo_key] = (rows, pulled, runs)
+            read_ok.add(board)
             stale = pulled is None or now - pulled > stale_after
         except sqlite3.Error as exc:
             if unreadable_out is not None:
@@ -676,8 +727,9 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 continue
             rows, pulled, runs = hit
             stale = True
-        if owners is None and rows:
-            owners = _ledger_owners(stale_ok)
+        if index is None and rows:
+            index = _ledger_index(stale_ok)
+        owners = index[0] if index is not None else None
         for r in rows:
             if ids is not None and r["chat_session"] not in ids:
                 continue
@@ -717,14 +769,30 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
         # [daveey] A reader that lists closed cards keeps a released link's card as an explicit released row.
         for r in _released_links(path, board, gateway, profile, ids, statuses):
             tid = str(r["id"])
-            if owners is None:
-                owners = _ledger_owners(stale_ok)
-            owner, owner_profile, _named = _owner_of(owners.get((board, tid), []), r["created_on"], r["chat_session"])
+            if index is None:
+                index = _ledger_index(stale_ok)
+            owner, owner_profile, _named = _owner_of(index[0].get((board, tid), []), r["created_on"],
+                                                     r["chat_session"])
             key = f"{owner or '?'}/{owner_profile}/{board}/{tid}"
             out.setdefault((r["chat_session"], key), _released.row(
                 r, board=board, gateway=gateway, key=key, owner=owner, owner_profile=owner_profile, pulled=pulled,
                 stale=stale))
+    # One ledger read per call serves the owner labels and the profile-board cards.
+    _merge_profile_board(out, _profile_board_cards((index or _ledger_index(stale_ok))[1], gateway, profile, statuses,
+                                                   replicas, read_ok), ids)
     return list(out.values())
+
+
+def _merge_profile_board(out: dict[tuple[str, str], dict[str, Any]], cards: list[dict[str, Any]],
+                         ids: Optional[set[str]]) -> None:
+    """Add each of this lineage's profile-board cards to ``replica_cards``'s answer unless it already has the card
+    (same chat, owner gateway, board and id, whatever owner label the replica row got)."""
+    have = {(c["session"], c["gateway"], c["board"], c["id"]) for c in out.values()}
+    for c in cards:
+        ref = (c["session"], c.get("gateway"), c["board"], c["id"])
+        if (ids is None or c["session"] in ids) and ref not in have:
+            have.add(ref)
+            out[(c["session"], c["key"])] = c
 
 
 def _released_links(path: Path, board: str, gateway: str, profile: str, ids: Optional[set[str]],
@@ -783,7 +851,11 @@ def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[
     [daveey] Chats the link writer never links (``_unlinked_chats``: machine sessions, placeholders) are left out
     of both sides and counted in ``machine_links``: their ledger rows were differences by construction, never a
     reader regression. On David-MBP they were 250 of the 270 only-in-ledger links (137 of 140 chats, all kanban
-    worker transcripts, 2026-11-13), which hid the real difference among them."""
+    worker transcripts, 2026-11-13), which hid the real difference among them.
+
+    [daveey] A card on a profile's own board (``_is_profile_board_card``) has no Board row by design, so the replica
+    side answers it from the ledger like the reader does and counts it in ``profile_board_links``: it is the
+    reader's own answer, not a difference (hub bb-tuner ``t_d3e3f88a``, the last David-MBP row, 2026-11-13)."""
     from hermes_cli.kanban_session_activity import _remote_links
     ledger: dict[str, set[tuple[str, str, str]]] = {}
     profiles: dict[str, set[Any]] = {}
@@ -795,14 +867,19 @@ def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[
         ledger.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
         profiles.setdefault(card["session"], set()).add(card.get("origin_profile"))
     replica: dict[str, set[tuple[str, str, str]]] = {}
+    profile_board: dict[str, set[tuple[str, str, str]]] = {}
     unreadable: list[str] = []
     from hermes_cli import kanban_sync_client as ksc
     replicas = [(slug, ksc.shadow_path(slug)) for slug, _path in ksc.board_paths()]
     for card in replica_cards(None, gateway, statuses, replicas, ledger_fallback=False, unreadable_out=unreadable):
         replica.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
         profiles.setdefault(card["session"], set()).add(card.get("origin_profile"))
+        if card.get("source") == PROFILE_BOARD_SOURCE:
+            profile_board.setdefault(card["session"], set()).add((card["gateway"], card["board"], card["id"]))
     skipped = _unlinked_chats(gateway, profiles)
     machine_links = sum(len(side.pop(s, ())) for side in (ledger, replica) for s in skipped)
+    for s in skipped:
+        profile_board.pop(s, None)
     # A replica that exists but cannot be read, or that is missing while the ledger has cards on its board, answers
     # nothing: the diff is never clean while one does (readers must not switch on it). A missing replica of a board
     # with no ledger cards has nothing to compare.
@@ -817,5 +894,6 @@ def links_diff(gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[
     # An unreadable replica answers nothing (see above).
     return {"clean": not only_ledger and not only_replica and not unreadable, "chats": len(sessions),
             "ledger_links": sum(len(v) for v in ledger.values()), "replica_links": sum(len(v) for v in replica.values()),
-            "machine_links": machine_links, "only_in_ledger": only_ledger, "only_in_replica": only_replica,
+            "machine_links": machine_links, "profile_board_links": sum(len(v) for v in profile_board.values()),
+            "only_in_ledger": only_ledger, "only_in_replica": only_replica,
             "unreadable": unreadable}

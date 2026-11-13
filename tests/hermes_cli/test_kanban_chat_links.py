@@ -50,7 +50,7 @@ def test_unreadable_replica_fallback_preserves_stale_policy(tmp_path, monkeypatc
     monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
     monkeypatch.setattr(ksa, '_remote_links', remote_links)
     rows = links.replica_cards(['s1'], ME, replicas=[('default', tmp_path / 'absent.db')], stale_ok=stale_ok)
-    assert calls == [stale_ok]
+    assert calls and set(calls) == {stale_ok}  # the cold fallback and the profile-board read both keep the policy
     assert [(r['id'], r['stale'], r['source']) for r in rows] == [('t_prior', True, 'ledger-fallback')]
 
 
@@ -453,3 +453,52 @@ def test_a_released_link_to_a_closed_card_stays_listed_as_done_for_a_reader_of_c
     assert ksa.active_task_counts() == {"s1": 2}  # t_hub (unknown) and t_open
     rows = {r["id"]: r["status"] for r in ksa.session_tasks(["s1"], closed)}
     assert rows == {"t_arch": "archived", "t_hub": "unknown", "t_open": "running", "t_worker": "done"}
+
+
+def _profile_board_row(task_id, session, profile="bb-tuner", **kw):
+    """A qualified ledger row owned by a non-default profile: hermes-hub keeps that card in the profile's OWN kanban
+    home (hub ``profiles/bb-tuner/kanban.db``), which Board sync never carries."""
+    return {**_ledger_row(task_id, session, **kw), "profile": profile, "owner_profile": profile,
+            "ownership_state": "qualified", "key": f"{OTHER}/{profile}/{kw.get('board', 'default')}/{task_id}"}
+
+
+def test_a_profile_board_card_stays_the_chats_from_the_ledger_and_links_diff_is_clean(live, kanban_home, monkeypatch,
+                                                                                     tmp_path):
+    """[daveey] Hub card t_d3e3f88a lives in the hub's bb-tuner profile board, not the synced root board: the Board
+    has no row for it and refused David-MBP's chat link (``not_found``, 2026-10-28). With ``links_reader: replica``
+    the chat lost the card and links_diff stayed unclean on that one row (2026-11-13). The reader now keeps such a
+    card from the ledger, and links_diff counts it as ``profile_board_links`` instead of a difference."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_open", "open", "running", OTHER)], [("t_open", ME, "s1", "shepherd", 0)])
+    rows = [_ledger_row("t_open", "s1"), _profile_board_row("t_d3e3f88a", "s1", status="ready"),
+            _profile_board_row("t_settled", "s1", status="done", released=True)]
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: rows)
+    got = {c["id"]: c for c in links.replica_cards(["s1"], ME, ksa.LISTED_STATUSES, replicas=[("default", rep)])}
+    assert sorted(got) == ["t_d3e3f88a", "t_open"]  # a released ledger row is no obligation
+    assert got["t_d3e3f88a"]["source"] == links.PROFILE_BOARD_SOURCE
+    assert (got["t_d3e3f88a"]["key"], got["t_d3e3f88a"]["status"]) == (f"{OTHER}/bb-tuner/default/t_d3e3f88a", "ready")
+    assert got["t_open"]["source"] == "replica"
+    monkeypatch.setattr(ksc, "board_paths", lambda: [("default", kanban_home / "kanban.db")])
+    monkeypatch.setattr(ksc, "shadow_path", lambda slug: rep)
+    report = links.links_diff(ME, ksa.LISTED_STATUSES)
+    assert report["clean"], report
+    assert (report["profile_board_links"], report["ledger_links"], report["replica_links"]) == (1, 2, 2)
+    (kanban_home / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n    links_reader: replica\n")
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: ksc.Identity("https://hub.test", "k", ME))
+    ksa._reset_cache_for_tests()
+    assert sorted(t["id"] for t in ksa.session_tasks(["s1"])) == ["t_d3e3f88a", "t_open"]
+    assert ksa.active_task_counts() == {"s1": 2}
+
+
+def test_a_replica_that_carries_a_profile_owned_card_keeps_its_own_answer(tmp_path, monkeypatch):
+    """The ledger fallback is only for cards no readable replica carries: when the Board has the card (a profile
+    the ledger names on a synced board), the replica's links decide, released ones included. A board no replica
+    is read for (unsynced, or unreadable) still answers from the ledger."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_carried", "carried", "running", OTHER)], [("t_carried", ME, "s1", "shepherd", 1)])
+    rows = [_profile_board_row("t_carried", "s1", profile="work"),
+            _profile_board_row("t_elsewhere", "s1", board="runners")]
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: rows)
+    got = {c["id"]: c["source"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])}
+    assert got == {"t_elsewhere": links.PROFILE_BOARD_SOURCE}
+    assert links.replica_cards(["s0"], ME, replicas=[("default", rep)]) == []  # another chat's card
