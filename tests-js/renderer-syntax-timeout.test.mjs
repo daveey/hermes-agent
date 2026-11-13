@@ -2,10 +2,11 @@
 // at macOS background QoS (taskpolicy -b), and on a contended host a check that takes 8 s idle took
 // longer than its old fixed 300 s budget (daveey-mini 2026-11-13, prebuild 764f1731c5: spawnSync
 // ETIMEDOUT failed a bundle vite had built cleanly). Only a stalled check may fail it.
-import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, test } from 'vitest'
 
 const checker = new URL('../apps/desktop/scripts/assert-dist-built.mjs', import.meta.url).href
@@ -68,6 +69,40 @@ describe('renderer chunk check budget', () => {
       const overrun = check(300)
       expect(overrun).toMatchObject({ ok: false, kind: 'harness' })
       expect(overrun.error).toContain('did not finish within 0.3 s')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 120_000)
+
+  test.skipIf(process.platform === 'win32')('the CLI tells a timed-out check apart from a bad bundle and names the budget knob', () => {
+    // main() resolves dist/ from its own location (scripts/..), so run a copy of the script in a scratch
+    // desktop root. realpath: isMain compares argv[1] with import.meta.url, which node reports resolved.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'renderer-check-cli-')))
+    try {
+      mkdirSync(join(root, 'scripts'))
+      for (const name of ['assert-dist-built.mjs', 'check-chunks-parse.mjs', 'utils.mjs']) {
+        copyFileSync(fileURLToPath(new URL(`../apps/desktop/scripts/${name}`, import.meta.url)), join(root, 'scripts', name))
+      }
+      mkdirSync(join(root, 'dist', 'assets'), { recursive: true })
+      writeFileSync(join(root, 'dist', 'index.html'), '<!doctype html>')
+      writeFileSync(join(root, 'dist', 'assets', 'index-x.js'), 'export const value = 1')
+      const slowNode = join(root, 'slow-node')
+      writeFileSync(slowNode, `#!/bin/sh\nsleep 1.5\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
+      chmodSync(slowNode, 0o755)
+
+      const run = spawnSync(process.execPath, [join(root, 'scripts', 'assert-dist-built.mjs')], {
+        env: { ...process.env, NODE: slowNode, HERMES_CHUNK_CHECK_TIMEOUT_MS: '300' },
+        encoding: 'utf8',
+      })
+
+      expect(run.status).toBe(1)
+      expect(run.stderr).toContain('did not finish within 0.3 s')
+      expect(run.stderr).toContain('failure of the CHECK')
+      expect(run.stderr).toContain('throttled or contended host')
+      // The hint itself, not only the error line above it, must name the knob to turn.
+      const hint = run.stderr.slice(run.stderr.indexOf('failure of the CHECK'))
+      expect(hint).toContain('HERMES_CHUNK_CHECK_TIMEOUT_MS')
+      expect(run.stderr).not.toContain('would produce an app that launches to a blank page')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
