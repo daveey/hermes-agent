@@ -465,12 +465,17 @@ class PythonEnvironment:
     def _compile_bytecode(self) -> bool:
         """Compile eagerly, except an environment of a home that borrows the account's state.
 
-        Every other file of such an environment is a link into the account's uv cache; its
-        bytecode is the one copy it would own, ~70 MiB per environment, mostly for modules a
-        test or review run never imports. Those compile on first import instead."""
+        Every other file of such an environment is a hard link (an APFS clone on macOS) into the
+        account's uv cache; its bytecode is the one copy it would own, ~70 MiB per environment,
+        mostly for modules a test or review run never imports. Those compile on first import
+        instead. The PM runtime (``installs/<key>/pm-runtime``) follows the same rule.
+
+        Under ``PYTHONDONTWRITEBYTECODE`` (the Docker image sets it) a lazy compile is never
+        written, so every start would recompile every import: compile eagerly there. Read from
+        ``os.environ``: ``self.env`` drops every ``PYTHON*`` key (``_base_environment``)."""
         from pm.environments import account_home_root, installs_root
 
-        if account_home_root() is None:
+        if os.environ.get("PYTHONDONTWRITEBYTECODE") or account_home_root() is None:
             return True
         try:
             return not self.destination.resolve().is_relative_to(installs_root().resolve())

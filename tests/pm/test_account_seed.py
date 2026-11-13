@@ -221,10 +221,21 @@ def _environment(destination: Path):
 def test_borrowing_home_environments_compile_bytecode_lazily(tmp_path, monkeypatch):
     from pm.environments import installs_root
 
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     assert _environment(installs_root() / "k" / "environments" / "g" / "venv")._compile_bytecode()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "fresh"))
     assert not _environment(installs_root() / "k" / "environments" / "g" / "venv")._compile_bytecode()
+    assert not _environment(installs_root() / "k" / "pm-runtime" / "generations" / "g")._compile_bytecode()
     assert _environment(tmp_path / "payload" / "venv")._compile_bytecode()  # a bundle build keeps it
+
+
+def test_borrowing_home_compiles_eagerly_when_lazy_bytecode_is_never_written(tmp_path, monkeypatch):
+    """PYTHONDONTWRITEBYTECODE (the Docker image) drops lazy pyc: each start would recompile."""
+    from pm.environments import installs_root
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "fresh"))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    assert _environment(installs_root() / "k" / "environments" / "g" / "venv")._compile_bytecode()
 
 
 def test_sync_passes_compile_bytecode_only_when_wanted(tmp_path, monkeypatch):
