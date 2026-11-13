@@ -353,7 +353,10 @@ def execute(frame, channel):
     # Background processes a previous admission of this session started outlive that worker
     # (F24); adopt them so process_manage in this turn can poll and kill them. Only this session's:
     # another chat's orphan (a Desktop job whose backend just rolled over) would finish in this
-    # per-turn process, whose completion queue nobody reads, and its notice was lost. [daveey]
+    # per-turn process, whose completion queue nobody reads, and its notice was lost. So a managed
+    # worker no longer adopts keyless orphans or orphans of other worker routes either: they wait
+    # for a later run of the same route, or for a gateway/Desktop backend restart, whose keeper
+    # adopts them. [daveey]
     from tools.process_registry import process_registry
     process_registry.recover_from_checkpoint(session_keys=(frame['route'], scope['session_id']))
     # Store construction binds the delegation ledger before tool discovery.

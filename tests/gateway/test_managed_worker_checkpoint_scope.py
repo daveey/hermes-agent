@@ -59,17 +59,7 @@ def _worker_recovery_kwargs(tmp_path, monkeypatch) -> dict:
     """Run the real managed-worker ``execute`` and capture exactly how it asks for recovery."""
     calls = []
     frame, _ = assignment(tmp_path, monkeypatch)
-    real_setattr = monkeypatch.setattr
-
-    def setattr_spy(target, *args, **kwargs):
-        if target == 'tools.process_registry.process_registry.recover_from_checkpoint':
-            args = (lambda *a, **k: calls.append((a, k)),)
-        return real_setattr(target, *args, **kwargs)
-    monkeypatch.setattr = setattr_spy
-    try:
-        _execute(frame, monkeypatch)
-    finally:
-        monkeypatch.setattr = real_setattr
+    _execute(frame, monkeypatch, recover=lambda *a, **k: calls.append((a, k)))
     assert len(calls) == 1, calls
     args, kwargs = calls[0]
     assert not args, args
