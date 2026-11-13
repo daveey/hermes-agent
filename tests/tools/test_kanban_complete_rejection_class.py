@@ -191,11 +191,19 @@ def test_success_has_no_rejection(board, monkeypatch):
 # card is terminal. Classifying refusals by exclusion mislabeled PR acceptance, then
 # scheduled/todo, then triage as "stale run"; this sweep makes a fourth status fail here. [daveey]
 _TERMINAL = {"done", "archived"}
+# The only statuses a no-run card may complete from. Pinned so a no-run triage/todo card that
+# starts completing fails here instead of passing the ok-branch silently. [daveey]
+_COMPLETES_WITHOUT_RUN = {"running", "ready", "blocked", "review"}  # complete_task's status IN (...)
 
 
 def _all_statuses():
     from hermes_cli.kanban_workflow import DEFAULT_STATUSES
     return sorted(DEFAULT_STATUSES)
+
+
+def test_expected_success_statuses_are_board_statuses():
+    statuses = set(_all_statuses())
+    assert _COMPLETES_WITHOUT_RUN <= statuses - _TERMINAL, statuses
 
 
 @pytest.mark.parametrize("status", _all_statuses())
@@ -208,9 +216,10 @@ def test_refusal_names_status_for_every_status(board, monkeypatch, status):
             conn.execute("UPDATE tasks SET status=?, current_run_id=NULL, claim_lock=NULL, "
                          "worker_pid=NULL WHERE id=?", (status, tid))
     out = json.loads(kt._handle_complete({"task_id": tid, "summary": "done"}))
-    if out.get("ok") is True:
-        assert status not in _TERMINAL, out
+    if status in _COMPLETES_WITHOUT_RUN:
+        assert out.get("ok") is True and "rejection" not in out, out
         return
+    assert out.get("ok") is not True, out
     assert out["rejection"] in kt.COMPLETE_REJECTION_CLASSES
     if status in _TERMINAL:
         assert out["rejection"] == "stale_run", out
