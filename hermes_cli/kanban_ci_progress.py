@@ -26,7 +26,6 @@ import calendar
 import json
 import logging
 import re
-import shutil
 import sqlite3
 import subprocess
 import threading
@@ -80,10 +79,11 @@ def run_target(ref: str, hint: str = "") -> Optional[tuple[str, str]]:
 
 def _fetch_jobs(repo: str, run_id: str) -> dict:
     """The run's jobs from the GitHub API through ``gh``. Raises on any failure."""
-    gh = shutil.which("gh")
-    if not gh:
-        raise RuntimeError("gh not found on PATH")
-    p = subprocess.run([gh, "api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"],
+    from hermes_platform.resolver.github import resolve_gh
+    resolved = resolve_gh()
+    if not resolved.found:
+        raise RuntimeError("gh not found on PATH, ~/bin or ~/.local/bin")
+    p = subprocess.run([*resolved.command, "api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"],
                        capture_output=True, text=True, timeout=FETCH_TIMEOUT_SECONDS, check=False,
                        stdin=subprocess.DEVNULL, encoding="utf-8", errors="replace")
     if p.returncode != 0:
