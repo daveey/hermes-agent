@@ -27,6 +27,7 @@ _lock = threading.RLock()
 # so a reopened store re-reads.
 _held: OrderedDict[str, list] = OrderedDict()
 _generation = 0
+_released: set[str] = set()
 
 
 def _sidecars(path: str) -> dict:
@@ -46,6 +47,7 @@ def reset() -> None:
     with _lock:
         while _held:
             _drop(next(iter(_held)))
+        _released.clear()
 
 
 def forget(db_path) -> None:
@@ -57,11 +59,13 @@ def forget(db_path) -> None:
 def release_under(root=None) -> int:
     """Close every kept connection on a store under ``root`` (every one when None): called by
     ``hermes_state_registry.close_all``/``close_all_under`` before the header probes are released, so a profile
-    delete's rmtree meets no kept descriptor. The next watch pass reopens what still exists."""
+    delete's rmtree meets no kept descriptor. Later idle passes use transient readers until
+    another tracked owner has reopened the store."""
     from hermes_state_common import path_is_under
     with _lock:
         doomed = [path for path in _held if root is None or path_is_under(Path(path), Path(root))]
         for path in doomed:
+            _released.add(path)
             _drop(path)
     return len(doomed)
 
@@ -84,7 +88,7 @@ def _open(path: str, ident: tuple[int, int]) -> list:
         conn.close()
         raise
     _generation += 1
-    held = _held[path] = [ident, conn, _generation, sidecars]
+    held = _held[path] = [ident, conn, _generation, sidecars, (st.st_size, st.st_mtime_ns)]
     while len(_held) > MAX_STORES:
         _drop(next(iter(_held)))
     return held
@@ -107,11 +111,18 @@ def observed(db_path):
     inside the block drops the connection, so the next call reopens (a new generation: no stale key matches)."""
     path = str(db_path)
     with _lock:
+        transient = path in _released
+        if transient:
+            from hermes_cli.sqlite_safe_read import has_live_connection
+            if has_live_connection(path):
+                _released.discard(path)
+                transient = False
         try:
             st = os.stat(path)
             ident = (st.st_dev, st.st_ino)
             held = _held.get(path)
-            if held is not None and (held[0] != ident or _stranded(held, path)):
+            if held is not None and (held[0] != ident or _stranded(held, path)
+                                     or held[4] != (st.st_size, st.st_mtime_ns)):
                 _drop(path)  # replaced, recreated or a new WAL generation under this path
                 held = None
             if held is None:
@@ -127,5 +138,5 @@ def observed(db_path):
         except BaseException:
             _drop(path)
             raise
-        if conn.in_transaction:  # a caller's snapshot left open would pin the WAL and hide later commits
+        if transient or conn.in_transaction:  # an idle released store must not regain a kept descriptor
             _drop(path)

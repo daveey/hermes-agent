@@ -173,8 +173,54 @@ def test_close_all_under_releases_kept_connections(tmp_path):
             pass
     close_all_under(tmp_path / "doomed")
     assert not has_live_connection(inside)
+    for _ in range(3):
+        with watch_store.observed(inside) as (_key, conn):
+            assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+        assert not has_live_connection(inside), "idle watcher must not reacquire a released profile"
     assert has_live_connection(outside)
     watch_store.reset()
+
+
+def test_released_store_can_be_kept_after_an_owner_reopens(tmp_path):
+    from hermes_cli.sqlite_safe_read import has_live_connection
+    path = tmp_path / "state.db"
+    db = SessionDB(path)
+    db.close()
+    watch_store.reset()
+    with watch_store.observed(path):
+        pass
+    watch_store.release_under(tmp_path)
+    db = SessionDB(path)
+    try:
+        with watch_store.observed(path):
+            pass
+        assert str(path) in watch_store._held
+        assert has_live_connection(path)
+    finally:
+        watch_store.reset()
+        db.close()
+
+
+def test_in_place_restore_reopens_sqlite_page_cache(tmp_path):
+    path, other = tmp_path / "a.db", tmp_path / "b.db"
+    for p, value in ((path, 1), (other, 99)):
+        conn = sqlite3.connect(p)
+        conn.execute("CREATE TABLE t(v)")
+        conn.execute("INSERT INTO t VALUES (?)", (value,))
+        conn.commit()
+        conn.close()
+    watch_store.reset()
+    try:
+        with watch_store.observed(path) as (before, conn):
+            assert conn.execute("SELECT v FROM t").fetchone()[0] == 1
+        inode = path.stat().st_ino
+        shutil.copyfile(other, path)
+        assert path.stat().st_ino == inode
+        with watch_store.observed(path) as (after, conn):
+            assert after != before
+            assert conn.execute("SELECT v FROM t").fetchone()[0] == 99
+    finally:
+        watch_store.reset()
 
 
 def test_a_transaction_left_open_drops_the_connection(tmp_path):
