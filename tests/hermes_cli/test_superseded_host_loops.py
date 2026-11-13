@@ -213,17 +213,31 @@ def test_a_wall_failure_on_current_code_still_waits_for_the_reset(monkeypatch):
     assert ng._retry_at("20261031_064851_d0f106", now) == reset + ng.DEFER_SLACK_S
 
 
-@pytest.mark.parametrize("stale", ["retired", "skew"])
-def test_a_wall_failure_on_stale_code_replays_after_the_short_delay(monkeypatch, stale):
+def test_a_skewed_but_not_retired_process_still_waits_for_the_reset(monkeypatch):
+    # [daveey] t_01a1d6b19bf73072: this process runs the replay itself, on the same stale code, so a short-delay
+    # replay would hit the same wall, fail and give up; only a retired process hands the replay to a successor.
     from gateway import code_skew
     from tui_gateway import automation_replay as ar
     from tui_gateway import notice_guarantee as ng
 
-    if stale == "retired":
-        monkeypatch.setattr(code_skew, "detect_code_skew", lambda: None)
-        hll.retire_host_loops("test", "always-on backend :9148 superseded")
-    else:
-        monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("17f28630e4", "0068f2ca86"))
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("17f28630e4", "0068f2ca86"))
+    assert hll.host_loops_retired() is None
+    now = time.time()
+    reset = now + 4 * 86400
+    assert _replay_due(monkeypatch, reset) == reset
+    assert ar.trusted_resets_at(reset) == reset
+    assert ng._retry_at("20261031_064851_d0f106", now) == reset + ng.DEFER_SLACK_S
+
+
+@pytest.mark.parametrize("skewed", [False, True])
+def test_a_wall_failure_in_a_retired_process_replays_after_the_short_delay(monkeypatch, skewed):
+    from gateway import code_skew
+    from tui_gateway import automation_replay as ar
+    from tui_gateway import notice_guarantee as ng
+
+    skew = ("17f28630e4", "0068f2ca86") if skewed else None
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: skew)
+    hll.retire_host_loops("test", "always-on backend :9148 superseded")
     now = time.time()
     due = _replay_due(monkeypatch, now + 4 * 86400)
     assert now + ar.REPLAY_MIN_DELAY_S <= due <= time.time() + ar.REPLAY_MIN_DELAY_S
