@@ -92,6 +92,20 @@ def test_crlf_blank_lines_still_end_the_record_paragraph(body, newline):
     assert kp.portable_reason(_args(body, title="sign in")) == "local marker"
 
 
+@pytest.mark.parametrize("record", [
+    "**Existing work checked:** searched board for X\r\n",
+    "## Existing work checked\r\nSearched board for X\r\n",
+])
+def test_a_crlf_record_list_is_stripped_whole(record):
+    # RED under CR-only normalisation ("\r" -> "\n" before "\r\n"): every CRLF became a blank line, so the record
+    # paragraph ended after its first line and the list items leaked back into the scanned text.
+    body = ("Fix the thing.\r\n\r\n" + record + "- t_01a1d5f0c0ffee02 is different\r\n- PR #12 closed\r\n\r\n"
+            "Next para stays.\r\n")
+    text = kp.without_evidence(body)
+    assert "t_01a1d5f0c0ffee02" not in text and "PR #12" not in text and "\r" not in text
+    assert "Fix the thing." in text and "Next para stays." in text
+
+
 def test_the_same_action_outside_the_record_still_stays_home():
     body = BODY.replace("## Decided fix\n", "## Decided fix\nRun `hermes-hub tasks` to list every board.\n")
     assert coordination.required_labels(_args(body), POOLS) is None
