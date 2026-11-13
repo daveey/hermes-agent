@@ -2323,14 +2323,14 @@ def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) 
     # One reversed positional scan: the anchor is whichever intent-bearing row is LAST in the original
     # transcript — a real ``role=user`` turn or a steer marker riding inside a ``role=tool`` result. See
     # #100053.
-    for message in reversed(original_messages):
-        if _is_real_user_message(message):
-            return _insert_real_user_anchor(compressed, _fresh_compaction_message_copy(message))
-        if not isinstance(message, dict) or message.get("role") != "tool":
-            continue
-        steer_text = _extract_steer_text_from_message(message)
-        if steer_text:
-            return _insert_real_user_anchor(compressed, {"role": "user", "content": steer_text})
+    from agent.context_compressor_turns import newest_live_intent
+    # A request answered before a notice-started turn is finished work, never the anchor (row 913645).
+    found = newest_live_intent(original_messages, lambda m: m if _is_real_user_message(m) else (
+        _extract_steer_text_from_message(m) if isinstance(m, dict) and m.get("role") == "tool" else None))
+    if isinstance(found, dict):
+        return _insert_real_user_anchor(compressed, _fresh_compaction_message_copy(found))
+    if found:
+        return _insert_real_user_anchor(compressed, {"role": "user", "content": found})
     from agent.message_metadata import append_message
     append_message(compressed, {"role": "user", "content": COMPRESSION_CONTINUATION_USER_CONTENT})
     return "placeholder_appended"
