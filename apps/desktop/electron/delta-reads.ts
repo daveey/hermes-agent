@@ -24,7 +24,7 @@
 // anything else is removed and that read goes whole, as it would have anyway. A copy only ever names a base: every
 // read still reaches the backend.
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
@@ -74,6 +74,7 @@ interface Copy {
 interface Disk {
   dir: string
   dirty: Set<string>
+  deleted: Set<string>
   // What each read's file holds (the hash last written or loaded) and when it was last written or touched.
   saved: Map<string, { at: number; hash: string }>
   tried: Set<string>
@@ -131,13 +132,15 @@ export class DeltaBodyStore {
   readonly #scopes = new Map<string, string>()
   #bytes = 0
   #disk: Disk | null = null
+  #flushing: Promise<void> | null = null
+  #flushEpoch = 0
 
   /**
    * Keep each read's newest copy in `dir` as well, so a relaunch still holds the bases (module comment). Nothing is
    * read until a read asks for its copy; nothing is written on the request path.
    */
   persistTo(dir: string): void {
-    this.#disk = { dir, dirty: new Set(), saved: new Map(), tried: new Set(), timer: null }
+    this.#disk = { dir, dirty: new Set(), deleted: new Set(), saved: new Map(), tried: new Set(), timer: null }
   }
 
   /**
@@ -195,6 +198,7 @@ export class DeltaBodyStore {
       return
     }
 
+    this.#disk?.deleted.delete(key)
     this.#hold(key, hash, body)
 
     if (!this.#alreadyOnDisk(key, hash)) {
@@ -262,10 +266,11 @@ export class DeltaBodyStore {
     const disk = this.#disk
 
     if (disk) {
-      disk.dirty.delete(key)
       disk.saved.delete(key)
+      disk.deleted.add(key)
       disk.tried.add(key)
-      fs.rm(path.join(disk.dir, diskName(key)), { force: true }, () => undefined)
+      this.#markDirty(key)
+      void this.flush() // removal shares the write publication fence, off the request path
     }
   }
 
@@ -277,13 +282,25 @@ export class DeltaBodyStore {
     this.#copies.delete(key)
   }
 
-  /** Write every read's newest copy that changed since the last flush, then trim the directory to the budget. */
+  /** Write changed copies off the request path. Dirty ownership lasts until publication, including during quit. */
   async flush(): Promise<void> {
+    while (this.#flushing) {await this.#flushing}
+
+    const pending = this.#flushPending()
+
+    this.#flushing = pending
+
+    try {
+      await pending
+    } finally {
+      if (this.#flushing === pending) {this.#flushing = null}
+    }
+  }
+
+  async #flushPending(): Promise<void> {
     const disk = this.#disk
 
-    if (!disk) {
-      return
-    }
+    if (!disk) {return}
 
     if (disk.timer) {
       clearTimeout(disk.timer)
@@ -291,28 +308,41 @@ export class DeltaBodyStore {
     }
 
     const keys = [...disk.dirty]
-
-    disk.dirty.clear()
+    const epoch = this.#flushEpoch
 
     try {
       await fs.promises.mkdir(disk.dir, { mode: 0o700, recursive: true })
 
       for (const key of keys) {
+        if (epoch !== this.#flushEpoch || disk !== this.#disk) {return}
+
         const copy = this.#copies.get(key)?.at(-1)
+        const target = path.join(disk.dir, diskName(key))
 
         if (copy) {
-          const target = path.join(disk.dir, diskName(key))
-          const tmp = `${target}.${process.pid}.tmp`
+          const tmp = `${target}.${randomUUID()}.tmp`
 
-          await fs.promises.writeFile(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
-          await fs.promises.rename(tmp, target)
-          disk.saved.set(key, { at: Date.now(), hash: copy.hash })
+          try {
+            await fs.promises.writeFile(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
+
+            // No await between validation and rename: delete/put/quit cannot interleave with publication.
+            if (epoch !== this.#flushEpoch || disk !== this.#disk || this.#copies.get(key)?.at(-1) !== copy) {continue}
+            fs.renameSync(tmp, target)
+            disk.saved.set(key, { at: Date.now(), hash: copy.hash })
+          } finally {
+            fs.rmSync(tmp, { force: true })
+          }
+        } else if (disk.deleted.has(key)) {
+          fs.rmSync(target, { force: true })
         }
-      }
 
-      await this.#trimDisk(disk.dir)
+        disk.dirty.delete(key)
+        disk.deleted.delete(key)
+      }
     } catch {
-      // Persistence is an optimisation: an unwritable directory leaves the copies in memory only.
+      // Persistence is an optimisation: an unwritable directory leaves the copies in memory and dirty for retry.
+    } finally {
+      if (epoch === this.#flushEpoch) {this.#trimDisk(disk.dir)}
     }
   }
 
@@ -331,7 +361,7 @@ export class DeltaBodyStore {
 
     const keys = [...disk.dirty]
 
-    disk.dirty.clear()
+    this.#flushEpoch += 1 // quit supersedes every captured async copy
 
     try {
       fs.mkdirSync(disk.dir, { mode: 0o700, recursive: true })
@@ -341,15 +371,26 @@ export class DeltaBodyStore {
 
         if (copy) {
           const target = path.join(disk.dir, diskName(key))
-          const tmp = `${target}.${process.pid}.tmp`
+          const tmp = `${target}.${randomUUID()}.tmp`
 
-          fs.writeFileSync(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
-          fs.renameSync(tmp, target)
-          disk.saved.set(key, { at: Date.now(), hash: copy.hash })
+          try {
+            fs.writeFileSync(tmp, encodeDiskCopy(key, copy), { mode: 0o600 })
+            fs.renameSync(tmp, target)
+            disk.saved.set(key, { at: Date.now(), hash: copy.hash })
+          } finally {
+            fs.rmSync(tmp, { force: true })
+          }
+        } else if (disk.deleted.has(key)) {
+          fs.rmSync(path.join(disk.dir, diskName(key)), { force: true })
         }
+
+        disk.dirty.delete(key)
+        disk.deleted.delete(key)
       }
     } catch {
       // as flush()
+    } finally {
+      this.#trimDisk(disk.dir)
     }
   }
 
@@ -369,13 +410,22 @@ export class DeltaBodyStore {
     }
   }
 
-  async #trimDisk(dir: string): Promise<void> {
+  #trimDisk(dir: string): void {
+    try {
+      this.#trimDiskFiles(dir)
+    } catch {
+      // Missing/unwritable cache: persistence must not interfere with reads or quitting.
+    }
+  }
+
+  #trimDiskFiles(dir: string): void {
     const files: { at: number; file: string; size: number }[] = []
 
-    for (const name of await fs.promises.readdir(dir)) {
-      if (name.endsWith(DISK_SUFFIX)) {
+    for (const name of fs.readdirSync(dir)) {
+      // Interrupted writes count too; otherwise repeated hard exits could grow unbounded temporary files.
+      if (name.endsWith(DISK_SUFFIX) || /^[a-f0-9]{32}\.base\.[\da-f-]+\.tmp$/.test(name)) {
         try {
-          const stat = await fs.promises.stat(path.join(dir, name))
+          const stat = fs.statSync(path.join(dir, name))
 
           files.push({ at: stat.mtimeMs, file: path.join(dir, name), size: stat.size })
         } catch {
@@ -391,7 +441,7 @@ export class DeltaBodyStore {
         break
       }
 
-      await fs.promises.rm(file.file, { force: true })
+      fs.rmSync(file.file, { force: true })
       total -= file.size
     }
   }
@@ -418,7 +468,7 @@ export class DeltaBodyStore {
     const copy = data.length <= DELTA_STORE_MAX_BYTES + 4096 ? decodeDiskCopy(key, data) : null
 
     if (!copy) {
-      fs.rm(file, { force: true }, () => undefined) // truncated, damaged or another read's: never a base
+      this.delete(key) // truncated, damaged or another read's: never a base
 
       return undefined
     }
