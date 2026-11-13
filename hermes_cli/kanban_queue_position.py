@@ -122,6 +122,10 @@ def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]
             until = [d["until_ms"] for d in drains.values() if "until_ms" in d]
             if until:
                 place["drain_until_ms"] = max(until)
+        from hermes_cli import kanban_label_backlog as klb
+        backlog = klb.read(conn, task_id, labels, machines=klb.available(labels, machines))
+        if klb.words(backlog):
+            place["backlog"] = backlog
         return place
     every = set().union(*carried.values())
     return {"lane": "unplaceable", "runs_on": labels, "missing": [lb for lb in labels if lb not in every],
@@ -263,6 +267,9 @@ def headline(place: dict[str, Any]) -> str:
     words = f"waiting for {machines} (runs_on {runs_on}); this machine cannot lease it"
     if place.get("draining"):
         words += f" ({', '.join(place['draining'])} draining for a core update)"
+    from hermes_cli import kanban_label_backlog as klb
+    if backlog := klb.words(place.get("backlog")):
+        words += f"; {backlog}"
     return words
 
 
@@ -315,6 +322,9 @@ def _describe_lane(place: Optional[dict[str, Any]]) -> Optional[str]:
                 "re-place it (`hermes kanban move <id> --runs-on <label> --reason ...`); do not re-create it, "
                 "clear the drain, or run its work outside the dispatcher")
     if lane == "machine":
+        from hermes_cli import kanban_label_backlog as klb
+        if klb.busy(place.get("backlog")):
+            return headline(place) + ". Queued behind same-label cards: " + klb.ADVICE
         return headline(place) + ". " + _NOT_STUCK
     if lane == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'}). " + _NOT_STUCK

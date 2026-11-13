@@ -82,6 +82,13 @@ def _pool_sentence(place: dict[str, Any], now: Optional[float] = None) -> str:
     return pool_words(place, advice=False)
 
 
+def _backlog(place: dict[str, Any]) -> dict[str, Any]:
+    """``{"label_backlog": ...}`` for a machine-lane place whose matching machines are busy with same-label cards
+    (``kanban_label_backlog``), else ``{}``."""
+    from hermes_cli import kanban_label_backlog as klb
+    return {"label_backlog": place["backlog"]} if klb.words(place.get("backlog")) else {}
+
+
 def _pool_suffix(payload: dict[str, Any]) -> str:
     """``" <pool hint>."`` for a notice payload that carries one, else ``""``."""
     hint = str(payload.get("pool_hint") or "").strip()
@@ -101,7 +108,11 @@ def _observation(payload: dict[str, Any]) -> str:
 
 def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None,
              payload: Optional[dict[str, Any]] = None, now: Optional[float] = None) -> str:
-    """Capacity advice, or the recorded skip's (or the unrecorded skip's) advice without priority changes."""
+    """Capacity advice, or the recorded skip's (or the unrecorded skip's) advice without priority changes. A card
+    whose matching machines claimed same-label cards during the wait is queued, so no re-place is offered."""
+    from hermes_cli import kanban_label_backlog as klb
+    if klb.busy((payload or {}).get("label_backlog")):
+        return f"Not a placement problem, do not re-place: {klb.ADVICE}"
     from hermes_cli.kanban_dispatch_skip import notice_advice
     from hermes_cli.kanban_priority import advice
     return f"{NO_FIX}: " + (notice_advice(payload or {}, now=now) or advice(parent_id, evidence))
@@ -137,7 +148,7 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
         return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}. {checkpoint}".rstrip()
     from hermes_cli.kanban_dispatch_skip import notice_fields
     pool = _pool_sentence(place, now)
-    fields = {**notice_fields(place, waited), **({"pool_hint": pool} if pool else {})}  # _options defers to it
+    fields = {**notice_fields(place, waited), **({"pool_hint": pool} if pool else {}), **_backlog(place)}
     return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place, now)}. " + (f"{pool}. " if pool else "")
             + checkpoint + _options(task.id, lane_evidence(conn, task.id), fields, now) + ".")
 
@@ -211,11 +222,14 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_host_counts as khc
     from hermes_cli import kanban_queue_position as kqp
+    from hermes_cli import kanban_label_backlog as klb
     if _already_posted(conn, task_id, waiting_on, wait_key, kind):
         return False  # before the queue place: every tick asks again for each long-ready card [daveey]
     place = _place(conn, waiting_on)
+    busy = klb.busy(place.get("backlog"))
     observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
+                              else {"reason": klb.REASON, "status": "queued"} if busy
                               else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     pool_hint = "" if guard else _pool_sentence(place, observed["observed_at"])  # outside the queue clause (#1821)
@@ -235,6 +249,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
             **observed, **checkpoint,
             **({"pool_hint": pool_hint} if pool_hint else {}),
             **(extra or {}),
+            **_backlog(place),
             "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),
             **({} if guard else notice_fields(place, ready_seconds)),

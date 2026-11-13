@@ -20,6 +20,9 @@ Guards:
 * the card's ``requires`` must fit the assignee's profile on at least one matching machine whose profile
   tools are known or unknown; every match known to lack one refuses ``capability_mismatch``, naming the
   machine and the missing tool (:mod:`hermes_cli.kanban_runs_on_capabilities`);
+* a queued card's move that drops a ``capability:`` label is refused ``capacity_wait`` unless ``force`` while matching
+  machines claimed cards needing its current labels in the last 30 min (:mod:`hermes_cli.kanban_label_backlog`): the
+  card is queued behind them, and a machine without the label cannot do the work (kanban-b962867f17).
 * the board must sync to the Board service (``runs_on`` is a Board placement field).
 * a target must attest ``capability:host_repo`` when required and ``skill:<pin>`` for every pinned skill,
   in addition to satisfying the assignee's existing profile-tool check.
@@ -165,12 +168,16 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     # A mandatory pin keeps its attestation label through every move (agent, operator, pickup-stall alarm):
     # [pool:worker] alone would let an old core lease it; machine:<x> needs x to attest it. [daveey]
     labels = carry(labels, dict(row), me=me)
+    from hermes_cli import kanban_label_backlog as klb
     if machines is None:
         reg = wn.registry()
         if reg is None:
             raise MoveRefused("registry_unavailable", "the Board machine registry is unreachable; try again")
         machines = reg.get("machines") or {}
     pool: Mapping[str, Mapping[str, Any]] = machines or {}
+    capacity_wait = klb.move_refusal(conn, task_id, row["status"], wn._parse(row["runs_on"]), labels, machines=pool)
+    if capacity_wait and not force:
+        raise MoveRefused(klb.MOVE_REFUSED, capacity_wait)
     exclude_me = row["status"] == "running"
     matches = matching_machines(labels, pool, me=me, exclude_me=exclude_me)
     if not matches:
@@ -210,6 +217,8 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     if leaves_here(me, matches):  # git reads: check() runs before every caller's write transaction
         if state := unpushed_here(conn, task_id, row["workspace_path"], me=me, force=force, checkpoint=checkpoint):
             host = {**host, "left_unpushed_state": state}
+    if capacity_wait:  # forced past the capacity-wait guard: the audit keeps why it was a queue, not a fault
+        host = {**host, "capacity_wait_overridden": capacity_wait[:500]}
     return {"runs_on": labels, "previous": wn._parse(row["runs_on"]), "matches": matches, "move_no": len(past) + 1,
             "forced": bool(back and force), "me": me, "host": host}
 
