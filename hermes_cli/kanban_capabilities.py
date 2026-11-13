@@ -287,22 +287,32 @@ def _cli_toolsets(config: dict, home: Path, needed: set[str] | None) -> set[str]
 
 @contextmanager
 def _profile_policy(assignee: str):
-    """``(home, effective config, terminal scope)`` of ``assignee``, bound to its scopes while open."""
-    from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+    """``(home, effective config, terminal scope)`` of ``assignee``, bound to its scopes while open.
+
+    [daveey] Bound as one scope for the assignee's home (``agent.runtime_scope.bind_state``), not
+    with the legacy setters: inside a dispatcher-spawned worker's bound scope a bare
+    ``set_terminal_scope`` raised ``ScopeSwitchRefused`` (profile_home=None) and an unstamped
+    ``set_secret_scope`` moved a foreign assignee's scope back to the worker's own home, so every
+    ``requires`` check from a worker failed as ``assignee_capability_mismatch`` (t_01a1d3dfcfabae47)."""
+    from agent.runtime_scope import bind_state, scope_for_profile
+    from agent.secret_scope import _is_process_home, build_profile_secret_scope
     from hermes_cli.config_backend import read_config_doc_readonly
     from hermes_cli.config_effective import load_profile_config_effective
     from hermes_cli.profiles import resolve_profile_env
-    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-    from tools.terminal_scope import build_profile_terminal_scope, reset_terminal_scope, set_terminal_scope
+    from tools.terminal_scope import build_profile_terminal_scope
 
     home = Path(resolve_profile_env(assignee))
     config_path = home / "config.yaml"
     # Missing files and malformed roots are otherwise treated as default policy by the
     # shared loader. That is fine for startup, but cannot establish assignment authority.
     _check_policy_shape(read_config_doc_readonly(config_path))
+    scope = scope_for_profile(home)
+    secrets = build_profile_secret_scope(home)
+    # Unstamped marks the process's own profile, as the legacy setter left it; any other home is routed.
+    stamp = not _is_process_home(home)
     with ExitStack() as stack:
-        stack.callback(reset_hermes_home_override, set_hermes_home_override(str(home)))
-        stack.callback(reset_secret_scope, set_secret_scope(build_profile_secret_scope(home)))
+        # Home and secrets first: the effective config resolves managed values against them.
+        stack.enter_context(bind_state(scope, secrets=secrets, stamp_home=stamp, terminal=False))
         config = load_profile_config_effective(config_path, fail_closed=True)
         _check_policy_shape(config)
         terminal = build_profile_terminal_scope(home)
@@ -310,7 +320,7 @@ def _profile_policy(assignee: str):
         # scope helper also preserves a legacy profile-local .env backend when YAML omits it.
         if "backend" in config.get("terminal", {}):
             terminal["TERMINAL_ENV"] = config["terminal"]["backend"]
-        stack.callback(reset_terminal_scope, set_terminal_scope(terminal))
+        stack.enter_context(bind_state(scope, secrets=secrets, stamp_home=stamp, terminal_policy=terminal))
         yield home, config, terminal
 
 
