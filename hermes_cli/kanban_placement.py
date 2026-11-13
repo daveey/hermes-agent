@@ -287,19 +287,23 @@ def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) 
     worker-first (:func:`kanban_hub_admission_placement.pool_route`) and portable cards keep their local placement
     (:func:`kanban_worker_placement.queue_decision`) instead of queueing on a pool label nobody may lease."""
     from hermes_cli import kanban_worker_node as wn
-    from hermes_cli.kanban_placement_coordination import _carries, _fresh
+    from hermes_cli.kanban_placement_coordination import _fresh
     if machines is None:
         machines = (wn.registry() or {}).get("machines") or {}
     wanted = {label} if isinstance(label, str) else set(label)
-
-    def carries(entry):
-        labels = entry.get("labels")
-        return _carries({"labels": [] if labels is None else labels}, wanted)
     now = time.time()
     return sorted(name for name, entry in machines.items()
                   if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
                   and ("pickup" not in entry or wn.advertises_pickup(entry)) and _fresh(entry, now)
-                  and carries(entry))
+                  and registry_carries(entry, wanted))
+
+
+def registry_carries(entry: dict, wanted: set) -> bool:
+    """True when registry ``entry`` carries every label in ``wanted``. ``labels`` must be a list of str
+    (coordination's ``_carries``); missing or null is the empty set; any other shape fails closed. [daveey]"""
+    from hermes_cli.kanban_placement_coordination import _carries
+    labels = entry.get("labels")
+    return _carries({"labels": [] if labels is None else labels}, wanted)
 
 
 class _Cfg:
@@ -533,7 +537,7 @@ def markers_unmeetable_here(self_gw: Optional[str], cfg: Optional[dict], machine
         from hermes_cli import kanban_worker_node as wn
         machines = dict((wn.registry() or {}).get("machines") or {})
     entry = machines.get(self_gw)
-    return isinstance(entry, dict) and "linux" in (entry.get("labels") or [])
+    return isinstance(entry, dict) and registry_carries(entry, {"linux"})
 
 
 def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
