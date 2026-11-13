@@ -595,9 +595,10 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 HOME_PREFIX = r"(?:~|/home/[^/\s]+|\$HOME\b|\$\{HOME\}|\"\$HOME\"|\"\$\{HOME\}\")"
 # ``cd ~ 2>/dev/null`` ends the cd too (an fd-numbered redirect); ``cd ~2>x`` is a dir word, not a redirect.
 # Redirects (``>``, ``>>``, ``&>``, ``N>``, ``N>&M`` plus their target word) are skipped, and the command must
-# then end: ``cd 2>/dev/null repo`` enters ``repo``, not home (PR #2603 review nit 1).
-_REDIR = (r"(?:[ \t]*&?>|[ \t]+\d+>)>?[ \t]*&?"
-          r"(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|()<>\"'])+")
+# then end: ``cd 2>/dev/null repo`` enters ``repo``, not home (PR #2603 review nit 1). The noclobber ``>|``, a
+# space after ``>&`` and a ``$(...)`` target (one nesting level) are redirects too (PR #2703 review nit 1).
+_REDIR = (r"(?:[ \t]*&?>|[ \t]+\d+>)[>|]?[ \t]*(?:&[ \t]*)?"
+          r"(?:\"[^\"\n]*\"|'[^'\n]*'|\$\((?:[^()\n]|\([^()\n]*\))*\)|[^\s;&|()<>\"'])+")
 _CMD_END = r"(?=(?:" + _REDIR + r")*(?:[ \t]*(?:$|[\n;|)]|&(?!>))|[ \t]+#))"
 _CD_HOME = (r"(?<![\w./-])(?-i:cd(?:[ \t]+" + HOME_PREFIX + r"/?)?|pushd[ \t]+" + HOME_PREFIX + r"/?)" + _CMD_END)
 _CHDIR = (r"(?:" + _CD_HOME + r"|(?:(?<=\n)|&&|\|\||;|`|\{)[ \t]*"
@@ -606,7 +607,10 @@ _CHDIR = (r"(?:" + _CD_HOME + r"|(?:(?<=\n)|&&|\|\||;|`|\{)[ \t]*"
 _CD_INTO = r"(?<![\w./-])(?-i:cd|pushd)[ \t]+[\"']?"
 _CODE_TREE = r"(?:hermes-agent|repos|bin)"
 _STATE_SUB = r"\.hermes/(?!" + _CODE_TREE + r"(?:/|\b))[\w.-]"
-_STATE_DIR = (r"\.hermes/?[\"']?" + _CMD_END + r"(?![ \t]*(?:#[^\n]*)?(?:&&|;|\n)\s*(?-i:cd|pushd)[ \t]+[\"']?(?:\./)?"
+# The code-tree exemption skips the state-dir cd's own redirects first (``cd ~/.hermes 2>/dev/null && cd
+# hermes-agent``, PR #2703 review nit 2).
+_STATE_DIR = (r"\.hermes/?[\"']?" + _CMD_END + r"(?!(?:" + _REDIR + r")*[ \t]*(?:#[^\n]*)?(?:&&|;|\n)\s*"
+              r"(?-i:cd|pushd)[ \t]+[\"']?(?:\./)?"
               + _CODE_TREE + r"(?![\w.-]))")
 HERMES_STATE_PATH = (r"(?:" + HOME_PREFIX + r"/" + _STATE_SUB + r"|" + _CD_INTO + HOME_PREFIX + r"/" + _STATE_DIR +
                      r"|" + _CD_HOME + r"(?:(?!" + _CHDIR + r")[\s\S])*?"

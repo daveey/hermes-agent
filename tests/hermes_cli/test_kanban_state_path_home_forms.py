@@ -103,6 +103,17 @@ def test_tilde_root_path_still_clears(attested):
     # PR #2603 review nit 2: the fd-redirect end reaches a cd into the state dir itself too.
     "cd ~/.hermes 2>/dev/null && cat .env",
     "cd ~ && cd .hermes 2>x && cat .env",
+    # PR #2703 review 5898829102 nit 1: a noclobber ``>|``, a space after ``>&`` and a ``$(...)`` target are redirects
+    # too; before the fix these cd-home forms stopped matching (fail-open).
+    "cd ~ >|log && cat .hermes/.env",
+    "cd ~ 2>|log && cat .hermes/.env",
+    "cd ~ >& /dev/null && cat .hermes/.env",
+    "cd ~ 2>& 1 && cat .hermes/.env",
+    "cd ~ >$(mktemp) && cat .hermes/.env",
+    "cd ~ >$(mktemp -p $(pwd)) && cat .hermes/.env",
+    "cd >$(mktemp) && cat .hermes/.env",
+    "pushd ~ >| /dev/null; cat .hermes/.env",
+    "cd ~/.hermes >$(mktemp) && cat .env",
 ])
 def test_pushd_and_commented_cd_home_are_state_paths(body):
     assert _hit(body)
@@ -117,6 +128,10 @@ def test_pushd_and_commented_cd_home_are_state_paths(body):
     "cd 2>&1 >/dev/null repo; cat .hermes/.env",
     "cd >>log repo\ncat .hermes/.env",
     'cd 2>"x y" repo && cat .hermes/.env',
+    # The nit 1 redirect forms keep this rule: an operand after them is still the cd target.
+    "cd >|log repo && cat .hermes/.env",
+    "cd >& /dev/null repo && cat .hermes/.env",
+    "cd >$(mktemp) repo && cat .hermes/.env",
 ])
 def test_cd_with_operand_after_a_redirect_is_not_cd_home(body):
     assert not _hit(body)
@@ -131,8 +146,21 @@ def test_cd_with_operand_after_a_redirect_is_not_cd_home(body):
     # No space: ``~2`` / ``~/2`` is a literal directory word, not home plus a ``2>`` redirect.
     "cd ~2>x && cat .hermes/.env",
     "cd ~/2>x && cat .hermes/.env",
+    "cd ~2>|x && cat .hermes/.env",
 ])
 def test_prose_cd_and_non_home_pushd_stay_portable(body):
+    assert not _hit(body)
+
+
+# PR #2703 review 5898829102 nit 2: a redirect on the cd into ~/.hermes does not hide the cd into its code tree that
+# follows, so the pair names the hermes-agent checkout (portable), not the state directory.
+@pytest.mark.parametrize("body", [
+    "cd ~/.hermes 2>/dev/null && cd hermes-agent && git status",
+    "cd ~/.hermes >/dev/null; cd ./repos/x",
+    "cd ~ && cd .hermes 2>&1 && cd hermes-agent && make",
+    "cd ~/.hermes >& /dev/null # code\ncd bin",
+])
+def test_redirected_cd_into_state_dir_then_code_tree_is_the_code_tree(body):
     assert not _hit(body)
 
 
