@@ -266,3 +266,75 @@ def test_two_gateways_leasing_one_run_is_ambiguous(boards):
         hub.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'claimed', ?, 1)",
                     (tid, run_id, json.dumps({"holder": "worker-4", "run_uid": uid})))
     assert verified(hub, tid) == (False, False)
+
+
+RED = {"ok": False, "classification": "failure", "head_sha": "b" * 40, "pr_url": PR, "pr_state": "OPEN",
+       "checks": [], "recovery": "", "required": []}
+
+
+def receipts(conn, tid):
+    return conn.execute("SELECT id, run_id, origin_gateway, payload FROM task_events WHERE task_id=? "
+                        "AND kind='pr_acceptance' ORDER BY id", (tid,)).fetchall()
+
+
+def test_a_pre_uid_replay_binds_its_runs_latest_receipt_not_an_earlier_red_one(boards):
+    """Live shape: MacBook t_01a1d54bdcb29711 (worker-4, pre-uid) has two receipts in run 14023 (260539, 260550).
+    The completion bound the latest: its board writes that receipt and the completion in one transaction."""
+    worker, hub = boards
+    tid = kb.create_task(worker, title="Ship it", assignee="dev", completion_contract="acme/repo")
+    run = kb.claim_task(worker, tid).current_run_id
+    with kb.write_txn(worker):  # an earlier attempt in the same run recorded a red receipt
+        kb._append_event(worker, tid, "pr_acceptance", RED, run_id=run)
+    assert kb.complete_task(worker, tid, summary="landed", expected_run_id=run, metadata={"published_pr": PR})
+    replay(worker, hub)
+    event_id, _ = payload_of(hub, tid)
+    rewrite(hub, event_id, lambda p: p.pop("pr_acceptance_event_uid", None))
+    red, green = receipts(hub, tid)
+    # Precondition: both receipts are this run's, from the same gateway, before the completion; red first.
+    assert red["run_id"] == green["run_id"] and red["origin_gateway"] == green["origin_gateway"] == "worker-3"
+    assert red["id"] < green["id"] < event_id and json.loads(red["payload"])["ok"] is False
+    assert verified(hub, tid) == (True, True)
+
+
+def test_a_receipt_written_after_the_completion_never_binds(boards):
+    """``before``: only a receipt earlier than the completion is the one it bound, by uid or by its run."""
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    event_id, payload = payload_of(hub, tid)
+    run = hub.execute("SELECT run_id FROM task_events WHERE id=?", (event_id,)).fetchone()[0]
+    (bound,) = receipts(hub, tid)
+    with kb.write_txn(hub):
+        kb._append_event(hub, tid, "pr_acceptance", json.loads(bound["payload"]), run_id=run)
+    later = receipts(hub, tid)[-1]
+    assert later["id"] > event_id and later["run_id"] == run
+    # The uid names the later receipt: no bind, even though it is green and of the same run.
+    later_uid = hub.execute("SELECT uid FROM task_events WHERE id=?", (later["id"],)).fetchone()[0]
+    assert later_uid and later_uid != payload["pr_acceptance_event_uid"]
+    rewrite(hub, event_id, lambda p: p.update(pr_acceptance_event_uid=later_uid))
+    assert verified(hub, tid) == (False, False)
+    # Pre-uid: the run's latest receipt before the completion is red, so a green one after it changes nothing.
+    rewrite(hub, event_id, lambda p: p.pop("pr_acceptance_event_uid"))
+    with kb.write_txn(hub):
+        hub.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(RED), bound["id"]))
+        hub.execute("UPDATE task_events SET origin_gateway='worker-3' WHERE id=?", (later["id"],))
+    assert verified(hub, tid) == (False, False)
+
+
+def test_an_imported_completions_integer_never_binds_a_receipt_written_on_this_board(boards):
+    """On the hub the worker's integer may name a hub-local receipt of the same card (``origin_gateway`` NULL):
+    that is not the receipt the worker bound, so the run's replayed receipt decides."""
+    worker, hub = boards
+    tid = completed_on_worker(worker)
+    replay(worker, hub)
+    event_id, payload = payload_of(hub, tid)
+    rewrite(hub, event_id, lambda p: p.pop("pr_acceptance_event_uid", None))
+    run = hub.execute("SELECT run_id FROM task_events WHERE id=?", (event_id,)).fetchone()[0]
+    worker_int = payload["pr_acceptance_event_id"]
+    local = hub.execute("SELECT id, origin_gateway FROM task_events WHERE id=?", (worker_int,)).fetchone()
+    # Precondition: the integer names a hub-written event before the completion.
+    assert local is not None and local["origin_gateway"] is None and worker_int < event_id
+    with kb.write_txn(hub):  # make it a red hub-local receipt of this card and run
+        hub.execute("UPDATE task_events SET task_id=?, kind='pr_acceptance', payload=?, run_id=? WHERE id=?",
+                    (tid, json.dumps(RED), run, worker_int))
+    assert verified(hub, tid) == (True, True)
