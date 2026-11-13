@@ -340,9 +340,10 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
             raise CronFireNotAdmitted(
                 f'Not admitted: the gateway is {reason}; the fire stays due: {exc}',
                 exc.state, exc.reason_code) from exc
-        if _dial_failed(exc) and _connect_holds_left(job['id']):
+        if job.get('_scheduled_instant') and _dial_failed(exc) and _connect_holds_left(job['id']):
             # The socket never opened (a stalled or restarting owner loop): nothing was submitted,
-            # so the fire is held like a not-ready gateway. After CONNECT_HOLD_LIMIT consecutive
+            # so a scheduled fire is held like a not-ready gateway (a manual run has no slot to keep
+            # due and fails loudly). After CONNECT_HOLD_LIMIT consecutive
             # holds it is booked FAILED below, so a gateway that stays unreachable still alerts.
             from cron.unadmitted_fire import CONNECT_FAILED
             raise CronFireNotAdmitted(

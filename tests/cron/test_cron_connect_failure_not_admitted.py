@@ -110,12 +110,48 @@ def test_dial_failure_before_submit_holds_the_fire(cron_home, monkeypatch):
 
 def test_run_canonical_job_raises_not_admitted_and_leaves_fire_error_unset(cron_home, monkeypatch):
     _connect_raising(monkeypatch, _dial_failure)
-    job = {"id": "job"}
+    job = {"id": "job", "_scheduled_instant": "2026-11-13T05:20:00+00:00"}
     with pytest.raises(scheduler_authority.CronFireNotAdmitted) as info:
         scheduler_authority.run_canonical_job(job, execution_id="fire")
     assert (info.value.state, info.value.reason_code) == ("unreachable", "connect_failed")
     assert "_fire_error" not in job
     assert not _journals(cron_home)
+
+
+def test_manual_run_dial_failure_is_booked_failed(cron_home, monkeypatch):
+    """A manual fire (``hermes cron run``) has no slot to hold: a dial failure books it FAILED as a
+    fire error with its output document, never the not-admitted crash path."""
+    dials = _connect_raising(monkeypatch, _dial_failure)
+    job_id, _slot = _due_agent_job()
+    stored = J.load_jobs()
+    later = (J._hermes_now() + timedelta(hours=1)).isoformat()
+    next(r for r in stored if r["id"] == job_id)["next_run_at"] = later
+    J.save_jobs(stored)
+    J.trigger_job(job_id)
+
+    S.tick(verbose=False)
+
+    assert dials, "the manual fire reached connect_gateway"
+    stored = _stored(job_id)
+    assert stored["last_status"] == "error" and stored["last_error_kind"] == "fire"
+    assert "stays due" not in stored["last_error"]
+    assert _outputs(job_id), "the FAILED run writes its output document"
+
+
+def test_another_hold_restarts_the_connect_hold_count(cron_home, monkeypatch):
+    """A not-ready hold between dial failures starts a fresh run of CONNECT_HOLD_LIMIT holds."""
+    from hermes_cli.gateway_client import GatewayUnavailableError
+    job_id, slot = _due_agent_job()
+    _connect_raising(monkeypatch, _dial_failure)
+    for _ in range(scheduler_authority.CONNECT_HOLD_LIMIT - 1):
+        S.tick(verbose=False)
+    _connect_raising(monkeypatch, lambda: GatewayUnavailableError("draining", "draining"))
+    S.tick(verbose=False)
+    _connect_raising(monkeypatch, _dial_failure)
+    for _ in range(scheduler_authority.CONNECT_HOLD_LIMIT):
+        S.tick(verbose=False)
+        assert _stored(job_id)["next_run_at"] == slot
+        assert int(_stored(job_id).get("failure_streak") or 0) == 0
 
 
 def test_client_error_without_a_transport_cause_still_fails(cron_home, monkeypatch):
