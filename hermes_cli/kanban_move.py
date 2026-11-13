@@ -34,7 +34,9 @@ Guards:
   (:func:`leaves_here`, matches from the registry). Limitations: only the host
   holding the trees can see them, so a move issued from another host is blind to them; and a move whose matches
   still include this host (``pool:worker`` issued on a pool worker, ``linux``) is not "leaving" and is not
-  guarded, though another matching host may claim the card (intentional: this host may still run it).
+  guarded, though another matching host may claim the card (intentional: this host may still run it). The same
+  holds for a worker-first repin to ``[]`` or ``[pool:worker]`` whose origin is an active, unheld registry machine
+  carrying those labels (:func:`_repin_leaves`): it skips the unpushed guard, as :func:`check` would.
 
 Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reason, move_no, forced}``: the audit log.
 """
