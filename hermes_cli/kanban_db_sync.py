@@ -1260,6 +1260,9 @@ class ApplyResult:
     # (``kanban_terminal_guard.enforce_after_apply``, run at the end of the page in the same transaction).
     left_terminal: list[tuple[str, str]] = field(default_factory=list)
     reopened: set[str] = field(default_factory=set)
+    # [daveey] Every card whose status this page changed, with the new status (a shadow copy too: it fires no
+    # observers, but the sync client re-probes the parks that name these cards, ``kanban_awaited_card_wake``).
+    status_changed: dict[str, str] = field(default_factory=dict)
 
 
 def _repair_revision(conn: sqlite3.Connection) -> Optional[int]:
@@ -1450,6 +1453,8 @@ def _mirror_lease(conn: sqlite3.Connection, task_id: str, holder: Optional[str],
 def _collect_task_observers(ch: RemoteChange, new_status: Optional[str], changed: set[str],
                             result: ApplyResult) -> None:
     kwargs = {"remote": True, "origin_gateway": ch.origin_gateway}
+    if "status" in changed and new_status:
+        result.status_changed[ch.uid] = new_status
     if "status" in changed and new_status in _STATUS_HOOKS:
         result.hooks.append((_STATUS_HOOKS[new_status], ch.uid, kwargs))
     if "status" in changed and new_status in _CLAIMABLE:

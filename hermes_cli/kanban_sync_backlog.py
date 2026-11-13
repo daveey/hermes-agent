@@ -65,14 +65,18 @@ def evidence(path: Path) -> dict:
 
 class Pulled(int):
     """The number of feed changes read (an ``int``, as before), plus whether the pull stopped at its page budget
-    with the head not reached (``more``) or did not run because a sync round held the board (``busy``)."""
+    with the head not reached (``more``) or did not run because a sync round held the board (``busy``), and
+    ``status_changed`` ({card id: new status}: every status change the pull applied, last one wins)."""
 
     more: bool
     busy: bool
+    status_changed: dict
 
-    def __new__(cls, n: int = 0, *, more: bool = False, busy: bool = False) -> Pulled:
+    def __new__(cls, n: int = 0, *, more: bool = False, busy: bool = False,
+                status_changed: Any = None) -> Pulled:
         out = super().__new__(cls, int(n))
         out.more, out.busy = bool(more), bool(busy)
+        out.status_changed = dict(status_changed or {})
         return out
 
 

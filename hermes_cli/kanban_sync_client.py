@@ -859,10 +859,11 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
     that gateway's cards. [daveey]"""
     from hermes_cli.kanban_sync_stop import checkpoint
     total = pages = 0
+    changed: dict[str, str] = {}  # status changes applied, for the parks that name those cards
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
     while True:
         if max_pages is not None and pages >= max_pages:
-            return Pulled(total, more=True)  # unbounded, a backlog starved the round's push for hours
+            return Pulled(total, more=True, status_changed=changed)  # unbounded, a backlog starved the round's push for hours
         pages += 1
         checkpoint()
         page = hub.changes(board, cursor)
@@ -872,23 +873,21 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             changes = own_partition(conn, changes, partition)
         changes = without_pending(changes, pending_task_fields(conn))
         nxt = int(page.get("next", cursor))
-        if not page.get("changes") and nxt == cursor and not page.get("more") and not _applying(conn):
+        if (not page.get("changes") and nxt == cursor and not page.get("more")
+                and not (sync.sync_state(conn) or {}).get("applying")):
             # An idle poll: no change, same cursor. The apply would only rewrite ``applying`` and ``cursor`` to
             # the values they hold, a write transaction (WAL frame, fsync, observer wake) every round on every
             # board for nothing. [daveey]
-            return Pulled(total)
+            return Pulled(total, status_changed=changed)
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
-        sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
-                                  local_pending_wins=True)
+        applied = sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
+                                            local_pending_wins=True)
+        changed.update(getattr(applied, "status_changed", None) or {})
         total += len(page.get("changes", []))
         cursor = nxt
         if not page.get("more"):
-            return Pulled(total)
-
-
-def _applying(conn: sqlite3.Connection) -> bool:
-    return bool((sync.sync_state(conn) or {}).get("applying"))
+            return Pulled(total, status_changed=changed)
 
 
 def resync(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool, partition: Optional[str] = None) -> int:
@@ -1037,6 +1036,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
             result.behind = pulled.more
+            from hermes_cli.kanban_awaited_card_wake import expedite
+            expedite(live, pulled.status_changed)  # a park naming a card the pull moved re-probes now [daveey]
             applies: Optional[list] = []  # credited revision steps (kanban_sync_own_writes); None = a rebuild
             if mode == "primary":
                 try:

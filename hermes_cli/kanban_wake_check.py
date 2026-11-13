@@ -1001,6 +1001,8 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         restore_missing_checks(conn, now=ts)  # [daveey] a park whose probe never reached this board
         from hermes_cli import kanban_ask_resolved as kar
         kar.reconcile(conn, now=ts)  # [daveey] an ask's probe row follows its stored ask; a lost one is restored
+        from hermes_cli.kanban_awaited_card_wake import report_lag
+        report_lag(conn, now=ts)  # [daveey] a park still asleep 2 min after its awaited card finished: one WARNING
         due = conn.execute(
             "SELECT w.task_id, w.cmd, w.every, w.generation, w.purpose FROM task_wake_checks w "
             f"JOIN tasks t ON t.id = w.task_id WHERE {_LIVE_ROW} AND w.next_at <= ? ORDER BY w.next_at",
