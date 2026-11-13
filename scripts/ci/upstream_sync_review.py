@@ -244,7 +244,7 @@ def off_key_review_cards(mod, slug: str, number: int, sha: str) -> list[str]:
                 md = json.loads(raw or "null")
             except (TypeError, ValueError):
                 continue
-            if (isinstance(md, dict) and md.get("verdict") == "approve" and md.get("reviewed_sha") == sha
+            if (isinstance(md, dict) and md.get("verdict") in ("approve", "request_changes") and md.get("reviewed_sha") == sha
                     and md.get("reviewed_pr") == f"https://github.com/{slug}/pull/{number}"
                     and isinstance(card, str) and re.fullmatch(r"t_[0-9a-f]+", card) and card not in cards):
                 cards.append(card)
@@ -295,12 +295,20 @@ class ShipReview:
         pr = {"number": number}
         card = mod.keyed_review_card(gh_repo, number, head)
         candidates = [card] if card else [*off_key_review_cards(mod, gh_repo, number, head), ""]
+        receipts = []
+        rejected = (getattr(mod, "ReviewRejected", _NeverRaised),
+                    getattr(mod, "ReviewChangesRequested", _NeverRaised))
         for candidate in candidates:
             try:
                 receipt = mod.review_gate(gh, gh_repo, pr, head, branch, "main", candidate, impl_task=self.impl_task)
+            except rejected as exc:
+                return False, str(exc)
             except mod.ReviewRefused as exc:
                 refusal = str(exc)
                 continue
+            receipts.append(receipt)
+        # Inspect every candidate before accepting: an approval cannot mask a rejection.
+        for receipt in receipts:
             code, why = mod.review_reply_guard(gh, gh_repo, pr, receipt, self.reply)
             if code is not None:
                 return False, (f"{why} (answer with `upstream_sync.py --head {head[:12]} --review-reply "

@@ -38,15 +38,15 @@ def test_offkey_exact_head_approval_lands_without_duplicate(world, land_stub, tm
         "verdict": "request_changes" if mismatch == "request_changes" else "approve",
         "reviewed_sha": "0" * 40 if mismatch == "other_sha" else head,
         "reviewed_pr": f"https://github.com/{slug}/pull/{pr['number']}"})
-    land_stub.update(approve={CARD: head})
+    land_stub.update(approve={} if mismatch else {CARD: head})
     assert gate(checkout, head, actions) == (sync.NOT_YET if mismatch else sync.LANDED)
     state = land_stub.read()
     assert len(state["filed"]) == (1 if mismatch else 0)
-    assert state["gates"][-1][0] == ("" if mismatch else CARD)
+    assert state["gates"][0][0] == ("" if mismatch == "other_sha" else CARD)
 
 
 @pytest.mark.parametrize("change", [
-    {"reviewed_sha": "b" * 40}, {"verdict": "request_changes"},
+    {"reviewed_sha": "b" * 40},
     {"reviewed_pr": URL + "0"}, {"reviewed_sha": SHA[:10]},
     {"verdict": "APPROVE"}, {"reviewed_pr": {URL: True}},
 ])
@@ -83,6 +83,45 @@ def test_offkey_discovery_is_not_approval_and_preserves_impl_identity(land_stub,
     assert not accepted  # authoritative ship gate refuses the otherwise matching receipt
     assert land_stub.read()["gates"][0] == [CARD, 7, SHA, "sync/head", "main", "t_implementer"]
     assert len(land_stub.read()["filed"]) == 1
+
+
+@pytest.mark.parametrize("reject_first", [True, False])
+@pytest.mark.parametrize("rejection", ["ReviewRejected", "ReviewChangesRequested"])
+def test_offkey_rejection_blocks_other_approval(tmp_path, monkeypatch, reject_first, rejection):
+    mod = board(tmp_path / "board.db")
+    rejected = "t_abcdef"
+    with sqlite3.connect(tmp_path / "board.db") as db:
+        db.execute("INSERT INTO tasks VALUES (?, 'done', 'another-key')", (rejected,))
+        db.execute("INSERT INTO task_runs VALUES (?, 'done', 'completed', ?, ?)", (
+            rejected, json.dumps({"verdict": "request_changes", "reviewed_sha": SHA,
+                                 "reviewed_pr": URL}), 2 if reject_first else 0))
+    class Refused(Exception):
+        pass
+    class Rejected(Refused):
+        pass
+    class ChangesRequested(Refused):
+        pass
+    mod.ReviewRefused = Refused
+    mod.ReviewRejected = Rejected
+    mod.ReviewChangesRequested = ChangesRequested
+    mod.ReviewCIStopped = type("CIStopped", (Exception,), {})
+    mod.Gh = lambda repo: None
+    mod.keyed_review_card = lambda *args: ""
+    calls = []
+    def review_gate(gh, slug, pr, sha, branch, base, card, **kwargs):
+        calls.append(card)
+        if card == rejected:
+            raise getattr(mod, rejection)("exact-head rejection")
+        return {"id": card, "source": "kanban"}
+    mod.review_gate = review_gate
+    mod.review_reply_guard = lambda *args: (None, "")
+    mod.request_review = lambda *args, **kwargs: pytest.fail("must not file past rejection")
+    checker = review.ShipReview(tmp_path)
+    monkeypatch.setattr(checker, "_module", lambda: mod)
+    accepted, reason = checker.check("example/fork", 7, SHA, "sync/head")
+    assert not accepted
+    assert "exact-head rejection" in reason
+    assert rejected in calls
 
 
 def test_keyed_refusal_cannot_be_bypassed_by_offkey(land_stub, tmp_path):
