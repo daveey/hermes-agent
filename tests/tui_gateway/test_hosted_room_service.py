@@ -590,6 +590,10 @@ def test_same_thread_followup_migrates_and_delivers_committed_peer_reply(
             for event in service._events("room-1")
         )
     )
+    # Plant the pre-migration cache with the driver stopped, as an upgraded build meets it at boot. A live
+    # room thread can be mid-sync past its schema check and index the next message over the wiped rows;
+    # a real migration resets the cursor under BEGIN IMMEDIATE, which that sync detects, but this wipe does not.
+    assert service.stop(timeout=30.0)
     with sqlite3.connect(db) as conn:
         assert conn.execute(
             """SELECT COUNT(*) FROM hosted_room_policy_transcript
@@ -600,6 +604,7 @@ def test_same_thread_followup_migrates_and_delivers_committed_peer_reply(
             """DELETE FROM hosted_room_policy_transcript_state
                WHERE room_id='room-1'"""
         )
+    service.start()
     service.send(
         room_id="room-1",
         event_id="user-2",
