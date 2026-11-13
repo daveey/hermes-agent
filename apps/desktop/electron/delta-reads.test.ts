@@ -126,7 +126,7 @@ describe('asking for a delta', () => {
   it('dropping a pooled backend (slowLinkTracker.forgetScope) unbinds its tunnel in the shared store', () => {
     const url = 'http://127.0.0.1:50888/api/cron/jobs'
 
-    noteRemoteConnect('http://127.0.0.1:50888', 'conn:hermes-hub::alpha', Date.now())
+    noteRemoteConnect('http://127.0.0.1:50888', 'conn:hermes-hub::alpha', Date.now(), () => undefined)
     expect(deltaRequestHeaders('GET', url)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
 
     slowLinkTracker.forgetScope('conn:hermes-hub::alpha')
@@ -137,7 +137,7 @@ describe('asking for a delta', () => {
     const url = 'http://127.0.0.1:50777/api/cron/jobs'
 
     expect(deltaRequestHeaders('GET', url)).toEqual({})
-    noteRemoteConnect('http://127.0.0.1:50777', 'conn:mac-mini::default', Date.now())
+    noteRemoteConnect('http://127.0.0.1:50777', 'conn:mac-mini::default', Date.now(), () => undefined)
     expect(deltaRequestHeaders('GET', url)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
     expect(deltaBodyStore.keyFor(url)).toBe('conn:mac-mini::default\u0000/api/cron/jobs')
   })
@@ -443,7 +443,7 @@ describe('fetchJson itself (json-fetch.ts), against a live server that speaks th
     expect(await read()).toEqual(JSON.parse(board().toString('utf8')))
     expect(seen.at(-1)).toEqual({ accept: '', base: '', token: 'session-token' })
 
-    noteRemoteConnect(origin, 'conn:fetch-json-test::default', Date.now())
+    noteRemoteConnect(origin, 'conn:fetch-json-test::default', Date.now(), () => undefined)
 
     expect(await read()).toEqual(JSON.parse(board().toString('utf8')))
     expect(seen.at(-1)).toMatchObject({ accept: 'zstd', base: '' })
