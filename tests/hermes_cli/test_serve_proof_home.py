@@ -79,8 +79,8 @@ def _clean_env(sentinel, origin=None, extra=None):
     return env
 
 
-def _launch(sentinel, args, origin=None, *, extra=None, wrapper=None):
-    env = _clean_env(sentinel, origin, extra)
+def _launch(sentinel, args, origin=None, *, extra=None, wrapper=None, env_override=None):
+    env = env_override if env_override is not None else _clean_env(sentinel, origin, extra)
     command = [sys.executable, '-c', _BOUNDARY, *args]
     if wrapper == 'python':
         command = [sys.executable, '-c',
@@ -302,3 +302,54 @@ def test_disposable_home_recovery_is_not_globally_disabled(monkeypatch, sentinel
     for key in _ORIGINS + ('HERMES_AGENT_HOME',):
         monkeypatch.delenv(key, raising=False)
     assert recovery_home_allowed(sentinel)  # production backends keep their own recovery
+
+
+_PROVENANCE = ('HERMES_AGENT_TOOL_CALL', 'HERMES_AGENT_ORIGIN', 'HERMES_AGENT_HOME')
+
+
+def test_desktop_relaunch_env_drops_tool_stamps(sentinel):
+    """An agent's update/desktop command reopens Desktop with clean_launch_env: the relaunched
+    Desktop's own HERMES_DESKTOP=1 backend is not agent-originated and must start."""
+    from hermes_cli.top_level_env import clean_launch_env
+
+    stamped = _clean_env(sentinel, extra={'HERMES_AGENT_TOOL_CALL': '1', 'HERMES_AGENT_ORIGIN': 'tool',
+                                          'HERMES_AGENT_HOME': str(sentinel)})
+    launch = clean_launch_env(stamped)
+    assert not set(_PROVENANCE) & set(launch)
+    launch['HERMES_DESKTOP'] = '1'  # what Electron sets on the backend it spawns
+    result = _launch(sentinel, ['serve', '--port', '0'], env_override=launch)
+    assert result.returncode == 87, (result.stdout, result.stderr)
+    assert 'Refused proof backend' not in result.stderr
+
+
+def test_desktop_top_level_launch_drops_tool_stamps(monkeypatch):
+    from hermes_cli.top_level_env import scrub_for_top_level_launch
+
+    for key in _PROVENANCE:
+        monkeypatch.setenv(key, '1')
+    scrub_for_top_level_launch(['desktop'])
+    assert not set(_PROVENANCE) & set(os.environ)
+
+
+def test_backend_launch_keeps_tool_stamps(monkeypatch):
+    """serve/dashboard keep the stamps: startup recovery still needs to see the origin."""
+    from hermes_cli.top_level_env import scrub_for_top_level_launch
+
+    for key in _PROVENANCE:
+        monkeypatch.setenv(key, '1')
+    scrub_for_top_level_launch(['serve'])
+    assert set(_PROVENANCE) <= set(os.environ)
+
+
+def test_electron_drops_the_same_provenance_stamps_at_startup():
+    import re
+
+    from hermes_cli.proof_home import PROVENANCE_KEYS
+
+    assert set(PROVENANCE_KEYS) == set(_PROVENANCE)
+    src = (ROOT / 'apps/desktop/electron/leaked-worker-env.ts').read_text()
+    m = re.search(r'export const AGENT_PROVENANCE_KEYS\s*=\s*\[(.*?)\]', src, re.DOTALL)
+    assert m, 'AGENT_PROVENANCE_KEYS missing from leaked-worker-env.ts'
+    assert set(re.findall(r"'([A-Z0-9_]+)'", m.group(1))) == set(PROVENANCE_KEYS)
+    main = (ROOT / 'apps/desktop/electron/main.ts').read_text()
+    assert re.search(r'dropAgentProvenance\(\)', main), 'main.ts must drop the stamps at startup'

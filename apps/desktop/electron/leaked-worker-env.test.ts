@@ -1,6 +1,21 @@
 import { describe, expect, it } from 'vitest'
 
-import { scrubLeakedWorkerEnv } from './leaked-worker-env'
+import { dropAgentProvenance, scrubLeakedWorkerEnv } from './leaked-worker-env'
+
+describe('dropAgentProvenance', () => {
+  it('drops tool-child stamps even without a worker marker', () => {
+    const env: NodeJS.ProcessEnv = {
+      HERMES_AGENT_HOME: '/Users/x/.hermes',
+      HERMES_AGENT_ORIGIN: 'tool',
+      HERMES_AGENT_TOOL_CALL: '1',
+      PATH: '/bin'
+    }
+
+    expect(scrubLeakedWorkerEnv(env)).toEqual([])
+    expect(dropAgentProvenance(env).sort()).toEqual(['HERMES_AGENT_HOME', 'HERMES_AGENT_ORIGIN', 'HERMES_AGENT_TOOL_CALL'])
+    expect(env).toEqual({ PATH: '/bin' })
+  })
+})
 
 describe('scrubLeakedWorkerEnv', () => {
   it('drops a worker identity env inherited by the Desktop', () => {

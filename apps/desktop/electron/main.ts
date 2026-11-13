@@ -338,7 +338,7 @@ import type { InstallStamp } from './install-stamp'
 import { createKeepAwakeController } from './keep-awake-controller'
 import { launchBuildIdentity } from './launch-build-identity'
 import { applyLaunchProfileOverride, parseLaunchProfile } from './launch-profile'
-import { scrubLeakedWorkerEnv } from './leaked-worker-env'
+import { dropAgentProvenance, scrubLeakedWorkerEnv } from './leaked-worker-env'
 import { fetchLinkTitle, resolveFaviconCached } from './link-metadata'
 import { CHROMIUM_LOG_FILENAME, enableLinuxCrashDiagnostics, linuxCrashDiagnostics } from './linux-crash-diagnostics'
 import {
@@ -798,13 +798,13 @@ if (process.env.HERMES_DESKTOP_TMPDIR) {
   delete process.env.HERMES_DESKTOP_TMPDIR
 }
 
-// Launched from inside a kanban worker / delegate child: never pass its identity on to the
-// backend, terminals or CLIs this Desktop spawns (see leaked-worker-env.ts). [daveey]
+// Never pass a worker's identity or agent tool stamps on to what this Desktop spawns (leaked-worker-env.ts). [daveey]
 {
   const leaked = scrubLeakedWorkerEnv()
+  const stamps = dropAgentProvenance()
 
-  if (leaked.length) {
-    console.error(`[hermes] dropped inherited worker env: ${leaked.join(', ')}`)
+  if (leaked.length || stamps.length) {
+    console.error(`[hermes] dropped inherited worker env: ${[...leaked, ...stamps].join(', ')}`)
   }
 
   // A worker's own test instance must not appear as a second Hermes on the owner's screen

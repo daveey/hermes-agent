@@ -27,6 +27,7 @@ from agent.delegation_context import (
 
 # First positional argv of a top-level surface (never a worker).
 TOP_LEVEL_COMMANDS = frozenset({"serve", "dashboard", "gui", "desktop", "gateway"})
+_DESKTOP_COMMANDS = frozenset({"gui", "desktop"})
 
 
 def scrub_leaked_worker_env(environ: Optional[MutableMapping[str, str]] = None) -> list[str]:
@@ -54,6 +55,10 @@ def clean_launch_env(base: Optional[MutableMapping[str, str]] = None) -> dict[st
     """A copy of ``base`` (default ``os.environ``) safe to hand to a top-level app launch."""
     env = dict(os.environ if base is None else base)
     scrub_leaked_worker_env(env)
+    # An agent's tool-child stamps must not make the relaunched Desktop's backend agent-originated
+    # (its HERMES_DESKTOP=1 serve would be refused on the production home; gateway-9aaf151a15).
+    from hermes_cli.proof_home import drop_provenance
+    drop_provenance(env)
     return drop_agent_attribution(env)
 
 
@@ -118,6 +123,11 @@ def scrub_for_top_level_launch(argv: Sequence[str]) -> list[str]:
         logging.getLogger(__name__).debug("finished-run identity drop failed", exc_info=True)
     if _first_positional(argv) not in TOP_LEVEL_COMMANDS:
         return []
+    if _first_positional(argv) in _DESKTOP_COMMANDS:
+        # The Desktop is the person's app even when an agent opened it; serve/dashboard keep the
+        # stamps so the proof-home guard and startup recovery still see agent origin.
+        from hermes_cli.proof_home import drop_provenance
+        drop_provenance(os.environ)
     # Name the dead lineage while the pins still exist (the scrub removes them). [daveey]
     diagnosis = leaked_worker_env_diagnosis() if os.environ.get(DELEGATED_CHILD_ENV_MARKER) else None
     removed = scrub_leaked_worker_env()

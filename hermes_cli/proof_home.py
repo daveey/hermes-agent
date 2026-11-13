@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 import shlex
 import sys
-from typing import Mapping, NoReturn, Optional, Sequence
+from typing import Mapping, MutableMapping, NoReturn, Optional, Sequence
 
 TOOL_CALL_ENV = "HERMES_AGENT_TOOL_CALL"  # health: allow HX002 -- process provenance stamp, not a setting
 ORIGIN_ENV = "HERMES_AGENT_ORIGIN"  # health: allow HX002 -- process provenance stamp, not a setting
@@ -30,6 +30,10 @@ AGENT_HOME_ENV = "HERMES_AGENT_HOME"  # health: allow HX002 -- launching home st
 PROOF_HOME_ENV = "HERMES_PROOF_HOME"  # health: allow HX002 -- per-process proof selector, like HERMES_HOME
 ORIGIN_KEYS = (TOOL_CALL_ENV, ORIGIN_ENV, "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK",
                "HERMES_DELEGATED_CHILD_CONTEXT")
+# Stamps a Desktop launch drops (clean_launch_env, desktop/gui argv, Electron startup —
+# apps/desktop/electron/leaked-worker-env.ts AGENT_PROVENANCE_KEYS mirrors this): an app an agent
+# reopens is the person's, and its own HERMES_DESKTOP=1 backend must not read as agent-launched.
+PROVENANCE_KEYS = (TOOL_CALL_ENV, ORIGIN_ENV, AGENT_HOME_ENV)
 _BACKENDS = ("serve", "dashboard")
 _LIFECYCLE_FLAGS = ("--help", "-h", "--status", "--stop")
 RECIPE = ('Use an existing disposable directory: mkdir -p "$TMPDIR/hermes-proof" && '
@@ -194,8 +198,20 @@ def recovery_home_allowed(home: str | Path) -> bool:
         return False
 
 
+def drop_provenance(env: MutableMapping[str, str]) -> MutableMapping[str, str]:
+    for key in PROVENANCE_KEYS:
+        env.pop(key, None)
+    return env
+
+
 def stamp_tool_child(env: dict[str, str]) -> dict[str, str]:
-    """Stamp a tool child's final env (after overrides/scrubbing) with origin and launching home."""
+    """Stamp a child's final env (after overrides/scrubbing) with origin and launching home.
+
+    Every child spawned through the shared subprocess sanitizer is stamped, not only the terminal,
+    process and execute_code tools: the stamp means "spawned by a Hermes agent process", and its
+    only consumer refuses restart-proof backends on production state, which no Hermes child (search
+    worker, cron script, helper daemon) legitimately starts. Desktop launches drop it.
+    """
     env[TOOL_CALL_ENV] = "1"
     env[ORIGIN_ENV] = os.environ.get(ORIGIN_ENV) or "tool"
     try:
