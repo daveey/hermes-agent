@@ -25,6 +25,9 @@ _EXECUTION = re.compile(r"(?:\b(?:run|execute|invoke|call|use|via|with)\s+`?|`|[
 # still-open quote acts with the hub's identity and replica, so it needs ``capability:hub-write`` (the hub-admin
 # attestation), not this worker's own hermes-hub install. A worker's ``hermes-hub outcomes --id`` reads only its
 # OWN sent requests (the hub's request read back as ``state: null`` on worker-1, 11-13), so bare spellings stay home.
+# The lookbehind also rejects a path-qualified spelling (``~/.hermes/bin/hub-admin '...'``): the hub-write
+# attestation covers the bare ``hub-admin`` on PATH, not an arbitrary install path, so such a card keeps the
+# wrapped action's own verdict (ACTION_REASON: stays home). Deliberate: the fail-closed direction.
 _HUB_ADMIN = re.compile(r"(?<![\w/.-])hub-admin\s+(['\"])(?:(?!\1).)*$", re.IGNORECASE)
 HUB_WRITE = "capability:hub-write"
 

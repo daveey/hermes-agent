@@ -527,3 +527,16 @@ def test_hub_admin_lookalike_names_do_not_open_a_hub_write_quote(prefix):
     from hermes_cli import kanban_placement_coordination as coord
     assert coord.requirements(f"{prefix} 'hermes-hub outcomes --id t_x'")[1] == coord.ACTION_REASON
     assert coord.requirements("run hub-admin 'hermes-hub outcomes --id t_x'") == ({"capability:hub-write"}, None)
+
+
+@pytest.mark.parametrize("text", [
+    "~/.hermes/bin/hub-admin 'hermes-hub outcomes --id t_x'",
+    "run /home/ubuntu/.hermes/bin/hub-admin 'hermes-hub requests --json'",
+    "./hub-admin 'hermes-hub outcomes --id t_x'",
+])
+def test_path_qualified_hub_admin_stays_home(text):
+    """Pinned: the hub-write attestation covers the bare hub-admin on PATH only, so a path-qualified spelling
+    is not read as hub-admin and the wrapped action keeps its own verdict (fail closed: stays home)."""
+    from hermes_cli import kanban_placement_coordination as coord
+    labels, reason = coord.requirements(text)
+    assert reason == coord.ACTION_REASON and coord.HUB_WRITE not in labels

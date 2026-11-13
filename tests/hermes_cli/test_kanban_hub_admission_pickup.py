@@ -327,3 +327,49 @@ def test_verdict_reads_events_after_the_created_payload():
                  (json.dumps({"admit": False, "entry": "move"}),))
     assert hap.verdict(conn, "t")["admit"] is False
     assert hap.verdict(conn, "other") is None
+
+
+HOME_SKIP = ("hub admission denied: fake judge denies; kept home (needs home coordination action), "
+             "left for its creator")
+
+
+def _screen_and_copy(hub, tid):
+    hub.round()
+    hub.enter()
+    replica = wn.open_replica(hub.conn)
+    assert replica is not None
+    try:
+        copy, plans, skips = hap.screen(hub.conn, replica, HUB, [tid], cfg=CFG, machines=MACHINES)
+        imported = wn.import_cards(hub.conn, replica, copy)
+    finally:
+        replica.close()
+    return copy, plans, skips, imported
+
+
+def test_apply_skip_text_names_the_home_reason_when_no_queue_takes_it(gws, hub_judge):
+    hub, worker, _svc = gws
+    hub_judge.admit_next = False
+    tid = _worker_card(worker)
+    _copy, plans, _skips, imported = _screen_and_copy(hub, tid)
+    audit = {**plans[tid]["audit"], "home": "needs home coordination action"}
+    assert hap.apply(hub.conn, HUB, {tid: {"audit": audit, "target": None}}, imported) == {tid: ("other", HOME_SKIP)}
+    assert _events(hub.conn, tid, "moved") == []
+
+
+def test_denied_text_without_home_or_once_re_placed():
+    audit = {"admit": False, "why": "w"}
+    assert hap._denied(audit, False) == "hub admission denied: w; no worker queue fits, left for its creator"
+    assert hap._denied({**audit, "home": "h"}, True) == "hub admission denied: w"
+
+
+def test_a_re_pickup_prior_verdict_skip_keeps_the_home_reason(gws, hub_judge, monkeypatch):
+    hub, worker, _svc = gws
+    tid = _worker_card(worker)
+    prior = {"admit": False, "why": "fake judge denies", "entry": hap.ENTRY, "runs_on": ["machine:hub"],
+             "home": "needs home coordination action"}
+    monkeypatch.setattr(hap, "verdict", lambda conn, task_id: prior if task_id == tid else None)
+    copy, plans, skips, _imported = _screen_and_copy(hub, tid)
+    assert (copy, plans, hub_judge.calls) == ([], {}, [])
+    assert skips[tid] == ("other", HOME_SKIP)
+    del prior["home"]
+    assert _screen_and_copy(hub, tid)[2][tid][1].endswith("; no worker queue fits, left for its creator")
