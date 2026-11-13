@@ -40,17 +40,25 @@ class ProviderAttempt:
         self._lock = threading.Lock()
         self._finished = False
         self._on_finish: list[Callable[[], None]] = []
+        self._released = threading.Event()
 
     def finish(self) -> None:
         """Daemon side, after the provider callback returned or raised: run the deferred releases here."""
         with self._lock:
             self._finished = True
             pending, self._on_finish = self._on_finish, []
-        for release in pending:
-            try:
-                release()
-            except Exception:
-                logger.debug("deferred aux client release failed", exc_info=True)
+        try:
+            for release in pending:
+                try:
+                    release()
+                except Exception:
+                    logger.debug("deferred aux client release failed", exc_info=True)
+        finally:
+            self._released.set()
+
+    def wait(self, timeout: float) -> bool:
+        """Owner side: block until the daemon returned and ran its deferred releases (False on timeout)."""
+        return self._released.wait(timeout)
 
     def defer(self, release: Callable[[], None]) -> bool:
         """Queue ``release`` for the daemon; False when the daemon already finished (the caller runs it)."""
@@ -106,25 +114,40 @@ async def run_in_thread(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> 
 
 
 @contextlib.contextmanager
+def collect_abandoned(abandoned: list[ProviderAttempt]) -> Iterator[list[ProviderAttempt]]:
+    """Record into ``abandoned`` each ``run_in_thread`` call cancelled mid-run inside this block. In an async
+    generator the block must not span a ``yield``: it has to open and close within one step of the task."""
+    token = _ABANDONED.set(abandoned)
+    try:
+        yield abandoned
+    finally:
+        _ABANDONED.reset(token)
+
+
+@contextlib.contextmanager
 def client_scope(client: Any, close: Callable[[Any], None]) -> Iterator[None]:
     """Own ``client`` for one provider call and ``close`` it on exit, on a thread allowed to.
 
     No abandoned daemon: closed here, as before. Otherwise the sockets are shut down from here and the
     close runs on the last abandoned daemon when its callback returns."""
     abandoned: list[ProviderAttempt] = []
-    token = _ABANDONED.set(abandoned)
     try:
-        yield
+        with collect_abandoned(abandoned):
+            yield
     finally:
-        _ABANDONED.reset(token)
         release_client(client, close, abandoned)
 
 
-def release_client(client: Any, close: Callable[[Any], None], abandoned: list[ProviderAttempt]) -> None:
+def release_client(client: Any, close: Callable[[Any], None], abandoned: list[ProviderAttempt],
+                   *, shutdown: Callable[[Any], int] | None = None) -> None:
+    """Close ``client`` here, or (abandoned daemons) shut its sockets down and defer the close to them.
+    ``shutdown`` (default: the client's pool sweep) returns how many sockets it shut down."""
     if not abandoned:
         close(client)
         return
-    from agent.agent_runtime_helpers import force_close_tcp_sockets
+    if shutdown is None:
+        from agent.agent_runtime_helpers import force_close_tcp_sockets
+        shutdown = lambda owned: force_close_tcp_sockets(getattr(owned, "_real_client", None) or owned)
     remaining = [len(abandoned)]
     lock = threading.Lock()
     swept = threading.Event()
@@ -151,7 +174,7 @@ def release_client(client: Any, close: Callable[[Any], None], abandoned: list[Pr
     try:
         for attempt in abandoned:
             deferred += bool(attempt.defer(daemon_done))
-        shutdown_count = force_close_tcp_sockets(getattr(client, "_real_client", None) or client) if deferred else 0
+        shutdown_count = shutdown(client) if deferred else 0
     finally:
         swept.set()
         for _ in range(len(abandoned) - deferred):
