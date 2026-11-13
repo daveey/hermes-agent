@@ -85,7 +85,7 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess | None:
 
 
 def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | None = None,
-                 started_at: float | None = None) -> dict | None:
+                 started_at: float | None = None, exit_code: int | None = None) -> dict | None:
     """The run scope's failure, or None when the scope did not fail.
 
     Under ``OOMPolicy=continue`` a child's OOM kill leaves the scope running, so the
@@ -95,7 +95,9 @@ def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | 
     runs whenever ``pid`` is known, not only when this process probed the policy: a
     dispatcher restarted after the spawn has no probe verdict, and the agent's own SIGKILL
     leaves no snapshot. ``started_at`` (the run's start, epoch seconds) bounds the
-    kernel-log read, which runs inside the reclaim write transaction.
+    kernel-log read, which runs inside the reclaim write transaction; a known
+    ``exit_code`` of 0 skips that per-pid read, since a worker that exited cleanly was not
+    the victim.
     """
     if run_id is None:
         return None
@@ -114,7 +116,7 @@ def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | 
     since = journal_since(started_at)
     if result == "oom-kill":
         victim = kernel_oom_victim(unit, since=since)
-    elif result != "signal" and pid:
+    elif result != "signal" and pid and exit_code != 0:  # rc 0: the worker outlived any kill
         victim = kernel_oom_victim(unit, pid=pid, since=since)
         result = "oom-kill" if victim else result
     if result not in {"oom-kill", "signal"}:

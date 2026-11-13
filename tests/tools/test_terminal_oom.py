@@ -87,7 +87,22 @@ def test_survivable_command_in_its_own_scope_gets_the_note(tmp_path, monkeypatch
     assert note == ("killed by the OOM killer at its scope's memory cap (4096 MiB; kernel victim: cc1plus pid 77); "
                     "run it under `systemd-run --user --scope -p MemoryMax=…` or reduce its footprint")
     assert kernel.calls == [(unit, watch.since)]
-    assert watch.note(0) is None
+    del kernel.records[unit]
+    assert watch.note(0) is None  # no kernel record in its scope: a clean exit stays clean
+
+
+def test_survivable_command_masking_its_own_oom_kill_is_still_named(tmp_path, monkeypatch, kernel):
+    """rc 0 from a pipeline that hid the kill gets the same note as in the run scope."""
+    _scope(tmp_path, monkeypatch)
+    unit = "hermes-worker-proc_cd34.scope"
+    watch = terminal_oom.OomWatch(SimpleNamespace(session=SimpleNamespace(systemd_unit=unit)))
+    kernel.records[unit] = {"pid": 78, "task": "sort", "limit_bytes": None}
+    note = watch.note(0)
+    assert note == ("a process was killed by the OOM killer at its scope's memory cap (unknown; kernel victim: "
+                    "sort pid 78) while this command ran (a pipeline may hide its exit status); "
+                    "run it under `systemd-run --user --scope -p MemoryMax=…` or reduce its footprint")
+    assert kernel.calls == [(unit, watch.since)]
+    assert watch.note(None) is None and len(kernel.calls) == 1  # no exit status: nothing is read
 
 
 def test_sigkill_without_an_oom_kill_keeps_the_generic_note(tmp_path, monkeypatch, kernel):

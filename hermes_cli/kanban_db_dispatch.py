@@ -1179,7 +1179,9 @@ def _classify_dead_worker(
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
     log = _kb.read_worker_log(task_id, tail_bytes=None, board=board) if task_id and run_id else ""
-    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid, started_at=_worker_scope.run_started_at(conn, run_id)) if task_id else None
+    exited = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id)
+    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid, started_at=_worker_scope.run_started_at(conn, run_id),
+                                         exit_code=0 if exited.kind == "clean_exit" else None) if task_id else None  # rc 0 skips the kernel log
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
         if kind == "oom_killed" and task_id:
@@ -1189,7 +1191,7 @@ def _classify_dead_worker(
         dead = _DeadWorker(kind, None, _worker_scope.describe(failure), kind,
                            {"pid": pid, "claimer": claimer, **failure})
     else:
-        dead = _ou.noted(_classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id), conn, task_id, run_id, log)
+        dead = _ou.noted(exited, conn, task_id, run_id, log)
     if task_id and not dead.rate_limited:
         worker_output = crash_worker_output(conn, task_id, run_id, pid, claimer, board=board)
         if worker_output:
@@ -1203,13 +1205,8 @@ def _classify_dead_worker(
 
 
 def _classify_dead_worker_exit(
-    pid: int,
-    claimer: Optional[str],
-    exit_code=None,
-    *,
-    task_id: Optional[str] = None,
-    board: Optional[str] = None,
-    run_id: Optional[int] = None,
+    pid: int, claimer: Optional[str], exit_code=None, *, task_id: Optional[str] = None,
+    board: Optional[str] = None, run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 

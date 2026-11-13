@@ -10,6 +10,7 @@ whose process died, so a concurrent job's kill is not pinned on the command.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -52,7 +53,7 @@ def _memory_max(cgroup: Path) -> str:
     try:
         raw = (cgroup / "memory.max").read_text(encoding="utf-8-sig").strip()
     except OSError:
-        return "MemoryMax unknown"
+        return "unknown"
     return f"{int(raw) / (1024 * 1024):g} MiB" if raw.isdecimal() else raw
 
 
@@ -73,7 +74,7 @@ def _kernel_victim(unit: str, since: float) -> Optional[dict]:
 
 
 def _size(limit_bytes) -> str:
-    return f"{limit_bytes / (1024 * 1024):g} MiB" if isinstance(limit_bytes, int) else "MemoryMax unknown"
+    return f"{limit_bytes / (1024 * 1024):g} MiB" if isinstance(limit_bytes, int) else "unknown"
 
 
 _ADVICE = "run it under `systemd-run --user --scope -p MemoryMax=…` or reduce its footprint"
@@ -87,10 +88,12 @@ class OomWatch:
     command was killed only when the victim is not a process that was already running when
     the command started; otherwise it names the victim and says no more. A ``survivable``
     foreground command runs in its own transient scope, where any victim is the command's.
+    Attribution is approximate: membership is judged against the ``cgroup.procs`` snapshot taken
+    at the start, and the kernel lookup returns only the window's last victim, so a pid reused
+    during the command or a second kill in the same window can be misattributed.
     """
 
     def __init__(self, survivable=None) -> None:
-        import time
         self.since = time.time() - 1
         self.survivable = survivable
         self.cgroup = run_scope_cgroup()
@@ -123,13 +126,21 @@ class OomWatch:
                 "under `systemd-run --user --scope -p MemoryMax=…` or reduce their footprint")
 
     def _own_scope_note(self, returncode) -> Optional[str]:
-        """A survivable command's own scope holds only it: any OOM victim there is the command's."""
+        """A survivable command's own scope holds only it: any OOM victim there is the command's.
+
+        Its scope is collected on exit, so no ``oom_kill`` count is left to compare: the kernel
+        log is read for every finished command, rc 0 included, where a pipeline can mask the
+        kill exactly as in the run scope.
+        """
         session = getattr(self.survivable, "session", None)
         unit = getattr(session, "systemd_unit", None)
-        if not isinstance(unit, str) or not unit or returncode in (0, None):
+        if not isinstance(unit, str) or not unit or returncode is None:
             return None
         victim = _kernel_victim(unit, self.since)
         if victim is None:
             return None
-        return (f"killed by the OOM killer at its scope's memory cap ({_size(victim.get('limit_bytes'))}; "
-                f"kernel victim: {victim['task']} pid {victim['pid']}); {_ADVICE}")
+        cap = f"{_size(victim.get('limit_bytes'))}; kernel victim: {victim['task']} pid {victim['pid']}"
+        if returncode == 0:
+            return (f"a process was killed by the OOM killer at its scope's memory cap ({cap}) while this "
+                    f"command ran (a pipeline may hide its exit status); {_ADVICE}")
+        return f"killed by the OOM killer at its scope's memory cap ({cap}); {_ADVICE}"

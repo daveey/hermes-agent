@@ -251,7 +251,33 @@ def test_classify_dead_worker_passes_the_run_start(monkeypatch):
                                                              "memory_max_bytes": None, "memory_peak_bytes": None})
     monkeypatch.setattr(kbd, "crash_worker_output", lambda *a, **kw: "")
     kbd._classify_dead_worker(4242, "h:1", None, task_id="t_x", run_id=5, conn=conn)
-    assert seen == {"pid": 4242, "started_at": 1794550650}
+    assert seen == {"pid": 4242, "started_at": 1794550650, "exit_code": None}
+
+
+def test_clean_exit_never_reads_the_kernel_log(monkeypatch):
+    """rc 0: the worker outlived any kill, so no journalctl runs inside the reclaim write txn."""
+    seen = _journal_argv(monkeypatch, props="LoadState=loaded\nResult=success\n")
+    assert scope.read_failure("t_x", 1, "", pid=1870933, exit_code=0) is None
+    assert seen == []
+    assert scope.read_failure("t_x", 1, "", pid=1870933, exit_code=1)["scope_result"] == "oom-kill"
+    assert len(seen) == 1  # a non-zero exit still asks the kernel whether the worker was its victim
+
+
+def test_classify_dead_worker_passes_the_known_exit_code(monkeypatch):
+    from hermes_cli import kanban_db_dispatch as kbd
+    seen = _journal_argv(monkeypatch, props="LoadState=not-found\n")
+    monkeypatch.setattr(kbd._kb, "read_worker_log", lambda *a, **kw: "")
+    monkeypatch.setattr(kbd, "crash_worker_output", lambda *a, **kw: "")
+    dead = kbd._classify_dead_worker(1870933, "h:1", 0, task_id="t_x", run_id=1)  # the authority's rc
+    assert dead.kind == "clean_exit" and seen == []
+    monkeypatch.setattr(kbd, "_recent_worker_exits", {1870933: (0, 0.0)})  # reaped here: wait status 0
+    assert kbd._classify_dead_worker(1870933, "h:1", task_id="t_x", run_id=1).kind == "clean_exit" and seen == []
+    monkeypatch.setattr(kbd, "_recent_worker_exits", {})
+    monkeypatch.setattr(kbd, "_worker_log_exit_code", lambda *a, **kw: 0)  # the log's exit trailer
+    assert kbd._classify_dead_worker(1870933, "h:1", task_id="t_x", run_id=1).kind == "clean_exit" and seen == []
+    monkeypatch.setattr(kbd, "_recent_worker_exits", {1870933: (9, 0.0)})  # SIGKILL: ask the kernel
+    kbd._classify_dead_worker(1870933, "h:1", task_id="t_x", run_id=1)
+    assert len(seen) == 1
 
 
 def test_compute_policy_nice_wrapper_keeps_the_oom_policy_env(probe, monkeypatch):
