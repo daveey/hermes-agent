@@ -325,3 +325,91 @@ def test_check_cli_rejects_lease_arguments():
     from hermes_cli import kanban_quiet
     args = types.SimpleNamespace(check=True, max_s=5, reason=None, observer_argv=None)
     assert kanban_quiet.cmd_quiet_hold(args) == kanban_quiet.EXIT_USAGE
+
+
+# ---- quiet-hold asks quiet-observe-check BEFORE the lease (no 2 h cooldown on a doomed start) --
+
+def _serve(env, answer=None):
+    """Route the production control-socket client to the fixture gateway (wire format as in
+    ``_check``), or to a fixed ``answer`` when one is given (an older core, no gateway)."""
+    from gateway import control_socket
+
+    def query(home, verb, *, params=None, report_unsupported=False, timeout=None):
+        if answer is not None:
+            return answer()
+        raw = json.dumps({"protocol": 1, "verb": verb, "id": 1, "params": params}).encode()
+        response = json.loads(env.server.handle_request_line(raw, "uid:1000"))
+        return response.get("result") if response.get("ok") else None
+
+    env.monkeypatch.setattr(control_socket, "query_gateway_control", query)
+
+
+@pytest.fixture
+def hold_home(env, tmp_path):
+    """A second HERMES_HOME for the hold: ``env`` already holds its own lease (and so a cooldown) in
+    ``env.root``. The fixture gateway keeps serving and reads the lease and window from here."""
+    from agent import claim_quiet as cq
+    home = tmp_path / "hold-home"
+    home.mkdir(mode=0o700)
+    env.monkeypatch.setenv("HERMES_HOME", str(home))
+    write_window(home, "idle")
+    assert cq.inspect().state == "inactive"
+    return home
+
+
+def test_hold_refused_by_the_gateway_check_takes_no_lease_and_spends_no_cooldown(
+        env, recorded, hold_home, tmp_path, capsys):
+    from agent import claim_quiet as cq
+    from hermes_cli import kanban_quiet
+    _use(env, recorded["near_miss"])  # a launch route attestation does not support
+    _serve(env)
+    epoch = (env.registry.snapshot().epoch, env.registry.membership_generation())
+    marker = tmp_path / "ran"
+    code = kanban_quiet.hold(30, "measure", [sys.executable, "-c", f"open({str(marker)!r}, 'w')"])
+    captured = capsys.readouterr()
+    assert not (hold_home / "kanban" / "claim-quiet" / "last-started.json").exists(), "cooldown was committed"
+    assert not marker.exists(), "the observer must never start"
+    assert code == kanban_quiet.EXIT_CHECK_REFUSED, captured.err
+    doc = json.loads(captured.out)
+    assert doc["admitted"] is False and "unsupported-route:relaunch-argv" in "".join(doc["registry_unknowns"])
+    assert "no cooldown spent" in captured.err
+    assert cq.inspect().state == "inactive", "the lease was taken"
+    assert (env.registry.snapshot().epoch, env.registry.membership_generation()) == epoch
+
+
+def test_hold_admitted_by_the_gateway_check_acquires_and_the_gateway_starts(
+        env, recorded, hold_home, tmp_path):
+    import threading
+    from agent import claim_quiet as cq
+    from hermes_cli import kanban_quiet
+    from tests.waiting import wait_until
+    _use(env, recorded["relaunch"])
+    _serve(env)
+    go = tmp_path / "go"
+    observer = ("import os, sys, threading\n"
+                "while not os.path.exists(sys.argv[1]): threading.Event().wait(0.02)\n")
+    result = {}
+    worker = threading.Thread(target=lambda: result.setdefault("code", kanban_quiet.hold(
+        60, "measure", [sys.executable, "-c", observer, str(go)])))
+    worker.start()
+    try:
+        wait_until(lambda: cq.read_active() is not None, timeout=60, what="hold lease")
+        held = type("Held", (), {"lease": cq.read_active()})
+        started = ok(env, "quiet-observe-start", start_params(held))
+        assert started.get("observer_token"), started
+    finally:
+        go.write_text("x")
+        worker.join(60)
+    assert not worker.is_alive() and result["code"] == kanban_quiet.EXIT_OK
+    assert (hold_home / "kanban" / "claim-quiet" / "last-started.json").exists()
+    assert cq.inspect().state == "inactive"
+
+
+@pytest.mark.parametrize("answer", [lambda: {"unsupported": True}, lambda: None],
+                         ids=["older-core", "no-gateway"])
+def test_hold_proceeds_when_the_gateway_does_not_answer_the_check(env, hold_home, answer, capsys):
+    from hermes_cli import kanban_quiet
+    _serve(env, answer)
+    assert kanban_quiet.hold(30, "measure", ["true"]) == kanban_quiet.EXIT_OK
+    assert (hold_home / "kanban" / "claim-quiet" / "last-started.json").exists()
+    assert "gateway check unavailable" in capsys.readouterr().err

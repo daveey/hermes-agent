@@ -2,7 +2,8 @@
 
 ``hermes kanban quiet-hold --check`` is the read-only preflight: it asks the gateway what
 ``quiet-observe-start`` would refuse apart from the lease and prints one JSON document; it takes no
-lease and writes no cooldown record (exit 0 admitted, 3 refused or gateway unavailable).
+lease and writes no cooldown record (exit 0 admitted, 3 refused or gateway unavailable). Its window
+freshness bound is start's own (``UPDATE_WINDOW_MAX_AGE_S``, 120 s), with no margin.
 
 Takes the root-scoped claim-quiet lease (:mod:`agent.claim_quiet`), runs the observer command under
 it and releases the lease on every path. Root-scoped: it never opens or initialises a Kanban board
@@ -23,19 +24,29 @@ Lease identity is passed to the observer through the environment:
 ``HERMES_CLAIM_QUIET_EPISODE_ID``, ``HERMES_CLAIM_QUIET_PRODUCER_PID``,
 ``HERMES_CLAIM_QUIET_EXPIRES_AT`` (UTC epoch seconds), ``HERMES_CLAIM_QUIET_MAX_S``.
 
-Exit codes: 0 observer succeeded; 2 usage; 69 lease unavailable (platform/filesystem/clock/record);
+Exit codes: 0 observer succeeded; 2 usage; 3 gateway check refused (no lease taken); 69 lease
+unavailable (platform/filesystem/clock/record);
 70 observer failed (spawn failure or non-zero exit; the observer's own status is on stderr);
 71 lease release failed; 75 busy (another lease is active); 76 cooldown; 78 preflight refused;
 124 deadline reached and the observer was terminated; 125 observer group death could not be
 verified; 130 cancelled by signal.
 
-Preflight (exit 78): before the lease is taken, so before the cooldown is committed, the host
-files the gateway's ``quiet-observe-start`` refuses on are read (``gateway.quiet_control.
-start_preflight_reasons``): a core-update drain/admission hold, and the deploy window, which must
-be this host's, ``idle`` and at most ``UPDATE_WINDOW_MAX_AGE_S - START_PREFLIGHT_MARGIN_S`` old.
-Nothing is written; retry when the window is fresh and idle. Runner-only refusals (attestation,
-coverage pending, unknowns) have no read-only control verb, so they still surface only from the
-gateway's start, after the lease. Once a start is attempted, lease and cooldown are unchanged.
+Preflight, before the lease is taken (so before the cooldown is committed), in two steps:
+
+1. Host files (exit 78): the files the gateway's ``quiet-observe-start`` refuses on are read
+   (``gateway.quiet_control.start_preflight_reasons``): a core-update drain/admission hold, and the
+   deploy window, which must be this host's, ``idle`` and at most ``UPDATE_WINDOW_MAX_AGE_S -
+   START_PREFLIGHT_MARGIN_S`` old (stricter than ``--check``, so a window that would go stale while
+   the observer starts is refused here).
+2. Gateway (exit 3, the ``--check`` code, with the same JSON document on stdout): the read-only
+   bookkeeping verb ``quiet-observe-check`` reports the runner-only refusals (code attestation route
+   and unknowns, coverage pending, drain/restart, registry unknowns). It takes no lease, writes no
+   cooldown and does not move the registry epoch. A gateway that does not answer (none running, or
+   an older core without the verb) keeps the earlier behaviour: the hold proceeds and the gateway's
+   start stays authoritative.
+
+Nothing is written on a refusal; retry when the cause clears. Once a start is attempted, lease and
+cooldown are unchanged.
 
 Proof targets: Board pool workers republish ``window.json`` only from the 10-minute
 ``hermes-core-update.timer`` and batch updates, so their window is usually stale or ``batching``
@@ -163,6 +174,26 @@ def _preflight() -> list[str]:
         return [f"preflight_unreadable:{type(exc).__name__}"]
 
 
+def _gateway_preflight(home=None, query=None) -> int | None:
+    """The gateway step of the preflight: EXIT_CHECK_REFUSED (its document printed) when the
+    gateway answers ``quiet-observe-check`` with a refusal, else None. Never raises: a gateway that
+    does not answer (none running, older core) or a failing query keeps the earlier behaviour."""
+    try:
+        doc, answered = _check_doc(home, query=query)
+    except Exception as exc:  # health: allow BLE001 -- an unanswered check keeps the earlier behaviour
+        _err(f"gateway check unavailable ({type(exc).__name__}); proceeding, start stays authoritative")
+        return None
+    if not answered:
+        _err(f"gateway check unavailable ({', '.join(doc['reasons'])}); proceeding, start stays authoritative")
+        return None
+    if _check_admitted(doc):
+        return None
+    _print_doc(doc)
+    _err("gateway quiet start would refuse (no lease taken, no cooldown spent): "
+         + ", ".join(str(r) for r in doc.get("reasons") or ["not_admitted"]))
+    return EXIT_CHECK_REFUSED
+
+
 def hold(max_s: int, reason: str, argv: Sequence[str], *, clock=None) -> int:
     """Acquire the lease, run ``argv`` under it, release in ``finally``; returns the exit code."""
     from agent import claim_quiet as cq
@@ -173,6 +204,9 @@ def hold(max_s: int, reason: str, argv: Sequence[str], *, clock=None) -> int:
         _err("gateway quiet start would refuse (no lease taken, no cooldown spent): "
              + ", ".join(refused))
         return EXIT_PREFLIGHT
+    gateway_refusal = _gateway_preflight()
+    if gateway_refusal is not None:
+        return gateway_refusal
     clock = clock or SystemClock()
     try:
         owner = cq.acquire(max_s=max_s, reason=reason, clock=clock)
@@ -265,11 +299,10 @@ def _kill_leftovers(pgid: int) -> bool:
     return True
 
 
-def check(home=None, *, query=None) -> int:
-    """``--check``: one JSON document on stdout with what ``quiet-observe-start`` would refuse
-    apart from the lease (registry unknowns, launch route, reasons). Takes no lease, writes no
-    cooldown record and reserves no work (``quiet-observe-check`` is a bookkeeping verb)."""
-    import json
+def _check_doc(home=None, *, query=None) -> tuple[dict, bool]:
+    """Ask the gateway ``quiet-observe-check``; returns ``(document, answered)``. ``answered`` is
+    False when no gateway answered the verb (none running, an older core, a malformed answer): the
+    document then carries ``check_unsupported_by_gateway`` or ``gateway_unavailable``."""
     from pathlib import Path
 
     if query is None:
@@ -278,15 +311,34 @@ def check(home=None, *, query=None) -> int:
         from gateway.status import _get_process_hermes_home
         home = _get_process_hermes_home()
     result = query(Path(home), "quiet-observe-check", params={"schema": 1}, report_unsupported=True)
+    answered = False
     if isinstance(result, dict) and result.get("unsupported"):
         doc = {"admitted": False, "reasons": ["check_unsupported_by_gateway"]}
     elif not isinstance(result, dict) or type(result.get("admitted")) is not bool:
         doc = {"admitted": False, "reasons": ["gateway_unavailable"]}
     else:
-        doc = result
-    doc = {"home": str(home), **doc}
-    print(json.dumps(doc, sort_keys=True, default=str))
-    return EXIT_OK if doc["admitted"] is True and not doc.get("reasons") else EXIT_CHECK_REFUSED
+        doc, answered = result, True
+    return {"home": str(home), **doc}, answered
+
+
+def _check_admitted(doc: dict) -> bool:
+    return doc.get("admitted") is True and not doc.get("reasons")
+
+
+def _print_doc(doc: dict) -> None:
+    import json
+    print(json.dumps(doc, sort_keys=True, default=str), flush=True)
+
+
+def check(home=None, *, query=None) -> int:
+    """``--check``: one JSON document on stdout with what ``quiet-observe-start`` would refuse
+    apart from the lease (registry unknowns, launch route, reasons). Takes no lease, writes no
+    cooldown record and reserves no work (``quiet-observe-check`` is a bookkeeping verb). Its
+    window bound is start's own 120 s; ``hold``'s host-file step also subtracts
+    ``START_PREFLIGHT_MARGIN_S``."""
+    doc, _answered = _check_doc(home, query=query)
+    _print_doc(doc)
+    return EXIT_OK if _check_admitted(doc) else EXIT_CHECK_REFUSED
 
 
 def cmd_quiet_hold(args) -> int:
