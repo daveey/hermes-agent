@@ -38,7 +38,7 @@ def _cli_create(*argv):
 @pytest.fixture
 def hub(monkeypatch, hub_judge):
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
-    monkeypatch.setattr(placement, "_machine_picks_up", lambda label: label == "pool:worker")
+    monkeypatch.setattr(placement, "_machine_picks_up", lambda labels: "pool:worker" in labels)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_WORKER_TASK", raising=False)
     return hub_judge

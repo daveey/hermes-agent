@@ -28,6 +28,7 @@ from hermes_cli import kanban_worker_node as wn
 from hermes_cli import kanban_worker_placement as wp
 from tests.hermes_cli import hub_judge_support
 from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli._placement_helpers import seen_now
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tools import kanban_tools as kt
 
@@ -56,7 +57,7 @@ def hub(tmp_path, monkeypatch, hub_judge):
     sync.set_mode(conn, "primary")
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: ME)
     monkeypatch.setattr(kt, "_persisted_identity", lambda: "default")
-    wn.set_registry_fetch(lambda: {"me": ME, "machines": [WORKER]})
+    wn.set_registry_fetch(lambda: {"me": ME, "machines": seen_now([WORKER])})
     hub_judge.admit_next = False
     try:
         yield home, conn
@@ -206,7 +207,7 @@ def test_self_check_leaves_other_worker_first_cards_to_the_reserve(hub, no_pull,
     tid = _stranded(conn, age=60 if case == "young" else 3600)
     cfg = {"worker_pools": CFG["worker_pools"]} if case == "no_queue" else CFG
     if case == "no_machine":
-        wn.set_registry_fetch(lambda: {"me": ME, "machines": [{**WORKER, "labels": ["pool:worker"]}]})
+        wn.set_registry_fetch(lambda: {"me": ME, "machines": seen_now([{**WORKER, "labels": ["pool:worker"]}])})
     if case == "registry_down":
         wn.set_registry_fetch(lambda: (_ for _ in ()).throw(OSError("board unreachable")))
     if case == "pinned":  # the Board already assigned it: runs_on machine:worker-N is not the bug state

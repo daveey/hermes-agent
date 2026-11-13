@@ -21,6 +21,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_move as km
 from hermes_cli import kanban_placement as kp
 from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli._placement_helpers import seen_now
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gateway
 
@@ -36,7 +37,7 @@ def _machines(*, held=()):
 
 def _registry(*, held=()):
     machines = list(_machines(held=held).values())
-    wn.set_registry_fetch(lambda: {"me": HUB, "machines": machines})
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now(machines)})
 
 
 @pytest.fixture
@@ -623,7 +624,7 @@ def test_a_worker_created_card_joins_the_pool_and_a_pin_to_the_ship_host_stays(w
     monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: "worker-2")
     monkeypatch.setattr(kp, "config", lambda: {"worker_queue": {"worker-2": POOL}})
     machines = list(_machines().values())
-    wn.set_registry_fetch(lambda: {"me": "worker-2", "machines": machines})
+    wn.set_registry_fetch(lambda: {"me": "worker-2", "machines": seen_now(machines)})
     out = json.loads(kt._handle_create({"title": "summarise the failing CI jobs", "assignee": "default",
                                         "requires": []}))
     assert out.get("ok") and _runs_on(w2.conn, out["task_id"]) == [POOL], out
@@ -721,7 +722,7 @@ def test_courier_create_denied_by_hub_admission_joins_the_pool_queue(hub, judge,
     monkeypatch.setattr(kp, "config", lambda: {**CFG, **({"worker_pools": {HUB: ["worker-1"]}} if pools else {})})
     machines = [{**m, "labels": [*m["labels"], "capability:hub-write"]} if m["name"] == "worker-2" else m
                 for m in _machines(held=("worker-1",)).values()]
-    wn.set_registry_fetch(lambda: {"me": HUB, "machines": machines})  # worker-2 is a hub-write worker
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now(machines)})  # worker-2: hub-write
     judge.admit_next = False
     args = {"title": "Read ~/.hermes/logs/agent.log on the hub", "requires": [], "assignee": "default"}
     out = json.loads(kt._handle_create(dict(args), origin_intent=_intent(f"request-courier-{pools}")))
@@ -866,7 +867,7 @@ def _on(monkeypatch, gateway, cfg, machines):
     monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: gateway)
     monkeypatch.setattr(kp, "config", lambda: cfg)
     monkeypatch.setattr(kanban_skill_check, "check_task_skills", lambda *a, **k: None)  # no skills dir here
-    wn.set_registry_fetch(lambda: {"me": gateway, "machines": list(machines.values())})
+    wn.set_registry_fetch(lambda: {"me": gateway, "machines": seen_now(machines.values())})
 
 
 @pytest.fixture

@@ -526,7 +526,8 @@ def hub_stay_remedy(structural, labels, *, assignee=None, pool_profiles=()):
 
 def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=None):
     """Where a denied card goes: the worker queue (``runs_on: [<pool label>, ...]``) when ``queue``
-    and ``kanban.placement.worker_queue`` names a live label for this gateway, else worker-first.
+    and ``kanban.placement.worker_queue`` names a label for this gateway that one live machine holds together
+    with every coordination label, else worker-first.
 
     Never a ``machine:worker-N`` pin. The queue's coordination labels include ``requires``'
     (``hub:write`` -> ``capability:hub-write``), so only a hub-write worker claims it.
@@ -551,8 +552,11 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
             # The declared list, normalized: a decision card's raw view can carry a bare string.
             out["requires"] = [declared] if isinstance(declared, str) else list(declared)
         return out
-    if label and (machine_ok or kp._machine_picks_up)(label):
-        out = {"where": "local", "runs_on": [label, *sorted(extra - {label})],
+    runs_on = [label, *sorted(extra - {label})] if label else []
+    # One liveness source for the whole set, as queue_decision judges it: one active, unheld, fresh pickup machine
+    # must hold every label (hub:write rides as capability:hub-write), else nobody could claim the queued card.
+    if label and (machine_ok or kp._machine_picks_up)(label if len(runs_on) == 1 else tuple(runs_on)):
+        out = {"where": "local", "runs_on": runs_on,
                "why": QUEUED_WHY.format(label=label), "hub_admission": audit}
     elif why := worker_first_refusal(args):
         # No attested queue: a denied mandatory pin is refused, as it was while the pin counted as uncarried.

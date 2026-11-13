@@ -170,7 +170,7 @@ def test_denied_follows_worker_queue(gate, cfg):
     """Operator 11-12 (PR #1247): a denied card joins the one worker queue, never machine:worker-N;
     hub:write rides along as capability:hub-write so only a hub-write worker claims it."""
     result = placement.decide({"title": "Read ~/.hermes/logs on the hub"}, self_gw="hub", cfg=cfg,
-                              live=lambda _: None, carries=True, machine_ok=lambda label: label == "pool:worker")
+                              live=lambda _: None, carries=True, machine_ok=lambda labels: "pool:worker" in labels)
     assert result["where"] == "local"
     assert result["runs_on"][0] == "pool:worker"
     assert "capability:hub-write" in result["runs_on"]
@@ -202,6 +202,49 @@ def test_origin_and_courier_denies_never_queue(gate, monkeypatch):
     audit = {"admit": False}
     assert "runs_on" not in hap.pool_route({"title": "x"}, QUEUE_CFG, "hub", audit, ["hub:write"], queue=False)
     assert hap.pool_route({"title": "x"}, QUEUE_CFG, "hub", audit, ["hub:write"])["runs_on"][0] == "pool:worker"
+
+
+# PR #2001 review nit 1 (t_01a1d416d71f0738): the deny route judged liveness on the queue label alone but queued
+# [pool:worker, capability:hub-write], so with no single live machine holding both the card sat unclaimable.
+@pytest.mark.parametrize("kind", ["split", "held", "stale", "joint"])
+def test_denied_queues_only_when_one_live_machine_holds_every_label(gate, monkeypatch, kind):
+    import time
+    from hermes_cli import kanban_hub_admission_placement as hap
+    from hermes_cli import kanban_worker_node as wn
+    seen = time.time() * 1000
+    machines = {"worker-1": {"state": "active", "last_seen": seen, "labels": ["pool:worker"]},
+                "worker-5": {"state": "active", "last_seen": seen, "labels": ["capability:hub-write"]}}
+    if kind != "split":
+        machines["worker-1"]["labels"].append("capability:hub-write")
+    if kind == "held":
+        machines["worker-1"]["hold"] = True
+    elif kind == "stale":
+        machines["worker-1"]["last_seen"] = seen - 3600 * 1000
+    monkeypatch.setattr(wn, "registry", lambda: {"me": "hub", "machines": machines})
+    out = hap.pool_route({"title": "x"}, HUB_CFG, "hub", {"admit": False}, ["hub:write"])
+    if kind == "joint":
+        assert out["runs_on"] == ["pool:worker", "capability:hub-write"], out
+        assert "placement_policy" not in out
+    else:
+        assert "runs_on" not in out, out  # today's fallback: worker-first, never an unclaimable queue
+        assert out["placement_policy"] == "worker-first-v1"
+    assert out["requires"] == ["hub:write"]
+
+
+def test_denied_machine_ok_seam_sees_the_whole_label_tuple(gate):
+    from hermes_cli import kanban_hub_admission_placement as hap
+    seen = []
+
+    def ok(labels):
+        seen.append(labels)
+        return labels == ("pool:worker", "capability:hub-write")
+    out = hap.pool_route({"title": "x"}, HUB_CFG, "hub", {"admit": False}, ["hub:write"], machine_ok=ok)
+    assert out["runs_on"] == ["pool:worker", "capability:hub-write"]
+    assert seen == [("pool:worker", "capability:hub-write")]
+    seen.clear()
+    out = hap.pool_route({"title": "x"}, HUB_CFG, "hub", {"admit": False}, None, machine_ok=ok)
+    assert seen == ["pool:worker"]  # a lone queue label is passed as the label itself
+    assert "runs_on" not in out and out["placement_policy"] == "worker-first-v1"
 
 
 @pytest.mark.parametrize("assignee", [None, ""])
@@ -270,7 +313,7 @@ def test_claim_stall_template_no_worker_can_claim_stays_home(gate, queue_live):
     """A denied card whose text the pickup claim gate refuses on every worker is not enrolled anywhere."""
     from hermes_cli import kanban_placement_coordination as coord
     result = placement.decide(_claim_stall(CLAIM_STALL_BARE), self_gw="hub", cfg=HUB_CFG, live=lambda _: None,
-                              carries=True, machine_ok=lambda label: queue_live and label == "pool:worker")
+                              carries=True, machine_ok=lambda labels: queue_live and "pool:worker" in labels)
     assert result["where"] == "local"
     assert "runs_on" not in result and "placement_policy" not in result
     assert "requires" not in result  # the deny route's hub:write is a worker label; home keeps the declaration
@@ -287,7 +330,7 @@ def test_claim_stall_template_via_hub_admin_queues_for_hub_write_workers(gate, m
     from hermes_cli import kanban_placement_coordination as coord
     from hermes_cli import kanban_worker_node as wn
     result = placement.decide(_claim_stall(CLAIM_STALL_HUB_ADMIN), self_gw="hub", cfg=HUB_CFG,
-                              live=lambda _: None, carries=True, machine_ok=lambda label: label == "pool:worker")
+                              live=lambda _: None, carries=True, machine_ok=lambda labels: "pool:worker" in labels)
     assert result["runs_on"][0] == "pool:worker"
     assert "capability:hub-write" in result["runs_on"]
     assert "capability:coordination-read" not in result["runs_on"]

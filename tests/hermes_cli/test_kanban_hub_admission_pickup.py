@@ -22,6 +22,7 @@ from hermes_cli import kanban_hub_admission_pickup as hap
 from hermes_cli import kanban_placement as kp
 from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli import hub_judge_support
+from tests.hermes_cli._placement_helpers import seen_now
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import BOARD, HUB, WORKER, Gateway
 
@@ -59,7 +60,7 @@ def _registry_enter(g):
 
     def enter():
         out = base()
-        wn.set_registry_fetch(lambda: {"me": g.name, "machines": list(MACHINES.values())})
+        wn.set_registry_fetch(lambda: {"me": g.name, "machines": seen_now(MACHINES.values())})
         return out
     return enter
 
@@ -166,7 +167,9 @@ def test_screen_makes_no_model_call_inside_a_write_transaction(gws, hub_judge):
 
 
 def test_target_follows_the_creation_time_deny_route(monkeypatch):
-    wn.set_registry_fetch(lambda: {"me": HUB, "machines": list(MACHINES.values())})
+    worker = {**MACHINES[WORKER], "labels": [*MACHINES[WORKER]["labels"], "capability:hub-write"]}
+    hub_write = {**MACHINES, WORKER: worker}
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now(hub_write.values())})
     try:
         fields = {"title": "t", "body": "b", "assignee": "default", "workspace_kind": "scratch",
                   "requires": ["terminal"], "skills": None, "board": "default"}
@@ -177,6 +180,9 @@ def test_target_follows_the_creation_time_deny_route(monkeypatch):
         assert "capability:hub-write" not in hap._target(fields, HUB, CFG, {})
         monkeypatch.setattr(kp, "portable_reason", lambda args, cfg=None: "home gateway marker")
         assert "capability:hub-write" in hap._target(fields, HUB, CFG, {})
+        # No live machine holds pool:worker + capability:hub-write: the deny route falls back to worker-first.
+        wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now(MACHINES.values())})
+        assert hap._target(fields, HUB, CFG, {}) is None
     finally:
         wn.set_registry_fetch(None)
 

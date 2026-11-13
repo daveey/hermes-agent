@@ -275,15 +275,18 @@ def route_labels(dest: str) -> list[str]:
 
 
 def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) -> list[str]:
-    """Active, unheld registry machines that carry ``label`` (or every label of a list/set) and pick up other
-    gateways' cards (sorted)."""
+    """Active, unheld, fresh registry machines that carry ``label`` (or every label of a list/set) and pick up
+    other gateways' cards (sorted). Fresh is coordination attestation's window (``last_seen`` within
+    ``FRESH_S``): a stale entry holding the whole set leases nothing, so it must not make a queue look live."""
     from hermes_cli import kanban_worker_node as wn
+    from hermes_cli.kanban_placement_coordination import _fresh
     if machines is None:
         machines = (wn.registry() or {}).get("machines") or {}
     wanted = {label} if isinstance(label, str) else set(label)
+    now = time.time()
     return sorted(name for name, entry in machines.items()
                   if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
-                  and ("pickup" not in entry or wn.advertises_pickup(entry))
+                  and ("pickup" not in entry or wn.advertises_pickup(entry)) and _fresh(entry, now)
                   and wanted <= set(entry.get("labels") or []))
 
 
@@ -649,7 +652,8 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
 
 
 def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
-                     machine_ok: Optional[Callable[[str], bool]], *, skip: bool = False) -> Optional[dict]:
+                     machine_ok: Optional[Callable[[str | tuple[str, ...]], bool]], *,
+                     skip: bool = False) -> Optional[dict]:
     """Legacy heavy routing; worker pools reuse portability without changing this opt-out path."""
     from hermes_cli.kanban_placement_coordination import legacy_refusal
     worker = c.heavy_target(self_gw)
@@ -663,16 +667,15 @@ def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
             "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
 
 
-def _machine_picks_up(name: str | tuple[str, ...]) -> bool:
+def _machine_picks_up(name: str | Iterable[str]) -> bool:
     """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
     pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
     and worker-1 included, though both claim ``runs_on`` cards), so a missing field counts as on:
     ``heavy_route`` naming the worker is the operator saying it picks up. A pool label (:func:`is_pool_label`) is
-    live when some such machine carries it; a label tuple (queue label + coordination labels) when one carries all."""
+    live when some fresh such machine carries it; a label collection (queue label + coordination labels) when one
+    carries all (:func:`label_machines`)."""
     from hermes_cli import kanban_worker_node as wn
-    if isinstance(name, (tuple, list, set, frozenset)):
-        return bool(label_machines(name))
-    if is_pool_label(name):
+    if not isinstance(name, str) or is_pool_label(name):
         return bool(label_machines(name))
     entry = ((wn.registry() or {}).get("machines") or {}).get(name)
     if not entry or entry.get("state", "active") != "active" or entry.get("hold"):
@@ -910,7 +913,7 @@ def _raw_explicit_pin(args: dict) -> str:
 def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
            self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
            locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
-           machine_ok: Optional[Callable[[str], bool]] = None,
+           machine_ok: Optional[Callable[[str | tuple[str, ...]], bool]] = None,
            info: Optional[Callable[[str], dict]] = None) -> dict:
     """``_decide`` plus one rule: a caller who pinned another gateway never gets a silent local card.
 
@@ -952,7 +955,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
 def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: Optional[dict] = None,
             self_gw: Optional[str] = None, live: Optional[Callable[[str], Optional[str]]] = None,
             locate: Optional[Callable[[str], dict]] = None, carries: Optional[bool] = None,
-            machine_ok: Optional[Callable[[str], bool]] = None,
+            machine_ok: Optional[Callable[[str | tuple[str, ...]], bool]] = None,
             info: Optional[Callable[[str], dict]] = None) -> dict:
     """``{"where": "local"|<gateway>, "why": str}`` for a ``kanban_create`` call; heavy work bound for a
     worker is ``{"where": "local", "runs_on": [machine:<worker>], "why": ...}``. Never raises."""

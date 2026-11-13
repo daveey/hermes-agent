@@ -1435,6 +1435,40 @@ def test_heavy_route_machine_check_reads_the_board_registry(monkeypatch, entry, 
     assert kp._machine_picks_up("worker-1") is ok
 
 
+# PR #2001 review nit 4 (t_01a1d416d71f0738): coordination attestation counts only members seen within FRESH_S, but
+# label_machines ignored last_seen, so a stale active/unheld entry holding the whole set still let a card queue.
+@pytest.mark.parametrize("age_s,listed", [(0, True), (60, True), (None, False), (301, False), (3600, False),
+                                          (-120, False), ("nan", False)])
+def test_label_machines_counts_only_fresh_members(monkeypatch, age_s, listed):
+    from hermes_cli import kanban_placement_coordination as coord
+    from hermes_cli import kanban_worker_node as wn
+    entry = {"state": "active", "labels": ["pool:worker", "capability:hub-write"]}
+    if age_s == "nan":
+        entry["last_seen"] = float("nan")
+    elif age_s is not None:
+        entry["last_seen"] = (time.time() - age_s) * 1000
+    assert coord.FRESH_S == 300
+    monkeypatch.setattr(wn, "registry", lambda: {"me": "hub", "machines": {"worker-1": entry}})
+    want = ["worker-1"] if listed else []
+    assert kp.label_machines("pool:worker") == want
+    assert kp.label_machines(("pool:worker", "capability:hub-write")) == want
+    assert kp._machine_picks_up(("pool:worker", "capability:hub-write")) is listed
+
+
+# Review nit 3: any non-string label collection is a joint label set, judged in one place.
+@pytest.mark.parametrize("shape", [tuple, list, set, frozenset])
+def test_machine_picks_up_takes_any_label_collection(monkeypatch, shape):
+    from hermes_cli import kanban_worker_node as wn
+    seen = int(time.time() * 1000)
+    machines = {"worker-1": {"state": "active", "last_seen": seen, "labels": ["pool:worker"]},
+                "worker-5": {"state": "active", "last_seen": seen, "labels": ["capability:hub-write"]}}
+    monkeypatch.setattr(wn, "registry", lambda: {"me": "hub", "machines": machines})
+    assert kp._machine_picks_up(shape(["pool:worker"])) is True
+    assert kp._machine_picks_up(shape(["pool:worker", "capability:hub-write"])) is False
+    machines["worker-1"]["labels"].append("capability:hub-write")
+    assert kp._machine_picks_up(shape(["pool:worker", "capability:hub-write"])) is True
+
+
 @pytest.mark.parametrize("title", ["Analyze public data", "Run the full test suite"])
 def test_tool_creates_worker_policy_atomically_and_reports_queue(mac, monkeypatch, title):
     from tools import kanban_tools as kt
