@@ -77,6 +77,21 @@ def test_heading_less_text_after_the_record_paragraph_is_still_scanned(body):
     assert kp.portable_reason(_args(body, title="sign in")) == "local marker"  # the host marker still binds
 
 
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+@pytest.mark.parametrize("body", [
+    "## Existing work checked\nNone open.\n\nThen open Chrome on the MacBook and sign in.\n",
+    "## Existing work checked\n\nNone open.\n\nThen open Chrome on the MacBook and sign in.\n",
+    "**Existing work checked:** None open.\n\nThen open Chrome on the MacBook and sign in.\n",
+])
+def test_crlf_blank_lines_still_end_the_record_paragraph(body, newline):
+    # RED before: a CRLF blank line is "\r", which the blank-line test never matched, so the record ran on to the
+    # next heading and hid the trailing step's host marker (fail-open, PR #2383 review 5894587994).
+    body = body.replace("\n", newline)
+    text = kp.without_evidence(body)
+    assert "None open." not in text and "open Chrome on the MacBook" in text
+    assert kp.portable_reason(_args(body, title="sign in")) == "local marker"
+
+
 def test_the_same_action_outside_the_record_still_stays_home():
     body = BODY.replace("## Decided fix\n", "## Decided fix\nRun `hermes-hub tasks` to list every board.\n")
     assert coordination.required_labels(_args(body), POOLS) is None

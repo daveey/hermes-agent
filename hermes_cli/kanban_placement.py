@@ -650,8 +650,11 @@ _EXISTING_WORK = re.compile(
 
 def without_evidence(body: str) -> str:
     """``body`` minus every complete fenced evidence block (:data:`EVIDENCE_OPEN` ... :data:`EVIDENCE_CLOSE`) and
-    every "Existing work checked" section (:data:`_EXISTING_WORK`)."""
-    return _EXISTING_WORK.sub("", _EVIDENCE.sub("", body or ""))
+    every "Existing work checked" section (:data:`_EXISTING_WORK`). Line endings are normalised to ``\\n`` first:
+    a CRLF blank line is ``\\r``, which the record's blank-line test never matched, so the record ran on and hid
+    later host markers (fail-open, PR #2383 review). Callers only scan the result."""
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    return _EXISTING_WORK.sub("", _EVIDENCE.sub("", text))
 
 
 def structural_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
