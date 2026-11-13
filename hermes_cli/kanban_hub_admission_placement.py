@@ -237,9 +237,12 @@ def stored_owner_verdict(entry, title, body):
         return None  # the judge was unavailable at relay time: retry, never a permanent answer
     sha = audit["skill_sha"] if isinstance(audit.get("skill_sha"), str) else ""
     result = {k: audit.get(k) for k in ("admit", "need", "evidence", "why")}
-    if judge.validated(result, {"title": title, "body": body}, None, sha) is None:
-        return {**asdict(judge.Verdict(why="relay-time admission verdict failed validation (need or verbatim "
-                                           "evidence)", skill_sha=sha)),
+    fields = {"title": title, "body": body}
+    if judge.validated(result, fields, None, sha) is None:
+        detail = (judge.SELF_ASSERTION_WHY if judge.pin_quoting_admit(result, fields, None)
+                  else "need or verbatim evidence")
+        return {**asdict(judge.Verdict(why=f"relay-time admission verdict failed validation ({detail})",
+                                       skill_sha=sha)),
                 "entry": audit.get("entry") or "capability_owner", "capability": audit.get("capability"),
                 "invalid": True}
     return audit

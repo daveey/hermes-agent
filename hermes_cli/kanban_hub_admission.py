@@ -6,6 +6,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -63,6 +64,39 @@ def self_assertion(quote):
     return any(marker in text for marker in SELF_ASSERTIONS)
 
 
+_PIN = re.compile("|".join(r"\s+".join(map(re.escape, m.split())) for m in SELF_ASSERTIONS), re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n[ \t]*\n")
+
+
+def _pin_spans(text):
+    """``[start, end)`` of every pin line in ``text``: the marker's whole line, run on to the sentence's end
+    when the producer wrapped it (never past a blank line)."""
+    spans = []
+    for match in _PIN.finditer(text):
+        start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        stop = _SENTENCE_END.search(text, match.end())
+        spans.append((start, max(len(text) if line_end < 0 else line_end, stop.end() if stop else len(text))))
+    return spans
+
+
+def quotes_pin_sentence(quote, fields, hub_reason):
+    """True when ``quote`` is a producer's pin sentence: it names the marker, or every verbatim occurrence of it
+    in the card overlaps a pin line (the rationale tail alone, review t_01a1d24d488edbd9). [daveey]"""
+    if self_assertion(quote):
+        return True
+    quote = str(quote or "")
+    found = False
+    for item in (fields.get("title") or "", fields.get("body") or "", hub_reason or ""):
+        spans, at = _pin_spans(item), item.find(quote) if quote else -1
+        while at >= 0:
+            found = True
+            if not any(at < end and at + len(quote) > start for start, end in spans):
+                return False
+            at = item.find(quote, at + 1)
+    return found
+
+
 def validated(result, fields, hub_reason, sha):
     """The Verdict for a well-formed, evidence-checked ``{admit, need, evidence, why}`` dict, else None."""
     if not isinstance(result, dict) or set(result) != {"admit", "need", "evidence", "why"}:
@@ -78,7 +112,7 @@ def validated(result, fields, hub_reason, sha):
         inputs = (fields.get("title") or "", fields.get("body") or "", hub_reason or "")
         if need is None or not quote.strip() or not any(quote in item for item in inputs):
             return None
-        if self_assertion(quote):
+        if quotes_pin_sentence(quote, fields, hub_reason):
             return None  # a producer's self-assertion: invalid as admission evidence (deny), cached copies too
     return Verdict(**result, skill_sha=sha)
 
@@ -91,9 +125,15 @@ def _parse(text, fields, hub_reason, sha):
     verdict = validated(result, fields, hub_reason, sha)
     if verdict is not None:
         return verdict
-    if isinstance(result, dict) and result.get("admit") is True and self_assertion(result.get("evidence")):
+    if pin_quoting_admit(result, fields, hub_reason):
         return Verdict(why=f"invalid admission verdict: {SELF_ASSERTION_WHY}", skill_sha=sha)
     return Verdict(why="invalid admission verdict", skill_sha=sha)
+
+
+def pin_quoting_admit(result, fields, hub_reason):
+    """True when ``result`` admits on a producer's pin sentence (so a deny can carry SELF_ASSERTION_WHY)."""
+    return (isinstance(result, dict) and result.get("admit") is True and isinstance(result.get("evidence"), str)
+            and quotes_pin_sentence(result["evidence"], fields, hub_reason))
 
 
 def _cache(key, verdict=None):

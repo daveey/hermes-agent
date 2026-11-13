@@ -269,3 +269,48 @@ def test_other_evidence_on_a_card_with_a_pin_sentence_still_admits(judge):
     reply.update(admit=True, need="hub_chrome", evidence="using the hub's signed-in Chrome", why="Browser.")
     body = f"{ESCAPE_PIN}\nRead the billing page using the hub's signed-in Chrome."
     assert gate.admit({"title": "billing", "body": body}).admit is True
+
+
+ESCAPE_TAIL = "it reads this gateway's own logs, state files and coach store, which a worker node does not have."
+WRAPPED_PIN = ("Pinned to the machine that filed it: the bsky cron output and its counters live\n"
+               "only on this machine.\n## Do this\n1. Read the counters.")
+
+
+@pytest.mark.parametrize("body, quote", [
+    (ESCAPE_BODY, ESCAPE_TAIL),                       # rationale tail alone (review t_01a1d24d488edbd9)
+    (ESCAPE_BODY, "which a worker node does not have"),
+    (WRAPPED_PIN, "only on this machine."),            # the wrapped continuation of a pin sentence
+], ids=["tail", "tail-fragment", "wrapped"])
+def test_quote_from_inside_a_pin_line_is_not_admission_evidence(judge, body, quote):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_live_process", evidence=quote, why="Needs local state.")
+    verdict = gate.admit({"title": ESCAPE_TITLE, "body": body})
+    assert verdict.admit is False and gate.SELF_ASSERTION_WHY in verdict.why
+
+
+def test_quote_also_found_outside_the_pin_line_is_judged_on_that_text(judge):
+    gate, _, reply, _ = judge
+    reply.update(admit=True, need="hub_chrome", evidence="signed-in Chrome", why="Browser.")
+    body = ("Pinned to the gateway that filed it: it needs the signed-in Chrome.\n\n"
+            "## Do this\n1. Renew the dashboard session in the hub's signed-in Chrome.")
+    assert gate.admit({"title": "renew", "body": body}).admit is True
+
+
+@pytest.mark.parametrize("pin, quote", [
+    (ESCAPE_PIN, ESCAPE_PIN),
+    (ESCAPE_PIN, ESCAPE_TAIL),
+    ("Pinned to the machine that filed it: the cron output is on this machine.",
+     "Pinned to the machine that filed it: the cron output is on this machine."),
+], ids=["gateway", "gateway-tail", "machine"])
+def test_stored_owner_verdict_quoting_a_pin_sentence_is_a_final_deny_with_its_why(judge, pin, quote):
+    gate, _, _, _ = judge
+    from hermes_cli.kanban_hub_admission_placement import stored_owner_verdict
+    entry = {"hub_admission": {"admit": True, "need": "hub_live_process", "evidence": quote, "why": "x",
+                               "skill_sha": "abc"}}
+    verdict = stored_owner_verdict(entry, "Capability owner", f"Owner card.\n{pin}\n\nRead the logs.")
+    assert verdict is not None
+    assert verdict["admit"] is False and verdict["invalid"] is True
+    assert gate.SELF_ASSERTION_WHY in verdict["why"]
+    if quote == ESCAPE_TAIL:  # without a pin line around it the same text is ordinary evidence
+        moved = stored_owner_verdict(entry, "Capability owner", f"Owner card.\n{quote}")
+        assert moved is not None and moved["admit"] is True
