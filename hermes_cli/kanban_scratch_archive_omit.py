@@ -31,8 +31,11 @@ The omission is recorded in the manifest (payload version 2, which an older
 ``verify_complete_archive`` refuses rather than misreads) and as
 ``objects_omitted: "remote"`` plus the restore steps in the repo's meta.json.
 Restore needs the remote: :func:`restore` clones it bare, fetches the recorded
-tips, moves those packs in, indexes the supplement pack, writes the omitted
-worktree files from their blobs and checks every ref resolves.
+tips (one at a time once a batch is refused), moves those packs in, indexes
+the supplement pack, writes the omitted worktree files from their blobs and
+checks every ref resolves. A remote-tracking ref whose branch the remote has
+since deleted and gc'd is dropped and reported (``dropped_remote_refs``);
+any other ref that does not resolve refuses the restore.
 """
 from __future__ import annotations
 
@@ -58,6 +61,8 @@ RESTORE_STEPS = [
     "commits.bundle is a subset)",
     "write each manifest 'omitted' file from `git cat-file blob <git_oid>`, checking sha256, "
     "then its mode and mtime",
+    "a recorded remote-tracking tip the remote no longer serves (branch deleted and gc'd there) is "
+    "dropped from refs/remotes/ and reported; HEAD, refs/heads/*, tags and refs/stash must resolve",
     "(kanban_scratch_archive_omit.restore does all of this)",
 ]
 
@@ -445,8 +450,45 @@ def _restore_env(url_map: dict[str, str]) -> dict:
     return env
 
 
-def _fetch_remote_objects(repo: Path, record: dict, env: dict) -> None:
-    """Clone each recorded remote bare into a temp dir, fetch the recorded tips, move its objects into *repo*."""
+# What a remote says when it no longer has (or will not serve) an object id we ask for.
+_GONE = re.compile(r"not our ref|unadvertised object|no such remote ref|couldn't find remote ref")
+
+
+def _fetch_tips(bare: Path, env: dict, oids: list[str]) -> set[str]:
+    """Fetch *oids* into *bare*; return the ones the remote no longer serves.
+
+    One fetch for all of them first (the common case). If the remote refuses
+    it, fetch each tip alone, so a single branch deleted and gc'd on the remote
+    since the archive does not stop the others. Only a refusal naming the
+    object as gone counts; any other failure (network, auth) still raises.
+    """
+    from hermes_cli.kanban_scratch_archive import ArchiveRefused
+    fetch = ("-c", "fetch.unpackLimit=1", "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin")
+    try:
+        _run_git(bare, env, *fetch, *oids)
+        return set()
+    except ArchiveRefused as exc:
+        if len(oids) == 1:
+            if _GONE.search(str(exc)):
+                return set(oids)
+            raise
+    gone = set()
+    for oid in oids:
+        try:
+            _run_git(bare, env, *fetch, oid)
+        except ArchiveRefused as exc:
+            if not _GONE.search(str(exc)):
+                raise
+            gone.add(oid)
+    return gone
+
+
+def _fetch_remote_objects(repo: Path, record: dict, env: dict) -> set[str]:
+    """Clone each recorded remote bare into a temp dir, fetch the recorded tips, move its objects into *repo*.
+
+    Returns the recorded tips no remote serves any more (:func:`_check_refs` drops their remote-tracking refs).
+    """
+    gone: set[str] = set()
     for name, url in sorted(record["remotes"].items()):
         oids = sorted({o for r, o in record["remote_refs"].items() if r.startswith(f"refs/remotes/{name}/")})
         filt = _run_git(repo, env, "config", "--default", "", "--get", f"remote.{name}.partialclonefilter")
@@ -464,9 +506,9 @@ def _fetch_remote_objects(repo: Path, record: dict, env: dict) -> None:
                        if not have.returncode and not line.endswith(b" missing")}
             oids = [o for o in oids if o not in present]
             if oids:
-                _run_git(bare, env, "-c", "fetch.unpackLimit=1", "fetch", "-q", "--no-tags",
-                         "--no-write-fetch-head", "origin", *oids)
+                gone |= _fetch_tips(bare, env, oids)
             _move_objects(bare / "objects", repo / ".git" / "objects")
+    return gone
 
 
 def _move_objects(src: Path, dest: Path) -> None:
@@ -522,6 +564,8 @@ def restore(archive: Path, target: Path, *, url_map: Optional[dict[str, str]] = 
     *url_map* rewrites a recorded remote URL (e.g. to a mirror). Needs the
     network for archives with omitted objects; refs are checked to resolve
     and, outside partial clones, ``git fsck --connectivity-only`` must pass.
+    The returned manifest's ``dropped_remote_refs`` ({git_dir: {ref: oid}})
+    lists remote-tracking refs dropped because the remote no longer has them.
     """
     from hermes_cli.kanban_scratch_archive import PAYLOAD_DIR, _TREE, verify_complete_archive
     manifest = verify_complete_archive(archive)
@@ -532,10 +576,11 @@ def restore(archive: Path, target: Path, *, url_map: Optional[dict[str, str]] = 
         # tar_filter's path rules, but the archived mode (it would clear group/other write bits).
         tar.extractall(target, filter=lambda m, dest: tarfile.tar_filter(m, dest).replace(mode=m.mode, deep=False))
     env = _restore_env(url_map or {})
+    gone: list[set[str]] = []
     for record in manifest.get("omitted_repos", []):
         git_dir = record["git_dir"]
         repo = target / git_dir[: -len("/.git")] if git_dir != ".git" else target
-        _fetch_remote_objects(repo, record, env)
+        gone.append(_fetch_remote_objects(repo, record, env))
         if record["pack"] is not None:
             with open(base / record["pack"], "rb") as fh:
                 proc = subprocess.run(["git", "-C", str(repo), "index-pack", "--stdin"], stdin=fh,
@@ -543,22 +588,48 @@ def restore(archive: Path, target: Path, *, url_map: Optional[dict[str, str]] = 
             if proc.returncode:
                 raise RuntimeError(f"index-pack of {record['pack']} failed: {proc.stderr[:300]!r}")
     _write_omitted(target, manifest, env)
-    for record in manifest.get("omitted_repos", []):
+    dropped: dict[str, dict[str, str]] = {}
+    for record, lost in zip(manifest.get("omitted_repos", []), gone):
         git_dir = record["git_dir"]
         repo = target / git_dir[: -len("/.git")] if git_dir != ".git" else target
-        _check_refs(repo, env)
+        refs = _check_refs(repo, env, lost)
+        if refs:
+            dropped[git_dir] = refs
+    manifest["dropped_remote_refs"] = dropped
     return manifest
 
 
-def _check_refs(repo: Path, env: dict) -> None:
+def _check_refs(repo: Path, env: dict, gone: frozenset[str] | set[str] = frozenset()) -> dict[str, str]:
+    """Check every restored ref (and HEAD) resolves; returns the remote-tracking refs dropped instead.
+
+    A ``refs/remotes/*`` ref whose recorded tip the remote no longer serves
+    (*gone*: its branch was deleted and gc'd there after the archive) is
+    deleted and reported, not fatal: it only mirrored the remote. HEAD, local
+    branches, tags, ``refs/stash`` and any other ref must resolve, else the
+    restore is refused.
+    """
     from hermes_cli.kanban_scratch_archive import ArchiveRefused
-    refs = _run_git(repo, env, "for-each-ref", "--format=%(objectname)").split()
+    listed = _run_git(repo, env, "for-each-ref", "--format=%(objectname) %(refname)").decode().splitlines()
+    refs = [tuple(line.split(" ", 1)) for line in listed if line.strip()]
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", "HEAD"], capture_output=True,
+                          env=dict(env, GIT_NO_LAZY_FETCH="1"), timeout=60, check=False, stdin=subprocess.DEVNULL)
+    if not head.returncode and _HEX40.fullmatch(head.stdout.strip()):
+        refs.append((head.stdout.strip().decode(), "HEAD"))
     if not refs:
-        return
-    proc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check"], input=b"\n".join(refs) + b"\n",
+        return {}
+    proc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check"],
+                          input="".join(f"{oid}\n" for oid, _ in refs).encode(),
                           capture_output=True, env=dict(env, GIT_NO_LAZY_FETCH="1"), timeout=600, check=False)
-    if proc.returncode or b" missing" in proc.stdout:
-        raise ArchiveRefused(f"restored refs in {repo} do not all resolve")
+    lines = proc.stdout.splitlines()
+    if proc.returncode or len(lines) != len(refs):
+        raise ArchiveRefused(f"restored refs in {repo} could not be checked")
+    missing = {ref: oid for (oid, ref), line in zip(refs, lines) if line.endswith(b" missing")}
+    fatal = sorted(ref for ref, oid in missing.items() if not (ref.startswith("refs/remotes/") and oid in gone))
+    if fatal:
+        raise ArchiveRefused(f"restored refs in {repo} do not all resolve: {', '.join(fatal[:10])}")
+    for ref in sorted(missing):  # --no-deref: refs/remotes/<r>/HEAD is a symref to a dropped branch
+        _run_git(repo, env, "update-ref", "--no-deref", "-d", ref)
     partial = _run_git(repo, env, "config", "--default", "", "--get", "extensions.partialclone").strip()
     if not partial:
         _run_git(repo, env, "fsck", "--connectivity-only", "--no-dangling", "--no-progress")
+    return missing

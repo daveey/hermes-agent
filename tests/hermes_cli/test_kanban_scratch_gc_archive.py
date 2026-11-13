@@ -1377,3 +1377,88 @@ def test_remote_probe_ignores_the_scratch_repos_own_config(board, tmp_path):
     assert _gc() == 0
     manifest = sa.verify_complete_archive(_archive(tid))
     assert manifest["version"] == 2 and not marker.exists()
+
+
+def _tracked_side_branch(tmp_path, repo, bare, *, local_branch=False):
+    """Push a `side` branch to the remote from another clone and fetch it as refs/remotes/origin/side."""
+    other = tmp_path / "side-pusher"
+    _run("clone", "-q", str(bare), str(other))
+    _run("checkout", "-q", "-b", "side", cwd=other)
+    (other / "side.txt").write_text("only on side\n")
+    _run("add", "side.txt", cwd=other)
+    _run("commit", "-q", "-m", "side", cwd=other)
+    _run("push", "-q", "origin", "side", cwd=other)
+    side = _run("rev-parse", "HEAD", cwd=other)
+    _run("fetch", "-q", str(bare), "+refs/heads/side:refs/remotes/origin/side", cwd=repo)
+    if local_branch:
+        _run("branch", "-q", "side", "refs/remotes/origin/side", cwd=repo)
+    return side
+
+
+def _delete_on_remote(bare, branch):
+    _run("branch", "-q", "-D", branch, cwd=bare)
+    _run("reflog", "expire", "--expire=now", "--all", cwd=bare)
+    _run("gc", "-q", "--prune=now", cwd=bare)
+
+
+def test_restore_drops_a_tracked_branch_the_remote_deleted_after_archiving(board, tmp_path):
+    # Review nit on PR #2354: one tracked branch deleted+gc'd on the remote aborted the whole restore.
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_scratch_archive_omit as om
+    tid, path, repo, bare = _network_clone_task(tmp_path)
+    side = _tracked_side_branch(tmp_path, repo, bare)
+    _local_work(repo)
+    head = _run("rev-parse", "HEAD", cwd=repo)
+    stash = _run("rev-parse", "refs/stash", cwd=repo)
+    before = _tree_state(path)
+    assert _gc() == 0
+    archive = _archive(tid)
+    [record] = sa.verify_complete_archive(archive)["omitted_repos"]
+    assert record["remote_refs"]["refs/remotes/origin/side"] == side
+    _delete_on_remote(bare, "side")
+
+    target = tmp_path / "restored"
+    manifest = om.restore(archive, target, url_map={FAKE_URL: str(bare)})
+    assert manifest["dropped_remote_refs"] == {"repo/.git": {"refs/remotes/origin/side": side}}
+    restored = target / "repo"
+    assert _run("rev-parse", "HEAD", cwd=restored) == head
+    assert _run("rev-parse", "refs/stash", cwd=restored) == stash
+    assert not _run("for-each-ref", "refs/remotes/origin/side", cwd=restored)
+    _run("fsck", "--connectivity-only", "--no-dangling", cwd=restored)
+    before.pop("repo/.git/refs/remotes/origin/side", None)
+    after = _tree_state(target)
+    after.pop("repo/.git/packed-refs", None)
+    before.pop("repo/.git/packed-refs", None)
+    assert {k: v for k, v in after.items() if "/logs/" not in k} == {
+        k: v for k, v in before.items() if "/logs/" not in k}
+
+
+def test_restore_still_refuses_when_a_local_branch_needs_the_deleted_tip(board, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_scratch_archive_omit as om
+    tid, _path, repo, bare = _network_clone_task(tmp_path)
+    _tracked_side_branch(tmp_path, repo, bare, local_branch=True)
+    assert _gc() == 0
+    _delete_on_remote(bare, "side")
+    with pytest.raises(sa.ArchiveRefused, match="refs/heads/side"):
+        om.restore(_archive(tid), tmp_path / "restored", url_map={FAKE_URL: str(bare)})
+
+
+def test_restore_failure_that_is_not_a_missing_object_still_raises(board, tmp_path, monkeypatch):
+    # Only "the remote no longer has this oid" drops a ref; a network/auth failure keeps refusing.
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_scratch_archive_omit as om
+    tid, _path, repo, bare = _network_clone_task(tmp_path)
+    _tracked_side_branch(tmp_path, repo, bare)
+    assert _gc() == 0
+    real = om._run_git
+
+    def flaky(repo_arg, env, *args):
+        if "fetch" in args:
+            raise sa.ArchiveRefused("git fetch failed: fatal: unable to access: Could not resolve host")
+        return real(repo_arg, env, *args)
+
+    monkeypatch.setattr(om, "_run_git", flaky)
+    _run("update-ref", "-d", "refs/heads/side", cwd=bare)  # forces a fetch of the side tip
+    with pytest.raises(sa.ArchiveRefused, match="Could not resolve host"):
+        om.restore(_archive(tid), tmp_path / "restored", url_map={FAKE_URL: str(bare)})
