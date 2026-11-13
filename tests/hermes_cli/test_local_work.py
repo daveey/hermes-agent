@@ -69,6 +69,32 @@ def test_canonical_home_follows_a_symlink_before_dotdot_like_hermes_home_key(tmp
     assert module.canonical_home(os.path.join("x", "link", "..", "h")) == expected
 
 
+def test_canonical_home_expands_tilde_before_joining_the_cwd(tmp_path, monkeypatch):
+    """``~/h`` names ``$HOME/h``, not ``<cwd>/~/h``: without expanduser the tilde spelling joined
+    onto the cwd and keyed differently from the absolute spelling of the same home."""
+    import hermes_cli.local_work as module
+    monkeypatch.setattr(module, "_HOME_KEYS", {})
+    user_home, elsewhere = tmp_path / "user", tmp_path / "elsewhere"
+    (user_home / "h").mkdir(parents=True)
+    (elsewhere / "~" / "h").mkdir(parents=True)  # the wrong answer exists too
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.chdir(elsewhere)
+    expected = os.path.normcase(os.path.realpath(user_home / "h"))
+    assert module.canonical_home("~/h") == expected
+    assert module.canonical_home("~/h") == module.canonical_home(str(user_home / "h"))
+
+
+def test_canonical_home_resolves_a_relative_bytes_spelling_against_the_cwd(tmp_path, monkeypatch):
+    """A relative bytes spelling is joined onto ``os.getcwdb()`` and keeps a bytes key; joining
+    it onto the str ``os.getcwd()`` raised TypeError."""
+    import hermes_cli.local_work as module
+    monkeypatch.setattr(module, "_HOME_KEYS", {})
+    (tmp_path / "a" / "rel").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "a")
+    expected = os.path.normcase(os.fsencode(os.path.realpath(tmp_path / "a" / "rel")))
+    assert module.canonical_home(b"rel") == expected
+
+
 def test_install_is_explicit_and_snapshot_is_detached(tmp_path, monkeypatch):
     import hermes_cli.local_work as module
     monkeypatch.setattr(module, "_registry", None)
