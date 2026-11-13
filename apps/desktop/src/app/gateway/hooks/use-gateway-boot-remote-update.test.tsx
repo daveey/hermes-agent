@@ -201,3 +201,44 @@ it('a remote update that pauses SSH startup past the wait cap still ends in the 
   expect($desktopBoot.get().error).toMatch(/SSH startup is paused/)
   expect($desktopBoot.get().running).toBe(false)
 })
+
+// PR #2112 review: the cap is hard. A bounded retry after the cap (main's snapshot says retryable, or the stage is
+// 'dialing') that meets the same refusal must not open a fresh 30 min wait: the overlay shows within the cap plus
+// the bounded retry budget (5 attempts, at most 2 + 4 + 8 + 15 + 15 s of backoff).
+it('a retryable boot snapshot past the wait cap spends only the bounded retry budget, then shows the overlay', async () => {
+  const desktop = fakeDesktop()
+  desktop.getConnection = vi.fn(async () => {
+    throw remoteUpdatePaused()
+  })
+  desktop.getBootProgress = vi.fn(async () => ({
+    error: null,
+    fakeMode: false,
+    message: '',
+    phase: 'init',
+    progress: 0,
+    retryable: true,
+    running: true,
+    timestamp: Date.now()
+  }))
+  ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+
+  render(<Harness />)
+  await flushAsync()
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(REMOTE_UPDATE_WAIT_MAX_MS)
+  })
+  expect($desktopBoot.get().error).toBeNull()
+
+  const callsAtCap = desktop.getConnection.mock.calls.length
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000 + 44_000 + 1_000)
+  })
+
+  // The bounded branch did retry after the cap (its 5 attempts), and then boot failed instead of waiting again.
+  expect(desktop.getConnection.mock.calls.length - callsAtCap).toBeGreaterThanOrEqual(5)
+  expect(desktop.getBootProgress).toHaveBeenCalled()
+  expect($desktopBoot.get().error).toMatch(/SSH startup is paused/)
+  expect($desktopBoot.get().running).toBe(false)
+})

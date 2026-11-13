@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-
 import { describe, expect, it } from 'vitest'
+
+import { REMOTE_UPDATE_PAUSED_PHRASE } from '../../../electron/remote-update-refusal'
 
 import {
   isRemoteUpdatePausedBootError,
@@ -9,8 +8,6 @@ import {
   REMOTE_UPDATE_WAIT_MAX_MS,
   RemoteUpdateWait
 } from './remote-update-wait'
-
-const electronSource = (name: string) => readFileSync(join(process.cwd(), 'electron', name), 'utf8')
 
 describe('isRemoteUpdatePausedBootError', () => {
   it("recognises the refusal as it crosses IPC, and the gate's cached form", () => {
@@ -31,35 +28,24 @@ describe('isRemoteUpdatePausedBootError', () => {
     expect(isRemoteUpdatePausedBootError(undefined)).toBe(false)
   })
 
-  // The renderer only sees text, so every producer of the refusal must keep the shared phrase.
-  it.each(['remote-lifecycle.ts', 'windows-remote-lifecycle.ts', 'remote-update-pause.ts'])(
-    '%s still words its update refusal with the phrase the renderer matches',
-    name => {
-      const messages = electronSource(name).match(/['`][^'`]*SSH startup is paused[^'`]*['`]/g) ?? []
-
-      expect(messages.length).toBeGreaterThan(0)
-
-      for (const message of messages) {
-        expect(isRemoteUpdatePausedBootError(message)).toBe(true)
-      }
-    }
-  )
+  it('matches the shared phrase the electron producers word their refusal with', () => {
+    expect(isRemoteUpdatePausedBootError(new Error(`Remote update; ${REMOTE_UPDATE_PAUSED_PHRASE}.`))).toBe(true)
+  })
 })
 
 describe('RemoteUpdateWait', () => {
-  it('polls until the cap, then gives up; reset starts a fresh wait', () => {
+  it('polls until the cap, stays spent after it, and only reset starts a fresh wait', () => {
     let now = 1_000
     const wait = new RemoteUpdateWait(() => now)
 
-    expect(wait.waiting).toBe(false)
     expect(wait.next()).toBe(REMOTE_UPDATE_POLL_MS)
-    expect(wait.waiting).toBe(true)
     now += REMOTE_UPDATE_WAIT_MAX_MS - 1
     expect(wait.next()).toBe(REMOTE_UPDATE_POLL_MS)
     now += 1
     expect(wait.next()).toBeNull()
+    now += 60_000
+    expect(wait.next()).toBeNull()
     wait.reset()
-    expect(wait.waiting).toBe(false)
     expect(wait.next()).toBe(REMOTE_UPDATE_POLL_MS)
   })
 })

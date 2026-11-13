@@ -896,6 +896,7 @@ export function useGatewayBoot({
         clearLivenessReprobeTimer()
         livenessProbeFailures = 0
         bootRetryAttempt = 0
+        remoteUpdateWait.reset()
         resetReconnectBackoff()
         reauthNotified = false
         primaryReauthError = null
@@ -1768,7 +1769,8 @@ export function useGatewayBoot({
         if (!cancelled) {
           const message = err instanceof Error ? err.message : String(err)
           // [daveey] A remote's own update pauses SSH startup: poll past the bounded budget until it exits.
-          const updateDelay = isRemoteUpdatePausedBootError(err) ? remoteUpdateWait.next() : null
+          const updatePaused = isRemoteUpdatePausedBootError(err)
+          const updateDelay = updatePaused ? remoteUpdateWait.next() : null
 
           if (updateDelay !== null) {
             bootFailed = false
@@ -1782,7 +1784,10 @@ export function useGatewayBoot({
             return
           }
 
-          remoteUpdateWait.reset()
+          // Past the cap the wait stays spent, so the bounded retries below cannot restart a 30 min wait.
+          if (!updatePaused) {
+            remoteUpdateWait.reset()
+          }
 
           // Main's classification (#82679) still decides every failure it can
           // see. The one it cannot see is the renderer-owned WebSocket dial:

@@ -12,6 +12,8 @@
 //
 // Electron-free: main.ts wraps bootstrapSshConnection() (the one chokepoint every SSH dial goes through) in run().
 
+import { REMOTE_UPDATE_PAUSED_PHRASE } from './remote-update-refusal'
+
 export const UPDATE_PAUSE_BACKOFF_MS = [2_000, 5_000, 10_000, 20_000, 30_000]
 // Same steps as remote-prewarm's own backoff for a down host, so prewarm's schedule is unchanged by the gate.
 export const UNREACHABLE_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000]
@@ -189,7 +191,10 @@ export class RemoteUpdatePause {
       return error
     }
 
-    const error: any = new Error(state.error?.message || 'Remote Hermes update in progress; SSH startup is paused.')
+    const error: any = new Error(
+      state.error?.message || `Remote Hermes update in progress; ${REMOTE_UPDATE_PAUSED_PHRASE}.`
+    )
+
     error.kind = 'update-in-progress'
     error.code = 'remote-update-paused'
     error.retryAt = state.retryAt
