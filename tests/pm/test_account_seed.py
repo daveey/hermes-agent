@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import zipfile
 
@@ -338,6 +339,34 @@ def test_other_opt_out_values_keep_borrowing(tmp_path, monkeypatch, value):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "fresh"))
     monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", value)
     assert environments.account_home_root() == tmp_path / ".hermes"
+
+
+def _run_tests_seed_function() -> str:
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "run_tests.sh").read_text(encoding="utf-8")
+    store = script[script.index("_account_tool_store() {") :]
+    assert "  _account_seed_enabled || return 1\n" in store[: store.index("\n}\n")]
+    start = script.index("_account_seed_enabled() {")
+    return script[start : script.index("\n}\n", start) + 3]
+
+
+@pytest.mark.parametrize(
+    "value", ["", "1", "yes", "0", "off", "False", "NO", " no ", "\toff\n", "  0", "n o", "0x"]
+)
+def test_run_tests_opt_out_matches_pm(monkeypatch, value):
+    """scripts/run_tests.sh decides tool-store borrowing with the same opt-out pm uses.
+
+    Regression: its ``case`` skipped pm's whitespace strip, so ``' no '`` stopped pm borrowing
+    but not run_tests.sh's."""
+    from pm import environments
+
+    monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", value)
+    shell = subprocess.run(
+        ["bash", "-c", _run_tests_seed_function() + "_account_seed_enabled"],
+        env={"PATH": os.environ.get("PATH", ""), "HERMES_PM_ACCOUNT_SEED": value},
+        check=False,
+    )
+    assert shell.returncode in (0, 1)
+    assert (shell.returncode == 0) is environments.account_seed_enabled()
 
 
 # --- seed marker ------------------------------------------------------------------------------

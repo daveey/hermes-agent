@@ -496,7 +496,10 @@ def uv_cache_dir() -> Path:
 
 # One line per lock whose seed this cache holds. Homes on different locks share one cache (a
 # borrowing home uses the account's, ``uv_cache_path``); a single-value marker flipped between
-# them and made each re-run its payload merge after the other.
+# them and made each re-run its payload merge after the other. The marker is a hint, not an exact
+# record: its read-modify-write takes no lock, so two homes on different locks writing at once can
+# drop one line, and an older Hermes sharing the cache (single-value marker) rewrites it as one line.
+# Either only costs an idempotent re-merge of that lock's payload on its next call.
 _SEED_MARKER_LOCKS = 8
 
 

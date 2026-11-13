@@ -53,4 +53,7 @@ bytes of an account inode.
 `HERMES_PM_ACCOUNT_SEED=0` turns borrowing off. CI sets it (`setup-pm`, whose `actions/cache`
 save/restore and `--exact-lock` prune act on the uv cache path), and so should a primary home kept
 outside `~/.hermes` beside a stale `~/.hermes`: it would otherwise share that home's uv cache and
-compile bytecode on first import instead of eagerly.
+compile bytecode on first import instead of eagerly. It is an environment variable, not a config
+key (root AGENTS.md otherwise rejects new non-secret `HERMES_*` variables), because it is
+per-process, CI sets it before any home or config exists, and `scripts/run_tests.sh` reads it
+(trimmed and case-folded the same way) to decide tool-store borrowing without starting Python.

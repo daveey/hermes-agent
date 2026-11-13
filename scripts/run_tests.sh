@@ -76,8 +76,7 @@ _has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/nul
 _account_tool_store() {
   local account py_minor
   [ -z "${HERMES_RUNTIME_DIR:-}" ] || return 1
-  # The same opt-out as pm.environments.account_seed_enabled (pm/AGENTS.md).
-  case "${HERMES_PM_ACCOUNT_SEED:-}" in 0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) return 1 ;; esac
+  _account_seed_enabled || return 1
   account="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
   [ -n "$account" ] || account="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')"
   [ -n "$account" ] && [ -d "$account" ] || return 1
@@ -90,6 +89,14 @@ _account_tool_store() {
   [ -f "$account/.hermes/tools/facts.json" ] && [ -w "$account/.hermes/tools" ] || return 1
   py_minor="$(_store_has_pins "$account/.hermes/tools")" || return 1
   printf '%s\n%s\n' "$account" "$py_minor"
+}
+# The same opt-out as pm.environments.account_seed_enabled (pm/AGENTS.md),
+# which strips surrounding whitespace and ignores case before matching.
+_account_seed_enabled() {
+  local value="${HERMES_PM_ACCOUNT_SEED:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  case "$value" in 0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) return 1 ;; esac
 }
 # Check, read-only for the store, that it already records this checkout's pins
 # (scripts/tool_store_pins.py says why and what counts, and the one write: the
