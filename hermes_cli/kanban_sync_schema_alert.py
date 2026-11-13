@@ -91,7 +91,7 @@ def cores(home: Optional[Path] = None) -> dict[str, Optional[str]]:
         if git:
             try:
                 out = subprocess.run([git, "-C", str(installed), "rev-parse", "origin/main"], capture_output=True,
-                                     text=True, timeout=10, check=False)
+                                     text=True, encoding="utf-8", errors="replace", timeout=10, check=False)
                 origin_main = out.stdout.strip() if out.returncode == 0 else None
             except (OSError, subprocess.SubprocessError):
                 origin_main = None

@@ -136,7 +136,7 @@ def _reference_schema() -> dict[str, frozenset[str]]:
             from hermes_cli import kanban_db as kb
             from hermes_cli import kanban_db_connect as kbc
             from hermes_cli.kanban_wake_episode import ensure_schema
-            mem = sqlite3.connect(":memory:", isolation_level=None)
+            mem = sqlite3.connect(":memory:", isolation_level=None)  # noqa: kanban-lockguard (in-memory reference schema, not a board)
             try:
                 mem.row_factory = sqlite3.Row
                 mem.executescript(kb.SCHEMA_SQL)
