@@ -6,7 +6,18 @@ the rev index, at a cost that does not grow with the board, so a reader that kee
 those tasks. A task id whose row is gone was deleted. Bookkeeping writes (claims, leases, heartbeats) do not mark: they
 do not bump the revision either (``BOOKKEEPING_COLUMNS``, ``UNREAD_EVENT_KINDS``).
 
-A cursor is trusted only when all of these hold in the reader's snapshot; otherwise the answer is ``FULL``:
+Writer precondition: do not use ``INSERT OR REPLACE`` (including SQLite's ``REPLACE INTO`` shorthand) on watched
+rows when a conflict can delete a row belonging to another task. With ``recursive_triggers`` off, SQLite silently
+deletes the conflicting row without firing its DELETE trigger. For example, replacing task a's comment uid with
+a comment for task b marks only b, although a lost a comment. The checks below do NOT detect that missing task and
+do NOT force ``FULL``. The same-task replacement test does not establish safety for a cross-task unique-key conflict.
+Use an ``ON CONFLICT DO UPDATE`` upsert instead: its UPDATE trigger marks both OLD and NEW task keys. A writer that
+must use REPLACE needs separately verified delete-trigger coverage or explicit full invalidation; a reader's pragma
+cannot enable another connection's delete triggers. Enabling recursive triggers globally also changes sync
+DELETE-trigger/outbox/tombstone behavior and is not part of this cursor's contract.
+
+Subject to that writer precondition, a cursor is trusted only when all of these hold in the reader's snapshot;
+otherwise the answer is ``FULL``:
 
 - the file carries every trigger of epoch >= 2 for the tables it watches, and the change table (``_covered``);
 - (a) ``MAX(kanban_task_change.rev) == kanban_activity_revision.revision``. An older writer's init replaces our
