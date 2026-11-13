@@ -77,9 +77,11 @@ def _tick(hub):
 
 # --- keep_reason: a portable fleet probe is not a hub-local wake_check ------------------------------------------
 
-def test_a_claim_deny_with_a_portable_fleet_probe_moves_to_the_worker_queue(gws, hub_judge):
+def test_a_claim_deny_with_a_portable_fleet_probe_moves_to_the_worker_queue(gws, hub_judge, monkeypatch):
     """The live t_01a184cee94603eb shape, with the default probe list: red on main (kept on the hub)."""
+    from tests.hermes_cli.test_kanban_hub_admission_claim import _no_board_promotion
     hub, worker, svc = gws
+    _no_board_promotion(monkeypatch)  # the claim screen's path; promotion applies the same keep reasons
     hub_judge.admit_next = False
     tid = _card(hub, wake_check=PROBE)
     _tick(hub)

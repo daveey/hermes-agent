@@ -350,6 +350,19 @@ class FakeHub:
             "board", None, hlc)
         return {"state": "assigned", "machine": candidates[0], "task_version": updated["version"]}
 
+    def reserve(self, board: str, *, task_id: str, expected_revision: int, candidates: list) -> dict:
+        """``POST /placement/reserve`` for a worker-first card, served with ``recover`` (a Board that has one has
+        both): assigns the first candidate at ``expected_revision`` without changing the row; off = 404."""
+        self._check()
+        if not self.svc.recover:
+            raise ksc.HubError(404, "not found")
+        self.svc.calls.append(("reserve", board, {"task_id": task_id, "candidates": candidates}))
+        row = self.svc.board(board)["rows"].get("tasks", {}).get(task_id)
+        if row is None or row["version"] != expected_revision or not candidates:
+            raise ksc.HubError(409, json.dumps({"error": "revision_conflict"}))
+        return {"state": "assigned", "machine": candidates[0], "reservation_id": f"r-{task_id}",
+                "expires_at": int(time.time()) + 60, "reason": "worker_capacity_reserved"}
+
     def ops(self, board: str, ops: list[dict]) -> dict:
         self._check()
         self.svc.calls.append(("ops", board, ops))

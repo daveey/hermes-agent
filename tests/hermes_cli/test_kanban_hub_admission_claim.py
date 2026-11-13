@@ -48,6 +48,16 @@ def _tick(hub):
     return hub.tick()
 
 
+@pytest.fixture(autouse=True)
+def _claim_screen_first(request, monkeypatch):
+    """These tests drive the claim screen, so the Board serves no promotion unless a test is about it.
+
+    Push-before-pull (t_01a1d36ddcea59fe) acks a hub-created card in the round's first push, and that round's feed
+    echo stamps ``created_on``, so the same round's reevaluate already promotes a portable legacy card through
+    placement recovery, before the tick's claim screen. The ``test_promotion_*`` cases cover that path."""
+    if "promotion" not in request.node.name:
+        _no_board_promotion(monkeypatch)
+
 def test_a_denied_pre_gate_hub_card_moves_to_the_worker_queue_and_is_not_claimed(gws, hub_judge):
     hub, worker, svc = gws
     hub_judge.admit_next = False
