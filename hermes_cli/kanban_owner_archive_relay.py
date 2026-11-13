@@ -229,7 +229,10 @@ def worker_archive(conn: sqlite3.Connection, tid: str, *,
             out.pop("task_id", None)
             return None, out
     from hermes_cli import kanban_foreign_card as kfc
-    kfc.check(conn, tid)  # [daveey] a card only in the Board replica: raise ForeignCardError naming its owner
+    if env_tid and kfc.owner_of(conn, tid)[0]:
+        from hermes_cli.kanban_creator_archive import forward as forward_creator
+        return forward_creator(conn, tid, env_tid, run_id_fn(env_tid))
+    kfc.check(conn, tid)  # Unscoped callers retain the foreign-card refusal.
     refusal, via = worker_archive_scope(conn, tid)
     if refusal:
         return refusal, None

@@ -35,7 +35,7 @@ from typing import Any, Iterator, Optional
 _log = logging.getLogger(__name__)
 
 OP = "operator"
-CARD_ACTIONS = ("comment", "move", "unblock")
+CARD_ACTIONS = ("comment", "move", "unblock", "creator_archive")
 LABEL_PUBLISH = "label_publish"  # names a machine, not a card (kanban_operator_labels)
 ACTIONS = (*CARD_ACTIONS, LABEL_PUBLISH)
 OWNER_ONLY = ("complete", "archive", "link", "unlink", "block", "edit", "assign", "delete", "reclaim")
@@ -54,7 +54,8 @@ MAX_PER_TICK = 5
 SCAN_BATCH = 500
 SKEW_S = 120
 AUTHOR = "kanban-operator-call"
-_FIELDS = {"comment": {"text"}, "move": {"runs_on", "reason"}, "unblock": {"reason"}}
+_FIELDS = {"comment": {"text"}, "move": {"runs_on", "reason"}, "unblock": {"reason"},
+           "creator_archive": {"reason"}}
 _MARK: dict = {}  # (live db path, board) -> replica event id scanned up to, this process
 _PERSISTED: dict = {}
 
@@ -321,6 +322,11 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         if row is None:
             return refuse("unknown_task", f"no card {target} in this gateway's Board replica")
         status, home = row["status"], row["created_on"]
+        if op["action"] == "creator_archive":
+            from hermes_cli.kanban_creator_archive import refusal
+            why = refusal(rep, target, requester)
+            if why:
+                return refuse("archive_scope", why)
         human = None
         if op["action"] == "unblock" and rep is not None:
             human = rep.execute("SELECT human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
@@ -330,7 +336,7 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         return refuse("no_home", f"{target} has no created_on; no gateway owns it")
     if home == _own_gateway(conn):
         return refuse("not_foreign", f"{target} was created on this gateway")
-    if status in ("done", "archived"):
+    if status in ("done", "archived") and op["action"] != "creator_archive":
         return refuse("terminal", f"{target} is {status}")
     if op["action"] == "move" and status == "running":
         return refuse("running", f"{target} is running; only its own run may move it (kanban_move)")
@@ -649,6 +655,9 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
     task = kb.get_task(conn, target)
     if task is None:
         return "refused", f"no such task {target}"
+    if action == "creator_archive":
+        from hermes_cli.kanban_creator_archive import apply
+        return apply(conn, payload, extra)
     if task.status in ("done", "archived"):
         return "refused", f"{target} is {task.status}"
     if action == "comment":

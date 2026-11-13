@@ -130,6 +130,9 @@ def sweep_stale_triage(
             continue
         if row["human_request"] or open_recovery_card(conn, row["id"]) or current_park(conn, row['id']):
             continue  # a human owns it, or its kernel recovery card is its producer
+        from hermes_cli.kanban_triage_cleanup import archive_requested_fixture
+        if archive_requested_fixture(conn, row["id"]):
+            continue
         recent = conn.execute(
             "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'triage_swept' AND created_at > ?",
             (row["id"], now - TRIAGE_SWEEP_CAP_WINDOW),
