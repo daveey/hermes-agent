@@ -298,6 +298,36 @@ def test_ephemeral_roots_never_cover_the_account(monkeypatch, tmp_path):
     assert not any(account.resolve().is_relative_to(root) for root in roots)
 
 
+def test_tmpfs_root_is_ephemeral(monkeypatch, tmp_path):
+    """/dev/shm is RAM-backed and boot-cleared: run-state-suite-local puts its shards' TMPDIR there."""
+    monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path / 'home' / '.hermes')
+    assert Path('/dev/shm').resolve() in inventory._ephemeral_roots()
+
+
+def test_board_removed_from_a_tmpfs_root_retires_like_tmp(monkeypatch, tmp_path):
+    """worker-1, 2026-11-13 16:09-16:26Z: a state-suite shard's board under /dev/shm/<run>/shard-5 stayed
+    registered after the run deleted it, and every claim on the host deferred worker_resources_unknown."""
+    account = tmp_path / 'account'
+    account.mkdir()
+    shm = tmp_path / 'shm'
+    monkeypatch.setattr(capacity, 'policy_root', lambda: account)
+    monkeypatch.setattr(inventory, 'TMPFS_ROOTS', (shm,))
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path / 'not-shm'))
+    shard = shm / 'state-suite-local-x' / 'shard-5' / 'tmpabc' / '.hermes'
+    shard.mkdir(parents=True)
+    _registered(shard / 'kanban.db')
+    record, = (account / 'worker-resources' / 'boards').glob('*.json')
+    shutil.rmtree(shm / 'state-suite-local-x')
+    assert inventory.paths() == []  # the census no longer refuses every claim
+    live = shm / 'live' / 'kanban.db'
+    live.parent.mkdir(parents=True)
+    _registered(live)  # the fenced path retires the collected record
+    assert not record.exists()
+    live.unlink()  # its directory survives: a moving board under the tmpfs root still refuses
+    with pytest.raises(FileNotFoundError):
+        inventory.paths()
+
+
 def test_pytest_never_registers_in_the_real_account_inventory(monkeypatch, tmp_path):
     """monkeypatch.undo() drops conftest's policy_root isolation; register must still refuse."""
     monkeypatch.setattr(hermes_constants, '_account_home', lambda: tmp_path)

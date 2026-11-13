@@ -4,7 +4,7 @@ Registration happens under account admission.lock before the final gate. Records
 survive process exits: a parked dispatcher is not evidence its running rows or
 jobs vanished. Missing registered DBs are unknown, never silently free capacity,
 except a board whose whole directory was removed from an ephemeral root (system
-temp, the account scratch dir): that workspace was garbage-collected, so its
+temp, /dev/shm, the account scratch dir): that workspace was garbage-collected, so its
 record retires instead of holding every claim on the host forever.
 
 Reads (``paths()``, called by ``refusal()`` and the never-mutating
@@ -59,10 +59,17 @@ def _refuse_test_registration() -> None:
                            f'inventory ({real}); is worker_compute_capacity.policy_root isolated?')
 
 
+# RAM-backed, boot-cleared temp roots. No real board lives there: state's run-state-suite-local runs its shards
+# with TMPDIR on /dev/shm, and a shard board left registered there held every claim on worker-1 for 17 min
+# (2026-11-13, t_01a1d5bf526e1344).
+TMPFS_ROOTS: tuple[Path, ...] = (Path('/dev/shm'),)
+
+
 def _ephemeral_roots() -> list[Path]:
     account = capacity.policy_root().resolve()
     # no-tmp: ok — matches boards OTHER processes made in system temp (pytest tmp_path), not our own scratch
-    roots = {Path('/tmp'), Path('/var/tmp'), Path(tempfile.gettempdir()), account / 'cache' / 'scratch'}
+    roots = {Path('/tmp'), Path('/var/tmp'), Path(tempfile.gettempdir()), account / 'cache' / 'scratch',
+             *TMPFS_ROOTS}
     # An odd TMPDIR (a home or /) must never make the account's own boards ephemeral.
     return [root for root in (r.resolve() for r in roots) if not account.is_relative_to(root)]
 
