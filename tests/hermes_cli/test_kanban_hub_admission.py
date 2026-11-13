@@ -975,7 +975,7 @@ def test_simultaneous_claimers_at_6_of_7_start_at_most_one(board, monkeypatch):
         with closing(sqlite3.connect(f"file:{home / 'kanban.db'}?mode=ro", uri=True, timeout=5)) as db:
             return 6 + db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
     monkeypatch.setattr(mm, "active_card_runs", active)
-    locked(monkeypatch, fake_sample(10.0, check=lambda: time.sleep(0.2)))  # health: allow HX013 -- stands in for the ~1 s sample held under the lock
+    locked(monkeypatch, fake_sample(10.0, check=lambda: time.sleep(0.2)))  # health: allow HX013 -- widens the locked census-to-commit window
     tasks = [task(conn, title=f"t{i}") for i in range(4)]
 
     def go(t):
