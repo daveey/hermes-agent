@@ -15,7 +15,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.delegation_context import is_dispatcher_owned_worker_context
 from agent.interrupt_control import interrupted_during_api_call_reason
-from agent.turn_failure_copy import exit_reason_failure, stamp_failure
+from agent.turn_failure_copy import PARTIAL_FAILED_TURN_NOTICE, exit_reason_failure, stamp_failure
 from agent.context_compressor import _DB_PERSISTED_MARKER
 from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
@@ -712,6 +712,46 @@ def _mirror_turn_to_memory(
             )
 
 
+def _silent_tool_tail(agent, final_response, interrupted, messages) -> bool:
+    """The turn left the loop on a raw ``tool`` row with no reply and no streamed text."""
+    return bool(
+        not final_response
+        and not interrupted
+        and messages
+        and isinstance(messages[-1], dict)
+        and messages[-1].get("role") == "tool"
+        and not (getattr(agent, "_current_streamed_assistant_text", "") or "").strip()
+    )
+
+
+def _close_failed_tool_tail(agent, messages, failed, turn_exit_reason, logger) -> bool:
+    """Close the tool tail of a turn that already failed (``failed``, or an exit reason that
+    fails the turn, e.g. ``session_persistence_failed`` when the tool result could not be
+    saved) with that reason's own explanation; return False for a turn that had not failed.
+    Relabelling such a turn ``pending_tool_result`` would hide the real cause behind "send
+    continue", which cannot help (gateway-a8b8d01aa4)."""
+    verdict = exit_reason_failure(turn_exit_reason)
+    if not failed and not (verdict is not None and verdict.fails_turn):
+        return False
+    logger.warning(
+        "finalize_turn: tool tail on failed turn %r kept its reason (not pending_tool_result)",
+        turn_exit_reason,
+    )
+    text = ""
+    try:
+        if agent._turn_completion_explainer_enabled():
+            text = agent._format_turn_completion_explanation(
+                turn_exit_reason, getattr(agent, "_last_persistence_error_cause", None),
+                db_path=getattr(getattr(agent, "_session_db", None), "db_path", None),
+                model=str(getattr(agent, "model", "") or ""),
+            )
+    except Exception:
+        logger.warning("turn-completion explainer failed for %r", turn_exit_reason, exc_info=True)
+    # The tool already ran, so the fallback is the partial-failure notice.
+    append_message(messages, {"role": "assistant", "content": text or PARTIAL_FAILED_TURN_NOTICE})
+    return True
+
+
 def finalize_turn(
     agent, *, final_response, api_call_count, interrupted, failed, messages, conversation_history,
     effective_task_id, turn_id, user_message, original_user_message, _should_review_memory,
@@ -748,13 +788,11 @@ def finalize_turn(
     # exit reason, fail the turn, and synthesize the visible close so the tail close in
     # ``_persist_step`` persists an assistant row. A turn that already streamed text is
     # left alone: ``_recover_final_from_stream`` owns that recovery (#95514).
+    # A turn that already failed is not a silent stop: ``_close_failed_tool_tail`` keeps its
+    # reason and closes the tail itself, so the relabel below never hides the real cause.
     if (
-        not final_response
-        and not interrupted
-        and messages
-        and isinstance(messages[-1], dict)
-        and messages[-1].get("role") == "tool"
-        and not (getattr(agent, "_current_streamed_assistant_text", "") or "").strip()
+        _silent_tool_tail(agent, final_response, interrupted, messages)
+        and not _close_failed_tool_tail(agent, messages, failed, _turn_exit_reason, logger)
     ):
         _turn_exit_reason = "pending_tool_result"
         failed = True

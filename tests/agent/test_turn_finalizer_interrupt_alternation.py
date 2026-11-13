@@ -263,3 +263,94 @@ def test_tool_tail_with_non_tool_last_role_is_untouched():
     )
     assert result["turn_exit_reason"] == "interrupted_by_user"  # unchanged passthrough
     assert result["failed"] is False
+
+
+def _finalize_failed(agent, messages, *, exit_reason, failed):
+    return finalize_turn(
+        agent, final_response="", api_call_count=1, interrupted=False, failed=failed,
+        messages=messages, conversation_history=None, effective_task_id="task-1",
+        turn_id="turn-1", user_message="summarize the log",
+        original_user_message="summarize the log", _should_review_memory=False,
+        _turn_exit_reason=exit_reason,
+    )
+
+
+def test_persistence_failed_tool_tail_keeps_its_reason():
+    """A tool result that could not be saved stops the turn as ``session_persistence_failed``
+    with the tool row last. The silent-stop close must not relabel it ``pending_tool_result``
+    ("send continue", which cannot work on a broken store): the reason and its cause survive and
+    the tool tail is still closed by a visible assistant row."""
+    agent = _StubAgent()
+    agent._last_persistence_error_cause = "corrupt"
+    messages = _pending_tool_result_tail()
+    result = _finalize_failed(agent, messages, exit_reason="session_persistence_failed", failed=True)
+
+    assert result["turn_exit_reason"] == "session_persistence_failed"
+    assert result["failure_reason"] == "session_persistence_failed:corrupt"
+    assert result["failed"] is True
+    assert result["completed"] is False
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"].strip()
+    assert "continue" not in messages[-1]["content"].lower()
+    _assert_no_tool_then_user(messages + [{"role": "user", "content": "are you done"}])
+
+
+def _turn_failing_exit_reasons():
+    from agent.turn_failure_copy import _EXIT_REASON_FAILURES
+
+    reasons = [prefix for prefix, _code, _retry, fails in _EXIT_REASON_FAILURES
+               if fails and prefix != "pending_tool_result"]
+    return [(r, False) for r in reasons] + [(r, True) for r in reasons] + [
+        ("session_persistence_failed", True)]
+
+
+def test_no_failed_turn_with_tool_tail_is_relabelled_pending():
+    """Detection guard: every exit reason that already fails the turn keeps its own reason
+    when the transcript ends on a tool row; ``pending_tool_result`` is only for turns that
+    stopped silently without any other failure. New failing reasons are covered automatically."""
+    for exit_reason, failed in _turn_failing_exit_reasons():
+        agent = _StubAgent()
+        messages = _pending_tool_result_tail()
+        result = _finalize_failed(agent, messages, exit_reason=exit_reason, failed=failed)
+        assert result["turn_exit_reason"] == exit_reason, (exit_reason, failed)
+        assert result["failed"] is True, (exit_reason, failed)
+        assert result.get("failure_reason") != "loop_error" or exit_reason in (
+            "repeated_outer_errors", "error_near_max_iterations"), (exit_reason, failed)
+        assert messages[-1]["role"] == "assistant", (exit_reason, failed)
+        assert messages[-1]["content"].strip(), (exit_reason, failed)
+
+
+def test_advisory_exit_reason_with_tool_tail_still_closes_as_pending():
+    """An advisory exit reason (``fails_turn`` False, e.g. ``empty_response_exhausted``) on a
+    turn that has not failed is still a silent stop: the tool tail keeps the
+    ``pending_tool_result`` close. Only reasons that fail the turn keep their own label."""
+    from agent.turn_failure_copy import _EXIT_REASON_FAILURES
+
+    advisory = [prefix for prefix, _code, _retry, fails in _EXIT_REASON_FAILURES if not fails]
+    assert advisory
+    for exit_reason in advisory:
+        agent = _StubAgent()
+        messages = _pending_tool_result_tail()
+        result = _finalize_failed(agent, messages, exit_reason=exit_reason, failed=False)
+        assert result["turn_exit_reason"] == "pending_tool_result", exit_reason
+        assert result["failed"] is True, exit_reason
+        assert messages[-1]["role"] == "assistant", exit_reason
+
+
+def test_persistence_failed_tool_tail_close_uses_the_storage_explainer():
+    """With the explainer on, the close row carries the storage failure's own explanation,
+    never the pending-tool "send continue" copy."""
+    from agent.turn_explainers import TurnExplainersMixin
+
+    agent = _StubAgent()
+    agent._turn_completion_explainer_enabled = lambda: True
+    agent._format_turn_completion_explanation = TurnExplainersMixin._format_turn_completion_explanation
+    agent._last_persistence_error_cause = "locked"
+    messages = _pending_tool_result_tail()
+    result = _finalize_failed(agent, messages, exit_reason="session_persistence_failed", failed=True)
+
+    expected = TurnExplainersMixin._format_turn_completion_explanation("session_persistence_failed", "locked")
+    pending = TurnExplainersMixin._format_turn_completion_explanation("pending_tool_result")
+    assert expected and messages[-1] == {**messages[-1], "role": "assistant", "content": expected}
+    assert messages[-1]["content"] != pending
+    assert result["failure_reason"] == "session_persistence_failed:locked"
