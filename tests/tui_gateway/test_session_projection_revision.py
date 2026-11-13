@@ -16,33 +16,35 @@ def store(tmp_path, monkeypatch):
     db.create_session("s", source="cli")
     server._sessions_db_sig_cache.clear()
     server._sessions_digest_at.clear()
+    from tui_gateway import watch_store
+    watch_store.reset()
     yield path, db
+    watch_store.reset()
     db.close()
 
 
 def test_settled_unchanged_tick_opens_no_database(store, monkeypatch):
-    import os
-
+    """Card J: an unchanged store costs one PRAGMA on its kept connection; no open, no projection read."""
     path, _db = store
-    # A settled timestamp is safe to reuse; recent writes retain the racy guard.
-    for candidate in (path, path.with_name(path.name + "-wal")):
-        if candidate.exists():
-            os.utime(candidate, ns=(1_000_000_000, 1_000_000_000))
     before = server._session_db_content_sig(path)
     connect = hermes_state._connect_tracked_db
-    calls = []
+    calls, statements = [], []
 
     def observed(*args, **kwargs):
         calls.append(args)
         return connect(*args, **kwargs)
 
     monkeypatch.setattr(hermes_state, "_connect_tracked_db", observed)
-    assert server._session_db_content_sig(path) == before
+    from tui_gateway import watch_store
+    with watch_store.observed(path) as (_key, conn):
+        conn.set_trace_callback(statements.append)
+    for _ in range(3):
+        assert server._session_db_content_sig(path) == before
     assert calls == []
+    assert statements == ["PRAGMA data_version"] * 3
     with sqlite3.connect(path) as writer:
         writer.execute("UPDATE sessions SET title='next tick'")
     assert server._session_db_content_sig(path) != before
-    assert calls
 
 
 def test_projection_reads_are_bounded_after_unrelated_commits(store, monkeypatch):
@@ -171,6 +173,8 @@ def test_failed_read_retries_without_throttle(store, monkeypatch):
     with sqlite3.connect(path) as writer:
         writer.execute("UPDATE sessions SET title='after failure'")
     connect = hermes_state._connect_tracked_db
+    from tui_gateway import watch_store
+    watch_store.reset()  # the kept reader is gone: the next pass must open one, and that open fails
 
     def locked(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")

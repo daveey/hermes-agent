@@ -311,12 +311,13 @@ def test_a_failed_read_keeps_a_good_answer_but_not_a_fallback(tmp_path, monkeypa
     would broadcast twice), but after a fallback a newer fallback replaces it, so an unreadable store that keeps
     moving still moves its signature (main's sessions digest rule)."""
     db = tmp_path / "state.db"
-    db.write_bytes(b"")
-    cache, mtimes, answers = {}, iter((1, 2, 3, 4)), iter(("good", RuntimeError("busy")))
+    with sqlite3.connect(db) as writer:
+        writer.execute("CREATE TABLE t(v)")
+    cache, mtimes, answers, reads = {}, iter((3, 4)), iter(("good", RuntimeError("busy"))), []
     monkeypatch.setattr(server, "_newest_mtime_ns", lambda _paths: next(mtimes))
-    monkeypatch.setattr(server, "_settled_mtime", lambda mtime: mtime)
 
-    def read(_conn, _mtime):
+    def read(_conn, _key):
+        reads.append(1)
         answer = next(answers, RuntimeError("busy"))
         if isinstance(answer, Exception):
             raise answer
@@ -325,9 +326,16 @@ def test_a_failed_read_keeps_a_good_answer_but_not_a_fallback(tmp_path, monkeypa
     def sig():
         return server._db_content_sig(db, cache, read, fallback=lambda mtime: ("fallback", mtime))
 
+    def commit():
+        with sqlite3.connect(db) as writer:
+            writer.execute("INSERT INTO t VALUES (1)")
+
     assert sig() == "good"
+    assert sig() == "good" and len(reads) == 1, "no commit: no read"
+    commit()
     assert sig() == "good", "a busy read after a good answer keeps it"
-    cache[str(db)] = (2, ("fallback", 2), True)
+    assert sig() == "good" and len(reads) == 3, "and leaves the key stale: the next pass reads again"
+    cache[str(db)] = (object(), ("fallback", 2), True)
     assert sig() == ("fallback", 3)
     assert sig() == ("fallback", 4), "after a fallback, a newer one replaces it"
 

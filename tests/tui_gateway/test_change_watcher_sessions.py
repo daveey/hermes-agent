@@ -99,10 +99,8 @@ def test_busy_db_is_not_redigested_more_often_than_min_interval(tmp_path, monkey
     clock = [1000.0]
     monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
     reads = []
-    import hermes_state
-    orig = hermes_state._connect_tracked_db
-    monkeypatch.setattr(hermes_state, "_connect_tracked_db",
-                        lambda *a, **k: (reads.append(1), orig(*a, **k))[1])
+    orig = server._session_digest
+    monkeypatch.setattr(server, "_session_digest", lambda *a, **k: (reads.append(1), orig(*a, **k))[1])
 
     before = server._sessions_sig()
     assert len(reads) == 1

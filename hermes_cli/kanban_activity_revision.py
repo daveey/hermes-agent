@@ -321,3 +321,11 @@ def _content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
 
 def is_revision(key: tuple) -> bool:
     return bool(key) and key[0] == "revision"
+
+
+def covered_revision(conn: sqlite3.Connection, path: Path, ident: tuple, tables: Iterable[str]) -> tuple | None:
+    """``(revision, schema_version)`` on ``conn`` when the counter covers every one of ``tables``, else None (an
+    older writer dropped the triggers: the caller reads the rows). ``ident`` is the file's (dev, ino); a matching
+    ``schema_version`` reuses the coverage proof, so the warm path is one statement. Must run outside a
+    transaction (a miss opens its own snapshot). Raises ``sqlite3.Error`` like any read."""
+    return _covered_read(conn, path, tuple(ident), tuple(tables))

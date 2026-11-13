@@ -67,14 +67,23 @@ def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
             _dir_tree_signature(os.path.join(root, name), sig, depth - 1)
 
 
-def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
+def _skills_scan_signature(dirs_to_scan, disabled, memo: Optional[dict] = None) -> tuple:
     """Stat-based change signature over every directory the catalog walks; platform is read via
-    ``agent.skill_utils.sys`` so test patches are honored."""
+    ``agent.skill_utils.sys`` so test patches are honored. ``memo`` (``{root: rows}``) shares one root's walk
+    between the scopes of one ``published_scopes_signature`` call: most scopes share their profile and external
+    roots, and walking each again per scope was most of the ``skills.changed`` watch (card J)."""
     from agent import skill_utils as _skill_utils
     platform = getattr(getattr(_skill_utils, "sys", None), "platform", "")
     sig: list = []
     for d in dirs_to_scan:
-        _dir_tree_signature(str(d), sig)
+        if memo is None:
+            _dir_tree_signature(str(d), sig)
+            continue
+        rows = memo.get(str(d))
+        if rows is None:
+            rows = memo[str(d)] = []
+            _dir_tree_signature(str(d), rows)
+        sig.extend(rows)
     return (tuple(sig), frozenset(disabled), platform)
 
 

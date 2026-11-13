@@ -62,22 +62,45 @@ def board_quiet(path, session_key):
 
 
 # [daveey] Board path -> (reader, data_version, events scanned up to, newest notify-kind event id, tui subs by
-# chat). data_version moves on every commit, and the main board commits ~40 times a minute with heartbeats,
-# claims and run bookkeeping that no chat poller reads, so a commit gate re-polled every board for every chat on
-# nearly every tick (t_01a1cee98b798343). What a chat's poll can claim is fixed by two inputs: the newest
+# chat, subscription key). data_version moves on every commit, and the main board commits ~40 times a minute with
+# heartbeats, claims and run bookkeeping that no chat poller reads, so a commit gate re-polled every board for every
+# chat on nearly every tick (t_01a1cee98b798343). What a chat's poll can claim is fixed by two inputs: the newest
 # deliverable-kind event id (AUTOINCREMENT, so any new one is above it) and that chat's own tui subscription
 # rows (cursor, in-flight mark). Read both once per commit for every chat in this process.
 _SIGS: dict[str, tuple] = {}
 _SIGS_LOCK = threading.Lock()
 _SIGS_MAX = 64
+_SUBS_SQL = ("SELECT chat_id, task_id, platform, thread_id, last_event_id, inflight_from "
+             "FROM kanban_notify_subs WHERE LOWER(platform) = 'tui' ORDER BY chat_id, task_id, platform, thread_id")
+# Card J (t_01a1d563324d7e8e): re-reading every tui subscription row (2.1k on the hub) on each of those commits was
+# most of the serve's kanban poll. The rows are keyed instead on the activity revision, whose triggers move on every
+# insert, delete and update of a read column of kanban_notify_subs (cursor, identity), plus the in-flight marks (the
+# one bookkeeping column read here; ``kanban_activity_revision.BOOKKEEPING_COLUMNS``), read in the rows' snapshot.
+_INFLIGHT_SQL = ("SELECT chat_id, task_id, platform, thread_id, inflight_from FROM kanban_notify_subs "
+                 "WHERE inflight_from IS NOT NULL AND LOWER(platform) = 'tui' "
+                 "ORDER BY chat_id, task_id, platform, thread_id")
 
 
-def _notify_content(conn, version, held):
+def _subs_revision(conn, path):
+    """``(dev, ino, revision, schema_version)`` when the activity counter covers ``kanban_notify_subs``, else None
+    (an older writer without the triggers: the rows are read on every commit, as before)."""
+    import os
+    from hermes_cli.kanban_activity_revision import covered_revision
+    st = os.stat(path)
+    revision = covered_revision(conn, Path(path), (st.st_dev, st.st_ino), ("kanban_notify_subs",))
+    return None if revision is None else (st.st_dev, st.st_ino, *revision)
+
+
+def _notify_content(conn, version, held, path=None):
     from tui_gateway.session_notifications import _KANBAN_NOTIFY_KINDS
     present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
                                           "('task_events', 'kanban_notify_subs')")}
     if len(present) != 2:
         return None  # not a board (yet): fall back to the commit revision
+    revision = None
+    if path is not None:
+        with contextlib.suppress(Exception):  # unknown coverage: read the rows
+            revision = _subs_revision(conn, path)  # before the snapshot: a commit in between only re-reads next time
     conn.execute("BEGIN")  # one snapshot for the event scan and the subscription rows
     try:
         top = int(conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0] or 0)
@@ -87,15 +110,17 @@ def _notify_content(conn, version, held):
             row = conn.execute(f"SELECT MAX(id) FROM task_events WHERE id > ? AND id <= ? AND kind IN ({marks})",
                                (start, top, *_KANBAN_NOTIFY_KINDS)).fetchone()
             newest = max(newest, int(row[0] or 0))
-        rows = conn.execute("SELECT chat_id, task_id, platform, thread_id, last_event_id, inflight_from "
-                            "FROM kanban_notify_subs WHERE LOWER(platform) = 'tui' "
-                            "ORDER BY chat_id, task_id, platform, thread_id").fetchall()
+        subs_key = None if revision is None else (revision, tuple(conn.execute(_INFLIGHT_SQL).fetchall()))
+        by_chat = held[4] if subs_key is not None and held is not None and held[5] == subs_key else None
+        rows = conn.execute(_SUBS_SQL).fetchall() if by_chat is None else ()
     finally:
         conn.execute("COMMIT")
-    by_chat: dict = {}
-    for row in rows:
-        by_chat.setdefault(row[0], []).append(tuple(row))
-    return conn, version, top, newest, {chat: tuple(subs) for chat, subs in by_chat.items()}
+    if by_chat is None:
+        grouped: dict = {}
+        for row in rows:
+            grouped.setdefault(row[0], []).append(tuple(row))
+        by_chat = {chat: tuple(subs) for chat, subs in grouped.items()}
+    return conn, version, top, newest, by_chat, subs_key
 
 
 def board_signature(path, chat_id=None):
@@ -111,7 +136,7 @@ def board_signature(path, chat_id=None):
         if held is not None and held[0] is not conn:
             held = None  # another reader (reopened, replaced file): its scan offsets prove nothing here
         if held is None or held[1] != version:
-            held = _notify_content(conn, version, held)
+            held = _notify_content(conn, version, held, path)
             if held is None:
                 return conn, version
             with _SIGS_LOCK:

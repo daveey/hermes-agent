@@ -5,6 +5,7 @@ rebound onto server.py's globals at install time (method_ctx.bind_module)."""
 from __future__ import annotations
 
 import itertools
+import os
 from pathlib import Path
 
 from .method_ctx import HandlerRegistry, bind_module
@@ -207,48 +208,62 @@ _MTIME_FALLBACK = "mtime-fallback"
 
 
 def _db_content_sig(db_path: Path, cache: dict, read, *, fallback=lambda mtime: None):
-    """``read(conn, mtime)`` over a read-only connection, cached behind the DB/WAL mtime so a watch pass
-    stays stat-only until another process commits. ``read`` returns ``(signature, is_fallback)``. A failed
-    read after a good answer keeps it and leaves the cached mtime stale so the next pass re-reads (answer ->
-    fallback -> answer would broadcast twice); otherwise the answer is ``fallback(mtime)``. Session stores
-    use :func:`_session_db_content_sig` (projection revision + digest throttle) instead. [daveey]"""
-    mtime = _newest_mtime_ns((db_path, db_path.with_name(f"{db_path.name}-wal")))
+    """``read(conn, key)`` over the store's kept read-only connection (``tui_gateway.watch_store``), cached behind
+    its commit key (file identity + ``PRAGMA data_version``) so a watch pass is one PRAGMA until a commit
+    publishes. Card J (t_01a1d563324d7e8e): reopening the store on every DB/WAL mtime move cost a schema parse and
+    a tracked open/close on nearly every 0.5 s pass. ``read`` returns ``(signature, is_fallback)``. A failed read
+    after a good answer keeps it and leaves the cached key stale so the next pass re-reads (answer -> fallback ->
+    answer would broadcast twice); otherwise the answer is ``fallback(DB/WAL mtime)``. Session stores use
+    :func:`_session_db_content_sig` (projection revision + digest throttle) instead. [daveey]"""
+    from tui_gateway import watch_store
     cache_key = str(db_path)
     cached = cache.get(cache_key)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
     if not db_path.exists():
-        cache[cache_key] = (mtime, None, True)
+        watch_store.forget(db_path)
+        cache[cache_key] = (_RACY_MTIME, None, True)
         return None
-    conn = None
     try:
-        from hermes_state import _connect_tracked_db
-        from hermes_state_holders import read_only_db_uri
-        conn = _connect_tracked_db(read_only_db_uri(db_path), tracking_path=db_path, uri=True, timeout=0.05)
-        signature, is_fallback = read(conn, mtime)
+        with watch_store.observed(db_path) as (key, conn):
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            signature, is_fallback = read(conn, key)
     except Exception:  # health: allow BLE001 -- any failed read (busy, locked, foreign schema) falls back like a busy one
         if cached is not None and not cached[2]:
             return cached[1]
-        signature, is_fallback = fallback(mtime), True
-    finally:
-        if conn is not None:
-            conn.close()
-    cache[cache_key] = (_settled_mtime(mtime), signature, is_fallback)
+        key = _RACY_MTIME  # never equal: the next pass reads again
+        signature, is_fallback = fallback(_newest_mtime_ns((db_path, db_path.with_name(f"{db_path.name}-wal")))), True
+    cache[cache_key] = (key, signature, is_fallback)
     return signature
+
+
+def _session_digest(conn, available: set, mtime) -> tuple:
+    """The legacy content digest of a store without the projection triggers (every session row)."""
+    import hashlib
+    fields = tuple(field for field in _SESSION_SIGNATURE_FIELDS if field in available)
+    if not fields:
+        # A state.db without a readable sessions table (foreign schema, legacy
+        # or transient file): keep the old mtime contract so any move still
+        # wakes the sidebar instead of silently never broadcasting.
+        return ("mtime-fallback", mtime)
+    order = " ORDER BY id" if "id" in available else ""
+    digest = hashlib.blake2b(digest_size=16)
+    for row in conn.execute(f"SELECT {', '.join(fields)} FROM sessions{order}"):
+        digest.update(repr(tuple(row)).encode("utf-8", "backslashreplace"))
+        digest.update(b"\0")
+    return (fields, digest.digest())
 
 
 def _session_db_content_sig(db_path: Path):
     """Read the transactional projection revision, or digest a legacy store.
 
     Upgraded stores use bounded schema/meta probes after writes, independent of
-    the legacy digest throttle. Unchanged stores need only data_version. The file
+    the legacy digest throttle. An unchanged store costs one ``PRAGMA data_version``
+    on its kept connection (``tui_gateway.watch_store``; card J). The file
     identity distinguishes replacements whose counters happen to be equal.
     Stores without the complete trigger capability retain the content fallback.
     """
-    from tui_gateway.kanban_replica_observer import fingerprint
+    from tui_gateway import watch_store
 
-    stamp = fingerprint(db_path)
-    mtime = _newest_mtime_ns((db_path, db_path.with_name(f"{db_path.name}-wal")))
     cache_key = str(db_path)
     cached = _sessions_db_sig_cache.get(cache_key)
     try:
@@ -256,6 +271,7 @@ def _session_db_content_sig(db_path: Path):
         identity = (stat.st_dev, stat.st_ino)
     except OSError:
         _sessions_db_sig_cache.pop(cache_key, None)
+        watch_store.forget(db_path)
         return None
     previous_identity = _sessions_db_identity.get(cache_key)
     if previous_identity != identity:
@@ -263,79 +279,41 @@ def _session_db_content_sig(db_path: Path):
         _sessions_db_sig_cache.pop(cache_key, None)
     _sessions_db_identity[cache_key] = identity
     revision_cached = cached is not None and cached[1] is not None and cached[1][0] == "revision"
-
-    if stamp is not None and cached is not None and cached[0] == stamp:
-        return cached[1]
     now = time.monotonic()
-    if (not revision_cached and cached is not None and cached[1] is not None
-            and now - _sessions_digest_at.get(cache_key, -SESSION_DIGEST_MIN_S) < SESSION_DIGEST_MIN_S):
-        return cached[1]
-    if not db_path.exists():
-        _sessions_db_sig_cache[cache_key] = (mtime, None)
-
-        return None
-
-    conn = None
+    key = None
     try:
-        import hashlib
-        from hermes_state import _connect_tracked_db
-        from hermes_state_holders import read_only_db_uri
-
-        conn = _connect_tracked_db(read_only_db_uri(db_path), tracking_path=db_path,
-                                   uri=True, timeout=0.05)
-        from hermes_state_projection import session_projection_revision
-        conn.execute("BEGIN")
-        revision = session_projection_revision(conn)
-        if revision is not None:
-            signature = ("revision", identity, revision)
-            stable = stamp if stamp is not None and fingerprint(db_path) == stamp else None
-            _sessions_db_sig_cache[cache_key] = (stable, signature)
-            return signature
-        available = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-        fields = tuple(field for field in _SESSION_SIGNATURE_FIELDS if field in available)
-        if not fields:
-            # A state.db without a readable sessions table (foreign schema, legacy
-            # or transient file): keep the old mtime contract so any move still
-            # wakes the sidebar instead of silently never broadcasting.
-            signature = ("mtime-fallback", mtime)
-        else:
-            order = " ORDER BY id" if "id" in available else ""
-            rows = conn.execute(f"SELECT {', '.join(fields)} FROM sessions{order}")
-            digest = hashlib.blake2b(digest_size=16)
-            for row in rows:
-                digest.update(repr(tuple(row)).encode("utf-8", "backslashreplace"))
-                digest.update(b"\0")
-            signature = (fields, digest.digest())
-    except Exception:
-        # A busy/locked read after a good one keeps the last digest and leaves the cached mtime
+        with watch_store.observed(db_path) as (key, conn):
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            if (not revision_cached and cached is not None and cached[1] is not None
+                    and now - _sessions_digest_at.get(cache_key, -SESSION_DIGEST_MIN_S) < SESSION_DIGEST_MIN_S):
+                return cached[1]  # cached key stays stale: the change is still seen on the trailing edge
+            from hermes_state_projection import session_projection_revision
+            conn.execute("BEGIN")
+            try:
+                revision = session_projection_revision(conn)
+                if revision is not None:
+                    signature = ("revision", identity, revision)
+                    _sessions_db_sig_cache[cache_key] = (key, signature)
+                    return signature
+                available = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+                signature = _session_digest(conn, available, key)
+            finally:
+                conn.execute("COMMIT")
+    except Exception:  # health: allow BLE001 -- busy/locked/foreign store: fall back like a busy read
+        # A busy/locked read after a good one keeps the last digest and leaves the cached key
         # stale so the next pass re-reads: digest -> mtime -> digest would broadcast twice.
         if cached is not None and cached[1] is not None and cached[1][0] != "mtime-fallback":
             return cached[1]
-        signature = ("mtime-fallback", mtime)
-    finally:
-        if conn is not None:
-            conn.close()
-
-    stable = stamp if stamp is not None and fingerprint(db_path) == stamp else None
-    _sessions_db_sig_cache[cache_key] = (stable, signature)
+        key = None
+        signature = ("mtime-fallback", _newest_mtime_ns((db_path, db_path.with_name(f"{db_path.name}-wal"))))
+    _sessions_db_sig_cache[cache_key] = (key, signature)
     _sessions_digest_at[cache_key] = now
-
     return signature
 
 
-# Filesystem timestamps come from a coarse clock (~4 ms ticks; whole seconds on some filesystems) and
-# SQLite commits in place, so a commit landing in the tick of a read leaves the DB/WAL mtime unchanged.
-# A digest read while the mtime is that fresh must not become a cache hit ("racily clean", as in git's
-# index): it is cached under a key no mtime equals, so the next tick re-reads the rows.
+# A cache key no commit key equals: a store that was missing or failed to read is read again next pass.
 _RACY_MTIME = object()
-
-
-def _settled_mtime(mtime):
-    """``mtime`` when it is old enough to trust as a cache key, else a never-matching sentinel."""
-    from utils import mtime_is_racy  # function-local: bodies are rebound onto server.py's globals
-    if mtime is None or mtime_is_racy(mtime):
-        return _RACY_MTIME
-    return mtime
 
 
 def _watched_homes() -> tuple[Path, ...]:
@@ -446,6 +424,27 @@ def _room_rows_sig(conn, _mtime) -> dict:
 
 
 _room_store_sig_cache: dict[str, tuple[object, dict | None, bool]] = {}
+# str(path) -> ((dev, ino), Path.resolve()). Resolving every store each 0.5 s pass was an lstat per path component
+# (a fifth of the groups watch on the hub, card J); one stat proves the path still names the same file.
+_resolved_paths: dict[str, tuple[tuple[int, int], Path]] = {}
+
+
+def _resolved(path) -> Path:
+    """``Path(path).resolve()``, reused while ``path`` still names the same file (dev, ino)."""
+    key = str(path)
+    try:
+        st = os.stat(key)
+    except OSError:
+        return Path(key).resolve()
+    ident = (st.st_dev, st.st_ino)
+    hit = _resolved_paths.get(key)
+    if hit is not None and hit[0] == ident:
+        return hit[1]
+    real = Path(key).resolve()
+    if len(_resolved_paths) >= 256:
+        _resolved_paths.clear()
+    _resolved_paths[key] = (ident, real)
+    return real
 
 
 def _groups_sig() -> dict:
@@ -458,7 +457,7 @@ def _groups_sig() -> dict:
     from gateway.hosted_rooms import default_db_path
     from tui_gateway.hosted_room_service import live_room_services
     services = live_room_services()
-    stores = {Path(path).resolve(): None for path in (
+    stores = {_resolved(path): None for path in (
         *(root / "state.db" for root in _watched_homes()), default_db_path(),
         *(service.db_path for service in services))}
     rooms: dict[str, list] = {}
@@ -495,7 +494,7 @@ def _wake_room_drivers() -> None:
     _groups_woken_heads.update(heads)
     for service in live_room_services():
         with contextlib.suppress(Exception):  # health: allow BLE001 -- a stopped service must not stop the watcher
-            if str(Path(service.db_path).resolve()) in moved:
+            if str(_resolved(service.db_path)) in moved:
                 service.wakeup()
 
 
