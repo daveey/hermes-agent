@@ -2,6 +2,7 @@
 (``inventory_pending``, gateway/session_local_inventory.reply_info). The classic CLI printed the
 gateway-judged startup lines (``unknown_toolsets``, ``tool_availability_warnings``) only from that
 reply, so under load they never showed: they now print when the late ``session.info`` settles it."""
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -65,6 +66,26 @@ def test_late_inventory_prints_the_startup_notices_once(pending_store, monkeypat
     assert db.connection.state("local-new").info_listeners == []
     assert db.switch_listeners == []  # the settled wait leaves no switch hook behind either
     assert len(printed) == 3, printed
+
+
+def test_two_settled_frames_reaching_the_wait_print_the_notices_once(pending_store, monkeypatch):
+    """Two settled ``session.info`` deliveries can both reach the wait: each ``apply_event`` snapshots
+    the listener list before it calls it, so a republish whose delivery snapshotted the list before the
+    first one removed the listener still calls it. The second call must print nothing and not raise."""
+    db, _client = pending_store
+    _host, printed = _launch(monkeypatch, db)
+    state = db.connection.state("local-new")
+    assert len(state.info_listeners) == 1
+    waiting = state.info_listeners[0]  # what a second delivery's snapshot of the list holds
+
+    async def deliver_twice():
+        state.apply_event("session.info", dict(LATE))  # the first settled frame: prints, ends the wait
+        waiting(dict(LATE))  # the second delivery, from a snapshot taken before the removal
+
+    asyncio.run_coroutine_threadsafe(deliver_twice(), db.connection.loop).result(10)
+    assert len(printed) == 3, printed
+    assert "gone_plugin" in printed[0] and printed[1:] == ["", "⚠ web: set FIRECRAWL_API_KEY"], printed
+    assert state.info_listeners == [] and db.switch_listeners == []
 
 
 def _settle_after_switch(db, client):
