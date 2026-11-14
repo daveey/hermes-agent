@@ -168,6 +168,27 @@ def test_a_moved_claim_books_nothing(board):
     assert _results(conn, context) == []
 
 
+@pytest.mark.parametrize(('sql', 'key'), [
+    ("UPDATE tasks SET claim_lock='moved' WHERE id=?", 'task_id'),
+    ('UPDATE tasks SET current_run_id=NULL WHERE id=?', 'task_id'),
+    ("UPDATE task_runs SET status='closed' WHERE id=?", 'run_id'),
+    ("UPDATE tasks SET status='ready' WHERE id=?", 'task_id'),
+    ("DELETE FROM task_events WHERE run_id=? AND kind='spawned'", 'run_id'),
+], ids=['task_claim_moved', 'task_run_moved', 'run_not_running', 'task_not_running', 'missing_spawn_witness'])
+def test_inconsistent_or_unwitnessed_submitter_books_nothing(board, sql, key):
+    """Break one fence at a time: changing the caller's claim also breaks the run-row fence."""
+    from hermes_cli.kanban_worker_log import record_submitter_owner_restart
+
+    conn, context = board
+    kbd._set_worker_pid(conn, context['task_id'], os.getpid())
+    with kb.write_txn(conn):
+        changed = conn.execute(sql, (context[key],))
+        assert changed.rowcount == 1
+        recorded = record_submitter_owner_restart(conn, context, os.getpid(), _SILENT)
+    assert _results(conn, context) == []
+    assert recorded is False
+
+
 def test_receipt_store_failure_keeps_the_exit(monkeypatch, tmp_path, capsys):
     from hermes_cli import kanban_worker_client as client
     from hermes_cli import kanban_worker_log
