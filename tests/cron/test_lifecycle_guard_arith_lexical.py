@@ -27,6 +27,20 @@ SHAPES = [
     r"(( ')' )); a[$(echo b[\$\(bash SCRIPT\)])]=1; echo \'",
     "(( ')' ))\n" r"a[$(echo b[\$\(bash SCRIPT\)])]=1; echo \'",
 ]
+# Bash 3.2 (macOS /bin/bash, as on the mini's CI runner) keeps a single-quoted
+# indexed-array subscript literal and fails its arithmetic before any
+# substitution runs; Bash 5 runs the substitution. The guard refuses the shape
+# on every version (fail-closed); only the execution proof depends on it.
+LITERAL_IN_BASH3 = {"a['$(bash SCRIPT)']=1"}
+
+
+def _bash_major(bash):
+    probe = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", "echo ${BASH_VERSINFO[0]}"],
+        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+        encoding="utf-8", timeout=10, check=True,
+    )
+    return int(probe.stdout.strip())
 
 
 @pytest.mark.platforms("posix")
@@ -55,7 +69,13 @@ def test_executed_arithmetic_substitutions_are_sinks(tmp_path, shape):
         encoding="utf-8", timeout=10, check=False,
     )
     # Invalid arithmetic can error only AFTER the command substitution has run.
-    assert marker.exists(), (result.returncode, result.stderr)
+    if shape in LITERAL_IN_BASH3 and _bash_major(bash) < 4:
+        # Pin Bash 3.2's literal subscript too, so a change either way shows.
+        assert not marker.exists(), (result.returncode, result.stderr)
+        assert result.returncode != 0 and "operand expected" in result.stderr, (
+            result.returncode, result.stderr)
+    else:
+        assert marker.exists(), (result.returncode, result.stderr)
     assert substitution_in_arithmetic(command, date_exempt=True)
     assert output_reaches_shell(command)
     script.write_text("# padding\n" * 150000, encoding="utf-8")
