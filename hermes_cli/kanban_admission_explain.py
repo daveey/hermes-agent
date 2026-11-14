@@ -16,19 +16,26 @@ def snapshot(conn) -> dict:
     from hermes_cli import kanban_admission_score as score
     from hermes_cli import kanban_queue_position as qp
 
-    scored = pools.score_enabled()
-    out = {"scored": scored, "pools": None}
+    from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
+
+    out = {"scored": True, "pools": None}
+    combined = []
     for lane in LANES:
         rows = pools.lane_rows(conn, lane)
-        # Off the opted-in hub the score is display-only: default weights, never a config read that could refuse.
-        parts = {row["id"]: p.as_dict() for row, p in score.rank(conn, rows, weights=None if scored else {})}
+        # All dispatchers use the same configured scoring policy.
+        parts = {row["id"]: p.as_dict() for row, p in score.rank(conn, rows)}
         details = {r["id"]: r for r in conn.execute(
             "SELECT id, title, priority, admission_class FROM tasks WHERE status=?", (lane,))}
         out[lane] = [{"id": row["id"], "title": details[row["id"]]["title"],
                       "priority": details[row["id"]]["priority"],
                       "admission_class": details[row["id"]]["admission_class"] or "normal",
                       "score": parts[row["id"]]} for row in rows]
-    if scored:
+        if lane == "ready" or review_dispatch_enabled():
+            combined.extend(rows)
+    by_id = {row["id"]: dict(row, lane=lane) for lane in LANES for row in out[lane]}
+    out["dispatch_order"] = [dict(by_id[row["id"]], score=parts.as_dict())
+                             for row, parts in score.rank(conn, combined)]
+    if pools.score_enabled():
         _running, limit = qp._running_and_limit(conn, None)
         out["pools"] = pools.queue_fields(limit, "normal").get("admission_pools")
     return out
@@ -51,11 +58,17 @@ def _explain(conn, snap, task_id) -> list[str]:
     ids = [row["id"] for row in lane or ()]
     if lane is None or task_id not in ids:
         return [f"{task_id}: not in a ready or review lane (status {task.status})"]
+    lane_index = ids.index(task_id)
+    row = lane[lane_index]
+    combined = snap["dispatch_order"]
+    ids = [candidate["id"] for candidate in combined]
+    if task_id not in ids:
+        return [f"{task_id}: review dispatch disabled", explain(row["score"])]
     index = ids.index(task_id)
-    row = lane[index]
-    lines = [f"{task_id}: {task.status} lane position {index + 1}/{len(ids)} (class {row['admission_class']})"]
-    if not snap["scored"]:
-        lines.append("hub admission score not enabled here: plain priority order")
+    lines = [f"{task_id}: combined position {index + 1}/{len(ids)} "
+             f"({task.status} lane position {lane_index + 1}/{len(lane)}; class {row['admission_class']})",
+             "advisory score order; placement, holds and capacity may exclude candidates"]
+
     lines.append(explain(row["score"]))
     if snap["pools"]:
         lines.append(_pools_line(snap["pools"]))
@@ -81,12 +94,10 @@ def cmd_queue(args: argparse.Namespace) -> int:
             return 1 if lines[0].startswith("no such task") else 0
     if _json_out(args, snap):
         return 0
-    print("hub admission score order" if snap["scored"] else "plain priority order (hub admission not enabled)")
+    print("admission score order (combined lanes; eligibility and capacity still apply)")
     if snap["pools"]:
         print(_pools_line(snap["pools"]))
-    for lane in LANES:
-        print(f"{lane}:")
-        for index, row in enumerate(snap[lane], 1):
-            print(f"  {index:3d}. {row['id']}  {row['admission_class']:8s}  "
-                  f"{row['score']['total']:g}  {row['title']}")
+    for index, row in enumerate(snap["dispatch_order"], 1):
+        print(f"  {index:3d}. {row['id']}  {row['lane']:6s}  {row['admission_class']:8s}  "
+              f"{row['score']['total']:g}  {row['title']}")
     return 0

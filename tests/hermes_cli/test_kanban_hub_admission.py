@@ -148,8 +148,9 @@ def test_queue_note_reports_pools_and_marked_lane_order(board, monkeypatch):
     kb.edit_task(conn, active, admission_class="urgent")
     assert kb.claim_task(conn, active)
     ordinary = task(conn, title="ordinary waiting")
-    kb.edit_task(conn, ordinary, priority=1000)
+    kb.edit_task(conn, ordinary, priority=100)
     marked = task(conn, title="marked waiting")
+    # Shared admission score order: capacity class (500) outranks priority 100; no marked-first partition.
     kb.edit_task(conn, marked, admission_class="capacity", admission_frees="frees: runner slots")
     monkeypatch.setattr(qp, "_running_and_limit", lambda *a: (2, 7))
     place = qp.read(conn, kb.get_task(conn, marked))
@@ -174,12 +175,14 @@ def test_queue_pool_details_do_not_change_legacy_workers(board, monkeypatch, ena
         with (home / "config.yaml").open("a") as config:
             config.write(f"  admission:\n    priority_slots: {slots}\n")
     ordinary = task(conn)
-    kb.edit_task(conn, ordinary, priority=1000)
+    kb.edit_task(conn, ordinary, priority=100)
     marked = task(conn)
     kb.edit_task(conn, marked, admission_class="urgent")
     monkeypatch.setattr(qp, "_running_and_limit", lambda *a: (0, 7))
+    # Admission score order is shared by every board; urgent class (1000) outranks priority 100.
     place = qp.read(conn, kb.get_task(conn, marked))
-    assert place["ahead"] == 1
+    assert place["ahead"] == 0
+    assert qp.read(conn, kb.get_task(conn, ordinary))["ahead"] == 1
     assert "admission_pools" not in place
 
 
@@ -362,8 +365,9 @@ def test_dispatch_budget_reaches_extra_pool_at_regular_cap(board, monkeypatch, p
 
 
 @pytest.mark.parametrize("review", [False, True])
-def test_dispatch_marked_candidate_precedes_normal_in_same_lane(
-    board, monkeypatch, all_assignees_spawnable, review,
+@pytest.mark.parametrize("normal_priority,marked_first", [(100, True), (1000, False)])
+def test_dispatch_follows_shared_score_for_marked_and_normal_candidates(
+    board, monkeypatch, all_assignees_spawnable, review, normal_priority, marked_first,
 ):
     from hermes_cli import kanban_db_dispatch as dispatch
     conn, home = board
@@ -375,7 +379,7 @@ def test_dispatch_marked_candidate_precedes_normal_in_same_lane(
     monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
     normal = task(conn, review=review, title="higher numeric priority")
-    kb.edit_task(conn, normal, priority=1000)
+    kb.edit_task(conn, normal, priority=normal_priority)
     marked = task(conn, review=review, title="restore capacity")
     kb.edit_task(conn, marked, admission_class="capacity", admission_frees="frees: worker slots")
     spawned = []
@@ -384,17 +388,20 @@ def test_dispatch_marked_candidate_precedes_normal_in_same_lane(
         spawned.append(candidate.id)
 
     result = dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=1, max_in_progress=7)
-    assert spawned == [marked], result
-    assert kb.get_task(conn, normal).status == ("review" if review else "ready")
-    receipt = conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (marked,)).fetchone()
-    assert receipt[0] == "priority"
+    # Capacity class adds 500: it beats priority 100 but not priority 1000 (equal ages, no marked-first partition).
+    first, other = (marked, normal) if marked_first else (normal, marked)
+    assert spawned == [first], result
+    assert kb.get_task(conn, other).status == ("review" if review else "ready")
+    receipt = conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (first,)).fetchone()
+    assert receipt[0] == ("priority" if marked_first else "regular")
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_replica_waiter_ranking_cannot_undo_marked_lane_order(board, monkeypatch, all_assignees_spawnable, enabled):
-    """A remote waiter donating priority to a normal row reorders within a class, never across marked-first."""
+def test_waiter_donated_priority_outranks_marked_class_in_shared_score(
+    board, monkeypatch, all_assignees_spawnable, enabled,
+):
+    """A waiter donating priority to a normal row lifts its score past a capacity-class row (no marked-first)."""
     from hermes_cli import kanban_db_dispatch as dispatch
-    from hermes_cli import kanban_dispatch_priority as donation
     conn, home = board
     configure(home, limit=50 if enabled else None, cap=7)
     if enabled:
@@ -404,21 +411,21 @@ def test_replica_waiter_ranking_cannot_undo_marked_lane_order(board, monkeypatch
         locked(monkeypatch, fake_sample(10))
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
     marked = task(conn, title="restore capacity")
-    kb.edit_task(conn, marked, admission_class="urgent")
+    kb.edit_task(conn, marked, admission_class="capacity", admission_frees="frees: worker slots")
     donated = task(conn, title="remote waiter donates")
-    monkeypatch.setattr(donation, "_order_with_remote_waiters",
-                        lambda c, rows: sorted(rows, key=lambda r: r["id"] != donated))
+    kb.create_task(conn, title="urgent waiter", assignee="default", priority=900, parents=[donated])
     spawned = []
 
     def spawn(candidate, workspace, board=None):
         spawned.append(candidate.id)
 
     dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=1, max_in_progress=7)
-    assert spawned == ([marked] if enabled else [donated])
+    # donated: 900 + unblock 25 > marked: 0 + class 500.
+    assert spawned == [donated]
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_dispatch_pool_order_keeps_worker_priority(board, monkeypatch, all_assignees_spawnable, enabled):
+def test_dispatch_pool_order_uses_shared_score(board, monkeypatch, all_assignees_spawnable, enabled):
     from hermes_cli import kanban_db_dispatch as dispatch
     conn, home = board
     configure(home, limit=None, cap=7)
@@ -429,7 +436,7 @@ def test_dispatch_pool_order_keeps_worker_priority(board, monkeypatch, all_assig
     high = task(conn, title="high normal")
     kb.edit_task(conn, high, priority=1000)
     marked = task(conn, title="marked low")
-    kb.edit_task(conn, marked, admission_class="urgent")
+    kb.edit_task(conn, marked, admission_class="capacity", admission_frees="frees: worker slots")
     spawned = []
 
     def spawn(candidate, workspace, board=None):
@@ -1090,8 +1097,8 @@ def test_breakdown_sums_every_component_with_default_weights(board):
     (row, parts), = score.rank(conn, rows(conn, tid), now_ms=now * 1000)
     assert row["id"] == tid
     assert (parts.effective_priority, parts.class_rank, parts.descendants, parts.age_buckets, parts.failures) == \
-        (300, 1, 3, 3, 1)
-    assert parts.total == 300 + 500 + 25 * 3 + 25 * 3 - 100
+        (300, 1, 3, 35, 1)
+    assert parts.total == 300 + 500 + 25 * 3 + 25 * 35 - 100
 
 
 def test_capacity_card_outranks_higher_priority_normal_card(board):
@@ -1117,16 +1124,16 @@ def test_descendants_raise_score_and_are_capped(board):
 def test_aging_lifts_starved_card_within_bound(board):
     conn, _home = board
     now = 1_800_000_000
-    starved = ready(conn, "starved", priority=0, created_at=now - 10 * 3600)
+    starved = ready(conn, "starved", priority=0, created_at=now - 3600)
     fresh = ready(conn, "fresh", priority=1000, created_at=now)
     (_row, parts), = score.rank(conn, rows(conn, starved), now_ms=now * 1000)
     assert parts.age_buckets == 60
-    # 60 buckets * 25 = 1500 > the 1000 priority cap: ten hours lift any card past fresh capped priority.
+    # One hour adds 1500 points, above fresh capped priority.
     assert order(conn, now, fresh, starved) == [starved, fresh]
-    # The bound: aging never exceeds 60 buckets, so an older card gains nothing more.
+    # Age keeps growing rather than saturating.
     older = ready(conn, "older", priority=0, created_at=now - 100 * 3600)
     (_row, parts), = score.rank(conn, rows(conn, older), now_ms=now * 1000)
-    assert parts.age_buckets == 60
+    assert parts.age_buckets == 6000
 
 
 def test_age_counts_current_ready_interval_not_card_age(board):
@@ -1137,7 +1144,7 @@ def test_age_counts_current_ready_interval_not_card_age(board):
         kb._append_event(conn, tid, "promoted", {})
         conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind='promoted'", (now - 25 * 60, tid))
     (_row, parts), = score.rank(conn, rows(conn, tid), now_ms=now * 1000)
-    assert parts.age_buckets == 2
+    assert parts.age_buckets == 25
     assert parts.ready_since == now - 25 * 60
 
 
@@ -1238,7 +1245,7 @@ def _enable(home):
         config.write("    priority_slots: 3\n")
 
 
-def test_opted_in_hub_lane_order_uses_score_and_keeps_marked_first(board):
+def test_opted_in_hub_lane_order_ages_across_classes(board):
     from hermes_cli import kanban_admission_pools as pools
     conn, home = board
     now = int(time.time())
@@ -1246,11 +1253,11 @@ def test_opted_in_hub_lane_order_uses_score_and_keeps_marked_first(board):
     fresh = ready(conn, "fresh", priority=1000, created_at=now)
     marked = ready(conn, "marked", priority=0, created_at=now, admission_class="capacity")
     _enable(home)
-    assert [r["id"] for r in pools.lane_rows(conn, "ready")] == [marked, starved, fresh]
+    assert [r["id"] for r in pools.lane_rows(conn, "ready")] == [starved, fresh, marked]
 
 
 @pytest.mark.parametrize("enabled,slots", [(False, 3), (True, 0)])
-def test_worker_lane_order_keeps_plain_priority(board, enabled, slots):
+def test_worker_lane_order_uses_ready_age(board, enabled, slots):
     from hermes_cli import kanban_admission_pools as pools
     conn, home = board
     now = int(time.time())
@@ -1259,7 +1266,7 @@ def test_worker_lane_order_keeps_plain_priority(board, enabled, slots):
     configure(home, cap=7, limit=50 if enabled else None)
     with (home / "config.yaml").open("a") as config:
         config.write(("" if enabled else "  admission:\n") + f"    priority_slots: {slots}\n")
-    assert [r["id"] for r in pools.lane_rows(conn, "ready")] == [fresh, starved]
+    assert [r["id"] for r in pools.lane_rows(conn, "ready")] == [starved, fresh]
 
 
 def _explain_board(conn, home, monkeypatch):
@@ -1294,25 +1301,34 @@ def test_queue_explain_prints_breakdown_position_and_pools(board, monkeypatch):
     conn, home = board
     fresh, starved, marked = _explain_board(conn, home, monkeypatch)
     text = kc.run_slash(f"queue --explain {starved}")
-    assert f"{starved}: ready lane position 2/3" in text
-    assert "score 1500 = priority 0 + class 500*0 + unblock 25*0 + age 25*60 - failures 100*0" in text
+    # Shared admission score order: 11h of ready age (16500) > capacity class + 25min age (1125) > priority 900.
+    assert f"{starved}: combined position 1/3 (ready lane position 1/3;" in text
+    assert "score 16500 = priority 0 + class 500*0 + unblock 25*0 + age 25*660 - failures 100*0" in text
     assert "pools: regular 1/7, priority 0/3" in text
-    assert f"ahead: {marked}" in text
+    assert "ahead:" not in text
+    assert f"ahead: {starved}, {marked}" in kc.run_slash(f"queue --explain {fresh}")
     listing = json.loads(kc.run_slash("queue --json"))
-    assert [row["id"] for row in listing["ready"]] == [marked, starved, fresh]
-    assert listing["ready"][0]["score"]["class_rank"] == 1
+    assert [row["id"] for row in listing["ready"]] == [starved, marked, fresh]
+    assert listing["ready"][1]["score"]["class_rank"] == 1
     assert listing["scored"] is True
 
 
-def test_queue_explain_on_worker_reports_plain_priority(board):
+def test_queue_explain_on_worker_reports_configured_score(board):
     from hermes_cli import kanban as kc
     conn, home = board
     configure(home, limit=None)
+    with (home / "config.yaml").open("a") as config:
+        config.write("  admission:\n    weights:\n      age: 40\n")
     tid = ready(conn, "worker card", priority=5)
     text = kc.run_slash(f"queue --explain {tid}")
-    assert "hub admission score not enabled here: plain priority order" in text
-    assert f"{tid}: ready lane position 1/1" in text
-    assert json.loads(kc.run_slash("queue --json"))["scored"] is False
+    assert "plain priority" not in text
+    assert "age 40*" in text
+    assert f"{tid}: combined position 1/1 (ready lane position 1/1;" in text
+    listing = json.loads(kc.run_slash("queue --json"))
+    assert listing["scored"] is True
+    assert listing["pools"] is None
+    assert listing["ready"][0]["score"]["weights"]["age"] == 40
+    assert "admission score order" in kc.run_slash("queue")
 
 
 def test_queue_explain_unknown_or_unqueued_card(board):
@@ -1417,8 +1433,8 @@ def test_equal_scores_prefer_earlier_ready_start_over_smaller_id(board):
     now = 1_800_000_000
     small, large = sorted([ready(conn, "x", created_at=now - 60), ready(conn, "y", created_at=now - 60)])
     with kb.write_txn(conn):
-        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (now - 120, large))
-        conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (now - 120, large))
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (now - 90, large))
+        conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (now - 90, large))
     (_r, a), = score.rank(conn, rows(conn, small), now_ms=now * 1000)
     (_r, b), = score.rank(conn, rows(conn, large), now_ms=now * 1000)
     assert a.total == b.total and b.ready_since < a.ready_since

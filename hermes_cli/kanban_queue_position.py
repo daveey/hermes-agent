@@ -20,17 +20,24 @@ _log = logging.getLogger(__name__)
 
 
 def _ahead(conn: sqlite3.Connection, task) -> int:
-    """Unclaimed ready cards of the same assignee the dispatcher reaches first, in its own lane order
-    (``DISPATCH_ORDER``: effective priority, then cards others wait on, then age). Worker-first cards wait for the
-    pool, not a local slot, so they are not ahead."""
+    """Approximate combined-lane score position among unclaimed cards of this assignee.
+
+    Worker-first cards wait for the pool, not a local slot. Other eligibility
+    gates remain advisory here rather than running network-bearing preclaim checks.
+    """
     from hermes_cli.kanban_admission_pools import lane_rows
+    from hermes_cli.kanban_admission_score import rank
+    from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
     from hermes_cli.kanban_worker_placement import POLICY
     eligible = {r[0] for r in conn.execute(
-        "SELECT id FROM tasks WHERE status = 'ready' AND claim_lock IS NULL AND assignee IS ? "
+        "SELECT id FROM tasks WHERE status IN ('ready', 'review') AND claim_lock IS NULL AND assignee IS ? "
         "AND (placement_policy IS NOT ? OR id = ?)",
         (task.assignee, POLICY, task.id),
     ).fetchall()}
-    ids = [r[0] for r in lane_rows(conn, "ready") if r[0] in eligible]
+    rows = list(lane_rows(conn, "ready"))
+    if review_dispatch_enabled():
+        rows.extend(lane_rows(conn, "review"))
+    ids = [r["id"] for r, _parts in rank(conn, rows) if r["id"] in eligible]
     return ids.index(task.id) if task.id in ids else len(ids)
 
 

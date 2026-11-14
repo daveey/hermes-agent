@@ -50,14 +50,17 @@ def test_pickup_budget_respects_unpublished_local_waiter(gws, mutation):
         replica.close()
 
 
-def test_pickup_ranking_preserves_review_lane_and_eligibility(gws, monkeypatch):
+@pytest.mark.parametrize("ready_priority,review_priority,enabled_pick", [(0, 1000, "review"), (1000, 0, "ready")])
+def test_pickup_ranking_shares_score_across_lanes_and_keeps_eligibility(
+    gws, monkeypatch, ready_priority, review_priority, enabled_pick,
+):
     from hermes_cli import kanban_db_dispatch as dispatch
 
     home, executor = gws
     home.enter()
-    ready = kb.create_task(home.conn, title="high priority ready", assignee="default", priority=1000,
+    ready = kb.create_task(home.conn, title="ready", assignee="default", priority=ready_priority,
                            runs_on=[f"machine:{support.WORKER}"])
-    review = kb.create_task(home.conn, title="low priority review", assignee="default", priority=0,
+    review = kb.create_task(home.conn, title="review", assignee="default", priority=review_priority,
                             runs_on=[f"machine:{support.WORKER}"])
     home.conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review,))
     home.conn.commit()
@@ -67,7 +70,9 @@ def test_pickup_ranking_preserves_review_lane_and_eligibility(gws, monkeypatch):
     replica = wn.open_replica(executor.conn)
     assert replica is not None
     try:
-        for enabled, expected in ((True, review), (False, ready)):
+        by_name = {"ready": ready, "review": review}
+        # Review rows compete on score when review dispatch is on; when off they are ineligible.
+        for enabled, expected in ((True, by_name[enabled_pick]), (False, ready)):
             monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: enabled)
             picked, _ = wn._evaluate(executor.conn, replica, support.WORKER, mode="all", limit=1,
                                       profile_exists=None, full_detail="full")

@@ -414,21 +414,24 @@ def _insert_decomposed_child(
     required = validate_assignment(assignee, requires=child.get("requires"),
                                    workspace_kind=child_ws_kind, workspace_path=child_ws_path)
     body = child.get("body")
+    from hermes_cli.kanban_admission_score import effective_priorities
+
+    priority = effective_priorities(conn, [root_id]).get(root_id, 0)
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
-        " workspace_path, tenant, created_at, created_by, requires) "
-        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
+        " workspace_path, tenant, created_at, created_by, requires, priority) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?)",
         (
             new_id, child["title"].strip(), body if isinstance(body, str) else None,
             assignee, child_ws_kind, child_ws_path,
             root_row["tenant"], now, (author or "decomposer"),
-            json.dumps(required),
+            json.dumps(required), priority,
         ),
     )
     _append_event(
         conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id,
-                                  "requires": required},
+                                  "requires": required, "priority": priority},
     )
     inherit_creator_origin(conn, new_id, root_id, created_at=now)
     return new_id

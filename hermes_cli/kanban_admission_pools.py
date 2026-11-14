@@ -1,8 +1,4 @@
 """Deterministic selection for separate regular and marked-only hub pools."""
-import logging
-import sqlite3
-
-_LOG = logging.getLogger(__name__)
 MARKED = ("capacity", "urgent")
 
 
@@ -83,29 +79,17 @@ def root_settings():
 
 
 def score_enabled() -> bool:
-    """Hub admission ordering (marked-first + score) applies only on an opted-in hub; workers keep priority."""
+    """Whether hub-specific pool diagnostics are enabled; scoring is shared by all executors."""
     from hermes_cli import machine_cpu_metrics as cpu
 
     return cpu.root_limit()[0] == cpu.ON and root_settings()[0] > 0
 
 
 def lane_rows(conn, status):
-    """Offer marked candidates before normal rows only on an opted-in hub."""
+    """Shared score order; marked-only capacity is enforced separately by PoolBudget."""
     from hermes_cli.kanban_db_dispatch_queries import lane_rows as query
 
-    marked_first = score_enabled()
-    rows = query(conn, status, marked_first=marked_first)
-    if not marked_first:
-        return rows
-    from hermes_cli import kanban_admission_score as score
-
-    try:
-        ranked = [row for row, _parts in score.rank(conn, rows)]
-    except (sqlite3.Error, OSError, ValueError):
-        _LOG.warning("admission score unavailable; using priority order", exc_info=True)
-        return rows
-    ranked.sort(key=lambda row: row["admission_class"] not in MARKED)
-    return ranked
+    return query(conn, status)
 
 
 class PoolBudget:

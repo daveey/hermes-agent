@@ -1538,7 +1538,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return None, None
 
 
-from hermes_cli.kanban_db_creation import tool_creation_audit as _creation_audit
+from hermes_cli.kanban_db_creation import tool_creation_audit as _creation_audit, inherit_tool_priority
 
 
 @_kanban_handler("kanban_create")
@@ -1601,6 +1601,7 @@ def _handle_create(args: dict, **kw) -> str:
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
                     if origin_intent is None and _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
+        args = inherit_tool_priority(conn, args, self_tid if self_task is not None else None)
         session_id = _create_session_id(args, origin_intent, self_task)
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:

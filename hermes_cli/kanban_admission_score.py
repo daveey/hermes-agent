@@ -1,7 +1,7 @@
 """Deterministic hub admission score (phase 2 of docs/kanban-hub-admission-v2.md). [daveey]
 
 ``score = min(PRIORITY_CAP, effective_priority) + class * class_rank + unblock * min(open_descendants, 20)
-         + age * min(ready_minutes // 10, 60) - failure * consecutive_failures``
+         + age * ready_minutes - failure * consecutive_failures``
 
 Effective priority and open descendants come from the same graph as
 :func:`kanban_dispatch_priority.order_with_remote_waiters`: the full replica, with local rows and a local child's
@@ -21,7 +21,7 @@ from hermes_cli.kanban_priority import PRIORITY_CAP
 
 DEFAULT_WEIGHTS = {"class": 500, "unblock": 25, "age": 25, "failure": 100}
 CLASS_RANK = {"normal": 0, "capacity": 1, "urgent": 2}
-DESCENDANT_CAP, AGE_BUCKET_S, AGE_CAP = 20, 600, 60
+DESCENDANT_CAP, AGE_BUCKET_S = 20, 60
 
 
 @dataclass(frozen=True)
@@ -85,31 +85,103 @@ def configured_weights() -> dict:
     return validate_weights(admission_policy().get("weights"))
 
 
-def _graph(conn: sqlite3.Connection):
+def _graph(conn: sqlite3.Connection, candidate_ids, *, now_s=None):
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_worker_node as wn
 
     remote, edges = [], []
+    metadata, since = {}, {}
     if sync.board_mode(conn) == "primary":
-        replica = wn.open_replica(conn)
-        if replica is not None:
+        replica = None
+        try:
             try:
-                remote = replica.execute(
-                    "SELECT id, priority, status FROM tasks WHERE status NOT IN ('done', 'archived')").fetchall()
-                edges = replica.execute("SELECT parent_id, child_id FROM task_links").fetchall()
-            finally:
+                replica = wn.open_replica(conn)
+            except RuntimeError:
+                # The replica provider reports unavailable runtime state this way;
+                # do not swallow RuntimeError from graph/history implementation.
+                replica = None
+            if replica is not None:
+                remote, edges, metadata, since = _source_snapshot(replica, candidate_ids)
+        except (sqlite3.Error, OSError):
+            # Never retain graph fragments after a failed history/edge read.
+            remote, edges, metadata, since = [], [], {}, {}
+        finally:
+            if replica is not None:
                 replica.close()
-    local = conn.execute("SELECT id, priority, status FROM tasks").fetchall()
+    local, local_edges, local_metadata, local_since = _source_snapshot(conn, candidate_ids)
     local_ids = {r[0] for r in local}
     tasks = {r[0]: (r[1] or 0, r[2]) for r in remote}
     tasks.update((r[0], (r[1] or 0, r[2])) for r in local)
+    _apply_turn_floor(conn, tasks, now_s=now_s)
     edges = [(p, c) for p, c in edges if c not in local_ids]
-    edges.extend(tuple(r) for r in conn.execute("SELECT parent_id, child_id FROM task_links").fetchall())
+    edges.extend(tuple(r) for r in local_edges)
     children = defaultdict(set)
     for parent, child in edges:
         if child in tasks and tasks[child][1] not in ("done", "archived"):
             children[parent].add(child)
-    return tasks, children
+    metadata.update(local_metadata)
+    since.update(local_since)
+    return tasks, children, metadata, since
+
+
+def _apply_turn_floor(conn, tasks, *, now_s=None):
+    """Apply advisory owners only to existing open rows on this connection's board."""
+    import time
+
+    from hermes_cli.kanban_host_counts import board_of
+    from hermes_cli.kanban_turn_urgency import read_owners
+
+    board = board_of(conn)
+    if board is None:
+        return
+    owners = read_owners(board=board, now_s=time.time() if now_s is None else now_s)
+    for tid in owners & tasks.keys():
+        priority, status = tasks[tid]
+        if status not in ("done", "archived"):
+            tasks[tid] = (max(priority, 900), status)
+
+
+def _alarm_key(key) -> bool:
+    """Explicit detector keys, not titles or priority bands, identify alarms."""
+    return isinstance(key, str) and key.startswith((
+        "worker-claim-watch:", "pickup-stall:", "mods-suite-red:",
+    ))
+
+
+def _source_snapshot(conn, candidate_ids):
+    """One consistent source view without committing a caller-owned transaction.
+
+    The two databases cannot share an atomic snapshot; local custody wins when
+    merging them. A savepoint pins each source's graph and history together.
+    """
+    conn.execute("SAVEPOINT admission_score_read")
+    try:
+        # Minimal/older replicas can lack producer identity. Absence gives no
+        # urgency floor; never infer an alarm from user-editable title prose.
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        key_column = "idempotency_key" if "idempotency_key" in columns else "NULL"
+        tasks = [(tid, max(priority or 0, 900) if _alarm_key(key) else priority, status)
+                 for tid, priority, status, key in conn.execute(
+                     f"SELECT id, priority, status, {key_column} FROM tasks")]
+        edges = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+        metadata, since = _candidate_state(conn, candidate_ids)
+        return tasks, edges, metadata, since
+    finally:
+        conn.execute("RELEASE admission_score_read")
+
+
+def _candidate_state(conn, ids):
+    """Read candidate metadata/history from one source, in bounded SQL batches."""
+    metadata, since = {}, {}
+    for offset in range(0, len(ids), 400):
+        batch = ids[offset:offset + 400]
+        marks = ",".join("?" for _ in batch)
+        found = {r[0]: (r[1] or "normal", r[2] or 0) for r in conn.execute(
+            f"SELECT id, admission_class, consecutive_failures FROM tasks WHERE id IN ({marks})", batch)}
+        metadata.update(found)
+        # Restrict history to extant rows; orphan events do not restore a vanished candidate.
+        since.update(_ready_since(conn, list(found)))
+    return metadata, since
 
 
 def _descendants(tid, children):
@@ -145,6 +217,16 @@ def _ready_since(conn: sqlite3.Connection, ids: list[str]) -> dict[str, int]:
     return since
 
 
+def effective_priorities(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, int]:
+    """Creation-time urgency inheritance, excluding age/class/unblock/failure points.
+
+    Return only extant task identities. Stored values are never changed.
+    """
+    tasks, children, _metadata, _since = _graph(conn, [])
+    return {tid: min(PRIORITY_CAP, max([tasks[tid][0], *(tasks[c][0] for c in _descendants(tid, children))]))
+            for tid in task_ids if tid in tasks}
+
+
 def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weights: Optional[dict] = None):
     """``rows`` (local task rows with ``id``) in admission order, each with its :class:`ScoreBreakdown`.
 
@@ -156,21 +238,19 @@ def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weight
         return []
     weights = configured_weights() if weights is None else validate_weights(weights)
     now_s = (time.time() * 1000 if now_ms is None else now_ms) / 1000
-    tasks, children = _graph(conn)
     ids = [row["id"] for row in rows]
-    marks = ",".join("?" for _ in ids)
-    local = {r[0]: (r[1] or "normal", r[2] or 0) for r in conn.execute(
-        f"SELECT id, admission_class, consecutive_failures FROM tasks WHERE id IN ({marks})", ids)}
-    since = _ready_since(conn, ids)
+    tasks, children, metadata, since = _graph(conn, ids, now_s=now_s)
     scored = []
     for row in rows:
         tid = row["id"]
         below = _descendants(tid, children)
         priority = max([tasks.get(tid, (0, None))[0], *(tasks[c][0] for c in below)])
-        klass, failures = local.get(tid, ("normal", 0))
+        klass, failures = metadata.get(tid, ("normal", 0))
         class_rank = CLASS_RANK.get(klass, 0)
         start = since.get(tid, 0)
-        buckets = min(AGE_CAP, max(0, int(now_s - start)) // AGE_BUCKET_S)
+        if start <= 0:
+            start = int(now_s)
+        buckets = max(0, int(now_s - start)) // AGE_BUCKET_S
         descendants = min(DESCENDANT_CAP, len(below))
         effective = min(PRIORITY_CAP, priority)
         total = (effective + weights["class"] * class_rank + weights["unblock"] * descendants

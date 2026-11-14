@@ -1,0 +1,75 @@
+"""Hand-filed worker children inherit requester urgency without a dependency edge."""
+import json
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from tools import kanban_tools as tools
+from tests.tools import test_kanban_worker_created_chats as helpers
+
+home = helpers.home
+
+
+@pytest.mark.parametrize('explicit,expected', [(None, 37), (0, 0), (11, 11), (60000, 1000)])
+def test_tool_default_inherits_but_explicit_priority_wins(home, monkeypatch, explicit, expected):
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title='creator', priority=37, session_id=helpers.CHAT)
+    monkeypatch.setenv('HERMES_KANBAN_TASK', creator)
+    monkeypatch.setenv('HERMES_SESSION_ID', helpers.WORKER)
+    args = {'title': 'child', 'assignee': 'default', 'requires': [], 'placement': 'local'}
+    if explicit is not None:
+        args['priority'] = explicit
+    result = json.loads(tools._handle_create(args))
+    assert result.get('ok'), result
+    with kbc.connect_closing() as conn:
+        child = kb.get_task(conn, result['task_id'])
+        assert child.priority == expected
+        assert conn.execute('SELECT COUNT(*) FROM task_links WHERE child_id=?', (child.id,)).fetchone()[0] == 0
+
+
+def test_tool_inherits_donated_priority_not_age_or_class(home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title='creator', priority=0, session_id=helpers.CHAT,
+                                 admission_class='urgent')
+        kb.create_task(conn, title='waiting', priority=83, parents=[creator])
+    monkeypatch.setenv('HERMES_KANBAN_TASK', creator)
+    monkeypatch.setenv('HERMES_SESSION_ID', helpers.WORKER)
+    result = json.loads(tools._handle_create({'title': 'child', 'assignee': 'default', 'requires': [],
+                                              'placement': 'local'}))
+    assert result.get('ok'), result
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, result['task_id']).priority == 83
+
+
+def test_inheritance_crosses_placement_and_courier_without_owner_reinference(home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title='requester', priority=37, session_id=helpers.CHAT)
+        unrelated = kb.create_task(conn, title='owner process task', priority=999)
+    monkeypatch.setenv('HERMES_KANBAN_TASK', creator)
+    monkeypatch.setenv('HERMES_SESSION_ID', helpers.WORKER)
+    sent = []
+
+    def transport(args, **kwargs):
+        sent.append(dict(args))
+        return json.dumps({'ok': True, 'transport_fixture': True}), None
+
+    with monkeypatch.context() as route:
+        route.setattr(tools, '_place_remote', transport)
+        result = json.loads(tools._handle_create({'title': 'transported child', 'requires': [],
+                                                  'assignee': 'default'}))
+    assert result['transport_fixture']
+    assert len(sent) == 1 and sent[0]['priority'] == 37
+    # Trusted owner receives the already serialized priority; its ambient worker
+    # must not donate its unrelated 999. Exercise creation, not just the helper.
+    monkeypatch.setenv('HERMES_KANBAN_TASK', unrelated)
+    intent = {'request_id': 'priority-transport-fixture',
+              'owner': {'gateway': 'owner', 'profile': 'default', 'board': 'default'},
+              'origin': {'gateway': 'sender', 'profile': 'default', 'session': helpers.CHAT}}
+    result = json.loads(tools._handle_create(sent[0], origin_intent=intent))
+    # No remote session exists in this fixture; persisted creation is distinct
+    # from the intentionally pending origin-binding acknowledgement.
+    assert result.get('created') and result.get('code') == 'origin_bind_pending', result
+    with kbc.connect_closing() as conn:
+        child = kb.get_task(conn, result['task_id'])
+        assert child is not None and child.priority == 37

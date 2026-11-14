@@ -853,8 +853,12 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "Defaults to HERMES_TENANT env if set."
         )),
         "priority": _prop("integer", (
-                "Dispatcher tiebreaker. Higher = picked sooner "
-                "when multiple ready tasks share an assignee."
+                "Urgency, capped at 1000; readiness aging also affects dispatch order. "
+                "When omitted by a worker, inherits its card's effective priority "
+                "(including dependency donation and urgency floors, excluding age/class bonuses). "
+                "An explicit zero overrides inheritance. Generated review, sweep and test-gap cards "
+                "should omit this field rather than use a flat 1000. Preserve explicit user urgency; "
+                "do not invent top-priority defaults in generated child briefs or p1000 titles."
         )),
         "admission_class": {
             "type": "string", "enum": ["normal", "capacity", "urgent"],

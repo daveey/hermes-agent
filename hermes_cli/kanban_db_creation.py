@@ -23,6 +23,16 @@ def tool_creation_audit(args: dict, *, admission=None, **effective) -> dict | No
     return audit
 
 
+def inherit_tool_priority(conn, args, creator_task_id):
+    """Resolve omitted worker urgency before placement/courier serialization."""
+    if creator_task_id is None or args.get("priority") is not None:
+        return args
+    from hermes_cli.kanban_admission_score import effective_priorities
+
+    # Explicit zero wins; this snapshot excludes age/class/unblock bonuses.
+    return {**args, "priority": effective_priorities(conn, [creator_task_id]).get(creator_task_id, 0)}
+
+
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    tenant, workspace_kind, workspace_path, branch_name, project_id,
                    skills, goal_mode, model_override, provider_override, created_by, requires,
@@ -49,6 +59,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         **(placement_audit if isinstance(placement_audit, dict) else {}),
         # Final insertion policy, not a later assignment or a caller's diagnostic override.
         "placement_policy": placement_policy,
+        "priority": conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0],
         "consent_stops": snapshot(conn, task_id, creator_task_id),
     })
     if isinstance(placement_audit, dict) and placement_audit.get("hub_admission"):

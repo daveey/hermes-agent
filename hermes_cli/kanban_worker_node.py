@@ -581,12 +581,10 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     review_enabled = review_dispatch_enabled()
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     listed = candidates(replica, own)
-    # Apply the executor's authoritative local graph before spending the import
-    # budget, just as dispatch does after pickup. Keep review ahead of ready. Within a lane, cards pinned here go
-    # first: only this machine can run them, pool cards have other takers (worker-1 2026-11-14: a pinned card
-    # waited budget_exhausted ~6 h behind pool cards, t_01a1d95eabbd2b9d). Stable: each group keeps its order.
-    listed = [row for lane in ("review", "ready") for row in sorted(order_with_remote_waiters(
-        conn, [row for row in listed if row["status"] == lane]), key=lambda row: row["id"] not in mine)]
+    # Rank the current ready/review episode before spending the import budget.
+    # A hard pinned-first partition would starve pool work on a busy executor;
+    # source-aware aging must compare both groups. Eligibility stays authoritative.
+    listed = order_with_remote_waiters(conn, listed)
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
