@@ -108,6 +108,22 @@ def test_masking_agrees_with_real_bash_execution(tmp_path, shape):
         assert unsafe
 
 
+@pytest.mark.parametrize("body", ["$(echo data)", "`echo data`"], ids=["dollar", "backtick"])
+@pytest.mark.parametrize("date_exempt", [True, False])
+def test_expanding_heredoc_substitution_fails_closed(body, date_exempt):
+    # This is the helper's conservative contract, not a claim that echo is unsafe.
+    # No arithmetic or unmatched quotes can make another scanner branch catch it.
+    command = f"cat <<EOF\n{body}\nEOF\n"
+    assert substitution_in_arithmetic(command, date_exempt=date_exempt)
+
+
+@pytest.mark.parametrize("body", ["$(echo data)", "`echo data`"], ids=["dollar", "backtick"])
+@pytest.mark.parametrize("date_exempt", [True, False])
+def test_literal_heredoc_plain_substitution_is_not_arithmetic(body, date_exempt):
+    command = f"cat <<'EOF'\n{body}\nEOF\n"
+    assert not substitution_in_arithmetic(command, date_exempt=date_exempt)
+
+
 def test_nested_literal_body_date_exemption_and_depth_limit():
     command = "bash <<'R'\nx=$(( $(date +%s) + 2700 ))\nR\n"
     assert not substitution_in_arithmetic(command, date_exempt=True)
