@@ -1450,3 +1450,77 @@ def test_tree_state_without_refresh_never_fetches(tmp_path, monkeypatch):
     calls.clear()
     assert kmp.tree_state([str(tree)]) is None  # the default refresh finds HEAD on the moved branch
     assert "fetch" in [c for c, _ in calls], calls
+
+
+# --- the home_marker audit matches the stored placement (t_01a1db073fff0642) --------------------------------------
+# The 24 h live check of t_01a1d2856e5fec44 found worker-created cards whose created event said ``decision: queue``
+# while the card stayed local (runs_on NULL), or that a home hit kept with no key at all. One test per shape.
+PASS_KEEPS = {"a-this-host", "a-worktree", "a-artifact", "operator", "gateway-test-failed"}
+
+
+def _audit_matches(conn, tid):
+    """The created event's ``home_marker`` says what the store did: queue exactly when ``runs_on`` is set, and a keep
+    only with a class the live check accepts."""
+    marker, runs_on = _home_marker(conn, tid), _runs_on(conn, tid)
+    if marker is not None:
+        assert (marker["decision"] == "queue") == (runs_on is not None), (marker, runs_on)
+        assert marker["decision"] == "queue" or marker["class"] in PASS_KEEPS, marker
+    return marker
+
+
+def test_a_home_hit_whose_text_every_pickup_gate_refuses_is_recorded_as_kept(on_w2):
+    """t_01a1d73ba3627290 (worker-2): an ssh hit queues, but a backticked ``hermes-hub tasks`` action (portability
+    drops backtick spans; the pickup gate's text keeps them) makes ``required_labels`` None, so the card stays."""
+    out = _create(title="Capability owner: ssh:mini for mini/t_01a1d73b8cf9634f",
+                  body="1. Read the waiting card: `hermes-hub tasks --gw mini --json`.\n2. Use ssh to pull the log.")
+    assert _runs_on(on_w2.conn, out["task_id"]) is None, out
+    assert _audit_matches(on_w2.conn, out["task_id"]) == {
+        "decision": "keep", "class": "gateway-test-failed", "hit": "ssh"}
+
+
+@pytest.mark.parametrize("placement", ["local", "worker-2"])
+def test_an_explicit_local_pin_carries_no_home_marker(on_w2, placement):
+    """t_01a1d773774908a6 (worker-7, placement_intent explicit): the local-pin note simulated the auto placement
+    (a queue record), then the pin kept the card here. The rule leaves explicit placement alone: no key."""
+    out = _create(title="Activate the fix in ~/.hermes/plugins/ship-only-guard/__init__.py", placement=placement)
+    assert _runs_on(on_w2.conn, out["task_id"]) is None, out
+    created = _created(on_w2.conn, out["task_id"])
+    assert created["placement_intent"] == "explicit" and "home_marker" not in created, created
+
+
+def test_a_pool_worker_profile_without_a_worker_queue_records_its_home_keep(w2, monkeypatch):
+    """t_01a1d8146b9ef790 (worker-5, created_by bb-tuner): that profile's config has no ``kanban.placement``, so
+    ``queue_decision`` had no queue label and returned before any record: the home hit kept the card with no key."""
+    _on(monkeypatch, "worker-2", {}, _pool_machines())
+    out = _create(title="fix the hermes-sync drain")
+    assert _runs_on(w2.conn, out["task_id"]) is None, out
+    assert _created(w2.conn, out["task_id"])["portable_reason"] == "home gateway marker"
+    assert _audit_matches(w2.conn, out["task_id"]) == {
+        "decision": "keep", "class": "gateway-test-failed", "hit": "hermes-sync"}
+
+
+@pytest.mark.parametrize("gateway, title", [
+    ("macbook", "fix the hermes-sync drain"),  # not a Linux pool worker: no gateway test to fail
+    ("worker-2", "rotate the CI token in the Keychain, then fix the hermes-sync drain"),  # a local marker keeps it
+])
+def test_a_queueless_keep_is_recorded_only_for_a_pool_workers_home_hit(w2, monkeypatch, gateway, title):
+    _on(monkeypatch, gateway, {}, _pool_machines())
+    out = _create(title=title)
+    assert _runs_on(w2.conn, out["task_id"]) is None, out
+    assert "home_marker" not in _created(w2.conn, out["task_id"]), out
+
+
+def test_a_queueless_placement_outside_a_create_reads_no_registry(monkeypatch):
+    """Off a create there is nothing to record, so a gateway without a queue label pays no registry read."""
+    from hermes_cli import kanban_worker_placement as kwp
+    calls = []
+
+    def fetch():
+        calls.append(1)
+        return {"me": "worker-2", "machines": seen_now(_pool_machines().values())}
+    wn.set_registry_fetch(fetch)
+    try:
+        assert kwp.queue_decision({"title": "fix the hermes-sync drain"}, {}, "worker-2", "auto") is None
+    finally:
+        wn.set_registry_fetch(None)
+    assert calls == []

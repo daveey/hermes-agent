@@ -219,10 +219,32 @@ def recorded(args: dict):
 
 
 def unclaimable(args: dict) -> None:
-    """The queue result found no live machine holding its whole label set, so the local keep stands: record that as
-    ``gateway-test-failed`` (no live label), not as the queue it would have been. A keep never reaches here."""
+    """The queue result found no live machine holding its whole label set, or text every pool member's pickup gate
+    refuses (``coordination.required_labels`` None), so the local keep stands: record that as
+    ``gateway-test-failed`` (no pool member can claim it), not as the queue it would have been. A keep never reaches
+    here."""
     if (record := recorded(args)) is not None:
         remember(args, {"decision": "keep", "class": "gateway-test-failed", "hit": record["hit"]})
+
+
+def _untested(args: dict, cfg) -> None:
+    """Record the card's first home-gateway-marker hit as kept because the gateway (or pool) test failed."""
+    from hermes_cli.kanban_placement_diagnostics import home_marker_hits
+    if hits := home_marker_hits(args, cfg):
+        remember(args, {"decision": "keep", "class": "gateway-test-failed", "hit": hits[0][1].group(0)})
+
+
+def no_queue(args: dict, cfg, gateway: str) -> None:
+    """A pool worker whose placement config names no ``worker_queue`` label cannot queue the card, so its home hit
+    keeps it here: record that as ``gateway-test-failed``. t_01a1db073fff0642 (fixture t_01a1d8146b9ef790): a
+    ``bb-tuner`` profile has no ``kanban.placement`` on the pool workers, and its home-marker card stayed local with
+    no ``home_marker`` key. [daveey]"""
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli.kanban_published_worktree import create_observation
+    # Cheapest first: no create to record for, then the text scan, and only then the (cached) registry read.
+    if (create_observation() is not None and kp.portable_reason(args, cfg) == "home gateway marker"
+            and kp.linux_pool_gateway(gateway, cfg)):
+        _untested(args, cfg)
 
 
 HOME_WHY = " (home gateway marker {hit} not bound to {gateway})"
@@ -238,11 +260,11 @@ def pool_worker_markers(args: dict, cfg, gateway: str, reason: str, live):
     t_01a1d2856e5fec44 home markers). [daveey]"""
     from hermes_cli import kanban_placement as kp
     from hermes_cli import kanban_worker_placement as kwp
-    from hermes_cli.kanban_placement_diagnostics import home_marker_hits, portability
+    from hermes_cli.kanban_placement_diagnostics import portability
 
     if not kp.linux_pool_gateway(gateway, cfg) or not live():
-        if reason == "home gateway marker" and not _is_hub(gateway, cfg) and (hits := home_marker_hits(args, cfg)):
-            remember(args, {"decision": "keep", "class": "gateway-test-failed", "hit": hits[0][1].group(0)})
+        if reason == "home gateway marker" and not _is_hub(gateway, cfg):
+            _untested(args, cfg)
         return None
     if portability(args, cfg, local_markers=False, home_markers=False)[0]:
         return None
