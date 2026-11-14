@@ -89,10 +89,14 @@ Board/courier operations already started may still consume their existing transp
 Before GitHub discovery, a drain gets half the invocation budget and checkpoints the JSON
 cursor; a slow discovery cannot prevent already queued delivery on every invocation.
 Within a drain, consecutive admissions are packed by `plan_pages` into multi-row pages
-(maximum 6000 bytes), flushed after at most 16 rows, an ownership boundary, or the
-resolution deadline. Occurrences are durable before ownership resolution; each batch's
-pages are committed before immediate delivery in the same drain. Half the drain window is
-reserved for prior attempted pages. If a slow owner exhausts it, the unsent pages remain
+(maximum 6000 bytes), flushed after at most 16 rows, an ownership boundary, or halfway
+through the drain window (then after each subsequent admission). Occurrences are durable before ownership resolution; each batch's
+pages are committed before immediate delivery in the same drain. Pending owner resolutions
+and prior attempted pages share one FIFO ordered by durable tickets, rather than
+fixed-priority phases. Batches are also flushed before selecting a prior page.
+A slow operation may consume the remaining window, but its rotated ticket lets the other
+queue progress on the next drain, including after restart. No new external work starts at
+or after the drain deadline. If a slow owner exhausts it, the unsent pages remain
 durable and retain their batch boundaries during next-drain ownership rechecks, so that
 unrelated slow owner cannot repeatedly delay the already-admitted prefix.
 Durable FIFO tickets are assigned transactionally when occurrences, pages and run attempts

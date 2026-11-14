@@ -580,12 +580,19 @@ def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: 
         "SELECT o.id,o.page FROM occurrences o JOIN pages p ON p.id=o.page "
         "WHERE o.repo=? AND p.attempted=0 AND p.delivered=0", (repo,)))
     journal.recheck_unattempted(repo)
-    # Reserve half the drain for retry pages. Bound admission batches independently
-    # of the backlog; every flush commits its pages before attempting delivery.
+    # Flush admissions early enough to leave time for their first delivery. This
+    # is a batch boundary, not a priority phase that can starve either queue.
     now = time.monotonic()
-    resolve_deadline = None if deadline is None else now + max(0, deadline - now) / 2
-    old_pages = {r[0] for r in journal.db.execute(
+    batch_deadline = None if deadline is None else now + max(0, deadline - now) / 2
+    # Both queues already share durable tickets. Merge them before external work:
+    # a slow first operation can overrun any reserved phase budget. Rotation before
+    # each attempt gives the other queue its turn even across process restarts.
+    pending = {str(row["id"]): row for row in journal.pending(repo)}
+    old_pages = {str(r[0]) for r in journal.db.execute(
         "SELECT id FROM pages WHERE repo=? AND delivered=0", (repo,))}
+    work = [(kind, item) for kind, item in journal.db.execute(
+        "SELECT kind,item FROM scheduling WHERE repo=? ORDER BY ticket,kind,item", (repo,))
+        if (kind == "occurrence" and item in pending) or (kind == "page" and item in old_pages)]
     def create(title, body, key, page):
         return _create_intake(journal, repo, board, state, relay, title, body, key, page, deadline)
     batch, owner_checks = [], {}
@@ -605,15 +612,19 @@ def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: 
         owner_checks.clear()
         return journal.deliver(repo, board, deadline=deadline, create=create, page_ids=page_ids)
     previous_group = None
-    for row in journal.pending(repo):
-        group = retry_groups.get(row["id"])
-        if group != previous_group:
+    for kind, item in work:
+        group = retry_groups.get(pending[item]["id"]) if kind == "occurrence" else None
+        if kind == "page" or group != previous_group:
             log += flush()
         previous_group = group
-        if resolve_deadline is not None and time.monotonic() >= resolve_deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             log.append("FAILED intake_budget; durable retry pending")
             break
-        journal.rotate(repo, "occurrence", str(row["id"]))
+        if kind == "page":
+            log += journal.deliver(repo, board, deadline=deadline, create=create, page_ids={int(item)})
+            continue
+        row = pending[item]
+        journal.rotate(repo, "occurrence", item)
         meta = json.loads(row["metadata"])
         url = f"https://github.com/{repo}/actions/runs/{meta['run_id']}/job/{meta['job_id']}"
         notes: dict[str, list[dict[str, str]]] = {}
@@ -627,7 +638,7 @@ def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: 
         if lines == ["queued"]:
             batch.append(row)
             owner_checks[row["id"]] = notes.get(meta["test_id"], [])
-            if len(batch) >= 16:
+            if len(batch) >= 16 or (batch_deadline is not None and time.monotonic() >= batch_deadline):
                 log += flush()
         else:
             log += flush()
@@ -635,7 +646,7 @@ def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: 
                 journal.acknowledge(row["id"], json.dumps(state["cards"][meta["test_id"]], sort_keys=True))
         log += lines
     log += flush()
-    return log + journal.deliver(repo, board, deadline=deadline, create=create, page_ids=old_pages)
+    return log
 
 
 def _create_intake(journal, repo, board, state, relay, title, body, key, page, deadline):
