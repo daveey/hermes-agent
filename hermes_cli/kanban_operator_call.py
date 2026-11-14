@@ -13,7 +13,7 @@ on a card another gateway created refuse ``foreign_card``. This module is the su
    ordinary functions on its live file and appends ``operator_call_result`` on the target card.
 3. Request side again (:func:`poll`): finds that result in the replica, finishes the request and wakes the caller.
 
-Only comment, move and unblock of a card exist, plus ``label_publish`` of a machine (``kanban_operator_labels``: the
+Card actions are comment, move, unblock and creator_archive (exact creator scope), plus ``label_publish`` (the
 hub executes it with its Board admin key, after re-running its own probe of that machine, and answers on the
 requester's card). complete / archive / link / unlink / block / edit of a foreign card stay with its owner and are
 refused; so is any second op or a card the op does not name. No Board admin key is read here.
