@@ -1033,8 +1033,15 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
         _log_standalone_profiles_at_boot(runner)
         from gateway.run_runtime import start_gateway_runtime_api
         await start_gateway_runtime_api(runner)
-        from gateway.run_api import await_session_socket_preload, preload_session_socket
+        from gateway.run_api import (
+            await_gateway_dashboard_warm, await_session_socket_preload,
+            preload_session_socket, warm_gateway_dashboard,
+        )
         ws_preload = preload_session_socket() if idle_exit else None  # overlaps the adapter/cron start
+        # The gateway HTTP lifespan only owns HTTP resources, not adapters/cron. Start now so its
+        # imports overlap startup; Desktop releases its polls at READY, not at the first request.
+        if not idle_exit:
+            warm_gateway_dashboard(runner)
 
         def _lifecycle_record_startup() -> Optional[dict]:
             # Report if the previous life died uncleanly (SIGKILL / OOM / VM death), then claim the
@@ -1054,6 +1061,7 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
         _early_verdict = await _start_gateway_run_runner(runner, _signal_initiated_shutdown)
         if _early_verdict is not None:
             await await_session_socket_preload(ws_preload)  # never left unawaited on the way out
+            await await_gateway_dashboard_warm(runner)
             return _early_verdict
         if _unclean_exit is not None:
             _start_deferred_state_db_integrity_check(_unclean_exit)
@@ -1065,6 +1073,7 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
         from gateway.run_runtime import publish_gateway_runtime_ready, wait_gateway_runtime
         try:
             await await_session_socket_preload(ws_preload)
+            await await_gateway_dashboard_warm(runner)
             # READY only once adapters, cron and housekeeping run; missing systemd state just disables watchdog.
             publish_gateway_runtime_ready(runner)
             from gateway.quiet_control import finalize_attestation
@@ -1073,12 +1082,7 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
             if idle_exit:
                 from gateway.run_idle_exit import arm_unmanaged_idle_exit
                 arm_unmanaged_idle_exit(runner)
-            else:
-                # A supervised/explicit gateway serves Desktop and the dashboard SPA, which call the
-                # dashboard routes right away: mount them now, after READY. A client's own idle-exit
-                # gateway (chat -q, TUI) only uses the native WebSocket; it mounts on first request.
-                from gateway.run_api import warm_gateway_dashboard
-                warm_gateway_dashboard(runner)
+
             await wait_gateway_runtime(runner)
         finally:
             try:

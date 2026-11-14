@@ -132,8 +132,8 @@ def build_gateway_parser(
                "4 authorization/profile mismatch; 5 deadline; 6 draining/update-paused; "
                "7 inaccessible/conflicting supervisor. Pending startup is not readiness.")
     _flag(gateway_ensure, "--json", help="Emit one credential-free JSON result (default)")
-    gateway_ensure.add_argument("--timeout", default="60",
-                                help="Total startup deadline in seconds (default: 60)")
+    gateway_ensure.add_argument("--timeout", default="330",
+                                help="Total startup deadline in seconds (default: 330)")
     gateway_ensure.set_defaults(func=cmd_gateway_ensure)
 
     gateway_attach = gateway_subparsers.add_parser(
@@ -150,8 +150,8 @@ def build_gateway_parser(
     _flag(attach_mode, "--start", help="Start the gateway when none serves this profile")
     _flag(attach_mode, "--recover",
         help="Discover first; start (or replace an older Hermes's) gateway only when it is not ready")
-    gateway_attach.add_argument("--timeout", default="60",
-                                help="Start deadline in seconds for --start/--recover (default: 60)")
+    gateway_attach.add_argument("--timeout", default="330",
+                                help="Start deadline in seconds for --start/--recover (default: 330)")
     gateway_attach.set_defaults(func=cmd_gateway_attach)
 
     gateway_start = gateway_subparsers.add_parser(

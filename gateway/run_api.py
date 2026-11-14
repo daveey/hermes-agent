@@ -7,7 +7,7 @@ not bootstrap an agent, scheduler, hosted room, or a second gateway.
 The native session WebSocket (ticketed ``/api/ws`` — every local CLI/TUI/Desktop session) is served
 without the dashboard app: importing ``hermes_cli.web_server`` (about 690 routes, ~0.6 s) before the
 listener bound stalled every cold start and the control socket's identify. The dashboard is mounted
-on its first request (imported off the event loop) or warmed after READY for a supervised gateway
+on its first request (imported off the event loop) or warmed before READY for a supervised gateway
 (``warm_gateway_dashboard``); a gated listener (non-loopback bind, ``webapp.public_url`` on the Webapp's,
 ``dashboard.public_url`` on the private one) and a
 process that already imported it mount it before the listener starts, exactly as before.
@@ -299,7 +299,7 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0, w
 
 
 def warm_gateway_dashboard(runner) -> None:
-    """Mount the dashboard in the background once the gateway is READY (supervised gateways, whose
+    """Mount the dashboard in the background before READY (supervised gateways, whose
     clients — Desktop, the dashboard SPA — call its routes right away). Never raises."""
     handle = getattr(runner, "session_api", None)
     mount = getattr(handle, "app", None)
@@ -315,6 +315,23 @@ def warm_gateway_dashboard(runner) -> None:
 
     runner._gateway_dashboard_warmup = asyncio.get_running_loop().create_task(
         _warm(), name="gateway-dashboard-warmup")
+
+
+async def await_gateway_dashboard_warm(runner, *, timeout: float = 30.0) -> None:
+    """Bound the supervised READY barrier without cancelling a still-running mount.
+
+    Warm-up logs failures itself; a failed mount is retried by the first request.
+    Like the session preload, ordinary failures never prevent READY.
+    """
+    task = getattr(runner, "_gateway_dashboard_warmup", None)
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    except TimeoutError:
+        logger.warning("Gateway dashboard API mount still running after %.0fs; publishing READY", timeout)
+    except Exception:
+        logger.warning("Gateway dashboard API warm-up failed; it loads on first request", exc_info=True)
 
 
 _SESSION_SOCKET_MODULE = "tui_gateway.ws"
