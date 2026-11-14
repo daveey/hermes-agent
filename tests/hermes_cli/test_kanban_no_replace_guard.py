@@ -8,6 +8,7 @@ identifiers/keywords require review. The executable counterexample lives under
 import ast
 from pathlib import Path
 import re
+import sqlite3
 
 import pytest
 
@@ -19,10 +20,11 @@ WATCHED = (
 )
 # SQL comments are legal whitespace even between INSERT / OR / REPLACE.
 SPACE = r"(?:\s|/\*[\s\S]*?\*/|--[^\n]*(?:\n|$))+"
-IDENT = r'(?:[a-z_]\w*|"[^\"]+"|`[^`]+`|\[[^\]]+\])'
+IDENT = r'''(?:[a-z_]\w*|"[^"]+"|'[^']+'|`[^`]+`|\[[^\]]+\])'''
+OPTIONAL_SPACE = rf"(?:{SPACE})?"
 REPLACE = re.compile(
     rf"\b(?:INSERT{SPACE}OR{SPACE})?REPLACE{SPACE}INTO{SPACE}"
-    rf"(?:(?:{IDENT})\s*\.\s*)?(?P<table>{IDENT})",
+    rf"(?:(?:{IDENT}){OPTIONAL_SPACE}\.{OPTIONAL_SPACE})?(?P<table>{IDENT})",
     re.IGNORECASE,
 )
 SOURCE_SUFFIXES = {".py", ".sql", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}
@@ -32,7 +34,7 @@ def _violations(text):
     return [
         match.group("table")
         for match in REPLACE.finditer(text)
-        if match.group("table").strip('"`[]').lower() in WATCHED
+        if match.group("table").strip("\"'`[]").lower() in WATCHED
     ]
 
 
@@ -119,6 +121,28 @@ def test_scan_escaped_quoted_identifiers(tmp_path, suffix, table):
     target = tmp_path / "plugins"
     target.mkdir()
     source = f'db.exec("REPLACE INTO \\"{table}\\" VALUES (?)")'
+    (target / f"writer{suffix}").write_text(source, encoding="utf-8")
+    assert len(_scan(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("identifier", [
+    "'task_comments'",
+    "main /* comment */ . task_comments",
+    "main. /* comment */ task_comments",
+    "'main' -- schema\n . -- table\n 'task_comments'",
+])
+@pytest.mark.parametrize("suffix", [".py", ".sql", ".js"])
+def test_scan_sqlite_identifier_forms(tmp_path, identifier, suffix):
+    sql = f"REPLACE INTO {identifier} VALUES (1, 'b')"
+    # Verify these are real cross-task replacements, not invented SQL syntax.
+    with sqlite3.connect(":memory:") as db:
+        db.execute("CREATE TABLE task_comments (uid INTEGER UNIQUE, task TEXT)")
+        db.execute("INSERT INTO task_comments VALUES (1, 'a')")
+        db.execute(sql)
+        assert db.execute("SELECT task FROM task_comments").fetchall() == [("b",)]
+    target = tmp_path / "gateway"
+    target.mkdir()
+    source = f"db.execute({sql!r})" if suffix == ".py" else sql
     (target / f"writer{suffix}").write_text(source, encoding="utf-8")
     assert len(_scan(tmp_path)) == 1
 
