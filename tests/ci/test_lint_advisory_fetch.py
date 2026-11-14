@@ -19,6 +19,7 @@ import pytest
 from ruamel.yaml import YAML
 
 from tests.ci import _gha_expr as gha
+from tests.ci.workflow_steps import replay_bash
 from tests.ci.test_fetch_merge_base import GIT_255_BUG, GIT_ENV, PARTIAL_CLONE_KEYS, commit, git
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -121,7 +122,7 @@ def pr_checkout(origin: Path, tmp_path: Path) -> Path:
     git(work, "fetch", "-q", "--no-tags", "--depth=2", "origin",
         "+refs/pull/7/merge:refs/remotes/pull/7/merge")
     git(work, "checkout", "-q", "--detach", "refs/remotes/pull/7/merge")
-    first = subprocess.run(["bash", str(SCRIPT), "main"], cwd=work, env={**os.environ, **GIT_ENV},
+    first = subprocess.run([replay_bash(), str(SCRIPT), "main"], cwd=work, env={**os.environ, **GIT_ENV},
                            capture_output=True, encoding="utf-8", timeout=120, check=False)
     assert first.returncode == 0, first.stderr
     assert git(work, "config", "--get", "remote.origin.promisor") == "true"
@@ -145,6 +146,8 @@ def run_step(name: str, work: Path, tmp_path: Path, fail: str) -> tuple[subproce
     assert gha.condition(step["if"], ctx), f"{name}: disabled for a Python pull request"
     bins = tmp_path / f"bin-{fail or 'ok'}-{STEPS.index(name)}"
     bins.mkdir()
+    # Nested workflow commands and env-bash shims need the same modern shell.
+    (bins / "bash").symlink_to(replay_bash())
     for tool, text in (("git", SHIM), ("python", FAKE_PYTHON)):
         (bins / tool).write_text(text, encoding="utf-8")
         (bins / tool).chmod(0o755)
@@ -156,7 +159,7 @@ def run_step(name: str, work: Path, tmp_path: Path, fail: str) -> tuple[subproce
            "PATH": f"{bins}{os.pathsep}{os.environ['PATH']}", "LINT_REAL_GIT": shutil.which("git"),
            "LINT_FAIL": fail, "LINT_ARGV_LOG": str(argv_log), "LINT_PYTHON_LOG": str(python_log),
            "LINT_BUG_TEXT": str(bug)}
-    result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c",
+    result = subprocess.run([replay_bash(), "--noprofile", "--norc", "-eo", "pipefail", "-c",
                              gha.render(step["run"], ctx)],
                             cwd=work, env=env, capture_output=True, encoding="utf-8", timeout=120,
                             check=False)

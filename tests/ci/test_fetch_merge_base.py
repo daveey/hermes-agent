@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.ci.workflow_steps import replay_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/actions/fetch-merge-base/fetch-merge-base.sh"
 
@@ -47,7 +49,7 @@ def run_script(cwd: Path, *args: str, path_prefix: Path | None = None,
     env = {**os.environ, **GIT_ENV, **(extra_env or {})}
     if path_prefix is not None:
         env["PATH"] = f"{path_prefix}{os.pathsep}{env.get('PATH', '')}"
-    return subprocess.run(["bash", str(SCRIPT), *args], cwd=cwd, env=env, capture_output=True,
+    return subprocess.run([replay_bash(), str(SCRIPT), *args], cwd=cwd, env=env, capture_output=True,
                           encoding="utf-8", timeout=120, check=False)
 
 
