@@ -83,7 +83,9 @@ def producer(conn, task_id: str, note: str) -> dict:
         if not is_headless_session(chat_id):
             local = gw == own and profile == get_active_profile_name()
             bind("tui" if local else "hub", session if local else chat_id)
-    if conn.execute("SELECT 1 FROM kanban_notify_subs WHERE task_id=? LIMIT 1", (task_id,)).fetchone():
+    from hermes_cli.kanban_db_notify import _owning_sub_clause
+    if conn.execute("SELECT 1 FROM kanban_notify_subs s JOIN tasks p ON p.id=s.task_id "
+                    f"WHERE s.task_id=? AND {_owning_sub_clause()} LIMIT 1", (task_id,)).fetchone():
         return {"kind": "chats"}
     episode = conn.execute("SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
     sup = kb.create_task(

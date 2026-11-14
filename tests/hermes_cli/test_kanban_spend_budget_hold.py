@@ -61,9 +61,13 @@ def test_owned_stop_has_one_chat_notice_and_no_supervisor(kanban_home, origin):
         assert len(events) == 1
 
 
-def test_unowned_stop_has_one_supervisor(kanban_home):
+@pytest.mark.parametrize("observer", [None, "touch", "shepherd"])
+def test_unowned_stop_has_one_supervisor(kanban_home, observer):
     with kbc.connect_closing() as conn:
         tid = stopped(conn)
+        if observer:
+            notify.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="observer",
+                                  delivery_metadata={"reason": observer})
         assert budget.hold(conn, tid) == "triage"
         budget.hold(conn, tid)
         (event,) = helpers._events(conn, tid, decision.NOTICE)
@@ -74,7 +78,7 @@ def test_unowned_stop_has_one_supervisor(kanban_home):
         assert tid in supervisor.body and "15 runs" in supervisor.body
         assert "promote" in supervisor.body and "archive" in supervisor.body
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
-        assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id=?", (tid,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id=?", (tid,)).fetchone()[0] == int(bool(observer))
 
 
 @pytest.mark.parametrize("status", ["ready", "review"])
@@ -139,9 +143,14 @@ def test_gateway_notice_contains_spend_and_decision(kanban_home):
     assert "15 runs" in text and "promote" in text and "archive" in text
 
 
-def test_producer_failure_keeps_hold_and_sweep_retries_once(kanban_home, monkeypatch):
+@pytest.mark.parametrize("prior_sweep", [False, True])
+def test_producer_failure_keeps_hold_and_sweep_retries_once(kanban_home, monkeypatch, prior_sweep):
     with kbc.connect_closing() as conn:
         tid = stopped(conn)
+        if prior_sweep:
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+            assert tid in sweep.sweep_stale_triage(conn, now=int(time.time()) + 7200)
         real = decision.producer
         def fail(c, task_id, note):
             real(c, task_id, note)  # even a partial publication must roll back

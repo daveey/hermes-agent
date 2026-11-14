@@ -24,7 +24,7 @@ TRIAGE_SWEEP_CAP_WINDOW = 86400
 # Events that put a card into triage. A card in triage whose newest such event is newer than its last
 # ``triage_swept`` re-entered triage after that sweep.
 TRIAGE_ENTRY_EVENTS = ("gave_up", "block_loop_detected", "agent_block_escalated", "supervisor_escalated",
-                       "continuation_exhausted", "blocked", "status")
+                       "continuation_exhausted", "blocked", "status", "spend_budget_triaged")
 _TRIAGE_BRIEF = (
     "\n\n---\n[triage sweep] This card sat in triage with no specifier. Specify it "
     "(clarify title/body, then do the work), or park it with kanban_schedule + a wake_check "
