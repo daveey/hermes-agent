@@ -453,9 +453,69 @@ def _signature(st: os.stat_result) -> list[int]:
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
+def _trusted_anchors() -> list[Path]:
+    """Directories an operator may keep behind a symlink: the kanban home and the parent of a
+    ``HERMES_KANBAN_WORKSPACES_ROOT`` override (the anchors
+    ``kanban_db_workspace._managed_scratch_path_info`` resolves for the same reason)."""
+    from hermes_cli import kanban_db as kb
+
+    anchors = []
+    override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
+    try:
+        if override:
+            anchors.append(Path(override).expanduser().parent)
+        anchors.append(kb.kanban_home())
+    except (OSError, RuntimeError, ValueError):
+        pass  # no anchor: every path is walked as spelled (fail closed)
+    return anchors
+
+
+def _canonical(path: Path) -> Path:
+    """*path* with a symlinked kanban home replaced by the home's real location.
+
+    An operator may keep the Hermes home behind a link (``~/.hermes -> .bb-hermes``).
+    Tasks then spell their workspace through it, and a no-follow walk from ``/``
+    refused every aged tree on that host forever. Only that one prefix is
+    resolved: the outermost ancestor of *path* that IS a trusted anchor (same
+    device and inode). The caller still walks the result without following links,
+    so a link below the home, or on a path that is not below it, is refused as
+    before. A relative path, one with ``..`` or one that cannot be judged is
+    returned as spelled.
+    """
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts:
+        return path
+    anchors = set()
+    for anchor in _trusted_anchors():
+        try:
+            st = os.stat(anchor)
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            anchors.add((st.st_dev, st.st_ino))
+    if not anchors:
+        return path
+    for ancestor in (*reversed(path.parents), path):  # outermost first
+        try:
+            st = os.stat(ancestor)
+            if (st.st_dev, st.st_ino) not in anchors:
+                continue
+            real = Path(os.path.realpath(ancestor))
+            rst = os.stat(real)
+        except OSError:
+            return path
+        if (rst.st_dev, rst.st_ino) != (st.st_dev, st.st_ino):
+            return path  # the link moved while it was read
+        return real.joinpath(*path.parts[len(ancestor.parts):])
+    return path
+
+
 def _open_root(root: Path) -> int:
-    """Anchor at / (or cwd), opening every path component without following links."""
-    root = Path(root)
+    """Anchor at / (or cwd), opening every path component without following links.
+
+    The one exception is the operator's own link to the kanban home, which
+    :func:`_canonical` replaces by its real location before the walk."""
+    root = _canonical(Path(root))
     fd = os.open(root.anchor or ".", _DIR_FLAGS)
     try:
         for part in root.parts[1:] if root.is_absolute() else root.parts:
@@ -872,7 +932,8 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
             # Persist every ancestor entry, not just the published name. Existing
             # directories may come from an interrupted prior attempt whose mkdir
             # was never flushed, so existence cannot serve as a durability fence.
-            for parent in final.absolute().parents:
+            # Through _canonical: a home kept behind a link is flushed at its real location.
+            for parent in _canonical(final.absolute()).parents:
                 _fsync_path(parent, directory=True)
         except BaseException:
             shutil.rmtree(final, ignore_errors=True)
