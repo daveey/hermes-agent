@@ -91,6 +91,14 @@ def forked_exit_status(proc, timeout: float | None) -> int | None:
     """Wait for a fork-server child, then read its status under _fork_lock (None on timeout)."""
     from multiprocessing.connection import wait
 
+    # The status bytes can already be consumed while the forkserver still has
+    # its writer open: an empty sentinel is then not readable, even after join.
+    # exitcode polls/caches status, so protect it from Process.start's cleanup.
+    with _fork_lock:
+        status = proc.exitcode
+        if status is not None:
+            proc.join()
+            return status
     if not wait([proc.sentinel], timeout):
         return None
     with _fork_lock:

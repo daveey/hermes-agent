@@ -136,6 +136,54 @@ def test_forked_child_poll_observes_status_without_consuming_output(monkeypatch,
     probe.assert_called_once_with(child._proc, 0)
 
 
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("status", [0, 1, -9])
+@pytest.mark.parametrize("poll_first", [False, True])
+def test_forked_status_survives_consumed_sentinel(tmp_path, monkeypatch, status, poll_first):
+    import multiprocessing
+    import os
+    from multiprocessing.connection import wait
+    from multiprocessing.forkserver import write_signed
+    from multiprocessing.popen_forkserver import Popen
+
+    # Real multiprocessing status decoding, with the forkserver's writer held
+    # open after its status write. No EOF can mask the consumed-pipe race.
+    read_fd, write_fd = os.pipe()
+    popen = Popen.__new__(Popen)
+    popen.sentinel = read_fd
+    popen.returncode = None
+    proc = multiprocessing.get_context("forkserver").Process()
+    proc._popen = popen
+    proc._sentinel = read_fd
+    child = launch._ForkedPytest.__new__(launch._ForkedPytest)
+    child._proc = proc
+    child.returncode = None
+    child.pid = 123
+    child._out = tmp_path / "output"
+    child._out.write_text("preserved diagnostics", encoding="utf-8")
+    kill = Mock()
+    monkeypatch.setattr(launch.os, "kill", kill)
+    try:
+        assert child.poll() is None  # a live child still has no status
+        with pytest.raises(subprocess.TimeoutExpired):
+            child.communicate(timeout=0)
+        assert child._out.exists()
+        write_signed(write_fd, status)
+        if poll_first:
+            assert child.poll() == status
+        assert child.communicate(timeout=0) == ("preserved diagnostics", None)
+        assert wait([read_fd], 0) == []  # consumed bytes, writer not closed
+        assert child.poll() == status
+        assert child.poll() == status
+        assert child.returncode == status
+        assert not child._out.exists()
+        child.kill()
+        kill.assert_not_called()  # terminal status must not resurrect kill eligibility
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
 @pytest.mark.parametrize("status", [None, 0])
 def test_runner_records_child_status_before_killing(tmp_path, monkeypatch, status):
     from scripts import run_tests_parallel as runner
