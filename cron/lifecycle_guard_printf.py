@@ -25,6 +25,7 @@ which bash drops again when reading script input.
 """
 
 import re
+import shlex
 import time
 from typing import Callable, Iterator, Optional, cast
 
@@ -117,9 +118,22 @@ def _pad(text: str, flags: str, width: int) -> str:
     return text.ljust(width) if "-" in flags else text.rjust(width)
 
 
+_ANSI_QUOTE_ESCAPES = {
+    "\a": r"\a", "\b": r"\b", "\x1b": r"\E", "\f": r"\f", "\n": r"\n",
+    "\r": r"\r", "\t": r"\t", "\v": r"\v", "\\": r"\\", "'": r"\'",
+}
+
+
 def _quoted(text: str) -> str:
-    """``%q``: bash backslash-quotes each special character, so the shell reading it gets *text*
-    back."""
+    """Bash uses ANSI-C quoting for ASCII controls, backslashes otherwise.
+
+    Equivalent shell words are not interchangeable here: ``%q`` precision slices
+    the quoted representation, whereas ``%Q`` slices the argument first.
+    """
+    if any(ord(c) < 32 or ord(c) == 127 for c in text):
+        pieces = (_ANSI_QUOTE_ESCAPES.get(c, f"\\{ord(c):03o}")
+                  if ord(c) < 32 or ord(c) == 127 or c in "\\'" else c for c in text)
+        return "$'" + "".join(pieces) + "'"
     return "".join(c if _SAFE_CHAR_RE.match(c) else "\\" + c for c in text) or "''"
 
 
@@ -240,6 +254,20 @@ _PRINTED_ESCAPE_RE = re.compile(r"\\[ntrvf]")
 _ECHO_OPTION_RE = re.compile(r"-[neE]+")
 
 
+_ANSI_QUOTED_RE = re.compile(r"\$'((?:\\.|[^'\\])*)'", re.DOTALL)
+
+
+def _shell_quote_variant(text: str) -> str:
+    """Also walk printf's complete ANSI-C quotes in a form shlex understands.
+
+    A precision-truncated quote may be closed by later format text. Keep the
+    original output too: this deliberately conservative variant does not infer
+    surrounding shell quote context. Only printf's emitted escape subset is decoded.
+    """
+    return _ANSI_QUOTED_RE.sub(
+        lambda match: shlex.quote(decode_c_escapes(match[1], echo_style=False)), text)
+
+
 def printed_argument_lines(name: str, arguments: list[str]) -> Iterator[str]:
     """The line(s) an ``echo``/``printf`` with *arguments* may print: as written, without
     ``echo``'s leading option words, and (fail closed) without every leading ``-word``."""
@@ -268,7 +296,9 @@ def printed_argument_lines(name: str, arguments: list[str]) -> Iterator[str]:
         models = FLOAT_MODELS if _FLOAT_CONVERSION_RE.search(arguments[start]) else (X87,)
         for model in models:
             try:
-                yield printf_output(arguments[start], arguments[start + 1 :], model)
+                output = printf_output(arguments[start], arguments[start + 1 :], model)
+                yield output
+                yield _shell_quote_variant(output)
             except (ValueError, ArithmeticError):
                 # Fail closed: a model bug must not abort the guard's walk (its caller falls
                 # back to the direct scan); the variants around this one are still walked.
