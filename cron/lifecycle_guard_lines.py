@@ -26,6 +26,29 @@ def _quoted_end(text: str, start: int, closer: str, *, escapes: bool = True) -> 
     return len(text)
 
 
+def _double_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str]:
+    """A substitution's quotes belong to its own frame, not the enclosing word."""
+    pos = copied = start
+    parts = ['"']
+    while pos < len(text):
+        char = text[pos]
+        if char == "\\":
+            pos += 2
+            continue
+        if char == '"':
+            pos += 1
+            break
+        if char in "$`":
+            end, span = _expansion(text, pos, in_double=True, shlex_quotes=shlex_quotes)
+            if span:
+                parts.extend((text[copied:pos], span))
+                pos = copied = end
+                continue
+        pos += 1
+    parts.append(text[copied:pos])
+    return pos, "".join(parts)
+
+
 def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str]:
     """Keep parameter words opaque to the OUTER comment/line scanner.
 
@@ -47,8 +70,13 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, 
         if char == "\\":
             pos += 2
             continue
-        if char in "'\"`":
-            pos = _quoted_end(text, pos + 1, char, escapes=char != "'")
+        if char == '"':
+            end, span = _double_span(text, pos + 1, shlex_quotes=shlex_quotes)
+            parts.extend((text[copied:pos], span))
+            pos = copied = end
+            continue
+        if char == "'":
+            pos = _quoted_end(text, pos + 1, char, escapes=False)
             continue
         if text.startswith(("${", "$("), pos):
             stack.append("}" if text[pos + 1] == "{" else ")")
