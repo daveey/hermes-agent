@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import re
+import shlex
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -90,6 +91,8 @@ def collect_nested_shell_inputs(
     texts: list[str] = []
     scripts: set[Path] = set()
     unknown_names = budget.alias_names is None
+    if not unknown_names:
+        texts.extend(_iter_nested_printed_payloads(walk_command))
     for text, script in _iter_nested_shell_inputs(command, walk_command, cwd=cwd,
                                                   heredocs=not unknown_names):
         if script is not None:
@@ -274,6 +277,64 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
             _LOGIN_SHELL_OPTION_RE.fullmatch(word) for word in arguments[:options_end]):
         return _shell_inputs(arguments, name)
     return None
+
+
+def _printed_pipeline_units(command: str) -> Iterator[str]:
+    """Keep compound groups and pipe-newline continuations within one printed-text unit."""
+    from cron.lifecycle_guard import _CONTROL_CHARS, _iter_command_token_lists
+
+    words: list[str] = []
+    depth = 0
+    continued = False
+    for tokens in _iter_command_token_lists(command):
+        for token in tokens:
+            controls = re.findall(r"\|&|&&|\|\||[;&|()]", token) if (
+                token and set(token) <= _CONTROL_CHARS) else [token]
+            for word in controls:
+                if word in ("(", "{"):
+                    depth += 1
+                elif word in (")", "}"):
+                    depth = max(0, depth - 1)
+                elif not depth and word in (";", "&", "&&", "||"):
+                    yield " ".join(words)
+                    words = []
+                    continued = False
+                    continue
+                words.append(word if word in ("(", ")", "{", "}", ";", "&", "&&", "||", "|", "|&")
+                             else shlex.quote(word))
+                continued = word in ("|", "|&")
+        if not depth and not continued:
+            yield " ".join(words)
+            words = []
+    if words:
+        yield " ".join(words)
+
+
+def _iter_nested_printed_payloads(command: str) -> Iterator[str]:
+    """Walk printed text with unknown names only within a pipe feeding a startup shell.
+
+    The ordinary printed-text approximation still scans each connected compound pipeline;
+    unrelated top-level pipelines retain their session scope. Keep the ordinary walk too.
+    """
+    from cron.lifecycle_guard import (
+        _command_segment_views, _iter_command_token_lists, _split_segments,
+    )
+    from cron.lifecycle_guard_output import iter_printed_shell_payloads
+
+    if "|" not in command:
+        return  # do not tokenize large no-pipe generators a second time
+    for pipeline in _printed_pipeline_units(command):
+        piped = False
+        for tokens in _iter_command_token_lists(pipeline):
+            for segment in _split_segments(tokens, keep_controls=True):
+                if segment in (["|"], ["|&"]):
+                    piped = True
+                elif piped and any(_nested_shell_input(view) == ("stdin", None)
+                                   for view in _command_segment_views(segment)):
+                    for payload, _raw_quote in iter_printed_shell_payloads(
+                            pipeline, shell_sink=True):
+                        yield payload
+                    break
 
 
 def _feeds_nested_shell(owner: Optional[str]) -> bool:

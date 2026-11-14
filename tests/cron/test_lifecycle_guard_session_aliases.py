@@ -392,6 +392,60 @@ def test_card_repro_python_body_in_login_shell_stays_allowed(tmp_path, live_kanb
     assert unsafe is True and refusal is not None and "SQLite" in refusal
 
 
+@pytest.mark.parametrize("sink,blocked", [
+    ("bash -l", True), ("zsh", True), ("ssh h", True),
+    ("bash", False), ("bash -s", False),
+    ("bash -l -c ':'", False), ("ssh h cat", False),
+])
+@pytest.mark.parametrize("printer", ["printf", "echo"])
+def test_printed_pipe_uses_consuming_shell_scope(tmp_path, live_kanban_db, sink, blocked, printer):
+    text = f"{printer} 't ( bash {live_kanban_db} )' | {sink}"
+    unsafe, refusal = scan_gateway_lifecycle(
+        text, cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe is blocked
+    if blocked:
+        assert refusal is not None and "SQLite" in refusal
+
+
+@pytest.mark.parametrize("separator", [";", "&&", "||", "\n"])
+def test_unrelated_login_shell_does_not_change_printed_pipe_scope(
+    tmp_path, live_kanban_db, separator,
+):
+    text = f"printf 't ( bash {live_kanban_db} )' | bash {separator} printf ':' | bash -l"
+    assert scan_gateway_lifecycle(
+        text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (False, None)
+
+
+def test_login_shell_on_producing_side_does_not_receive_printed_text(tmp_path, live_kanban_db):
+    text = f"bash -l | printf 't ( bash {live_kanban_db} )' | bash"
+    assert scan_gateway_lifecycle(
+        text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "printf 't ( bash {db} )' | ( bash -l )",
+    "( printf 't ( bash {db} )' ) | bash -l",
+    "printf 't ( bash {db} )' | {{ :; bash -l; }}",
+    "printf 't ( bash {db} )' |\nbash -l",
+    "printf 't ( bash {db} )' |& bash -l",
+    "printf 't ( bash {db} )' | cat | bash -l",
+])
+def test_compound_printed_pipe_keeps_nested_scope(tmp_path, live_kanban_db, shape):
+    unsafe, refusal = scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe is True and refusal is not None and "SQLite" in refusal
+
+
+def test_no_pipe_does_not_tokenize_printed_payloads(monkeypatch):
+    from cron.lifecycle_guard_nested_shells import _iter_nested_printed_payloads
+
+    def unexpected(command):
+        pytest.fail("no-pipe command was tokenized")
+
+    monkeypatch.setattr("cron.lifecycle_guard._iter_command_token_lists", unexpected)
+    assert list(_iter_nested_printed_payloads("printf ':'")) == []
+
+
 def test_nested_shell_input_shapes():
     """Which nested shells hold aliases of their own, and what of theirs is shell code."""
     from cron.lifecycle_guard_nested_shells import _feeds_nested_shell, _iter_nested_shell_inputs

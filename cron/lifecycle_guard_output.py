@@ -38,7 +38,7 @@ def iter_recursive_payloads(command, nested_texts, *, cwd, executed, budget, cov
 
 
 def iter_printed_shell_payloads(
-    command: str, *, include_quoted: bool = True,
+    command: str, *, include_quoted: bool = True, shell_sink: bool = False,
 ) -> Iterator[tuple[str, bool]]:
     """Yield (payload, raw_quote) when output may execute as shell code.
 
@@ -46,11 +46,12 @@ def iter_printed_shell_payloads(
     consumer may omit ONLY their enumeration in the same interpretation scope.
     Keep both quote kinds and overlapping pairs: apostrophes inside the other
     kind must not hide later literals. Unknown producers remain conservative.
+    *shell_sink*: the caller already knows the output reaches a shell.
     """
     from cron import lifecycle_guard as guard
     from tools.shell_heredoc import output_reaches_shell
 
-    if not output_reaches_shell(command):
+    if not shell_sink and not output_reaches_shell(command):
         return
     seen: set[str] = set()
 
