@@ -115,6 +115,24 @@ def test_real_plugin_dataclass_and_absolute_ctypes_through_gateway(tmp_path, ext
     assert result['start']['valid'] and result['snapshot']['valid'], result
 
 
+def test_core_native_soname_is_not_external(tmp_path, extension_core, python):
+    libraries = list(Path('/lib').glob('*/libc.so.6'))
+    if not libraries or not Path('/proc/self/maps').exists():
+        pytest.skip('loader-search regression requires Linux libc and proc maps')
+    native = extension_core / 'libquietreview.so'
+    shutil.copyfile(libraries[0].resolve(), native)
+    probe = extension_core / 'attest_probe.py'
+    probe.write_text(PROBE.replace(
+        'assert mod.Point(3).x == 3',
+        "assert mod.Point(3).x == 3\nassert str(pathlib.Path(__file__).parent / 'libquietreview.so') in pathlib.Path('/proc/self/maps').read_text()"))
+    route._git(extension_core, 'add', '-A')
+    route._git(extension_core, 'commit', '-qm', 'native loader search fixture')
+    result = route.run_stub(tmp_path, python, route.current_script(extension_core), extra_env={
+        'QUIET_NATIVE_LIBRARY': native.name, 'LD_LIBRARY_PATH': str(extension_core)})
+    assert 'unknown:code:native-load:' + native.name in result['check']['reasons'], result
+    assert not result['check']['admitted'] and not result['start']['valid']
+
+
 @pytest.mark.parametrize('state,delta,age,foreign,hold,admitted', [
     ('batching', 3600, 0, False, False, True),
     ('batching', 600, 0, False, False, True),

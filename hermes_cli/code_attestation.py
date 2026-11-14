@@ -1267,7 +1267,13 @@ class Attestation:
                 if not allowed:
                     self.mark_unknown("dependency-unreceipted:" + str(path))
         if caller is None or not allowed:
-            self._extension_unknown("native-load:" + str(name), name)
+            reason = "native-load:" + str(name)
+            # Loader search is not cwd-relative provenance. Only absolute paths
+            # can establish that an unknown library is outside the core root.
+            if isinstance(name, str) and os.path.isabs(name):
+                self._extension_unknown(reason, name)
+            else:
+                self.mark_unknown(reason)
             return
         if len(self._native_loads) < MAX_DEP_REPORT:
             self._native_loads.append({"name": name, "caller_component": caller})
