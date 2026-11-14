@@ -678,6 +678,10 @@ HOME_GATEWAY_MARKERS = (
 # Kanban/scratch artifact that exists here, keeps the card. ``a`` ('this host' names the creating worker) keeps it.
 # ``b`` (hub or fleet state), ``c`` (Mac work) and ``d`` (a tool every pool worker carries) queue it for the pool,
 # with :data:`HOME_CLASS_LABELS`. Operator ``extra_home_markers`` still keep it.
+# Generic systemctl/journalctl, gateway restart and config phrases remain class b even on a worker: they do not
+# identify whose unit/config is intended. Say 'this host' to bind worker-self work (class a); do not infer custody
+# from the command alone. The follow-up live-window audit found no worker-self unit/config request to justify
+# another implicit class-a phrase.
 HOME_MARKER_CLASSES = {
     HOST_WORKTREE_PATH: "worktree", LOCAL_WORKTREE_PATH: "worktree", HERMES_STATE_PATH: "state-path",
     r"\bthis host\b": "a",

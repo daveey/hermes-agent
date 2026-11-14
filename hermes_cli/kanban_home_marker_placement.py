@@ -18,6 +18,7 @@ decision that placed the card, without probing again.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import time
@@ -33,7 +34,9 @@ _CLAUDE_WT_ROOT = re.compile(r"(?:~|/)[^\s`'\"]*/\.claude/worktrees/[\w-]+(?:\.[
 _STATE = re.compile(_HOME + r"/\.hermes/[^\s`'\"<>()\[\]]*")
 _REL_STATE = re.compile(r"\.hermes/[^\s`'\"<>()\[\]]*", re.IGNORECASE)
 # This worker's own unpublished files: a card's workspace, evidence or attachments, or a scratch file.
-_ARTIFACT = re.compile(r"/\.hermes/(kanban/(?:workspaces|evidence|attachments)|cache/scratch)/([^/\s]+)")
+_ARTIFACT = re.compile(
+    r"/\.hermes/(kanban/(?:workspaces|evidence|attachments|boards/[^/\s]+/(?:workspaces|attachments))|cache/scratch)"
+    r"/([^/\s]+)")
 
 KEEP_TAIL = ("Push the branch, or attach the files with kanban_attach and drop the path, to let any pool worker "
              "run it.")
@@ -49,8 +52,8 @@ NOTES = {
 
 def _local_path(raw: str) -> Path:
     """``raw`` on this host: ``~`` and ``/home/<this user>`` expand against ``Path.home()``."""
-    if raw.startswith("~/"):
-        return Path.home() / raw[2:]
+    if home := re.match(r'(?:~|\$HOME|\$\{HOME\}|"\$HOME"|"\$\{HOME\}")/', raw):
+        return Path.home() / raw[home.end():]
     m = re.match(r"/home/([^/]+)/(.*)", raw)
     if m and m.group(1) == Path.home().name:
         return Path.home() / m.group(2)
@@ -115,7 +118,9 @@ def _worktree(pattern, match, gateway, probe):
         if state:
             yield "keep", "a-worktree", root, (), state
         else:
-            yield "queue", "worktree-not-here", root, (), NOTES["path"].format(hit=root, gateway=gateway)
+            note = (NOTES["path"].format(hit=root, gateway=gateway) if root in found else
+                    f"{root} names the worktree collection, not one tree; name the tree to keep the card here.")
+            yield "queue", "worktree-not-here", root, (), note
 
 
 def _last_rel_state(match):
@@ -141,7 +146,7 @@ def _state_path(pattern, match, gateway, probe):
     for raw in dict.fromkeys(paths) or [_clean("~/" + rel.group(0)) if rel else match.group(0)]:
         if art := _ARTIFACT.search(raw):
             # health: allow HX001 -- the card text names ~/.hermes literally; probe that same path on this worker
-            if (Path.home() / ".hermes" / art.group(1) / art.group(2)).exists():
+            if _local_path(raw[:art.end()]).exists():
                 yield "keep", "a-artifact", raw, (), f"{raw} exists only on this worker"
             else:
                 yield ("queue", "artifact-not-here", raw, (kp.HOME_CLASS_LABELS["b"],),
@@ -168,9 +173,16 @@ def classify(args: dict, cfg, gateway: str):
     their labels and one note sentence per class. Reused for the rest of the create. [daveey]"""
     from hermes_cli.kanban_placement_diagnostics import home_marker_hits
     cache = _cache()
-    key = (gateway, *_key(args))
+    requires = args.get("requires") or []
+    requires = (requires,) if isinstance(requires, str) else tuple(requires)
+    # Snapshot all hit-filtering config (including extra_home_markers and hub_read_roots): callers may mutate
+    # lists in place. The audit's text-only identity below deliberately survives derived requires additions.
+    key = (gateway, *_key(args), requires, json.dumps(cfg, sort_keys=True, default=repr))
     if cache is not None and key in cache:
-        return cache[key]
+        result = cache[key]
+        if result is not None:
+            remember(args, {"decision": result["decision"], "class": result["class"], "hit": result["hit"]})
+        return result
     hits = home_marker_hits(args, cfg)
     result = None
     if hits:
