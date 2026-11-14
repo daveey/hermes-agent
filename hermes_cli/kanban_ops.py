@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import logging
 import os
 import sys
 import time
@@ -337,6 +339,39 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
+_KEEP_PREFIX = "Scratch preserved: "
+
+
+class _KeepLines(logging.Handler):
+    """Print each ``Scratch preserved: `` record on stdout as one bare line (no logger prefix)."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            if message.startswith(_KEEP_PREFIX):
+                # One record is one line: a path may hold a line break, and a wrapper relays by line.
+                print("?".join(message.splitlines()))
+        except Exception:  # health: allow BLE001 -- logging.Handler contract: emit never raises into the caller
+            self.handleError(record)
+
+
+@contextlib.contextmanager
+def _keep_lines_on_stdout():
+    """While open, every kept scratch tree's reason is also a stdout line. [daveey]
+
+    Subcommands log to files only, so a caller that captures this command's output (the Mac and
+    worker GC wrappers) never saw why a tree was kept, and agent.log rotates within a day. File
+    logging is untouched: this only adds a handler on ``hermes_cli`` for the workspace pass.
+    """
+    handler = _KeepLines()
+    package = logging.getLogger("hermes_cli")
+    package.addHandler(handler)
+    try:
+        yield
+    finally:
+        package.removeHandler(handler)
+
+
 def _cmd_gc(args: argparse.Namespace) -> int:
     """Retry terminal workspace cleanup and remove old events and worker logs."""
     event_days = getattr(args, "event_retention_days", 30)
@@ -352,10 +387,11 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     budget_s = getattr(args, "scratch_budget_seconds", None)
     # One budget for the whole workspace pass: the wrapper's kill covers it all.
     budget = Budget(DEFAULT_BUDGET_S if budget_s is None else budget_s)
-    with kbc.connect_closing() as conn:
-        removed_ws = gc_task_worktrees(conn, older_than_days=wt_days)
-    with kbc.connect_closing() as conn:
-        removed_ws += gc_task_scratch(conn, older_than_days=wt_days, budget=budget)
+    with _keep_lines_on_stdout():
+        with kbc.connect_closing() as conn:
+            removed_ws = gc_task_worktrees(conn, older_than_days=wt_days)
+        with kbc.connect_closing() as conn:
+            removed_ws += gc_task_scratch(conn, older_than_days=wt_days, budget=budget)
 
     removed_events = 0
     if event_days:

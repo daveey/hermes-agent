@@ -302,8 +302,12 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
         final = sa.archive_workspace(path, archive_dir, task_id=task_id, completed_at=completed_at)
     except (sa.ArchiveRefused, OSError, subprocess.SubprocessError, ValueError) as exc:
         log.info("Keeping aged scratch workspace for task %s: %s (%s)", task_id, path, exc)
+        entry = None
         if refusals is not None:
             refusals.record(task_id, path, completed_at, str(exc))
+            entry = refusals.entries.get(task_id)
+        from hermes_cli.kanban_scratch_backoff import report_archive_refused
+        report_archive_refused(path, task_id, entry, exc)
         return 0
     if refusals is not None:
         refusals.clear(task_id)
@@ -332,6 +336,8 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
     except (sa.ArchiveRefused, OSError) as exc:
         log.info("Keeping archived scratch workspace for task %s (or detached recovery tree): %s (%s)",
                  task_id, path, exc)
+        from hermes_cli.kanban_scratch_backoff import keep_detail
+        log.warning("Scratch preserved: reason=detach_refused path=%s task=%s; %s", path, task_id, keep_detail(exc))
         return 0
 
 

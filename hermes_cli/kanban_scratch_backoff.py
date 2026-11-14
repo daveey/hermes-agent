@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -160,6 +161,29 @@ class Refusals:
                         self.file, exc_info=True)
 
 
+# ``hermes kanban gc`` prints every ``Scratch preserved: `` record on stdout (kanban_ops._cmd_gc)
+# and the Mac/worker GC wrappers relay those lines into their own log, so a kept tree's reason
+# outlives agent.log's rotation. The detail is cut to this alphabet: the relay full-matches it.
+_DETAIL_UNSAFE = re.compile(r"[^A-Za-z0-9_./:=,()' -]")
+DETAIL_MAX = 200
+
+
+def keep_detail(reason) -> str:
+    """*reason* as one relay-safe line: any character outside the alphabet becomes ``?``, cut to 200."""
+    return _DETAIL_UNSAFE.sub("?", str(reason))[:DETAIL_MAX]
+
+
+def report_archive_refused(path: Path, task_id: str, entry: Optional[dict], reason) -> None:
+    """One ``Scratch preserved: reason=archive_refused`` line for a tree kept by an archive refusal.
+
+    *entry* is the tree's backoff entry (attempt count and next retry); ``None`` when the caller
+    keeps no backoff state, which reads as a first attempt with no retry time.
+    """
+    attempts, retry_at = (entry["count"], int(entry["retry_at"])) if entry else (1, None)
+    log.warning("Scratch preserved: reason=archive_refused path=%s task=%s attempts=%s retry_at=%s; %s",
+                path, task_id, attempts, retry_at, keep_detail(reason))
+
+
 def skip_logged(refusals: Refusals, key: str, path: Path, completed_at, task_id: str) -> bool:
     """True (and one INFO line) when *key* is inside its backoff window: the tree is kept untouched."""
     entry = refusals.backing_off(key, path, completed_at)
@@ -168,4 +192,5 @@ def skip_logged(refusals: Refusals, key: str, path: Path, completed_at, task_id:
     log.info("Keeping aged scratch workspace for task %s: %s (archive refused %d time(s), "
              "next retry after %s; last: %s)", task_id, path, entry["count"],
              _utc(entry["retry_at"]), entry.get("reason"))
+    report_archive_refused(path, task_id, entry, entry.get("reason"))
     return True
