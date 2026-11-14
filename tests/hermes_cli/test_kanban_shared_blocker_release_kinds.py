@@ -102,3 +102,32 @@ def test_operator_release_after_dispatcher_release_stays_exempt(kanban_home, clo
         helpers._blocked_behind(conn, 'peer reasserts', blocker_id=WALL)
         assert blockers.blocker_states(conn)[WALL].is_open
         assert blockers.shared_blocker_guard(conn, target) is None
+
+
+def test_operator_release_then_hold_retire_clear_stays_exempt(kanban_home, clock):
+    """A clear that only retires a ready card's historical hold is not a dispatcher release.
+
+    ``release_cleared_blockers`` appends :data:`CLEARED_EVENT` (no ``woke``) to cards already
+    ``ready`` when the wall clears; that annotation must not turn the operator's earlier unblock
+    into the dispatcher's, or a peer's newer assertion would hold the operator-released card.
+    """
+    with kbc.connect_closing() as conn:
+        # The check's evidence lands on the lowest card id, so the lower id plays the parked peer
+        # and the clear's annotation is the target's very next event after the operator's unblock.
+        pair = [helpers._legacy_blocked_behind(conn, f'waiter {i}', blocker_id=WALL) for i in range(2)]
+        peer, target = sorted(pair)
+        clock[0] += 10
+        assert kb.unblock_task(conn, target)   # the operator says: try again now
+        assert kb.get_task(conn, target).status == 'ready'
+        clock[0] += 60
+        assert checks.run_due_checks(conn, cfg=CFG) == [WALL]
+        clock[0] += 30
+        assert blockers.release_cleared_blockers(conn) == [peer]
+        kinds = [r['kind'] for r in conn.execute(
+            'SELECT kind FROM task_events WHERE task_id=? ORDER BY id', (target,))]
+        assert kinds[-2:] == ['unblocked', blockers.CLEARED_EVENT]
+        clock[0] += 60
+        helpers._blocked_behind(conn, 'fresh run hits the wall again', blocker_id=WALL)
+        assert blockers.blocker_states(conn)[WALL].is_open
+        assert blockers._operator_released(conn, target, WALL) is True
+        assert blockers.shared_blocker_guard(conn, target) is None

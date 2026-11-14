@@ -530,8 +530,12 @@ def _operator_released(conn: sqlite3.Connection, task_id: str, blocker_id: str) 
     ``kb.unblock_task`` too, then record :data:`CLEARED_EVENT` / :data:`PROBE_RELEASED_EVENT` as the
     card's very next event. Such a release answers the wall's state at that moment; a run started after
     it that hits the wall again is newer evidence, so the card falls back to the normal rule instead of
-    spawning only to rediscover the wall (one wasted run per released card per episode). [daveey]
+    spawning only to rediscover the wall (one wasted run per released card per episode). A
+    :data:`CLEARED_EVENT` without ``woke: True`` retired a ready/review card's hold and released
+    nothing, so it leaves an operator's unblock just before it the operator's. [daveey]
     """
+    from hermes_cli import kanban_db as kb
+
     if not _unblocked_since_assertion(conn, task_id, blocker_id, own_only=True):
         return False
     rows = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='unblocked'", (task_id,)).fetchall()
@@ -542,7 +546,11 @@ def _operator_released(conn: sqlite3.Connection, task_id: str, blocker_id: str) 
         (task_id, newest["created_at"], newest["id"]),
     ) if _event_order(row) > order]
     after = min(following, key=_event_order, default=None)
-    return after is None or after["kind"] not in _DISPATCHER_RELEASES
+    if after is None or after["kind"] not in _DISPATCHER_RELEASES:
+        return True
+    # Hold-retirement annotation (release_cleared_blockers' ready/review branch): no ``woke``, no
+    # release; kanban_awaiting.prior_same_premise tells a real wake apart by the same key.
+    return after["kind"] == CLEARED_EVENT and kb._json_dict(after["payload"]).get("woke") is not True
 
 
 def shared_blocker_guard(
