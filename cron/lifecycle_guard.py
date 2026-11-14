@@ -1700,15 +1700,17 @@ def _contains_unsafe_gateway_action(
 
     # A nested startup-file shell's input is walked first, with unknown alias names (nit 1).
     from cron.lifecycle_guard_nested_shells import (
-        collect_nested_shell_inputs, shell_scope, unvisited_scopes)
+        collect_nested_shell_inputs, refuse_unresolved_stdin, shell_scope, unvisited_scopes)
 
     from cron.lifecycle_guard_output import iter_printed_shell_payloads, quote_scope
 
     session_payloads = list(itertools.chain(_iter_shell_command_payloads(walk_command),
         (text for text, _raw in iter_printed_shell_payloads(
             walk_command, include_quoted=covered_quote_scope != quote_scope(cwd, executed, budget)))))
-    nested_texts, nested_scripts = collect_nested_shell_inputs(
+    nested_texts, nested_scripts, unresolved = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
+    if refuse_unresolved_stdin(budget, unresolved, executed=executed):
+        return True
     from cron.lifecycle_guard_startup import scan_shell_inputs, script_working_directory
 
     if scan_shell_inputs(

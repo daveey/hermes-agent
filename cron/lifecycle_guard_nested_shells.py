@@ -86,16 +86,19 @@ def unvisited_scopes(
 def collect_nested_shell_inputs(
     command: str, walk_command: str, *, cwd: Optional[str], budget: _LifecycleScanBudget,
     session_payloads: Sequence[str] = (),
-) -> tuple[list[str], set[Path]]:
-    """``(texts, resolved scripts)`` a nested shell holding its own aliases parses in *command*
-    (see ``_iter_nested_shell_inputs``). Under already unknown alias names a heredoc body needs
+) -> tuple[list[str], set[Path], Optional[str]]:
+    """``(texts, resolved scripts, unresolved)`` a nested shell holding its own aliases parses in
+    *command* (see ``_iter_nested_shell_inputs``). Under already unknown alias names a heredoc body needs
     no second walk (the session walk reads it in the same scope), but ``-c`` payloads, here-strings
     and scripts are still returned: `su -lc T`, `runuser --comm=T`, `su -l bob < f` hand the
     shell text or a path no ordinary walk names (review 5903452583 B1). There the session scope is
     at least as strict as the nested one (it may also unmask heredoc bodies), so a text among
-    *session_payloads* (walked in the session scope anyway) is left out: walked and charged once."""
+    *session_payloads* (walked in the session scope anyway) is left out: walked and charged once.
+    *unresolved* names the first stdin source such a shell reads that the walk cannot name
+    (``su -l bob < $S``, ``< <(cmd)``, ``0<&3`` with no source): the caller fails closed."""
     texts: list[str] = []
     scripts: set[Path] = set()
+    unresolved: Optional[str] = None
     unknown_names = budget.alias_names is None
     # Under unknown names the session walk reads a printed pipe, but not text a `<(…)` feeds a
     # compound command or a redirection-first command (`{ su -l bob; } < <(echo T)`).
@@ -103,11 +106,26 @@ def collect_nested_shell_inputs(
                  if not (unknown_names and text in session_payloads))
     for text, script in _iter_nested_shell_inputs(command, walk_command, cwd=cwd,
                                                   heredocs=not unknown_names):
-        if script is not None:
+        if isinstance(text, Unresolved):
+            unresolved = unresolved or str(text)
+        elif script is not None:
             scripts.add(_resolve_lenient(script))
         elif text and not (unknown_names and text in session_payloads):
             texts.append(text)
-    return texts, scripts
+    return texts, scripts, unresolved
+
+
+def refuse_unresolved_stdin(
+    budget: _LifecycleScanBudget, unresolved: Optional[str], *, executed: bool,
+) -> bool:
+    """Fail closed (named refusal) on *unresolved* from ``collect_nested_shell_inputs`` in
+    executed text; a mere mention is never refused."""
+    if not (unresolved and executed):
+        return False
+    from cron.lifecycle_guard import _refuse_unreadable
+
+    return _refuse_unreadable(budget, Path(unresolved), f"the guard cannot resolve `{unresolved}`, "
+                              "the stdin of a login/interactive shell it starts")
 
 
 # Login/interactive POSIX shells (`-l`, `-i`, `-ils`, `--login`), every zsh (`~/.zshenv` runs
@@ -795,14 +813,18 @@ def _iter_nested_shell_inputs(
     # redirection overrides it: with a stdin-reading one anywhere, every compound command's
     # redirections count, failing closed.
     grouped = any(found == ("stdin", None) for _view, found in classified)
+    fds = _descriptor_sources(view for view, _found in classified) if grouped else {}
+    # So does a function body's (`f() { su -l bob; }; f < f`): a call to any function the
+    # command defines counts, whichever body holds the shell (`g() { f; }; g < f`).
+    functions = _defined_functions(walk_command) if grouped else frozenset()
     for owner, body in (iter_heredoc_bodies(command) if heredocs else ()):
-        if _feeds_nested_shell(owner) or (grouped and _closes_compound(owner or "")):
+        if _feeds_nested_shell(owner) or (grouped and _reaches_group(owner or "", functions)):
             yield body, None
     if grouped:
         yield from _fed_shell_inputs(walk_command, cwd=cwd)
     for view, found in classified:
-        if grouped and _compound_redirections(view):
-            yield from _redirected_shell_inputs(view, cwd=cwd)
+        if grouped and (_compound_redirections(view) or _calls_function(view, functions)):
+            yield from _redirected_shell_inputs(view, cwd=cwd, fds=fds)
         if found is None:
             continue
         kind, value = found
@@ -812,7 +834,7 @@ def _iter_nested_shell_inputs(
             for path in _resolved_or_nothing(value, cwd):
                 yield None, path
         elif kind == "stdin":
-            yield from _redirected_shell_inputs(view, cwd=cwd)
+            yield from _redirected_shell_inputs(view, cwd=cwd, fds=fds)
 
 
 def _fed_shell_inputs(walk_command: str, *, cwd: Optional[str]) -> Iterator[tuple[None, Path]]:
@@ -832,25 +854,80 @@ def _fed_shell_inputs(walk_command: str, *, cwd: Optional[str]) -> Iterator[tupl
                     yield None, path
 
 
-def _redirected_shell_inputs(
-    view: list[str], *, cwd: Optional[str],
-) -> Iterator[tuple[Optional[str], Optional[Path]]]:
-    """Keep stdin redirections in the consuming shell's scope, not the session's. ``/dev/null``
-    feeds the shell nothing (and is no regular file to walk)."""
+def _redirections(view: list[str]) -> Iterator[tuple[str, str, str]]:
+    """``(fd, operator, target)`` of each redirection in *view* (a separate target included)."""
     words = iter(view)
     for word in words:
         match = _REDIRECTION.match(word)
-        if match is None:
-            continue
-        fd, operator, target = match.groups()
-        target = target or next(words, "")
+        if match is not None:
+            fd, operator, target = match.groups()
+            yield fd, operator, target or next(words, "")
+
+
+def _descriptor_sources(views: Iterator[list[str]]) -> dict[str, list[tuple[str, str]]]:
+    """``{fd: [(operator, target), …]}`` for every input redirection of a descriptor above 2
+    anywhere in the command (``3< f``, ``exec 3<> f``, ``3<<< T``): which one a later ``0<&3``
+    duplicates depends on order and scope the walk does not track, so each counts."""
+    sources: dict[str, list[tuple[str, str]]] = {}
+    for view in views:
+        for fd, operator, target in _redirections(view):
+            if fd.isdigit() and int(fd) > 2 and operator.startswith("<"):
+                sources.setdefault(fd, []).append((operator, target))
+    return sources
+
+
+_FD_PATH_RE = re.compile(r"/(?:dev|proc/self)/fd/(\d+)")
+
+
+def _redirected_shell_inputs(
+    view: list[str], *, cwd: Optional[str], fds: Optional[dict[str, list[tuple[str, str]]]] = None,
+) -> Iterator[tuple[Optional[str], Optional[Path]]]:
+    """Keep stdin redirections in the consuming shell's scope, not the session's. ``/dev/null``
+    feeds the shell nothing (and is no regular file to walk). A stdin duplicated from another
+    descriptor (``0<&3``, ``< /dev/fd/3``) reads that descriptor's sources (*fds*)."""
+    for fd, operator, target in _redirections(view):
         if fd not in ("", "0"):
             continue
-        if operator == "<<<":
-            yield target, None
-        elif operator in ("<", "<>") and target != "/dev/null":
-            for path in _resolved_or_nothing(target, cwd):
-                yield None, path
+        duplicated = _FD_PATH_RE.fullmatch(target) if operator in ("<", "<>") else None
+        if operator == "<&" and target in ("-", "0"):
+            continue  # stdin closed, or left as it is
+        if operator == "<&" or (duplicated and duplicated.group(1) != "0"):
+            source = duplicated.group(1) if duplicated else target
+            sources = (fds or {}).get(source, ())
+            if not sources or any(dup_operator not in ("<", "<>", "<<<")
+                                  for dup_operator, _dup_target in sources):
+                yield Unresolved(f"{operator}{target}"), None
+            for dup_operator, dup_target in sources:
+                yield from _stdin_source(dup_operator, dup_target, cwd)
+        else:
+            yield from _stdin_source(operator, target, cwd)
+
+
+def _stdin_source(
+    operator: str, target: str, cwd: Optional[str],
+) -> Iterator[tuple[Optional[str], Optional[Path]]]:
+    """What one input redirection (``< f``, ``<> f``, ``<<< T``) hands the shell reading it; an
+    ``Unresolved`` text when the walk cannot name it (see ``_unresolvable``)."""
+    if operator == "<<<":
+        yield target, None
+    elif operator in ("<", "<>") and _unresolvable(target):
+        yield Unresolved(target), None
+    elif operator in ("<", "<>") and target != "/dev/null":
+        for path in _resolved_or_nothing(target, cwd):
+            yield None, path
+
+
+class Unresolved(str):
+    """A stdin source a nested shell reads whose content the walk cannot name: a variable, a
+    command or process substitution, a glob, a heredoc or unknown descriptor behind ``0<&N``."""
+
+
+# The tokenizer splits `<(cmd)` and `$(cmd)` at the parenthesis: the target is then `<` or `$`.
+_UNRESOLVABLE_TARGET_RE = re.compile(r"[$`*?\[]|^[<>]|^$")
+
+
+def _unresolvable(target: str) -> bool:
+    return _UNRESOLVABLE_TARGET_RE.search(target) is not None
 
 
 def _compound_redirections(view: list[str]) -> bool:
@@ -863,3 +940,26 @@ def _closes_compound(owner: str) -> bool:
     """Whether a heredoc's *owner* text is a compound command's closer (``} <<'E'``, ``fi <<E``):
     the body is then the stdin of the commands that compound command holds."""
     return any(_compound_redirections(view) for view in _iter_command_segment_views(owner))
+
+
+# `NAME ()` (bash, POSIX) or `function NAME` (bash, ksh), the latter with or without `()`.
+_FUNCTION_DEFINITION_RE = re.compile(
+    r"(?:^|[\s;&|(){}])(?:function\s+([^\s;&|(){}<>]+)|([A-Za-z_][\w.:-]*)\s*\(\s*\))")
+
+
+def _defined_functions(command: str) -> frozenset[str]:
+    """Names of the shell functions *command* may define."""
+    return frozenset(name for match in _FUNCTION_DEFINITION_RE.finditer(command)
+                     for name in match.groups() if name)
+
+
+def _calls_function(view: list[str], functions: frozenset[str]) -> bool:
+    """Whether *view* runs one of *functions*."""
+    index = _command_token_index(view) if functions else None
+    return index is not None and view[index] in functions
+
+
+def _reaches_group(owner: str, functions: frozenset[str]) -> bool:
+    """Whether a heredoc's *owner* text hands the body to a compound command or function call."""
+    return any(_compound_redirections(view) or _calls_function(view, functions)
+               for view in _iter_command_segment_views(owner))

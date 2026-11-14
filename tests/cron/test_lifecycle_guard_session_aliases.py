@@ -381,6 +381,25 @@ _NESTED_FOREIGN_SHELLS = [
     "nice su - bob <<< 't ( bash {db} )'",
     "timeout 5 su -c 't ( bash {db} )' bob",
     "env sudo -s <<'EOF'\nt ( bash {db} )\nEOF",
+    # stdin duplicated from another descriptor (t_01a1daf4b486a755): the descriptor's source.
+    "su -l bob 0<&3 3< {script}",
+    "{{ su -l bob; }} 0<&3 3< {script}",
+    "{{ su -l bob; }} <&3 3< {script}",
+    "exec 3< {script}; {{ su -l bob; }} 0<&3",
+    "exec 3< {script}\nsu -l bob <&3",
+    "su -l bob < /dev/fd/3 3< {script}",
+    "su -l bob < /proc/self/fd/3 3<> {script}",
+    "su -l bob 0<&3 3<<< 't ( bash {db} )'",
+    # A redirection on a call to a function the command defines reaches the body's shells.
+    "f() {{ su -l bob; }}; f < {script}",
+    "f() {{ su -l bob; }}; f <<< 't ( bash {db} )'",
+    "f() {{ su -l bob; }}; f <<EOF\nt ( bash {db} )\nEOF",
+    "function f {{ su -l bob; }}; f < {script}",
+    "function f() {{ su -l bob; }}\nf 0< {script}",
+    "f() {{\nsu -l bob\n}}\nf < {script}",
+    "f() {{ su -l bob; }}; g() {{ f; }}; g < {script}",
+    "f() {{ su -l bob; }}; f 0<&3 3< {script}",
+    "f() ( su -l bob ); f < {script}",
 ]
 
 
@@ -535,6 +554,21 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "nice su -l bob -c true <<< 't ( bash {db} )'",
     "sudo cat < {script}",
     "env runuser -u bob -- cat < {script}",
+    # A duplicated descriptor feeding no login shell, or a closed/own stdin (t_01a1daf4b486a755).
+    "cat 0<&3 3< {script}",
+    "exec 3< {script}; cat <&3",
+    "su -l bob 0<&-",
+    "su -l bob 0<&0",
+    # An unresolvable source that feeds no login shell (t_01a1daf4b486a755).
+    "cat < $S",
+    "{{ cat; }} < <(cat {script})",
+    "S={script}; cat < $S; su -l bob < /dev/null",
+    "while read l; do echo \"$l\"; done < <(cat {script})",
+    # A function call's redirection reaches only shells the command runs (t_01a1daf4b486a755).
+    "f() {{ cat; }}; f < {script}",
+    "f() {{ su -l bob; }}; cat < {script}",
+    "f() {{ su -l bob; }}; cat <<'EOF'\nt ( bash {db} )\nEOF",
+    "f() {{ su -l bob; }}; f < /dev/null",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
@@ -583,6 +617,48 @@ def test_multiline_group_without_a_fed_shell_stays_allowed(tmp_path, live_kanban
     script.write_text(f"t ( bash {live_kanban_db} )\n")
     text = shape.format(script=script)
     assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=None) == (False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "su -l bob < <(cat {script})",
+    "while read l; do su -l bob; done < <(cat {script})",
+    "S={script}; su -l bob < $S",
+    "su -l bob < $S",
+    "su -l bob < \"$S\"",
+    "su -l bob < ${{S}}",
+    "su -l bob < $(echo {script})",
+    "su -l bob <$(echo {script})",
+    "su -l bob < `echo {script}`",
+    "su -l bob < {tmp}/*.sh",
+    "{{ su -l bob; }} < $S",
+    "su -l bob 0<&3",  # a descriptor with no source in the command
+    "su -l bob 0<&$fd",
+    "su -l bob 0<&3 3< $S",
+    "su -l bob 0<&3 3<<'EOF'\nt ( bash {db} )\nEOF",
+])
+def test_nested_login_shell_unresolvable_stdin_fails_closed(tmp_path, live_kanban_db, shape):
+    """t_01a1daf4b486a755: a stdin whose content the walk cannot name (a variable, a command or
+    process substitution, a glob, an unknown descriptor) fed to a login shell is refused, not
+    skipped as if it held nothing."""
+    assert "alias" not in str(tmp_path).lower()
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(db=live_kanban_db, script=script, tmp=tmp_path)
+    for names in (frozenset({"zz"}), frozenset(), None):
+        unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
+        assert unsafe is True and refusal is not None and "cannot resolve" in refusal, (shape, names)
+
+
+def test_unresolvable_login_shell_stdin_in_a_mentioned_file_is_not_refused(tmp_path):
+    """Only executed text fails closed: a file a Python body merely opens is a mention."""
+    script = tmp_path / "s.sh"
+    script.write_text("su -l bob < $S\n")
+    mention = f"python3 - <<'PY'\nprint(open('{script}').read())\nPY"
+    assert scan_gateway_lifecycle(mention, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
+        False, None)
+    unsafe, refusal = scan_gateway_lifecycle(f"bash {script}", cwd=str(tmp_path),
+                                             session_aliases=frozenset({"zz"}))
+    assert unsafe is True and refusal is not None and "cannot resolve `$S`" in refusal
 
 
 @pytest.mark.parametrize("option", [
