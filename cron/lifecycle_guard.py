@@ -24,6 +24,7 @@ from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import (
     heredoc_scripts, iter_script_segment_contexts, join_continued_lines,
     protect_redirection_ampersands, restore_redirection_ampersands, split_glued_redirections)
+from cron.lifecycle_guard_words import redirection_parts, tokenize_redirections
 from cron.lifecycle_guard_lines import (  # newlines outside quotes, word-start `#` comments
     _split_logical_lines, join_line_continuations, strip_shell_comments,
 )
@@ -743,11 +744,11 @@ def _iter_command_token_lists(command: str) -> Iterator[list[str]]:
     of its own (``python3 -<f.py``), as in the shell."""
     for line in _split_logical_lines(strip_shell_comments(command).replace("\\\n", "")):
         try:
-            tokens = _shlex_tokens(split_glued_redirections(line))
+            tokens = tokenize_redirections(line, _shlex_tokens, _REDIRECTION)
         except ValueError:
             for physical_line in line.splitlines():
                 try:
-                    yield _shlex_tokens(split_glued_redirections(physical_line))
+                    yield tokenize_redirections(physical_line, _shlex_tokens, _REDIRECTION)
                 except ValueError:
                     continue
             continue
@@ -927,12 +928,12 @@ def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
     opened: dict[str, str] = {}
     index = 0
     while index < len(arguments):
-        match = _REDIRECTION.match(arguments[index])
+        match = redirection_parts(arguments[index], _REDIRECTION)
         index += 1
         if match is None:
             kept.append(arguments[index - 1])
             continue
-        fd, operator, target = match.groups()
+        fd, operator, target = match
         if not target and index < len(arguments):
             target = arguments[index]
             index += 1
@@ -970,11 +971,11 @@ def _cat_relays_stdin(segment: list[str]) -> bool:
         if index is not None and (name := _executable_name(view[index])) in ("cat", "tee"):
             words, arguments = iter(view[index + 1 :]), []
             for word in words:
-                match = _REDIRECTION.match(word)
+                match = redirection_parts(word, _REDIRECTION)
                 if match is None:
                     arguments.append(word)
                     continue
-                fd, operator, target = match.groups()
+                fd, operator, target = match
                 target = target or next(words, "")
                 if fd in ("", "0") and operator.startswith("<") and (operator, target) != ("<&", "0"):
                     return False  # `cat < x`, `cat <<< x`, `cat <&3` read their own stdin
@@ -1081,10 +1082,10 @@ def _hoist_command_redirections(segment: list[str]) -> list[str]:
 def _redirection_width(word: str) -> int:
     """Words a redirection starting at *word* spans: 1 with a glued target (``<f``), 2 when the
     target is the next word (``< f``), 0 when *word* is not a redirection."""
-    match = _REDIRECTION.match(word)
+    match = redirection_parts(word, _REDIRECTION)
     if match is None:
         return 0
-    return 1 if match.group(3) else 2
+    return 1 if match[2] else 2
 
 
 def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
@@ -1189,7 +1190,7 @@ def _mask_data_sink_arguments(text: str) -> str:
             lines_out.append(line)
             continue
         try:
-            tokens = _shlex_tokens(split_glued_redirections(line))
+            tokens = tokenize_redirections(line, _shlex_tokens, _REDIRECTION)
         except ValueError:
             lines_out.append(line)
             continue
