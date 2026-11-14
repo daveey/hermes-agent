@@ -41,9 +41,60 @@ def _double_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str
         if char in "$`":
             end, span = _expansion(text, pos, in_double=True, shlex_quotes=shlex_quotes)
             if span:
+                if shlex_quotes:
+                    span = span.replace("\\", "\\\\").replace('"', '\\"')
                 parts.extend((text[copied:pos], span))
                 pos = copied = end
                 continue
+        pos += 1
+    parts.append(text[copied:pos])
+    return pos, "".join(parts)
+
+
+def _command_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str]:
+    """Find a substitution's closing parenthesis in its own shell comment frame."""
+    pos = copied = start
+    depth = 1
+    word_start = True
+    parts = ["$("]
+    while pos < len(text):
+        char = text[pos]
+        if char == "#" and word_start:
+            end = text.find("\n", pos)
+            end = len(text) if end < 0 else end
+            if shlex_quotes:
+                parts.append(text[copied:pos])
+                copied = end
+            pos = end
+            continue
+        if char == "\\":
+            if text[pos + 1:pos + 2] != "\n":
+                word_start = False
+            pos += 2
+            continue
+        if char == "'":
+            pos = _quoted_end(text, pos + 1, char, escapes=False)
+            word_start = False
+            continue
+        if char == '"':
+            end, span = _double_span(text, pos + 1, shlex_quotes=shlex_quotes)
+        elif char in "$`":
+            end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes)
+        else:
+            end, span = pos, ""
+        if span:
+            parts.extend((text[copied:pos], span))
+            pos = copied = end
+            word_start = False
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if not depth:
+                pos += 1
+                break
+        word_start = char in _WORD_BREAKS
         pos += 1
     parts.append(text[copied:pos])
     return pos, "".join(parts)
@@ -60,7 +111,9 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, 
     parts = [text[start - 2:start]]
     while pos < len(text) and stack:
         char = text[pos]
-        if char == "`" or text.startswith("$'", pos):
+        if char == "`" or text.startswith("$'", pos) or (
+            text.startswith("$(", pos) and not text.startswith("$((", pos)
+        ):
             # Nested backticks need the same inner-comment normalization as root
             # substitutions; otherwise a comment's quote leaks into outer shlex.
             end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes)
@@ -95,6 +148,8 @@ def _expansion(text: str, pos: int, *, in_double: bool, shlex_quotes: bool) -> t
     """Return an opaque span, or an empty span when ordinary scanning should proceed."""
     if text.startswith("${", pos):
         return _parameter_span(text, pos + 2, shlex_quotes=shlex_quotes)
+    elif text.startswith("$(", pos) and not text.startswith("$((", pos):
+        return _command_span(text, pos + 2, shlex_quotes=shlex_quotes)
     elif text[pos] == "`":
         end = _quoted_end(text, pos + 1, "`")
         if shlex_quotes and text[end - 1:end] == "`":
@@ -131,9 +186,16 @@ def _scan(text: str, *, split: bool, keep_comments: bool, shlex_quotes: bool = F
     for pos, ch in enumerate(text):
         if pos < end:
             continue
-        if ch in "$`" and not in_comment and not in_single and not escape:
+        if (ch in "$`" and not in_comment and not in_single and not escape
+                and not text.startswith("$(", pos)):
+            # Root $() traversal stays visible to logical-line consumers; only
+            # nested opaque words need the substitution framed as a whole.
             end, span = _expansion(text, pos, in_double=in_double, shlex_quotes=shlex_quotes)
             if span:
+                if shlex_quotes and in_double:
+                    # shlex has no nested shell frames: keep the normalized
+                    # substitution's quotes inside the enclosing quoted word.
+                    span = span.replace("\\", "\\\\").replace('"', '\\"')
                 current.append(span)
                 word_start = False
                 continue

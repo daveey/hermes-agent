@@ -6,6 +6,16 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 from tests.cron import test_lifecycle_guard_comment_words as helpers
 
 PREFIXES = [
+    'echo ${x:-"$(echo $\'it\\\'s\' #say "x\n)"}',
+    'echo "${x:-$(echo $\'it\\\'s\' #say "x\n)}"',
+    'echo ${x:-"$(echo #say "x\n)"}',
+    'echo "${x:-$(echo #say "x\n)}"',
+    'echo ${x:-"$(echo #} "\n)"}',
+    'echo ${x:-$(echo #say "x\n)}',
+    "echo ${x:-$(echo #it's\n)}",
+    'echo ${x:-$(echo #} "\n)}',
+    'echo ${x:-"$(echo "$(echo #say "x\n)")"}',
+    'echo ${x:-"$(echo ${y:-$(echo #say "x\n)})"}',
     "x='a b'; echo ${x// #/y}",
     "echo ${x:-a #b}",
     "echo `echo #x`",
