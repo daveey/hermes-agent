@@ -61,16 +61,32 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
     depth = 1
     word_start = True
     parts = ["$("]
+    # Depths at which an open `case` waits for its `esac`: there a bare `)` ends a pattern,
+    # not the substitution (`$(case x in x) true;; esac)`).
+    case_depths: list[int] = []
+    at_command = True
+    last_word = ""
     while pos < len(text):
         char = text[pos]
         if char == "#" and word_start:
             end = text.find("\n", pos)
             end = len(text) if end < 0 else end
-            if shlex_quotes:
-                parts.append(text[copied:pos])
-                copied = end
-            pos = end
+            parts.append(text[copied:pos])
+            if not shlex_quotes:
+                # A comment's trailing backslash continues nothing (the newline still ends
+                # it), so it must not survive into a later continuation join.
+                parts.append(text[pos:end].rstrip("\r").rstrip("\\"))
+            pos = copied = end
             continue
+        if word_start and char not in _WORD_BREAKS:
+            word = _plain_word(text, pos)
+            if word == "case" and at_command:
+                case_depths.append(depth)
+            elif (word == "esac" and case_depths and case_depths[-1] == depth
+                  and (at_command or last_word == "in")):
+                case_depths.pop()
+            at_command = word in _COMMAND_PREFIX_WORDS
+            last_word = word
         if char == "\\":
             if text[pos + 1:pos + 2] != "\n":
                 word_start = False
@@ -100,10 +116,15 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
         elif char == "(":
             depth += 1
         elif char == ")":
-            depth -= 1
-            if not depth:
-                pos += 1
-                break
+            if case_depths and case_depths[-1] == depth:
+                at_command = True  # a case pattern ends; its command list follows
+            else:
+                depth -= 1
+                if not depth:
+                    pos += 1
+                    break
+        if char in _COMMAND_BREAKS:
+            at_command = True
         word_start = char in _WORD_BREAKS
         pos += 1
     parts.append(text[copied:pos])
@@ -145,6 +166,10 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool,
         if char == "'":
             pos = _quoted_end(text, pos + 1, char, escapes=False)
             continue
+        if char == "\n" and breaks is not None:
+            # Fail closed as an unframed scan does: should a nested frame end early (a
+            # construct its walker misreads), the newline after it still ends the line.
+            breaks.append(_out_len(parts) + pos - copied)
         if text.startswith(("${", "$("), pos):
             stack.append("}" if text[pos + 1] == "{" else ")")
             pos += 2
@@ -196,6 +221,22 @@ def _expansion(text: str, pos: int, *, in_double: bool, shlex_quotes: bool,
 
 # Characters after which an unquoted `#` starts a word, so a comment (bash's metacharacters).
 _WORD_BREAKS = frozenset(" \t\n;&|()<>")
+# Characters after which the next word is in command position (a reserved word is recognized).
+_COMMAND_BREAKS = frozenset(";&|(\n")
+# Reserved words after which the next word is still in command position.
+_COMMAND_PREFIX_WORDS = frozenset({
+    "if", "then", "else", "elif", "do", "while", "until", "!", "{", "time",
+})
+_PLAIN_WORD = re.compile(r"!|\{|[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _plain_word(text: str, pos: int) -> str | None:
+    """The unquoted word starting at *pos* when it is a bare name (a candidate reserved word)."""
+    match = _PLAIN_WORD.match(text, pos)
+    if match is None or (match.end() < len(text) and text[match.end()] not in _WORD_BREAKS):
+        return None
+    return match.group()
+
 # A backslash-newline continuation and the indentation after it (what the regex scans collapse).
 _CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
 
