@@ -179,6 +179,7 @@
     "plugins/kanban/dashboard/board_diagnostics.py hermes_cli.kanban_diagnostics": 1,
     "plugins/kanban/dashboard/board_incremental.py hermes_cli.kanban_db": 1,
     "plugins/kanban/dashboard/board_prewarm.py hermes_cli.kanban_db": 1,
+    "plugins/kanban/dashboard/board_read.py hermes_cli.kanban_activity_revision.UNREAD_EVENT_KINDS": 1,
     "plugins/kanban/dashboard/board_read.py hermes_cli.kanban_db": 1,
     "plugins/kanban/dashboard/board_read.py hermes_cli.kanban_diagnostics": 1,
     "plugins/kanban/dashboard/board_read.py hermes_cli.kanban_wake_check": 1,
