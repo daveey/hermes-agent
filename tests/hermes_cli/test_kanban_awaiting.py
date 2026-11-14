@@ -427,6 +427,19 @@ def test_clear_annotation_does_not_reset_repark_budget(kanban_home, status):
         assert kaw.prior_same_premise(conn, tid, "same") == 2
 
 
+@pytest.mark.parametrize("payload", [{"woke": True}, {"woke": True, "status": None}, {"status": "todo"}])
+def test_clear_wake_provenance_resets_repark_budget(kanban_home, payload):
+    """A blocked-branch wake (``woke``, no status) or a parent-gated ``todo`` wake ends the streak."""
+    from hermes_cli import kanban_shared_blockers as ksb
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        with kb.write_txn(conn):
+            for _ in range(2):
+                kb._append_event(conn, tid, "scheduled", {"awaiting": {"premise": "same"}})
+            kb._append_event(conn, tid, ksb.CLEARED_EVENT, payload)
+        assert kaw.prior_same_premise(conn, tid, "same") == 0
+
+
 def test_escalation_without_any_assignee_uses_default(kanban_home, monkeypatch):
     monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
     with kbc.connect_closing() as conn:

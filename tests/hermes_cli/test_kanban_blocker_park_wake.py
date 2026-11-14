@@ -401,6 +401,85 @@ def test_newer_clear_after_an_independent_repark_retires_only_the_hold(kanban_ho
         assert len(_cleared_events(conn, a)) == 2
 
 
+# --- Repark accounting: every real clear-wake ends the premise streak ---------------------
+# Review of PR #2932: ``prior_same_premise`` ended its run only at a clear whose status was
+# ready/review. The blocked branch wrote no status and a parent-gated wake wrote ``todo``, so
+# both real wakes kept the earlier scheduled streak and the next re-park could escalate.
+
+def _streak(conn, tid: str, premise: str = "same", n: int = 2) -> None:
+    with kb.write_txn(conn):
+        for _ in range(n):
+            kb._append_event(conn, tid, "scheduled", {"awaiting": {"kind": "external", "premise": premise}})
+
+
+def _clear_by_other(monkeypatch, conn) -> str:
+    clearing = _worker_block_behind(monkeypatch, conn, "wall probe")
+    assert kb.unblock_task(conn, clearing)
+    assert kb.claim_task(conn, clearing)
+    assert kb.complete_task(conn, clearing, result="wall gone")
+    return clearing
+
+
+def test_blocked_clear_wake_ends_repark_streak(kanban_home, monkeypatch):
+    from hermes_cli import kanban_awaiting as kaw
+    hr = {"action": "Raise the limit", "why_human": "billing owner only", "interaction": "external",
+          "scope": "github org billing", "evidence": "job annotation"}
+    with kbc.connect_closing() as conn:
+        waiting = kb.create_task(conn, title="blocked waiter", assignee="default")
+        kb.claim_task(conn, waiting)
+        _streak(conn, waiting)
+        assert kb.block_task(conn, waiting, reason="billing", kind="needs_input", blocker_id=BID, human_request=hr)
+        assert kb.get_task(conn, waiting).status == "blocked"
+        assert kaw.prior_same_premise(conn, waiting, "same") == 2
+        _clear_by_other(monkeypatch, conn)
+        assert ksb.release_cleared_blockers(conn) == [waiting]
+        assert kb.get_task(conn, waiting).status == "ready"
+        assert kaw.prior_same_premise(conn, waiting, "same") == 0
+        assert _cleared_events(conn, waiting)[-1].payload.get("woke") is True
+
+
+def test_parent_gated_clear_wake_ends_repark_streak(kanban_home, monkeypatch):
+    from hermes_cli import kanban_awaiting as kaw
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="open parent", assignee="default")
+        waiting = kb.create_task(conn, title="gated waiter", assignee="default")
+        _streak(conn, waiting)
+        _as_worker(monkeypatch, conn, waiting)
+        out = json.loads(kt._handle_block({"reason": "Actions refuses jobs: billing", "kind": "capability",
+                                           "blocker_id": BID}))
+        assert "error" not in out, out
+        _as_parent(monkeypatch)
+        assert kb.get_task(conn, waiting).status == "scheduled"
+        kb.link_tasks(conn, parent, waiting)
+        assert kaw.prior_same_premise(conn, waiting, "same") == 2
+        _clear_by_other(monkeypatch, conn)
+        assert ksb.release_cleared_blockers(conn) == [waiting]
+        assert kb.get_task(conn, waiting).status == "todo"
+        assert kaw.prior_same_premise(conn, waiting, "same") == 0
+        event = _cleared_events(conn, waiting)[-1]
+        assert event.payload.get("woke") is True and event.payload.get("status") == "todo"
+
+
+@pytest.mark.parametrize("status", ["ready", "own-wait"])
+def test_clear_annotation_keeps_repark_streak(kanban_home, monkeypatch, status):
+    """A clear that only retires a hold (no lane change) is not a wake and keeps the streak."""
+    from hermes_cli import kanban_awaiting as kaw
+    with kbc.connect_closing() as conn:
+        waiting = _worker_block_behind(monkeypatch, conn, "annotated waiter")
+    if status == "own-wait":
+        _repark(monkeypatch, "schedule", "parent", waiting)
+    with kbc.connect_closing() as conn:
+        if status == "ready":
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (waiting,))
+        _streak(conn, waiting)
+        _clear_by_other(monkeypatch, conn)
+        assert ksb.release_cleared_blockers(conn) == []
+        event = _cleared_events(conn, waiting)[-1]
+        assert "woke" not in event.payload and "status" not in event.payload
+        assert kaw.prior_same_premise(conn, waiting, "same") == 2
+
+
 def _age_all(conn, seconds: int) -> None:
     with kb.write_txn(conn):
         conn.execute("UPDATE task_runs SET started_at = started_at - ?, "

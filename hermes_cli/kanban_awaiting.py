@@ -719,8 +719,9 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
         except (ValueError, AttributeError):
             data, got = {}, {}
         if kind == CLEARED_EVENT:
-            # Only a real wake interrupts the premise streak; hold-retirement annotations do not.
-            if data.get("status") in ("ready", "review"):
+            # Only a real wake interrupts the premise streak; hold-retirement annotations do not. ``woke``
+            # covers the blocked branch (no status) and a parent-gated ``todo`` wake; status is the legacy form.
+            if data.get("woke") is True or data.get("status") in ("ready", "review", "todo"):
                 break
             continue
         if kind == CONDITION_MET_EVENT:

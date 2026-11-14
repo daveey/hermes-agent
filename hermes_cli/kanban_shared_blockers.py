@@ -639,6 +639,9 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
                 with kb.write_txn(conn):
                     kb._append_event(conn, tid, CLEARED_EVENT, payload)
                 continue
+            # ``woke`` marks a real lane change for repark accounting (``kanban_awaiting.prior_same_premise``):
+            # the blocked branch has no status and a parent-gated wake lands ``todo``. [daveey]
+            payload["woke"] = True
             if row["status"] == "blocked":
                 if not kb.unblock_task(conn, tid):
                     continue
