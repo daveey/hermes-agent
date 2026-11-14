@@ -91,8 +91,10 @@ def release_under(root=None) -> int:
 def _transient(path: str) -> bool:
     from hermes_state_common import path_is_under
     from hermes_cli.sqlite_safe_read import has_live_connection
+    if path in _reactivated:
+        return False
     released = _release_all or any(path_is_under(Path(path), root) for root in _released_roots)
-    if not released or path in _reactivated:
+    if not released:
         return False
     # Check before opening our own tracked observer, which must never reactivate itself.
     if has_live_connection(path):

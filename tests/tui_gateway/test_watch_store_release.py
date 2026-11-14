@@ -75,6 +75,26 @@ def test_release_covers_evicted_stores_and_reactivation_is_per_path(tmp_path):
     assert not has_live_connection(paths[0])
 
 
+def test_reactivated_owner_skips_released_root_scans(tmp_path, monkeypatch):
+    import hermes_state_common
+
+    path = tmp_path / "released" / "state.db"
+    create(path)
+    watch_store.release_under(path.parent)
+    watch_store.release_under(tmp_path / "other")
+    with contextlib.closing(_connect_tracked_db(path, tracking_path=path)):
+        observe(path)
+        assert str(path) in watch_store._reactivated
+        with monkeypatch.context() as patch:
+            def unexpected_scan(*_args):
+                pytest.fail("reactivated owner must bypass released-root resolution")
+            patch.setattr(hermes_state_common, "path_is_under", unexpected_scan)
+            assert not watch_store._transient(str(path))
+    close_all_under(path.parent)
+    assert watch_store._transient(str(path))
+    assert str(path) not in watch_store._reactivated
+
+
 def content(path, cache):
     def read(conn, _key):
         return conn.execute("SELECT title FROM sessions").fetchone()[0], False
