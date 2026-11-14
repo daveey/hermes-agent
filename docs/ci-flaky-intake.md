@@ -51,7 +51,21 @@ incomplete (published total differs from the visible tail, or any field is at th
 limit) cannot prove it never cited this job; holding the row would strand every recurrence of a
 test whose old card is closed with more than three comments. Such rows are admitted with an
 `owner_check` list naming each candidate (`candidate`, `status`,
-`reason=closed_history_incomplete`) so triage checks them first. The worst case is a
+`reason=closed_history_incomplete`) so triage checks them first. Lists whose serialized JSON
+exceeds 1024 UTF-8 bytes use `owner_check_ref: {sha256, count}` instead of the inline list;
+this is not an empty inventory or an ownership decision. Full, unshortened JSON is retained
+in the journal's `owner_check_details(digest, payload)` table, committed atomically with the
+page and keyed by the SHA256 of the stored UTF-8 payload. The reference is immutable even
+if a later inventory differs. Retrieve it on the producer host before disposition:
+
+```sh
+sqlite3 -readonly "$QUEUE" "SELECT payload FROM owner_check_details WHERE digest='<owner_check_ref.sha256>';"
+```
+
+Whole-journal backups include these details; an occurrences-only export does not. Export
+`SELECT digest,payload FROM owner_check_details` alongside pages and occurrences for triage
+or rollback. Do not prune referenced details independently of their manifests.
+The worst case is a
 duplicate triage row, never a dropped occurrence. To revert to holding these rows, restore
 the `RuntimeError("closed foreign owner history unavailable")` branch in `_foreign_owner`.
 

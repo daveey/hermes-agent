@@ -23,6 +23,7 @@ except ImportError:
     import flaky_artifact as fa  # type: ignore[no-redef]
 
 PAGE_BYTES = 6000
+OWNER_CHECK_BYTES = 1024
 
 
 def utc_day() -> str:
@@ -167,6 +168,8 @@ class Journal:
                 id INTEGER PRIMARY KEY, repo TEXT NOT NULL, day TEXT NOT NULL,
                 payload TEXT NOT NULL, card TEXT, delivered INTEGER NOT NULL DEFAULT 0,
                 attempted INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS owner_check_details (
+                digest TEXT PRIMARY KEY, payload TEXT NOT NULL);
         """)
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(pages)")}
         if "attempted" not in columns:
@@ -267,17 +270,27 @@ class Journal:
         ``owner_check`` names unverifiable prior-owner candidates per occurrence
         (an empty list means none were found in the inventoried scopes)."""
         groups: list[list] = []
+        details: dict[str, str] = {}
         for row in rows:
             item = {**json.loads(row["metadata"]), "occurrence_id": row["id"],
                     "observed_day": row["day"], "status": "needs_triage"}
             if owner_check is not None:
-                item["owner_check"] = owner_check.get(row["id"], [])
+                notes = owner_check.get(row["id"], [])
+                encoded = json.dumps(notes, sort_keys=True)
+                if len(encoded.encode("utf-8")) > OWNER_CHECK_BYTES:
+                    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                    details[digest] = encoded
+                    item["owner_check_ref"] = {"sha256": digest, "count": len(notes)}
+                else:
+                    item["owner_check"] = notes
             if not groups or groups[-1][0]["target_day"] != row["target_day"] or len(
                 json.dumps([r["item"] for r in groups[-1]] + [item]).encode("utf-8")
             ) > PAGE_BYTES - 300:
                 groups.append([])
             groups[-1].append({"id": row["id"], "target_day": row["target_day"], "item": item})
         with self.db:
+            # Full diagnostics and their manifest references commit atomically.
+            self.db.executemany("INSERT OR IGNORE INTO owner_check_details VALUES (?,?)", details.items())
             for group in groups:
                 data = json.dumps({"version": 1, "occurrences": [r["item"] for r in group]}, sort_keys=True)
                 marker = hashlib.sha256(data.encode()).hexdigest()
@@ -329,7 +342,7 @@ class Journal:
                             "Triage related fixes together; create named follow-ups only for genuinely distinct fixes. "
                             "Existing exact-test owners remain owners. Owner inventory before admission: this "
                             "board plus hermes-hub replica cards on fresh scopes; unsynced legacy profile boards "
-                            "are not inventoried, and rows with owner_check candidates had clipped closed-card "
+                            "are not inventoried, and rows with owner_check or owner_check_ref had clipped closed-card "
                             "history, so check those first. Read the full durable queue before closing; "
                             "record each test's disposition and follow-up owner. No retry threshold changes.\n"
                             "Backlog/export: see docs/ci-flaky-intake.md. New arrivals reopen a done intake.")
