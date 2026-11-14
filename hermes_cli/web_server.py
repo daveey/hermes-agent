@@ -608,6 +608,10 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
             hosted = await forward_secondary_plugin_request(request, plugin_name)
         if hosted is not None:
             return hosted
+    if plugin_name == 'kanban':
+        from hermes_cli.kanban_annotation_mutation import request_context
+        with plugin_request_scope(request.scope), request_context(plugin_name, request.method, path):
+            return await call_next(request)
     return await call_next(request)
 
 

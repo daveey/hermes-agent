@@ -65,7 +65,8 @@ def test_a_version_1_copy_is_ignored(copy_on):
     assert disk.save(SCOPE, parts) and disk.save_host(SCOPE, "f" * 64, time.time(), parts)
     for path in (disk._path(SCOPE), disk._path(SCOPE).with_suffix(".host.json")):
         body = json.loads(path.read_text(encoding="utf-8"))
-        assert body["version"] == disk._VERSION != 1
+        expected = disk._HOST_VERSION if path.name.endswith('.host.json') else disk._VERSION
+        assert body["version"] == expected != 1
         body["version"] = 1
         path.write_text(json.dumps(body), encoding="utf-8")
     assert disk.load(SCOPE) is None

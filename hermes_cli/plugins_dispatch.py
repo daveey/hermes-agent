@@ -347,6 +347,14 @@ class PluginDispatchMixin:
         """
         return resolve_plugin_command_result(callback(**cls._hook_callback_kwargs(callback, payload)))
 
+    @classmethod
+    def _invoke_observed_callback(cls, hook_name: str, callback: Callable, payload: dict[str, Any]) -> Any:
+        if hook_name != "post_llm_call":
+            return cls._invoke_hook_callback(callback, payload)
+        from hermes_cli.kanban_annotation_closeout import observe
+        with observe():
+            return cls._invoke_hook_callback(callback, payload)
+
     def invoke_hook(self, hook_name: str, **kwargs: Any) -> list[Any]:
         """Call all callbacks for *hook_name*; return their non-``None`` results.
 
@@ -390,7 +398,7 @@ class PluginDispatchMixin:
                                 results.append(directive)
                         continue
                 else:
-                    ret = self._invoke_hook_callback(cb, kwargs)
+                    ret = self._invoke_observed_callback(hook_name, cb, kwargs)
                 if ret is not None:
                     results.append(ret)
             except (Exception, SystemExit) as exc:  # health: allow BLE001 -- moved from invoke_hook: plugin callbacks are untrusted; each failure is reported and isolated
@@ -507,7 +515,7 @@ class PluginDispatchMixin:
 
         def _runner() -> None:
             try:
-                outcome["value"] = context.run(self._invoke_hook_callback, cb, kwargs)
+                outcome["value"] = context.run(self._invoke_observed_callback, hook_name, cb, kwargs)
             except BaseException as exc:
                 failure["exc"] = exc
             finally:

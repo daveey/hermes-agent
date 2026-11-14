@@ -40,6 +40,22 @@ FORCE = False
 _seeded: dict[tuple[str, ...], tuple[tuple, float]] = {}
 # The last ``(parts, time)`` written per scope, so an unchanged read is not rewritten on every poll.
 _saved: dict[tuple[str, ...], tuple[tuple, float]] = {}
+# Immutable body names make header replacement safe across concurrent publishers.
+_HOST_VERSION = 3
+_host_saved: dict[Path, tuple[tuple, str, tuple[int, ...] | None]] = {}
+_HOST_SCOPE_CAP = 32
+_host_loaded: dict[Path, tuple[str, tuple[int, ...], tuple]] = {}
+_host_load_lock = threading.RLock()
+
+
+def _parts_digest(raw: list) -> str:
+    return hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _body_path(path: Path, digest: str) -> Path:
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("invalid annotation parts digest")
+    return path.with_name(f"{path.stem}.{digest}.body.json")
 
 
 def enabled() -> bool:
@@ -49,6 +65,9 @@ def enabled() -> bool:
 def reset() -> None:
     _seeded.clear()
     _saved.clear()
+    _host_saved.clear()
+    with _host_load_lock:
+        _host_loaded.clear()
 
 
 def published(scope: tuple[str, ...], parts: tuple) -> None:
@@ -157,34 +176,117 @@ def _decode_parts(raw: Any) -> tuple | None:
     return tuple({k: _decode(v) for k, v in part.items()} for part in raw)
 
 
-def save_host(scope: tuple[str, ...], fingerprint: str, read_at: float, parts: tuple) -> bool:
+def save_host(scope: tuple[str, ...], fingerprint: str, read_at: float, parts: tuple,
+              *, mutation_token: str | None = None, display_identity: str | None = None,
+              narrow_key: str | None = None) -> bool:
     """[daveey] The host copy other processes adopt (``kanban_annotation_host``): ``parts`` answered exactly the
     inputs ``fingerprint`` names, read at ``read_at``. Never raises."""
     if not enabled() or len(parts) not in (_PARTS, _PARTS + 1):
         return False
     try:
-        body = {"version": _VERSION, "scope": list(scope), "fingerprint": fingerprint, "read_at": float(read_at),
-                "parts": [{str(k): _encode(v) for k, v in part.items()} for part in parts]}
-        _write_json(_path(scope).with_suffix(".host.json"), body)
-        return True
+        from hermes_cli.kanban_annotation_storage import body_matches, custody, previous_digest, prune, signature
+
+        path = _path(scope)
+        with custody(path, writer=True):
+            previous = previous_digest(path)
+            saved = _host_saved.get(path)
+            if (saved is not None and saved[0] == parts and saved[2] is not None
+                    and signature(_body_path(path, saved[1])) == saved[2]):
+                digest = saved[1]
+            else:
+                raw = [{str(k): _encode(v) for k, v in part.items()} for part in parts]
+                digest = _parts_digest(raw)
+                body_path = _body_path(path, digest)
+                if not body_matches(body_path, raw):
+                    _write_json(body_path, {"parts": raw})
+                # Keep a detached copy: callers can mutate their input after publication.
+                frozen = _decode_parts(raw)
+                if frozen is None:
+                    return False
+                _host_saved[path] = (frozen, digest, signature(body_path))
+                while len(_host_saved) > _HOST_SCOPE_CAP:
+                    del _host_saved[next(iter(_host_saved))]
+            header = {"version": _HOST_VERSION, "scope": list(scope), "fingerprint": fingerprint,
+                      "read_at": float(read_at), "parts_digest": digest, "mutation_token": mutation_token,
+                      "display_identity": display_identity, "narrow_key": narrow_key,
+                      "verified_at": float(read_at)}
+            _write_json(path.with_suffix(".host.json"), header)
+            prune(path, {digest, previous})
+            return True
     except Exception:  # health: allow BLE001 -- best-effort; other processes then read for themselves
         log.debug("kanban annotation host copy not saved", exc_info=True)
         return False
 
 
-def load_host(scope: tuple[str, ...]) -> tuple[str, float, tuple] | None:
-    """``(fingerprint, read_at, parts)`` of the host copy for ``scope``, else None. Never raises."""
+def confirm_host(scope: tuple[str, ...], narrow_key: str, verified_at: float) -> bool:
+    """Header-only rewrite: the holder found ``narrow_key`` unchanged since the published read, so the display
+    copy stays current. Keeps fingerprint/read_at/parts/mutation ack exactly (strict adopters unaffected);
+    only ``verified_at`` advances. Never raises."""
+    if not enabled() or not narrow_key:
+        return False
+    try:
+        from hermes_cli.kanban_annotation_storage import custody
+
+        path = _path(scope)
+        with custody(path, writer=True):
+            target = path.with_suffix(".host.json")
+            header = json.loads(target.read_text(encoding="utf-8-sig"))
+            if (header.get("version") != _HOST_VERSION or header.get("scope") != list(scope)
+                    or header.get("narrow_key") != narrow_key or not float(header["read_at"]) <= verified_at
+                    or not verified_at <= time.time()):
+                return False
+            header["verified_at"] = max(float(header.get("verified_at") or 0.0), float(verified_at))
+            _write_json(target, header)
+            return True
+    except Exception:  # health: allow BLE001 -- best-effort; the copy then ages out for display callers
+        log.debug("kanban annotation host copy not confirmed", exc_info=True)
+        return False
+
+
+def load_host(scope: tuple[str, ...], *, shared: bool = False,
+              display_identity: str | None = None, mutation_token: str | None = None,
+              header_out: dict | None = None) -> tuple[str, float, tuple] | None:
+    """Return the host copy or None. With shared=True, callers MUST NOT mutate any returned parts.
+
+    Shared reads reuse a verified body while its identity and metadata match, but
+    always read the small header. Ordinary callers retain detached mutable parts.
+    """
     if not enabled():
         return None
     try:
-        body = json.loads(_path(scope).with_suffix(".host.json").read_text(encoding="utf-8-sig"))
-        if body.get("version") != _VERSION or body.get("scope") != list(scope):
-            return None
-        fingerprint, read_at = body["fingerprint"], float(body["read_at"])
-        parts = _decode_parts(body["parts"])
-        if not isinstance(fingerprint, str) or parts is None or not read_at <= time.time():
-            return None
-        return fingerprint, read_at, parts
+        from hermes_cli.kanban_annotation_storage import custody, signature
+
+        path = _path(scope)
+        with _host_load_lock, custody(path, writer=False):
+            body = json.loads(path.with_suffix(".host.json").read_text(encoding="utf-8-sig"))
+            if body.get("version") != _HOST_VERSION or body.get("scope") != list(scope):
+                return None
+            if display_identity is not None and body.get("display_identity") != display_identity:
+                return None
+            if mutation_token is not None and body.get("mutation_token") != mutation_token:
+                return None
+            fingerprint, read_at = body["fingerprint"], float(body["read_at"])
+            digest = body["parts_digest"]
+            body_path = _body_path(path, digest)
+            before = signature(body_path)
+            cached = _host_loaded.get(path) if shared else None
+            if before is not None and cached is not None and cached[:2] == (digest, before):
+                parts = cached[2]
+            else:
+                _host_loaded.pop(path, None)
+                raw = json.loads(body_path.read_text(encoding="utf-8-sig"))["parts"]
+                if _parts_digest(raw) != digest or before is None or signature(body_path) != before:
+                    return None
+                parts = _decode_parts(raw)
+                if shared and parts is not None:
+                    _host_loaded[path] = (digest, before, parts)
+                    while len(_host_loaded) > _HOST_SCOPE_CAP:
+                        del _host_loaded[next(iter(_host_loaded))]
+            if not isinstance(fingerprint, str) or parts is None or not read_at <= time.time():
+                return None
+            if header_out is not None:
+                header_out.update(body)
+            return fingerprint, read_at, parts
     except FileNotFoundError:
         return None
     except Exception:  # health: allow BLE001 -- a bad copy is no copy

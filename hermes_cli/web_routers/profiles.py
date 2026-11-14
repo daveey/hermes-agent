@@ -496,7 +496,7 @@ def get_profiles_sessions(
         window = _pinned_window(merged, offset, limit)
     if not full:
         _strip_session_list_rows(window)
-    annotate_kanban_activity(window)
+    annotate_kanban_activity(window, display=True)
     annotate_goal_activity(window)
     annotate_cron_activity(window)
     annotate_background_activity(window)
@@ -557,7 +557,7 @@ def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile:
     base = [set(row) for row in rows]
     annotate_subagent_activity(rows)
     annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
-        annotate_goal_activity(annotate_kanban_activity(rows))))))
+        annotate_goal_activity(annotate_kanban_activity(rows, display=True))))))
     out = []
     for row, before in zip(rows, base):
         stamps = {key: row[key] for key in row if key not in before and not key.startswith("_")}
@@ -657,7 +657,7 @@ def get_profiles_sessions_sidebar(
         _strip_session_list_rows(win)
         annotate_subagent_activity(win)
         return annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
-            annotate_goal_activity(annotate_kanban_activity(win))))))
+            annotate_goal_activity(annotate_kanban_activity(win, display=True))))))
 
     storage = _corrupt_profile_stores(scanned)
     retryable = _retryable_profile_errors(errors, scanned)

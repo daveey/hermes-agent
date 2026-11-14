@@ -17,7 +17,7 @@ def listing(tmp_path, monkeypatch):
     db.create_session('first', source='cli')
     monkeypatch.setattr(profiles, '_profile_targets', lambda _: [('default', tmp_path)])
     for name in ('kanban', 'goal', 'cron', 'background', 'turn'):
-        monkeypatch.setattr(profiles, f'annotate_{name}_activity', lambda rows: None)
+        monkeypatch.setattr(profiles, f'annotate_{name}_activity', lambda rows, **kwargs: None)
     monkeypatch.setattr(profiles, 'annotate_review_wait', lambda rows: None)
     scans = []
     original = profiles._read_profile_db

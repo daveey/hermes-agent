@@ -40,7 +40,7 @@ def test_route_serializes_scans_without_caching_or_losing_query_params(monkeypat
     monkeypatch.setattr(profiles, '_read_profile_db', targets)
     monkeypatch.setattr(profiles, '_corrupt_profile_stores', lambda targets: {})
     for name in ('kanban', 'goal', 'cron', 'background', 'turn'):
-        monkeypatch.setattr(profiles, f'annotate_{name}_activity', lambda rows: None)
+        monkeypatch.setattr(profiles, f'annotate_{name}_activity', lambda rows, **kwargs: None)
     monkeypatch.setattr(profiles, 'annotate_review_wait', lambda rows: None)
     ready = threading.Barrier(5)
 

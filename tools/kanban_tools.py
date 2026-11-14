@@ -30,6 +30,7 @@ from tools.kanban_tools_placement import (_local_placement, _machine_placement, 
 # SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
 from tools.kanban_tools_attach_url import _download_url_with_cap, _store_attachment
 from tools.kanban_tools_db_hint import generic_tool_error
+from tools.kanban_tools_rejection import _tag_rejection
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo, _escalated)
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
@@ -174,18 +175,6 @@ COMPLETE_REJECTION_CLASSES = frozenset({
 })
 
 
-def _tag_rejection(payload: str, rejection: str) -> str:
-    """Add ``rejection`` to a tool_error JSON payload that lacks one."""
-    try:
-        data = json.loads(payload)
-    except (TypeError, ValueError):
-        return payload
-    if not isinstance(data, dict) or "error" not in data or data.get("rejection"):
-        return payload
-    data["rejection"] = rejection
-    return json.dumps(data, ensure_ascii=False)
-
-
 # Keys a handler reads that its LLM-facing schema deliberately does not declare:
 # ``session_id`` is provenance stamped by internal callers (31fe2290393), ``project_id``
 # the pre-``project`` alias still honoured by ``_handle_create`` (e7811345c17).
@@ -231,7 +220,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 refused = _remote_lease_refusal(tool_name, args)
                 if refused is not None:
                     return refused
-                out = fn(args, **kw)
+                from hermes_cli.kanban_annotation_mutation import tool_context
+                with tool_context(tool_name):
+                    out = fn(args, **kw)
                 if tool_name in _RUN_LIFECYCLE_TOOLS and isinstance(out, str) and out.startswith('{"ok": true'):
                     from tools import kanban_tools_run_end as kre
                     out = kre.annotate_success(_board, args, out)

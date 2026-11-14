@@ -1582,8 +1582,11 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
             conn.execute(f"RELEASE {savepoint}")
         return
 
+    from hermes_cli import kanban_annotation_mutation as annotation_mutation
+
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
+        annotation_scope = annotation_mutation.arm(conn)
         _local_status_wake.arm(conn)  # [daveey] record this txn's status changes for the awaited-card wake
         yield conn
     except Exception:
@@ -1603,6 +1606,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
                 conn.execute("ROLLBACK")
             _run_end_lease.flush(conn, committed=False)
             raise
+        annotation_mutation.flush(conn, annotation_scope)
         _run_end_lease.flush(conn, committed=True)  # [daveey] Board lease of a run this txn ended
         # Post-commit torn-extend check — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)

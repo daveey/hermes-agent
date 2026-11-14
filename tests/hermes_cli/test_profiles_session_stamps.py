@@ -40,7 +40,8 @@ def rest(monkeypatch, _isolate_hermes_home):
 
     seen = []
 
-    def fake_kanban(rows):
+    def fake_kanban(rows, *, display=False):
+        assert display is True  # display endpoints explicitly opt in; strict defaults stay exact
         # The real annotator reads the boards; this one proves the endpoint feeds it rows with their lineage.
         for row in rows:
             seen.append((row["id"], list(row.get("_lineage_ids") or [])))

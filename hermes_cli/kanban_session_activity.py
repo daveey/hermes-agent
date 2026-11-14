@@ -26,6 +26,7 @@ from hermes_cli import kanban_session_activity_revalidate as _revalidate
 from hermes_cli import kanban_counts_scopes as _count_scopes
 from hermes_cli.kanban_execution_source import transaction as _execution_transaction
 from hermes_cli import kanban_session_activity_recent_done as _recent_done
+from hermes_cli.kanban_session_activity_decode import _decode_replica_task
 from hermes_cli import kanban_execution_receipt as _receipts
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
@@ -554,23 +555,6 @@ def _meta_float(conn: sqlite3.Connection, key: str) -> float | None:
 # every kanban.db / hub.db change, and re-parsing and re-hashing thousands of unchanged rows cost ~0.3 s per
 # sidebar refresh. Keyed on the exact stored text, so an edited row always decodes afresh. [daveey]
 _replica_decoded: dict[tuple[str, str, str], tuple[Any, tuple[dict[str, Any], str | None, dict[str, Any]]]] = {}
-
-
-def _decode_replica_task(record_key: str, data: Any) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
-    """``(task, legacy record digest or None, owner evidence)`` of one replica row; a pure function of its text.
-    Callers treat ``task`` as read-only: it is shared across reads of an unchanged row."""
-    from hermes_cli.kanban_origin_ledger import _owner_evidence
-    from hermes_cli.kanban_origin_legacy import record_digest
-
-    try:
-        t = json.loads(data)
-    except (TypeError, ValueError) as exc:
-        raise ValueError('invalid replica task data') from exc
-    if not isinstance(t, dict) or not t.get('id'):
-        raise ValueError('invalid replica task data')
-    digest = record_digest(t) if len(str(record_key).split('/')) == 2 else None
-    evidence = _owner_evidence(t) if t.get('status') in TERMINAL_STATUSES else {}
-    return t, digest, evidence
 
 
 # [daveey] Last live (``now=None``) replica read: (key, read_at, None, cards, qualified, owners). The remote
@@ -1749,7 +1733,7 @@ def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = N
 
 
 @_la.accounted("annotation.poll")
-def _annotation_snapshot() -> tuple | None:
+def _annotation_snapshot(*, display: bool = False) -> tuple | None:
     """One in-flight annotation read, shared by overlapping polls.
 
     Returns the last good parts when a refresh is already running, so those polls
@@ -1788,7 +1772,9 @@ def _annotation_snapshot() -> tuple | None:
                                         None, max(0.0, deadline - time.monotonic()))
     previous = _last_annotation.get(scope)
     try:  # [daveey] unchanged inputs: re-read inline; else adopt another process's read of exactly these inputs
-        parts = previous is not None and _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
+        parts = _host_copy.adopt_display(scope) if display else None
+        if parts is None:
+            parts = previous is not None and _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
         parts = parts or _host_copy.adopt(scope)
     except BaseException:
         _annotate_refresh_lock.release()
@@ -1840,7 +1826,7 @@ def _mark_kanban_unknown(rows):
     return rows
 
 
-def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = False) -> list[dict[str, Any]]:
     """Stamp ``kanban_active``, ``kanban_blocked``, ``kanban_waiting_on`` (local open card ids), ``kanban_unseen`` (finished cards whose result the
     session has not been handed yet) and ``kanban_attention`` (done cards a registered check flags) on each session row
     (summed over its whole compression lineage). Never raises: the list must
@@ -1851,6 +1837,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     # Never re-date a cached zero as a new owner observation.
     observed_at = time.time() - _CACHE_TTL_S
     shared = getattr(_annotation_scope, "reads", None)
+    if shared and getattr(_annotation_scope, "display", False) != display:
+        shared = None  # a display snapshot is not a strict caller's input proof
     attention = None
     try:
         if shared:
@@ -1858,7 +1846,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = parts[:10]
             execution = parts[10] if len(parts) > 10 else {}
         else:
-            parts = _annotation_snapshot()
+            parts = _annotation_snapshot(display=True) if display else _annotation_snapshot()
             copy_at = _annotation_copy.observed_at(parts)  # [daveey] a previous process's copy keeps its own date
             if copy_at is None:
                 copy_at = annotation_read_at(parts)  # a previous read served while the next one runs keeps its date
@@ -1871,6 +1859,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
              attention) = parts[:11]
             execution = parts[11] if len(parts) > 11 else {}
             if shared is not None:
+                _annotation_scope.display = display
                 shared.append((active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys,
                                extra, execution, copy_at))
                 _annotation_scope.attention = attention

@@ -208,7 +208,7 @@ def routed(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, "automated_session_sources", lambda home: set())
     monkeypatch.setattr(profiles, "profile_project_trees", project_trees)
     for name in ("kanban", "goal", "cron", "background", "turn"):
-        monkeypatch.setattr(profiles, f"annotate_{name}_activity", lambda rows: rows)
+        monkeypatch.setattr(profiles, f"annotate_{name}_activity", lambda rows, **kw: rows)
     monkeypatch.setattr(profiles, "annotate_review_wait", lambda rows: rows)
     monkeypatch.setattr(sessions, "_session_db_path_for_profile", lambda profile: db_path)
     monkeypatch.setattr(sessions, "_list_sessions_payload", list_payload)

@@ -365,7 +365,9 @@ class HostRuntime:
             return {"status": response.status_code, "headers": list(response.headers.multi_items()),
                     "body": response.content}
 
-        return encode(self._run(request()))
+        from hermes_cli.kanban_annotation_mutation import request_context
+        with request_context(str(params['plugin']), str(params['method']), str(params['path'])):
+            return encode(self._run(request()))
 
     def op_invoke(self, params: dict[str, Any]) -> Any:
         ref = int(params["ref"])

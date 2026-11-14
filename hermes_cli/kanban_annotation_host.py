@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli import kanban_annotation_disk as _disk
+from hermes_cli import kanban_annotation_mutation as _mutation
 
 log = logging.getLogger("hermes_cli.kanban_session_activity")
 
@@ -49,9 +50,14 @@ LEASE_NAME = "kanban-annotation"
 DEMAND_WINDOW_S = 60.0
 DEMAND_TOUCH_S = 10.0  # a poller re-touches its scope's demand file at most this often
 HOLDER_INTERVAL_S = 2.0
+HOLDER_MOVED_FLOOR_S = 10.0
+DISPLAY_MAX_AGE_S = 12.0
 HOLDER_REFRESH_AGE_S = 20.0  # the holder re-reads an unchanged scope this long after its copy's read
+NARROW_CONFIRM_S = 6.0  # an unchanged narrow key re-stamps the copy's display ``verified_at`` this often
 _VERSION = 1
 _UNDECLARED = "undeclared"
+_fp_local = threading.local()  # .waiting: the declared waiting inputs the last fingerprint() on this thread read
+_holder_ctx = threading.local()  # .active: this thread is the holder (only it pays for a narrow key)
 
 
 class _Unportable(Exception):
@@ -175,9 +181,11 @@ def fingerprint(scope: tuple[str, ...], full: tuple, wall: float) -> tuple[str, 
     from hermes_cli import kanban_session_activity as _ksa
 
     try:
+        _fp_local.waiting = None
         if not _ksa._revalidate.revalidatable(full, wall):
             return None
         waiting, complete = _waiting_inputs(dict(_ksa._waiting_sources))
+        _fp_local.waiting = waiting
         body = [_VERSION, list(scope), core_sha(), _portable(full),
                 [[name, _code_id(fn)] for name, fn in sorted(_ksa._done_checks.items())], waiting]
         digest = hashlib.sha256(json.dumps(body, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
@@ -196,6 +204,17 @@ def _inputs_now(scope: tuple[str, ...]) -> tuple[tuple, tuple, float, tuple[str,
     pinned = getattr(_ksa._revalidate.inputs_pin, "fingerprints", None)
     full = pinned[1] if pinned is not None and pinned[1] is not None else local + _ksa._shadow_fingerprint()
     return local, full, wall, fingerprint(scope, full, wall)
+
+
+def _narrow_now(scope: tuple[str, ...], full: tuple, fp: tuple[str, bool] | None) -> str | None:
+    """The display/holder-only narrow key (``kanban_annotation_narrow``) for the inputs :func:`fingerprint` just
+    read on this thread; None (= moved) whenever it is unknown. Never used to certify an exact adoption."""
+    waiting = getattr(_fp_local, "waiting", None)
+    if fp is None or waiting is None:
+        return None
+    from hermes_cli import kanban_annotation_narrow as _narrow
+
+    return _narrow.key(scope, full, waiting)
 
 
 # -- the read -----------------------------------------------------------------------------------------------------
@@ -234,6 +253,58 @@ def read_annotation_parts() -> tuple:
 
 # -- adopt --------------------------------------------------------------------------------------------------------
 
+def _display_identity(scope: tuple[str, ...]) -> tuple[str, bool]:
+    """Code/registration identity only: never runs a waiting input probe."""
+    from hermes_cli import kanban_session_activity as _ksa
+
+    sources = dict(_ksa._waiting_sources)
+    waiting, complete = [], True
+    for name, fn in sorted(sources.items()):
+        declared = _declared.get(name)
+        has_inputs = declared is not None and declared[0] is fn
+        complete = complete and has_inputs
+        waiting.append([name, _code_id(fn), _code_id(declared[1]) if declared is not None and has_inputs else _UNDECLARED])
+    body = [_VERSION, list(scope), core_sha(),
+            [[name, _code_id(fn)] for name, fn in sorted(_ksa._done_checks.items())], waiting]
+    return hashlib.sha256(json.dumps(body, separators=(",", ":"), sort_keys=True).encode()).hexdigest(), complete
+
+
+def adopt_display(scope: tuple[str, ...]) -> tuple | None:
+    """Display-only bounded adoption; cannot certify strict task/closeout inputs.
+
+    Caller holds the annotation lock. Reject pending own writes, and verify code
+    identity in the same disk read as the parts, without probing changing inputs.
+    """
+    from hermes_cli import kanban_session_activity as _ksa
+
+    if not enabled():
+        return None
+    try:
+        identity, complete = _display_identity(scope)
+        token = _mutation.current(scope)
+        header: dict = {}
+        copy = _disk.load_host(scope, shared=True, display_identity=identity, mutation_token=token,
+                               header_out=header)
+        now = time.time()
+        if copy is None or _mutation.current(scope) != token:
+            return None
+        verified = header.get("verified_at")
+        # Display age runs from the holder's last narrow-key confirmation (never ahead of now, never before read).
+        seen = max(copy[1], float(verified)) if isinstance(verified, (int, float)) and verified <= now else copy[1]
+        if not 0 <= now - seen <= DISPLAY_MAX_AGE_S:
+            return None
+        parts = copy[2]
+    except Exception:  # health: allow BLE001 -- unknown code/copy fails closed to the normal read
+        log.debug("kanban annotation display copy not adopted", exc_info=True)
+        return None
+    if not complete:
+        extra = {sid: frozenset(ids) for sid, ids in _ksa._extra_waiting().items()}
+        parts = parts[:9] + (extra,) + parts[10:]
+    _ksa._bounded.record(scope, parts, copy[1])
+    _ksa._last_annotation[scope] = parts
+    return parts
+
+
 def adopt(scope: tuple[str, ...]) -> tuple | None:
     """Caller holds the annotation refresh lock. The published parts for ``scope`` when its fingerprint is exactly
     this process's and its read is younger than ``_COUNTS_MAX_AGE_S``; recorded as this process's last read (dated
@@ -243,7 +314,7 @@ def adopt(scope: tuple[str, ...]) -> tuple | None:
     if not enabled():
         return None
     try:
-        copy = _disk.load_host(scope)
+        copy = _disk.load_host(scope, shared=True)
         if copy is None or time.time() - copy[1] >= _ksa._COUNTS_MAX_AGE_S:
             return None
         _local, _full, _wall, fp = _inputs_now(scope)
@@ -274,14 +345,22 @@ def prepare(scope: tuple[str, ...]) -> tuple | None:
     if not enabled():
         return None
     try:
+        # Only a forced read can acknowledge the cue: an ordinary poll may reuse
+        # counts that predate a closeout mutation outside the board fingerprint.
+        token = _mutation.current(scope) if getattr(_ksa._revalidate.force_read, "scope", None) == scope else None
         local, full, wall, fp = _inputs_now(scope)
+        narrow = _narrow_now(scope, full, fp) if getattr(_holder_ctx, "active", False) else None
     except Exception:  # health: allow BLE001 -- the read itself reports a board error
         log.debug("kanban annotation host inputs unavailable", exc_info=True)
         return None
+    try:
+        display_identity, _complete = _display_identity(scope)
+    except Exception:  # health: allow BLE001 -- unavailable display identity must not disable exact publication
+        display_identity = None
     if getattr(_ksa._revalidate.inputs_pin, "fingerprints", None) is None:
         _ksa._revalidate.inputs_pin.fingerprints = (local, full)
         _pin_set.scope = scope
-    return (full, wall, fp)
+    return (full, wall, fp, token, display_identity, narrow)
 
 
 def finish(scope: tuple[str, ...]) -> None:
@@ -300,13 +379,14 @@ def publish(scope: tuple[str, ...], prepared: tuple | None, parts: tuple) -> boo
 
     if prepared is None or prepared[2] is None:
         return False
-    full, wall, (digest, _complete) = prepared
+    full, wall, (digest, _complete), token, display_identity, narrow = prepared
     with _ksa._cache_lock:
         if (_ksa._cache is None or _ksa._cache_scope != scope or _ksa._cache_fingerprint != full
                 or not _ksa._cache_revalidatable):
             return False
         counts_at = time.time() - max(0.0, time.monotonic() - _ksa._cache_read_at)
-    return _disk.save_host(scope, digest, min(wall, counts_at), parts)
+    return _disk.save_host(scope, digest, min(wall, counts_at), parts, mutation_token=token,
+                           display_identity=display_identity, narrow_key=narrow)
 
 
 # -- holder -------------------------------------------------------------------------------------------------------
@@ -314,6 +394,17 @@ def publish(scope: tuple[str, ...], prepared: tuple | None, parts: tuple) -> boo
 _known: dict[tuple[str, ...], contextvars.Context] = {}
 _touched: dict[tuple[str, ...], float] = {}
 _holder: list = []
+
+
+def kick(scope: tuple[str, ...]) -> None:
+    """Post-commit mutation cue; never acknowledge a cue that arrives during a read."""
+    if not enabled():
+        return
+    demand(scope)
+    try:
+        _mutation.record(scope)
+    except (OSError, ValueError):
+        log.warning("kanban annotation mutation cue not recorded", exc_info=True)
 
 
 def demand(scope: tuple[str, ...]) -> None:
@@ -358,20 +449,34 @@ def _holder_refresh_scope(scope: tuple[str, ...]) -> bool:
     age = _disk.demand_age(scope)
     if age is None or age > DEMAND_WINDOW_S or _ksa._origin_scope() != scope:
         return False  # nobody polled it lately, or this context no longer reproduces the scope
-    copy = _disk.load_host(scope)
-    renew = copy is not None and time.time() - copy[1] >= HOLDER_REFRESH_AGE_S
-    if copy is not None and not renew:
-        _local, _full, _wall, fp = _inputs_now(scope)
+    copy = _disk.load_host(scope, shared=True, header_out=(header := {}))
+    copy_age = time.time() - copy[1] if copy is not None else None
+    renew = copy_age is not None and copy_age >= HOLDER_REFRESH_AGE_S
+    kicked = _mutation.pending(scope)
+    if copy is not None and not renew and not kicked:
+        _local, full, wall, fp = _inputs_now(scope)
         if fp is not None and fp[0] == copy[0]:
+            return False
+        if copy_age is not None and 0 <= copy_age < HOLDER_MOVED_FLOOR_S:
+            return False
+        # [daveey] Exact inputs moved past the floor: refresh only for a substantive move (narrow key). An
+        # unchanged narrow key re-stamps the display ``verified_at`` (header only) and waits for the 20 s renewal.
+        published = header.get("narrow_key")
+        if published and _narrow_now(scope, full, fp) == published:
+            verified = header.get("verified_at")
+            if not isinstance(verified, (int, float)) or wall - verified >= NARROW_CONFIRM_S:
+                _disk.confirm_host(scope, published, wall)
             return False
     if not _ksa._annotate_refresh_lock.acquire(blocking=False):
         return False  # a poll here is already reading (it publishes)
     # [daveey] An aging copy is renewed by a real read: the counts cache would answer the unchanged inputs with the
     # old read, republishing its ``read_at`` until the copy expires for every adopter at ``_COUNTS_MAX_AGE_S``.
-    _ksa._revalidate.force_read.scope = scope if renew else None
+    _ksa._revalidate.force_read.scope = scope if renew or kicked else None
+    _holder_ctx.active = True
     try:
         _ksa._refresh_annotation_locked(scope)
     finally:
+        _holder_ctx.active = False
         _ksa._revalidate.force_read.scope = None
         _ksa._annotate_refresh_lock.release()
     return True

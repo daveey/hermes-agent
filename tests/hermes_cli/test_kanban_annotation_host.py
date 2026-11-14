@@ -108,6 +108,26 @@ def test_adopted_rows_equal_a_local_refresh(world, monkeypatch):
         dispose()
 
 
+def test_identical_parts_changed_inputs_republish_and_adopt(world):
+    world['conn'].execute("DELETE FROM tasks")
+    _poll()
+    before = disk.load_host(SCOPE)
+    _advance(world, 4)
+    # Committed inputs move, but the next read has the same empty parts.
+    world['conn'].execute("INSERT INTO tasks VALUES ('t4', 'ready', 's4')")
+    world['conn'].execute("DELETE FROM tasks WHERE id='t4'")
+    with ksa._annotate_refresh_lock:
+        ksa._refresh_annotation_locked(SCOPE)
+    after = disk.load_host(SCOPE)
+    assert before is not None and after is not None
+    assert before[0] != after[0] and before[1] < after[1]
+    assert before[2] == after[2]
+    calls = world['calls']['recompute']
+    _other_process()
+    assert host.adopt(SCOPE) == after[2]
+    assert world['calls']['recompute'] == calls
+
+
 def test_a_waiting_source_change_defeats_adopt(world):
     """A chat-closeout ledger write moves its declared inputs: the copy's waiting part is another input's."""
     ledger = {"version": 1, "pending": ["t9"]}
@@ -206,6 +226,8 @@ def test_holder_refreshes_a_demanded_scope_once_per_change(world):
     assert world["calls"]["recompute"] == 1 and disk.load_host(SCOPE) is not None
     assert host._holder_pass() == 0  # the copy answers the current inputs
     world["conn"].execute("INSERT INTO tasks VALUES ('t4', 'ready', 's1')")
+    assert host._holder_pass() == 0  # a foreign write respects the per-scope floor
+    _advance(world, 10)
     assert host._holder_pass() == 1
     _other_process()
     after, _ = _poll()

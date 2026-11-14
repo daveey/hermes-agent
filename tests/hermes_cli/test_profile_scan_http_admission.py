@@ -56,7 +56,7 @@ async def test_profile_scan_burst_keeps_status_responsive(monkeypatch, tmp_path,
     monkeypatch.setattr(profiles, '_read_profile_db', read)
     monkeypatch.setattr(profiles, '_corrupt_profile_stores', lambda targets: {})
     for name in ('kanban', 'goal', 'cron', 'background', 'turn'):
-        monkeypatch.setattr(profiles, f'annotate_{name}_activity', lambda rows: rows)
+        monkeypatch.setattr(profiles, f'annotate_{name}_activity', lambda rows, **kw: rows)
     monkeypatch.setattr(profiles, 'annotate_review_wait', lambda rows: rows)
     app = FastAPI()
     app.include_router(profiles.sessions_router)
