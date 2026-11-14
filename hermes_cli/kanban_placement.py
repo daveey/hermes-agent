@@ -442,15 +442,36 @@ def config_snapshot() -> Iterator[dict]:
         _round_config.cfg = None
 
 
+def _placement_block(doc) -> dict:
+    cfg = (((doc or {}).get("kanban") or {}).get("placement") or {}) if isinstance(doc, dict) else {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def config() -> dict:
+    """``kanban.placement`` of the active profile, else of the board home (``kanban_home()/config.yaml``). [daveey]
+
+    The board is shared by every profile on the host, so its placement policy (worker_queue, worker_pools,
+    hub_read_roots, extra_home_markers) is a machine fact the root config carries. A named profile with no
+    ``placement`` block (managed worker profiles bb-tuner/coach/alpha-follow) used to read ``{}``: its creates
+    never queued ``pool:worker`` and home markers were skipped (t_01a1db0fb5d6a9cc). A profile's own non-empty
+    block still wins whole; there is no per-key merge.
+    """
     pinned = getattr(_round_config, "cfg", None)
     if pinned is not None:
         return pinned
     try:
         from hermes_cli.config import load_config_readonly
-        cfg = ((load_config_readonly() or {}).get("kanban") or {}).get("placement") or {}
-        return cfg if isinstance(cfg, dict) else {}
-    except Exception:
+        cfg = _placement_block(load_config_readonly())
+    except Exception:  # health: allow BLE001 S110 -- an unreadable profile config falls through to the board home
+        cfg = {}
+    if cfg:
+        return cfg
+    try:
+        from hermes_cli.config_backend import config_exists, read_config_doc_readonly
+        from hermes_cli.kanban_db import kanban_home
+        path = kanban_home() / "config.yaml"
+        return _placement_block(read_config_doc_readonly(path)) if config_exists(path) else {}
+    except Exception:  # health: allow BLE001 S110 -- an unreadable board config means no placement policy
         return {}
 
 
