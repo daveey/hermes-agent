@@ -11,7 +11,10 @@ profile-archive, prompt-surface and blob-size guards that CI runs in workflows o
     python scripts/check --uninstall-hook
 
 CI runs the same command (``.github/workflows/lint.yml``), so a green local run means a green
-lint lane. Hooks are skippable (``--no-verify``); CI is not. The code-health part honours the
+lint lane. On macOS execution is refused: portable core checks belong on a pool worker.
+Hook management remains available. Refresh installed hooks after updating; their admission
+also protects historical candidates whose own checker predates this policy.
+Hooks are skippable (``--no-verify``); CI is not. The code-health part honours the
 ``ENFORCEMENT`` switch in ``scripts/code_health/config.py`` (blocking / advisory / off).
 """
 
@@ -113,6 +116,12 @@ done
 judge() {  # judge TREE-ISH ARGS...: check out TREE-ISH alone and run its own scripts/check ARGS
   local tree=$1 tmp dir rc
   shift
+  # The installed hook must also protect pushes of historical candidates whose
+  # own scripts/check predates Mac admission. Refuse, never skip a required gate.
+  if [ "$(uname -s)" = Darwin ]; then
+    echo "scripts/check: portable core checks belong on a pool worker, not this Mac" >&2
+    return 2
+  fi
   tmp="$(mktemp -d)" || return 1
   # Git for Windows: native git and python get this path verbatim when MSYS path conversion
   # is off (MSYS_NO_PATHCONV=1, as Hermes' terminal sets it), so hand them C:/... spelling.
@@ -339,6 +348,10 @@ def main(argv: list[str] | None = None) -> int:
         return install_hook(args.install_hook)
     if args.uninstall_hook:
         return uninstall_hooks()
+    if sys.platform == "darwin":
+        print("scripts/check: portable core checks belong on a pool worker, not this Mac; "
+              "run the unchanged required gates there", file=sys.stderr)
+        return 2
     if args.commit and _upstream_sync_refused(args.commit):
         return 1
     try:
