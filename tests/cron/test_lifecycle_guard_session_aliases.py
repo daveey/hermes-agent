@@ -292,6 +292,12 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "runuser -ubob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
     "runuser --user bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
     "runuser --user=bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser -u bob -- printf '%s\\n' --command='t ( bash {db} )'",
+    "runuser -u bob -- printf '%s\\n' -c 't ( bash {db} )'",
+    "runuser -u bob printf '%s\\n' --command='t ( bash {db} )'",
+    "runuser --user=bob printf '%s\\n' -c 't ( bash {db} )'",
+    "su -- bob --command='t ( bash {db} )'",
+    "runuser -- bob -c 't ( bash {db} )'",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""

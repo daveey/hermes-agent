@@ -166,17 +166,21 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
     name = _executable_name(view[index])
     if name in ("su", "runuser"):
         options = view[index + 1:]
-        for position, word in enumerate(options):
-            if word.startswith("--command="):
-                return "payload", word.partition("=")[2]
-            if word in ("-c", "--command") and position + 1 < len(options):
-                return "payload", options[position + 1]
         direct_user = any(
             word == "--user" or word.startswith("--user=")
             or re.fullmatch(r"-[mpPl]*u.*", word)
             for word in _option_words(options, frozenset("ucsg"))[0]
         )
         if name == "su" or not direct_user:
+            # Direct-user runuser executes argv, not a shell command string.
+            # Even in shell mode, -- ends the wrapper's option namespace.
+            for position, word in enumerate(options):
+                if word == "--":
+                    break
+                if word.startswith("--command="):
+                    return "payload", word.partition("=")[2]
+                if word in ("-c", "--command") and position + 1 < len(options):
+                    return "payload", options[position + 1]
             return "stdin", None
     if name == "doas":
         options, _operand = _option_words(view[index + 1:], frozenset("uC"))
