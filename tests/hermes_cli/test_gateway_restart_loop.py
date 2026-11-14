@@ -1694,6 +1694,8 @@ class TestTerminalToolGatewayLifecycleGuardRemote:
         fake_env = _RemoteEnv()
         fake_env.cwd = "/remote/workspace"
         self._patch_env(monkeypatch, fake_env, inside_gateway=True)
+        # Select a remote backend: local missing paths are final, not remote reads.
+        monkeypatch.setattr(tt, "_get_env_config", lambda: {"env_type": "ssh", "cwd": "/remote/workspace", "timeout": 60, "lifetime_seconds": 3600})
 
         result = json.loads(tt.terminal_tool(command=f"/bin/bash {script}"))
 
