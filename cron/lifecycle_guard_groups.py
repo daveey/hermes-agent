@@ -31,8 +31,6 @@ PROCESS_SUBSTITUTION = "\x00<(…)"
 _SUBSTITUTION_OPENERS = frozenset({"<", ">", ">>", ">|", "1>", "1>>", "1>|", "&>", "&>>"})
 # Operators that carry a command on past the end of its line.
 _CONTINUING_OPERATORS = frozenset({"|", "|&", "&&", "||"})
-# Stands, while tokenizing, for the `&` of `>&`, `<&`, `&>` and `&>>` (a private-use character).
-_REDIRECTION_AMPERSAND = "\ue000"
 
 Context = tuple[list[str], bool, list[str]]
 # Each process substitution of a command: (its position, or None for a `>(…)`, files it writes).
@@ -133,11 +131,11 @@ def split_glued_redirections(line: str) -> str:
 
 
 def protect_redirection_ampersands(line: str) -> str:
-    """*line* with the ``&`` of each unquoted, unescaped redirection operator (``2>&1``, ``<&0``,
-    ``&>f``, ``&>>f``) swapped for a word character, so a tokenizer splitting on ``&`` keeps the
-    redirection whole instead of reading a background ``&``. ``&&``, ``|&`` and a lone ``&``
-    keep theirs. The ``|`` of ``>|f`` is escaped for shlex too: it is no pipe. Undo the ampersand
-    swap per token with ``restore_redirection_ampersands``."""
+    """Escape redirection punctuation for shlex, leaving control operators unchanged.
+
+    Shlex consumes these escapes itself. No sentinel or post-tokenization replacement
+    may alias literal filename characters to a different file.
+    """
     out: list[str] = []
     in_single = in_double = escape = False
     previous = ""  # the last character when it was unquoted and unescaped
@@ -156,7 +154,7 @@ def protect_redirection_ampersands(line: str) -> str:
             after = line[position + 1: position + 2]
             if ch == "&" and (previous in ("<", ">")
                               or (after == ">" and previous not in ("&", "|"))):
-                ch = _REDIRECTION_AMPERSAND
+                ch = r"\&"
             elif ch == "|" and previous == ">":  # `>|f` writes f; it pipes nothing
                 ch = r"\|"
         previous = ch if shell_character else ""
@@ -165,8 +163,8 @@ def protect_redirection_ampersands(line: str) -> str:
 
 
 def restore_redirection_ampersands(token: str) -> str:
-    """*token* as written (see ``protect_redirection_ampersands``)."""
-    return token.replace(_REDIRECTION_AMPERSAND, "&")
+    """Compatibility hook: shlex now removes escapes without a sentinel swap."""
+    return token
 
 
 def join_continued_lines(token_lists: Iterable[list[str]]) -> Iterator[list[str]]:
