@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from cron.lifecycle_guard import (
+    _MAX_PREFIX_PEELS,
     _REDIRECTION,
     _SHELL_EXECUTABLES,
     _command_token_index,
@@ -233,11 +234,32 @@ def _remote_reads_stdin(remote: list[str]) -> bool:
 def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
     """``_shell_inputs`` of the nested shell *view* starts when that shell holds aliases of its
     own (see above), else ``None``. For ssh only stdin counts: a remote ``-c`` or script names
-    remote text and paths."""
+    remote text and paths. Command wrappers are peeled one at a time (``env su -l bob``,
+    ``nice sudo -i``, ``sudo su - bob``): each may itself be the shell launcher."""
     index = _command_token_index(view)
-    if index is None:
-        return None
-    name = _executable_name(view[index])
+    login_exec = False
+    for _ in range(_MAX_PREFIX_PEELS):
+        if index is None or index >= len(view):
+            return None
+        name = _executable_name(view[index])
+        found = _launcher_shell_input(view, index, name)
+        if found is not None:
+            return found
+        # `exec -l` anywhere in the chain fails closed: its `-` reaches the next argv[0].
+        login_exec = login_exec or (name == "exec" and "-l" in itertools.takewhile(
+            lambda word: word.startswith("-"), view[index + 1:]))
+        peeled = _peel_transparent_prefixes(view, index, limit=1)
+        if peeled == index:
+            return _shell_input(view, index, name, login_exec)
+        index = peeled
+    return None
+
+
+def _launcher_shell_input(
+    view: list[str], index: int, name: str,
+) -> Optional[tuple[str, Optional[str]]]:
+    """What a su/runuser/doas/sudo at *index* hands its own shell, or ``None`` when it runs the
+    command after its options instead (direct-user runuser, plain ``sudo``/``doas``)."""
     if name in ("su", "runuser"):
         options = [_su_long_option(word) for word in view[index + 1:]]
         direct_user = name == "runuser" and any(
@@ -263,13 +285,14 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
         if any(_SUDO_SHELL_OPTION_RE.fullmatch(word) for word in options):
             rest = _split_redirections(view[index + 1 + operand:])[0]
             return ("payload", " ".join(rest)) if rest else ("stdin", None)
-    login_exec = name == "exec" and "-l" in itertools.takewhile(
-        lambda word: word.startswith("-"), view[index + 1:])
-    peeled = _peel_transparent_prefixes(view, index)
-    if peeled >= len(view):
-        return None
-    name = _executable_name(view[peeled])
-    arguments = _split_redirections(view[peeled + 1:])[0]
+    return None
+
+
+def _shell_input(
+    view: list[str], index: int, name: str, login_exec: bool,
+) -> Optional[tuple[str, Optional[str]]]:
+    """``_nested_shell_input`` for the unwrapped command *name* at *index*: ssh or a shell."""
+    arguments = _split_redirections(view[index + 1:])[0]
     if name == "ssh":
         from tools.shell_heredoc import _SSH_VALUE_OPTIONS
 
@@ -280,7 +303,7 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
     options_end = _shell_options_end(arguments, name)[0]
     # ENV is read by interactive POSIX shells (already covered by -i); BASH_ENV
     # additionally lets a plain non-interactive bash define and enable aliases.
-    startup_env = name == "bash" and any(word.startswith("BASH_ENV=") for word in view[:peeled])
+    startup_env = name == "bash" and any(word.startswith("BASH_ENV=") for word in view[:index])
     if name == "zsh" or login_exec or startup_env or any(
             _LOGIN_SHELL_OPTION_RE.fullmatch(word) for word in arguments[:options_end]):
         return _shell_inputs(arguments, name)

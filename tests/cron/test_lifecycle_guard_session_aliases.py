@@ -353,6 +353,29 @@ _NESTED_FOREIGN_SHELLS = [
     "( bash -l ) < <(printf '%s\\n' 't ( bash {db} )')",
     "while read l; do su -l bob; done < <(echo 't ( bash {db} )')",
     "su -l bob < <(python3 - <<'PY'\nprint('t ( bash {db} )')\nPY\n)",
+    # The login shell behind a command wrapper (t_01a1db36142b6311): base read only the first
+    # word, so `env`/`exec`/`command`/`nice`/`timeout` hid `su` and its stdin was never walked.
+    "env su -l bob < {script}",
+    "exec su -l bob < {script}",
+    "command su -l bob < {script}",
+    "nice su -l bob < {script}",
+    "timeout 5 su -l bob < {script}",
+    "env -i HOME=/x nohup nice -n 5 su -l bob < {script}",
+    "sudo su -l bob < {script}",
+    "sudo -u root su - bob < {script}",
+    "env sudo -i < {script}",
+    "nice doas -s < {script}",
+    "command runuser -l bob < {script}",
+    "{{ env su -l bob; }} < {script}",
+    "cat {script} | env su -l bob",
+    "cat {script} | exec su -l bob",
+    "cat {script} | command su -l bob",
+    "cat {script} | nice su -l bob",
+    "cat {script} | timeout 5 su -l bob",
+    "env su -l bob <<'EOF'\nt ( bash {db} )\nEOF",
+    "nice su - bob <<< 't ( bash {db} )'",
+    "timeout 5 su -c 't ( bash {db} )' bob",
+    "env sudo -s <<'EOF'\nt ( bash {db} )\nEOF",
 ]
 
 
@@ -477,6 +500,15 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "su -l bob; cat < <(echo 't ( bash {db} )')",
     "{{ su -l bob; cat < <(echo 't ( bash {db} )'); }}",
     "su -l bob < <(echo ':'); echo 't ( bash {db} )'",
+    # A wrapper around a non-shell command, or a login shell given its own `-c`.
+    "env cat < {script}",
+    "nice cat < {script}",
+    "timeout 5 cat < {script}",
+    "cat {script} | env cat",
+    "env su -l bob -c true < {script}",
+    "nice su -l bob -c true <<< 't ( bash {db} )'",
+    "sudo cat < {script}",
+    "env runuser -u bob -- cat < {script}",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
@@ -708,11 +740,14 @@ def test_nested_shell_input_shapes():
     for owner in ("bash -l <<'E'", "sh -i <<'E'", "zsh <<'E'", "ssh h <<'E'",
                   "ssh -p 22 -o X=1 h 'bash -s' <<'E'", "ssh h 'cd /x; bash' <<'E'",
                   "sudo -i <<'E'", "sudo -u root -s <<'E'", "su - bob <<'E'",
-                  "timeout 9 bash --login <<'E'", "exec -l bash <<'E'", None):
+                  "timeout 9 bash --login <<'E'", "exec -l bash <<'E'",
+                  "env su -l bob <<'E'", "nice -n 5 sudo -i <<'E'", "command doas -s <<'E'",
+                  "sudo su - bob <<'E'", "exec runuser -l bob <<'E'", None):
         assert _feeds_nested_shell(owner), owner
     for owner in ("bash <<'E'", "bash -s <<'E'", "sh -e <<'E'", "python3 - <<'E'",
                   "ssh h python3 - <<'E'", "ssh h 'cat > f' <<'E'", "bash -l x.sh <<'E'",
-                  "sudo -u bob python3 - <<'E'", "cat <<'E'"):
+                  "sudo -u bob python3 - <<'E'", "cat <<'E'", "env cat <<'E'",
+                  "nice su -l bob -c true <<'E'", "env runuser -u bob -- cat <<'E'"):
         assert not _feeds_nested_shell(owner), owner
     found = list(_iter_nested_shell_inputs("bash -l -c 'x ( y )'; zsh s.sh; bash -c 'z'", "", cwd="/"))
     assert found == []  # *walk_command* holds the segments; *command* only its heredocs

@@ -803,10 +803,10 @@ def _executable_name(token: str) -> str:
     return Path(token).name or token
 
 
-def _peel_transparent_prefixes(segment: list[str], index: int) -> int:
-    """Index of the command a wrapper chain actually executes. Unchanged if not a wrapper; may be
-    ``len(segment)`` when a wrapper has no operand — callers must bounds-check."""
-    for _ in range(_MAX_PREFIX_PEELS):
+def _peel_transparent_prefixes(segment: list[str], index: int, limit: int = _MAX_PREFIX_PEELS) -> int:
+    """Index of the command a chain of at most *limit* wrappers executes. Unchanged if not a
+    wrapper; may be ``len(segment)`` when a wrapper has no operand — callers must bounds-check."""
+    for _ in range(limit):
         if index >= len(segment):
             return index
         name = _executable_name(segment[index])
