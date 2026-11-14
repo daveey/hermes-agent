@@ -17,6 +17,21 @@ def receipt_delivery_paths(conn, task_id: str, records: list) -> list[str]:
         if not isinstance(record, dict) or record.get("warning") or not record.get("sha256"):
             continue
         uid = record.get("attachment_uid")
+        # Large files have no replicated attachment. Only their writer may use
+        # the original (or scratch-GC-retained) path, with the recorded digest.
+        if not uid and not record.get("attachment_id") and record.get("machine") == machine:
+            from gateway.platforms.base import validate_media_delivery_path
+
+            raw = record.get("retained_path") or record.get("path")
+            if isinstance(raw, str) and validate_media_delivery_path(raw) is not None:
+                path = Path(raw).expanduser()
+                try:
+                    with path.open("rb") as stream:
+                        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                except OSError:
+                    continue
+                if digest == record["sha256"] and str(path) not in paths:
+                    paths.append(str(path))
         for row in rows:
             matches = (uid and row.get("uid") == uid) or (
                 not uid and record.get("machine") == machine

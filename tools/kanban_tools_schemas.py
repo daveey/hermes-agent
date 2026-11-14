@@ -254,11 +254,14 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "else uploads as a file) so the deliverable "
                 "lands with the completion notification. Skip "
                 "intermediate scratch files and references that "
-                "are not the deliverable. The path must exist "
-                "on disk at completion. Files inside a managed scratch "
-                "workspace are copied to durable task attachments before "
-                "cleanup; a missing declared scratch artifact keeps the "
-                "task in-flight so you can fix the path and retry."
+                "are not the deliverable. Completion records the executing "
+                "machine, path and SHA256. Existing files up to 25 MB are "
+                "copied to card attachments and replicated to the home board; "
+                "larger scratch files are retained on the executing machine. "
+                "Missing paths (including scratch paths) produce visible "
+                "receipt warnings, not successful file-delivery claims. "
+                "Failures preserving existing scratch bytes keep the task "
+                "in-flight. Native chat uploads depend on local byte availability."
             ),
         },
     },

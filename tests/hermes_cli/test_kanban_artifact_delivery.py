@@ -15,6 +15,46 @@ from tests.hermes_cli import test_kanban_artifact_machine as support
 stores = support.stores
 
 
+@pytest.mark.parametrize("retained", [False, True])
+def test_large_local_artifact_delivery_checks_identity_digest_and_policy(stores, monkeypatch, retained):
+    from gateway.platforms import base
+
+    _, worker, home_conn, conn, _, tid, _ = stores
+    source = worker / "large.bin"
+    source.write_bytes(b"larger than fixture cap")
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 1)
+    record = support.complete(conn, tid, [str(source)])["artifact_receipt"][0]
+    if retained:
+        target = worker / "retained.bin"
+        source.rename(target)
+        record["retained_path"] = str(target)
+    else:
+        target = source
+    assert delivery.receipt_delivery_paths(conn, tid, [record]) == [str(target)]
+    assert delivery.receipt_delivery_paths(home_conn, tid, [record]) == []
+    assert delivery.receipt_delivery_paths(conn, tid, [{**record, "sha256": "bad"}]) == []
+    monkeypatch.setattr(base, "validate_media_delivery_path", lambda p: None)
+    assert delivery.receipt_delivery_paths(conn, tid, [record]) == []
+
+
+@pytest.mark.asyncio
+async def test_notifier_uploads_large_artifact_on_writer(stores, monkeypatch):
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+
+    _, worker, _, conn, _, tid, _ = stores
+    report = worker / "large-report.bin"
+    report.write_bytes(b"large report")
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 1)
+    payload = support.complete(conn, tid, [str(report)])
+    adapter = SimpleNamespace(extract_local_files=lambda text: ([], []), send_document=AsyncMock())
+    monkeypatch.setattr(delivery, "delivery_paths", lambda task_id, records, board: delivery.receipt_delivery_paths(conn, task_id, records))
+    await GatewayKanbanWatchersMixin._deliver_kanban_artifacts(
+        None, adapter=adapter, chat_id="chat", metadata={},
+        event_payload=payload, task=SimpleNamespace(id=tid, result="done"),
+    )
+    assert adapter.send_document.await_args.kwargs["file_path"] == str(report)
+
+
 @pytest.mark.parametrize("symlink", [False, True])
 def test_denied_source_is_not_laundered_into_attachment(stores, monkeypatch, symlink):
     from gateway.platforms import base
