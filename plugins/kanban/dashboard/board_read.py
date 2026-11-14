@@ -50,24 +50,48 @@ def _wake_states(conn: sqlite3.Connection, row_ids: list) -> dict:
 
 
 def _event_marks(conn: sqlite3.Connection, row_ids: list) -> dict[str, tuple]:
-    """``{task_id: (event count, max event id)}``: an insert or delete moves it. Events are otherwise
-    immutable: the only in-place UPDATEs (run_id on completion) commit with a task row change and
-    a new event, and the legacy kind rename runs once per DB at migration. Read BEFORE the events
-    it vouches for, so an event committed in between is re-read on the next refresh, never missed."""
+    """Append/delete marks, read in the materializer's snapshot.
+
+    Same-ID edits/replacements additionally invalidate through P2; these marks
+    also detect heartbeat inserts/deletes excluded from that content cursor.
+    """
     if not row_ids:
         return {}
+    # COUNT uses the covering task-id index; MAX uses a single last-row seek.
+    # A grouped COUNT/MAX executes both aggregates for every historical event.
     return {r[0]: (r[1], r[2]) for r in conn.execute(
-        f"SELECT task_id, COUNT(*), MAX(id) FROM task_events WHERE task_id IN ({_placeholders(row_ids)}) "
-        "GROUP BY task_id", tuple(row_ids))}
+        f"WITH wanted(task_id) AS (VALUES {','.join(['(?)'] * len(row_ids))}) "
+        "SELECT task_id, (SELECT COUNT(*) FROM task_events e WHERE e.task_id=w.task_id), "
+        "(SELECT MAX(id) FROM task_events e WHERE e.task_id=w.task_id) FROM wanted w",
+        tuple(row_ids)) if r[1]}
+
+
+def _unmarked_event_marks(conn: sqlite3.Connection, row_ids: list) -> dict[str, tuple]:
+    """``{task_id: (count, max id)}`` of only the event kinds the P2 cursor does not mark.
+
+    P2 marks the task of every other event insert and of every event update or delete
+    (``kanban_activity_revision``), so under a trusted cursor these inserts are the only
+    event changes left to detect. COUNT catches an insert at any id (pickup history
+    backfills below every id); both aggregates seek ``idx_events_kind_task_id`` and never
+    touch the rest of the history."""
+    from hermes_cli.kanban_activity_revision import UNREAD_EVENT_KINDS
+    if not row_ids:
+        return {}
+    kinds = ",".join(["?"] * len(UNREAD_EVENT_KINDS))
+    return {r[0]: (r[1], r[2]) for r in conn.execute(
+        f"WITH wanted(task_id) AS (VALUES {','.join(['(?)'] * len(row_ids))}) "
+        "SELECT w.task_id, COUNT(e.id), MAX(e.id) FROM wanted w LEFT JOIN task_events e "
+        f"ON e.task_id = w.task_id AND e.kind IN ({kinds}) GROUP BY w.task_id",
+        (*row_ids, *UNREAD_EVENT_KINDS))}
 
 
 def fresh(value):
     """New dicts/lists all the way down (scalars shared). Projections hand these out so a
     caller editing a payload can never edit the retained rows."""
     if isinstance(value, dict):
-        return {k: fresh(v) for k, v in value.items()}
+        return {k: fresh(v) if isinstance(v, (dict, list)) else v for k, v in value.items()}
     if isinstance(value, list):
-        return [fresh(v) for v in value]
+        return [fresh(v) if isinstance(v, (dict, list)) else v for v in value]
     return value
 
 
@@ -160,28 +184,60 @@ def _done_state(conn, filters: dict, done_limit) -> tuple[str, list, int, frozen
     return f"status != 'done' OR rowid IN ({_placeholders(keep)})", keep, len(done), done_ids, window
 
 
-def _diag_memo(rows, events_by_task, runs_by_task, marks) -> dict:
-    """Per task: what its diagnostics inputs were read from, to tell a changed task next time."""
+def _history_mark(events) -> Optional[tuple]:
+    """``_event_marks`` of exactly these retained events (rows come ``ORDER BY id``):
+    whatever the database says next is compared with what was actually read."""
+    if not events:
+        return _NO_EVENTS
+    last = events[-1]
+    try:
+        return (len(events), last["id"])
+    except (KeyError, IndexError, TypeError):
+        return None  # cannot vouch: the next refresh reloads
+
+
+def _diag_memo(rows, events_by_task, runs_by_task, marks, unmarked=None) -> dict:
+    """Per task: what its diagnostics inputs were read from, to tell a changed task next time:
+    ``(task row, raw runs or None, event count/max, events, runs, unmarked-kind count/max)``."""
     return {r["id"]: (tuple(r), _raw(runs_by_task.get(r["id"], ())), marks.get(r["id"], _NO_EVENTS),
-                      events_by_task.get(r["id"], ()), runs_by_task.get(r["id"], ())) for r in rows}
+                      events_by_task.get(r["id"], ()), runs_by_task.get(r["id"], ()),
+                      None if unmarked is None else unmarked.get(r["id"])) for r in rows}
 
 
 def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable, *,
                              graphs=None, event_changed=None) -> tuple:
     """Retain event histories independently of task/run bookkeeping. ``event_changed``
-    is the trusted P2 invalidation set; updates/deletes of events always mark their task.
-    Count/max additionally catches excluded heartbeat inserts. Legacy callers without
-    a cursor retain the conservative row/run invalidation. Clock/config rules stay fresh.
+    is the trusted P2 invalidation set: it marks every event insert, update and delete
+    except inserts of ``UNREAD_EVENT_KINDS`` (heartbeats), which ``_unmarked_event_marks``
+    catches with index seeks, so a trusted refresh never scans retained histories.
+    Legacy callers without a cursor compare whole-history count/max plus the task row and
+    runs (conservative). Clock/config rules stay fresh.
     """
     ids = [r["id"] for r in diag_rows]
-    marks = _event_marks(conn, ids)
+    trusted = event_changed is not None
+    unmarked = _unmarked_event_marks(conn, ids)
+    if trusted:  # memos built without unmarked marks fall back to whole-history marks
+        marks = _event_marks(conn, [tid for tid in ids if tid in prev
+                                    and (len(prev[tid]) < 6 or prev[tid][5] is None)])
+    else:
+        marks = _event_marks(conn, ids)
     runs = retained_runs(conn, ids, prev, event_changed, _rows_by_task)
-    raw_runs = {tid: _raw(runs[tid]) for tid in ids}
-    changed = {tid for r, tid in zip(diag_rows, ids)
-               if (old := prev.get(tid)) is None or old[2] is None
-               or old[2] != marks.get(tid, _NO_EVENTS)
-               or (event_changed is not None and tid in event_changed)
-               or (event_changed is None and (old[0] != tuple(r) or old[1] != raw_runs[tid]))}
+
+    def moved(r, tid) -> bool:
+        old = prev.get(tid)
+        if old is None:
+            return True
+        if trusted:
+            if tid in event_changed:
+                return True
+            if len(old) > 5 and old[5] is not None:
+                return old[5] != unmarked.get(tid)
+            return old[2] is None or old[2] != marks.get(tid, _NO_EVENTS)
+        if old[2] is None or old[2] != marks.get(tid, _NO_EVENTS) or old[0] != tuple(r):
+            return True
+        return (old[1] if old[1] is not None else _raw(old[4])) != _raw(runs[tid])
+
+    changed = {tid for r, tid in zip(diag_rows, ids) if moved(r, tid)}
     part = diagnostic_inputs(conn, task_ids=[tid for tid in ids if tid in changed]) if changed else None
     fresh_events = part[1] if part is not None else {}
     events = {}
@@ -189,10 +245,11 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     for r, tid in zip(diag_rows, ids):
         if tid in fresh_events or tid not in changed:
             events[tid] = fresh_events[tid] if tid in fresh_events else prev[tid][3]
-            memo[tid] = (tuple(r), raw_runs[tid], marks.get(tid, _NO_EVENTS), events[tid], runs[tid])
+            # Raw run signatures are only compared by a legacy refresh, which derives them then.
+            memo[tid] = (tuple(r), None, _history_mark(events[tid]), events[tid], runs[tid], unmarked.get(tid))
         else:  # vanished between reads: no events held, so never vouch for a mark
             events[tid] = ()
-            memo[tid] = (tuple(r), raw_runs[tid], None, (), runs[tid])
+            memo[tid] = (tuple(r), None, None, (), runs[tid], None)
     if graphs is None:
         graphs = kanban_db.task_graph_contexts(conn, ids)
     inputs = (tuple(diag_rows), events, runs, graphs, _wake_states(conn, ids))
@@ -260,8 +317,9 @@ def materialize(conn, tenant, include_archived, workflow_template_id, current_st
         diag_inputs, diag_memo = _incremental_diag_inputs(conn, diag_rows, old["diag"], diagnostic_inputs)
     else:
         marks = _event_marks(conn, diag_ids)  # before the events it vouches for
+        unmarked = _unmarked_event_marks(conn, diag_ids)
         diag_inputs = diagnostic_inputs(conn, task_ids=diag_ids)
-        diag_memo = (_diag_memo(diag_inputs[0], diag_inputs[1], diag_inputs[2], marks)
+        diag_memo = (_diag_memo(diag_inputs[0], diag_inputs[1], diag_inputs[2], marks, unmarked)
                      if diag_inputs is not None else {})
     latest_event_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
     # One window-function query for latest summaries (avoids N+1); cards get a

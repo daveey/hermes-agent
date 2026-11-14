@@ -121,3 +121,31 @@ def test_untrusted_run_path_reloads(source, monkeypatch):
     rows = source.execute('SELECT * FROM tasks').fetchall()
     br._incremental_diag_inputs(source, rows, old, lambda *_args, **_kwargs: None, graphs={})
     assert 'task_runs' in loaded
+
+
+def test_unchanged_run_bookkeeping_is_compared_in_sql(source):
+    """Retained runs whose ids and bookkeeping are unchanged are kept without fetching and
+    comparing each run's values in Python; a bookkeeping write still reaches the run."""
+    old = memo(source)
+    _, old = refresh(source, old)  # first trusted refresh records the signature
+    statements = []
+    source.set_trace_callback(statements.append)
+    got, old = refresh(source, old)
+    source.set_trace_callback(None)
+    overlay = [s for s in statements if 'FROM task_runs' in s and 'quote(' not in s]
+    assert overlay == [], 'unchanged bookkeeping must not be re-read value by value'
+    source.execute("UPDATE task_runs SET worker_pid = 42")
+    got, old = refresh(source, old)
+    assert got[2]['t'][0]['worker_pid'] == 42
+    got, old = refresh(source, old)
+    assert got[2]['t'][0]['worker_pid'] == 42
+
+
+def test_retained_run_overlay_is_type_exact(source):
+    """An equal-comparing value of another type (1 -> 1.0 in an untyped column) is still a change."""
+    old = memo(source)
+    for value in (1, 1.0, 1):
+        source.execute('UPDATE task_runs SET claim_expires = ?', (value,))
+        got, old = refresh(source, old)
+        _, _, fresh_runs = inputs(source)
+        assert type(got[2]['t'][0]['claim_expires']) is type(fresh_runs['t'][0]['claim_expires']) is type(value)

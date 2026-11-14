@@ -20,6 +20,43 @@ class EventHistory(tuple):
     def __delattr__(self, name):
         raise AttributeError("event snapshots cannot be reassigned")
 
+    def latest_ts(self, kinds):
+        from hermes_cli.kanban_diagnostics import _latest_event_ts
+        key = frozenset(kinds)
+        cache = self.__dict__.setdefault("_latest_ts", {})
+        if key not in cache:
+            cache[key] = _latest_event_ts(tuple(self), kinds)
+        return cache[key]
+
+    def ready_floor(self, runs):
+        from collections.abc import Mapping
+        from hermes_cli.kanban_diagnostics import _last_ready_entry_ts
+        runs = tuple(runs)
+        if not all(isinstance(run, Mapping) for run in runs):
+            return _last_ready_entry_ts(tuple(self), runs)
+        # Keep only the latest run snapshot: bookkeeping changes (including
+        # NULL -> 0) affect unused-grant classification without moving P2.
+        # Types are part of the key: 100 == 100.0 but the floor would differ in type.
+        key = tuple(tuple((name, type(value), value) for name, value in run.items()) for run in runs)
+        if any(type(value) not in (str, int, float, bytes, type(None))
+               for run in key for _name, _type, value in run):
+            return _last_ready_entry_ts(tuple(self), runs)
+        previous = self.__dict__.get("_ready_floor")
+        if previous is None or previous[0] != key:
+            value = _last_ready_entry_ts(tuple(self), runs)
+            self.__dict__["_ready_floor"] = (key, value)
+        return self.__dict__["_ready_floor"][1]
+
+    @cached_property
+    def terminal_provider(self):
+        from hermes_cli.kanban_diagnostics import _latest_gave_up_is_terminal_provider
+        return _latest_gave_up_is_terminal_provider(tuple(self))
+
+    @cached_property
+    def last_block(self):
+        from hermes_cli.kanban_diagnostics import _event_kind
+        return next((ev for ev in reversed(self) if _event_kind(ev) == "blocked"), None)
+
     @cached_property
     def active_cards(self):
         from hermes_cli.kanban_diagnostics import _active_hallucination_events

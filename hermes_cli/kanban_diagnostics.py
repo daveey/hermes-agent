@@ -123,12 +123,16 @@ def _first_field(task, primary: str, legacy: str, default=None):
 
 def _latest_event_ts(events: Iterable[Any], kinds: set[str] | frozenset[str]) -> int:
     """Max ``created_at`` over events whose kind is in ``kinds`` (0 if none)."""
+    if isinstance(events, EventHistory):
+        return events.latest_ts(kinds)
     return max([0, *(_event_ts(ev) for ev in events if _event_kind(ev) in kinds)])
 
 
 def _latest_gave_up_is_terminal_provider(events: Iterable[Any]) -> bool:
     """True when the most recent breaker trip was a terminal provider error (credential
     revoked, model gone) and nothing has resumed the task since."""
+    if isinstance(events, EventHistory):
+        return events.terminal_provider
     for ev in reversed(list(events)):
         kind = _event_kind(ev)
         if kind == "gave_up":
@@ -540,7 +544,8 @@ def _rule_review_dependency_deadlock(task, events, runs, now, cfg) -> list[Diagn
     for it to be terminal. Graph-aware; deliberately mutates nothing."""
     if _task_field(task, "status") != "blocked":
         return []
-    latest_block = next((ev for ev in reversed(list(events)) if _event_kind(ev) == "blocked"), None)
+    latest_block = (events.last_block if isinstance(events, EventHistory) else
+                    next((ev for ev in reversed(list(events)) if _event_kind(ev) == "blocked"), None))
     if latest_block is None:
         return []
     reason = str(_parse_payload(latest_block).get("reason") or "").strip()
@@ -735,6 +740,8 @@ def _last_ready_entry_ts(events: Iterable[Any], runs: Iterable[Any] = ()) -> int
     event and its run's end never reset the clock, so a card whose grants keep bouncing keeps its real age
     (default/t_01a1c6c56a99c3e1, 2026-11-10: ready@1794369068 hid a wait since 1794351914). Actual execution,
     loss and ready transitions still count. [daveey]"""
+    if isinstance(events, EventHistory):
+        return events.ready_floor(runs)
     from hermes_cli.kanban_unused_grant import unused_grant_run_ids
     events, runs = list(events), list(runs)
     unused = unused_grant_run_ids(runs, events)
