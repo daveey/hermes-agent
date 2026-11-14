@@ -213,9 +213,16 @@ def test_in_place_restore_reopens_sqlite_page_cache(tmp_path):
     try:
         with watch_store.observed(path) as (before, conn):
             assert conn.execute("SELECT v FROM t").fetchone()[0] == 1
-        inode = path.stat().st_ino
+        original = path.stat()
         shutil.copyfile(other, path)
-        assert path.stat().st_ino == inode
+        # Equal-size SQLite files can have equal header counters, and copyfile can
+        # finish within the same filesystem mtime tick. Exercise the changed-mtime
+        # restore contract explicitly instead of depending on wall-clock progress.
+        os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 2_000_000_000))
+        restored = path.stat()
+        assert restored.st_ino == original.st_ino
+        assert restored.st_size == original.st_size
+        assert restored.st_mtime_ns != original.st_mtime_ns
         with watch_store.observed(path) as (after, conn):
             assert after != before
             assert conn.execute("SELECT v FROM t").fetchone()[0] == 99
