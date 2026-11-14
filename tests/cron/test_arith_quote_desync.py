@@ -1,5 +1,9 @@
 """Quote-like data must not hide a later arithmetic output sink."""
 
+import shlex
+import shutil
+import subprocess
+
 import pytest
 
 from cron.lifecycle_guard import scan_gateway_lifecycle
@@ -24,6 +28,20 @@ def test_masked_body_retains_its_own_terminator():
     assert strip_inert_heredoc_bodies(command) == "cat <<'EOF'\n\nEOF\necho ok\n"
 
 SINK = r'''x=$(( 1 + $(echo "b[\$(bash BIG)]") ))'''
+
+
+@pytest.mark.parametrize("owner", ["bash", "bash -s", "env bash", "ssh host bash", "unknown"])
+@pytest.mark.parametrize("prefix", ["", "cat <<'EOF'\ndata\nEOF\n"])
+def test_literal_executable_heredoc_keeps_arithmetic_sink(tmp_path, owner, prefix):
+    big = tmp_path / "BIG"
+    big.write_text("# padding\n" * 150000, encoding="utf-8")
+    command = prefix + owner + " <<'R'\n" + SINK.replace("BIG", str(big)) + "\nR\n"
+    assert substitution_in_arithmetic(command, date_exempt=True)
+    assert output_reaches_shell(command)
+    assert strip_inert_heredoc_bodies(command) == command
+    unsafe, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe
+    assert reason and "larger than the scan cap" in reason
 
 
 @pytest.mark.parametrize("prefix", [
@@ -57,4 +75,43 @@ def test_quote_like_data_preserves_date_exemption(prefix):
     "echo $'broken\\' $(echo data)",
 ])
 def test_unclosed_quotes_fail_closed(command):
+    assert substitution_in_arithmetic(command, date_exempt=True)
+
+
+@pytest.mark.parametrize("shape", [
+    "bash <<'R'\nSINK\nR\n",
+    "sh -s <<'R'\nSINK\nR\n",
+    "cat <<'EOF' >F\nb[$(bash BIG)]\nEOF\nbash <<'R'\nx=$(( 1 + $(cat F) ))\nR\n",
+    "cat <<'R'\nSINK\nR\n",
+    "cat <<'EOF'\nhello\nEOF\nSINK\ncat <<EOF\nplain\nEOF\n",
+    "cat <<EOF\ndon't\nEOF\nSINK\n",
+])
+def test_masking_agrees_with_real_bash_execution(tmp_path, shape):
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash unavailable")
+    assert bash is not None
+    marker = tmp_path / "executed"
+    big = tmp_path / "BIG"
+    big.write_text("touch " + shlex.quote(str(marker)) + "\n" + "# padding\n" * 150000)
+    command = shape.replace("SINK", SINK)
+    unsafe, _ = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    subprocess.run([bash, "-c", command], cwd=tmp_path, capture_output=True,
+                   timeout=10, check=False)
+    if marker.exists():
+        assert unsafe, "real bash executed a payload the guard allowed"
+    elif shape == "cat <<'R'\nSINK\nR\n":
+        assert not unsafe
+    else:
+        # Linux /bin/sh may be dash (no recursive array arithmetic), not bash.
+        assert shape.startswith("sh -s ")
+        assert unsafe
+
+
+def test_nested_literal_body_date_exemption_and_depth_limit():
+    command = "bash <<'R'\nx=$(( $(date +%s) + 2700 ))\nR\n"
+    assert not substitution_in_arithmetic(command, date_exempt=True)
+    assert substitution_in_arithmetic(command, date_exempt=False)
+    for index in range(35):
+        command = f"bash <<'R{index}'\n{command}R{index}\n"
     assert substitution_in_arithmetic(command, date_exempt=True)
