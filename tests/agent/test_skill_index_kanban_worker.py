@@ -69,6 +69,24 @@ def test_compact_strips_only_the_exact_trigger_suffix(home):
     assert "- apple-notes: Use when David Asks: notes." in build_skills_system_prompt(index_mode="compact")
 
 
+def test_plugin_skill_rows_follow_the_index_mode(monkeypatch):
+    # Plugin (ctx.register_skill) rows join the index after the on-disk rows are labelled: compact must
+    # strip their triggers too, full keeps them, names lists the name only. No mode hides the name.
+    from hermes_cli import plugins
+    meta = {"name": "demo:disk-helper", "description": DESC, "frontmatter": {
+        "name": "disk-helper", "description": DESC,
+        "triggers": {"asks": ["my disk is full"], "not_for": "the CI runner disk"}}}
+    monkeypatch.setattr(plugins, "discover_plugins", lambda *a, **k: None)
+    monkeypatch.setattr(plugins, "get_plugin_manager",
+                        lambda: SimpleNamespace(list_plugin_skill_metadata=lambda: [meta]))
+    assert _row(build_skills_system_prompt(), "demo:disk-helper").endswith(f"- demo:disk-helper: {DESC}{TRIGGERS}")
+    compact = build_skills_system_prompt(index_mode="compact")
+    assert _row(compact, "demo:disk-helper").endswith(f"- demo:disk-helper: {DESC}")
+    assert "Asks:" not in compact and "Not for:" not in compact
+    names = build_skills_system_prompt(index_mode="names")
+    assert "demo:disk-helper" in names and DESC not in names and "Asks:" not in names
+
+
 def test_names_mode_lists_every_skill_name_and_no_description():
     names = build_skills_system_prompt(index_mode="names")
     for name in ("mac-disk-cleanup", "apple-notes", "email-triage"):
