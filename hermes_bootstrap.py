@@ -542,12 +542,6 @@ def _settle_interrupted_update() -> None:
 
 _settle_interrupted_update()
 
-# After the repair above: a merge killed while writing hermes_agent/ must not keep the repair from running.
-from hermes_agent.compat import install as _install_compat
-
-_install_compat()
-
-
 def _record_boot_revision() -> None:
     """Read the checkout revision before the rest of the tree is imported. The boot-pin guard
     (``gateway.code_skew``) installs much later, in ``start_gateway``/the serve lifespan; a
@@ -585,6 +579,12 @@ def _install_code_attestation() -> None:
 
 
 _install_code_attestation()
+
+# Keep compat after interrupted-update repair and audit installation: its modules
+# must be observed as executed code, not silently added to the trusted seed.
+from hermes_agent.compat import install as _install_compat
+
+_install_compat()
 
 
 def _pin_launcher_home() -> None:
