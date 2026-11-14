@@ -79,8 +79,12 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
             backtick_open = not backtick_open
             continue
         if token[0] == "\\":
+            if _escaped_opener(command, token, start) and _subscript_word_before(command, stack, pos):
+                return True
             continue
         if token == '"':
+            if quoted and command[start - 1] == "$" and _subscript_word_before(command, stack, pos):
+                return True  # `"$"(…)`: the `$` joins a later `(` after quote removal
             top[3] = not quoted
             continue
         skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
@@ -125,7 +129,7 @@ def _quick_result(command: str, depth: int) -> bool | None:
     # Never apply this exception to top-level shell text or code-like bodies.
     if depth and not any(mark in command for mark in ("$", "`", "<(", ">(")):
         return False
-    if "$(" not in command and not any(mark in command for mark in ("'", '"', "`")):
+    if "$(" not in command and not any(mark in command for mark in ("'", '"', "`", "\\")):
         return False
     if "$(" in command and _INTEGER_DECLARATION_RE.search(command):
         return True
@@ -134,13 +138,63 @@ def _quick_result(command: str, depth: int) -> bool | None:
 
 def _arithmetic_quotes(stack) -> bool:
     """Parameter words inherit the nearest evaluator's lexical quote rules."""
-    for kind, closer, _, _ in reversed(stack):
+    for frame in reversed(stack):
+        kind, closer = frame[0], frame[1]
         if kind == _CMD:
             return False
         if kind == _ARITH:
             # `let` and [[ ]] parse shell words before evaluating operands.
             return closer not in ("let", "]]")
     return False
+
+
+def _word_arithmetic_frame(stack) -> list | None:
+    """The ``let`` / ``[[ … -eq … ]]`` frame whose operands are evaluated after quote removal.
+
+    Bash removes the shell quotes of those operands first, then evaluates the remaining
+    text as arithmetic, and an array subscript in that text runs its command substitutions:
+    ``let 'a[$(bash F)]=1'`` and ``[[ 1 -eq 'a[$(bash F)]' ]]`` run ``bash F``. Subscript
+    (``]``) and parameter frames inside such an operand belong to the same word.
+    """
+    for frame in reversed(stack):
+        if frame[0] == _CMD:
+            return None
+        if frame[0] == _ARITH and frame[1] != "]":
+            return frame if frame[1] in ("let", "]]") else None
+    return None
+
+
+def _subscript_word_before(command: str, stack, pos: int) -> bool:
+    """Whether a quoted/escaped substitution opener ending before *pos* sits in a word
+    arithmetic frame after a ``[`` (coarse: any ``[`` in the frame so far, so separate
+    ``let`` arguments or ``[[`` operands also count; that only fails closed)."""
+    frame = _word_arithmetic_frame(stack)
+    if frame is None:
+        return False
+    if command.find("[", frame[4], pos) != -1:
+        return True
+    frame[4] = pos  # no `[` up to here: later queries resume past it (linear overall)
+    return False
+
+
+def _escaped_opener(command: str, token: str, start: int) -> bool:
+    """Whether a backslash escape can form ``$(`` or a backtick once quotes are removed."""
+    if token == "\\`":
+        return True
+    if token == "\\$":
+        return command[start + 2:start + 3] in ("(", "\\", "'", '"')
+    if token == "\\(":
+        index = start - 1
+        while index >= 0 and command[index] in "'\"":
+            index -= 1
+        return index >= 0 and command[index] == "$"
+    return False
+
+
+def _quoted_opener(span: str, date_exempt: bool) -> bool:
+    """Whether a quoted span (closing quote included) can supply a substitution opener
+    after quote removal: ``'$('`` itself, or a trailing ``$`` that meets a later ``(``."""
+    return _span_substitutes(span, date_exempt) or span[:-1].endswith("$")
 
 
 def _span_substitutes(span: str, date_exempt: bool) -> bool:
@@ -160,9 +214,15 @@ def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, 
         close = _quote_close(command, pos, ansi=token == "$'")
         if close is None:
             return -1
-        if _arithmetic_quotes(stack) and _span_substitutes(command[pos:close], date_exempt):
+        span = command[pos:close]
+        if _arithmetic_quotes(stack) and _span_substitutes(span, date_exempt):
             # Bash still uses the apostrophes to find the frame's closer, but then
             # evaluates the text with double-quote semantics, so `$(`/backticks run.
+            return -1
+        if _word_arithmetic_frame(stack) is not None and (
+                (token == "$'" and "\\" in span)  # escapes can spell both `[` and `$(`
+                or (_quoted_opener(span, date_exempt)
+                    and _subscript_word_before(command, stack, close))):
             return -1
         return close
     if quoted:
@@ -264,7 +324,7 @@ def _cmd_token(command, token, start, pos, stack, closes, operators) -> int:
             return len(command) if newline == -1 else newline
         return pos
     if token.startswith("let"):
-        stack.append([_ARITH, "let", 0, False])
+        stack.append([_ARITH, "let", 0, False, pos])  # [4]: see _subscript_word_before
         return pos
     if token == "((":
         stack.append([_ARITH, "))", 0, False])
@@ -281,7 +341,7 @@ def _cmd_token(command, token, start, pos, stack, closes, operators) -> int:
         close = closes[index] if index < len(closes) else len(command)
         operator = bisect.bisect_left(operators, pos)
         if operator < len(operators) and operators[operator] < close:
-            stack.append([_ARITH, "]]", 0, False])
+            stack.append([_ARITH, "]]", 0, False, pos])
         return pos
     if token == "[" and start > 0 and (command[start - 1].isalnum() or command[start - 1] == "_"):
         stack.append([_ARITH, "]", 0, False])  # `a[…]=` subscript

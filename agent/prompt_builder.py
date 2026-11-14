@@ -25,7 +25,7 @@ from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
     TIER_LOCAL, extract_skill_conditions, extract_skill_description,
     get_disabled_skill_names, get_skill_search_roots,
-    iter_skill_index_files, parse_frontmatter, skill_index_triggers_enabled, skill_matches_apps,
+    iter_skill_index_files, parse_frontmatter, render_skill_triggers, skill_index_triggers_enabled, skill_matches_apps,
     skill_matches_environment, skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
@@ -1216,8 +1216,9 @@ _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2 added org provenance fields (org_id/org_author); v4 adds ``rel`` (SKILL.md path relative to its root) for
 # duplicate-name resolution; v5 stores descriptions clipped at a word boundary; v6 rows carry ``triggers:`` and the
-# snapshot records ``index_triggers`` (the skills.index_triggers value they were built with). Older ones are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 6
+# snapshot records ``index_triggers`` (the skills.index_triggers value they were built with); v7 rows carry
+# ``triggers`` (the suffix their description ends with) so a Kanban worker's index can drop it. Older ones are rebuilt.
+_SKILLS_SNAPSHOT_VERSION = 7
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1281,12 +1282,15 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     category = "general" if len(parts) < 2 else "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
     platforms = frontmatter.get("platforms") or []
     platforms = [platforms] if isinstance(platforms, str) else platforms
+    triggers = render_skill_triggers(frontmatter)
     entry = {
         "skill_name": skill_name, "category": category, "frontmatter_name": str(frontmatter.get("name", skill_name)),
         "rel": skill_file.relative_to(skills_dir).as_posix(),
         "description": description, "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
         "requires_apps": _requires_apps_list(frontmatter),
+        # The trigger suffix the description carries ("" when index_triggers is off or there is none).
+        "triggers": triggers if triggers and description.endswith(triggers) else "",
     }
     return entry
 
@@ -1374,12 +1378,15 @@ def _current_session_platform_hint() -> str:
 def build_skills_system_prompt(
     available_tools: set[str] | None = None, available_toolsets: set[str] | None = None,
     compact_categories: frozenset[str] | None = None, skills_dir_override: Path | None = None,
+    index_mode: str = "full",
 ) -> str:
     """Compact skill index for the system prompt.
 
     Same-named skills resolve like skill_view: project > local > create_dir > external_dirs, and a
     same-tier duplicate is listed under its exact relative path (``agent.skill_utils.resolve_skill_catalog``).
     ``compact_categories`` (coding posture) demotes categories to a names-only line — nothing is ever hidden.
+    ``index_mode`` (``skills.index_in_kanban_worker`` for a Kanban worker): ``full``, ``compact`` (rows
+    without their ``triggers:`` text) or ``names`` (every category names-only).
     ``skills_dir_override`` makes home resolution EXPLICIT: a build thread that never bound the HERMES_HOME
     ContextVar would otherwise leak the default profile's skills into a bot's prompt.
     """
@@ -1401,7 +1408,7 @@ def build_skills_system_prompt(
         if not skills_dir.exists() and not extra_roots:
             return ""
         return _build_skills_system_prompt_inner(
-            skills_dir, extra_roots, available_tools, available_toolsets, compact_categories)
+            skills_dir, extra_roots, available_tools, available_toolsets, compact_categories, index_mode)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1423,82 +1430,8 @@ def _scan_extra_root(root: Path, skill_files, tier: int, log_fmt: str) -> list[t
     return rows
 
 
-def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict[str, list[tuple[str, str]]]) -> None:
-    """Index rows under each entry's ``load_name`` (what skill_view accepts)."""
-    from agent.skill_utils import TIER_PROJECT
-    for entry in (e for e in visible_entries if e["load_name"]):
-        desc = entry.get("description", "")
-        if entry["tier"] == TIER_PROJECT:
-            desc = f"[project] {desc}".strip()
-        category = entry.get("category") or "general"
-        skills_by_category.setdefault(category, []).append((entry["load_name"], desc))
-
-
-def _render_skills_index(
-    skills_by_category: dict[str, list[tuple[str, str]]],
-    compact_categories: frozenset[str] | None, available_tools: set[str] | None, unloadable: list[str] = (),
-) -> str:
-    """Render the ## Skills block; "" when there is nothing to list. *unloadable* names (different skills
-    sharing a name AND relative path within one tier — one root or several) get a rename note instead of a row skill_view would refuse."""
-    if not skills_by_category:
-        return ""
-    # Demoted categories collapse to one names-only line. NEVER drop entries — agent-created skills are the
-    # model's project memory and it won't rediscover them via skills_list. Nested categories follow their parent.
-    demoted = frozenset(cat for cat in skills_by_category if cat.split("/", 1)[0] in (compact_categories or frozenset()))
-    hidden_note = (
-        "\n(Categories marked [names only] are outside the current coding "
-        "context, so their descriptions are omitted — the skills work "
-        "normally and load with skill_view(name) as usual.)"
-    ) if demoted else ""
-    if unloadable:
-        hidden_note += (f"\n(A copy of {', '.join(unloadable)} is not listed: it shares both its name and its path "
-                        "with a different skill in the same skills directory tier (e.g. another external_dirs entry), "
-                        "so skill_view cannot load it — rename one.)")
-    # Don't name web_search when the session has no web tools (dangling reference).
-    _basic_tools = "terminal" if available_tools is not None and "web_search" not in available_tools else "web_search or terminal"
-    index_lines = []
-    for category in sorted(skills_by_category):
-        entries = skills_by_category[category]
-        if category in demoted:
-            index_lines.append(f"  {category} [names only]: {', '.join(sorted({n for n, _ in entries}))}")
-            continue
-        rows: dict[str, str] = {}
-        for name, desc in sorted(entries, key=lambda x: x[0]):  # stable: first entry per name wins
-            rows.setdefault(name, desc)
-        # A one-skill category is a single top-level row: its header would only repeat what the row
-        # says (a skill at the top of the tree is its own category, so the name printed twice).
-        indent = "  " if len(rows) == 1 else "    "
-        if len(rows) > 1:
-            index_lines.append(f"  {category}:")
-        index_lines.extend(f"{indent}- {name}: {desc}" if desc else f"{indent}- {name}" for name, desc in rows.items())
-    from agent.oneshot_footprint import ONESHOT_SKILLS_LOAD_GUIDANCE, is_single_query_session
-    if is_single_query_session():
-        return (
-            ONESHOT_SKILLS_LOAD_GUIDANCE
-            + "\n<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
-            + hidden_note
-        )
-    return (
-        "## Skills\n"
-        "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
-        "task, you MUST load it with skill_view(name) and follow its instructions. Err on the side of "
-        "loading — it is always better to have context you don't need than to miss critical steps, pitfalls, "
-        "or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific "
-        "commands, and proven workflows that outperform general-purpose approaches. Load the skill "
-        f"even if you think you could handle the task with basic tools like {_basic_tools}. "
-        "Skills also encode the user's preferred approach, conventions, and quality standards for tasks like "
-        "code review, planning, and testing — load them even for tasks you already know how to do, because "
-        "the skill defines how it should be done here.\n"
-        "If a skill has issues, fix it with skill_manage(action='patch').\n"
-        "After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps, "
-        "had wrong commands, or needed pitfalls you discovered, update it before finishing.\n"
-        "\n"
-        "<available_skills>\n"
-        + "\n".join(index_lines) + "\n"
-        "</available_skills>\n\n"
-        "Only proceed without loading a skill if genuinely none are relevant to the task."
-        + hidden_note
-    )
+# Row labelling and the ## Skills render live in a sibling (FILE_LINES); re-exported for callers.
+from agent.prompt_builder_skills_index import _label_visible_entries, _render_skills_index
 
 
 def _oneshot_prompt_variant() -> bool:
@@ -1508,7 +1441,7 @@ def _oneshot_prompt_variant() -> bool:
 
 def _build_skills_system_prompt_inner(
     skills_dir: Path, extra_roots: list[tuple[int, Path]], available_tools: set[str] | None,
-    available_toolsets: set[str] | None, compact_categories: frozenset[str] | None,
+    available_toolsets: set[str] | None, compact_categories: frozenset[str] | None, index_mode: str = "full",
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
@@ -1527,7 +1460,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
-        _oneshot_prompt_variant(), tuple(plugin_rows), skill_index_triggers_enabled(),
+        _oneshot_prompt_variant(), tuple(plugin_rows), skill_index_triggers_enabled(), index_mode,
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
     app_gated = snapshot is not None and any(
@@ -1573,7 +1506,7 @@ def _build_skills_system_prompt_inner(
         for entry, ok in rows])
     visible_entries = [e for e in resolved
                        if e["visible"] and e["status"] != "shadowed" and not is_disabled_entry(e, disabled)]
-    _label_visible_entries(visible_entries, skills_by_category)
+    _label_visible_entries(visible_entries, skills_by_category, with_triggers=index_mode == "full")
     if plugin_rows:
         # Same category label skills_list gives registry skills; qualified names are already
         # namespaced (plugin:skill) so they cannot collide with on-disk load_names.
@@ -1593,7 +1526,7 @@ def _build_skills_system_prompt_inner(
             logger.debug("Could not write skills prompt snapshot: %s", e)
 
     unloadable = sorted({e["name"] for e in visible_entries if not e["load_name"]})
-    result = _render_skills_index(skills_by_category, compact_categories, available_tools, unloadable)
+    result = _render_skills_index(skills_by_category, compact_categories, available_tools, unloadable, index_mode)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

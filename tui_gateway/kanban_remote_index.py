@@ -28,7 +28,9 @@ the change, like the incremental in-process build it replaces.
 
 The holder (host loop lease ``kanban-remote-index``, :func:`ensure_holder`) watches the replica's change key once
 a second and republishes as soon as it moves, so the readers' 5 s polls normally hit. With the holder dead every
-reader still computes on a miss, so a notice is never later than the poll that would have found it before.
+reader still computes on a miss, so a notice is never later than the poll that would have found it before. While
+a live holder is beating, a reader of the root home's own copy leaves a miss to it for at most
+:data:`DEFER_MAX_S` (:func:`defer`): the notice can arrive one poll later, and the poll builds nothing.
 Only the root home runs a holder; a profile home's ledger gets its copy from its own readers' misses.
 """
 from __future__ import annotations
@@ -60,12 +62,16 @@ _clock = time.monotonic
 
 _memo_lock = threading.Lock()  # guards the dicts below only; never held across I/O
 _keys: dict[tuple, tuple] = {}  # (hub, ledger) -> (stamp, replica key or None)
-_answers: dict[tuple, Optional[tuple]] = {}  # (hub, ledger, stamp, profile, sids) -> hit or None (miss)
+_answers: dict[tuple, tuple] = {}  # (hub, ledger, stamp, profile, sids) -> hit (a miss is read again)
+# [daveey] (hub, ledger, profile, sids) -> _clock() of this chat's first miss deferred to the holder (:func:`defer`)
+_deferring: dict[tuple, float] = {}
+DEFER_MAX_S = 4.0  # under one 5 s notice poll: a chat's next poll after a deferred miss computes if still missing
+HOLDER_BEAT_MAX_S = 5.0  # a holder beats each 1 s pass; one slow rebuild (P1 max 2.8 s) must not look dead
 _published: dict[tuple, tuple] = {}  # (hub, ledger) -> (key, ledger file id) this process published or found
 _decoded: dict[tuple, tuple] = {}  # (replica base, owner, key) -> (seq, task): payloads this process parsed
 _DECODED_MAX = 20_000
 _holders: dict[tuple, tuple] = {}  # (hub, ledger) -> (stop event, role priority) of this process's refresher
-stats = {"hits": 0, "misses": 0, "publishes": 0, "busy": 0, "rows_written": 0}
+stats = {"hits": 0, "misses": 0, "publishes": 0, "busy": 0, "rows_written": 0, "deferred": 0}
 
 
 def index_path(ledger: Path) -> Path:
@@ -143,7 +149,7 @@ def current_key(hub: Path, ledger: Path, stamp) -> Optional[str]:
 def lookup(hub: Path, ledger: Path, stamp, profile: str, sids: tuple) -> Optional[tuple]:
     """``(me, {sid: [card, ...]}, observed)`` from the published copy, or None (compute locally).
 
-    Answers (hit or miss) are memoized per change key, so an unchanged replica opens nothing here."""
+    Hits are memoized per change key, so an unchanged replica opens nothing here; a miss is read again."""
     from tui_gateway.kanban_remote_observations import Observed
 
     key = current_key(hub, ledger, stamp)
@@ -168,7 +174,65 @@ def lookup(hub: Path, ledger: Path, stamp, profile: str, sids: tuple) -> Optiona
         answer = (me, by_sid, observed)
     with _memo_lock:
         stats["hits" if answer is not None else "misses"] += 1
-        _remember(_answers, memo_key, answer)
+        # [daveey] Only hits are kept: the holder publishes this very stamp's copy after the miss (the replica does
+        # not move when it does), and a remembered miss rebuilt the index on every poll until the next commit.
+        if answer is not None:
+            _remember(_answers, memo_key, answer)
+            _deferring.pop((*_slot(hub, ledger), profile, sids), None)
+    return answer
+
+
+def defer(hub: Path, ledger: Path, profile: str, sids: tuple, key: Optional[str]) -> bool:
+    """On a miss of the root home's own copy: True when this poll should read nothing and leave the build to a
+    live holder that is beating (it republishes within ~1 s of a replica commit; rebuilding here too cost a
+    Desktop serve ~1% of a core, J t_01a1d862f6e2fc9e). A chat waits less than :data:`DEFER_MAX_S` (under one
+    5 s poll) from its first deferred miss, across replica stamps; its misses then compute as before until a hit.
+    A replica with no change ``key`` (never published), any doubt about the holder, or a profile home (the holder
+    publishes only the root ledger's copy) computes at once."""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    slot, now = (*_slot(hub, ledger), profile, sids), _clock()
+    with _memo_lock:
+        first = _deferring.get(slot)
+    try:
+        wait = (key is not None and (first is None or now - first < DEFER_MAX_S) and _holder_beating(now)
+                and os.path.realpath(get_hermes_home()) == os.path.realpath(get_default_hermes_root()))
+    except (OSError, ValueError):
+        wait = False
+    with _memo_lock:
+        if not wait:
+            # An expired slot stays: its later misses compute until a hit (lookup) clears it, so a holder that
+            # beats but never publishes cannot make every other poll wait again. Any other refusal forgets it.
+            if first is None or now - first < DEFER_MAX_S:
+                _deferring.pop(slot, None)
+            return False
+        if first is None:
+            _remember(_deferring, slot, now)
+        stats["deferred"] += 1
+    return True
+
+
+_beating: Optional[tuple] = None  # (_clock() read, answer): one lease read per second for every chat's miss
+
+
+def _holder_beating(now: float) -> bool:
+    """A live process holds :data:`LEASE` and beat within :data:`HOLDER_BEAT_MAX_S` (it beats every pass)."""
+    global _beating
+    memo = _beating
+    if memo is not None and 0 <= now - memo[0] < REFRESH_POLL_S:
+        return memo[1]
+    from hermes_cli.host_loop_lease import holders
+
+    answer = False
+    try:
+        for meta in holders():
+            if meta.get("name") == LEASE and meta.get("live"):
+                age = time.time() - float(meta.get("heartbeat_at") or 0)
+                answer = 0 <= age <= HOLDER_BEAT_MAX_S  # a wall clock stepped back is doubt, not a fresh beat
+                break
+    except (OSError, TypeError, ValueError):
+        answer = False
+    _beating = (now, answer)
     return answer
 
 
@@ -505,9 +569,12 @@ def ensure_holder(role: str) -> None:
 
 def reset() -> None:
     """Forget this process's memos and stop its refreshers (tests, a backend forgetting its memos)."""
+    global _beating
     with _memo_lock:
         _keys.clear()
         _answers.clear()
+        _deferring.clear()
+        _beating = None
         _published.clear()
         _decoded.clear()
         for name in stats:

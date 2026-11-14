@@ -2,9 +2,9 @@
 
 Invariant: a card whose latest terminal event (``completed``, ``archived``, or a ``status``/``status_healed`` move
 to ``done``/``archived``) has no reopen ordered after it (``reopened``, ``unblocked``, ``review_reopened``,
-``promoted_manual``, or a ``status`` move to a live status), in origin order (``_event_order``: second, UUIDv7 ms,
-then id), stays terminal. A wake (``continuation_woken``, ``condition_met``, ``promoted``, ``wake_check_*``) is
-never a reopen, whatever order it was minted or delivered in.
+``promoted_manual``, or a ``status`` move to a live status), in origin order (``_event_order``: second, UUIDv7 ms
+when the uid was minted in that second, then id), stays terminal. A wake (``continuation_woken``,
+``condition_met``, ``promoted``, ``wake_check_*``) is never a reopen, whatever order it was minted or delivered in.
 
 Why: a wake minted against a stale copy of the card carries ``status=ready``. Two producers made one in Nov 2026:
 a MacBook whose pull was hours behind fired a clock wake for a card a worker had completed meanwhile (pushed 5 h

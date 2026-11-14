@@ -56,8 +56,9 @@ def fence_stale_quota_assertions(conn, states, asserting, *, now):
     """Keep stale cards releasable, but don't treat their old runs as new evidence.
 
     Only the GitHub quota family opts into this policy. A run that began before
-    recovery cannot reopen it; the dispatcher can discover a genuinely new wall
-    on its next cheap check or a newly started worker can report it.
+    recovery cannot reopen it. After a verified clear only a run that started
+    after the recovery can report a genuinely new wall: ``run_due_checks`` runs
+    the cheap check only while a wall is open, so it never re-opens one.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_shared_blockers import _mark_cleared, run_effect

@@ -413,6 +413,7 @@ def _record_worker_result(context, code, last_output, failure=None, extra=None, 
     from hermes_cli.kanban_db_connect import connect_closing
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_quota_receipt import quota_fields, route_fields
+    from hermes_cli.kanban_spend_budget import usage_fields
     observer_error = None
     strict_death_proof = False
     if not (extra or {}).get('continuable'):
@@ -443,6 +444,7 @@ def _record_worker_result(context, code, last_output, failure=None, extra=None, 
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
                  'last_output': last_output, **quota_fields(failure), **route_fields(failure, agent),
+                 **usage_fields(agent),  # [daveey] the run's tokens, summed by kanban_spend_budget on the home board
                  **(extra or {}), **identity_fields,
                  **({'death_proof_version': 1} if strict_death_proof else {})},
                 run_id=context['run_id'])

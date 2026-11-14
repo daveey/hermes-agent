@@ -4,7 +4,8 @@ import subprocess
 
 import pytest
 
-from cron.lifecycle_guard import _iter_printed_shell_payloads, scan_gateway_lifecycle
+from cron.lifecycle_guard import scan_gateway_lifecycle
+from cron.lifecycle_guard_output import iter_printed_shell_payloads
 from tools.shell_heredoc import output_reaches_shell
 
 
@@ -21,7 +22,7 @@ from tools.shell_heredoc import output_reaches_shell
 def test_comment_is_not_an_output_sink(prefix, indent, comment):
     text = prefix + indent + comment + '\nlog="$HOME/data.log"\n'
     assert not output_reaches_shell(text)
-    assert list(_iter_printed_shell_payloads(text)) == []
+    assert list(iter_printed_shell_payloads(text)) == []
 
 
 def test_wrapper_does_not_execute_oversized_data_assignment(tmp_path):

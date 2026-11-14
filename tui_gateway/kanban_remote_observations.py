@@ -15,7 +15,7 @@ _memo: dict[tuple, tuple] = {}
 _generation: dict[tuple, int] = {}  # observe key -> ledger writes started, so only the newest publishes its memo
 
 
-def _snapshot(replica: Path, previous, decoded: dict) -> tuple[bool, list[tuple] | None, tuple | None]:
+def _snapshot(replica: Path, previous, decoded: dict, lane=None) -> tuple[bool, list[tuple] | None, tuple | None]:
     """Read readiness and ALL canonical terminal states from the same SQLite snapshot.
 
     The hub client sets gateway before pulling and commits each feed page. Until
@@ -50,7 +50,7 @@ def _snapshot(replica: Path, previous, decoded: dict) -> tuple[bool, list[tuple]
                     if isinstance(task, dict) and (task.get("status") in _TERMINAL or _withdrawal(task) is not None):
                         cards.append((owner, key, task))
             return ready, cards, signature
-        cards = _changed_rows_cards(conn, replica, meta.get("gateway"), decoded)
+        cards = _changed_rows_cards(conn, replica, meta.get("gateway"), decoded, lane)
     return ready, cards, signature
 
 
@@ -80,7 +80,7 @@ def _terminal_states():
     return _TERMINAL
 
 
-def _changed_rows_cards(conn, replica: Path, me, decoded: dict) -> list[tuple]:
+def _changed_rows_cards(conn, replica: Path, me, decoded: dict, lane=None) -> list[tuple]:
     """``decoded`` is the caller's (replica, owner, key) -> (seq, terminal summary or None) map.
 
     The replica holds thousands of task rows (~30 MB of JSON on a busy fleet) and its signature moves whenever any
@@ -94,7 +94,13 @@ def _changed_rows_cards(conn, replica: Path, me, decoded: dict) -> list[tuple]:
     # payload point reads remain proportional to changes.
     sql = "SELECT json_group_array(json_array(gw, key, seq, NULL)) FROM replica WHERE coll = 'tasks'"
     row = conn.execute(sql + " AND gw != ?", (me,)).fetchone() if me else conn.execute(sql).fetchone()
-    rows = _canonical([tuple(item) for item in json.loads(row[0])])
+    rows = [tuple(item) for item in json.loads(row[0])]
+    if lane is not None and lane.enabled:  # [daveey] bystanders keep no decoded entry (observation_compact)
+        from tui_gateway import kanban_remote_observation_compact as compact
+        from tui_gateway.remote_sweep_projection import legacy_keys
+
+        return compact.scan(conn, (_canonical(rows), legacy_keys(rows)), str(replica), me, decoded, lane, _summary)
+    rows = _canonical(rows)
     tag = str(replica)
     seen = set()
     cards = []
@@ -116,7 +122,7 @@ def _changed_rows_cards(conn, replica: Path, me, decoded: dict) -> list[tuple]:
     return cards
 
 
-def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple, float | None]:
+def _persist(source: str, cards: list[tuple], ledger, now: float, extra=()) -> dict[tuple, float | None]:
     """Seed retained history once; later current-key states receive one local window.
 
     [daveey] ``observations`` rows are insert-only, so a ``(source, ref, state)`` already read from (or written to)
@@ -124,6 +130,8 @@ def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple,
     seen yet touch SQLite. Re-reading every terminal card per replica change was most of the notice pollers' wait.
     ``observe`` calls this without ``_lock``; concurrent callers serialize on the ledger's ``BEGIN IMMEDIATE`` and,
     the rows being insert-only, agree on every ``first_seen``. Nothing enters ``_known`` before its commit.
+    ``extra`` (bystander terminal rows, ``kanban_remote_observation_compact``) is written by the same rule but is
+    neither answered nor remembered; ``_known`` keeps only the current cards' states.
     """
     from tui_gateway.kanban_remote_notices import FRESH_S, _fresh_at, _ledger
 
@@ -139,9 +147,10 @@ def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple,
         at, state, ref = _fresh_at(task), _notice_state(task), f"{owner}/{key}"
         states.append((owner, key, state, ref, at))
         if known is None or (ref, state) not in known:
-            missing.append((key, state, ref, at))
-    if known is not None and not missing:  # an entry also proves the source's baseline is recorded
+            missing.append((key, state, ref, at, True))
+    if known is not None and not missing and not extra:  # an entry also proves the source's baseline is recorded
         return _fresh_map(states, known)
+    missing += [(key, _notice_state(task), f"{owner}/{key}", _fresh_at(task), False) for owner, key, task in extra]
     stats["transactions"] += 1
     added = {}
     with contextlib.closing(_ledger(ledger)) as conn:
@@ -154,20 +163,22 @@ def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple,
             initial = conn.execute("SELECT 1 FROM observation_sources WHERE source=?", (source,)).fetchone() is None
             if initial:
                 conn.execute("INSERT INTO observation_sources VALUES (?)", (source,))
-            for key, state, ref, at in missing:
+            for key, state, ref, at, answer in missing:
                 # Unknown ages and frozen legacy keys cannot establish local freshness.
                 seen = now if at is not None and key.count('/') >= 2 and (not initial or now - at <= FRESH_S) else None
                 row = conn.execute("SELECT first_seen FROM observations WHERE source=? AND ref=? AND state=?",
                                    (source, ref, state)).fetchone()
                 if row is None:
                     conn.execute("INSERT INTO observations VALUES (?,?,?,?)", (source, ref, state, seen))
-                added[(ref, state)] = row[0] if row is not None else seen
+                if answer:
+                    added[(ref, state)] = row[0] if row is not None else seen
             conn.commit()
         except BaseException:
             conn.rollback()
             raise
     after = _file_id(ledger)
     merged = {**(known or {}), **added} if after == file_id else added
+    merged = {pair: merged[pair] for _owner, _key, state, ref, _at in states if (pair := (ref, state)) in merged}
     if after is not None:
         with _known_lock:  # a racing caller's entries may be dropped here: they are only re-read, never wrong
             _known[slot] = (after, merged)
@@ -223,9 +234,12 @@ def _file_id(path: Path) -> tuple | None:
 
 class _ReplicaFlight:
     def __init__(self):
+        from tui_gateway.kanban_remote_observation_compact import Lane
+
         self.lock = threading.Lock()
         self.decoded = {}
         self.result = None
+        self.lane = Lane()  # [daveey] bystander rows: seq/state hashes and unwritten terminal states only
 
     def read(self, replica, stamp, ident):
         from tui_gateway.kanban_replica_observer import file_identity, fingerprint
@@ -235,8 +249,9 @@ class _ReplicaFlight:
             return previous
         if ident is None or previous is None or previous[4] != ident:
             self.decoded.clear()
+            self.lane.table.trusted = False  # its seqs may name another file; its state hashes still hold
             previous = None
-        ready, cards, signature = _snapshot(replica, previous[2] if previous else None, self.decoded)
+        ready, cards, signature = _snapshot(replica, previous[2] if previous else None, self.decoded, self.lane)
         if cards is None:
             cards = previous[1]
         after = fingerprint(replica)
@@ -307,22 +322,29 @@ def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tup
         stamp = fingerprint(replica)
         ident = file_identity(stamp)
         ledger_id = _file_id(ledger)
+        if flight.lane.adopt(key[1], ledger_id):  # another ledger: bystanders re-read for it (or kept in full)
+            flight.result = None
+            flight.decoded.clear()
+            with _lock:
+                for stale in [memo for memo in _memo if memo[0] == key[0]]:
+                    del _memo[stale]
         with _lock:
             cached = _memo.get(key)
             if cached is not None and (cached[2] != ledger_id or cached[4] != ident):
                 _memo.pop(key)
                 cached = None
-            if cached is not None and stamp is not None and cached[3] == stamp:
+            if cached is not None and stamp is not None and cached[3] == stamp and not flight.lane.pending:
                 return cached[1]
         ready, cards, signature, stamp, ident = flight.read(replica, stamp, ident)
         if not ready:
             return {}
+        extra = flight.lane.pending
         with _lock:
             # Re-read: a leader may have published this snapshot's memo since the first look.
             latest = _memo.get(key)
             if latest is not None and (latest[2] != ledger_id or latest[4] != ident):
                 latest = None
-            if latest is not None and signature is not None and signature == latest[0]:
+            if latest is not None and signature is not None and signature == latest[0] and not extra:
                 fresh = latest[1]
                 _remember(key, (signature, fresh, ledger_id, stamp, ident))
                 return fresh
@@ -331,8 +353,9 @@ def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tup
             leading: _Pending | None = None
             generation = 0
             if not (_follow and signature is not None and ident is not None and waiting is not None
-                    and waiting.token == token and waiting.owner != threading.get_ident()):
+                    and waiting.token == token and waiting.owner != threading.get_ident() and not extra):
                 waiting = None
+                flight.lane.pending = []  # this caller writes them; a failed write puts them back
                 _generation[key] = generation = _generation.get(key, 0) + 1
                 leading = _Pending(token) if signature is not None and ident is not None else None
                 if leading is not None:
@@ -346,7 +369,7 @@ def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tup
     # poller's transaction. ``cards`` is this call's own snapshot, so the answer is the one it would have had under
     # the lock; only the newest snapshot started for ``key`` publishes its memo, and only after its commit.
     try:
-        fresh = _persist(key[0], cards or [], ledger, now)
+        fresh = _persist(key[0], cards or [], ledger, now, extra) if extra else _persist(key[0], cards or [], ledger, now)
         ledger_id = _file_id(ledger)
         with _lock:
             if leading is not None:
@@ -354,6 +377,11 @@ def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tup
             if _generation.get(key) == generation:
                 _remember(key, (signature, fresh, ledger_id, stamp, ident))
             return fresh
+    except BaseException:
+        if extra:
+            with flight.lock:
+                flight.lane.pending[:0] = extra
+        raise
     finally:
         if leading is not None:
             with _lock:

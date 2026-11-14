@@ -963,12 +963,15 @@ async def reset_and_rehome_messages(runner, session_key, old_session_id):
     return entry, release
 
 
-async def admit_route_wake(runner, adapter, source, text, producer, metadata=None):
+async def admit_route_wake(runner, adapter, source, text, producer, metadata=None, replay_of=None):
     """Commit a producer wake (Kanban push wake, /loop tick) for ``source``'s route into the
     authority FIFO, like heartbeats and process completions, instead of a classic turn that
     interrupts or races the admitted one. ``False`` when no authority serves the scope or the
     route holds no committed human turn to borrow provenance from: the caller keeps the adapter
-    path (nothing is queued there either). Raises ``RuntimeStoreError`` on a refusal."""
+    path (nothing is queued there either). Raises ``RuntimeStoreError`` on a refusal.
+    [daveey] ``replay_of``: the identity tail of a wake a held quota wall refused
+    (``gateway.session_wall_replay``). Its one redelivery takes the tail ``wall-replay:<tail>``, so a
+    second admission is an exact replay, and never folds into a waiting wake."""
     from gateway.session_authorities import active_authority
     from gateway.session_local_recovery import restore_completion_route
     from gateway.session_detached import detached_live, detached_route_of, route_entry
@@ -979,7 +982,8 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
     if authority is None or entry is None:
         return False
     import uuid
-    identity = json.dumps([producer, key, uuid.uuid4().hex], separators=(',', ':'))
+    tail = 'wall-replay:' + replay_of if replay_of else uuid.uuid4().hex
+    identity = json.dumps([producer, key, tail], separators=(',', ':'))
     if source.platform == Platform.LOCAL or detached_route_of(source):
         # A local route (or a conversation its chat moved past, answered by its app viewers) has no
         # messaging provenance to borrow: its wake rides local_automation_v1 on the live session's own
@@ -992,7 +996,7 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
                              message_id=identity, metadata={'gateway_session_key': key,
                                                             'gateway_session_id': entry.session_id,
                                                             **(metadata or {})})
-        await _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer)
+        await _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer, replay_of)
         return True
     from gateway.session_envelope import restore_native
     envelope = committed_route_envelope(authority, entry)
@@ -1005,11 +1009,11 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
                          message_id=identity, metadata={'gateway_session_key': key,
                                                         'gateway_session_id': entry.session_id,
                                                         **(metadata or {})})
-    await _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer)
+    await _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer, replay_of)
     return True
 
 
-async def _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer):
+async def _admit_route_wake_event(runner, authority, adapter, event, identity, entry, producer, replay_of=None):
     """A Kanban wake carrying its cards folds into a Kanban wake still waiting at the FIFO tail
     (``gateway.kanban_wake_fold``), so a busy chat runs ONE turn for every card event that piled up.
     The waiting row is cancelled in this admission's own transaction (``_fold_queued``); when it was
@@ -1017,7 +1021,7 @@ async def _admit_route_wake_event(runner, authority, adapter, event, identity, e
     store refuses (``invalid_params``: e.g. past ``kanban_wake_fold._MAX_CARDS`` cards) while the
     wake alone is valid: refusing it would refuse every later wake to the chat."""
     from gateway import kanban_wake_fold
-    if producer != kanban_wake_fold.PRODUCER or not event.metadata.get('kanban_cards'):
+    if replay_of or producer != kanban_wake_fold.PRODUCER or not event.metadata.get('kanban_cards'):
         return await authority.admit_automation(adapter, event, identity)
     import asyncio
     async with kanban_wake_fold.wake_lock(runner):

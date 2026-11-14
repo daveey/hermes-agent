@@ -7,6 +7,7 @@ import sqlite3
 import time
 from pathlib import Path
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli.kanban_shared_blocker_fence import consistent_uid_milliseconds
 
 _log = logging.getLogger(__name__)
 _CHUNK = 500
@@ -225,15 +226,12 @@ def _event_order(event: dict) -> tuple[int, int, int]:
     The local id is arrival order: the Board can deliver an ``unblocked`` before the ``blocked`` it follows, and
     both carry the same second. Every synced event's uid is a UUIDv7 minted at its insert on its own gateway, so
     its 48-bit millisecond orders the two. A row with no uid (sync off, or written while the triggers were down)
-    falls back to arrival order, and so does a uid that is not a v7 (its leading bits are random, not time)."""
-    ms = 0
-    uid = event.get("uid")
-    if isinstance(uid, str) and len(uid) >= 15 and uid[14] == "7":
-        try:
-            ms = int(uid[:8] + uid[9:13], 16)
-        except ValueError:
-            ms = 0
-    return int(event["created_at"] or 0), ms, int(event["id"])
+    falls back to arrival order, and so does a uid that is not a v7 (its leading bits are random, not time) or a
+    v7 outside the row's own second: ``kanban_db_sync`` backfills uid-less rows with a v7 stamped at backfill time.
+    """
+    second = int(event["created_at"] or 0)
+    ms = consistent_uid_milliseconds(event.get("uid"), second)
+    return second, second * 1000 if ms is None else ms, int(event["id"])
 
 
 def _payload(event: dict) -> dict:

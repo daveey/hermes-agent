@@ -28,6 +28,7 @@ from hermes_cli.kanban_execution_source import transaction as _execution_transac
 from hermes_cli import kanban_session_activity_recent_done as _recent_done
 from hermes_cli.kanban_session_activity_decode import _decode_replica_task
 from hermes_cli import kanban_execution_receipt as _receipts
+from hermes_cli.kanban_session_activity_origin_snapshot import SnapshotRootMoved as _RootMoved
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
@@ -1112,7 +1113,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
         try:
             _remote_snapshot(cards)
             _snapshot_saved = (scope, [dict(c) for c in cards])
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, _RootMoved) as exc:  # also a mid-save home swap; the test tripwire raises [daveey]
             _log.warning("origin-work snapshot not saved; retrying on the next change: %s", exc)
     with _cache_lock:
         _remote_scope = scope

@@ -22,6 +22,12 @@ def _use_wal(conn) -> None:
         kanban_lockguard.guard(conn)  # a file that only became WAL now gets its OFD lock guard
 
 
+class SnapshotRootMoved(RuntimeError):
+    """A save refused because ``kanban_home()`` moved while its scope was resolved: a race, not a fault. Callers may
+    skip the save and retry on the next change. The test-isolation tripwire raises a plain RuntimeError instead,
+    so a leaking test still fails loudly. [daveey]"""
+
+
 def remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]] | None:
     """Durable last-known origin obligations, separate from the replaceable hub replica.
 
@@ -31,12 +37,22 @@ def remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str,
     from hermes_cli import kanban_db
     from hermes_cli import kanban_session_activity as _ksa  # lazy: that module imports this one; tests spy its seams
 
-    path = kanban_db.kanban_home() / "origin-work.db"
+    root = kanban_db.kanban_home()
+    path = root / "origin-work.db"
     if cards is None:
         if not path.exists():
             return None
+        scope = json.dumps(_ksa._origin_scope())
         conn = _ksa._open_ro(path)
     else:
+        # The scope re-reads kanban_home(). A save racing an env swap (a test fixture moving HERMES_KANBAN_HOME)
+        # filed one root's scope in another root's file: 20 pytest rows of ~1 MB in the hub's live file. [daveey]
+        scope = json.dumps(_ksa._origin_scope())
+        if kanban_db.kanban_home() != root:
+            raise SnapshotRootMoved("kanban home moved while resolving the origin-work scope; not saving across roots")
+        import hermes_state_guard
+
+        hermes_state_guard.ensure_origin_work_test_isolation(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = _ksa._kanban_lockguard.connect(path, timeout=0.5)
         try:
@@ -45,7 +61,6 @@ def remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str,
             conn.close()
             raise
     try:
-        scope = json.dumps(_ksa._origin_scope())
         if cards is not None:
             with conn:
                 conn.execute("CREATE TABLE IF NOT EXISTS scoped_snapshot (scope TEXT PRIMARY KEY, data TEXT NOT NULL)")

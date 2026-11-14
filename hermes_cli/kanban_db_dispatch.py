@@ -1875,8 +1875,7 @@ def _dispatch_lane_task(
     if lane_admission_refused(conn, task_id, assignee, result, profile_exists=_profile_exists_fn(),
                               spawn_fn=spawn_fn, dry_run=dry_run, lane=lane):
         return False
-    # Per-profile cap: one profile's local model / API quota / browser pool
-    # must not be overwhelmed by a fan-out even with global headroom.
+    # Per-profile cap: a fan-out must not swamp one profile's local model / API quota / browser pool.
     if per_profile_cap is not None:
         current = per_profile_running.get(assignee, 0)
         if current >= per_profile_cap:
@@ -1887,12 +1886,14 @@ def _dispatch_lane_task(
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         _record_clock_hold(conn, result, task_id, guard_reason)
-        # Maintenance is home-owned; foreign executors still record the guard.
-        if not dry_run:
+        if not dry_run:  # maintenance is home-owned; foreign executors still record the guard
             if _block_if_guard_hold_capped(conn, task_id, guard_reason):
                 result.auto_blocked.append(task_id)
                 return False
             _guard_notice.record_guard_hold(conn, task_id, guard_reason)
+        return False
+    from hermes_cli.kanban_llm_pacing_dispatch import hold as _pacing_hold  # quota-pace governor [daveey]
+    if _pacing_hold(conn, row, lane, result, dry_run=dry_run):  # pool ahead of pace: wait, unclaimed
         return False
 
     def _count_spawn(name: str) -> None:
@@ -1904,8 +1905,7 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
-    # The assignee's own gateway service is failed/masked/disabled: claim nothing, hold the card and
-    # file the owner-down card (``kanban_owner_down``). Before it, every claim crashed on it. [daveey]
+    # Assignee's gateway service failed/masked/disabled: hold unclaimed, file ``kanban_owner_down``'s card. [daveey]
     from hermes_cli.kanban_owner_down import preflight as _owner_down_preflight
     down = _owner_down_preflight(conn, task_id, assignee)
     if down is not None:

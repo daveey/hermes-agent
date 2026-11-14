@@ -647,6 +647,31 @@ dispatcher's live claim, instead (event `no_progress_parked` / `no_progress_esca
   A looping owner card goes to `triage`. No `continuation_exhausted` or
   `goal_unachievable` event is written, so no recovery card is opened.
 
+#### Spend budget
+
+The no-progress budget and the continuation cap count *consecutive* idle
+outcomes, so a card whose runs alternate (continue, block, schedule, reclaim)
+or change something small every time is never stopped by them. The spend
+budget bounds the total instead. Before claiming a `ready` or `review` card the
+dispatcher counts its *spending runs* (closed runs that lasted at least 60 s;
+quota walls, released claims and spawn failures end in seconds and are not
+counted) since the card last handed work on (a run that ended `completed`,
+`review_requested` or `changes_requested`) or was last sent to triage by this
+budget, and sums the tokens those runs reported. Each managed worker books its
+agent's session tokens (`usage`: input, output, cache-read, cache-write, estimated
+cost) on the run's `worker_result` event, on whichever host ran it, so the
+card's home board sees the whole spend.
+
+At `kanban.spend_budget_runs` spending runs (default 15) or
+`kanban.spend_budget_cache_read_tokens` cache-read tokens (default 30000000),
+0 disabling either, the dispatcher spawns nothing and, deciding again under
+the write lock and never under another dispatcher's live claim, moves the card
+to `triage` with a `spend_budget_triaged` event and a comment showing the spend
+(`dispatch --json` key `no_progress_held`, action `spend_budget:triage`). The
+auto-decomposer skips cards that already ran, so triage holds the card until
+someone splits, re-scopes, archives or promotes it; a promote starts a new
+budget window.
+
 #### Workers and systemd cgroups
 
 Workers are fire-and-forget processes that outlive the dispatcher tick, so

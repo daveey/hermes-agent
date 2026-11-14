@@ -209,9 +209,13 @@ def _index(path: Path) -> tuple[str, dict]:
     return me, index
 
 
-def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple) -> tuple[str, dict[str, Any], dict]:
+def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple,
+                own: bool = False) -> tuple[str, dict[str, Any], dict]:
     """``(me, {sid: [card, ...]}, observed)`` for one chat: the host's published copy when it is of the replica's
-    current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]"""
+    current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]
+
+    On the host's ``own`` replica and ledger a miss is left to a live holder for at most one poll
+    (:func:`kanban_remote_index.defer`): no cards this poll, nothing read or claimed."""
     from tui_gateway import kanban_remote_index as published
     from tui_gateway.kanban_replica_observer import fingerprint
 
@@ -220,8 +224,10 @@ def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple) -> tu
     hit = published.lookup(path, ledger_file, stamp, profile, sids)
     if hit is not None:
         return hit
-    me, index, observed = published.compute(path, ledger, ledger_file, now,
-                                            published.current_key(path, ledger_file, stamp))
+    key = published.current_key(path, ledger_file, stamp)
+    if own and published.defer(path, ledger_file, profile, sids, key):
+        return "", {}, {}
+    me, index, observed = published.compute(path, ledger, ledger_file, now, key)
     return me, {sid: index.get((profile, sid), ()) for sid in sids}, observed
 
 
@@ -676,7 +682,8 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
         if hub_db is None and ledger is None:  # the host's own replica: keep its published copy current
             from tui_gateway.kanban_remote_index import ensure_holder
             ensure_holder("serve")  # once per process; a gateway's own later claim upgrades the role
-        me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids)
+        me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids,
+                                              own=hub_db is None and ledger is None)
         cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
             return []
@@ -1065,6 +1072,8 @@ def _settle_stale_claims(states: dict, path, ledger) -> int:
     swept reason=delivered after 9eb41135c6). A live holder, a card still in that state (the re-offer path owns
     it) and a card missing from the replica (partial sync) are left alone. Never raises.
     """
+    from tui_gateway.remote_sweep_projection import CompactTask
+
     try:
         conn = _ledger(ledger)
         try:
@@ -1078,7 +1087,12 @@ def _settle_stale_claims(states: dict, path, ledger) -> int:
                     continue
                 if _holder_is_me(row["holder_pid"]) or _holder_alive(row["holder_pid"], row["holder_start"]):
                     continue
-                profile, notice_id = _stale_notice_id(row, current[1])
+                task = current[1]
+                if isinstance(task, CompactTask):  # [daveey] a bystander row keeps no sessions: read them back
+                    task = task.load(path)
+                    if task is None:
+                        continue  # the row moved since this snapshot: the next sweep settles it from its own
+                profile, notice_id = _stale_notice_id(row, task)
                 swept_key = (str(path), profile, str(row["session"]), notice_id)
                 with conn:
                     cur = conn.execute(

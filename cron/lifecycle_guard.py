@@ -1494,61 +1494,6 @@ def _iter_shell_command_payloads(command: str) -> Iterator[str]:
                 break
 
 
-# Quoted string literals (shell or interpreter quoting alike), each kind on its own; a literal may
-# span lines (`eval "$( cat <<'PY'` … `)"`). The lookahead yields the span after EVERY quote up to
-# the next one of its kind, not just alternate pairs: an apostrophe inside the other kind
-# (`print("it's")`) must not shift which spans count as literals (review 5890784121 nit 1).
-_QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r"(?=\"([^\"]+)\")"))
-# Producers that print their own arguments, quoted or not (`echo bash /x/a.sh | bash`).
-_ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
-
-
-def _iter_printed_shell_payloads(command: str) -> Iterator[str]:
-    """When some output in *command* is run as shell code (``python3 - <<'PY' | bash``,
-    ``eval "$(…)"``, ``bash <(…)``), yield what a producer may print as the shell's command:
-    every quoted string literal (``print('bash /x/big.sh')``) and the argument line of every
-    ``echo``/``printf`` (``echo bash /x/big.sh``, also without leading option words:
-    ``echo -n bash /x/big.sh``), each also with ``\\n``-style escapes turned into
-    newlines and decoded the way printf, ``%b`` and ``echo -e`` decode them
-    (with_escapes_decoded). Their paths are executed, not mentions. Single and double quotes
-    are matched independently, so a literal nested in the other kind
-    (``python3 -c "print('bash x')"``) is
-    yielded too, and every span between two consecutive quotes of a kind is yielded, so a stray
-    apostrophe (``print("it's")``) cannot pair the quotes around a later literal the wrong way.
-
-    Fails closed by design (review 5890191993 nits): every yielded literal is walked as an
-    executed command, so a producer that merely reads an oversized data file
-    (``sqlite3.connect('/d/big.db')``) refuses on the scan cap, and the literals charge the shared
-    line/byte budget, so a generator of ~16k lines piped to a shell refuses on the line cap (~8k
-    lines when each prints a literal; the between-quote spans dedupe and leave both unchanged)."""
-    from tools.shell_heredoc import output_reaches_shell
-
-    if not output_reaches_shell(command):
-        return
-    seen: set[str] = set()
-
-    def unseen(text: str) -> Iterator[str]:
-        for variant in _with_escapes_decoded(text):
-            if variant not in seen:
-                seen.add(variant)
-                yield variant
-
-    for pattern in _QUOTED_LITERAL_RES:
-        for match in pattern.finditer(command):
-            yield from unseen(match[1])
-    if not any(name in command for name in _ARGUMENT_PRINTERS):
-        return  # skip a second tokenization of a large generator that never echoes
-    for segment in _iter_command_segments(command):
-        segment = segment[_peel_reserved_words(segment):]  # `{ echo …; }`, `then echo …`
-        index = _executed_command_index(segment)
-        if index is None:
-            continue
-        name = _executable_name(segment[index])
-        if name in _ARGUMENT_PRINTERS:
-            for line in _printed_argument_lines(name, segment[index + 1 :]):
-                yield from unseen(line)
-
-
 # --- referenced-script reading ----------------------------------------------------------------
 
 def _has_binary_magic(data: bytes) -> bool:
@@ -1738,7 +1683,7 @@ def _walk_candidates(
 def _contains_unsafe_gateway_action(
     command: str, *, cwd: Optional[str], depth: int, visited: set[object], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
-    source: Optional[str] = None,
+    source: Optional[str] = None, covered_quote_scope: Optional[tuple] = None,
 ) -> bool:
     """``executed=False`` means *command* is the content of a file that is only MENTIONED in inert
     (masked) text: it is still scanned for a literal lifecycle command, but "could not scan" (budget,
@@ -1755,7 +1700,7 @@ def _contains_unsafe_gateway_action(
 
     def recurse(
         text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,
-        nested: bool = False,
+        nested: bool = False, covered_quotes: Optional[tuple] = None,
     ) -> bool:
         if python_source:
             return _python_source_is_unsafe(text, budget)
@@ -1763,6 +1708,7 @@ def _contains_unsafe_gateway_action(
             return _contains_unsafe_gateway_action(
                 text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
                 read_remote_script=read_remote_script, executed=executed, source=source,
+                covered_quote_scope=covered_quotes,
             )
 
     # The walks below must see the same masked view `_direct_lifecycle_scan` sees (#110422): a
@@ -1779,13 +1725,12 @@ def _contains_unsafe_gateway_action(
 
     nested_texts, nested_scripts = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget)
-    for payload, nested in itertools.chain(
-            zip(nested_texts, itertools.repeat(True)),
-            zip(itertools.chain(_iter_shell_command_payloads(walk_command),
-                                _iter_printed_shell_payloads(walk_command)), itertools.repeat(False))):
-        # An `sh -c` payload is text of the same file (or command) it appears in; so is a string
-        # an interpreter prints when its output is fed to a shell.
-        if recurse(payload, cwd, executed, source, nested=nested):
+    from cron.lifecycle_guard_output import iter_recursive_payloads
+
+    for payload, nested, covered in iter_recursive_payloads(
+            walk_command, nested_texts, cwd=cwd, executed=executed,
+            budget=budget, covered_scope=covered_quote_scope):
+        if recurse(payload, cwd, executed, source, nested=nested, covered_quotes=covered):
             return True
 
     for script_path, candidate_executed, python_source in _walk_candidates(

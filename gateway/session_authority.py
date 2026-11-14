@@ -1653,4 +1653,7 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
     watch_routes(runner, store)
     from gateway.session_local_recovery import recover_local_sessions
     recover_local_sessions(authority)
+    # [daveey] Redeliveries of automated wakes a held quota wall refused, planned before a restart.
+    from gateway.session_wall_replay import arm_pending
+    await arm_pending(authority)
     return authority

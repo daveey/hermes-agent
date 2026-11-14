@@ -316,8 +316,13 @@ def _skills_prompt(agent: Any) -> str:
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
+    # A dispatcher-owned Kanban worker re-reads this index on every call with no user phrasing to match:
+    # skills.index_in_kanban_worker (default compact) trims it. Chats keep the full index. [daveey]
+    from agent.skill_utils import kanban_worker_skill_index_mode
+    index_mode = kanban_worker_skill_index_mode() if owned_kanban_task() else "full"
     return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
-                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
+                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent),
+                                         index_mode=index_mode)
 
 
 def _auto_load_parts(agent: Any) -> list[str]:

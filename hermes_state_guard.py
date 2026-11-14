@@ -176,6 +176,20 @@ def ensure_kanban_test_isolation(db_path: Path) -> None:
         )
 
 
+def ensure_origin_work_test_isolation(path: Path) -> None:
+    """Raise before a pytest-context process (env OR ancestry) writes the account's live ``<root>/origin-work.db``.
+    Plugin suites with their own conftest swap HERMES_KANBAN_HOME per test; background saves landed ~20 MB of
+    test-scope rows in the hub's live file (t_01a1dadf165f8c53). Needs no conftest, like the board guard. [daveey]"""
+    if not _in_test_context():
+        return
+    root = _account_hermes_root()
+    if root is not None and Path(path).expanduser().resolve() == root / "origin-work.db":
+        raise RuntimeError(
+            f"live-system guard: a test resolved the production origin-work snapshot {path} (under the account's "
+            f"Hermes root {root}). Isolate HERMES_KANBAN_HOME in the fixture."
+        )
+
+
 # Test-only SessionDB instance registry. Under the hermetic suite every
 # successfully constructed SessionDB is added to this WeakSet so the autouse
 # teardown in tests/conftest.py (_close_leaked_session_dbs) can close whatever

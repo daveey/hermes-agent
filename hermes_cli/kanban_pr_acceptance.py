@@ -254,11 +254,13 @@ def collect_acceptance(contract: str, published_pr: str | None,
         else:
             runs = complete_runs(pages)
         phase = "reading commit statuses"
-        from hermes_cli.kanban_pr_fallback import complete_statuses, fallback_outcomes, mark_absence
+        from hermes_cli.kanban_pr_fallback import (actions_attempts, complete_statuses,
+                                                   fallback_outcomes, mark_absence)
         statuses = complete_statuses(_api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                           paginate=True, profile_home=profile_home), sha)
         phase = "selecting merge-time evidence"
-        runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses, distinct_suites=not required)
+        runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses, distinct_suites=not required,
+                                        attempt_of=actions_attempts(_api, repo, profile_home))
         outcomes = []
         app_of_bot: dict[str, int | None] = {}
         for context, app_id in sorted(required, key=str):

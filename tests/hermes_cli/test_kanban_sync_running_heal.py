@@ -213,9 +213,22 @@ def test_a_restored_ask_with_a_resolved_check_gets_its_probe_row(live, kanban_ho
 def test_a_non_v7_uid_does_not_reorder_same_second_events():
     from hermes_cli.kanban_sync_divergence import _event_order
     v4 = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-    assert _event_order({"created_at": 100, "id": 5, "uid": v4}) == (100, 0, 5)
+    assert _event_order({"created_at": 100, "id": 5, "uid": v4}) == (100, 100_000, 5)
+    assert _event_order({"created_at": 100, "id": 5, "uid": None}) == (100, 100_000, 5)
     v7 = "01a1cf86-8673-7c4f-883e-0f361585d8e4"
-    assert _event_order({"created_at": 100, "id": 5, "uid": v7})[1] == 0x01a1cf868673
+    own_second = 0x01a1cf868673 // 1000
+    assert _event_order({"created_at": own_second, "id": 5, "uid": v7})[1] == 0x01a1cf868673
+
+
+def test_a_backfilled_v7_uid_does_not_reorder_same_second_events():
+    """``kanban_db_sync`` backfills uid-less rows with a v7 uid stamped at backfill time: a uid whose second is not
+    the row's own is not event time, so the earlier-arrived row stays first even though its uid is later."""
+    from hermes_cli.kanban_sync_divergence import _event_order
+    backfilled = "01a1cf86-8673-7c4f-883e-0f361585d8e4"  # minted in a later second than the row's 100
+    first = {"created_at": 100, "id": 5, "uid": backfilled}
+    second = {"created_at": 100, "id": 6, "uid": None}
+    assert _event_order(first) == (100, 100_000, 5)
+    assert max((first, second), key=_event_order) is second
 
 
 @pytest.mark.parametrize("unblock_later_ms,expected", [(5, "todo"), (-5, "blocked")])

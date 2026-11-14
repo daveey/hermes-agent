@@ -471,6 +471,38 @@ def test_terminal_hold_orders_by_origin_not_by_arrival():
     assert ktg.terminal_hold(conn, "t")["id"] == 4
 
 
+def _v7_at(ms: int) -> str:
+    stamp = f"{ms:012x}"
+    return f"{stamp[:8]}-{stamp[8:]}-7abc-8def-0123456789ab"
+
+
+@pytest.mark.parametrize("first,second,held", [("completed", "reopened", None), ("reopened", "completed", 2)])
+def test_terminal_hold_does_not_trust_a_backfilled_uid_clock(first, second, held):
+    """``kanban_db_sync`` backfills a uid-less row with a v7 uid stamped at backfill time (here second 900 for a row
+    of second 500). Its milliseconds are not event time, so two events of one second fall back to arrival order."""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, uid TEXT, task_id TEXT, kind TEXT, payload TEXT, "
+                 "created_at INTEGER)")
+    conn.execute("INSERT INTO task_events VALUES (1, ?, 't', ?, '{}', 500)", (_v7_at(900_123), first))
+    conn.execute("INSERT INTO task_events VALUES (2, NULL, 't', ?, '{}', 500)", (second,))
+    hold = ktg.terminal_hold(conn, "t")
+    assert (hold and hold["id"]) == held
+
+
+def test_terminal_hold_still_orders_one_second_by_a_consistent_uid_clock():
+    """A uid minted in the row's own second is event time: the later-minted reopen wins although it arrived first."""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, uid TEXT, task_id TEXT, kind TEXT, payload TEXT, "
+                 "created_at INTEGER)")
+    conn.execute("INSERT INTO task_events VALUES (1, ?, 't', 'reopened', '{}', 500)", (_v7_at(500_700),))
+    conn.execute("INSERT INTO task_events VALUES (2, ?, 't', 'completed', '{}', 500)", (_v7_at(500_200),))
+    assert ktg.terminal_hold(conn, "t") is None
+
+
 # --- unblock_task: ``unblocked`` is a reopen, and its automated callers act on the local row -----------------------
 # PR #1958 review 5889419180 nit 1: a stale copy of a done card, auto-unblocked by the shared-blocker clear/probe,
 # the quota release or a ``resolved_check``, went ``ready`` and wrote ``unblocked``, which both guards (here and

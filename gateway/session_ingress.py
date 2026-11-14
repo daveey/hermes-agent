@@ -413,6 +413,9 @@ async def execute_admission(authority, ref, row):
                 if row.get('update_resume') or is_api or (row['payload'].get('finite') is True and not event.get_command()):
                     result = {'final_response': '', 'messages': [], 'failed': True, 'completed': False,
                               'error': response or 'The admitted turn failed.'}
+            # [daveey] An automated wake a held quota wall refused before it ran: one redelivery after the reset.
+            from gateway.session_wall_replay import after_turn
+            response = await after_turn(authority, row, event.source, result, response)
             # The drain commits this under the stream lock so no viewer reads `terminal`
             # before the completion event exists in the replay ring.
             authority.pending_results[row['admission_id']] = {

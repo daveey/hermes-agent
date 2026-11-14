@@ -84,7 +84,16 @@ def _aliases(cfg):
     return section.get('shared_blocker_aliases', {}) if isinstance(section, dict) else {}
 
 
-def _key(conn, now):
+def _snapshot_aliases(scope):
+    """The aliases the held snapshot carries now (its live content, so an in-place
+    edit counts), or None when no snapshot is held."""
+    held = scope.get(('config', get_ident()))
+    return None if held is None else _aliases(held)
+
+
+def _key(conn, now, aliases=None):
+    """Commit/config identity. ``aliases`` given: the caller vouches for them and
+    the live config is not re-read (``read``'s post-compute check)."""
     if conn.in_transaction:
         return None
     from hermes_cli.config import load_config_readonly
@@ -102,12 +111,13 @@ def _key(conn, now):
                     files.append(None)
         version = conn.execute('PRAGMA data_version').fetchone()[0]
         schema = conn.execute('PRAGMA schema_version').fetchone()[0]
-        live = load_config_readonly()
-        aliases = _aliases(live)
-        scope = _SCOPE.get() or {}
-        held = scope.get(('aliases', get_ident()))
-        if ('config', get_ident()) in scope and held != aliases:
-            _hold_config(scope, live)
+        if aliases is None:
+            live = load_config_readonly()
+            aliases = _aliases(live)
+            scope = _SCOPE.get() or {}
+            held = scope.get(('aliases', get_ident()))
+            if ('config', get_ident()) in scope and held != aliases:
+                _hold_config(scope, live)
         return (conn, conn.total_changes, version, schema, tuple(files), now, deepcopy(aliases))
     except (sqlite3.Error, OSError, ConfigBackendUnavailable):
         return None
@@ -119,6 +129,12 @@ def read(name, conn, now, compute):
     Transactions (including savepoints) always bypass. total_changes catches
     same-connection writes even after rollback; data_version catches peers.
     Scope exit drops all retained handles and observations.
+
+    Only the pre-compute key reads the live config: ``compute`` sees config
+    solely through the pass snapshot (``config``), so the value is fresh for
+    the key's aliases iff the snapshot still carries them afterwards. A live
+    edit during ``compute`` is caught by the next read's key. With no snapshot
+    held the post-compute key falls back to a live read.
     """
     scope = _SCOPE.get()
     if scope is None:
@@ -133,6 +149,6 @@ def read(name, conn, now, compute):
         return deepcopy(held[1])
     scope.pop(slot, None)
     value = compute()
-    if _key(conn, now) == key:
+    if _key(conn, now, _snapshot_aliases(scope)) == key:
         scope[slot] = (key, deepcopy(value))
     return value
