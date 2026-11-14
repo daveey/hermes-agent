@@ -4202,9 +4202,9 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
             # Stamp the adopting process before readiness, not at run_one_job's first
             # heartbeat: the claiming gateway may exit as soon as it sees the ack.
             owner = (job.get("fire_claim") or {}).get("by")
-            if owner and not heartbeat_fire_claim(job["id"], expected_owner=owner):
-                logger.error("Cron external worker lost fire claim for %s", execution_id)
-                return False
+            claim_lost = owner and not heartbeat_fire_claim(job["id"], expected_owner=owner)
+            if claim_lost:
+                finish_lost_execution(execution_id, "Fire claim ownership lost before worker readiness")
             try:
                 ack_path.parent.mkdir(parents=True, exist_ok=True)
                 # Publish via write-to-temp + atomic rename. Writing ack_path in place
@@ -4230,6 +4230,10 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
                     execution_id,
                 )
                 return False
+            if claim_lost:
+                # Adoption succeeded and its terminal outcome is booked. Acknowledge
+                # that handoff without running or triggering a dispatch-failure notice.
+                return True
             old_external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER")
             os.environ["_HERMES_CRON_EXTERNAL_WORKER"] = execution_id
             try:
