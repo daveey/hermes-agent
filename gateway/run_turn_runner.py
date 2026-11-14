@@ -256,6 +256,12 @@ def _resolution_failure_result(exc: Exception, platform: Platform) -> dict:
     text, reason, retryable = _resolution_failure_reply(exc, platform)
     result = stamp_failure({"final_response": text, "messages": [], "api_calls": 0, "tools": [],
                             "failed": True, "completed": False, "error": str(exc)}, reason, retryable)
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    resets_at = getattr(exc, "resets_at", None) if isinstance(exc, SubscriptionQuotaUnavailable) else None
+    if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+        # [daveey] The held wall's reset: the card names it, and an automated wake refused here is
+        # redelivered once after it (gateway.session_wall_replay); a person resends it themselves.
+        result["failure_resets_at"] = float(resets_at)
     if reason == "route_refused":
         # [daveey] The router refused the chat's own route (a pinned subscription wall): the reply names
         # the reset and /model, and a resend repeats the refusal. Like the policy refusals
