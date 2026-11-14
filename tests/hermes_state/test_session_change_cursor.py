@@ -226,6 +226,32 @@ def test_older_writer_without_triggers_reads_full(store):
         db2.close()
 
 
+def test_reinstall_without_schema_change_invalidates_prior_epoch(store):
+    db, reader, _ = store
+    cur = _cursor(reader)
+    assert cur.revision == 0
+    # A missing singleton needs repair, but the existing tables/triggers need no DDL.
+    # Unlike dropped-trigger repair, no schema-cookie change can mask epoch reuse.
+    db._execute_write(lambda c: c.execute("DELETE FROM session_change_revision"))
+    assert changed_since(reader, cur) == (FULL, None)
+    assert sc.ensure_installed(reader) is True
+    ids, fresh = changed_since(reader, cur)
+    assert fresh is not None
+    assert (fresh.dev, fresh.ino, fresh.shm, fresh.schema_cookie,
+            fresh.schema_level, fresh.lineage, fresh.revision) == (
+                cur.dev, cur.ino, cur.shm, cur.schema_cookie,
+                cur.schema_level, cur.lineage, cur.revision)
+    assert ids is FULL  # Only the install epoch distinguishes these valid snapshots.
+    assert fresh.epoch != cur.epoch
+    # Ordinary stable init must neither write nor invalidate the repaired cursor.
+    changes = reader.total_changes
+    assert sc.ensure_installed(reader) is False
+    assert reader.total_changes == changes
+    assert changed_since(reader, fresh) == (frozenset(), fresh)
+    db.create_session("after-repair", "cli")
+    assert _changed(reader, fresh)[0] == {"after-repair"}
+
+
 def test_stale_trigger_set_reads_full(store):
     db, reader, _ = store
     db.create_session("a", "cli")
