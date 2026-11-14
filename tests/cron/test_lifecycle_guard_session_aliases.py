@@ -485,6 +485,74 @@ def test_no_pipe_does_not_tokenize_printed_payloads(monkeypatch):
     assert list(_iter_nested_printed_payloads("printf ':'")) == []
 
 
+# PR #2928 review 5901902665 nit 1: a heredoc body is the program of the producer that owns it, so
+# what that program prints into a startup shell's stdin is walked with unknown alias names too.
+_PY_PRINTS = "print('t ( bash {db} )')\n"
+
+
+@pytest.mark.parametrize("shape,blocked", [
+    ("python3 - <<'PY' | bash -l\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' | zsh\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' | ssh h\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' | cat | bash -l\n" + _PY_PRINTS + "PY", True),
+    ("python3 - << PY |& bash -l\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' |\n" + _PY_PRINTS + "PY\nbash -l", True),
+    ("python3 - <<'PY' | bash -l\nprint(\"it's\", 't ( bash {db} )')\nPY", True),
+    ("cat <<'A'; python3 - <<'PY' | bash -l\nA\n" + _PY_PRINTS + "PY", True),
+    # A quoted `<<x` leaves openers and bodies unmatched: the line's units all get the body.
+    ("echo '<<x'; python3 - <<'PY' | bash -l\n" + _PY_PRINTS + "PY", True),
+    ("{{ python3 - <<'PY'\n" + _PY_PRINTS + "PY\n}} | bash -l", True),
+    # Controls: the body's output reaches no startup shell, or a plain one.
+    ("python3 - <<'PY' | bash\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY' | bash -s\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY'; printf ':' | bash -l\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY' && printf ':' | bash -l\n" + _PY_PRINTS + "PY", False),
+    ("printf ':' | bash -l | python3 - <<'PY'\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY' | bash -l\nprint(':')\nPY\nprintf 't ( bash {db} )' | bash", False),
+])
+def test_heredoc_producer_pipe_uses_consuming_shell_scope(tmp_path, live_kanban_db, shape, blocked):
+    unsafe, refusal = scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe is blocked
+    if blocked:
+        assert refusal is not None and "SQLite" in refusal
+
+
+# PR #2928 review 5901902665 nit 2: only a `{` (or `if`, loop) in command position opens a group,
+# and a list operator or line break inside a group ends the pipe there: a later login shell reads
+# the group's own stdin, not an earlier command's output.
+@pytest.mark.parametrize("shape", [
+    "echo {{ ; printf 't ( bash {db} )' | bash ; printf ':' | bash -l",
+    "echo if ; printf 't ( bash {db} )' | bash ; printf ':' | bash -l",
+    "{{ printf 't ( bash {db} )' | cat; bash -l; }}",
+    "{{ printf 't ( bash {db} )' | cat && bash -l; }}",
+    "{{ printf 't ( bash {db} )' | cat\nbash -l\n}}",
+    "( printf 't ( bash {db} )' | cat; bash -l )",
+    "{{ printf 't ( bash {db} )' | cat; bash -l; }} | cat",
+])
+def test_group_pipe_does_not_reach_later_login_shell(tmp_path, live_kanban_db, shape):
+    assert scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path),
+        session_aliases=frozenset({"zz"})) == (False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "printf 't ( bash {db} )' | {{ cat; bash -l; }}",
+    "printf 't ( bash {db} )' | ( cat; bash -l )",
+    "printf 't ( bash {db} )' | {{ cat\nbash -l\n}}",
+    "{{ printf 't ( bash {db} )'; }} | bash -l",
+    "{{ printf 't ( bash {db} )' | cat; }} | bash -l",
+    "if true; then printf 't ( bash {db} )'; fi | bash -l",
+    "while :; do printf 't ( bash {db} )'; done | bash -l",
+    "for x in a; do printf 't ( bash {db} )'; done | bash -l",
+    "f() {{ :; }}; {{ printf 't ( bash {db} )'; }} | bash -l",
+])
+def test_group_output_piped_to_login_shell_keeps_nested_scope(tmp_path, live_kanban_db, shape):
+    unsafe, refusal = scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe is True and refusal is not None and "SQLite" in refusal
+
+
 def test_nested_shell_input_shapes():
     """Which nested shells hold aliases of their own, and what of theirs is shell code."""
     from cron.lifecycle_guard_nested_shells import _feeds_nested_shell, _iter_nested_shell_inputs

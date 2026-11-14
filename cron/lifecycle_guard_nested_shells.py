@@ -280,35 +280,162 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
     return None
 
 
-def _printed_pipeline_units(command: str) -> Iterator[str]:
-    """Keep compound groups and pipe-newline continuations within one printed-text unit."""
+# Printed pipeline structure (PR #2928 review 5901902665). A word opens or closes a compound
+# command only in command position (`echo {` prints a brace); `(`/`)` are operators and always do.
+_GROUP_OPEN_WORDS = frozenset({"{", "if", "while", "until", "for", "select"})
+_GROUP_CLOSE_WORDS = frozenset({"}", "fi", "done"})
+# Reserved words after which the next word is in command position again (`for`/`select` are not:
+# their name and word list are no commands).
+_COMMAND_PREFIX_WORDS = frozenset({"{", "if", "while", "until", "then", "else", "elif", "do", "!",
+                                   "time"})
+_LIST_OPERATORS = frozenset({";", "&", "&&", "||", ";;"})
+_PIPE_OPERATORS = frozenset({"|", "|&"})
+
+
+def _is_heredoc_opener(word: str) -> bool:
+    return word.startswith("<<") and not word.startswith("<<<")
+
+
+def _lines_with_heredoc_bodies(command: str) -> Iterator[tuple[str, list[str]]]:
+    """``(logical line, bodies of the heredocs it opens)``, in order. An opener that does not
+    parse or has no terminator takes the rest of *command* as its body (fail closed)."""
+    if "<<" not in command:
+        yield command, []
+        return
+    from tools.shell_heredoc import _heredoc_bodies, _scan_heredoc_command_unit
+
+    cursor = 0
+    last_opener = command.rfind("<<")
+    while cursor < len(command):
+        if cursor > last_opener:
+            yield command[cursor:], []
+            return
+        end, specs, unknown_operator, _post_list, _owner = _scan_heredoc_command_unit(
+            command, cursor)
+        line = command[cursor:end]
+        bodies = _heredoc_bodies(command, end + 1, specs) if specs and end < len(command) else None
+        if unknown_operator or (specs and bodies is None):
+            yield line, [command[end + 1:]]
+            return
+        if not bodies:
+            yield line, []
+            cursor = end + 1
+            continue
+        yield line, [command[start:terminator] for start, terminator, _after in bodies]
+        cursor = bodies[-1][2]
+
+
+class _PrintedUnit:
+    """One printed-text unit: ``(role, word)`` events and the heredoc bodies its openers own."""
+
+    __slots__ = ("bodies", "events")
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+        self.bodies: list[str] = []
+
+    def text(self) -> str:
+        return " ".join(word if role != "word" else shlex.quote(word)
+                        for role, word in self.events).replace(" \n ", "\n")
+
+
+def _printed_pipeline_units(command: str) -> list[_PrintedUnit]:
+    """Split *command* into printed-text units: top-level lists, with compound groups and
+    pipe-newline continuations kept whole. Event roles are ``word``, ``open``, ``close``,
+    ``list``, ``pipe`` and ``newline`` (a line break inside a group: a list separator there).
+    A heredoc body joins the unit holding its opener (nit 1); when the openers on a line cannot
+    be matched to its bodies one to one, every unit the line touches gets them all."""
     from cron.lifecycle_guard import _CONTROL_CHARS, _iter_command_token_lists
 
-    words: list[str] = []
+    units: list[_PrintedUnit] = []
+    unit = _PrintedUnit()
     depth = 0
     continued = False
-    for tokens in _iter_command_token_lists(command):
-        for token in tokens:
-            controls = re.findall(r"\|&|&&|\|\||[;&|()]", token) if (
-                token and set(token) <= _CONTROL_CHARS) else [token]
-            for word in controls:
-                if word in ("(", "{"):
-                    depth += 1
-                elif word in (")", "}"):
-                    depth = max(0, depth - 1)
-                elif not depth and word in (";", "&", "&&", "||"):
-                    yield " ".join(words)
-                    words = []
-                    continued = False
-                    continue
-                words.append(word if word in ("(", ")", "{", "}", ";", "&", "&&", "||", "|", "|&")
-                             else shlex.quote(word))
-                continued = word in ("|", "|&")
-        if not depth and not continued:
-            yield " ".join(words)
-            words = []
-    if words:
-        yield " ".join(words)
+    command_position = True
+    for line, bodies in _lines_with_heredoc_bodies(command):
+        touched = [unit]
+        openers: list[_PrintedUnit] = []
+        for tokens in _iter_command_token_lists(line):
+            if unit.events and not continued:
+                if not depth:
+                    units.append(unit)
+                    unit = _PrintedUnit()
+                    touched.append(unit)
+                else:
+                    unit.events.append(("newline", "\n"))
+                command_position = True
+            for token in tokens:
+                words = re.findall(r"\|&|&&|\|\||;;|[;&|()]", token) if (
+                    token and set(token) <= _CONTROL_CHARS) else [token]
+                for word in words:
+                    if word in _PIPE_OPERATORS or word in _LIST_OPERATORS or word in ("(", ")"):
+                        role = ("pipe" if word in _PIPE_OPERATORS else "list"
+                                if word in _LIST_OPERATORS else "open" if word == "(" else "close")
+                        command_position = True
+                    elif command_position and word in _GROUP_OPEN_WORDS:
+                        role, command_position = "open", word in _COMMAND_PREFIX_WORDS
+                    elif command_position and word in _GROUP_CLOSE_WORDS:
+                        role, command_position = "close", False
+                    else:
+                        role = "word"
+                        command_position = command_position and word in _COMMAND_PREFIX_WORDS
+                    depth = depth + 1 if role == "open" else max(0, depth - (role == "close"))
+                    if role == "list" and not depth:
+                        units.append(unit)
+                        unit = _PrintedUnit()
+                        touched.append(unit)
+                        continued = False
+                        continue
+                    if role == "word" and _is_heredoc_opener(word):
+                        openers.append(unit)
+                    unit.events.append((role, word))
+                    continued = role == "pipe"
+        if len(openers) == len(bodies):
+            for owner, body in zip(openers, bodies):
+                owner.bodies.append(body)
+        else:
+            for owner in touched:
+                owner.bodies.extend(bodies)
+    units.append(unit)
+    return [unit for unit in units if unit.events]
+
+
+def _unit_feeds_nested_stdin(unit: _PrintedUnit) -> tuple[bool, bool]:
+    """``(printed text, heredoc body output)``: whether a pipe in *unit* feeds a startup shell's
+    stdin, and whether a heredoc-owning producer upstream of that pipe feeds it. A list operator
+    or line break ends a pipe inside a group: what follows reads the group's stdin (nit 2)."""
+    from cron.lifecycle_guard import _command_segment_views
+
+    feeds = feeds_body = False
+    piped = carried = own_body = False
+    frames: list[list[bool]] = []  # [piped, carried, holds a body] at each open group
+    words: list[str] = []
+    for role, word in [*unit.events, ("list", ";")]:
+        if role == "word":
+            words.append(word)
+            if _is_heredoc_opener(word):
+                own_body = True
+                for frame in frames:
+                    frame[2] = True
+            continue
+        if words and piped and any(_nested_shell_input(view) == ("stdin", None)
+                                   for view in _command_segment_views(words)):
+            feeds = True
+            feeds_body = feeds_body or carried
+        words = []
+        if role == "pipe":
+            piped, carried, own_body = True, carried or own_body, False
+        elif role in ("list", "newline"):
+            piped, carried = (frames[-1][0], frames[-1][1]) if frames else (False, False)
+            own_body = False
+        elif role == "open":
+            frames.append([piped, carried, False])
+            own_body = False
+        elif frames:  # close: the group is the pipeline's command now
+            piped, carried, own_body = frames.pop()
+        else:
+            piped = carried = own_body = False
+    return feeds, feeds_body
 
 
 def _iter_nested_printed_payloads(command: str) -> Iterator[str]:
@@ -316,26 +443,21 @@ def _iter_nested_printed_payloads(command: str) -> Iterator[str]:
 
     The ordinary printed-text approximation still scans each connected compound pipeline;
     unrelated top-level pipelines retain their session scope. Keep the ordinary walk too.
+    A heredoc body is its producer's program (``python3 - <<'PY' | bash -l``), so what it may
+    print is walked too when that producer is upstream of the pipe (nit 1).
     """
-    from cron.lifecycle_guard import (
-        _command_segment_views, _iter_command_token_lists, _split_segments,
-    )
     from cron.lifecycle_guard_output import iter_printed_shell_payloads
 
     if "|" not in command:
         return  # do not tokenize large no-pipe generators a second time
-    for pipeline in _printed_pipeline_units(command):
-        piped = False
-        for tokens in _iter_command_token_lists(pipeline):
-            for segment in _split_segments(tokens, keep_controls=True):
-                if segment in (["|"], ["|&"]):
-                    piped = True
-                elif piped and any(_nested_shell_input(view) == ("stdin", None)
-                                   for view in _command_segment_views(segment)):
-                    for payload, _raw_quote in iter_printed_shell_payloads(
-                            pipeline, shell_sink=True):
-                        yield payload
-                    break
+    for unit in _printed_pipeline_units(command):
+        feeds, feeds_body = _unit_feeds_nested_stdin(unit)
+        if feeds:
+            text = unit.text()
+            if feeds_body and unit.bodies:
+                text = "\n".join([text, *unit.bodies])
+            for payload, _raw_quote in iter_printed_shell_payloads(text, shell_sink=True):
+                yield payload
 
 
 def _feeds_nested_shell(owner: Optional[str]) -> bool:
