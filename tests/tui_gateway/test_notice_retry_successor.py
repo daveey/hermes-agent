@@ -86,6 +86,14 @@ def test_malformed_provenance_keeps_original(field, value, monkeypatch):
     assert nr.effective_due(closeout) == closeout["retry_at"]
 
 
+@pytest.mark.parametrize("due,short", [(float("inf"), 100.0), (200.0, -float("inf"))])
+def test_different_code_nonfinite_deadline_keeps_original(due, short, monkeypatch):
+    # Known different code would take min(); a non-finite deadline must not win it.
+    monkeypatch.setattr(host_loop_lease, "_core_sha", lambda: "b" * 40)
+    closeout = {"retry_code_sha": "a" * 40, "retry_at": due, "retry_short_at": short}
+    assert nr.effective_due(closeout) == due
+
+
 def test_booking_only_marks_extended_delays_and_never_extends_due(monkeypatch):
     monkeypatch.setattr(host_loop_lease, "_core_sha", lambda: "a" * 40)
     assert nr.booking(100, 100) == {}
