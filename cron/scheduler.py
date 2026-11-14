@@ -4199,6 +4199,12 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
                     execution_id,
                 )
                 return False
+            # Stamp the adopting process before readiness, not at run_one_job's first
+            # heartbeat: the claiming gateway may exit as soon as it sees the ack.
+            owner = (job.get("fire_claim") or {}).get("by")
+            if owner and not heartbeat_fire_claim(job["id"], expected_owner=owner):
+                logger.error("Cron external worker lost fire claim for %s", execution_id)
+                return False
             try:
                 ack_path.parent.mkdir(parents=True, exist_ok=True)
                 # Publish via write-to-temp + atomic rename. Writing ack_path in place
