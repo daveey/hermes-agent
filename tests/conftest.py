@@ -335,12 +335,12 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     # The hermes-hub replica (hub.db) lives under HOME, which stays real: point readers (kanban_create's overlap
     # check, wait replicas) at an empty per-test dir so the host's live cards never leak into a test. [daveey]
     monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hermes-hub-state"))
+    # self_gateway reads mail identity before the replica; HOME deliberately stays real.
+    # Redirect rather than delete: absence falls back to ~/.config/hermes-mail/config.json.
+    monkeypatch.setenv("HERMES_MAIL_CONFIG", str(tmp_path / "hermes-mail.json"))
 
-    # 3. Isolate both inputs to profile/root resolution. HERMES_HOME alone
-    #    is insufficient: get_default_hermes_root() resolves the native root
-    #    too, to distinguish standard profiles from custom deployments.
-    #    Patch only the Hermes default, not HOME/Path.home(). Subprocesses need
-    #    a stable HOME. Hardcoded real-home I/O must still trip the guard.
+    # 3. Isolate HERMES_HOME and the native root used to distinguish profiles/custom deployments.
+    # Keep HOME/Path.home() stable for subprocesses; hardcoded real-home I/O must still trip the guard.
     import hermes_constants
 
     platform_default = hermes_constants._get_platform_default_hermes_home
