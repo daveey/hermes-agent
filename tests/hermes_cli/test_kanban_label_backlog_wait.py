@@ -183,3 +183,44 @@ def test_move_protection_only_for_ready_capability_drops(hub, status, previous, 
     from hermes_cli import kanban_label_backlog as klb
     tid = _seed(hub.conn, claims=1)
     assert klb.move_refusal(hub.conn, tid, status, previous, new, machines=POOL) is None
+
+
+@pytest.mark.parametrize("case", ["empty_labels", "missing_task", "unreadable"])
+def test_unknown_evidence_cannot_refuse_a_move(hub, case):
+    import sqlite3
+    from hermes_cli import kanban_label_backlog as klb
+    tid = _seed(hub.conn, claims=1)
+    conn = sqlite3.connect(":memory:") if case == "unreadable" else hub.conn
+    try:
+        result = klb.read(conn, "missing" if case == "missing_task" else tid,
+                          [] if case == "empty_labels" else LABELS, machines={"worker-3"})
+        assert result["known"] is False and not klb.busy(result)
+        assert klb.words(result) == ""
+    finally:
+        if conn is not hub.conn:
+            conn.close()
+
+
+@pytest.mark.parametrize("raw", [None, {}, [], "not json", '[1]', '["pool:worker", null]'])
+def test_malformed_labels_are_not_evidence(raw):
+    from hermes_cli import kanban_label_backlog as klb
+    assert klb._labels(raw) is None
+
+
+@pytest.mark.parametrize("raw", [None, [], "not json", '{"holder": 3}', '{"holder": ""}'])
+def test_malformed_holders_are_not_evidence(raw):
+    from hermes_cli import kanban_label_backlog as klb
+    assert klb._holder(raw) is None
+
+
+def test_update_hold_takes_precedence_over_recent_pool_claims(hub):
+    tid = _seed(hub.conn, claims=1)
+    assert kpu.post_notice(hub.conn, tid, tid, wait_key="hold", waited_seconds=1900, ready_seconds=1900,
+                           kind=kcw.NOTICE_KIND, extra={"core_update_hold": True})
+    raw = hub.conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
+                           (tid, kcw.NOTICE_KIND)).fetchone()[0]
+    payload = json.loads(raw)
+    assert payload["admission"] == {"reason": "core_update_hold", "status": "held"}
+    text = kcw.notice_text(payload)
+    assert "claims are held for a pending Hermes update" in text
+    assert "Not a placement problem" not in text

@@ -124,7 +124,7 @@ def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]
                 place["drain_until_ms"] = max(until)
         from hermes_cli import kanban_label_backlog as klb
         backlog = klb.read(conn, task_id, labels, machines=klb.available(labels, machines))
-        if klb.words(backlog):
+        if backlog.get("ahead") or klb.busy(backlog):
             place["backlog"] = backlog
         return place
     every = set().union(*carried.values())
