@@ -7,6 +7,45 @@ import socket
 from pathlib import Path
 
 
+def warnings(records) -> list[str]:
+    """``machine:path — warning`` lines the completing worker must see."""
+    if not isinstance(records, list):
+        return []
+    return [f"{r.get('machine')}:{r.get('path')} — {r['warning']}"
+            for r in records if isinstance(r, dict) and r.get("warning")]
+
+
+def completion_custody(events) -> dict:
+    """The kanban_complete result's receipt plus its warnings, surfaced to the worker."""
+    custody = latest_receipt(events)
+    return {**custody, "artifact_warnings": warnings(custody["artifact_receipt"])}
+
+
+def display_metadata(metadata):
+    """Handoff display copy: executor-local paths name their machine.
+
+    Receipt attachments resolve by ``attachment_uid`` on every replica; a bare
+    executor-local path (legacy ``artifacts``, or the ``attachment_path`` older
+    receipts stored) misleads a reader on another machine.
+    """
+    records = metadata.get("artifact_receipt") if isinstance(metadata, dict) else None
+    if not isinstance(records, list):
+        return metadata
+    machines = {r.get("machine") for r in records if isinstance(r, dict) and r.get("machine")}
+    if len(machines) != 1:
+        return metadata
+    (machine,) = machines
+    shown = dict(metadata)
+    shown["artifact_receipt"] = [
+        {k: v for k, v in r.items() if k != "attachment_path"} if isinstance(r, dict) else r
+        for r in records]
+    artifacts = metadata.get("artifacts")
+    if isinstance(artifacts, list):
+        shown["artifacts"] = [f"{machine}:{p}" if isinstance(p, str) and p.startswith(("/", "~")) else p
+                              for p in artifacts]
+    return shown
+
+
 def latest_receipt(events) -> dict:
     """Expose custody independently of truncated event-history views."""
     for event in reversed(events):
@@ -140,12 +179,14 @@ def _large(conn, task_id: str, source: Path, stat, record: dict, staged: list[Pa
 
 
 def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: int,
-                 staged: list[Path], *, uploaded_by: str, relocated: dict[str, str]) -> None:
+                 staged: list[Path], *, uploaded_by: str, relocated: dict[str, str],
+                 local_copies: dict[str, str] | None = None) -> None:
     """Attach small external files through the same byte-sync as scratch copies.
 
-    The generated receipt never rewrites an observed evidence identity. A local
-    attachment path is useful only alongside its machine; attachment_uid locates
-    the bytes on another replica after normal Board blob synchronization.
+    The generated receipt never rewrites an observed evidence identity. The
+    executor-local attachment path goes only to ``local_copies`` (this staging
+    pass), never into the receipt: attachment_uid locates the bytes on another
+    replica after normal Board blob synchronization.
     ``role`` separates declared deliverables (``artifact``, uploaded to chat)
     from ``evidence`` refs (custody only). Free-text evidence that names no file
     gets no record. Files over the attachment cap are never read here (``_large``).
@@ -203,7 +244,8 @@ def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: 
             record["attachment_id"] = row["id"]
             if "uid" in row.keys():
                 record["attachment_uid"] = row["uid"]
-            record["attachment_path"] = row["stored_path"]
+            if local_copies is not None:
+                local_copies[raw] = row["stored_path"]
             with source.open("rb") as stream:
                 record["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
         except (OSError, kb.ArtifactPreservationError) as exc:

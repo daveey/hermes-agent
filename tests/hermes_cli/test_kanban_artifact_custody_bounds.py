@@ -180,8 +180,11 @@ def test_custody_copies_land_on_the_tasks_board(kanban_home, monkeypatch, tmp_pa
         assert kb.complete_task(conn, task, summary="Report", expected_run_id=run,
                                 metadata={"artifacts": [str(p) for p in sources]})
         records = kb.latest_run(conn, task).metadata["artifact_receipt"]
+        # Receipts carry no executor-local attachment_path: resolve by attachment_id.
+        stored = {row["id"]: row["stored_path"] for row in conn.execute(
+            "SELECT id, stored_path FROM task_attachments WHERE task_id=?", (task,))}
     root = kb.attachments_root(board="other").resolve()
-    kept = [r.get("attachment_path") or r.get("retained_path") for r in records]
+    kept = [stored.get(r.get("attachment_id")) or r.get("retained_path") for r in records]
     kept = [Path(p).resolve() for p in kept if p]
     assert kept and all(p.is_relative_to(root) for p in kept), (kept, root)
 

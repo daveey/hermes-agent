@@ -67,8 +67,11 @@ def _ctx_stamp(ts: int, now: int) -> str:
 def _ctx_metadata_line(metadata: Any) -> Optional[str]:
     if not metadata:
         return None
+    from hermes_cli.kanban_artifact_receipt import display_metadata
+
     try:
-        return f"_metadata_: `{_ctx_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True))}`"
+        shown = display_metadata(metadata)
+        return f"_metadata_: `{_ctx_cap(json.dumps(shown, ensure_ascii=False, sort_keys=True))}`"
     except Exception:
         return None
 

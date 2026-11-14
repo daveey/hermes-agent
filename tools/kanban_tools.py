@@ -968,11 +968,12 @@ def _handle_complete(args: dict, **kw) -> str:
         # Artifact staging is atomic with the completion write, so a worker that
         # read `kanban_attachments` before completing saw an empty list and has
         # no way to observe what its completion just registered (#117360).
-        # Report the card's durable attachment set in the result.
+        # Report the card's durable attachment set and custody warnings in the result.
+        from hermes_cli.kanban_artifact_receipt import completion_custody
         return _ok(task_id=tid, run_id=run.id if run else None,
                    attachments=[
                        _fields(a, _ATTACHMENT_FIELDS)
-                       for a in kb.list_attachments(conn, tid)])
+                       for a in kb.list_attachments(conn, tid)], **completion_custody(kb.list_events(conn, tid)))
 
 
 def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:

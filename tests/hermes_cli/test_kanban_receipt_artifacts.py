@@ -47,7 +47,9 @@ def test_exact_receipt_records_missing_or_attaches_beyond_incidental_budget(kanb
         record = meta["artifact_receipt"][0]
         assert record["path"] == str(report)
         if exists:
-            assert Path(record["attachment_path"]).read_text() == "exceeds incidental cap"
+            assert "attachment_path" not in record  # readers resolve by attachment id/uid
+            (row,) = [a for a in kb.list_attachments(conn, task) if a.id == record["attachment_id"]]
+            assert Path(row.stored_path).read_text() == "exceeds incidental cap"
             assert "warning" not in record
         else:
             assert "missing" in record["warning"].lower()

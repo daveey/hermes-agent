@@ -267,11 +267,11 @@ def stage_completion_artifacts(
     metadata.pop(SKIPPED_KEY, None)
     metadata.pop("_staged_artifacts", None)
     with discard_on_error(staged):
+        mapping: dict[str, str] = {}
         record_files(conn, task_id, metadata, originals, now, staged,
-                     uploaded_by=uploaded_by, relocated={})
+                     uploaded_by=uploaded_by, relocated={}, local_copies=mapping)
         records = metadata.get("artifact_receipt", [])
-        mapping = {r["path"]: r.get("attachment_path", r.get("retained_path"))
-                   for r in records if r.get("attachment_path") or r.get("retained_path")}
+        mapping.update({r["path"]: r["retained_path"] for r in records if r.get("retained_path")})
         known = {str(Path(raw).expanduser().resolve()): kept for raw, kept in mapping.items()}
         if "artifacts" in metadata:
             metadata["artifacts"] = [mapping.get(raw, raw) for raw in cleaned_artifact_paths(metadata)]
