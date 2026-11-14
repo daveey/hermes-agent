@@ -19,6 +19,8 @@ pytestmark = pytest.mark.platforms("linux")
 @pytest.mark.parametrize("mode", ["fresh-runner", "aged-runner", "default-pruner"])
 def test_runner_sweep_deleted_cwd_scope(slot_env, monkeypatch, tmp_path, mode):
     monkeypatch.setenv("HERMES_TEST_HOST_SLOTS", "1")
+    # Match conftest's parent policy isolation in the fresh holder interpreter.
+    monkeypatch.setenv("HERMES_TEST_POLICY_ROOT", str(tmp_path / "hermes_test"))
     tree = tmp_path / "attempt" / "worktree"
     tree.mkdir(parents=True)
     child, _ = holders._spawn_holder(tree)
