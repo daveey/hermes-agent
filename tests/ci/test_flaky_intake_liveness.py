@@ -8,6 +8,26 @@ from scripts.ci.flaky_intake import Journal
 from tests.ci.test_flaky_intake import Board, record
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Failed in {run}/job/9", True),
+    ("[job]({run}/job/9).", True),
+    ("Failed in {run}/job/90", False),
+    ("Failed in {run}/job/9extra", False),
+    ("Failed in {run}/job/9/other", False),
+    ("Failed in https://proxy.invalid/{run}/job/9", False),
+    ("Run {run} job 9", True),
+    ("Run {run} job `9`.", True),
+    ("Run {run} job 90", False),
+    ("Run {run} job 9extra", False),
+    ("Run {run}0 job 9", False),
+    ("Run {run}/job/90 test 9", False),
+    ("Run {run} test 9", False),
+])
+def test_job_receipts_require_exact_urls_and_explicit_job_ids(text, expected):
+    run = "https://github.com/o/r/actions/runs/1"
+    assert fk._cites_job(text.format(run=run), f"{run}/job/9") is expected
+
+
 class ReadableBoard(Board):
     def card(self, cid, board=None):
         return self.cards.get(cid)
@@ -74,10 +94,11 @@ def test_ambiguous_create_never_repeated_when_key_exists_or_inventory_fails(tmp_
 
 @pytest.mark.parametrize("cached", [True, False])
 @pytest.mark.parametrize("job", [9, 10])
-def test_legacy_cursor_body_receipt_dedupes_cutover(tmp_path, cached, job):
+@pytest.mark.parametrize("body_job", [9, 90])
+def test_legacy_cursor_body_receipt_dedupes_cutover(tmp_path, cached, job, body_job):
     path = tmp_path / "legacy.json"
     test = "tests/a.py::test_0"
-    url = "https://github.com/o/r/actions/runs/1/job/9"
+    url = f"https://github.com/o/r/actions/runs/1/job/{body_job}"
     cards = {test: {"card": "card0", "generation": 0}} if cached else {}
     path.write_text(json.dumps({"runs": ["1/1"], "cards": cards}))
     board = ReadableBoard()
@@ -87,7 +108,7 @@ def test_legacy_cursor_body_receipt_dedupes_cutover(tmp_path, cached, job):
         journal.record("o/r", [(job, [{"test_id": test}])], {"id": 1, "head_sha": "a" * 40})
         fk.drain_intake(journal, "o/r", board, fk.load_state(path), None)
         assert journal.db.execute("SELECT sum(delivered) FROM occurrences").fetchone()[0] == 1
-        assert len(board.notes["card0"]) == int(job != 9)
+        assert len(board.notes["card0"]) == int(job != body_job)
     finally:
         journal.close()
 

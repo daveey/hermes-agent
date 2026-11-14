@@ -307,10 +307,13 @@ def _cites_job(text: str, url: str) -> bool:
     Workers often write "run <run url> ... job 123202653589" instead of the job URL
     (t_01a1858daf93c588 did), and that is the same job.
     """
-    if url in text:
+    def exact_url(value: str) -> bool:
+        return re.search(r"(?<![\w/])" + re.escape(value) + r"(?![\w/#?%=&+\-])", text) is not None
+
+    if exact_url(url):
         return True
     m = _GH_JOB_URL.fullmatch(url)
-    return bool(m) and m.group(1) in text and re.search(rf"(?<!\d){m.group(2)}(?!\d)", text) is not None
+    return bool(m) and exact_url(m.group(1)) and re.search(rf"\bjob\s+`?{m.group(2)}(?!\w)", text) is not None
 
 
 def _existing_cards(board: Board, run_url: str, test_id: str) -> tuple[list[dict], list[dict]]:
