@@ -10,7 +10,11 @@ from hermes_cli.auth_codex_quota_window import quota_restored
 from tests.agent.test_codex_rotation_window import _pool, _rotate
 
 
-@pytest.mark.parametrize("delta, expected", [(0, True), (60, True), (-60, True), (61, False)])
+@pytest.mark.parametrize("delta, expected", [
+    (0, True), (60, True), (-60, True), (-61, False),
+    (7 * 86400, True),  # banked/upstream reset moved the walled window later (#43747)
+    (-6 * 86400, False),  # a 5h window resetting before a weekly wall is not evidence
+])
 def test_window_reset_tolerance(delta, expected):
     assert quota_restored({"rate_limit": {"primary_window": {
         "used_percent": 0, "reset_at": 1000 + delta}}}, 1000) is expected

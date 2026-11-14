@@ -9,14 +9,18 @@ def _number(value):
 def quota_restored(payload, reset_at=None):
     """A partial short-window response cannot disprove a named long-window wall.
 
-    Match absolute reset epochs with a minute of provider rounding tolerance.
-    Unknown/missing evidence keeps the bench; account/model denial always wins.
+    Evidence must include an open window that resets no earlier than the persisted wall
+    (a minute of provider rounding tolerance): the walled window itself, or the same
+    window after a banked/upstream reset moved its reset later (#43747). A shorter
+    window that resets before the wall says nothing about it. Unknown/missing evidence
+    keeps the bench; account/model denial always wins.
     """
     limits = [payload.get("rate_limit") or {}] + [
         extra.get("rate_limit") or {} for extra in (payload.get("additional_rate_limits") or [])
         if isinstance(extra, dict)]
     usages = []
     matched = reset_at is None
+    floor = float(reset_at) - 60 if _number(reset_at) else None
     for limit in limits:
         if limit.get("allowed") is False or limit.get("limit_reached") is True:
             return False
@@ -26,7 +30,7 @@ def quota_restored(payload, reset_at=None):
             if _number(used):
                 usages.append(used)
                 reset = window.get("reset_at")
-                if _number(reset_at) and _number(reset) and abs(reset - reset_at) <= 60:
+                if floor is not None and _number(reset) and reset >= floor:
                     matched = True
     return bool(usages) and matched and all(0 <= used < 100 for used in usages)
 
