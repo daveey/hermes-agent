@@ -201,6 +201,24 @@ def test_scope_exclusion_applies_before_predicate(agent, hooks, kind):
     assert calls == [{"session_id": agent.session_id}]
 
 
+def test_gate_without_buffer_attributes_streams_ordinary_turn(agent, hooks):
+    # A legacy gate that declares neither predicate nor needs_buffer must not
+    # buffer: the missing flag defaults to False, so ordinary text streams live.
+    seen = []
+
+    def plain_gate(session_id, turn_messages, **kwargs):
+        seen.append(session_id)  # no verdict: let the reply through
+
+    hooks._hooks["pre_final_gate"] = [plain_gate]
+    assert needs_buffer(agent) is False
+    run = Script(agent, ["Hello."])
+    result = agent.run_conversation("hello")
+    assert result["final_response"] == "Hello."
+    assert run.immediate == [["Hello."]]
+    assert agent._final_gate_buffer is None
+    assert seen  # the gate itself still ran at finalization
+
+
 def test_last_pre_hook_controls_buffer(agent, hooks):
     gate = hooks._hooks["pre_final_gate"][0]
     # Legacy dynamic gates are also armed after *all* hooks, not just the first.
