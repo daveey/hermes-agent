@@ -196,6 +196,7 @@
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.inventory.build_models_payload": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.inventory.load_picker_context": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban._check_dispatcher_presence": 1,
+    "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_artifact_receipt.latest_receipt": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_db": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_db_attachment_names._collision_free_path": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_db_attachment_names._safe_attachment_name": 1,
