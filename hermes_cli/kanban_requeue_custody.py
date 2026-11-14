@@ -22,7 +22,8 @@ While a custody is open, :func:`claim_refusal` (called from ``kanban_db_sync.cla
 every Board lease) defers another host's claim with a reason naming the host, the pids and the commands; the
 custody host claims as usual. The custody host's dispatch tick (:func:`sweep`) records
 ``requeue_custody_released`` once every custody pid has exited, or at ``until`` (the run's
-``max_runtime_seconds``, 60 min when unset) terminates the jobs as groups (TERM, then KILL) and records it. A
+``max_runtime_seconds``, 60 min when unset) terminates the jobs as groups (TERM, then KILL) and records it,
+unless the custody host's own retry holds the card then (it keeps the job until that run ends). A
 custody whose host never reports (the host died with its processes) stops holding ``RELEASE_GRACE_SECONDS``
 after ``until``. A requeue that finds no live persisted job records no custody: today's behaviour.
 
@@ -46,6 +47,7 @@ RELEASE_GRACE_SECONDS = 600
 TERM_GRACE_SECONDS = 5.0
 SWEEP_WINDOW_SECONDS = 14 * 86400
 CMD_CHARS = 160
+_HAS_PROC = os.path.exists("/proc/self/stat")  # Linux; macOS has none (test seam)
 
 
 # --- host identity ------------------------------------------------------------------------------
@@ -66,11 +68,26 @@ def own_host(conn: sqlite3.Connection) -> str:
 def _start_ticks(pid: int) -> Optional[int]:
     """Kernel start time of a running pid; None when gone or a zombie (exited, not yet reaped)."""
     from pathlib import Path
+    if not _HAS_PROC:
+        return _start_fingerprint_without_proc(pid)
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8-sig")
         fields = stat[stat.rindex(")") + 2:].split()
         return None if fields[0] in ("Z", "X") else int(fields[19])
     except (OSError, ValueError, IndexError):
+        return None
+
+
+def _start_fingerprint_without_proc(pid: int) -> Optional[int]:
+    """macOS: the process registry's own fingerprint (``gateway.status.get_process_start_time``, psutil
+    centiseconds), so a checkpoint's ``host_start_time`` compares equal; None when gone or a zombie."""
+    try:
+        import psutil  # type: ignore
+        if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+            return None
+        from gateway.status import get_process_start_time
+        return get_process_start_time(pid)
+    except Exception:  # health: allow BLE001 -- psutil NoSuchProcess/AccessDenied/missing all read as not ours
         return None
 
 
@@ -128,7 +145,7 @@ def _signal(record: dict, sig: int, *, group: bool) -> None:
         return
     try:
         if group and os.getpgid(pid) == pid:
-            os.killpg(pid, sig)  # windows-footgun: ok -- POSIX only (reads /proc); a job leads its own group
+            os.killpg(pid, sig)  # windows-footgun: ok -- POSIX workers only; a job leads its own group
         else:
             os.kill(pid, sig)
     except OSError:
@@ -255,6 +272,16 @@ def _release(conn: sqlite3.Connection, task_id: str, custody: dict, outcome: str
             "outcome": outcome, **extra})
 
 
+def _held_here(conn: sqlite3.Connection, task_id: str) -> bool:
+    """This host's claim holds the card (the custody host re-claimed the retry): no other host can claim it, so
+    the bound has nothing to prevent and must not kill a ``persist_on_release`` job the running retry relies on.
+    The custody stays open; once that run ends, the sweep resumes (bound included)."""
+    from hermes_cli import kanban_db as kb
+    row = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row is not None and row["status"] == "running" and bool(row["claim_lock"]) \
+        and kb._claim_is_local(row["claim_lock"], kb._host_prefix())
+
+
 def sweep(conn: sqlite3.Connection, *, now: Optional[float] = None,
           terminate_fn: Optional[Callable[[list[dict]], list[dict]]] = None) -> list[str]:
     """Dispatch tick on the custody host: release custodies whose processes all exited; at ``until``, terminate
@@ -268,8 +295,8 @@ def sweep(conn: sqlite3.Connection, *, now: Optional[float] = None,
                 continue
             procs = [p for p in custody["processes"] if isinstance(p, dict)]
             live = [p for p in procs if _alive(p.get("pid"), p.get("start"))]
-            if live and moment < float(custody.get("until") or 0):
-                continue
+            if live and (moment < float(custody.get("until") or 0) or _held_here(conn, task_id)):
+                continue  # before the bound, or the retry runs here with the job: persist_on_release holds
             extra: dict = {}
             outcome = "exited"
             if live:

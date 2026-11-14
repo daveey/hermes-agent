@@ -19,6 +19,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_requeue_custody as custody
 from hermes_cli.kanban_core_update_requeue import CORE_UPDATE_REQUEUE_REASON
+from tests.waiting import wait_until
 
 SESSION = "local-run-48261-session"
 HOST, OTHER = "worker-2", "worker-8"
@@ -225,3 +226,41 @@ def test_custody_of_a_silent_host_stops_holding_after_the_grace(board, procs, mo
     row = board.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
     assert custody.claim_refusal(board, row, now=until + custody.RELEASE_GRACE_SECONDS - 1)
     assert custody.claim_refusal(board, row, now=until + custody.RELEASE_GRACE_SECONDS) is None
+
+
+def test_bound_spares_the_job_while_the_custody_hosts_retry_runs(board, procs, monkeypatch):
+    """Review of 478094ef: the bound must not kill a persist_on_release job the same host's re-claimed retry
+    runs with (another host can't claim a running card, so killing prevents nothing). Once that run ends
+    while the job still lives, the bound applies again."""
+    tid = _running_card(board, max_runtime=60)
+    ship = _ready(procs(STUBBORN))
+    start = custody._start_ticks(ship)
+    assert start is not None
+    _checkpoint(board, _entry(ship, persist=True, command="ship"))
+    monkeypatch.setattr(custody, "own_host", lambda conn: HOST)
+    until = _requeue(board, tid)["custody"]["until"]
+    assert not _claim_from(board, monkeypatch, tid, HOST).deferred
+    assert kb.claim_task(board, tid) is not None  # the custody host's own retry runs
+
+    assert custody.sweep(board, now=until + 1) == []
+    task = kb.get_task(board, tid)
+    assert task is not None and task.status == "running" and custody._alive(ship, start)
+
+    assert kb.reclaim_task(board, tid, reason="operator", signal_fn=lambda *_: None)  # that run ends
+    assert custody.sweep(board, now=until + 2) == [tid]
+    assert _wait_dead(ship, start)
+
+
+def test_liveness_without_proc_uses_the_registry_fingerprint(procs, monkeypatch):
+    """Review nit of 478094ef: on macOS (no /proc) every pid read as dead, so no custody was ever recorded.
+    Without /proc the fingerprint is the process registry's own (psutil), matching checkpoint entries."""
+    from gateway.status import get_process_start_time
+    monkeypatch.setattr(custody, "_HAS_PROC", False)
+    proc = procs(SLEEPER)
+    pid = _ready(proc)
+    assert custody._start_ticks(pid) is not None and custody._start_ticks(pid) == get_process_start_time(pid)
+    assert custody._alive(pid, get_process_start_time(pid))
+    proc.kill()
+    wait_until(lambda: custody._start_ticks(pid) is None, timeout=5, what="killed child reads as dead (zombie)")
+    proc.wait(timeout=5)
+    assert custody._start_ticks(pid) is None
