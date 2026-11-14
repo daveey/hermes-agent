@@ -520,6 +520,31 @@ def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_i
     return True
 
 
+_DISPATCHER_RELEASES = (CLEARED_EVENT, PROBE_RELEASED_EVENT)
+
+
+def _operator_released(conn: sqlite3.Connection, task_id: str, blocker_id: str) -> bool:
+    """The card's newest ``unblocked`` is newer than its own last assertion and was not the dispatcher's.
+
+    :func:`release_cleared_blockers` and :func:`probe_stranded_blockers` release through
+    ``kb.unblock_task`` too, then record :data:`CLEARED_EVENT` / :data:`PROBE_RELEASED_EVENT` as the
+    card's very next event. Such a release answers the wall's state at that moment; a run started after
+    it that hits the wall again is newer evidence, so the card falls back to the normal rule instead of
+    spawning only to rediscover the wall (one wasted run per released card per episode). [daveey]
+    """
+    if not _unblocked_since_assertion(conn, task_id, blocker_id, own_only=True):
+        return False
+    rows = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='unblocked'", (task_id,)).fetchall()
+    newest = max(rows, key=_event_order)
+    order = _event_order(newest)
+    following = [row for row in conn.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND created_at>=? AND id<>?",
+        (task_id, newest["created_at"], newest["id"]),
+    ) if _event_order(row) > order]
+    after = min(following, key=_event_order, default=None)
+    return after is None or after["kind"] not in _DISPATCHER_RELEASES
+
+
 def shared_blocker_guard(
     conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
     interval: Optional[int] = None,
@@ -553,10 +578,10 @@ def _shared_blocker_hold(conn, task_id, *, now=None, interval=None) -> Optional[
     if st is None or not st.is_open or not task_applies(conn, st, task_id):
         return None
     from hermes_cli.kanban_shared_blocker_checks import registered_checks
-    if st.blocker_id in registered_checks() and _unblocked_since_assertion(
-            conn, task_id, st.blocker_id, own_only=True):
+    if st.blocker_id in registered_checks() and _operator_released(conn, task_id, st.blocker_id):
         # This wall has an independent dispatcher probe. A peer's long run or
         # reassertion cannot revoke the operator's explicit release of this card.
+        # The dispatcher's own releases earn no such exemption (_operator_released).
         return None
     others = [t for t in st.behind if t != task_id and task_applies(conn, st, t)]
     if others:
