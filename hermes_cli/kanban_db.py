@@ -1000,6 +1000,7 @@ CREATE TABLE IF NOT EXISTS task_wake_checks (
     fails     INTEGER NOT NULL DEFAULT 0, first_failure_at INTEGER,
     generation TEXT, purpose TEXT NOT NULL DEFAULT 'wake'  -- 'wake' (park) | 'ask_resolved' (kanban_ask_resolved)
 );
+CREATE INDEX IF NOT EXISTS idx_wake_checks_next_at  ON task_wake_checks(next_at);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);

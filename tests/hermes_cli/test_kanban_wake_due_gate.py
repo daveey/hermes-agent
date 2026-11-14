@@ -10,6 +10,20 @@ from tests.hermes_cli import test_kanban_wake_check as helpers
 kanban_home = helpers.kanban_home
 
 
+def test_deadline_query_uses_covering_index_after_schema_upgrade(kanban_home):
+    with kbc.connect_closing() as conn:
+        # Simulate an existing board from before the deadline index was added.
+        conn.execute("DROP INDEX IF EXISTS idx_wake_checks_next_at")
+        kbc.apply_schema_steps(conn)
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT MIN(next_at) FROM task_wake_checks"
+        ).fetchall()
+        assert any("COVERING INDEX idx_wake_checks_next_at" in row[3] for row in plan)
+        # Schema initialization remains idempotent on subsequent opens.
+        kbc.apply_schema_steps(conn)
+        assert conn.execute("SELECT MIN(next_at) FROM task_wake_checks").fetchone()[0] is None
+
+
 def test_not_due_avoids_probe_join_and_config_but_due_runs(kanban_home, monkeypatch):
     from hermes_cli import kanban_ci_progress as ci
     monkeypatch.setattr(ci, "submit_sweep", Mock(return_value=None))
