@@ -37,7 +37,9 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, 
     parts = [text[start - 2:start]]
     while pos < len(text) and stack:
         char = text[pos]
-        if text.startswith("$'", pos):
+        if char == "`" or text.startswith("$'", pos):
+            # Nested backticks need the same inner-comment normalization as root
+            # substitutions; otherwise a comment's quote leaks into outer shlex.
             end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes)
             parts.extend((text[copied:pos], span))
             pos = copied = end
