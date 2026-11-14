@@ -51,8 +51,12 @@ def _double_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str
     return pos, "".join(parts)
 
 
-def _command_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str]:
-    """Find a substitution's closing parenthesis in its own shell comment frame."""
+def _command_span(text: str, start: int, *, shlex_quotes: bool,
+                  breaks: list[int] | None = None) -> tuple[int, str]:
+    """Find a substitution's closing parenthesis in its own shell comment frame.
+
+    With *breaks*, record (relative to the returned span) each newline that separates commands
+    in this frame or a nested parameter/command frame, so a logical-line split still sees them."""
     pos = copied = start
     depth = 1
     word_start = True
@@ -76,18 +80,24 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, st
             pos = _quoted_end(text, pos + 1, char, escapes=False)
             word_start = False
             continue
+        nested: list[int] | None = None
         if char == '"':
             end, span = _double_span(text, pos + 1, shlex_quotes=shlex_quotes)
         elif char in "$`":
-            end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes)
+            nested = [] if breaks is not None else None
+            end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes,
+                                   breaks=nested)
         else:
             end, span = pos, ""
         if span:
+            _shift_breaks(breaks, nested, _out_len(parts) + pos - copied)
             parts.extend((text[copied:pos], span))
             pos = copied = end
             word_start = False
             continue
-        if char == "(":
+        if char == "\n" and breaks is not None:
+            breaks.append(_out_len(parts) + pos - copied)
+        elif char == "(":
             depth += 1
         elif char == ")":
             depth -= 1
@@ -100,7 +110,8 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, st
     return pos, "".join(parts)
 
 
-def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str]:
+def _parameter_span(text: str, start: int, *, shlex_quotes: bool,
+                    breaks: list[int] | None = None) -> tuple[int, str]:
     """Keep parameter words opaque to the OUTER comment/line scanner.
 
     Nested expansions and quoted closing braces do not end the parameter. Contents
@@ -116,7 +127,10 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, 
         ):
             # Nested backticks need the same inner-comment normalization as root
             # substitutions; otherwise a comment's quote leaks into outer shlex.
-            end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes)
+            nested = [] if breaks is not None else None
+            end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes,
+                                   breaks=nested)
+            _shift_breaks(breaks, nested, _out_len(parts) + pos - copied)
             parts.extend((text[copied:pos], span))
             pos = copied = end
             continue
@@ -144,12 +158,25 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, 
     return pos, "".join(parts)
 
 
-def _expansion(text: str, pos: int, *, in_double: bool, shlex_quotes: bool) -> tuple[int, str]:
-    """Return an opaque span, or an empty span when ordinary scanning should proceed."""
+def _out_len(parts: list[str]) -> int:
+    return sum(map(len, parts))
+
+
+def _shift_breaks(breaks: list[int] | None, nested: list[int] | None, offset: int) -> None:
+    if breaks is not None and nested:
+        breaks.extend(offset + brk for brk in nested)
+
+
+def _expansion(text: str, pos: int, *, in_double: bool, shlex_quotes: bool,
+               breaks: list[int] | None = None) -> tuple[int, str]:
+    """Return an opaque span, or an empty span when ordinary scanning should proceed.
+
+    *breaks* collects command-separating newlines of nested ``$(...)`` frames (see
+    ``_command_span``); backtick bodies and double-quoted frames do not report them."""
     if text.startswith("${", pos):
-        return _parameter_span(text, pos + 2, shlex_quotes=shlex_quotes)
+        return _parameter_span(text, pos + 2, shlex_quotes=shlex_quotes, breaks=breaks)
     elif text.startswith("$(", pos) and not text.startswith("$((", pos):
-        return _command_span(text, pos + 2, shlex_quotes=shlex_quotes)
+        return _command_span(text, pos + 2, shlex_quotes=shlex_quotes, breaks=breaks)
     elif text[pos] == "`":
         end = _quoted_end(text, pos + 1, "`")
         if shlex_quotes and text[end - 1:end] == "`":
@@ -190,13 +217,23 @@ def _scan(text: str, *, split: bool, keep_comments: bool, shlex_quotes: bool = F
                 and not text.startswith("$(", pos)):
             # Root $() traversal stays visible to logical-line consumers; only
             # nested opaque words need the substitution framed as a whole.
-            end, span = _expansion(text, pos, in_double=in_double, shlex_quotes=shlex_quotes)
+            breaks: list[int] | None = [] if split and not in_double else None
+            end, span = _expansion(text, pos, in_double=in_double, shlex_quotes=shlex_quotes,
+                                   breaks=breaks)
             if span:
                 if shlex_quotes and in_double:
                     # shlex has no nested shell frames: keep the normalized
                     # substitution's quotes inside the enclosing quoted word.
                     span = span.replace("\\", "\\\\").replace('"', '\\"')
-                current.append(span)
+                # A newline separating commands in a nested $() still ends the logical
+                # line (as an unframed scan does), so the command after it is read.
+                prev = 0
+                for brk in breaks or ():
+                    current.append(span[prev:brk])
+                    lines.append("".join(current))
+                    current = []
+                    prev = brk + 1
+                current.append(span[prev:])
                 word_start = False
                 continue
         if in_comment:

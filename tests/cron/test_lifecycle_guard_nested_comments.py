@@ -63,6 +63,32 @@ def test_nested_context_does_not_hide_following_command(tmp_path, prefix, danger
     assert refused is dangerous, reason
 
 
+# A newline inside a `$(...)` nested in a parameter word separates commands there, so the
+# command after it runs even though the `${...}` word is framed as one opaque span.
+NEWLINE_FRAMES = [
+    "echo ${x:-$(true\n{cmd})}",
+    "echo ${x:-$(echo #c\n{cmd})}",
+    "echo ${x:-$(echo #it's\n{cmd})}",
+    "echo ${x:-${y:-$(true\n{cmd})}}",
+    "echo ${x:-$(echo ${y:-$(true\n{cmd})})}",
+    "echo $(echo ${x:-$(true\n{cmd})})",
+    "echo ${x:-$(true\ntrue\n{cmd})}",
+    # A quoted newline inside the nested substitution is data, not a separator.
+    "echo ${x:-$(echo \"a\nb\")}\n{cmd}",
+    "echo ${x:-$(echo 'a\nb')}; {cmd}",
+]
+
+
+@pytest.mark.parametrize("frame", NEWLINE_FRAMES)
+@pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
+def test_newline_in_nested_substitution_separates_commands(tmp_path, frame, dangerous):
+    helpers._tree(tmp_path)
+    command = frame.replace("{cmd}", "bash ./r.sh" if dangerous else "python3 ./clean.py")
+    assert helpers._bash_runs(tmp_path, command) is dangerous
+    refused, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert refused is dangerous, reason
+
+
 @pytest.mark.parametrize("escape", [r"\0", r"\x00"])
 @pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
 def test_ansi_nul_truncates_only_quoted_span(tmp_path, escape, dangerous):
