@@ -511,7 +511,9 @@ def auth_priority_command(args) -> None:
 
 def _auth_set_disabled(args, disabled: bool) -> None:
     """`hermes auth disable|enable <provider> <target>`: switch one pooled credential off or back on."""
-    from agent.credential_pool_disabled import SUPPORTED_PROVIDERS, disabled_by_root, set_credential_disabled
+    from agent.credential_pool_disabled import (
+        SUPPORTED_PROVIDERS, disabled_by_relay, disabled_by_root, set_credential_disabled,
+    )
     provider = _normalize_provider(getattr(args, "provider", ""))
     if disabled and provider not in SUPPORTED_PROVIDERS:
         raise SystemExit(f"Disabling is supported for {', '.join(sorted(SUPPORTED_PROVIDERS))}, not {provider}; "
@@ -522,6 +524,10 @@ def _auth_set_disabled(args, disabled: bool) -> None:
     if matched is None or index is None:
         raise SystemExit(f"{error} Provider: {provider}.")
     changed = set_credential_disabled(provider, matched, disabled)
+    if not disabled and disabled_by_relay(provider, matched):
+        print(f"Still disabled: {provider} credential #{index} ({matched.label}) by hub-oauth-relay policy; "
+              "local disable cleared. Enable on the hub, then pull again.")
+        return
     verb = "Disabled" if disabled else "Enabled"
     state = "" if changed else " (already " + ("disabled" if disabled else "enabled") + ")"
     print(f"{verb} {provider} credential #{index} ({matched.label}){state}")

@@ -290,6 +290,20 @@ def forget_removed(provider: str, removed: Any, remaining: Iterable[Any]) -> boo
     return True
 
 
+def disabled_by_relay(provider: str, entry: Any) -> bool:
+    """Whether relay-owned policy in the active or root home still disables this row."""
+    from hermes_cli import auth as auth_mod
+    for path in {auth_mod._auth_file_path(), _root_path()} - {None}:
+        try:
+            store = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        records = (r for r in _records(store, provider) if r.get("source") == "hub-oauth-relay")
+        if matches(entry, _keys_from_records(records)):
+            return True
+    return False
+
+
 def disabled_by_root(provider: str, entry: Any) -> bool:
     """True when the global root (not the active profile) holds a record disabling *entry*."""
     from hermes_cli import auth as auth_mod

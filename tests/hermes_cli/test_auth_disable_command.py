@@ -82,6 +82,35 @@ def test_enable_warns_when_root_disables(home, monkeypatch, tmp_path, capsys):
     assert "(already enabled)" in out and "global Hermes home also disables" in out
 
 
+@pytest.mark.parametrize("location", ["active", "root"])
+@pytest.mark.parametrize("local", [False, True])
+def test_enable_reports_remaining_relay_policy(home, monkeypatch, tmp_path, capsys, location, local):
+    from agent import credential_pool_disabled as cpd
+    from agent.credential_pool import load_pool
+    from hermes_cli import auth
+
+    store = auth._load_auth_store()
+    store["credential_pool"]["anthropic"][0]["source"] = "manual:hub_minted"
+    auth._save_auth_store(store)
+    if local:
+        _run("disable", "acct0")
+    record = {"label": "acct0", "source": "hub-oauth-relay", "scope": "manual:hub_minted"}
+    if location == "active":
+        store = auth._load_auth_store()
+        store.setdefault("disabled_credentials", {}).setdefault("anthropic", []).append(record)
+        auth._save_auth_store(store)
+    else:
+        root = tmp_path / "root.json"
+        root.write_text(json.dumps({"disabled_credentials": {"anthropic": [record]}}))
+        monkeypatch.setattr(cpd, "_root_path", lambda: root)
+    capsys.readouterr()
+    _run("enable", "acct0")
+    out = capsys.readouterr().out
+    assert "Still disabled" in out and "hub-oauth-relay" in out
+    assert "already enabled" not in out
+    assert cpd.is_credential_disabled("anthropic", load_pool("anthropic").entries()[0])
+
+
 def test_remove_forgets_the_disable_so_a_re_added_row_is_not_born_disabled(home):
     from hermes_cli.auth_commands import auth_remove_command
     _run("disable", "acct0")
