@@ -29,7 +29,12 @@ def test_changed_canonical_request_never_archives(fleet, monkeypatch, field):
     assert kb.get_task(f.h, f.target).status != "archived"
     f.board()
     requests.drain(f.w)
-    assert helpers.request_status(f, out) == "rejected"
+    # A changed target's refusal is deliberately not accepted as a result for
+    # the original target. The caller stays pending rather than trusting it.
+    assert helpers.request_status(f, out) == ("accepted" if field == "target_task_id" else "rejected")
+    result = f.h.execute("SELECT payload FROM task_events WHERE kind=?", (calls.RESULT_KIND,)).fetchone()
+    assert result is not None
+    assert json.loads(result[0])["outcome"] == "refused"
 
 
 def test_done_target_with_dependent_is_refused_at_home(fleet, monkeypatch):
