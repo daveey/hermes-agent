@@ -499,7 +499,8 @@ def _event_order(row) -> tuple[int, int]:
     from hermes_cli.kanban_shared_blocker_fence import consistent_uid_milliseconds
 
     created = kb._to_epoch(row["created_at"]) or 0
-    # A backfilled uid carries backfill time: trust it only inside created_at's second.
+    # A backfilled uid carries backfill time: trust it only inside created_at's second
+    # (or just past it, for a write straddling the boundary).
     stamp = consistent_uid_milliseconds(row["uid"] if "uid" in row.keys() else None, created)
     if stamp is None:
         stamp = created * 1000

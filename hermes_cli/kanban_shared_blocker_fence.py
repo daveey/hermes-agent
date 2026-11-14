@@ -29,14 +29,25 @@ def uid_milliseconds(identity):
     return uid.int >> 80 if uid.version == 7 else None
 
 
+# created_at is read in Python before the INSERT and the uid is minted later by
+# the AFTER INSERT trigger, so a write straddling a second boundary carries a
+# legitimate uid just past created_at's second (replay of local boards: 296 of
+# 957,626 v7 event uids, 259 within 50 ms, max 760 ms). Backfilled uids sit
+# minutes to days out (125k at >= 60 s).
+UID_STRADDLE_MS = 1000
+
+
 def consistent_uid_milliseconds(identity, seconds):
-    """UUIDv7 milliseconds only when they fall in the row's own recorded second.
+    """UUIDv7 milliseconds only when they fall in the row's own recorded second,
+    or within :data:`UID_STRADDLE_MS` after it (a write straddling the boundary).
 
     Sync backfills uid-less rows with a v7 uid stamped at backfill time, so a
-    uid whose second disagrees with the row's seconds clock is not event time.
+    uid stamped later than that is not event time.
     """
     ms = uid_milliseconds(identity)
-    return ms if ms is not None and ms // 1000 == seconds else None
+    if ms is None or type(seconds) is not int:
+        return None
+    return ms if seconds * 1000 <= ms < (seconds + 1) * 1000 + UID_STRADDLE_MS else None
 
 
 def _uid_before_check(identity, started, payload):

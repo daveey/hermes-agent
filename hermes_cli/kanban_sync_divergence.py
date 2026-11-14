@@ -228,6 +228,8 @@ def _event_order(event: dict) -> tuple[int, int, int]:
     its 48-bit millisecond orders the two. A row with no uid (sync off, or written while the triggers were down)
     falls back to arrival order, and so does a uid that is not a v7 (its leading bits are random, not time) or a
     v7 outside the row's own second: ``kanban_db_sync`` backfills uid-less rows with a v7 stamped at backfill time.
+    A uid up to ``UID_STRADDLE_MS`` past the second still counts (created_at is read before the INSERT, the uid at
+    it), and sorts last in its own second.
     """
     second = int(event["created_at"] or 0)
     ms = consistent_uid_milliseconds(event.get("uid"), second)

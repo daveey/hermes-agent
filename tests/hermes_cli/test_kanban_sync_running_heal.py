@@ -8,6 +8,7 @@ import json
 import logging
 import sqlite3
 import time
+import uuid
 
 import pytest
 
@@ -229,6 +230,20 @@ def test_a_backfilled_v7_uid_does_not_reorder_same_second_events():
     second = {"created_at": 100, "id": 6, "uid": None}
     assert _event_order(first) == (100, 100_000, 5)
     assert max((first, second), key=_event_order) is second
+
+
+@pytest.mark.parametrize("uid_ms,key", [
+    pytest.param(101_010, 101_010, id="straddle-10ms-into-next-second"),
+    pytest.param(101_999, 101_999, id="last-straddle-millisecond"),
+    pytest.param(102_000, 100_000, id="past-the-straddle-window"),
+    pytest.param(99_999, 100_000, id="before-the-row-second"),
+])
+def test_event_order_straddle_window(uid_ms, key):
+    """A uid minted just past created_at's second (the trigger runs after created_at is read) still orders within
+    its own second, last; one a full second further out is a backfill and falls back to the id."""
+    from hermes_cli.kanban_sync_divergence import _event_order
+    uid = str(uuid.UUID(int=(uid_ms << 80) | (7 << 76) | (2 << 62)))
+    assert _event_order({"created_at": 100, "id": 5, "uid": uid}) == (100, key, 5)
 
 
 @pytest.mark.parametrize("unblock_later_ms,expected", [(5, "todo"), (-5, "blocked")])
