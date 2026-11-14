@@ -8,11 +8,12 @@ import importlib.util
 import json
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tests.waiting import wait_until
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "observe_gateway_quiet.py"
 spec = importlib.util.spec_from_file_location("observe_gateway_quiet", SCRIPT)
@@ -207,24 +208,43 @@ def test_ps_cputime_rejects_garbage():
         obs.parse_ps_cputime("abc")
 
 
-def test_cpu_reader_measures_exactly_the_named_pid():
-    busy = subprocess.Popen([sys.executable, "-c", "import time\nt=time.process_time()\n"
-                             "while time.process_time()-t<0.6: pass\nimport sys; sys.stdin.read()"],
-                            stdin=subprocess.PIPE)
+def test_cpu_reader_measures_exactly_the_named_pid(tmp_path):
+    # Lifetime totals are not identities: the parent and child can both have
+    # consumed (for example) 0.55s. Compare controlled work deltas instead.
+    program = (
+        "import sys, time\nfrom pathlib import Path\n"
+        "root = Path(sys.argv[1])\n"
+        "root.with_suffix('.ready').touch()\n"
+        "if sys.stdin.buffer.read(1):\n"
+        "    t = time.process_time()\n"
+        "    while time.process_time() - t < 0.6: pass\n"
+        "    root.with_suffix('.done').touch()\n"
+        "    sys.stdin.buffer.read()\n"
+    )
+    processes = []
     try:
-        before = obs.read_cpu_seconds(busy.pid)
-        assert before is not None
+        for name in ("busy", "idle"):
+            processes.append(subprocess.Popen(
+                [sys.executable, "-c", program, str(tmp_path / name)], stdin=subprocess.PIPE))
+        busy = processes[0]
+        wait_until(lambda: all((tmp_path / f"{name}.ready").exists() for name in ("busy", "idle")),
+                   timeout=30, what="both children waiting for work")
+        before = [obs.read_cpu_seconds(proc.pid) for proc in processes]
+        assert all(value is not None for value in before)
         start = obs.read_process_start(busy.pid)
         assert start is not None and obs.read_process_start(busy.pid) == start  # stable identity
-        deadline = threading.Event()
-        while (obs.read_cpu_seconds(busy.pid) or 0) < 0.5 and not deadline.wait(0.05):
-            pass
-        assert obs.read_cpu_seconds(busy.pid) >= 0.5
-        parent = obs.read_cpu_seconds(__import__("os").getpid())
-        assert parent is not None and parent != obs.read_cpu_seconds(busy.pid)
+        busy.stdin.write(b"x")
+        busy.stdin.flush()
+        wait_until(lambda: (tmp_path / "busy.done").exists(), timeout=30, what="child CPU work completed")
+        after = [obs.read_cpu_seconds(proc.pid) for proc in processes]
+        assert all(value is not None for value in after)
+        assert after[0] - before[0] >= 0.5
+        assert after[1] - before[1] < 0.1  # reading a different PID must not include the busy child's work
     finally:
-        busy.stdin.close()
-        busy.wait(10)
+        for proc in processes:
+            proc.kill()
+            proc.stdin.close()
+            proc.wait(30)
 
 
 # ---- end to end: fake control endpoint + real child as the gateway -------------------------
