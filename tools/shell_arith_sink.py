@@ -117,6 +117,11 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
 def _quick_result(command: str, depth: int) -> bool | None:
     if depth >= 32:
         return True
+    # Literal heredoc bodies can be prose, even for unknown consumers. Without
+    # expansion introducers no substitution can form, regardless of quoting.
+    # Never apply this exception to top-level shell text or code-like bodies.
+    if depth and not any(mark in command for mark in ("$", "`", "<(", ">(")):
+        return False
     if "$(" not in command and not any(mark in command for mark in ("'", '"', "`")):
         return False
     if "$(" in command and _INTEGER_DECLARATION_RE.search(command):
