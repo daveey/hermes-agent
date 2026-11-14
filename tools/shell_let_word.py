@@ -118,7 +118,8 @@ def _ansi_c_piece(command: str, pos: int) -> tuple[str | None, int]:
                 out.append(chr(value) if value <= 0x10FFFF else "\ufffd")
             index = numeric.end()
             continue
-        if command.startswith("\\c@", index):
+        # Bash folds ASCII case before XOR 0x40: both @ and ` produce NUL.
+        if command.startswith(("\\c@", "\\c`"), index):
             truncated = True
             index += 3
             continue

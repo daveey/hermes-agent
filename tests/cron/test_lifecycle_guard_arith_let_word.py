@@ -18,6 +18,9 @@ from tools.shell_let_word import hidden_let_end
 
 # NUL truncates only its ANSI-C piece, not subsequent quoted/literal pieces.
 REVIEW_SINKS = [
+    r"$'let\c`ignored' 'a[$(SCRIPT)]=1'",
+    r"$'le\c`ignored't 'a[$(SCRIPT)]=1'",
+    r"$'le\c`ignored\'still ignored't 'a[$(SCRIPT)]=1'",
     r"$'let\0ignored' 'a[$(SCRIPT)]=1'",
     r"$'le\x00ignored't 'a[$(SCRIPT)]=1'",
     r"$'le\u0000ignored't 'a[$(SCRIPT)]=1'",
@@ -76,6 +79,10 @@ PRINTED = [
 # Bash runs none of these: no word is `let` after quote removal, or none of its operands
 # holds a subscript substitution.
 DATA = [
+    r"$'let\c`ignored'x 'a[$(SCRIPT)]=1' 2>/dev/null",
+    r"$'le\c`ignored' 'a[$(SCRIPT)]=1' 2>/dev/null",
+    r"$'let\cAignored' 'a[$(SCRIPT)]=1' 2>/dev/null",
+    r"$'let\caignored' 'a[$(SCRIPT)]=1' 2>/dev/null",
     r"$'let\0ignored'x 'a[$(SCRIPT)]=1' 2>/dev/null",
     r"$'lex\0let' 'a[$(SCRIPT)]=1' 2>/dev/null",
     r"$'letx\0' 'a[$(SCRIPT)]=1' 2>/dev/null",
