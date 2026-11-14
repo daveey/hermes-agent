@@ -122,3 +122,58 @@ def test_non_weakrefable_callable_is_retained_until_unregistered(monkeypatch):
     assert list(kg._reader_caches) == [callback]
     assert kg.unregister_reader_cache(callback) is True
     assert len(kg._reader_caches) == 0
+
+
+def test_slotted_instance_bound_method_stays_registered_while_owner_lives(tmp_path, monkeypatch):
+    from hermes_cli import kanban_lockguard
+
+    monkeypatch.setattr(kg, "_reader_caches", type(kg._reader_caches)())
+    monkeypatch.setattr(kg, "_connections", weakref.WeakSet())
+    monkeypatch.setattr(kg, "_poisoned", set())
+    path = str(tmp_path / "board.db")
+    calls = []
+    scans = iter([["retired-wal"], []])
+    monkeypatch.setattr(kanban_lockguard, "stranded_sidecars", lambda _: next(scans))
+
+    class SlottedCache:
+        __slots__ = ()  # no __weakref__: WeakMethod cannot reference the owner
+
+        def evict(self, board):
+            calls.append(board)
+
+    cache = SlottedCache()
+    kg.register_reader_cache(cache.evict)
+    gc.collect()
+    assert list(kg._reader_caches) == [cache.evict]
+    kg.recover(path)
+    assert calls == [path]
+    assert kg.unregister_reader_cache(cache.evict) is True
+    assert len(kg._reader_caches) == 0
+
+
+def test_builtin_bound_method_stays_registered_while_owner_lives(monkeypatch):
+    monkeypatch.setattr(kg, "_reader_caches", type(kg._reader_caches)())
+    evicted = []
+    kg.register_reader_cache(evicted.append)
+    gc.collect()
+    assert list(kg._reader_caches) == [evicted.append]
+    assert kg.unregister_reader_cache(evicted.append) is True
+    assert len(kg._reader_caches) == 0
+
+
+def test_unregister_after_pruned_entry_removes_the_matching_callback(monkeypatch):
+    monkeypatch.setattr(kg, "_reader_caches", type(kg._reader_caches)())
+
+    def make(name):
+        def callback(path):
+            pass
+        callback.__name__ = name
+        return callback
+
+    first, second, third, fourth = (make(n) for n in ("first", "second", "third", "fourth"))
+    for callback in (first, second, third, fourth):
+        kg.register_reader_cache(callback)
+    del first
+    gc.collect()
+    assert kg.unregister_reader_cache(third) is True
+    assert list(kg._reader_caches) == [second, fourth]

@@ -11,6 +11,7 @@ import os
 import sqlite3
 import threading
 import time
+import types
 import weakref
 from urllib.parse import unquote
 
@@ -56,10 +57,16 @@ class _ReaderCaches:
         try:
             entry = weakref.WeakMethod(callback)
         except TypeError:
-            try:
-                entry = weakref.ref(callback)
-            except TypeError:
-                entry = callback  # Some extension callables cannot be weakly referenced.
+            owner = getattr(callback, "__self__", None)
+            if owner is not None and not isinstance(owner, types.ModuleType):
+                # A bound method whose owner has no weakref slot (``__slots__``, ``list.append``): a weak
+                # reference to the method object itself would die with the caller's expression.
+                entry = callback
+            else:
+                try:
+                    entry = weakref.ref(callback)
+                except TypeError:
+                    entry = callback  # Some extension callables cannot be weakly referenced.
         self._entries.append(entry)
 
 
@@ -250,7 +257,14 @@ def forget(conn) -> None:
 
 
 def register_reader_cache(evict) -> None:
-    """A cache eviction must wait for its borrowers before closing its handles."""
+    """A cache eviction must wait for its borrowers before closing its handles.
+
+    Registration does not keep ``evict`` alive: a bound method lives as long as its instance, a function as long
+    as its module or other owner. A lambda, closure or ``functools.partial`` with no other owner is dropped at
+    once, so the caller holds it and passes the same object to ``unregister_reader_cache`` on unload. Bound
+    methods whose owner cannot be weakly referenced (``__slots__`` instances, builtin methods like
+    ``list.append``) and callables without weak-reference support are held strongly until unregistered.
+    """
     with _lock:
         if evict not in _reader_caches:
             _reader_caches.append(evict)
