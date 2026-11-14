@@ -542,6 +542,11 @@ def _settle_interrupted_update() -> None:
 
 _settle_interrupted_update()
 
+# After the repair above: a merge killed while writing hermes_agent/ must not keep the repair from running.
+from hermes_agent.compat import install as _install_compat
+
+_install_compat()
+
 
 def _record_boot_revision() -> None:
     """Read the checkout revision before the rest of the tree is imported. The boot-pin guard

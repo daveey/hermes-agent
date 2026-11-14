@@ -1652,7 +1652,7 @@ def _handle_create(args: dict, **kw) -> str:
         _admission_refused(marker_placement)  # raises the typed refusal for a denied hub pin
         try:
             new_tid = kb.create_task(
-                conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
+                conn, title=_redact(str(title).strip()), body=_redact_opt(args.get("body")), assignee=str(assignee),
                 parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None
                                                else args.get("tenant") or os.environ.get("HERMES_TENANT")),
                 priority=_opt_int(args.get("priority"), 0),

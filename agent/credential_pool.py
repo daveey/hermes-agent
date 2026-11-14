@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from agent.credential_pool_admin import CredentialPoolAdminMixin
 from agent.credential_pool_model_cooldowns import CredentialPoolModelCooldownMixin, model_cooldown_until
-from agent.credential_pool_timestamps import _normalize_error_context, _parse_absolute_timestamp
+from agent.credential_pool_errors import _normalize_error_context, redact_error_text
+from agent.credential_pool_timestamps import _parse_absolute_timestamp
 
 import logging
 import os
@@ -1156,7 +1157,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         persist: bool = True,
         failure_reason: Optional[str] = None,
     ) -> PooledCredential:
-        normalized_error = _normalize_error_context(error_context)
+        normalized_error = _normalize_error_context(error_context, (entry.access_token, entry.refresh_token, entry.agent_key))
         # Permanent OAuth failures become STATUS_DEAD, not STATUS_EXHAUSTED:
         # otherwise a revoked credential re-enters rotation every hour and
         # fails immediately until the user removes it (#32849); a row whose
@@ -1853,7 +1854,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 last_status_at=time.time(),
                 last_error_code=None,
                 last_error_reason=str(getattr(exc, "code", None) or "invalid_grant"),
-                last_error_message=str(exc),
+                last_error_message=redact_error_text(str(exc), (current.access_token, current.refresh_token, current.agent_key)),
             )
 
     def _clear_terminal_tokens_state(self, entry: PooledCredential, exc: Exception) -> None:

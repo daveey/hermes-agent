@@ -85,6 +85,22 @@ def _is_under_folded(resolved: Path, base: Path) -> bool:
     return r[:len(b)] == b
 
 
+def deny_key(path: str | Path) -> str:
+    """``path`` as text for credential-DENY comparisons, casefolded. macOS and Windows open
+    ``~/.ssh`` for ``~/.SSH`` while realpath/resolve keep the typed case. [daveey] Folded on Linux
+    too, like ``_is_under_folded``: over-blocking a cased lookalike there is the accepted cost of
+    failing closed (upstream keeps Linux exact). Never for allowlist containment (safe roots,
+    cache roots): folding there would widen what is allowed."""
+    return os.fspath(path).casefold()
+
+
+def deny_path_under(resolved: str | Path, base: str | Path) -> bool:
+    """``_is_under`` for deny lists: ``resolved`` equals ``base`` or lies below it, compared by ``deny_key``."""
+    target, root = deny_key(resolved), deny_key(base)
+    return target == root or target.startswith(root.rstrip(os.sep) + os.sep)
+
+
+
 def _is_under(resolved: str | Path, base: str | Path) -> bool:
     """True when ``resolved`` equals ``base`` or lies below it (both already resolved);
     ``Path`` inputs use ``relative_to`` (platform semantics), ``str`` a realpath prefix test."""
@@ -334,6 +350,10 @@ def build_write_approval_paths(home: str) -> set[str]:
 # mcp-tokens/, pairing/, vault/ (key + ciphertext side by side),
 # browser-profile/ (copied cookies / Login Data) and webapp/ (the Webapp's
 # browser credential and its grants to native apps) hold credential material.
+# skills/ and memories/ are deliberately NOT here: they are user-editable
+# content, and write approval for them (memory/skills ``write_approval``) is
+# enforced by the memory/skill subsystem tools, not the generic write path
+# (#60440 tracks closing that gap for write_file/patch).
 # Control files (auth.json, config.yaml, webhook_subscriptions.json) are
 # deliberately NOT here (#45947): read-denied, but the user may ask to edit them.
 _HERMES_PROTECTED_SUBPATHS = (
@@ -490,6 +510,17 @@ def is_blocked_device_path(path: str) -> bool:
     if normalized in _BLOCKED_DEVICE_PATHS:
         return True
     return normalized.startswith("/proc/") and normalized.endswith(_BLOCKED_PROC_SUFFIXES)
+
+
+def is_project_env_basename(name: str) -> bool:
+    """True if ``name`` is a secret-bearing project env filename.
+
+    Shared by the read guard (:func:`get_read_block_error`, which blocks reading
+    these anywhere on disk) and the media-delivery denylist
+    (``gateway/platforms/base.validate_media_delivery_path``) so the delivery /
+    exfil side can't drift from the read side. Case-insensitive basename match.
+    """
+    return name.lower() in _BLOCKED_PROJECT_ENV_BASENAMES
 
 
 def get_read_block_error(path: str) -> Optional[str]:

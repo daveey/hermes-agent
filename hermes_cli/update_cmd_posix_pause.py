@@ -103,12 +103,17 @@ class PauseRefused(RuntimeError):
         self.units = list(units)
 
 
+class StopUnsettled(PauseRefused):
+    """A ``--force`` stop is still running (a supervisor's stop job, a gateway that outlived
+    SIGKILL): nothing may be started behind it, so the update stops before the checkout moves."""
+
+
 def _empty_token() -> dict:
     return {"platform": "posix", "resume_needed": False, "profiles": {}, "unmapped_pids": [],
             "unmapped": [], "posix_units": []}
 
 
-def arm_pause(*, no_gateway_restart: bool) -> dict | None:
+def arm_pause(*, no_gateway_restart: bool, force: bool = False) -> dict | None:
     """Arm this run's pause (no stop yet) and adopt any set a killed update left paused.
 
     ``None`` on Windows (its own pause) and with ``--no-gateway-restart`` (the user manages
@@ -128,6 +133,8 @@ def arm_pause(*, no_gateway_restart: bool) -> dict | None:
             token["platform"] = "posix"
     except Exception as exc:  # health: allow BLE001 -- an unreadable record must not block the update; recovery retries it
         print(f"  ⚠ Could not adopt gateways an earlier update paused: {exc}")
+    if force:
+        token["force"] = True  # ``hermes update --force``: stop at once, no drain (update_cmd_force_stop)
     _RUN = token
     return token
 
@@ -233,11 +240,11 @@ def _discover_launchd() -> list[dict]:
         _locate_launchd_gateway_service, get_launchd_plist_path, launchd_gateway_labels_for_install,
         legacy_launchd_labels_for_install,
     )
-    from hermes_cli.update_fleet_scope import launchd_label_foreign_home
+    from hermes_cli.update_fleet_scope import launchd_label_skip_notice
     derived = launchd_gateway_labels_for_install()
     jobs = []
     for label in derived + legacy_launchd_labels_for_install(exclude=set(derived)):
-        if launchd_label_foreign_home(label) is not None:
+        if launchd_label_skip_notice(label) is not None:
             continue
         domain, pid = _locate_launchd_gateway_service(label)
         if domain is None or not pid or pid <= 0:
@@ -461,6 +468,13 @@ def _stop_unit(unit: dict) -> None:
         return
     if result.returncode != 0:
         raise PauseRefused(f"systemctl stop {unit['unit']} failed: {(result.stderr or '').strip()}", [unit["unit"]])
+
+
+def unit_stop_pending(unit: dict) -> bool:
+    """A systemd unit whose stop has not settled (``deactivating``, or a job still queued): a start
+    now would queue behind it. Unreadable counts as pending; a launchd job is never held here."""
+    from hermes_cli.update_cmd_fleet_unit_budget import _settled, unit_job_state
+    return unit.get("kind") == "systemd" and not _settled(unit_job_state(_scope_cmd(unit), unit["unit"]))
 
 
 def _start_unit(unit: dict) -> int:
@@ -819,6 +833,9 @@ def _stop_gateways(token: dict, entries: list[dict], deadline: float | None = No
     from hermes_cli import update_pause_record as pause_record
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
     from hermes_cli.update_gateway_fence import parked_launchd_launcher
+    if token.get("force"):
+        from hermes_cli.update_cmd_force_stop import force_stop_gateways
+        return force_stop_gateways(token, entries)
     if _stop_busy_opted_in():
         return _stop_busy_gateways(token, entries, deadline if deadline is not None
                                    else time.monotonic() + _PRE_SWAP_DRAIN_WAIT_S)
@@ -956,7 +973,8 @@ def pause_at_commit_point() -> str | None:
     """Stop this install's gateways before the first checkout move; once per run.
 
     A failed or overlong drain refuses the move. The sticky verdict also fences later
-    commit points in the same update; retrying requires a new run."""
+    commit points in the same update; retrying requires a new run. Under ``--force`` a stop that
+    has not settled (``StopUnsettled``) refuses as well, before git writes a file."""
     token = _RUN
     if token is None:
         return None
@@ -980,6 +998,10 @@ def _pause(token: dict) -> str | None:
         print(f"  ↷ {STOP_BUSY_ENV} is Linux-only; this host keeps the idle-only pause (busy gateways defer the update)")
     _MANAGE_CMDS.clear()
     budget = _subprocess_budget(deadline) if opted_in else nullcontext([])
+    # An adopted set an earlier ``--force`` left mid-stop: its unit reads MainPID 0, so discovery
+    # skips it, and the swap plus the resume would start it behind that unfinished stop job.
+    if held := [u for u in token.get("posix_units") or [] if u.get("stop_unsettled") and unit_stop_pending(u)]:
+        return _abort_unsettled(token, f"{_names(held)} is still stopping from an earlier `hermes update --force`")
     try:
         _DISCOVERY_DEADLINE = deadline if opted_in else None
         with budget as timed_out:
@@ -1045,6 +1067,8 @@ def _pause(token: dict) -> str | None:
         # Exemption and restart custody were decided together before recording. Re-evaluating
         # here could skip a newly parked launcher while retaining its durable restart debt.
         _stop_gateways(token, supervised + bare, deadline, fence_checked=True)
+    except StopUnsettled as exc:
+        return _abort_unsettled(token, str(exc))
     except BaseException as exc:  # health: allow BLE001 -- interruption must settle before cmd_update releases its fence
         from hermes_cli.update_cmd_windows import _resume_windows_gateways_after_update
         print(f"  ↷ Update deferred: {exc or type(exc).__name__}; the checkout was not changed")
@@ -1083,6 +1107,23 @@ def _deferral_streak(refusal: BaseException | None = None) -> None:
             deferrals.note_deferral(getattr(refusal, "units", ()), str(refusal))
     except Exception as exc:  # health: allow BLE001 -- bookkeeping must not turn a deferral into a crash
         print(f"  ⚠ Could not record the deferral streak: {exc}")
+
+
+def _abort_unsettled(token: dict, why: str) -> str:
+    """The commit point's refusal for a ``--force`` stop still in flight. A rollback start would
+    queue behind that stop (or race the gateway still exiting) and the swap would follow, so neither
+    runs: this process restarts nothing; the durable record stays owed for the next launch's
+    recovery, which holds an entry until its process has exited and its unit's stop has settled."""
+    from hermes_cli import update_pause_record as pause_record
+    token["resume_needed"] = False  # no exit resume in this process (it would start behind the stop)
+    for unit in token.get("posix_units") or []:
+        if unit.get("kind") == "systemd":
+            unit["stop_unsettled"] = True  # durable: recovery and the next update hold it while it stops
+    token["resume_deferred"] = why  # ``sync`` keeps the record owed for the next launch
+    pause_record.sync(token)
+    return (f"--force could not finish stopping the gateways: {why}. The update stopped before "
+            "changing the checkout; the stopped gateways restart at the next `hermes` command once "
+            "their stop has completed, then run `hermes update --force` again")
 
 
 # --------------------------------------------------------------------------- resume

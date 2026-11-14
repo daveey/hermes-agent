@@ -49,6 +49,7 @@ from hermes_cli.kanban_db_dispatch_clock import record_clock_hold as _record_clo
 from hermes_cli.kanban_db_dispatch_rerun import reopened_after
 from hermes_cli import kanban_db_dispatch_custody as _custody
 from hermes_cli.kanban_db_dispatch_pid import _pid_alive  # re-export
+from hermes_cli._startup_fast import project_root_str
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -2511,9 +2512,8 @@ def _open_worker_log(task: Task, board: Optional[str]):
     log_dir = _kb.worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
-    from hermes_cli.kanban_worker_log import rotate_worker_log, worker_log_rotation_config
-    rotate_worker_log(log_path, *worker_log_rotation_config())
-    log = open(log_path, "ab")
+    from hermes_cli.kanban_worker_log import open_worker_log
+    log = open_worker_log(log_path)
     log.write(f'\n[kanban-worker-start] run_id={task.current_run_id}\n'.encode())
     log.flush()  # must reach disk before a child can fail (even before importing its client)
     return log
@@ -2671,13 +2671,11 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
     env.pop("HERMES_TUI", None)
 
     cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
-    # The worker is `-m hermes_cli.kanban_worker_client`: Hermes itself, with no console-script
-    # bootstrap. The routed-profile scrub above strips Hermes-owned PYTHONPATH entries (user
-    # children must not see our tree), so a PYTHONPATH-launched dispatcher spawned a child that
-    # died on `No module named 'hermes_cli'` before it ever reached the owner. Same pin as cron's
-    # external worker (#112729): applied to the sanitized env, after every other decision stands.
+    # The worker is `-m hermes_cli.kanban_worker_client` with no console-script bootstrap, and the scrub
+    # above strips our PYTHONPATH entries, so a PYTHONPATH-launched dispatcher's child died on
+    # `No module named 'hermes_cli'` (#112729). Pinned last, after every other env decision.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
-    env = pin_hermes_tree_on_pythonpath(env, Path(_startup_fast.project_root_str()))
+    env = pin_hermes_tree_on_pythonpath(env, Path(project_root_str()))
     # [daveey] Deferred placement: a card with parents that nothing pins here runs on the routed gateway.
     # Its forwarder (seconds, no LLM) replaces the worker; on any failure it execs ``cmd`` itself.
     from hermes_cli.kanban_placement_forward import forward_argv
