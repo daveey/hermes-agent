@@ -108,5 +108,28 @@ def test_claim_cas_still_fences_successor_and_new_failure_rebooks(db, monkeypatc
     stale = ng.candidates(db, now)[0]
     assert helpers._run(db, verdict="error", now=now)[1] == [(helpers.CHAT, row)]
     assert not ng._claim(db, stale, now)
-    assert helpers._closeout_meta(db, row)[2] == 2
+    assert helpers._closeout_meta(db, row)[2] == 1
     assert helpers._run(db, now=now + 1000) == ([], [])
+
+
+@pytest.mark.parametrize("attempts", [1, ng.MAX_ATTEMPTS - 1])
+def test_repeated_deploy_wall_failures_preserve_reset_attempt(db, monkeypatch, attempts):
+    now = 2_000_000_000.0
+    reset = now + 4 * 86400
+    monkeypatch.setattr(ng.time, "time", lambda: now)
+    monkeypatch.setattr(ng, "_retry_at", lambda sid, t: reset)
+    row = helpers._notice(db, "done", closeout={
+        "state": "deferred", "retry_at": reset, "attempts": attempts,
+        "retry_code_sha": "a" * 40, "retry_short_at": now})
+    for code in ("b", "c", "d", "e"):
+        now += 3600
+        monkeypatch.setattr(host_loop_lease, "_core_sha", lambda: code * 40)
+        assert helpers._run(db, verdict="error", now=now)[1] == [(helpers.CHAT, row)]
+        assert tuple(helpers._closeout_meta(db, row)) == ("deferred", reset, attempts)
+        assert helpers._run(db, now=now + 1000) == ([], [])
+    # At the real deadline the normal failed-wake budget applies, not a refund.
+    now = reset
+    assert helpers._run(db, verdict="error", now=now)[1] == [(helpers.CHAT, row)]
+    state, _, count = helpers._closeout_meta(db, row)
+    assert count == attempts + 1
+    assert state == ("error" if count == ng.MAX_ATTEMPTS else "deferred")

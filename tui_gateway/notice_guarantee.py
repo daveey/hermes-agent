@@ -23,7 +23,8 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
   restart (or a still-broken store) outlived was never offered again (two hub chats, 2026-11-10). A deferred row
   is durable: any backend's pass picks it up. Long wall bookings include the process's frozen code identity:
   a different-code successor uses the booking's short-delay deadline instead. Same/unknown code and legacy
-  rows keep the wall deadline; discovery still claims with CAS and preserves the attempt budget. [daveey]
+  rows keep the wall deadline. Failed early rechecks refund their attempt so deploys cannot exhaust the
+  normal failed-wake budget before the wall reset; discovery still claims with CAS. [daveey]
 - a wake that found the chat ``"busy"`` (no live turn, yet admission refused it: a core update's admission hold or
   drain, a paused turn owed to its restarting backend, an exiting backend's fence) is deferred the same way,
   ``BUSY_RETRY_S`` doubling up to ``BUSY_RETRY_MAX_S``, at most ``MAX_BUSY_ATTEMPTS`` busy wakes per row (counted in
@@ -304,7 +305,8 @@ def _retry_at(sid: str, now: float) -> float:
 
 
 def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
-                  retry_at: Optional[Callable[[str, float], float]] = None, busy_attempts: int = 0) -> str:
+                  retry_at: Optional[Callable[[str, float], float]] = None, busy_attempts: int = 0,
+                  early_recheck: bool = False) -> str:
     """Worker: the wake, then the verdict on the claimed row; a wake that did not start refreshes the outcome.
     A failed (``"error"``) or busy wake with attempts left is stamped ``deferred`` for a later pass (module doc)."""
     try:
@@ -314,6 +316,8 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
             logger.warning("notice close-out wake of %s failed", sid, exc_info=True)
             verdict = "error"
         extra: dict = {}
+        if verdict == "error" and early_recheck:
+            attempts -= 1  # Speculative successor failure must leave the reset-time budget intact.
         if verdict == "busy":
             busy_attempts += 1
             extra = {"busy_attempts": busy_attempts}
@@ -400,7 +404,10 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn, see
     try:
         attempts = _attempts(cand["meta"]) + 1
         busy = _busy_attempts(cand["meta"])
-        spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"], attempts=attempts, busy_attempts=busy))
+        from tui_gateway.notice_retry import early_recheck
+        early = early_recheck(cand["meta"], now)
+        spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"], attempts=attempts,
+                                   busy_attempts=busy, early_recheck=early))
     except Exception:
         _wake_slots.release()
         _stamp(db, cand["msg_id"], "error")

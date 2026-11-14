@@ -37,3 +37,15 @@ def effective_due(closeout: dict) -> Any:
     if current and current != sha:
         return min(due, short)
     return due
+
+
+def early_recheck(meta: dict, now: float) -> bool:
+    """Only a due, different-code wake before the stored wall is speculative."""
+    closeout = meta.get("closeout")
+    if not isinstance(closeout, dict) or closeout.get("state") != "deferred":
+        return False
+    due = effective_due(closeout)
+    original = closeout.get("retry_at")
+    return (isinstance(due, (int, float)) and not isinstance(due, bool)
+            and isinstance(original, (int, float)) and not isinstance(original, bool)
+            and due <= now < original)
