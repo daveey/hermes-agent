@@ -21,6 +21,9 @@ def isolated_machine_home(request, tmp_path, monkeypatch):
         return
     home = tmp_path / ".hermes"
     home.mkdir(exist_ok=True)
+    import hermes_constants
+
+    monkeypatch.setattr(hermes_constants, "_account_home", lambda: tmp_path)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))

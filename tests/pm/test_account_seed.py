@@ -190,12 +190,37 @@ def test_account_home_root_is_only_another_home_on_the_same_filesystem(tmp_path,
 
 
 def test_no_account_home_means_no_borrowing(tmp_path, monkeypatch):
+    import hermes_constants
     from pm import environments
 
+    monkeypatch.setattr(hermes_constants, "_account_home", lambda: tmp_path / "nobody")
     monkeypatch.setenv("HOME", str(tmp_path / "nobody"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "nobody")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "fresh"))
     assert environments.account_home_root() is None
+
+
+@pytest.mark.parametrize("suffix", ["", "-canary"])
+def test_fake_home_without_override_uses_passwd_account_cache(tmp_path, monkeypatch, suffix):
+    import hermes_constants
+    from pm.environments import account_home_root
+    from pm.packages import uv_cache_path
+
+    account = tmp_path / (".hermes" + suffix)
+    cache = account / "cache" / "uv"
+    cache.mkdir(parents=True)
+    fake = tmp_path / "fake-home"
+    fake.mkdir()
+    monkeypatch.setattr(hermes_constants, "_account_home", lambda: tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: fake)
+    monkeypatch.setenv("HOME", str(fake))
+    monkeypatch.setenv("HERMES_DATA_DIR_SUFFIX", suffix)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert account_home_root() == account
+    assert uv_cache_path() == cache
+    monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", "0")
+    assert account_home_root() is None
+    assert uv_cache_path() == fake / (".hermes" + suffix) / "cache" / "uv"
 
 
 # --- uv cache ---------------------------------------------------------------------------------

@@ -47,6 +47,8 @@ def bootstrap_environment(source: Path, work: Path, cache: Path,
         "LOCALAPPDATA": str(home / "AppData/Local"),
         "APPDATA": str(home / "AppData/Roaming"),
         "HERMES_HOME": str(work / "hermes-home"),
+        # Build-owned state must not borrow the invoking account's PM cache/seed.
+        "HERMES_PM_ACCOUNT_SEED": "0",
         "HERMES_RUNTIME_DIR": str(cache / "tools"),
         "HERMES_PYTHON_SRC_ROOT": str(source),
         "XDG_CONFIG_HOME": str(home / "config"), "XDG_CACHE_HOME": str(home / "cache"),

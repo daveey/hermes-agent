@@ -789,6 +789,7 @@ def test_native_dispatch_child_environment(tmp_path, monkeypatch, cache_source, 
     from pm.packages import uv_cache_dir
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "host")
+    monkeypatch.setattr("hermes_constants._account_home", lambda: tmp_path / "host")
     monkeypatch.setattr("pm.native_build.prepare_windows_environment", lambda **kwargs: dict(kwargs["env"]))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "user"))
     monkeypatch.delenv("UV_CACHE_DIR", raising=False)

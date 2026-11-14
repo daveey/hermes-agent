@@ -30,6 +30,8 @@ def isolated_machine_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    # Copied-install subprocesses must not borrow the real account's seed/cache.
+    monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", "0")
     monkeypatch.delenv("HERMES_INSTALL_ROOT", raising=False)
 
 

@@ -557,6 +557,7 @@ def test_foreign_checkout_sync_uses_its_own_pm_generation(client, tmp_path, monk
 def test_cold_manager_build_does_not_bootstrap_a_worker(client, tmp_path, monkeypatch, locked_wheelhouse):
     import pm
 
+    monkeypatch.setenv("HERMES_PM_ACCOUNT_SEED", "0")
     wheels, _ = locked_wheelhouse
 
     uv = shutil.which("uv")

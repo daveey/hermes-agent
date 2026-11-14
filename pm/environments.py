@@ -45,7 +45,8 @@ def account_seed_enabled() -> bool:
 def account_home_root() -> Path | None:
     """The account's default home when the active home is another one on its filesystem, else ``None``.
 
-    A test, review or mutation home (``HERMES_HOME=<scratch>``) then reuses the account's
+    A test, review or mutation home (``HERMES_HOME=<scratch>`` or ``HOME=<scratch>``)
+    reuses the passwd account's
     immutable, content-checked state (verified tool entries, uv's cache, source snapshots) by
     hard link instead of fetching and unpacking its own ~2 GiB copy. Another filesystem keeps
     the home's own state: a link cannot cross it.
@@ -56,11 +57,11 @@ def account_home_root() -> Path | None:
     and CI (whose cache save/restore and prune act on the uv cache path), set
     ``HERMES_PM_ACCOUNT_SEED=0`` (``ACCOUNT_SEED_ENV``) to keep every piece of state its own.
     """
-    from hermes_constants import _get_platform_default_hermes_home
+    from hermes_constants import account_default_hermes_home
 
     if not account_seed_enabled():
         return None
-    account = _get_platform_default_hermes_home()
+    account = account_default_hermes_home()
     active = dependency_home_root()
     while not active.exists() and active.parent != active:
         active = active.parent
