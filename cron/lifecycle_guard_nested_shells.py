@@ -130,6 +130,55 @@ def _option_words(
     return options, index
 
 
+# util-linux su/runuser long options; getopt_long accepts any unique prefix of these.
+_SU_LONG_OPTIONS = (
+    "--command", "--session-command", "--fast", "--group", "--supp-group", "--login",
+    "--preserve-environment", "--pty", "--no-pty", "--shell", "--whitelist-environment",
+    "--user", "--help", "--version",
+)
+
+
+def _su_long_option(word: str) -> str:
+    """*word* with an abbreviated su/runuser long option spelled out (``--whitelist`` ->
+    ``--whitelist-environment``, ``--comm=x`` -> ``--command=x``); other words unchanged."""
+    if not word.startswith("--") or word == "--":
+        return word
+    name, equals, value = word.partition("=")
+    if name in _SU_LONG_OPTIONS:
+        return word
+    matches = [option for option in _SU_LONG_OPTIONS if option.startswith(name)]
+    return matches[0] + equals + value if len(matches) == 1 else word
+
+
+def _su_payload(words: list[str]) -> Optional[str]:
+    """The first ``-c``/``--command``/``--session-command`` value anywhere in su-mode *words*
+    (long options already spelled out), including clustered and glued short forms. Operands
+    after the user, even past ``--``, reach the shell, so nothing stops the scan."""
+    for position, word in enumerate(words):
+        following = words[position + 1] if position + 1 < len(words) else None
+        if word.startswith("--"):
+            name, equals, value = word.partition("=")
+            if name in ("--command", "--session-command"):
+                if equals:
+                    return value
+                if following is not None:
+                    return following
+            continue
+        if not word.startswith("-") or word == "-":
+            continue
+        for letter_index, letter in enumerate(word[1:], 1):
+            if letter in "sgGuw":
+                break  # takes a value: the rest of the word (or the next one) is not flags
+            if letter == "c":
+                glued = word[letter_index + 1:]
+                if glued:
+                    return glued
+                if following is not None:
+                    return following
+                break
+    return None
+
+
 def _shell_inputs(arguments: list[str], shell: str) -> tuple[str, Optional[str]]:
     """What a POSIX *shell* given *arguments* parses as code: ``("payload", text)`` for ``-c``,
     ``("script", path)`` for a script operand, else ``("stdin", None)``."""
@@ -173,8 +222,8 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
         return None
     name = _executable_name(view[index])
     if name in ("su", "runuser"):
-        options = view[index + 1:]
-        direct_user = any(
+        options = [_su_long_option(word) for word in view[index + 1:]]
+        direct_user = name == "runuser" and any(
             word == "--user" or word.startswith("--user=")
             or re.fullmatch(r"-[mpPl]*u.*", word)
             for word in _option_words(options, frozenset("ucsgGw"), frozenset({
@@ -182,19 +231,14 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
                 "--supp-group", "--whitelist-environment",
             }))[0]
         )
-        if name == "su" or not direct_user:
-            # Direct-user runuser executes argv, not a shell command string.
-            # Even in shell mode, -- ends the wrapper's option namespace.
-            for position, word in enumerate(options):
-                if word == "--":
-                    break
-                if word.startswith("--command="):
-                    return "payload", word.partition("=")[2]
-                if word in ("-c", "--command") and position + 1 < len(options):
-                    return "payload", options[position + 1]
-            return "stdin", None
+        if not direct_user:
+            # Direct-user runuser executes argv, not a shell command string. In su mode the
+            # operands after the user (even after `--`) are handed to the shell, so a `-c`
+            # anywhere is shell code: scan every word and fail closed.
+            payload = _su_payload(options)
+            return ("payload", payload) if payload is not None else ("stdin", None)
     if name == "doas":
-        options, _operand = _option_words(view[index + 1:], frozenset("uC"))
+        options, _operand = _option_words(view[index + 1:], frozenset("auC"))
         if any(re.fullmatch(r"-[A-Za-z]*s[A-Za-z]*", word) for word in options):
             return "stdin", None
     if name == "sudo":

@@ -261,6 +261,21 @@ _NESTED_FOREIGN_SHELLS = [
     "BASH_ENV=x bash <<< 't ( bash {db} )'",
     "BASH_ENV=x bash < {script}",
     "ENV=x sh -i -c 't ( bash {db} )'",
+    # su-mode operands after the user, even past `--`, reach the shell (`bash -c CMD`).
+    "su -- bob -c 't ( bash {db} )'",
+    "runuser -- bob -c 't ( bash {db} )'",
+    "su bob -c 't ( bash {db} )'",
+    "su -lc 't ( bash {db} )' bob",
+    "su -c't ( bash {db} )' bob",
+    # getopt_long accepts unique long-option prefixes.
+    "runuser --whitelist -u bob <<< 't ( bash {db} )'",
+    "runuser --white -u bob <<< 't ( bash {db} )'",
+    "runuser --supp -u bob <<< 't ( bash {db} )'",
+    "runuser --gro -u bob <<< 't ( bash {db} )'",
+    "runuser --comm='t ( bash {db} )' bob",
+    "runuser --com 't ( bash {db} )' bob",
+    "su --sess='t ( bash {db} )' bob",
+    "doas -a style -s <<< 't ( bash {db} )'",
 ]
 
 
@@ -296,8 +311,10 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "runuser -u bob -- printf '%s\\n' -c 't ( bash {db} )'",
     "runuser -u bob printf '%s\\n' --command='t ( bash {db} )'",
     "runuser --user=bob printf '%s\\n' -c 't ( bash {db} )'",
-    "su -- bob --command='t ( bash {db} )'",
-    "runuser -- bob -c 't ( bash {db} )'",
+    "runuser --us bob -- cat <<< 't ( bash {db} )'",
+    "runuser --u=bob -- printf '%s\\\\n' -c 't ( bash {db} )'",
+    "runuser --white HOME -u bob -- cat <<< 't ( bash {db} )'",
+    "runuser --supp=root --us=bob -- cat <<< 't ( bash {db} )'",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
@@ -324,7 +341,10 @@ def test_runuser_value_options_preserve_direct_stdin(tmp_path, live_kanban_db, o
         False, None)
 
 
-@pytest.mark.parametrize("option", ["--group", "--supp-group", "--whitelist-environment", "-g", "-G", "-w"])
+@pytest.mark.parametrize("option", [
+    "--group", "--supp-group", "--whitelist-environment", "-g", "-G", "-w",
+    "--gr", "--supp", "--whitelist", "--w",
+])
 def test_runuser_option_value_is_not_user_switch(tmp_path, live_kanban_db, option):
     """A flag-looking value cannot prove direct-user mode and suppress the shell walk."""
     text = f"runuser {option} -u bob <<< 't ( bash {live_kanban_db} )'"
