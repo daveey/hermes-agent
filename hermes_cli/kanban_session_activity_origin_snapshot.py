@@ -7,6 +7,21 @@ import json
 from typing import Any
 
 
+def _use_wal(conn) -> None:
+    """Every process on the host reads and rewrites this file (a multi-MB row per scope). In a rollback journal a
+    commit locks out every reader and any open reader fails the commit, so the remote-links rebuild's cold read
+    died with ``database is locked`` (kanban-ec72354e6b). WAL lets reads proceed during a write. The shared helper
+    keeps its policy: never on WAL-reset-vulnerable SQLite or WAL-hostile filesystems, never a live downgrade. [daveey]
+    """
+    from hermes_cli import kanban_lockguard
+    from hermes_state_wal import apply_wal_with_fallback
+
+    if apply_wal_with_fallback(conn, db_label="origin-work.db") == "wal":
+        # Bound the -wal file: each save appends the whole scope row.
+        conn.execute("PRAGMA journal_size_limit=8388608")
+        kanban_lockguard.guard(conn)  # a file that only became WAL now gets its OFD lock guard
+
+
 def remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]] | None:
     """Durable last-known origin obligations, separate from the replaceable hub replica.
 
@@ -24,6 +39,11 @@ def remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str,
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = _ksa._kanban_lockguard.connect(path, timeout=0.5)
+        try:
+            _use_wal(conn)
+        except BaseException:
+            conn.close()
+            raise
     try:
         scope = json.dumps(_ksa._origin_scope())
         if cards is not None:
