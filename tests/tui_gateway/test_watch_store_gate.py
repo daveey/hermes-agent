@@ -271,16 +271,14 @@ def test_replay_budget_store_signatures(store):
         return tuple(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()), False
 
     passes = 60
-    best = float("inf")
-    for _ in range(3):
-        spent = 0.0
-        for n in range(passes):
-            if n / passes < COMMIT_SHARE:
-                db.set_session_title(f"bench-{n}", f"t{time.time_ns()}")
-            t0 = time.thread_time()
-            server._session_db_content_sig(path)
-            server._db_content_sig(path, cache, read)
-            spent += time.thread_time() - t0
-        best = min(best, spent / passes)
-    per_s = best * PASSES_PER_S
-    assert per_s <= BUDGET_CORE, f"{best * 1000:.3f} ms per pass = {per_s:.3%} of a core"
+    spent = 0.0
+    for n in range(passes):
+        if n / passes < COMMIT_SHARE:
+            db.set_session_title(f"bench-{n}", f"tick-{n}")
+        t0 = time.thread_time()
+        server._session_db_content_sig(path)
+        server._db_content_sig(path, cache, read)
+        spent += time.thread_time() - t0
+    per_pass = spent / passes
+    per_s = per_pass * PASSES_PER_S
+    assert per_s <= BUDGET_CORE, f"{per_pass * 1000:.3f} ms per pass = {per_s:.3%} of a core"

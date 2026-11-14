@@ -119,6 +119,23 @@ def test_deferral_is_bounded_by_one_poll_while_the_holder_never_publishes(own, m
     assert _refs(_poll()) == {"hub/default/default/t_new", "hub/default/default/t_newer"} and len(computes) == 1
 
 
+def test_the_chat_poll_after_a_deferred_miss_computes(own, monkeypatch):
+    """Absolute bound, not relative to DEFER_MAX_S: the notice poller polls every 5 s, so a deferral costs
+    the notice at most one poll even if the holder beats and never publishes."""
+    replica, ledger = own
+    _lease()
+    assert kri.refresh(replica, ledger, now=NOW)
+    _poll()
+    clock = [100.0]
+    monkeypatch.setattr(kri, "_clock", lambda: clock[0])
+    monkeypatch.setattr(kri, "publish", lambda *a, **k: False)
+    _add(replica, _done("t_new"), 50)
+    computes = _count_computes(monkeypatch)
+    assert _poll() == []  # deferred
+    clock[0] += 5.0  # the chat's next notice poll
+    assert _refs(_poll()) == {"hub/default/default/t_new"} and len(computes) == 1
+
+
 def test_a_beating_holder_that_never_publishes_does_not_defer_again_after_the_bound(own, monkeypatch):
     """A holder beats after a failed build too: once a chat's bound expired, its misses compute until a hit."""
     replica, ledger = own
@@ -182,17 +199,15 @@ def test_a_replica_with_no_change_key_never_defers(own, monkeypatch):
     assert kri.stats["deferred"] == 0
 
 
-@pytest.mark.parametrize("holder", ["absent", "released", "dead_pid", "stale_beat", "corrupt"])
+_NO_LIVE_HOLDER = {"absent": None, "released": {"held": False}, "dead_pid": {"pid": 2 ** 22 + 12345},
+                   "stale_beat": {"age": 3 * 5.0 + 1, "interval": 5.0}, "corrupt": {"raw": "{not json"}}
+
+
+@pytest.mark.parametrize("holder", list(_NO_LIVE_HOLDER))
 def test_no_live_beating_holder_computes_the_miss_at_once(own, monkeypatch, holder):
     replica, ledger = own
-    if holder == "released":
-        _lease(held=False)
-    elif holder == "dead_pid":
-        _lease(pid=2 ** 22 + 12345)
-    elif holder == "stale_beat":
-        _lease(age=3 * 5.0 + 1, interval=5.0)
-    elif holder == "corrupt":
-        _lease(raw="{not json")
+    if _NO_LIVE_HOLDER[holder] is not None:
+        _lease(**_NO_LIVE_HOLDER[holder])
     assert kri.refresh(replica, ledger, now=NOW)
     _poll()
     _add(replica, _done("t_new"), 50)

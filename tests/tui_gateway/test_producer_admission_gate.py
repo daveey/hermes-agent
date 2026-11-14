@@ -288,17 +288,16 @@ def test_replay_budget_every_store_committing_every_pass():
         for n, db in enumerate(stores):
             db.create_session(f"s{n}", "desktop")
         delivery.sweep_once()  # cold: opens observers
-        best = float("inf")
-        for _ in range(3):
-            spent = 0.0
-            for i in range(10):
-                for db in stores:
-                    _commit(db, i)
-                t0 = time.thread_time()
-                assert delivery.sweep_once() == []
-                spent += time.thread_time() - t0
-            best = min(best, spent / 10)
-        assert best / INTERVAL_S <= BUDGET_CORE, f"{best * 1000:.2f} ms per pass = {best / INTERVAL_S:.4%} of a core"
+        spent = 0.0
+        for i in range(10):
+            for db in stores:
+                _commit(db, i)
+            t0 = time.thread_time()
+            assert delivery.sweep_once() == []
+            spent += time.thread_time() - t0
+        per_pass = spent / 10
+        assert per_pass / INTERVAL_S <= BUDGET_CORE, (
+            f"{per_pass * 1000:.2f} ms per pass = {per_pass / INTERVAL_S:.4%} of a core")
     finally:
         for db in stores:
             db.close()

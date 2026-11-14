@@ -177,22 +177,20 @@ def test_replay_budget_board_signature(board):
     for chat in chats:
         idle.board_signature(path, chat)
     commits = 40
-    reread = warm = float("inf")
-    for _ in range(3):
-        first = rest = 0.0
-        for n in range(commits):
-            if n % REVISION_EVERY == 0:
-                _write("UPDATE kanban_notify_subs SET last_event_id = ? WHERE task_id = 't_bench_0'", n + 1)
-            else:
-                _bookkeeping(tasks[1], n)
-            t0 = time.thread_time()
-            idle.board_signature(path, chats[0])  # the first probe after a commit reads it
-            t1 = time.thread_time()
-            for chat in chats[1:]:
-                idle.board_signature(path, chat)
-            first, rest = first + t1 - t0, rest + time.thread_time() - t1
-        reread = min(reread, first / commits)
-        warm = min(warm, rest / commits / (LIVE_CHATS - 1))
+    first = rest = 0.0
+    for n in range(commits):
+        if n % REVISION_EVERY == 0:
+            _write("UPDATE kanban_notify_subs SET last_event_id = ? WHERE task_id = 't_bench_0'", n + 1)
+        else:
+            _bookkeeping(tasks[1], n)
+        t0 = time.thread_time()
+        idle.board_signature(path, chats[0])  # the first probe after a commit reads it
+        t1 = time.thread_time()
+        for chat in chats[1:]:
+            idle.board_signature(path, chat)
+        first, rest = first + t1 - t0, rest + time.thread_time() - t1
+    reread = first / commits
+    warm = rest / commits / (LIVE_CHATS - 1)
     per_s = reread * min(COMMITS_PER_S, LIVE_CHATS / POLL_S) + warm * LIVE_CHATS / POLL_S
     assert per_s <= BUDGET_CORE, (f"{reread * 1000:.2f} ms per commit, {warm * 1000:.3f} ms per probe = "
                                   f"{per_s:.3%} of a core")

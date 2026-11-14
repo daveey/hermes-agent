@@ -202,16 +202,14 @@ def test_replay_budget_polled_profile_list(files, monkeypatch):
     try:
         for p in paths:
             memo.running_pid(p, probe=probe)
-        best = float("inf")
-        for _ in range(5):
-            t0 = time.thread_time()
-            for _ in range(50):
-                for p in paths:
-                    assert memo.running_pid(p, probe=probe) == pid
-            best = min(best, (time.thread_time() - t0) / 50)
+        t0 = time.thread_time()
+        for _ in range(50):
+            for p in paths:
+                assert memo.running_pid(p, probe=probe) == pid
+        per_list = (time.thread_time() - t0) / 50
     finally:
         for h in held:
             h.close()
     assert probe.calls == len(paths)
-    per_second = best / 2.0  # one profile list every 2 s
-    assert per_second <= 0.0005, f"{best * 1000:.3f} ms per list = {per_second:.4%} of a core"
+    per_second = per_list / 2.0  # one profile list every 2 s
+    assert per_second <= 0.0005, f"{per_list * 1000:.3f} ms per list = {per_second:.4%} of a core"
