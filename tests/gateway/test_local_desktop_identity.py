@@ -189,9 +189,30 @@ async def test_a_fresh_launch_claims_the_trial_and_opens_onboarding_on_it(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_the_first_local_desktop_connection_runs_the_desktop_boot_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("delayed_start", [False, True])
+async def test_the_first_local_desktop_connection_runs_the_desktop_boot_work(tmp_path, monkeypatch, delayed_start):
     from hermes_cli import anon_auth, free_tier_bootstrap, onboarding_run
     from tui_gateway import server
+    import asyncio
+    import threading
+    from agent import memory_provider
+
+    release = threading.Event()
+    threads = []
+    spawn = memory_provider.spawn_context_thread
+
+    def tracked_spawn(target, **kwargs):
+        def run():
+            if delayed_start and kwargs.get("name") == "free-tier-bootstrap":
+                assert release.wait(20), "bootstrap was never released"
+            return target()
+        thread = spawn(run, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(memory_provider, "spawn_context_thread", tracked_spawn)
+    # Due computation is independent of the setup record and install latch tested here.
+    monkeypatch.setattr(server, "start_due_boot", lambda: None)
     seen = []
     monkeypatch.setattr(onboarding_run, "latch_first_install", lambda: seen.append(anon_auth.on_local_desktop_backend()))
     monkeypatch.setattr(server, "_local_desktop_boot_started", False)
@@ -200,9 +221,17 @@ async def test_the_first_local_desktop_connection_runs_the_desktop_boot_work(tmp
     try:
         await _request(conn, 1, "client.capabilities", {"desktop_local": True})
         await _request(conn, 2, "client.capabilities", {"desktop_local": True})
-        assert free_tier_bootstrap.wait_for_record(timeout=20) is not None
+        # Force the legal schedule where the RPC replies before the worker enters run_bootstrap.
+        if delayed_start:
+            assert not free_tier_bootstrap._started
+            asyncio.get_running_loop().call_soon(release.set)
+        await async_wait_until(free_tier_bootstrap.current_record, timeout=20, what="desktop setup record")
         assert seen == [True]
     finally:
+        release.set()
+        for thread in threads:
+            thread.join(20)
+            assert not thread.is_alive()
         await conn.connection.close()
         free_tier_bootstrap.reset_for_tests()
 
