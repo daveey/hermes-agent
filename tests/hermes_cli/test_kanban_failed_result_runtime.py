@@ -17,17 +17,42 @@ from tools.environments.local import build_subprocess_env
 
 board = fixtures.board
 
+#: Stand-in instantiation epoch where the host has none to read. Strict death proof needs a
+#: nonempty epoch (``valid_birth``), and ``current_instantiation_epoch`` is empty off Linux (macOS
+#: has no boot_id/PID-1 start in /proc). Production deliberately keeps such hosts out of the strict
+#: protocol (test_empty_epoch_host_never_records_strict_death_proof); these tests model the
+#: protocol itself with real processes and signals, so they pin one epoch in parent AND writer.
+_FIXTURE_EPOCH = 'fixture-runtime-epoch'
+_EPOCH_ENV = 'HERMES_TEST_FIXTURE_INSTANTIATION_EPOCH'
+_PIN_CHILD_EPOCH = (
+    'import os as _fixture_os\n'
+    'import gateway.drain_control as _fixture_drain_control\n'
+    f'_fixture_epoch = _fixture_os.environ[{_EPOCH_ENV!r}]\n'
+    '_fixture_drain_control.current_instantiation_epoch = lambda: _fixture_epoch\n')
+
+
+@pytest.fixture(autouse=True)
+def instantiation_epoch(monkeypatch):
+    """The host's real epoch (Linux), else the fixture's; the writer child is pinned to the same."""
+    from gateway import drain_control
+    epoch = drain_control.current_instantiation_epoch() or _FIXTURE_EPOCH
+    monkeypatch.setattr(drain_control, 'current_instantiation_epoch', lambda: epoch)
+    return epoch
+
 
 @contextmanager
-def _hung_writer(conn, context, *, code=1, output='fixture worker_receipt_timeout', outer_pid=None):
-    script = fixtures._CHILD.replace(
+def _hung_writer(conn, context, *, code=1, output='fixture worker_receipt_timeout', outer_pid=None,
+                 strict=True):
+    from gateway import drain_control
+    script = _PIN_CHILD_EPOCH + fixtures._CHILD.replace(
         "_record_worker_result(context, 1, 'fixture worker_receipt_timeout')",
         f'_record_worker_result(context, {code!r}, {output!r})').replace(
         'raise SystemExit(1)', "print('RESULT_COMMITTED', flush=True)\nsys.stdin.read(1)")
     proc = subprocess.Popen(
         [sys.executable, '-c', script, json.dumps(context), 'unit'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding='utf-8', env=build_subprocess_env(),
+        text=True, encoding='utf-8',
+        env={**build_subprocess_env(), _EPOCH_ENV: drain_control.current_instantiation_epoch()},
         cwd=str(Path(__file__).resolve().parents[2]))
     try:
         kbd._set_worker_pid(conn, context['task_id'], outer_pid or proc.pid)
@@ -40,7 +65,7 @@ def _hung_writer(conn, context, *, code=1, output='fixture worker_receipt_timeou
         payload = json.loads(conn.execute(
             "SELECT payload FROM task_events WHERE run_id=? AND kind='worker_result'",
             (context['run_id'],)).fetchone()[0])
-        assert payload['death_proof_version'] == 1
+        assert payload.get('death_proof_version') == (1 if strict else None), payload
         yield proc
     finally:
         if proc.poll() is None:
@@ -214,3 +239,20 @@ def test_expiry_preserves_neutral_receipt_accounting(board, entry, code, output,
                                                (context['run_id'],))]
         assert kinds.count(event) == 1, kinds
         assert not {'timed_out', 'reclaimed', 'crashed'}.intersection(kinds)
+
+
+@pytest.mark.platforms('posix')
+def test_empty_epoch_host_never_records_strict_death_proof(board, monkeypatch):
+    """A host with no instantiation epoch (macOS in production) cannot prove a reboot did not
+    recycle a PID, so its writer never opts into the strict protocol or claims a verified death."""
+    from gateway import drain_control
+    conn, context = board
+    monkeypatch.setattr(drain_control, 'current_instantiation_epoch', lambda: '')
+    with _hung_writer(conn, context, strict=False) as writer:
+        payload = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE run_id=? AND kind='worker_result'",
+            (context['run_id'],)).fetchone()[0])
+        assert payload['exit_code'] == 1 and 'result_role' not in payload, payload
+        assert kbd.detect_crashed_workers(conn, failed_results_only=True) == []
+        assert writer.poll() is None
+        _assert_open(conn, context)

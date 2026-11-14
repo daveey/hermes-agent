@@ -567,6 +567,9 @@ def test_replay_starts_the_python_and_tools_hosted_steps_call():
 @pytest.mark.platforms("posix")
 def test_replay_python3_is_the_replay_interpreter_when_its_dir_has_only_python(tmp_path):
     """A Windows venv dir holds only ``python``: python3 must not fall through to a host interpreter."""
+    # Same prerequisite as every replay here: skip (naming the too-old bash) where no bash 4+ exists,
+    # e.g. a stock Mac's /bin/bash 3.2. The bare child has no pytest, so it can only fail on it.
+    workflow_steps.replay_bash()
     interpreter = tmp_path / "Scripts" / "python"
     interpreter.parent.mkdir()
     interpreter.symlink_to(os.path.realpath(sys.executable))

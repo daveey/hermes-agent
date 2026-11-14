@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,24 +119,30 @@ def test_unix_exchange_has_one_deadline_for_a_trickling_peer(tmp_path, monkeypat
     import threading
     import time as _time
     from gateway import control_socket as cs
-    path = tmp_path / "s.sock"
-    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-    srv.bind(str(path))
-    srv.listen(1)
+    # A mkdtemp root, not tmp_path: pytest's tmp_path nests past the 104-byte macOS sun_path
+    # limit (same convention as short_home in test_shutdown_watchdog.py).
+    root = Path(tempfile.mkdtemp(prefix="hcsp-"))
+    path = root / "s.sock"
     monkeypatch.setattr(cs, "resolve_client_socket_path", lambda home: path)
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        srv.bind(str(path))
+        srv.listen(1)
 
-    def trickle():
-        conn, _ = srv.accept()
-        with conn:
-            conn.recv(4096)
-            for _ in range(40):
-                try:
-                    conn.sendall(b"x")
-                except OSError:
-                    return
-                _time.sleep(0.1)  # health: allow HX013 -- delayed bytes exercise a peer stretching per-read timeouts
-    threading.Thread(target=trickle, daemon=True).start()
-    started = _time.monotonic()
-    cs._query_unix_socket(tmp_path, b"{}\n", 0.5)
-    assert _time.monotonic() - started <= 0.5 + 0.3
-    srv.close()
+        def trickle():
+            conn, _ = srv.accept()
+            with conn:
+                conn.recv(4096)
+                for _ in range(40):
+                    try:
+                        conn.sendall(b"x")
+                    except OSError:
+                        return
+                    _time.sleep(0.1)  # health: allow HX013 -- delayed bytes exercise a peer stretching per-read timeouts
+        threading.Thread(target=trickle, daemon=True).start()
+        started = _time.monotonic()
+        cs._query_unix_socket(tmp_path, b"{}\n", 0.5)
+        assert _time.monotonic() - started <= 0.5 + 0.3
+    finally:
+        srv.close()
+        shutil.rmtree(root, ignore_errors=True)
