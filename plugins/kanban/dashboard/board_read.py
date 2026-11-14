@@ -14,6 +14,7 @@ from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
 from hermes_cli import kanban_workflow
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics
+from plugins.kanban.dashboard.board_run_history import retained_runs
 
 # Dashboard columns, left-to-right ("archived" is a filter toggle, not a column), from the
 # one workflow definition. A status missing here gets mis-bucketed into ``todo``.
@@ -31,8 +32,9 @@ def _rows_by_task(conn: sqlite3.Connection, table: str, row_ids: list) -> dict[s
     if row_ids:
         for row in conn.execute(
                 f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
-            by_task.setdefault(row["task_id"], []).append(MappingProxyType(dict(row)))
-    return {tid: tuple(v) for tid, v in by_task.items()}  # immutable, O(1) field lookup
+            by_task.setdefault(row["task_id"], []).append(row)
+    return {tid: (kd.EventHistory(v) if table == "task_events"
+                  else tuple(MappingProxyType(dict(row)) for row in v)) for tid, v in by_task.items()}
 
 
 def _raw(rows) -> tuple:
@@ -91,8 +93,8 @@ def diagnostic_inputs(conn: sqlite3.Connection, task_ids: Optional[list[str]] = 
 
 def diagnostics_from_inputs(inputs: Optional[tuple]) -> dict[str, list[dict]]:
     """Run the rules over ``diagnostic_inputs``. Reads config, the clock and the hub replica
-    now, so a retained input set still yields current diagnostics. Rules get fresh lists and
-    copies of the graph/wake dicts, never the retained objects."""
+    now, so a retained input set still yields current diagnostics. Event histories are immutable;
+    rules get fresh run lists and copies of graph/wake dicts."""
     from hermes_cli.config import load_config
 
     if inputs is None:
@@ -103,7 +105,7 @@ def diagnostics_from_inputs(inputs: Optional[tuple]) -> dict[str, list[dict]]:
     for r in rows:
         tid = r["id"]
         diags = kd.compute_task_diagnostics(
-            r, list(events_by_task[tid]), list(runs_by_task[tid]), config=diag_config,
+            r, events_by_task[tid], list(runs_by_task[tid]), config=diag_config,
             graph=fresh(graph_by_task.get(tid)), wake_check=fresh(wake_by_task.get(tid)))
         if diags:
             out[tid] = [d.to_dict() for d in diags]
@@ -161,7 +163,7 @@ def _done_state(conn, filters: dict, done_limit) -> tuple[str, list, int, frozen
 def _diag_memo(rows, events_by_task, runs_by_task, marks) -> dict:
     """Per task: what its diagnostics inputs were read from, to tell a changed task next time."""
     return {r["id"]: (tuple(r), _raw(runs_by_task.get(r["id"], ())), marks.get(r["id"], _NO_EVENTS),
-                      events_by_task.get(r["id"], ())) for r in rows}
+                      events_by_task.get(r["id"], ()), runs_by_task.get(r["id"], ())) for r in rows}
 
 
 def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable, *,
@@ -173,7 +175,7 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     """
     ids = [r["id"] for r in diag_rows]
     marks = _event_marks(conn, ids)
-    runs = _rows_by_task(conn, "task_runs", ids)
+    runs = retained_runs(conn, ids, prev, event_changed, _rows_by_task)
     raw_runs = {tid: _raw(runs[tid]) for tid in ids}
     changed = {tid for r, tid in zip(diag_rows, ids)
                if (old := prev.get(tid)) is None or old[2] is None
@@ -187,10 +189,10 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     for r, tid in zip(diag_rows, ids):
         if tid in fresh_events or tid not in changed:
             events[tid] = fresh_events[tid] if tid in fresh_events else prev[tid][3]
-            memo[tid] = (tuple(r), raw_runs[tid], marks.get(tid, _NO_EVENTS), events[tid])
+            memo[tid] = (tuple(r), raw_runs[tid], marks.get(tid, _NO_EVENTS), events[tid], runs[tid])
         else:  # vanished between reads: no events held, so never vouch for a mark
             events[tid] = ()
-            memo[tid] = (tuple(r), raw_runs[tid], None, ())
+            memo[tid] = (tuple(r), raw_runs[tid], None, (), runs[tid])
     if graphs is None:
         graphs = kanban_db.task_graph_contexts(conn, ids)
     inputs = (tuple(diag_rows), events, runs, graphs, _wake_states(conn, ids))

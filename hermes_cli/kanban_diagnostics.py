@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import json
 import time
+from hermes_cli.kanban_diagnostic_history import EventHistory
 
 
 # Least → most urgent; sorted outputs put critical first.
@@ -156,6 +157,11 @@ def _error_snippet(last_err) -> str:
 def _active_hallucination_events(events: Iterable[Any], kind: str) -> list[Any]:
     """Events of ``kind`` with no ``completed``/``edited`` event strictly after
     them. Requires id-sorted (arrival-order) input, which the DB provides."""
+    if isinstance(events, EventHistory):
+        if kind == "completion_blocked_hallucination":
+            return list(events.active_cards)
+        if kind == "suspected_hallucinated_references":
+            return list(events.active_refs)
     active: list[Any] = []
     for ev in events:
         k = _event_kind(ev)
@@ -202,7 +208,7 @@ def _runs_newest_first(runs) -> list[Any]:
 # Each rule: (task, events, runs, now_ts, config) -> list[Diagnostic].
 # ``events``/``runs`` are kanban_db rows/dataclasses or same-shaped dicts.
 
-RuleFn = Callable[[Any, list[Any], list[Any], int, dict], list[Diagnostic]]
+RuleFn = Callable[[Any, list[Any] | tuple, list[Any], int, dict], list[Diagnostic]]
 
 
 def _aux_slot_explicit(slot: Any) -> bool:
@@ -663,11 +669,11 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
     seen_unblock_since_last_cycle = False
     initial_blocked_ts = 0
     last_cycle_blocked_ts = 0
-    for ev in events:
-        ts = _event_ts(ev)
+    cycle_inputs = (events.cycle_inputs if isinstance(events, EventHistory)
+                    else ((_event_ts(ev), _event_kind(ev)) for ev in events))
+    for ts, kind in cycle_inputs:
         if ts < cycle_cutoff:
             continue
-        kind = _event_kind(ev)
         if kind == "blocked":
             if initial_blocked_ts == 0:
                 initial_blocked_ts = ts
@@ -782,7 +788,9 @@ def _pinned_quota_hold_until(events, now) -> Optional[int]:
     hold still in the future (``kanban_dispatch_skip``); else None. Same episode bounds as its reader."""
     from hermes_cli.kanban_dispatch_skip import EVENT, PINNED_QUOTA_WALL, _episode_kinds
     bounds = _episode_kinds() | {EVENT}
-    for ev in sorted(events or [], key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0), reverse=True):
+    ordered = (events.quota_candidates if isinstance(events, EventHistory) else
+               sorted(events or [], key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0), reverse=True))
+    for ev in ordered:
         if _event_kind(ev) not in bounds:
             continue
         payload = _parse_payload(ev) if _event_kind(ev) == EVENT else {}
@@ -799,8 +807,11 @@ def _ready_hold_reason(task, events, cfg, now=None) -> Optional[str]:
     Capacity checks can precede pickup/guard evaluation, leaving old guard history on a
     replica-only card. A same-second clear must outrank the guard it retired.
     """
-    evs = [ev for ev in (events or []) if _event_kind(ev) != "dispatch_skipped"]  # skip records end no guard
-    latest = max(evs, key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0)) if evs else None
+    if isinstance(events, EventHistory):
+        latest = events.ready_latest
+    else:
+        evs = [ev for ev in (events or []) if _event_kind(ev) != "dispatch_skipped"]  # skip records end no guard
+        latest = max(evs, key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0)) if evs else None
     if latest is not None and _event_kind(latest) == "respawn_guarded":
         return "respawn_guarded"
     if _foreign_machines(task, cfg):
@@ -957,16 +968,10 @@ def _rule_overdue_wake(task, events, runs, now, cfg) -> list[Diagnostic]:
     if _task_field(task, "status") != "scheduled":
         return []
     grace = float(cfg.get("overdue_wake_grace_seconds", kc.OVERDUE_WAKE_GRACE_SECONDS))
-    parking = None
-    for idx, ev in enumerate(events or []):
-        if _event_kind(ev) not in kc.SCHEDULED_ENTRY_EVENTS:
-            continue
-        key = (_event_ts(ev), int(_task_field(ev, "id", default=0) or 0), idx)
-        if parking is None or key >= parking[0]:
-            parking = (key, ev)
+    parking = _latest_parking_event(events)
     if parking is None:
         return []
-    payload = kc.pending_wake_payload(_event_kind(parking[1]), _parse_payload(parking[1]))
+    payload = kc.pending_wake_payload(_event_kind(parking), _parse_payload(parking))
     if payload is None:
         return []
     wake_at = int(payload["wake_at"])
@@ -990,6 +995,8 @@ def _rule_overdue_wake(task, events, runs, now, cfg) -> list[Diagnostic]:
 def _latest_parking_event(events):
     from hermes_cli import kanban_continuation as kc
 
+    if isinstance(events, EventHistory):
+        return events.latest_parking
     parking = None
     for idx, ev in enumerate(events or []):
         if _event_kind(ev) not in kc.SCHEDULED_ENTRY_EVENTS:
@@ -1307,7 +1314,7 @@ def config_from_runtime_config(raw_config: Optional[dict]) -> dict:
 
 def compute_task_diagnostics(
     task,
-    events: list,
+    events: list | tuple,
     runs: list,
     *,
     now: Optional[int] = None,

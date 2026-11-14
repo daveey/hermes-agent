@@ -87,13 +87,17 @@ def _affected(conn, cards, pcards, changed):
 
 
 def _extras(conn, cards, pcards, affected, board_read):
-    ids = list(cards)
+    # current_run_id can point at another task's run; keep this cheap PK join exact
+    # even when the changed run's owning task is outside the displayed graph.
+    starts = kanban_db.current_run_started_ats(conn, list(cards))
+    retained = {tid: {**pcards[tid][2], "current_run_started_at": starts.get(tid)}
+                for tid in cards if tid not in affected}
+    ids = sorted(affected)
     if not ids:
-        return {}
+        return retained
     rollups = _rollups(conn, sorted(affected)) if affected else {}
     ph, params = _ph(ids), tuple(ids)
     summaries = kanban_db.latest_summaries(conn, ids)
-    starts = kanban_db.current_run_started_ats(conn, ids)
     try:
         managers = {str(r[0]): str(r[1]) for r in conn.execute(
             "SELECT task_id, chat_id FROM kanban_notify_subs WHERE platform = 'tui' AND chat_id != '' "
@@ -101,11 +105,11 @@ def _extras(conn, cards, pcards, affected, board_read):
     except sqlite3.Error:  # board predates notify subscriptions
         managers = {}
     cap = board_read._CARD_SUMMARY_PREVIEW_CHARS
-    return {tid: {
+    return {**retained, **{tid: {
         **(rollups[tid] if tid in rollups else pcards[tid][2]),
         "latest_summary": summaries[tid][:cap] if summaries.get(tid) else None,
         "current_run_started_at": starts.get(tid),
-        "managing_session_id": managers.get(tid) or cards[tid][0].session_id or None} for tid in ids}
+        "managing_session_id": managers.get(tid) or cards[tid][0].session_id or None} for tid in ids}}
 
 
 def _done_window(inc, by_id, changed, cap):

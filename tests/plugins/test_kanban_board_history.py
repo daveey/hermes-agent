@@ -32,6 +32,18 @@ def test_history_rows_are_immutable_keyed_snapshots():
     conn.close()
 
 
+def test_unchanged_extras_do_not_read_summary_history(monkeypatch):
+    from plugins.kanban.dashboard import board_incremental as bi
+    from hermes_cli import kanban_db as kb
+    extra = {"latest_summary": "retained", "current_run_started_at": None}
+    def unexpected(*_args):
+        pytest.fail("unchanged P2 task must retain summaries/start/subscriber extras")
+    monkeypatch.setattr(kb, 'latest_summaries', unexpected)
+    monkeypatch.setattr(kb, 'current_run_started_ats', lambda *_: {})
+    got = bi._extras(None, {'t': (None, None)}, {'t': (None, None, extra)}, set(), br)
+    assert got == {'t': extra}
+
+
 def test_task_only_changes_do_not_reload_event_history(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -53,6 +65,29 @@ def test_task_only_changes_do_not_reload_event_history(monkeypatch):
     assert inputs[0][0]["last_heartbeat_at"] == 2
     assert inputs[1]["t"] is events["t"]
     conn.close()
+
+
+@pytest.mark.parametrize('mutation', ['summary', 'run_start', 'subscriber', 'foreign_run_start', 'run_delete'])
+def test_retained_extras_match_cold_payload(board, mutation):
+    ids, run_id = helpers._seed()
+    conn = kbc.connect()
+    try:
+        if mutation == 'foreign_run_start':
+            conn.execute('UPDATE tasks SET current_run_id = ? WHERE id = ?', (run_id, ids[1]))
+            conn.commit()
+        helpers._read(board)
+        queries = {
+            'summary': ("UPDATE task_runs SET summary = 'new summary' WHERE id = ?", (run_id,)),
+            'run_start': ('UPDATE task_runs SET started_at = 555 WHERE id = ?', (run_id,)),
+            'foreign_run_start': ('UPDATE task_runs SET started_at = 666 WHERE id = ?', (run_id,)),
+            'run_delete': ('DELETE FROM task_runs WHERE id = ?', (run_id,)),
+            'subscriber': ("INSERT INTO kanban_notify_subs (task_id,platform,chat_id,created_at) VALUES (?,'tui','new-chat',9999999999)", (ids[0],)),
+        }
+        conn.execute(*queries[mutation])
+        conn.commit()
+        assert helpers._stable(helpers._read(board)) == helpers._cold(board)
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("mutation", ["event_update", "event_delete", "event_replace", "run_update", "heartbeat"])
