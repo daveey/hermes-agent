@@ -2761,11 +2761,10 @@ def _seed_tokens_singleton(seed: _Seeder, auth_store: dict[str, Any]) -> None:
 
 def _seed_from_singletons(provider: str, entries: list[PooledCredential]) -> tuple[bool, set[str]]:
     seed = _Seeder(provider, entries)
-    auth_store = _load_auth_store()
     if provider == "anthropic":
         _seed_anthropic_singletons(seed)
     elif provider == "nous":
-        _seed_nous_singleton(seed, auth_store)
+        _seed_nous_singleton(seed, _load_auth_store())
     elif provider == "qwen-oauth":
         _seed_qwen_singleton(seed)
     elif provider == "minimax-oauth":
@@ -2775,7 +2774,7 @@ def _seed_from_singletons(provider: str, entries: list[PooledCredential]) -> tup
         # this gate the removal is undone on the next load_pool().
         if provider == "openai-codex" and seed.is_suppressed(provider, "device_code"):
             return seed.result
-        _seed_tokens_singleton(seed, auth_store)
+        _seed_tokens_singleton(seed, _load_auth_store())
     else:
         _seed_profile_singleton(seed)
     return seed.result

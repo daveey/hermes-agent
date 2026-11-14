@@ -10,6 +10,7 @@ import shutil
 import stat
 import sys
 from collections.abc import Callable, Mapping, MutableMapping
+from functools import lru_cache
 from pathlib import Path
 
 _profile_fallback_warned: bool = False
@@ -61,9 +62,15 @@ def get_hermes_home_override() -> str | None:
     return (current_state().home or None) if current_state is not None else None
 
 
+@lru_cache(maxsize=128)
+def _expanded_home_path(expanded: str) -> Path:
+    """Reuse only immutable path syntax, never environment selection or filesystem state."""
+    return Path(expanded)
+
+
 def _expand_hermes_home(path: str) -> Path:
-    """Expand environment and user-home syntax in a Hermes home path."""
-    return Path(os.path.expanduser(os.path.expandvars(path)))
+    """Expand live inputs each call; avoid rebuilding the same Path thousands of times per picker."""
+    return _expanded_home_path(os.path.expanduser(os.path.expandvars(path)))
 
 
 def _platform_default_hermes_home(environ: Mapping[str, str], user_home: Callable[[], Path]) -> Path:
@@ -234,12 +241,11 @@ def hermes_home_key(path: str | Path | None = None) -> str:
     not exist yet is resolved without touching the cache, because the answer
     can change once it is created (e.g. part of the path turns out to be a symlink).
     """
-    candidate = Path(path) if path is not None else get_hermes_home()
-    raw = str(candidate)
+    raw = os.fspath(path) if path is not None else str(get_hermes_home())
     cached = _HOME_KEY_CACHE.get(raw)
     if cached is not None:
         return cached
-    expanded = candidate.expanduser()
+    expanded = Path(raw).expanduser()
     try:
         resolved = expanded.resolve(strict=True)
     except OSError:
