@@ -257,7 +257,7 @@ _REVIEW_KEYS = ("verdict", "approved", "reviewed_sha")
 # summary or result). Any other key routes by _REVIEW_KEYS alone, so hub reviews that
 # record review_outcome or reviewer_checks, and size-judge rulings, take the ordering
 # continuation as they did before #728. [daveey]
-_LOST_REVIEW_KEYS = frozenset({"pr", "reviewed_pr", "worker_session_id", "artifacts"})
+_LOST_REVIEW_KEYS = frozenset({"pr", "reviewed_pr", "worker_session_id", "artifacts", "artifact_receipt"})
 
 
 def is_review_result(metadata, summary, captured) -> bool:

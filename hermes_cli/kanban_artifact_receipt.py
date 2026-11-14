@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
+import shutil
 import socket
 from pathlib import Path
 
@@ -26,7 +28,7 @@ def format_receipt(payload) -> str:
         if not isinstance(record, dict) or not record.get("machine") or not record.get("path"):
             continue
         line = f"{record['machine']}:{record['path']}"
-        for key in ("sha256", "attachment_uid", "warning"):
+        for key in ("retained_path", "sha256", "attachment_uid", "warning"):
             if record.get(key):
                 line += f" — {key}: {record[key]}"
         lines.append(line)
@@ -54,6 +56,14 @@ def declared_files(metadata: dict) -> list[str]:
                 if isinstance(ref, str) and ref.startswith(("/", "~/")):
                     paths.append(ref)
     return list(dict.fromkeys(paths))
+
+
+def _in_managed_workspace(conn, task_id: str, source: Path) -> bool:
+    from hermes_cli.kanban_db_workspace import _scratch_workspace, _managed_scratch_path_info
+
+    workspace = _scratch_workspace(conn, task_id)
+    return bool(workspace is not None and _managed_scratch_path_info(workspace)[0]
+                and source.resolve().is_relative_to(workspace.resolve()))
 
 
 def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: int,
@@ -106,6 +116,18 @@ def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: 
                 if "uid" in row.keys():
                     record["attachment_uid"] = row["uid"]
                 record["attachment_path"] = row["stored_path"]
+            elif _in_managed_workspace(conn, task_id, source):
+                # Large files cannot use blob sync, but must outlive scratch GC.
+                directory = kb.task_attachments_dir(task_id) / "local-artifacts"
+                directory.mkdir(parents=True, exist_ok=True)
+                dest = kb._unique_attachment_path(directory, source.name, set(staged))
+                staged.append(dest)
+                with source.open("rb") as src, dest.open("xb") as dst:
+                    shutil.copyfileobj(src, dst, 1024 * 1024)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                source = dest
+                record["retained_path"] = str(dest)
             with source.open("rb") as stream:
                 record["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
         except (OSError, kb.ArtifactPreservationError) as exc:
@@ -113,6 +135,11 @@ def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: 
             if dest is not None and "attachment_id" not in record:
                 with contextlib.suppress(OSError):
                     dest.unlink(missing_ok=True)
+            record.pop("retained_path", None)
+            if _in_managed_workspace(conn, task_id, Path(raw).expanduser()):
+                raise kb.ArtifactPreservationError(
+                    f"could not preserve scratch artifact {raw}: {exc}"
+                ) from exc
             record["warning"] = f"Artifact unavailable on executing machine: {exc}"
     if records:
         metadata["artifact_receipt"] = records

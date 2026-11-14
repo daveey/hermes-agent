@@ -33,33 +33,38 @@ def test_receipt_identity_survives_artifact_relocation(kanban_home):
 
 
 @pytest.mark.parametrize("name,exists", [("report.md", False), ("report with spaces.md", False), ("report.md", True)])
-def test_unpreservable_receipt_rolls_back_and_removes_staged_files(kanban_home, monkeypatch, name, exists):
+def test_exact_receipt_records_missing_or_attaches_beyond_incidental_budget(kanban_home, monkeypatch, name, exists):
     monkeypatch.setattr(kmf, "METADATA_FILES_MAX_BYTES", 2)
     with kbc.connect_closing() as conn:
         task, ws, run = helpers._scratch_card(conn)
         report = ws / name
         if exists:
-            report.write_text("exceeds cap")
-        artifact = ws / "report"
-        artifact.write_text("ok")
-        before = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (task,)).fetchone()[0]
-        with pytest.raises(kb.ArtifactPreservationError, match="completion_receipt"):
-            kb.complete_task(conn, task, summary="Report delivered", metadata={"artifacts": [str(artifact)], "completion_receipt": receipt(str(report))}, expected_run_id=run)
-        assert kb.get_task(conn, task).status == "running"
-        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (task,)).fetchone()[0] == before
-        assert not kb.list_attachments(conn, task)
-        assert not list(kb.task_attachments_dir(task).glob("*"))
-        assert ws.exists()
+            report.write_text("exceeds incidental cap")
+        value = receipt(str(report))
+        assert kb.complete_task(conn, task, summary="Report", metadata={"completion_receipt": value}, expected_run_id=run)
+        meta = kb.latest_run(conn, task).metadata
+        assert meta["completion_receipt"] == value
+        record = meta["artifact_receipt"][0]
+        assert record["path"] == str(report)
+        if exists:
+            assert Path(record["attachment_path"]).read_text() == "exceeds incidental cap"
+            assert "warning" not in record
+        else:
+            assert "missing" in record["warning"].lower()
+            assert not kb.list_attachments(conn, task)
+        assert not ws.exists()
 
 
 def test_caller_cannot_forge_relocation_of_missing_evidence(kanban_home):
     with kbc.connect_closing() as conn:
         task, ws, run = helpers._scratch_card(conn)
         ref = str(ws / "missing")
-        with pytest.raises(kb.ArtifactPreservationError, match="completion_receipt"):
-            kb.complete_task(conn, task, summary="Report delivered", expected_run_id=run,
-                             metadata={"completion_receipt": receipt(ref), "attached_from_workspace": {ref: "/elsewhere/pretend"}})
-        assert kb.get_task(conn, task).status == "running"
+        assert kb.complete_task(conn, task, summary="Report", expected_run_id=run,
+                               metadata={"completion_receipt": receipt(ref), "attached_from_workspace": {ref: "/elsewhere/pretend"}})
+        meta = kb.latest_run(conn, task).metadata
+        assert "missing" in meta["artifact_receipt"][0]["warning"].lower()
+        assert "attachment_path" not in meta["artifact_receipt"][0]
+        assert not meta.get("attached_from_workspace")
 
 
 def test_late_run_write_failure_removes_receipt_copies(kanban_home, monkeypatch):

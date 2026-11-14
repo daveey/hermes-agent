@@ -15,9 +15,10 @@ an attachment row. The metadata string is rewritten to the copy, and
 declared artifact, a named file that cannot be kept never fails the
 transition: it is skipped, the reason is logged, and it is recorded under
 ``attached_from_workspace_skipped``. Paths outside the workspace are untouched.
-Completion receipts are the exception: their observed identities are never rewritten,
-and completion refuses any scratch evidence that cannot be preserved. The existing
-attachment map locates the durable copy without pretending it was observed anew.
+Completion receipt identities are never rewritten. Exact file refs are recorded by
+artifact custody: missing files carry warnings, small files become attachments, and
+large scratch files retain an executor-local copy. Ambiguous scratch refs still fail
+closed, rather than pretending a different evidence identity was observed.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ ATTACHED_KEY = "attached_from_workspace"
 SKIPPED_KEY = "attached_from_workspace_skipped"
 # Top-level keys this pass never scans or rewrites: declared artifacts are staged
 # (and rewritten) by ``_persist_scratch_completion_artifacts``; the rest are ours.
-_SKIP_KEYS = frozenset({"artifacts", "_staged_artifacts", ATTACHED_KEY, SKIPPED_KEY})
+_SKIP_KEYS = frozenset({"artifacts", "artifact_receipt", "_staged_artifacts", ATTACHED_KEY, SKIPPED_KEY})
 _TRAILING_PUNCT = ".,;:!?)]}"
 
 
@@ -250,8 +251,6 @@ def stage_completion_artifacts(
     transaction rolls back. Workspace files that other metadata values name
     (``replay_report=<ws>/REPORT.md``) are kept too, best-effort
     (:func:`preserve_metadata_files`). [daveey]"""
-    from hermes_cli import kanban_db as kb
-
     from hermes_cli.kanban_artifact_receipt import declared_files, record_files
 
     originals = declared_files(metadata)
@@ -261,27 +260,24 @@ def stage_completion_artifacts(
     # must not make missing evidence appear preserved.
     metadata.pop(ATTACHED_KEY, None)
     metadata.pop(SKIPPED_KEY, None)
+    metadata.pop("_staged_artifacts", None)
     with discard_on_error(staged):
-        declared = kb._cleaned_artifact_paths(metadata)
-        kb._persist_scratch_completion_artifacts(conn, task_id, metadata)
-        staged.extend(Path(stored_path) for stored_path in metadata.pop("_staged_artifacts", []))
-        for path in staged:
-            kb._insert_completion_attachment(
-                conn, task_id, filename=path.name, stored_path=str(path),
-                size=path.stat().st_size, created_at=now, uploaded_by=uploaded_by,
-            )
-        known: dict[str, str] = {}
-        for original, kept in zip(declared, kb._cleaned_artifact_paths(metadata)):
-            if kept != original:
-                with contextlib.suppress(OSError):
-                    known[str(Path(original).expanduser().resolve())] = kept
+        record_files(conn, task_id, metadata, originals, now, staged,
+                     uploaded_by=uploaded_by, relocated={})
+        records = metadata.get("artifact_receipt", [])
+        mapping = {r["path"]: r.get("attachment_path", r.get("retained_path"))
+                   for r in records if r.get("attachment_path") or r.get("retained_path")}
+        known = {str(Path(raw).expanduser().resolve()): kept for raw, kept in mapping.items()}
+        if "artifacts" in metadata:
+            metadata["artifacts"] = [mapping.get(raw, raw) for raw in cleaned_artifact_paths(metadata)]
         staged.extend(preserve_metadata_files(
             conn, task_id, metadata, now, uploaded_by=uploaded_by, known=known,
         ))
+        # The incidental scan must not rewrite custody's observed source paths.
+        if records:
+            metadata["artifact_receipt"] = records
         if uploaded_by == "kanban_complete" and "completion_receipt" in metadata:
             _verify_receipt_files(conn, task_id, metadata)
-        record_files(conn, task_id, metadata, originals, now, staged, uploaded_by=uploaded_by,
-                     relocated=dict(zip(declared, kb._cleaned_artifact_paths(metadata))))
     return staged
 
 
@@ -313,6 +309,7 @@ def _verify_receipt_files(conn, task_id: str, metadata: dict) -> None:
     refs = {e["ref"] for item in receipt["items"] for e in item["evidence"]}
     refs.update(item["superseded_by"] for item in receipt["items"] if "superseded_by" in item)
     attached = metadata.get(ATTACHED_KEY, {})
+    recorded = {r["path"] for r in metadata.get("artifact_receipt", [])}
     for ref in refs:
         # Never normalize an evidence identity silently. Workspace aliases and
         # embedded paths must be resubmitted as the exact absolute file reference
@@ -322,5 +319,5 @@ def _verify_receipt_files(conn, task_id: str, metadata: dict) -> None:
             path = Path(ref).expanduser()
             path = path if path.is_absolute() else workspace / path
             scratch_ref = scratch_ref or path.resolve().is_relative_to(workspace.resolve())
-        if scratch_ref and ref not in attached:
+        if scratch_ref and ref not in attached and ref not in recorded:
             raise ArtifactPreservationError("completion_receipt evidence could not be preserved: " + ref)

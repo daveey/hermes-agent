@@ -205,7 +205,7 @@ def test_lost_review_completed_by_the_worker_tool_stays_held(board, monkeypatch)
         assert out["ok"] is True, out
         stored = kb._json_dict(board.execute(
             "SELECT metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,)).fetchone()[0])
-        assert sorted(stored) == ["artifacts", "worker_session_id"], stored
+        assert sorted(stored) == ["artifact_receipt", "artifacts", "worker_session_id"], stored
     kb.recompute_ready(board)
     assert dispatch.check_respawn_guard(board, task) == "active_pr"
 
