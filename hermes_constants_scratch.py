@@ -295,7 +295,9 @@ def _owned_by_hermes(proc, registered: set[int]) -> bool:
         return False
 
 
-def reap_processes_rooted_in(scratch_root: Path, doomed: list[Path], audit: logging.Logger = logger) -> int:
+def reap_processes_rooted_in(
+    scratch_root: Path, doomed: list[Path], audit: logging.Logger = logger, *, reap_deleted_cwds: bool = True,
+) -> int:
     """TERM (then KILL) same-user processes whose cwd is inside an entry about to be
     pruned, or is a path under *scratch_root* that no longer exists. Returns the count.
 
@@ -347,7 +349,8 @@ def reap_processes_rooted_in(scratch_root: Path, doomed: list[Path], audit: logg
     # Re-filter against the shrunk *doomed*: an orphan in a kept entry is spared with it (the
     # reap only exists to clear the way for rmtree); one whose cwd is already gone still goes.
     victims = [(proc, cwd_path) for proc, cwd_path in victims if (proc, cwd_path) not in owned
-               and (not os.path.exists(cwd_path) or any(_under(cwd_path, os.path.realpath(str(e))) for e in doomed))]
+               and ((reap_deleted_cwds and not os.path.exists(cwd_path))
+                    or any(_under(cwd_path, os.path.realpath(str(e))) for e in doomed))]
     if not victims:
         return 0
     for proc, cwd_path in victims:
@@ -415,15 +418,19 @@ def release_git_worktrees(repos: set[str]) -> None:
 
 def prune_idle_entries(
     root: Path, max_idle_hours: float, skip_names: frozenset[str], log_file: Path | None = None,
+    *, reap_deleted_cwds: bool = True,
 ) -> int:
     """Delete top-level entries of *root* with no write anywhere in their subtree for
     *max_idle_hours*, reaping processes and worktree registrations rooted in them first.
     Each removal, each signalled process and each entry rescued mid-prune (touched
     again after selection) is recorded in *log_file*. Returns the count actually
-    removed."""
+    removed. Set ``reap_deleted_cwds=False`` for shared test roots: deleted working
+    directories inside fresh attempts are test fixtures, not abandoned processes.
+    Processes inside selected idle entries are still reaped before removal.
+    """
     audit = _open_prune_log(log_file)
     try:
-        return _prune_idle_entries(root, max_idle_hours, skip_names, audit)
+        return _prune_idle_entries(root, max_idle_hours, skip_names, audit, reap_deleted_cwds=reap_deleted_cwds)
     finally:
         if audit is not logger:
             for handler in audit.handlers:
@@ -432,6 +439,7 @@ def prune_idle_entries(
 
 def _prune_idle_entries(
     root: Path, max_idle_hours: float, skip_names: frozenset[str], audit: logging.Logger,
+    *, reap_deleted_cwds: bool = True,
 ) -> int:
     cutoff = time.time() - max_idle_hours * 3600
     # Entries already known to hold files this user cannot read or delete are skipped before
@@ -453,7 +461,10 @@ def _prune_idle_entries(
     # Runs even with nothing to delete: orphans whose cwd was removed by an earlier pass
     # (or by hand) are found by the deleted-cwd rule, not by membership in ``doomed``.
     try:
-        reap_processes_rooted_in(root, doomed, audit)
+        if reap_deleted_cwds:
+            reap_processes_rooted_in(root, doomed, audit)
+        else:
+            reap_processes_rooted_in(root, doomed, audit, reap_deleted_cwds=False)
     # health: allow BLE001 -- fail-closed boundary: any failure leaves who works inside unknown; audited below
     except Exception as exc:  # psutil missing or restricted host
         audit.info("scratch prune: process check failed (%s: %r), nothing deleted this pass",

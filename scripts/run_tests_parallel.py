@@ -78,7 +78,9 @@ def _sweep_killed_run_roots(root: str) -> None:
         from hermes_constants_scratch import prune_idle_entries
     except ImportError:  # runner invoked from outside the repo root
         return
-    prune_idle_entries(Path(root), 24, frozenset())
+    # Concurrent tests deliberately delete a child's cwd (e.g. host-slot reclamation).
+    # Only aged attempt roots belong to this sweep, not every deleted cwd on the host.
+    prune_idle_entries(Path(root), 24, frozenset(), reap_deleted_cwds=False)
 
 
 def _rmtree_force(path: str) -> None:
