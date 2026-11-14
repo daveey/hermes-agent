@@ -344,14 +344,16 @@ def _settle_seen(s: _State) -> None:
 
 def _advance(s: _State, view, me: str, origin_profile: str) -> None:
     """Bring ``s`` to ``view``'s rows, re-projecting only rows whose stored text changed."""
-    rows = view.relevant if view.me is not None else view.by_key
+    # Unfiltered structural views predate the optional scalar projection fields.
+    rows = view.relevant if getattr(view, 'me', None) is not None else view.by_key
+    bystanders = getattr(view, 'bystanders', {})
     shared_view = _shared.setdefault(s.tag, ChainMap({}, {}))
     # Count actual reuse of scalar projections, just as _stage counts reused stages.
     prior = shared_view.maps[1]
-    stats['shared'] += sum(1 for rk, value in view.bystanders.items()
+    stats['shared'] += sum(1 for rk, value in bystanders.items()
                            if s.bystanders.get(rk) != value and prior.get(rk) == value)
-    shared_view.maps[1] = view.bystanders
-    s.bystanders = view.bystanders
+    shared_view.maps[1] = bystanders
+    s.bystanders = bystanders
     if s.gen is not None and view.base_gen == s.gen:
         removed, candidates = view.removed, view.changed
     else:  # not the view ``s`` was advanced from: compare every row (no decode for unchanged ones)
@@ -412,7 +414,7 @@ def project(view, now: float, me: str, info_rows: list, last_ok: float | None, o
         # Keep its generation unchanged so its next read still reconciles normally.
         for other in _states.values():
             if other.tag == view.path and other.key[0] == me:
-                for rk in other.stages.keys() & view.bystanders.keys():
+                for rk in other.stages.keys() & getattr(view, 'bystanders', {}).keys():
                     _unapply(other, rk)
         try:
             if s is None:
