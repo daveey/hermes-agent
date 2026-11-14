@@ -21,6 +21,9 @@ from tests.hermes_cli.test_kanban_move_unpushed import (
     TARGET, _card, _commit, _git, _moved, _refused, _worktree, hub)
 from tests.hermes_cli.test_kanban_worker_repin import NoCallHub, _acknowledged, _RecordHub
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 conn = db_fixtures.conn
 __all__ = ["conn", "hub"]
 
@@ -31,7 +34,7 @@ def test_a_tree_named_only_in_the_queued_moves_checkpoint_keeps_the_card_here(hu
     tid = _card(hub)
     tree = _worktree(tmp_path, "ckpt-queued")  # no owner marker, nothing stored names it
     _commit(tree, "b.txt")
-    res = km.move_queued(hub.conn, tid, runs_on=TARGET, reason="slots", checkpoint=f"WIP in {tree}, not pushed")
+    res = km.move_queued(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="slots", checkpoint=f"WIP in {tree}, not pushed")
     _refused(res, tree)
     assert _moved(hub.conn, tid) == []
 
@@ -44,7 +47,7 @@ def test_a_tree_named_only_in_the_running_moves_checkpoint_keeps_the_card_here(h
     run_id = hub.conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
     tree = _worktree(tmp_path, "ckpt-running")
     _commit(tree, "b.txt")
-    res = km.move_task(hub.conn, tid, runs_on=TARGET, reason="r", checkpoint=f"Done: commit b in {tree}.",
+    res = km.move_task(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="r", checkpoint=f"Done: commit b in {tree}.",
                        expected_run_id=run_id)
     _refused(res, tree)
     assert kb.get_task(hub.conn, tid).status == "running"
@@ -57,8 +60,8 @@ def test_a_text_named_tree_owned_by_another_card_does_not_keep_this_card(hub, tm
     tree = _worktree(tmp_path, "impl-owned", owner=impl)
     _commit(tree, "b.txt")
     review = _card(hub, title="reviewer", body=f"Review the implementer's tree at {tree} (head b).")
-    assert km.move_queued(hub.conn, review, runs_on=TARGET, reason="slots")["ok"]
-    _refused(km.move_queued(hub.conn, impl, runs_on=TARGET, reason="slots"), tree)  # still its owner's state
+    assert km.move_queued(hub.conn, review, runs_on=TARGET, host_reason=HR, reason="slots")["ok"]
+    _refused(km.move_queued(hub.conn, impl, runs_on=TARGET, host_reason=HR, reason="slots"), tree)  # still its owner's state
 
 
 def test_a_text_named_tree_owned_by_the_card_itself_still_counts(hub, tmp_path):

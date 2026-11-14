@@ -23,6 +23,9 @@ from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gateway
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 TARGET = [f"machine:{WORKER}"]
 
 
@@ -88,7 +91,7 @@ def test_an_owner_marked_tree_with_an_unpushed_commit_keeps_the_card_here(hub, t
     tid = _card(hub)
     tree = _worktree(tmp_path, "impl", owner=tid)
     _commit(tree, "b.txt")  # on wt/impl only: no remote has it
-    res = km.move_queued(hub.conn, tid, runs_on=TARGET, reason="worker-1 has slots")
+    res = km.move_queued(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="worker-1 has slots")
     _refused(res, tree)
     assert "unpushed commits" in res["error"]
     assert _moved(hub.conn, tid) == [] and _runs_on(hub.conn, tid) != TARGET
@@ -99,7 +102,7 @@ def test_a_dirty_owner_marked_tree_keeps_the_card_here(hub, tmp_path):
     tree = _worktree(tmp_path, "dirty", owner=tid)
     _git(tree, "push", "-q", "origin", "HEAD:refs/heads/wt/dirty")
     (tree / "wip.txt").write_text("not committed\n")
-    res = km.move_queued(hub.conn, tid, runs_on=TARGET, reason="worker-1 has slots")
+    res = km.move_queued(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="worker-1 has slots")
     _refused(res, tree)
     assert "dirty worktree" in res["error"]
 
@@ -109,7 +112,7 @@ def test_a_clean_tree_whose_commits_are_pushed_moves(hub, tmp_path):
     tree = _worktree(tmp_path, "pushed", owner=tid)
     _commit(tree, "b.txt")
     _git(tree, "push", "-q", "origin", "HEAD:refs/heads/wt/pushed")
-    res = km.move_queued(hub.conn, tid, runs_on=TARGET, reason="worker-1 has slots")
+    res = km.move_queued(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="worker-1 has slots")
     assert res["ok"], res
     assert "left_unpushed_state" not in _moved(hub.conn, tid)[-1]
 
@@ -120,7 +123,7 @@ def test_a_tree_named_only_in_the_newest_comment_keeps_the_card_here(hub, tmp_pa
     _commit(tree, "b.txt")
     kb.add_comment(hub.conn, tid, "default", "older note, no path")
     kb.add_comment(hub.conn, tid, "default", f"Implementation is in {tree}, commit b not pushed yet.")
-    _refused(km.move_queued(hub.conn, tid, runs_on=TARGET, reason="worker-1 has slots"), tree)
+    _refused(km.move_queued(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="worker-1 has slots"), tree)
 
 
 def test_a_shared_main_checkout_the_body_mentions_is_not_the_cards_work(hub, tmp_path):
@@ -129,14 +132,14 @@ def test_a_shared_main_checkout_the_body_mentions_is_not_the_cards_work(hub, tmp
     _git(main, "init", "-q")
     (main / "untracked.txt").write_text("someone else's\n")
     tid = _card(hub, body=f"Fix the parser in {main}.")
-    assert km.move_queued(hub.conn, tid, runs_on=TARGET, reason="worker-1 has slots")["ok"]
+    assert km.move_queued(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="worker-1 has slots")["ok"]
 
 
 def test_force_leaves_the_state_and_the_event_records_it(hub, tmp_path):
     tid = _card(hub)
     tree = _worktree(tmp_path, "forced", owner=tid)
     _commit(tree, "b.txt")
-    res = km.move_queued(hub.conn, tid, runs_on=TARGET, reason="abandon the hub copy", force=True)
+    res = km.move_queued(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="abandon the hub copy", force=True)
     assert res["ok"], res
     ev = _moved(hub.conn, tid)[-1]
     assert ev["left_unpushed_state"] == f"unpushed commits in {tree.resolve()}", ev
@@ -159,7 +162,7 @@ def test_a_running_cards_own_move_is_refused_and_its_run_goes_on(hub, tmp_path):
     assert kb.get_task(hub.conn, tid).status == "running"
     tree = _worktree(tmp_path, "running", owner=tid)
     _commit(tree, "b.txt")
-    res = km.move_task(hub.conn, tid, runs_on=TARGET, reason="r", checkpoint="c", expected_run_id=run_id)
+    res = km.move_task(hub.conn, tid, runs_on=TARGET, host_reason=HR, reason="r", checkpoint="c", expected_run_id=run_id)
     _refused(res, tree)
     assert kb.get_task(hub.conn, tid).status == "running"
 
@@ -169,7 +172,7 @@ def test_the_cli_prints_the_refusal_code(hub, tmp_path):
     tid = _card(hub)
     tree = _worktree(tmp_path, "cli", owner=tid)
     _commit(tree, "b.txt")
-    out = json.loads(kcli.run_slash(f'move {tid} --runs-on machine:{WORKER} --reason "slots" --json'))
+    out = json.loads(kcli.run_slash(f'move {tid} --runs-on machine:{WORKER} --host-reason worktree --reason "slots" --json'))
     assert out["reason_code"] == "unpushed_state_here", out
-    text = kcli.run_slash(f'move {tid} --runs-on machine:{WORKER} --reason "slots"')
+    text = kcli.run_slash(f'move {tid} --runs-on machine:{WORKER} --host-reason worktree --reason "slots"')
     assert "[unpushed_state_here]" in text and "pass force to leave it" in text, text

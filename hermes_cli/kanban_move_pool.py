@@ -1,12 +1,17 @@
-"""Moves onto one worker: the pool is the default, a single worker needs a host reason. [daveey]
+"""Moves onto one machine: the pool is the default, a single machine needs a host reason. [daveey]
 
 Pinning a card to one worker for capacity froze the choice when capacity changed: on 11-12 ten ready cards waited
 up to 261 min on ``machine:worker-2`` while it was drain-held and worker-1 and worker-4 had free slots. The queue
 for any worker is ``runs_on: [pool:worker]`` (:data:`hermes_cli.kanban_placement.POOL_LABEL`, ``hermes kanban move
-<id> --pool``). A move to ``machine:<x>`` where x carries the pool label is refused without ``host_reason`` (the
-card works on that host, or holds unpushed state there). A pooled card re-pinned by hand to the machine it is on
-must also hold unpushed state there when a tree of the card was found: a clean tree whose commits are on a remote
-stays on the pool. The park itself pins on unpushed state (:mod:`hermes_cli.kanban_park_pin`).
+<id> --pool``). A move whose ``runs_on`` names any ``machine:<x>`` is refused without ``host_reason`` naming state on
+x (a worktree, a stamp, unpublished work, a live process, Mac-only or hub-only work): a capacity stall is a
+condition of the machine the card leaves, not state on x, and a new single-machine pin only moves the stall (11-13:
+three pickup-stall alarm moves pinned published work to machine:worker-1/-4/-8; two stalled again there). A
+``host_reason`` that only cites capacity is refused too (:func:`capacity_only`). The worker-first origin repin and
+the stranded-label reroute (:mod:`hermes_cli.kanban_creator_repin`) carry their own target state. A pooled card
+re-pinned by hand to the machine it is on must also hold unpushed state there when a tree of the card was found: a
+clean tree whose commits are on a remote stays on the pool. The park itself pins on unpushed state
+(:mod:`hermes_cli.kanban_park_pin`).
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 HOST_REASON_REQUIRED = "host_reason_required"
+HOST_REASON_CAPACITY = "host_reason_capacity"
 POOL_KEEPS_PUSHED = "pool_keeps_pushed"
 
 _PATH = re.compile(r"(?<![\w.:/-])~?(?:/[\w.@+-]+){2,}")
@@ -44,11 +50,40 @@ def cli_labels(args: Any) -> tuple[Optional[list[str]], dict[str, Any], str]:
     return labels, {"host_reason": getattr(args, "host_reason", None)}, ""
 
 
+def machine_pins(labels: Iterable[str]) -> list[str]:
+    """Machines named by ``machine:<x>`` labels."""
+    return [lab.split(":", 1)[1] for lab in labels if isinstance(lab, str) and lab.startswith("machine:")]
+
+
 def pool_pins(labels: list[str], machines: Mapping[str, Mapping[str, Any]]) -> list[str]:
     """Machines named by ``machine:<x>`` labels that are pool workers (carry the pool label)."""
     label = pool_label()
-    names = [lab.split(":", 1)[1] for lab in labels if lab.startswith("machine:")]
-    return [n for n in names if label in ((machines.get(n) or {}).get("labels") or [])]
+    return [n for n in machine_pins(labels) if label in ((machines.get(n) or {}).get("labels") or [])]
+
+
+# A host reason names state on the target; one that only cites capacity (free slots, 10/10, eligible now) does not.
+_CAPACITY = re.compile(r"free (?:card )?slots?|slots? free|\b\d+\s*/\s*\d+\b|capacity|budget_exhausted|"
+                       r"less loaded|eligible now|has room|\bidle\b|\bunheld\b|\bfull\b", re.IGNORECASE)
+_STATE = re.compile(r"worktree|\btrees?\b|stamp|unpushed|unpublished|uncommitted|dirty|\bpids?\b|process|"
+                    r"\blogs?\b|artifact|evidence|\bfiles?\b|checkout|workspace|fixture|\bmac\b|macos|"
+                    r"xcode|\bios\b|simulator|\bgpus?\b|hub-only|hub only|keychain|chrome|desktop|device|"
+                    r"database|signed-in|/home/|~/|\.json|\.log", re.IGNORECASE)
+
+
+def capacity_only(host_reason: str) -> bool:
+    """Whether ``host_reason`` cites capacity and names no state on a host (the refused alarm-move shape)."""
+    return bool(_CAPACITY.search(host_reason or "")) and not _STATE.search(host_reason or "")
+
+
+def host_reason_message(name: str, *, pooled: bool) -> str:
+    """The ``host_reason_required`` refusal for a move to ``machine:<name>``: queue on the pool instead."""
+    label = pool_label()
+    what = f"machine:{name} is a pool worker ({label})" if pooled else f"runs_on names one machine (machine:{name})"
+    return (f"{what}. Queue the card for any worker instead (runs_on [{label!r}], `hermes kanban move <id> --pool`): "
+            "it waits in the single queue until any worker has a free slot. A capacity stall is a condition of the "
+            f"machine the card leaves, not state on {name}; a new single-machine pin only moves the stall. Pin one "
+            f"machine only with host_reason naming state on {name}: a worktree, a stamp, unpublished work, a live "
+            "process, or Mac-only or hub-only work.")
 
 
 def _is_tree(path: Path) -> bool:
@@ -293,16 +328,19 @@ def check(labels: list[str], machines: Mapping[str, Mapping[str, Any]], *, me: s
           previous: Optional[list[str]], workspace_path: Optional[str], host_reason: Optional[str],
           force: bool, refused: type, task_id: Optional[str] = None) -> dict[str, Any]:
     """Event fields for a move (``host_reason``, ``unpushed_state``), or raise ``refused(code, message)``."""
+    named = machine_pins(labels)
     pins = pool_pins(labels, machines)
     reason = (host_reason or "").strip()
-    if not pins:
+    if not named:
         return {"host_reason": reason[:500]} if reason else {}
     label = pool_label()
     if not reason:
-        raise refused(HOST_REASON_REQUIRED, (
-            f"machine:{pins[0]} is a pool worker ({label}). Queue the card for any worker instead (runs_on "
-            f"[{label!r}], `hermes kanban move <id> --pool`), so whichever worker has a free slot claims it. Pin one "
-            "worker only with host_reason: the card works on that host, or holds unpushed state there."))
+        raise refused(HOST_REASON_REQUIRED, host_reason_message((pins or named)[0], pooled=bool(pins)))
+    if capacity_only(reason):
+        raise refused(HOST_REASON_CAPACITY, (
+            f"host_reason {reason[:200]!r} cites capacity, not state on {named[0]}. Capacity is never a host reason: "
+            f"use runs_on [{label!r}] (`hermes kanban move <id> --pool`), or name the worktree, stamp, unpublished "
+            "work, live process, or Mac-only or hub-only work that holds the card there."))
     out: dict[str, Any] = {"host_reason": reason[:500]}
     if me in pins and not running and label in (previous or []):
         trees, unpushed = card_trees_state(task_id, workspace_path)

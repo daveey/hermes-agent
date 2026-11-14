@@ -25,6 +25,9 @@ from hermes_cli.kanban_capabilities import CapabilityMismatchError
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import BOARD, HUB, MACHINES, WORKER, Gateway
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 WITH_KANBAN = "platform_toolsets:\n  cli: [terminal, file, kanban]\n"
 NEEDS = ["terminal", "file", "git", "kanban"]
 NO_SHELL = "platform_toolsets:\n  cli: [file]\n"
@@ -117,7 +120,7 @@ def test_move_to_a_machine_known_to_lack_a_tool_is_refused_naming_it(gws, monkey
     _publish(monkeypatch, {})
     tid, run_id = _running_hub_card(hub, requires=NEEDS)
     _publish(monkeypatch, {WORKER: {"default": {"terminal", "file", "git"}}})
-    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], reason="heavy", checkpoint="x",
+    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="heavy", checkpoint="x",
                        expected_run_id=run_id)
     assert not res["ok"] and res["reason_code"] == "capability_mismatch", res
     assert "worker-1" in res["error"] and "kanban" in res["error"]
@@ -126,7 +129,7 @@ def test_move_to_a_machine_known_to_lack_a_tool_is_refused_naming_it(gws, monkey
         hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]) == ["machine:hub"]
     # Control: the same move succeeds once the worker publishes the tool.
     _publish(monkeypatch, {WORKER: {"default": {"terminal", "file", "kanban"}}})
-    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], reason="heavy", checkpoint="x",
+    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="heavy", checkpoint="x",
                        expected_run_id=run_id)
     assert res["ok"], res
 
@@ -137,7 +140,7 @@ def test_queued_move_is_refused_too(gws, monkeypatch):
     tid = kb.create_task(hub.conn, title="q", assignee="default", requires=NEEDS, runs_on=["machine:hub"],
                          triage=True)
     _publish(monkeypatch, {WORKER: {"default": {"terminal"}}})
-    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], reason="heavy")
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="heavy")
     assert not res["ok"] and res["reason_code"] == "capability_mismatch" and "worker-1" in res["error"], res
 
 

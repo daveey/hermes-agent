@@ -21,6 +21,9 @@ from tests.hermes_cli import test_kanban_worker_policy_db as db_fixtures
 from tests.hermes_cli.test_kanban_worker_node import BOARD, HUB, WORKER
 from tests.hermes_cli.test_kanban_worker_repin import RepinHub
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 conn = db_fixtures.conn
 gws = node_fixtures.gws
 svc = node_fixtures.svc
@@ -73,7 +76,7 @@ def test_a_worker_move_back_to_the_origin_is_repinned_there_and_the_origin_runs_
     tid, run_id = _worker_runs_policy_card(origin, worker, svc)
 
     worker.enter()
-    res = km.move_task(worker.conn, tid, runs_on=[f"machine:{HUB}"], reason="needs the hub's askeve runtime",
+    res = km.move_task(worker.conn, tid, runs_on=[f"machine:{HUB}"], host_reason=HR, reason="needs the hub's askeve runtime",
                        checkpoint="draft f9f05dd6e; next: fix the red suites", expected_run_id=run_id, force=True)
     assert res["ok"] and res["status"] == "ready", res
     assert res.get("repin") == "requested", res  # the worker cannot write a Board-owned pin; the origin applies it
@@ -115,7 +118,7 @@ def test_a_reclaimed_move_of_a_policy_card_is_a_request_too(gws, svc, monkeypatc
         "prev_pid": pid, "host_local": True, "termination_attempted": True, "terminated": True, "sigkill": False})
     worker.enter()
     before = worker.conn.execute("SELECT runs_on FROM tasks WHERE id=?", (tid,)).fetchone()[0]
-    res = km.move_reclaim(worker.conn, tid, runs_on=[f"machine:{HUB}"], reason="needs the hub", force=True)
+    res = km.move_reclaim(worker.conn, tid, runs_on=[f"machine:{HUB}"], host_reason=HR, reason="needs the hub", force=True)
     assert res["ok"] and res.get("repin") == "requested", res
     assert worker.conn.execute("SELECT runs_on FROM tasks WHERE id=?", (tid,)).fetchone()[0] == before
     assert _moved(worker.conn, tid)[-1].get("repin_requested") is True

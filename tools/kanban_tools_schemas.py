@@ -549,22 +549,25 @@ KANBAN_MOVE_SCHEMA = _schema(
         "gateway whose runs_on no enrolled machine carries (stranded: e.g. ['hermes-hub']) may be re-routed by any "
         "worker to labels a machine does carry (e.g. ['machine:hub']); the old labels are kept in a comment. "
         "Third: a pickup-stall alarm's run may move a ready card its alarm lists off the stalled machine to "
-        "runs_on = [\"pool:worker\"] while another pool worker is eligible now (or [\"machine:<X>\"] for one other "
-        "eligible machine outside the pool). "
-        "Every other card is refused."
+        "runs_on = [\"pool:worker\"] while another pool worker can take it (a free slot now is not needed: the "
+        "card waits in the single queue until any worker has one). "
+        "Every other card is refused. Any runs_on naming a machine:<X> (this card, another card, an operator "
+        "move) is refused without host_reason naming state on X: capacity is a condition of the machine a card "
+        "leaves, not state on another one."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "runs_on": {"type": "array", "items": {"type": "string"}, "description": (
             "Labels the next machine must have, e.g. [\"pool:worker\"] (any worker with a free slot: the default "
             "for portable work), [\"macos\"], [\"linux\"]. machine:<name> pins one registered machine that picks "
-            "up this board (else refused); pinning one pool worker also needs host_reason."
+            "up this board (else refused) and always needs host_reason."
         )},
         "reason": _prop("string", "Why the card must move (what this machine lacks). Logged on the card."),
         "host_reason": _prop("string", (
-            "Required for runs_on naming one pool worker (machine:worker-N): the card works on that host, or "
-            "holds unpushed state there. Capacity is never a host reason: use [\"pool:worker\"]. Also required "
-            "when reason claims ship/landing custody: hermes-core-wt ship lands from every machine."
+            "Required for runs_on naming one machine (machine:<name>): the state on that host that holds the card "
+            "there: a worktree, a stamp, unpublished work, a live process, or Mac-only or hub-only work. Capacity "
+            "(free slots, a full machine) is never a host reason and is refused: use [\"pool:worker\"]. Also "
+            "required when reason claims ship/landing custody: hermes-core-wt ship lands from every machine."
         )),
         "checkpoint": _prop("string", (
             "Everything the next run needs to resume on the other machine: what is done (commits, branches, "
@@ -1160,7 +1163,8 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "carries only archive ops. "
         "Op operator {action, task_id, ...} is the scoped Board-operator call for ONE card ANOTHER gateway "
         "created (the ones kanban_comment/kanban_move/kanban_unblock refuse as foreign_card): action "
-        "comment {text}, move {runs_on, reason} (not while it runs) or unblock {reason} (an agent's block "
+        "comment {text}, move {runs_on, reason, host_reason?} (not while it runs; a machine:<X> target needs "
+        "host_reason naming state on X, else use [\"pool:worker\"]) or unblock {reason} (an agent's block "
         "only, never one waiting on a human). That card's home gateway executes it; complete/archive/link/"
         "unlink of a foreign card are refused (its owner's), one op per request, every call logged. "
         "Action label_publish {machine, labels, proof: {kind: 'hub_probe'}} (no task_id) asks the hub to ADD "
@@ -1189,6 +1193,8 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
                                "description": "operator label_publish: skill:/capability: labels to add."},
                     "proof": {"type": "object", "description": "operator label_publish: {kind: 'hub_probe'}."},
                     "reason": {"type": "string", "description": "operator move/unblock: why (required)."},
+                    "host_reason": {"type": "string", "description": "operator move to machine:<X>: the state on "
+                                                                     "X that holds the card there (required for it)."},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},
                     "task_id": {"type": "string", "description": "reconcile_notify: the subscribed task; "

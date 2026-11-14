@@ -19,6 +19,9 @@ from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import BOARD, HUB, MACHINES, WORKER, Gateway, _runs
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 
 @pytest.fixture
 def svc():
@@ -59,7 +62,7 @@ def _events(conn, tid, kind=km.MOVED_EVENT):
 def test_a_hub_card_moves_itself_to_the_worker_and_completes_there_once(gws, svc):
     hub, worker = gws
     tid, run_id = _running_hub_card(hub)
-    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], reason="needs the worker's GPU",
+    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="needs the worker's GPU",
                        checkpoint="step 1 done (commit abc); next: run the bench", expected_run_id=run_id)
     assert res["ok"] and res["matches"] == [WORKER] and res["move_no"] == 1 and res["status"] == "ready", res
     t = hub.conn.execute("SELECT status, runs_on, claim_lock FROM tasks WHERE id = ?", (tid,)).fetchone()
@@ -98,7 +101,7 @@ def test_move_refuses_unknown_held_and_self_only_targets(gws):
         res = km.move_task(hub.conn, tid, runs_on=runs_on, reason="r", checkpoint="c", expected_run_id=run_id)
         assert not res["ok"] and res["reason_code"] == "no_machine", (runs_on, res)
     held = {**MACHINES, WORKER: {**MACHINES[WORKER], "hold": True}}
-    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], reason="r", checkpoint="c",
+    res = km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="r", checkpoint="c",
                        expected_run_id=run_id, machines=held)
     assert res["reason_code"] == "no_machine"
     assert kb.get_task(hub.conn, tid).status == "running"  # a refused move leaves the run alone
@@ -107,9 +110,9 @@ def test_move_refuses_unknown_held_and_self_only_targets(gws):
 def test_move_needs_a_reason_and_a_running_card(gws):
     hub, _ = gws
     tid, run_id = _running_hub_card(hub)
-    assert km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], reason=" ", checkpoint="c",
+    assert km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason=" ", checkpoint="c",
                         expected_run_id=run_id)["reason_code"] == "reason_required"
-    assert km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], reason="r", checkpoint="c",
+    assert km.move_task(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="r", checkpoint="c",
                         expected_run_id=run_id + 99)["ok"] is False  # not this run's card
 
 
@@ -117,7 +120,7 @@ def test_workspace_bound_cards_never_move(gws):
     hub, _ = gws
     hub.enter()
     tid = kb.create_task(hub.conn, title="wt", assignee="default", workspace_kind="dir", workspace_path="/tmp/x")
-    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], reason="r")
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="r")
     assert res["reason_code"] == "workspace_bound"
 
 
@@ -129,14 +132,14 @@ def test_max_moves_and_ping_pong(gws):
     machines = {**MACHINES, HUB: {**MACHINES[HUB], "pickup": "explicit"},
                 "w2": {"name": "w2", "state": "active", "labels": ["linux"], "hold": False, "pickup": "all"}}
     # hub -> worker-1 -> w2: each move leaves a machine.
-    assert km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], reason="1", machines=machines, me=HUB)["ok"]
-    assert km.move_queued(hub.conn, tid, runs_on=["machine:w2"], reason="2", machines=machines, me=WORKER)["ok"]
+    assert km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="1", machines=machines, me=HUB)["ok"]
+    assert km.move_queued(hub.conn, tid, runs_on=["machine:w2"], host_reason=HR, reason="2", machines=machines, me=WORKER)["ok"]
     # w2 -> hub: the card already left the hub -> ping-pong, unless forced (and a forced move still counts).
-    res = km.move_queued(hub.conn, tid, runs_on=["machine:hub"], reason="3", machines=machines, me="w2")
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:hub"], host_reason=HR, reason="3", machines=machines, me="w2")
     assert res["reason_code"] == "ping_pong"
-    res = km.move_queued(hub.conn, tid, runs_on=["machine:hub"], reason="3", machines=machines, me="w2", force=True)
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:hub"], host_reason=HR, reason="3", machines=machines, me="w2", force=True)
     assert res["ok"] and res["move_no"] == 3 and _events(hub.conn, tid)[-1]["forced"] is True
-    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], reason="4", machines=machines, me=HUB,
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="4", machines=machines, me=HUB,
                          force=True)
     assert res["reason_code"] == "move_limit"  # default kanban.move.max_moves = 3
     assert [e["reason"] for e in _events(hub.conn, tid)] == ["1", "2", "3"]  # the audit log
@@ -148,7 +151,7 @@ def test_labels_matching_a_machine_it_never_left_are_not_ping_pong(gws):
     hub.enter()
     tid = kb.create_task(hub.conn, title="q", assignee="default")
     machines = {**MACHINES, "w2": {"name": "w2", "state": "active", "labels": ["linux"], "hold": False}}
-    assert km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], reason="1", machines=machines, me=HUB)["ok"]
+    assert km.move_queued(hub.conn, tid, runs_on=["machine:worker-1"], host_reason=HR, reason="1", machines=machines, me=HUB)["ok"]
     # From worker-1, ["linux"] matches the hub (left) and w2 (never visited): allowed.
     assert km.move_queued(hub.conn, tid, runs_on=["linux"], reason="2", machines=machines, me=WORKER)["ok"]
 
@@ -161,14 +164,14 @@ def test_tool_kanban_move_moves_the_workers_own_card(gws, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
     from tools import kanban_tools as kt
-    out = json.loads(kt._handle_move({"runs_on": ["machine:worker-1"], "reason": "needs linux box",
+    out = json.loads(kt._handle_move({"runs_on": ["machine:worker-1"], "host_reason": HR, "reason": "needs linux box",
                                       "checkpoint": "done: A; next: B"}))
     assert out.get("ok", True) and out["runs_on"] == ["machine:worker-1"] and out["matches"] == [WORKER], out
     assert "End your turn" in out["next"]
     assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]) == [
         "machine:worker-1"]
     assert _events(hub.conn, tid)[0]["reason"] == "needs linux box"
-    out = json.loads(kt._handle_move({"runs_on": ["machine:worker-1"], "reason": "again", "checkpoint": "x"}))
+    out = json.loads(kt._handle_move({"runs_on": ["machine:worker-1"], "host_reason": HR, "reason": "again", "checkpoint": "x"}))
     assert out.get("ok") is False or "error" in out  # the run is over: no second move from it
 
 
@@ -204,10 +207,10 @@ def test_cli_move_relabels_a_queued_card(gws):
     hub, _ = gws
     hub.enter()
     tid = kb.create_task(hub.conn, title="queued", assignee="default")
-    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --reason "needs the worker" --json'))
+    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --host-reason worktree --reason "needs the worker" --json'))
     assert out["ok"] and out["runs_on"] == ["machine:worker-1"], out
     assert _events(hub.conn, tid)[0]["queued"] is True
-    out = json.loads(_cli(f'move {tid} --runs-on machine:nowhere --reason x --json'))
+    out = json.loads(_cli(f'move {tid} --runs-on machine:nowhere --host-reason worktree --reason x --json'))
     assert out["reason_code"] == "no_machine"
 
 
@@ -218,9 +221,9 @@ def test_cli_move_of_a_running_card_needs_reclaim(gws, monkeypatch):
     stopped = []
     monkeypatch.setattr(kb, "_terminate_reclaimed_worker", lambda pid, lock, **kw: stopped.append(pid) or {
         "prev_pid": pid, "host_local": True, "termination_attempted": True, "terminated": True, "sigkill": False})
-    out = json.loads(_cli(f"move {tid} --runs-on machine:worker-1 --reason x --json"))
+    out = json.loads(_cli(f"move {tid} --runs-on machine:worker-1 --host-reason worktree --reason x --json"))
     assert out["reason_code"] == "running" and kb.get_task(hub.conn, tid).status == "running"
-    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --reason "stuck here" --reclaim --json'))
+    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --host-reason worktree --reason "stuck here" --reclaim --json'))
     assert out["ok"], out
     t = hub.conn.execute("SELECT status, runs_on, claim_lock FROM tasks WHERE id = ?", (tid,)).fetchone()
     assert t["status"] != "running" and t["claim_lock"] is None and json.loads(t["runs_on"]) == ["machine:worker-1"]
@@ -232,10 +235,10 @@ def test_cli_move_by_the_cards_own_worker_ends_its_run(gws, monkeypatch):
     tid, run_id = _running_hub_card(hub)
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --reason "needs linux" --json'))
+    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --host-reason worktree --reason "needs linux" --json'))
     assert out["reason_code"] == "checkpoint_required"  # refused before touching the card
     assert kb.get_task(hub.conn, tid).status == "running"
-    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --reason "needs linux" '
+    out = json.loads(_cli(f'move {tid} --runs-on machine:worker-1 --host-reason worktree --reason "needs linux" '
                           f'--checkpoint "did A; next B" --json'))
     assert out["ok"] and out["status"] == "ready", out
     run = hub.conn.execute("SELECT outcome FROM task_runs WHERE id = ?", (run_id,)).fetchone()

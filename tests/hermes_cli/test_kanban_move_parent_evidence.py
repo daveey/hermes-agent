@@ -11,6 +11,9 @@ from hermes_cli import kanban_unused_grant
 from tests.hermes_cli import test_kanban_dependency_pr_handoff as helpers
 from tests.hermes_cli import test_kanban_move as moves
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 svc = moves.svc
 gws = moves.gws
 
@@ -22,7 +25,7 @@ def moved_parent(gws, monkeypatch):
     task, _run, clock = helpers.park(hub.conn, monkeypatch)
     parent = kb.parent_ids(hub.conn, task)[0]
     clock[0] += 1
-    assert km.move_queued(hub.conn, task, runs_on=["machine:worker-1"], reason="capacity",
+    assert km.move_queued(hub.conn, task, runs_on=["machine:worker-1"], host_reason=HR, reason="capacity",
                           checkpoint="Resume existing PR")["ok"]
     # Use the source's real evidence with an independent primary. No dispatch
     # claim consumes the checkpoint before individual reader boundaries run.

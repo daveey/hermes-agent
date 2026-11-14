@@ -25,6 +25,8 @@ from tests.hermes_cli import test_kanban_worker_node as support
 
 M, X = "worker-1", "worker-2"
 NOW = 1_800_000_000_000
+# t_01a1d95c41620e6c: a move to one machine needs a host_reason naming state on it; capacity is never one.
+HR = "the card's worktree and suite logs are on worker-2"
 svc = support.svc
 fleet = oc.fleet
 
@@ -70,9 +72,12 @@ class Board:
             for col, value in cols.items():
                 self.conn.execute(f"UPDATE tasks SET {col} = ? WHERE id = ?", (value, tid))
 
-    def why(self, target=None, runs_on=(f"machine:{X}",), machines=None, alarm=None):
+    def why(self, target=None, runs_on=(f"machine:{X}",), machines=None, alarm=None, host_reason=None):
+        if host_reason is None and any(str(label).startswith("machine:") for label in runs_on):
+            host_reason = HR
         return rp.refusal(self.conn, target or self.target, alarm or self.alarm, list(runs_on),
-                          machines=_machines() if machines is None else machines, now_ms=NOW)
+                          machines=_machines() if machines is None else machines, now_ms=NOW,
+                          host_reason=host_reason or None)
 
 
 @pytest.fixture
@@ -194,14 +199,46 @@ def test_the_pool_queue_is_a_valid_target_when_another_pool_worker_is_eligible(b
 @pytest.mark.parametrize("machines", [
     lambda: _machines(),                                               # no machine carries the pool label
     lambda: _pooled(worker_2={"hold": True}),                          # the only other pool worker is held
-    lambda: _pooled(worker_2={"metrics": {"active_card_runs": 10}}),  # ... or has no free slot
-    lambda: _pooled(worker_2={"last_seen": NOW - 301_000}),           # ... or was not seen recently
+    lambda: _pooled(worker_2={"state": "retired"}),                    # ... or retired
+    lambda: _pooled(worker_2={"pickup": None}),                        # ... or takes no pickup
     lambda: _machines(worker_1={"hold": False, "labels": [*_worker(M)["labels"], POOL]}),  # only M is pooled
     lambda: None,                                                      # the registry is unreadable
 ])
-def test_the_pool_queue_is_refused_when_no_other_pool_worker_is_eligible_now(board, machines):
+def test_the_pool_queue_is_refused_when_no_other_pool_worker_can_take_it(board, machines):
     why = rp.refusal(board.conn, board.target, board.alarm, [POOL], machines=machines(), now_ms=NOW)
     assert why is not None and (POOL in why or "unreadable" in why), why
+
+
+@pytest.mark.parametrize("change", [
+    {"metrics": {"active_card_runs": 10}},  # full now: the card waits in the single queue for a slot
+    {"metrics": {"active_card_runs": 0, "drain_active": 1}},
+])
+def test_the_pool_queue_does_not_need_a_free_slot_now(board, change):
+    """t_01a1d95c41620e6c: requiring a free pool slot sent the alarm to ``machine:<X>`` pins (worker-1/-4/-8 on 11-13)
+    that stalled again on X. The single queue waits for any worker's slot."""
+    assert board.why(runs_on=[POOL], machines=_pooled(worker_2=change)) is None
+
+
+# --- t_01a1d95c41620e6c: a machine:<X> target needs a host_reason naming state on X ---------------------------------
+
+def test_an_alarm_move_to_one_machine_without_a_host_reason_is_refused_pointing_at_the_pool(board):
+    why = board.why(host_reason="")
+    assert why is not None and "host_reason" in why and POOL in why, why
+
+
+@pytest.mark.parametrize("reason", ["worker-1 10/10, no pool worker eligible now", "worker-2 has free slots",
+                                    "capacity on worker-2", "worker-1 is full"])
+def test_an_alarm_move_to_one_machine_citing_capacity_is_refused(board, reason):
+    why = board.why(host_reason=reason)
+    assert why is not None and "capacity" in why and POOL in why, why
+
+
+def test_the_same_alarm_move_to_the_pool_is_accepted(board):
+    assert board.why(runs_on=[POOL], machines=_pooled(), host_reason="") is None
+
+
+def test_an_alarm_move_naming_state_on_the_machine_is_accepted(board):
+    assert board.why(host_reason="worker-2 holds the card's worktree ~/code/_wt/x with unpushed commits") is None
 
 
 @pytest.mark.parametrize("runs_on", [[POOL, "linux"], [POOL, f"machine:{X}"], ["pool:gpu"]])
@@ -332,7 +369,7 @@ def test_the_hub_lane_without_hub_write_is_a_valid_target(board):
 
 def test_an_unreadable_registry_refuses(board):
     assert "unreadable" in rp.refusal(board.conn, board.target, board.alarm, [f"machine:{X}"], machines=None,
-                                      now_ms=NOW)
+                                      now_ms=NOW, host_reason=HR)
 
 
 def test_a_card_not_on_this_board_or_only_a_pickup_copy_points_at_the_operator_call(board, monkeypatch):
@@ -389,10 +426,12 @@ def held(tmp_path, monkeypatch, svc):
         wn.set_registry_fetch(None)
 
 
-def _move(task_id, runs_on):
+def _move(task_id, runs_on, host_reason=None):
     from tools import kanban_tools as kt
-    return json.loads(kt._handle_move({"task_id": task_id, "runs_on": runs_on, "reason": f"{M} is on hold",
-                                       "checkpoint": "n/a"}))
+    args = {"task_id": task_id, "runs_on": runs_on, "reason": f"{M} is on hold", "checkpoint": "n/a"}
+    if host_reason:
+        args["host_reason"] = host_reason
+    return json.loads(kt._handle_move(args))
 
 
 def test_the_alarms_run_re_places_each_listed_card_and_keeps_running(held):
@@ -400,7 +439,10 @@ def test_the_alarms_run_re_places_each_listed_card_and_keeps_running(held):
     body = kb.get_task(hub.conn, alarm).body
     assert "kanban_move(task_id=" in body and "kanban_supervisor_request" in body  # the alarm names the command
     for tid in cards:
-        out = _move(tid, [f"machine:{X}"])
+        out = _move(tid, [f"machine:{X}"])  # t_01a1d95c41620e6c: a capacity stall is no state on X
+        assert out.get("ok") is not True and "host_reason" in out["error"], out
+        assert place._pin(hub.conn, tid) == [f"machine:{M}"]
+        out = _move(tid, [f"machine:{X}"], host_reason=HR)
         assert out.get("ok") is True, out
         assert place._pin(hub.conn, tid) == [f"machine:{X}"]
         [moved] = [json.loads(e[0]) for e in hub.conn.execute(
@@ -473,13 +515,13 @@ def test_the_alarms_run_leaves_a_card_whose_unpushed_tree_is_on_this_host(held, 
     gitdir = (tree / ".git").read_text().split(":", 1)[1].strip()
     (Path(gitdir) / "hermes-owner.json").write_text(json.dumps({"task_id": a}))
     subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "wip"], cwd=tree, check=True, capture_output=True)
-    out = _move(a, [f"machine:{X}"])
+    out = _move(a, [f"machine:{X}"], host_reason=HR)
     # The tool error carries move_queued's message, not its reason_code.
     assert out.get("ok") is not True and "unpushed commits in" in out["error"], out
     assert "another machine cannot resume it" in out["error"], out
     assert place._pin(hub.conn, a) == [f"machine:{M}"]
     assert not hub.conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'moved'", (a,)).fetchone()
-    assert _move(b, [f"machine:{X}"]).get("ok") is True  # a card with no tree here still moves
+    assert _move(b, [f"machine:{X}"], host_reason=HR).get("ok") is True  # a card with no tree here still moves
     assert kb.get_task(hub.conn, alarm).status == "running"
 
 
@@ -507,19 +549,25 @@ def test_an_alarm_caller_gets_the_same_scope_on_an_operator_call_move(fleet, mon
                      f.caller))
     monkeypatch.setattr(rp, "_registry_machines", lambda: _machines())
 
-    def ask(runs_on, target=None):
-        out = ksr.submit(f.w, env_task=f.caller, env_run=str(f.run_id), dry_run=True, ops=[
-            {"op": "operator", "action": "move", "task_id": target or f.target, "runs_on": runs_on,
-             "reason": f"{M} is on hold"}])
+    def ask(runs_on, target=None, host_reason=None):
+        op = {"op": "operator", "action": "move", "task_id": target or f.target, "runs_on": runs_on,
+              "reason": f"{M} is on hold"}
+        if host_reason:
+            op["host_reason"] = host_reason
+        out = ksr.submit(f.w, env_task=f.caller, env_run=str(f.run_id), dry_run=True, ops=[op])
         return out["ops"][0]
 
-    assert ask([f"machine:{X}"])["verdict"] == "supervisor"
-    assert ask([f"machine:{M}"]).get("code") == "pickup_stall_scope"
+    # t_01a1d95c41620e6c: the 11-13 alarm moves (worker-7 -> worker-1/-4, worker-3 -> worker-8) carried no host state.
+    assert ask([f"machine:{X}"]).get("code") == "pickup_stall_scope"
+    assert ask([f"machine:{X}"], host_reason="worker-7 10/10, no pool worker eligible now").get(
+        "code") == "pickup_stall_scope"
+    assert ask([f"machine:{X}"], host_reason=HR)["verdict"] == "supervisor"
+    assert ask([f"machine:{M}"], host_reason=HR).get("code") == "pickup_stall_scope"
     other = f.card(f.h, "not listed")
     with kb.write_txn(f.h):
         f.h.execute("UPDATE tasks SET runs_on = ? WHERE id = ?", (json.dumps([f"machine:{M}"]), other))
     f.board()
-    assert ask([f"machine:{X}"], target=other).get("code") == "pickup_stall_scope"
+    assert ask([f"machine:{X}"], target=other, host_reason=HR).get("code") == "pickup_stall_scope"
     # The pool queue: granted while another pool worker is eligible now, refused when none is.
     assert ask([POOL]).get("code") == "pickup_stall_scope"
     monkeypatch.setattr(rp, "_registry_machines", lambda: _pooled())

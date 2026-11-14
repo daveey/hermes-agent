@@ -403,8 +403,9 @@ _SPECS = [
              help="Queue the card for any worker (= --runs-on pool:worker): the first worker with a free slot "
                   "claims it"),
         _arg("--host-reason", dest="host_reason", default=None,
-             help="Required to pin one pool worker (machine:worker-N): the card works on that host, or holds "
-                  "unpushed state there"),
+             help="Required for any machine:<name> label: the state on that host that holds the card there "
+                  "(a worktree, a stamp, unpublished work, a live process, Mac-only or hub-only work). Capacity "
+                  "is never one: use --pool"),
         _arg("--reason", required=True, help="Why the card must move (logged as a `moved` event)"),
         _arg("--checkpoint", default=None,
              help="Resume notes (required when a card's own worker moves its running card)"),

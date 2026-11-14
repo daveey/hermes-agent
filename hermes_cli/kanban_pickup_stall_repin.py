@@ -7,21 +7,21 @@ task or its ``repin-owner`` supervisor, and the stalled cards were created by ot
 re-placed them by hand.
 
 The grant (:func:`refusal`) is the alarm's own run moving one target with ``kanban_move(task_id=<target>,
-runs_on=["pool:worker"], reason=...)`` (or ``["machine:<X>"]``). Every condition must hold, each read on the board the
-move would write:
+runs_on=["pool:worker"], reason=...)``. Every condition must hold, each read on the board the move would write:
 
 * the caller is an open alarm the detector filed: ``created_by`` the detector, ``created_on`` M, idempotency key
   ``pickup-stall:<M>:...`` (M is read from the key, never from the arguments);
 * the target is one the alarm lists: the card its per-card key names, or a ``- <id> (`` line in its body or in a
   detector comment (``_refresh_targets``);
 * the target is still ready and unclaimed, with no current run, and still pinned ``machine:<M>`` (only off M);
-* ``runs_on`` is exactly ``["machine:<X>"]``, X is not M, and X is eligible now by the alarm placement rules
-  (active, unheld, copies cards, carries the target's ``capability:<requires>`` and ``profile:<assignee>``, not
-  draining, seen recently, a free card slot); or exactly the pool queue ``[POOL_LABEL]``
-  (:data:`hermes_cli.kanban_placement.POOL_LABEL`) while some pool machine other than M is eligible now by the same
-  rules plus the target's ``skill:<skills>`` (the Board's ``requiredLabels``) (t_01a1d0214f3e63e8:
-  ``machine:<pool worker>`` needs a ``host_reason`` (:mod:`hermes_cli.kanban_move_pool`)
-  that no alarm path passes, so with every eligible machine a pool worker the alarm could re-place nothing).
+* ``runs_on`` is exactly the pool queue ``[POOL_LABEL]`` (:data:`hermes_cli.kanban_placement.POOL_LABEL`) while
+  some pool machine other than M can take the card (active, unheld, copies cards, carries the target's
+  ``capability:<requires>``, ``profile:<assignee>`` and ``skill:<skills>``, the Board's ``requiredLabels``). A free
+  slot is not required: the card waits in the single queue until any worker has one (t_01a1d95c41620e6c);
+* or exactly one ``["machine:<X>"]``, X is not M, X is eligible now by the alarm placement rules, and the move
+  carries a ``host_reason`` naming state on X (:mod:`hermes_cli.kanban_move_pool`). A capacity stall is a
+  condition on M, not state on X: on 11-13 three alarm moves pinned published work to machine:worker-1/-4/-8 with
+  no host reason, and two stalled again there.
 
 The move itself is the ordinary queued move (``kanban_move.move_queued``) with its own guards. Nothing here reads
 or writes a registry hold, so a hold is never lifted or shortened. A target another gateway created is moved through
@@ -43,11 +43,11 @@ def howto(own: str) -> str:
     pool = pool_label()
     return (f"To re-place a listed card off {own}, call the kanban_move TOOL from this alarm's run (not the shell: "
             f"`hermes kanban move` is fenced in worker shells): kanban_move(task_id=\"<listed card>\", "
-            f"runs_on=[\"{pool}\"], reason=\"...\") queues it for any pool worker other than {own} with a free "
-            "slot (granted while one is eligible now). Never pin one pool worker: that needs a host_reason, and "
-            "capacity is none. Only when no pool worker is eligible, use runs_on=[\"machine:<X>\"] for another "
-            "machine eligible now that is not a pool worker (active, unheld, free slot, the card's profile and "
-            "capabilities). When the card was created on another gateway, kanban_move answers foreign_card: send "
+            f"runs_on=[\"{pool}\"], reason=\"...\") queues it for any pool worker other than {own}: it waits in the "
+            "single queue until one has a free slot. Never pin one machine for capacity: a stall is a condition on "
+            f"{own}, not state on another machine, so runs_on=[\"machine:<X>\"] is refused without a host_reason "
+            "naming state on X (a worktree, a stamp, unpublished work, a live process, Mac-only or hub-only work). "
+            "When the card was created on another gateway, kanban_move answers foreign_card: send "
             "the same move as kanban_supervisor_request(ops=[{\"op\": \"operator\", \"action\": \"move\", "
             f"\"task_id\": \"<listed card>\", \"runs_on\": [\"{pool}\"], \"reason\": \"...\"}}]). Only the cards "
             f"this alarm lists, only while they are ready and pinned to {own}, and never back to {own}.")
@@ -187,7 +187,8 @@ def eligible_now(name: str, own: str, machines: Optional[Mapping[str, Mapping[st
 
 
 def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: Any, *,
-                  machines: Optional[Mapping[str, Mapping[str, Any]]], now_ms: int) -> Optional[str]:
+                  machines: Optional[Mapping[str, Mapping[str, Any]]], now_ms: int,
+                  host_reason: Optional[str] = None) -> Optional[str]:
     """None when ``alarm``'s run may move ``target`` (rows, ``conn`` holds the alarm's comments) to ``runs_on``."""
     from hermes_cli import kanban_worker_node as wn
     own = alarm_own(alarm)
@@ -221,6 +222,13 @@ def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: An
     name = labels[0].split(":", 1)[1]
     if name == own:
         return f"the card must leave {own}"
+    from hermes_cli import kanban_move_pool as kmp
+    reason = (host_reason or "").strip()
+    if not reason:
+        pooled = bool(kmp.pool_pins(labels, machines or {}))
+        return f"{kmp.host_reason_message(name, pooled=pooled)} For a stall on {own} that is the pool queue."
+    if kmp.capacity_only(reason):
+        return f"host_reason {reason[:200]!r} cites capacity, not state on {name}; use runs_on=[\"{pool_label()}\"]"
     return eligible_now(name, own, machines, _need(target), now_ms)
 
 
@@ -231,23 +239,21 @@ def pool_label() -> str:
 
 def pool_refusal(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], need: set,
                  now_ms: int) -> Optional[str]:
-    """None when a pool machine other than ``own`` may take the card now (:func:`eligible_now`), else why not.
-
-    The pool queue is how an alarm re-places a card onto a pool worker: ``machine:<pool worker>`` needs a
-    ``host_reason`` (:mod:`hermes_cli.kanban_move_pool`), which capacity never is, so no alarm path passes one."""
+    """None when a pool machine other than ``own`` can take the card (active, unheld, copies cards, carries
+    ``need``), else why not. A free slot now is not required: the card waits in the single queue until any worker
+    has one (t_01a1d95c41620e6c). Requiring one sent the alarm to ``machine:<X>`` pins that stalled again on X.
+    ``now_ms`` is kept for callers; eligibility here is structural."""
+    from hermes_cli import kanban_pickup_stall as kps
     label = pool_label()
     if machines is None:
         return "the machine registry is unreadable"
     pooled = sorted(n for n, e in machines.items() if n != own and label in ((e or {}).get("labels") or []))
-    whys = []
-    for name in pooled:
-        why = eligible_now(name, own, machines, need, now_ms)
-        if why is None:
-            return None
-        whys.append(why)
-    return (f"no {label} machine other than {own} is eligible now"
-            + (f": {'; '.join(whys)}" if whys else " (none carries the label)")
-            + "; a machine outside the pool that is eligible now takes runs_on=[\"machine:<X>\"]")
+    if any(kps._takes_work(name, machines.get(name) or {}, own, need) for name in pooled):
+        return None
+    return (f"no {label} machine other than {own} can take it"
+            + (f" ({', '.join(pooled)}: retired, held, takes no pickup, or lacks {', '.join(sorted(need))})"
+               if pooled else " (none carries the label)")
+            + f"; the card stays on {own} until a pool worker carries those labels")
 
 
 def _registry_machines() -> Optional[Mapping[str, Mapping[str, Any]]]:
@@ -257,7 +263,7 @@ def _registry_machines() -> Optional[Mapping[str, Mapping[str, Any]]]:
 
 
 def refusal(conn: sqlite3.Connection, task_id: str, env_task: str, runs_on: Any, *,
-            machines: Any = False, now_ms: Optional[int] = None) -> Optional[str]:
+            machines: Any = False, now_ms: Optional[int] = None, host_reason: Optional[str] = None) -> Optional[str]:
     """None when ``env_task`` (the caller's alarm) may move local card ``task_id`` to ``runs_on``; else why not."""
     from hermes_cli import kanban_pickup_stall as kps
     alarm = conn.execute("SELECT * FROM tasks WHERE id = ?", (env_task,)).fetchone()
@@ -270,21 +276,21 @@ def refusal(conn: sqlite3.Connection, task_id: str, env_task: str, runs_on: Any,
                 "kanban_supervisor_request(ops=[{op: 'operator', action: 'move', task_id, runs_on, reason}])")
     return scope_refusal(conn, alarm, target, runs_on,
                          machines=_registry_machines() if machines is False else machines,
-                         now_ms=kps._now_ms() if now_ms is None else now_ms)
+                         now_ms=kps._now_ms() if now_ms is None else now_ms, host_reason=host_reason)
 
 
 def move(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs_on: Any, reason: str,
-         machines: Any = False, hub: Any = None) -> dict[str, Any]:
+         machines: Any = False, hub: Any = None, host_reason: Optional[str] = None) -> dict[str, Any]:
     """The granted move (``move_queued``'s result), re-checking the scope first."""
     from hermes_cli import kanban_move as km
     from hermes_cli import kanban_worker_node as wn
     pool = _registry_machines() if machines is False else machines
-    why = refusal(conn, task_id, env_task, runs_on, machines=pool)
+    why = refusal(conn, task_id, env_task, runs_on, machines=pool, host_reason=host_reason)
     if why is not None:
         return {"ok": False, "reason_code": "pickup_stall_scope", "error": why}
     alarm = conn.execute("SELECT * FROM tasks WHERE id = ?", (env_task,)).fetchone()
     return km.move_queued(conn, task_id, runs_on=list(wn.normalize_runs_on(runs_on) or []), reason=reason,
-                          machines=pool, hub=hub,
+                          machines=pool, hub=hub, host_reason=host_reason,
                           event_extra={"pickup_stall_alarm": env_task, "stalled_machine": alarm_own(alarm)})
 
 
@@ -306,4 +312,4 @@ def operator_refusal(conn: sqlite3.Connection, rep: Optional[sqlite3.Connection]
             target = None
     return scope_refusal(conn, alarm, target, op.get("runs_on"),
                          machines=_registry_machines() if machines is False else machines,
-                         now_ms=kps._now_ms() if now_ms is None else now_ms)
+                         now_ms=kps._now_ms() if now_ms is None else now_ms, host_reason=op.get("host_reason"))
