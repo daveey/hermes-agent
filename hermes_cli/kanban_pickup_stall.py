@@ -321,8 +321,8 @@ def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]
                     requires: tuple[str, ...] = _REQUIRES, now_ms: Optional[int] = None,
                     ) -> tuple[Optional[list[str]], str]:
     """``(runs_on, why)`` for an alarm about machine ``own``; never ``machine:<own>``. ``machines`` is the registry
-    (None: unreadable). In order: the eligible-now host (:func:`_can_host` and :func:`_ready_now`) with the most
-    free slots; the hub operator lane; any other host; any other machine that copies cards, even held (the hub
+    (None: unreadable). In order: an eligible-now non-hub host (:func:`_can_host` and :func:`_ready_now`) with the
+    most free slots; the eligible-now hub; the hub operator lane; any other host; any card-copying host, even held (hub
     first: it runs the alarm when that hold ends, not ``own``'s). With no other such machine enrolled, None
     (default placement): the registry offers nowhere else."""
     from hermes_cli import kanban_worker_node as wn
@@ -337,7 +337,7 @@ def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]
     hosts = {n: e for n, e in machines.items() if _can_host(n, e, own, need)}
     now = sorted(n for n, e in hosts.items() if _ready_now(e, now_ms))
     if now:
-        best = min(now, key=lambda n: (-(_free_slots(hosts[n]) or 0), n))
+        best = min(now, key=lambda n: (n == OPERATOR_LANE, -(_free_slots(hosts[n]) or 0), n))
         free = _free_slots(hosts[best])
         return [f"machine:{best}"], (f"{best} is active, unheld, not draining"
                                      + (f" and has {free} free card slot(s)" if free is not None else ""))

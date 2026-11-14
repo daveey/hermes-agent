@@ -80,7 +80,9 @@ def test_a_hold_alarm_lands_on_another_eligible_machine_with_the_evidence(gws, m
 
 def test_a_queue_full_alarm_lands_on_another_eligible_machine(gws, monkeypatch):
     hub, worker = gws
-    _registry(monkeypatch)
+    # A free hub must not win over a capable worker with only one free slot.
+    _registry(monkeypatch, hub=_hub())
+    monkeypatch.setitem(support.MACHINES, OTHER, _worker(OTHER, metrics={"active_card_runs": 9}))
     old, new = stall._pinned(hub, title="oldest"), stall._pinned(hub, title="newer")
     worker.round()
     worker.tick(max_spawn=0)
