@@ -85,6 +85,15 @@ ALLOWED = [
 ]
 
 
+def test_comment_quote_does_not_break_data_sink_exemption():
+    # Data-sink masking tokenizes the original command, before logical-line splitting.
+    assert scan_gateway_lifecycle("grep 'hermes gateway restart' /dev/null # it's") == (False, None)
+
+
+def test_comment_quote_does_not_hide_direct_lifecycle_command():
+    assert scan_gateway_lifecycle("hermes gateway restart # it's")[0] is True
+
+
 def _tree(tmp_path):
     (tmp_path / "r.sh").write_text('hermes gateway "restart"\n')
     (tmp_path / "clean.py").write_text("print(1)\n")
