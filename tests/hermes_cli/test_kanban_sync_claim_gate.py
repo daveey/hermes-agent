@@ -15,7 +15,11 @@ import argparse
 import json
 import logging
 import os
+import select
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -196,6 +200,76 @@ def test_another_live_process_loop_record_holds_and_opens_claims(live, kanban_ho
     assert not claims.held(live)
     path.write_text(json.dumps({"pid": 2 ** 22 + 12345, "open": {}}))  # a dead loop's record: ignored
     assert not claims.held(live)
+
+
+_PRODUCER = """
+import sys
+from hermes_cli import kanban_sync_claims as claims
+from hermes_cli.kanban_sync_stop import run_loop
+
+
+def loop(*_):
+    print("started", flush=True)  # the loop runs; no round of it has completed
+    sys.stdin.readline()
+    claims.note_round("default", sys.argv[1], at_head=True)
+    print("at-head", flush=True)
+    sys.stdin.readline()
+
+
+run_loop(loop, lambda: True, 1)
+print("stopped", flush=True)
+"""
+
+
+def _expect(proc, line):
+    ready, _, _ = select.select([proc.stdout], [], [], 60)
+    assert ready, f"the producer never printed {line!r}"
+    assert proc.stdout.readline().strip() == line
+
+
+def _status(conn, tid):
+    return conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+
+
+def _send(proc):
+    proc.stdin.write("go\n")
+    proc.stdin.flush()
+
+
+def test_a_real_sync_loop_in_another_process_holds_this_processes_claims_until_its_round_reaches_the_head(
+        live, kanban_home, tmp_path):
+    """The split-process gate with a real producer: another process runs the sync loop (``run_loop``), which must
+    publish its held record when the loop starts, before any round. This process has no loop (a profile gateway's
+    dispatcher, or ``hermes kanban claim`` from a shell): during that initial sync it claims nothing, once the
+    producer's round reaches the head it claims, and when the producer's tenure ends its record goes away."""
+    db = kanban_home / "kanban.db"
+    tid = kb.create_task(live, title="foreign", assignee="default")
+    script = tmp_path / "producer.py"
+    script.write_text(_PRODUCER)
+    root = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "HERMES_KANBAN_HOME": str(kb.kanban_home()),
+           "PYTHONPATH": os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")]))}
+    producer = subprocess.Popen([sys.executable, "-u", str(script), str(db)], cwd=root, env=env, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        _expect(producer, "started")
+        tick = _tick(live)
+        assert (tick.claim_deferred, _status(live, tid)) == ([(tid, claims.DEFERRAL)], "ready")
+        assert claims.describe(db, "primary") == claims.HELD
+        _send(producer)
+        _expect(producer, "at-head")
+        assert claims.describe(db, "primary") == "open"
+        _tick(live)
+        assert _status(live, tid) == "running"
+        _send(producer)
+        _expect(producer, "stopped")
+        assert producer.wait(timeout=60) == 0
+    finally:
+        if producer.poll() is None:
+            producer.kill()
+            producer.wait(timeout=60)
+    assert not claims.state_path().exists()  # the ended tenure removed its record
+    assert claims.describe(db, "primary") == "no live sync loop recorded"
 
 
 @pytest.mark.parametrize("previous_tenure", [False, True])
