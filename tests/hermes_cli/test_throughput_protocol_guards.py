@@ -219,6 +219,27 @@ def test_partial_cleanup_closed_connection_is_retryable():
     assert disable_stranded(conn) is False
 
 
+def test_empty_journal_floor_independently(db):
+    db.execute("INSERT INTO sessions(id,source,started_at) VALUES ('a','test',1)")
+    db.execute('DELETE FROM throughput_changes')
+    db.execute('UPDATE throughput_revision SET keys=0')
+    assert not rev._invariant_ok(db)
+
+
+def test_usage_unique_cardinality_independently(db, monkeypatch):
+    original = rev._unique_indexes
+
+    def indexes(conn, table):
+        rows = original(conn, table)
+        if table == 'session_model_usage':
+            # Put the valid PK first, unlike SQLite's default new-index-first order.
+            return rows + [('alien', 'c', False, [('model', 'BINARY')])]
+        return rows
+
+    monkeypatch.setattr(rev, '_unique_indexes', indexes)
+    assert not rev._supported_shape(db)
+
+
 def test_closed_connection_is_unproven():
     conn = sqlite3.connect(':memory:')
     conn.close()
