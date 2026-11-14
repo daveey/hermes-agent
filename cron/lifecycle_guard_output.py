@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 
+from cron.lifecycle_guard_arith_words import iter_arithmetic_word_payloads
+
 _QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r'(?="([^"]+)")'))
 _ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
 
@@ -25,6 +27,8 @@ def iter_recursive_payloads(command, nested_texts, *, cwd, executed, budget, cov
     for payload in nested_texts:
         yield payload, True, None
     for payload in guard._iter_shell_command_payloads(command):
+        yield payload, False, None
+    for payload in iter_arithmetic_word_payloads(command):
         yield payload, False, None
     # Snapshot after preceding nested-shell walks; shared budget state may have changed.
     scope = quote_scope(cwd, executed, budget)
