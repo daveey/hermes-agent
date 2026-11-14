@@ -268,7 +268,8 @@ def _fake_forkserver_child(read_fd):
 
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("status", [0, 1, -9])
-def test_forked_status_read_excludes_concurrent_process_start(monkeypatch, status):
+@pytest.mark.parametrize("written", ["before_call", "during_wait"])
+def test_forked_status_read_excludes_concurrent_process_start(monkeypatch, status, written):
     """A Process.start racing the status read must not consume the status bytes.
 
     Interleaving, made deterministic: the status poll has seen the sentinel
@@ -276,15 +277,42 @@ def test_forked_status_read_excludes_concurrent_process_start(monkeypatch, statu
     start_forked(), whose Process.start() first polls every registered child
     (multiprocessing.process._cleanup). Unlocked, that poll reads the bytes and
     the status poll then reads EOF, which multiprocessing reports as 255.
+
+    before_call: the status is already written, so the early exitcode read
+    races. during_wait: the early exitcode read finds nothing, the status
+    arrives while forked_exit_status waits on the sentinel, and the race hits
+    the post-wait join()/exitcode read.
     """
     import os
-    from multiprocessing import forkserver
+    from multiprocessing import connection, forkserver
     from multiprocessing import process as mp_process
 
     read_fd, write_fd = os.pipe()
     proc = _fake_forkserver_child(read_fd)
-    forkserver.write_signed(write_fd, status)
-    os.close(write_fd)  # the server has closed its writer: a lost read sees EOF
+    status_reader = threading.get_ident()
+    waits = []  # sentinel wait timeouts on the status-reading thread
+    writer_open = [True]
+
+    def write_status_and_close():
+        forkserver.write_signed(write_fd, status)
+        os.close(write_fd)  # the server has closed its writer: a lost read sees EOF
+        writer_open.clear()
+
+    if written == "before_call":
+        write_status_and_close()
+    else:
+        real_wait = connection.wait
+
+        def wait(objects, timeout=None):
+            if threading.get_ident() == status_reader:
+                if not waits:
+                    assert real_wait(objects, 0) == []  # no status yet
+                elif len(waits) == 1:  # forked_exit_status now waits on the sentinel
+                    write_status_and_close()
+                waits.append(timeout)
+            return real_wait(objects, timeout)
+
+        monkeypatch.setattr(connection, "wait", wait)
 
     decided = threading.Event()  # the racing start either waits on the lock or has polled
     contended = threading.Event()
@@ -327,15 +355,19 @@ def test_forked_status_read_excludes_concurrent_process_start(monkeypatch, statu
 
     monkeypatch.setattr(forkserver, "read_signed", read_signed)
     try:
-        assert launch.forked_exit_status(proc, 0) == status
+        assert launch.forked_exit_status(proc, 30) == status
         racer.join(30)
         assert not racer.is_alive()
         assert contended.is_set()  # the start waited for the status read to finish
         assert starter_done.is_set()
         assert proc.exitcode == status
         assert proc not in mp_process._children
+        if written == "during_wait":  # early exitcode poll, then the sentinel wait
+            assert waits[:2] == [0, 30]
     finally:
         mp_process._children.discard(proc)
+        if writer_open:
+            os.close(write_fd)
         os.close(read_fd)
 
 
