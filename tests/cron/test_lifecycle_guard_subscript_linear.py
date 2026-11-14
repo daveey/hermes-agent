@@ -7,6 +7,7 @@ import pytest
 
 import tools.shell_arith_sink as arith_sink
 from cron.lifecycle_guard import scan_gateway_lifecycle
+from tools.shell_command_position import QuotedNameClassifier, quoted_name_is_arithmetic
 from tools.shell_heredoc import output_reaches_shell
 
 PRODUCER = "$(echo 'b[$(bash ./big.sh)]')"
@@ -14,14 +15,15 @@ PRODUCER = "$(echo 'b[$(bash ./big.sh)]')"
 
 @pytest.fixture
 def prefix_lengths(monkeypatch):
+    """Lengths of the source spans the classifier tokenizes, one per tokenization."""
     lengths = []
-    real = arith_sink.quoted_name_is_arithmetic
+    real = QuotedNameClassifier._tokenize
 
-    def counting(prefix):
-        lengths.append(len(prefix))
-        return real(prefix)
+    def counting(self, command, start):
+        lengths.append(start - self._resume)
+        return real(self, command, start)
 
-    monkeypatch.setattr(arith_sink, "quoted_name_is_arithmetic", counting)
+    monkeypatch.setattr(QuotedNameClassifier, "_tokenize", counting)
     return lengths
 
 
@@ -50,6 +52,60 @@ def test_python_program_word_is_classified_once(prefix_lengths):
     command = f'python3 -c "{body}"'
     arith_sink.substitution_in_arithmetic(command, date_exempt=True)
     assert len(prefix_lengths) <= 1
+
+
+# One simple command with thousands of quoted subscript-like words (review 5906053691):
+# each tokenization resumes at the previous word, so the total stays linear.
+ONE_COMMAND = [
+    "echo " + " ".join(f'"a[{i}]"' for i in range(2000)),
+    "git add " + " ".join(f'"src/m{i}/f[{i}].py"' for i in range(2000)),
+    "printf %s " + " ".join(f'"a[{i}]" "b"[{i}]' for i in range(1000)),
+    "a=1 " * 100 + "echo " + " ".join(f'"a[{i}]"' for i in range(2000)),
+    'echo "' + "".join(f'a[{i}]"x"' for i in range(2000)) + '"',
+    'echo "' + "".join(f'a[{i}]$(n)' for i in range(2000)) + '"',
+    "a=(" + " ".join(f'"x{i}[{i}]"' for i in range(2000)) + ")",
+]
+
+
+@pytest.mark.parametrize("command", ONE_COMMAND)
+def test_one_command_with_many_quoted_words_tokenizes_linearly(prefix_lengths, command):
+    arith_sink.substitution_in_arithmetic(command, date_exempt=True)
+    assert sum(prefix_lengths) <= 2 * len(command)
+
+
+@pytest.mark.parametrize("command", ONE_COMMAND[:2])
+def test_one_command_with_many_quoted_words_scans_fast(tmp_path, command):
+    import time
+    began = time.perf_counter()
+    scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert time.perf_counter() - began < 5  # ~0.2 s linear; minutes when quadratic
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_incremental_classification_matches_whole_prefix(seed):
+    import random
+    rng = random.Random(seed)
+    pool = ['unset', 'printf', '-v', 'echo', 'test', 'command', 'a=1', 'if', 'time',
+            '"a[1]"', '"b"[2]', "'q'\"c[3]\"", '2>"e[4]"', '>|', '"f[5]"x"g[6]"',
+            'x\\\n"d[7]"', '$(echo "h[8]")', '"i[9]$(n m)j[0]"', '"k[1]" "l[2]"', '#c']
+    command = " ".join(rng.choice(pool) for _ in range(rng.randint(1, 12)))
+    classifier = QuotedNameClassifier(0)
+    quote = ""
+    for at, ch in enumerate(command):
+        if ch == '"' and command[at - 1:at] != "\\":
+            quote = "" if quote else '"'
+        if ch != "[" or not quote or command[at - 1] in " \"'":
+            continue
+        assert classifier.classify(command, at) == quoted_name_is_arithmetic(command[:at]), (
+            command, at)
+
+
+def test_quoted_compound_array_element_is_data():
+    assert not arith_sink.substitution_in_arithmetic('arr=("x[$(cat f)]")', date_exempt=True)
+    assert not arith_sink.substitution_in_arithmetic(
+        'declare -a arr=("[$(cat f)]=1" "y")', date_exempt=True)
+    assert arith_sink.substitution_in_arithmetic('arr=([$(cat f)]=1)', date_exempt=True)
+    assert arith_sink.substitution_in_arithmetic('declare -a "x=([$(cat f)]=1)"', date_exempt=True)
 
 
 SINKS = [

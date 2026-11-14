@@ -26,18 +26,27 @@ BUILTINS = [
 ]
 
 
-@pytest.fixture(scope="module")
-def marker_payload(tmp_path_factory):
+def write_marker_payload(tmp_path_factory):
     payload = tmp_path_factory.mktemp("prefix-payload") / "big.sh"
     payload.write_text("#" + "padding" * 200000 + "\nprintf ran > marker\n")
     return payload
 
 
+@pytest.fixture(scope="module")
+def marker_payload(tmp_path_factory):
+    return write_marker_payload(tmp_path_factory)
+
+
 @pytest.mark.parametrize("name", NAMES)
 @pytest.mark.parametrize("prior", PRIOR)
 @pytest.mark.parametrize("builtin", BUILTINS)
-@pytest.mark.parametrize("wrapper", WRAPPERS)
+@pytest.mark.parametrize("wrapper", WRAPPERS[0::4])
 def test_prior_expansion_cross_product(tmp_path, marker_payload, name, prior, builtin, wrapper):
+    """Wrapper shard 0 of 4; shards 1-3 live in ..._prefix_shard{1,2,3}.py (per-file time cap)."""
+    check_prior_expansion(tmp_path, marker_payload, name, prior, builtin, wrapper)
+
+
+def check_prior_expansion(tmp_path, marker_payload, name, prior, builtin, wrapper):
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("Bash required for execution evidence")

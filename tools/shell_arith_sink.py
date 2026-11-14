@@ -22,7 +22,7 @@ from __future__ import annotations
 import bisect
 import re
 
-from tools.shell_command_position import quoted_name_is_arithmetic
+from tools.shell_command_position import QuotedNameClassifier
 
 # `$(date +%s)` prints only digits: the one producer whose output arithmetic may hold.
 DATE_PRODUCER_BODY = r"""[ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\)"""
@@ -52,7 +52,7 @@ _NOT_NAME_END = frozenset(" \t\n[],:=./+%^~")
 
 # Frames are [kind, closer, depth, in_double_quotes]; command frames also carry the
 # source start of their current simple command (so outer quotes cannot change nested
-# command position) and the cached classification of the open double-quoted word.
+# command position) and that command's incremental quoted-word classifier.
 _CMD, _ARITH, _PARAM = "cmd", "arith", "param"
 _PARAM_ARITH = "param_arith"  # parameter word feeding an arithmetic evaluator
 _PARAM_PATTERN = "param_pattern"  # only its replacement feeds the evaluator
@@ -103,8 +103,6 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
             if quoted and command[start - 1] == "$" and _subscript_word_before(command, stack, pos):
                 return True  # `"$"(…)`: the `$` joins a later `(` after quote removal
             top[3] = not quoted
-            if kind == _CMD:
-                top[5] = None  # a new quoted word: classify its subscripts afresh
             continue
         skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
                              date_exempt, _depth)
@@ -134,18 +132,20 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
 def _quoted_subscript_sink(command: str, start: int, top: list) -> bool:
     """Whether the double-quoted ``[`` at *start* opens a builtin's array subscript.
 
-    Linear overall: only a ``[`` that can follow a name is classified, at most once per
-    quoted word (later brackets in it share the command and word), and only from the
-    start of its own simple command.
+    Linear overall: only a ``[`` that can follow a name is classified, by one
+    incremental classifier per simple command (see ``QuotedNameClassifier``).
+    A quoted element of a compound array literal, ``a=("x[…]")``, is a plain value.
     """
+    if top[1] == "array":
+        return False
     index = start - 1
     while index >= top[4] and command[index] in "\"'":
         index -= 1
     if index < top[4] or command[index] in _NOT_NAME_END:
         return False
-    if top[5] is None:
-        top[5] = quoted_name_is_arithmetic(command[top[4]:start])
-    return top[5]
+    if top[5] is None or top[5].base != top[4]:
+        top[5] = QuotedNameClassifier(top[4])
+    return top[5].classify(command, start)
 
 
 def _compound_assignment_before(command: str, start: int) -> bool:
