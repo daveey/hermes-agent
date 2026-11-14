@@ -383,9 +383,10 @@ class _UsageRecorder:
         return False
 
     def get(self, url, headers=None, **_kw):
+        import time
         self.seen.append((str(url), (headers or {}).get("Authorization", "")))
         return SimpleNamespace(status_code=200, json=lambda: {
-            "rate_limit": {"primary_window": {"used_percent": 10}}}, headers={})
+            "rate_limit": {"primary_window": {"used_percent": 10, "reset_at": time.time() + 3 * 86400}}}, headers={})
 
 
 def _exhausted_jwt_pool(home: Path) -> None:

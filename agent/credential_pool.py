@@ -1366,6 +1366,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 )
                 should_adopt = False
             if should_adopt:
+                from agent.credential_pool_pushed import has_live_quota_mark
                 logger.debug(
                     "Pool entry %s: syncing %s tokens from auth.json (refreshed by another process)",
                     entry.id, display,
@@ -1373,7 +1374,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 field_updates: dict[str, Any] = {
                     "access_token": store_access or entry.access_token,
                     "refresh_token": store_refresh or entry.refresh_token,
-                    **_CLEAR_STATUS,
+                    **({} if is_codex and has_live_quota_mark(entry) else _CLEAR_STATUS),
                 }
                 if state.get("last_refresh"):
                     field_updates["last_refresh"] = state["last_refresh"]
@@ -1939,7 +1940,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             # The row keeps the canonical URL; a gateway key belongs to its route host (#121486).
             from hermes_cli.auth_codex import _codex_pool_route_base_url
             return bool(auth_mod._probe_codex_quota_restored(
-                token, base_url=_codex_pool_route_base_url(entry.base_url)))
+                token, base_url=_codex_pool_route_base_url(entry.base_url),
+                reset_at=entry.last_error_reset_at, failure_at=entry.last_status_at))
         except Exception:
             logger.debug("Codex quota-restored probe failed", exc_info=True)
             return False
@@ -2039,6 +2041,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False, model: Optional[str] = None,
+        exclude_id: Optional[str] = None,
     ) -> tuple[list[PooledCredential], list[PooledCredential]]:
         """Return (available, pending_refresh) for entries not in cooldown.
 
@@ -2047,13 +2050,14 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         so cross-process flock acquisition and OAuth I/O cannot stall every pool consumer.
         """
         from agent.codex_entitlements import codex_entry_entitled_for_model
+        from agent.credential_pool_bench import log_early_lift, resync_with_logging, rotation_candidates
         now = time.time()
         cleared_any = False
         entries_to_prune: list[str] = []
         available: list[PooledCredential] = []
         pending_refresh: list[PooledCredential] = []
         sole_credential = self._is_sole_credential()
-        for entry in self._enabled_entries():  # rows switched off by ``hermes auth disable`` never serve
+        for entry in rotation_candidates(self, exclude_id):  # exclude before resync/probes
             if self._allowed_auth_types is not None and entry.auth_type not in self._allowed_auth_types:
                 continue
             # Borrowed credentials persist as metadata-only references and are
@@ -2061,7 +2065,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             # unhydrated duplicate as an empty key.
             if entry.auth_type == AUTH_TYPE_API_KEY and not entry.runtime_api_key:
                 continue
-            synced = self._resync_stale_entry(entry)
+            synced = resync_with_logging(self, entry)
             if synced is not entry:
                 entry = synced
                 cleared_any = True
@@ -2099,6 +2103,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 ):
                     continue
                 if clear_expired:
+                    log_early_lift(entry, "quota_probe")
                     # The probe may have rotated this row's single-use token pair: clear the
                     # cooldown on the live row, not on this pre-probe copy.
                     entry = self._find(lambda e, i=entry.id: e.id == i) or entry
@@ -2145,13 +2150,11 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _select_unlocked(
         self, *, refresh: bool = True, count: bool = True, model: Optional[str] = None,
+        exclude_id: Optional[str] = None,
     ) -> tuple[Optional[PooledCredential], list[PooledCredential]]:
-        """Select the best available entry; returns ``(entry, pending_refresh)``.
-
-        ``count=False`` skips the ``request_count`` bump for selections that are
-        not going to serve a request (a forced-refresh target lookup).
-        """
-        available, pending_refresh = self._available_entries(clear_expired=True, refresh=refresh, model=model)
+        """Return (entry, pending_refresh); count=False skips the request counter."""
+        available, pending_refresh = self._available_entries(
+            clear_expired=True, refresh=refresh, model=model, exclude_id=exclude_id)
         if not available:
             self._current_id = None
             self._log_no_available_entries()
@@ -2335,18 +2338,14 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             self._current_id = None
             next_entry, _pending = self._select_unlocked(refresh=False, model=model)
             if next_entry is not None and next_entry.id == entry.id:
-                # No-recovery guard (#97315): selection handed back the very entry that was
-                # just marked (the auth-store sync adopted fresher tokens, or a quota probe
-                # false-positive lifted the bench mid-selection). Returning it reports a
-                # successful rotation without changing the credential, so the caller retries
-                # the same 429 forever (~2 req/s for hours). Mirror the single-entry guard on
-                # the unmatched-identity branch: surface the failure instead.
+                # Preserve #97315's no-self-retry invariant without hiding healthy peers.
                 logger.warning(
                     "credential pool: rotation returned the just-marked entry %s — "
-                    "treating as no-recovery so the failure surfaces", _label,
+                    "reapplying failure and selecting another entry", _label,
                 )
-                self._current_id = None
-                return None
+                if status_code in (402, 429) or next_entry.runtime_api_key == entry.runtime_api_key:
+                    self._mark_exhausted(next_entry, status_code, error_context, failure_reason=failure_reason)
+                next_entry, _pending = self._select_unlocked(refresh=False, model=model, exclude_id=entry.id)
             if next_entry:
                 logger.info("credential pool: rotated to %s", next_entry.label or next_entry.id[:8])
             return next_entry

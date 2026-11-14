@@ -735,6 +735,7 @@ def _entry_is_rate_limit_exhausted(entry: dict[str, Any]) -> bool:
 # pool is exhausted, so without a floor a busy gateway would hammer the usage endpoint per call.
 CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS = 300  # 5 minutes
 _codex_quota_probe_cache: dict[str, tuple[float, Optional[bool]]] = {}
+_codex_quota_probe_evidence: dict[str, tuple[Optional[float], Optional[float]]] = {}
 _codex_quota_probe_lock = threading.Lock()
 
 
@@ -757,6 +758,7 @@ def _codex_usage_probe_url(base_url: Optional[str]) -> str:
 
 def _probe_codex_quota_restored(
     access_token: Any, *, base_url: Optional[str] = None,
+    reset_at: Optional[float] = None, failure_at: Optional[float] = None,
     min_interval_seconds: float = CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS) -> Optional[bool]:
     """Ask the Codex usage endpoint whether this account's quota is usable again.
 
@@ -770,13 +772,15 @@ def _probe_codex_quota_restored(
     if not token or not _decode_jwt_claims(token):
         return None
     cache_key = _codex_quota_probe_cache_key(token)
+    scope = (reset_at, failure_at)
     now = time.monotonic()
     with _codex_quota_probe_lock:
         cached = _codex_quota_probe_cache.get(cache_key)
         if cached is not None and (now - cached[0]) < min_interval_seconds:
-            return cached[1]
+            return cached[1] if _codex_quota_probe_evidence.get(cache_key, (None, None)) == scope else None
         # Reserve the slot immediately so concurrent selectors don't stampede the endpoint.
         _codex_quota_probe_cache[cache_key] = (now, None)
+        _codex_quota_probe_evidence[cache_key] = scope
     result: Optional[bool] = None
     try:
         # Account/residency headers from the JWT (required for some account shapes).
@@ -788,20 +792,8 @@ def _probe_codex_quota_restored(
             response = client.get(_codex_usage_probe_url(base_url), headers=headers)
         if response.status_code == 200:
             payload = response.json() or {}
-            # A model-scoped allowance (``additional_rate_limits``) at 100% still 429s that
-            # model, so it counts against "restored" like the account-wide windows (#97315).
-            windows = [payload.get("rate_limit") or {}] + [
-                extra.get("rate_limit") or {}
-                for extra in (payload.get("additional_rate_limits") or [])
-                if isinstance(extra, dict)]
-            worst_used: Optional[float] = None
-            for rate_limit in windows:
-                for key in ("primary_window", "secondary_window"):
-                    used = (rate_limit.get(key) or {}).get("used_percent")
-                    if isinstance(used, (int, float)):
-                        worst_used = max(worst_used or 0.0, float(used))
-            if worst_used is not None:
-                result = worst_used < 100.0
+            from hermes_cli.auth_codex_quota_window import quota_restored
+            result = quota_restored(payload, reset_at)
         elif response.status_code == 429:
             result = False
     except Exception:
