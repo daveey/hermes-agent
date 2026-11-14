@@ -761,43 +761,11 @@ def _iter_command_segments(command: str) -> Iterator[list[str]]:
         yield from _split_segments(tokens)
 
 
-# Reserved words that may lead a segment before the command it runs or the `(` that opens a
-# command list: `if (cd x && ./y)`, `then x`, `! x`, `time -p x`, `{ x; }`, `coproc NAME { x; }`,
-# `function NAME ( … )`. `fi`/`done`/`}` close a list and run nothing.
-_RESERVED_PREFIX_WORDS = frozenset({
-    "if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc", "in", "{",
-    "function",
-})
-_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
 def _peel_reserved_words(segment: list[str]) -> int:
-    """Index of the first word of *segment* past its leading reserved words and their operands
-    (bash's ``time [-p] [--]``, ``coproc NAME`` before a compound command, ``function NAME``).
+    """Shared keyword walk for command lists, printers and arithmetic name consumers."""
+    from tools.shell_command_position import peel_reserved_words
 
-    The one keyword walk shared by the ``(`` classifier and the executed-command scan, so the two
-    cannot disagree about what a leading keyword hides. An ordinary command's argument named
-    ``time`` is not a keyword: only words before the first non-keyword are peeled."""
-    index = 0
-    while index < len(segment) and segment[index] in _RESERVED_PREFIX_WORDS:
-        word = segment[index]
-        index += 1
-        if index >= len(segment):
-            break
-        if word == "time":
-            if segment[index] == "-p":
-                index += 1
-            if index < len(segment) and segment[index] == "--":
-                index += 1
-        elif word == "function":
-            # `function NAME ( … )` defines (does not run) NAME; its body is a command list.
-            index += 1
-        elif word == "coproc" and _SHELL_NAME.fullmatch(segment[index]) and (
-            index + 1 == len(segment) or segment[index + 1] == "{"
-        ):
-            # `coproc NAME ( … )` / `coproc NAME { …; }`; `coproc cmd args` runs cmd itself.
-            index += 1
-    return index
+    return peel_reserved_words(segment)
 
 
 def _opens_call_arguments(segment: list[str]) -> bool:
