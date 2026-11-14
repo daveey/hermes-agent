@@ -17,7 +17,9 @@ Each park now carries ``awaiting = {kind, ref, why}`` on its parking event:
   over 15 min and no runner is refused (``ci_run_unstartable``), and a card parked on one is woken
   (``kanban_ci_progress``).
 * ``external``: ``ref`` names the vendor or ticket and ``why`` gives the evidence.
-* ``clock``: a real window (a soak, a cooldown, a release slot).
+* ``clock``: a real cooldown or release slot. Observation-window parks are refused (``soak_wait``):
+  check now and report the actual elapsed window. Quota resets, short continuation pacing (<=2 h),
+  and an explicit ``soak_requested_by: David — "<his words>"`` line on the card are exempt.
 * ``resource``: an internal resource gate (a governor's pool or host-pressure hold) whose own
   ``wake_check`` passes once the reading drops below its threshold. It needs that probe, never
   escalates into an "Unstick" owner card (nobody can act on a transient load reading), and a
@@ -69,7 +71,9 @@ OPAQUE_PROBE_WAIT = "opaque_probe_wait"
 PRODUCER_DONE = "producer_done"
 # The CI run the park names has a job queued past the limit with no runner (``kanban_ci_progress``).
 CI_RUN_UNSTARTABLE = "ci_run_unstartable"
-CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE, CI_RUN_UNSTARTABLE)
+SOAK_WAIT = "soak_wait"
+CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE, CI_RUN_UNSTARTABLE,
+         SOAK_WAIT)
 # Parks in a row on one premise before the next one escalates instead (the 3rd park = 2nd re-park).
 REPARK_LIMIT = 2
 # Fires of one opaque probe, each followed by a re-park on it, before the next park escalates: a probe
@@ -559,9 +563,13 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
     from hermes_cli.kanban_comment_origin import check_park
     check_park(conn, task_id, wake_check)
     declared = normalize(awaiting)
+    from hermes_cli import kanban_soak_wait
     if declared is None:
-        return _infer(conn, task_id, reason=reason, wake_check=wake_check, clock_only=clock_only,
-                      op=op, wake_in=wake_in)
+        inferred = _infer(conn, task_id, reason=reason, wake_check=wake_check, clock_only=clock_only,
+                          op=op, wake_in=wake_in)
+        kanban_soak_wait.check(conn, task_id, inferred, reason, short_continue=_short_continue(op, wake_in))
+        return inferred
+    kanban_soak_wait.check(conn, task_id, declared, reason, short_continue=_short_continue(op, wake_in))
     text = " ".join(x for x in (reason, declared.get("why"), declared.get("ref")) if x)
     if declared["kind"] == RESOURCE and not (wake_check and str(wake_check).strip()):
         raise AwaitingError(INVALID_AWAITING, (

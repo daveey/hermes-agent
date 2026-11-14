@@ -3,7 +3,7 @@
 Replays of the four 10-26/27 orphan waits (``~/.hermes/kanban/evidence/orphan-waits-20261027/
 5whys.md``; reasons verbatim from the parking events and the state-branch fixtures in
 ``tests/test_session_idle_orphan_wait.py``) must be refused with a typed error, and the controls
-from those fixtures (a running card, an in-progress CI run, a pure clock soak, a wait on a card
+from those fixtures (a running card, an in-progress CI run, a pure clock wait, a wait on a card
 blocked on David with a visible ask) must still park.
 """
 from __future__ import annotations
@@ -224,10 +224,10 @@ def test_replay_tracker_card_that_produces_nothing_is_refused(kanban_home, monke
     "Waiting for AWS support to grant the quota increase (case 1234567).",
     "Upstream API returns 403 Forbidden while their maintenance runs; SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
     "Rate limiter returned 401 unauthorized until the token rotates at 02:00.",
-    "No permissions changes needed; waiting for nightly soak.",
+    "No permissions changes needed; waiting for nightly release slot.",
     "Earlier run hit permission denied on cache; fixed in PR 12. Waiting for CI rerun.",
-    "Per David's decision yesterday, deploy then soak 24h.",
-    "Following David's approval in chat, rollout is live; 24h soak.",
+    "Per David's decision yesterday, deploy at the release slot.",
+    "Following David's approval in chat, rollout is live; cooldown.",
     "David's decision recorded 23:06 (design A); waiting for TestFlight processing build 412.",
 ])
 def test_ordinary_park_prose_is_not_a_wall(kanban_home, monkeypatch, reason) -> None:
@@ -264,8 +264,8 @@ def test_ci_wait_needs_a_run_id(kanban_home, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("reason", [
-    "SCHEDULED_UNTIL=2099-01-01T00:00:00Z \u2014 24h OOM soak window after deploy.",
-    "No David decision needed; waiting on the 24h soak. SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
+    "SCHEDULED_UNTIL=2099-01-01T00:00:00Z \u2014 release slot.",
+    "No David decision needed; waiting on cooldown. SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
     "Fixed file permissions on the cache dir; waiting for the nightly run at 02:00 to confirm.",
 ])
 def test_pure_clock_waits_park(kanban_home, monkeypatch, reason) -> None:
@@ -533,7 +533,7 @@ def test_pacing_continues_and_distinct_clock_windows_never_escalate(kanban_home,
             out = _repark(conn, monkeypatch, a, "continue", {
                 "checkpoint": "Build still running; check again.", "resume_after_seconds": 300})
             assert out.get("status") == "scheduled", out
-        for why in ("24h soak after deploy A", "release slot Monday", "cooldown after B", "soak after C"):
+        for why in ("release slot A", "release slot Monday", "cooldown after B", "cooldown after C"):
             out = _repark(conn, monkeypatch, b, "schedule", {
                 "reason": "window", "clock_only": True, "awaiting": {"kind": "clock", "why": why}})
             assert out.get("status") == "scheduled", out
@@ -610,7 +610,7 @@ def test_opaque_probe_with_a_declared_external_producer_parks(kanban_home, monke
     ("schedule", {"reason": "Owner card builds the image.", "wake_check": "hermes kanban wait-check task {owner}"}),
     ("continue", {"checkpoint": "Build still running; check again.", "resume_after_seconds": 600,
                   "wake_check": "! ps -p 3966721 >/dev/null"}),
-    ("block", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z \u2014 24h soak window.", "kind": "time",
+    ("block", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z \u2014 release slot.", "kind": "time",
                "clock_only": True}),
 ])
 def test_named_producers_and_short_continues_still_park(kanban_home, monkeypatch, op, args) -> None:
@@ -728,9 +728,9 @@ def test_wake_probe_naming_a_descendant_is_refused(kanban_home, monkeypatch) -> 
         parent = _running(conn)
         child = _linked_child(conn, parent)
         _as_worker(monkeypatch, conn, parent)
-        out = _tool("schedule", {"reason": "soak", "clock_only": True,
+        out = _tool("schedule", {"reason": "release slot", "clock_only": True,
                                  "wake_check": f"hermes kanban wait-check task {child}",
-                                 "awaiting": {"kind": "clock", "why": "24h soak"}})
+                                 "awaiting": {"kind": "clock", "why": "release slot"}})
         assert out.get("rejection") == kaw.INVALID_AWAITING or out.get("code") == kaw.INVALID_AWAITING, out
         assert "descendant" in (out.get("error") or "")
         assert kb.get_task(conn, parent).status == "running"
