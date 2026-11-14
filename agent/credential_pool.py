@@ -1941,7 +1941,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             from hermes_cli.auth_codex import _codex_pool_route_base_url
             return bool(auth_mod._probe_codex_quota_restored(
                 token, base_url=_codex_pool_route_base_url(entry.base_url),
-                reset_at=entry.last_error_reset_at, failure_at=entry.last_status_at))
+                reset_at=_parse_absolute_timestamp(entry.last_error_reset_at), failure_at=entry.last_status_at))
         except Exception:
             logger.debug("Codex quota-restored probe failed", exc_info=True)
             return False

@@ -6,7 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 def log_early_lift(entry, mechanism):
-    reset = entry.last_error_reset_at
+    from agent.credential_pool_timestamps import _parse_absolute_timestamp
+    reset = _parse_absolute_timestamp(entry.last_error_reset_at)
     if entry.last_status == "exhausted" and reset is not None and reset > time.time():
         logger.info("credential pool: bench lifted early %s mechanism=%s old_reset=%s",
                     entry.label or entry.id[:8], mechanism, reset)

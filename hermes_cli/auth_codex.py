@@ -675,8 +675,8 @@ def resolve_codex_runtime_credentials(
             # days in the future while the account is already usable again. Never from a
             # read-only caller: the picker fingerprint resolves on every cache-only read.
             if not read_only and _probe_codex_pool_entry_quota_restored(pool_rate_limit):
-                logger.info("Codex quota restored upstream — clearing stale pool cooldown(s).")
-                clear_codex_pool_quota_cooldowns()
+                from hermes_cli.auth_codex_quota_window import clear_proven_cooldown
+                clear_proven_cooldown(pool_rate_limit)
                 pool_token, pool_base = _pool_codex_credential(skip_disabled=not read_only)
                 if pool_token:
                     return _codex_runtime_result(
@@ -855,13 +855,15 @@ def _probe_codex_pool_entry_quota_restored(entry: dict[str, Any]) -> Optional[bo
                     if disk_entry.get("id") == entry.get("id"):
                         disk_entry.update(fresh)
                         _save_auth_store(auth_store)
+                        entry["access_token"] = token
                         break
         except Exception:
             logger.debug("Failed to persist refreshed Codex pool tokens", exc_info=True)
     if not token:
         return None
     # The row keeps the canonical URL; a gateway key belongs to its route host (#121486).
-    return _probe_codex_quota_restored(token, base_url=_codex_pool_route_base_url(entry.get("base_url")))
+    return _probe_codex_quota_restored(token, base_url=_codex_pool_route_base_url(entry.get("base_url")),
+                                      reset_at=entry.get("reset_at"), failure_at=entry.get("last_status_at"))
 
 
 def clear_codex_pool_quota_cooldowns(access_token: Optional[str] = None) -> int:
@@ -917,7 +919,7 @@ def _codex_pool_rate_limit_status() -> Optional[dict[str, Any]]:
             reset_at = _parse_absolute_timestamp(entry.get("last_error_reset_at"))
             if reset_at is None or reset_at > now:
                 return {
-                    "label": entry.get("label"), "last_refresh": entry.get("last_refresh"),
+                    "label": entry.get("label"), "last_refresh": entry.get("last_refresh"), "last_status_at": entry.get("last_status_at"),
                     "reset_at": reset_at, "reason": entry.get("last_error_reason"),
                     "message": entry.get("last_error_message"), "access_token": token.strip(),
                     "refresh_token": entry.get("refresh_token"), "id": entry.get("id"),

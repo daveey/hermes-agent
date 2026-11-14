@@ -63,7 +63,7 @@ def test_singleton_token_adoption_preserves_weekly_quota(tmp_path, monkeypatch):
     entry = pool._adopt(pool.entries()[0], source="device_code")
     pool._mark_exhausted(entry, 429, {"reason": "usage_limit_reached", "reset_at": reset})
     state = json.loads((tmp_path / "auth.json").read_text())
-    fresh = _token("replacement")
+    fresh = _token("A") + "-new-generation"
     state["providers"] = {"openai-codex": {"tokens": {"access_token": fresh, "refresh_token": "new-refresh"}}}
     (tmp_path / "auth.json").write_text(json.dumps(state))
     entry = next(e for e in pool.entries() if e.id == "A")
@@ -88,16 +88,38 @@ def test_short_window_all_walled_is_retryable(tmp_path, monkeypatch):
         _verify(pool, rows[0]["access_token"])
 
 
-def test_proven_weekly_reopen_logs_and_rotation_still_excludes_failure(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("other_walled", [False, True])
+def test_proven_weekly_reopen_logs_and_rotation_still_excludes_failure(tmp_path, monkeypatch, caplog, other_walled):
     reset = time.time() + 6 * 86400
     payload = {"rate_limit": {"primary_window": {"used_percent": 0},
                               "secondary_window": {"used_percent": 0, "reset_at": reset}}}
-    pool, _, _ = _pool(tmp_path, monkeypatch, payload=payload)
+    pool, rows, _ = _pool(tmp_path, monkeypatch, payload=payload, other_walled=other_walled)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload)
+                                    if rows[0]["access_token"] in request.headers["Authorization"]
+                                    else httpx.Response(429))
+    monkeypatch.setattr(auth_codex, "_codex_http_client", lambda **kwargs: httpx.Client(transport=transport))
     with caplog.at_level(logging.INFO):
         nxt = _rotate(pool, reset)
-    assert nxt is not None and nxt.id == "B"
-    _verify(pool, nxt.runtime_api_key)
+    if other_walled:
+        assert nxt is None
+        with pytest.raises(SubscriptionQuotaUnavailable):
+            _verify(pool, rows[0]["access_token"])
+    else:
+        assert nxt is not None and nxt.id == "B"
+        _verify(pool, nxt.runtime_api_key)
     assert "bench lifted early" in caplog.text
     assert "quota_probe" in caplog.text
-    assert "old_reset=" in caplog.text
     assert next(e for e in pool.entries() if e.id == "A").last_status == "exhausted"
+
+
+def test_explicit_reset_resync_logs_early_lift(tmp_path, monkeypatch, caplog):
+    pool, _, reset = _pool(tmp_path, monkeypatch)
+    assert _rotate(pool, reset).id == "B"
+    state = json.loads((tmp_path / "auth.json").read_text())
+    row = next(row for row in state["credential_pool"]["openai-codex"] if row["id"] == "A")
+    row["status_cleared_at"] = time.time() + 1
+    (tmp_path / "auth.json").write_text(json.dumps(state))
+    with caplog.at_level(logging.INFO):
+        available, _ = pool._available_entries(clear_expired=True, refresh=False)
+    assert "A" in {entry.id for entry in available}
+    assert "bench lifted early A mechanism=resync old_reset=" in caplog.text

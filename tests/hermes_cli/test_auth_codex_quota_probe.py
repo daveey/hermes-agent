@@ -370,7 +370,9 @@ def test_resolver_refreshes_expired_token_before_probe(tmp_path, monkeypatch):
     fresh = _jwt({"exp": now + 3600})
     refresh_calls: list = []
     _fake_refresh(monkeypatch, fresh, refresh_calls)
-    http_calls = _patch_expiry_aware_httpx(monkeypatch, _StubResponse(200, _usage_payload(0.0, 0.0)))
+    payload = _usage_payload(0.0, 0.0)
+    payload["rate_limit"]["secondary_window"]["reset_at"] = now + 3 * 86400
+    http_calls = _patch_expiry_aware_httpx(monkeypatch, _StubResponse(200, payload))
 
     resolved = resolve_codex_runtime_credentials()
 
