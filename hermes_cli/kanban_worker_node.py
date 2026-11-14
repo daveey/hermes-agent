@@ -571,9 +571,11 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     listed = candidates(replica, own)
     # Apply the executor's authoritative local graph before spending the import
-    # budget, just as dispatch does after pickup. Keep review ahead of ready.
-    listed = [row for lane in ("review", "ready") for row in order_with_remote_waiters(
-        conn, [row for row in listed if row["status"] == lane])]
+    # budget, just as dispatch does after pickup. Keep review ahead of ready. Within a lane, cards pinned here go
+    # first: only this machine can run them, pool cards have other takers (worker-1 2026-11-14: a pinned card
+    # waited budget_exhausted ~6 h behind pool cards, t_01a1d95eabbd2b9d). Stable: each group keeps its order.
+    listed = [row for lane in ("review", "ready") for row in sorted(order_with_remote_waiters(
+        conn, [row for row in listed if row["status"] == lane]), key=lambda row: row["id"] not in mine)]
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
@@ -615,11 +617,15 @@ def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tupl
     taking the pickup budget: worker-3 2026-11-12, 4 cards walled until 11-17/18 filled the batch and two
     priority-0 cards pinned to it waited ``budget_exhausted`` (t_01a1cf9f2b838cbb). Not copied, it spends no
     budget; an episode with a free alternate route (``decision`` -> None) is copied as before. Any failure copies
-    as before: the local guard still decides after the copy."""
+    as before: the local guard still decides after the copy.
+
+    With no episode (the card never ran), the pre-claim ``pinned_quota_wall`` hold
+    (:func:`kanban_dispatch_skip.pinned_quota_hold`): worker-1 2026-11-14, a fresh mandatory pin on a walled model
+    was copied, held and evicted ~700 times in 3 h while a card pinned here waited (t_01a1d95eabbd2b9d)."""
     from hermes_cli.kanban_quota_episode import decision, episode, hold_until
     try:
         if not episode(replica, card["id"]):
-            return None
+            return _pin_walled(replica, card)
         from hermes_cli import kanban_db as kb
         task = kb.get_task(replica, card["id"])
         guard = decision(replica, task, lane=card["status"])[0] if task is not None else None
@@ -633,6 +639,19 @@ def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tupl
     when = f" until {datetime.fromtimestamp(until, UTC):%Y-%m-%dT%H:%M:%SZ}" if until else ""
     # Not "hold": that groups with a registry hold of the whole machine (kanban_pickup_stall._HOST_GROUPS).
     return "quota_hold", f"{guard}{when} (local dispatch would hold it)"
+
+
+def _pin_walled(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+    """[daveey] ``("quota_hold", detail)`` when local dispatch would hold the never-run ``card`` pre-claim on its
+    pin's live quota wall (``hold_pinned_quota``: ready lane only, read-only, same inputs on the replica)."""
+    from hermes_cli.kanban_dispatch_skip import PINNED_QUOTA_WALL, pinned_quota_hold
+    held = pinned_quota_hold(replica, card["id"]) if card["status"] == "ready" else None
+    if held is None:
+        return None
+    from datetime import UTC, datetime
+    model, provider, until = held
+    return "quota_hold", (f"{PINNED_QUOTA_WALL} {model} ({provider}) until "
+                          f"{datetime.fromtimestamp(until, UTC):%Y-%m-%dT%H:%M:%SZ} (local dispatch would hold it)")
 
 
 def note_capped(conn: sqlite3.Connection, profile_exists: Optional[Callable[[str], bool]] = None) -> None:

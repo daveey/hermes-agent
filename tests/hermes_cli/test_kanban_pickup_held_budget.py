@@ -47,10 +47,11 @@ def imports(monkeypatch):
     return seen
 
 
-def _held_on_board(hub, priority, reason="subscription_quota_reset"):
+def _held_on_board(hub, priority, reason="subscription_quota_reset", runs_on=()):
     """A hub card another machine's dispatcher holds: its ``respawn_guarded`` event is in the Board history."""
     hub.enter()
-    tid = kb.create_task(hub.conn, title=f"held {priority}", assignee="default", priority=priority, runs_on=[])
+    tid = kb.create_task(hub.conn, title=f"held {priority}", assignee="default", priority=priority,
+                         runs_on=list(runs_on))
     with write_txn(hub.conn):
         append_event(hub.conn, tid, "respawn_guarded", {"reason": reason})
     hub.round()
@@ -124,8 +125,8 @@ def test_the_held_imports_per_tick_are_bounded(gws, monkeypatch):
     monkeypatch.setattr(kph, "FREE_PER_TICK", 2)
     held = [_held_on_board(hub, 900 - i) for i in range(3)]
     plain = support._hub_card(hub, title="plain", priority=0, runs_on=PIN)
-    got = _pickup(worker, 1)
-    assert got == held[:2] + [plain]
+    got = _pickup(worker, 2)  # the card pinned here first (t_01a1d95eabbd2b9d), then at most 2 free held copies
+    assert got == [plain] + held[:2]
 
 
 def test_a_capped_tick_reports_a_held_pinned_card_as_held(gws):
@@ -165,7 +166,7 @@ def test_a_stalled_guard_held_card_does_not_file_the_registry_hold_repair(gws):
 
 def test_an_unreadable_board_hold_takes_the_budget_as_before(gws, monkeypatch):
     hub, worker = gws
-    tid = _held_on_board(hub, 900)
+    tid = _held_on_board(hub, 900, runs_on=PIN)  # pinned here too: such cards go first (t_01a1d95eabbd2b9d)
     pinned = support._hub_card(hub, title="pinned", priority=0, runs_on=PIN)
 
     def boom(*a, **kw):
