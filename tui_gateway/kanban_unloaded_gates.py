@@ -153,7 +153,10 @@ def _guarantee() -> Inputs:
                     # Admission can recover without a database revision.
                     if closeout.get('busy_attempts'):
                         return Inputs()
-                    retry = closeout.get('retry_at')
+                    # Match the consumer's code-change recovery deadline; a
+                    # persisted wall backoff can shorten after a new build.
+                    from tui_gateway.notice_retry import effective_due
+                    retry = effective_due(closeout)
                     timestamp = row['timestamp']
                     if (not isinstance(retry, (int, float)) or isinstance(retry, bool)
                             or not isinstance(timestamp, (int, float))

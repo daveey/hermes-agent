@@ -108,6 +108,60 @@ def test_host_deferred_guarantee_skips_only_until_backoff_expires(host, monkeypa
         db.close()
 
 
+@pytest.mark.parametrize(('booked_sha', 'current_sha', 'timestamp', 'deadline'), [
+    ('old-build', 'new-build', 1.0, 1500.0),
+    ('old-build', 'old-build', 1.0, 9000.0),
+    (None, 'new-build', 1.0, 9000.0),
+    ('old-build', '', 1.0, 9000.0),
+    ('old-build', 'new-build', 1400.0, 1700.0),
+])
+def test_host_guarantee_uses_effective_retry_deadline(
+        host, monkeypatch, tmp_path, booked_sha, current_sha, timestamp, deadline):
+    import json
+    from hermes_state import SessionDB
+    from hermes_cli import host_loop_lease
+    from tui_gateway import kanban_unloaded_gates as gates
+
+    monkeypatch.setattr(host_loop_lease, '_core_sha', lambda: current_sha)
+    with contextlib.closing(SessionDB(tmp_path / 'state.db')) as db:
+        db.create_session('chat', 'desktop')
+        db.append_message('chat', 'user', 'work')
+        msg = db.append_kanban_notice('chat', 'done', {'notice_id': 'effective-due'})
+        closeout = {'state': 'deferred', 'retry_at': 9000,
+                    'retry_short_at': 1500, 'retry_code_sha': booked_sha}
+        db._write_rowcount('UPDATE messages SET timestamp=?, display_metadata=? WHERE id=?',
+                          (timestamp, json.dumps({'closeout': closeout}), msg))
+        monkeypatch.setattr(gates, '_profile_paths', lambda every_store=True: [db.db_path])
+        clock, calls, wakes = [1000.0], [], []
+        monkeypatch.setattr(gates.time, 'time', lambda: clock[0])
+
+        @contextlib.contextmanager
+        def opener(sid):
+            yield db, sid
+
+        def guarantee():
+            calls.append(clock[0])
+            return REAL_GUARANTEE(
+                now=clock[0], stores=lambda: iter([db]), holders=list, session_db=opener,
+                wake=lambda *args: wakes.append(args) or 'started', spawn=lambda job: job())
+
+        monkeypatch.setattr(ng, 'guarantee_pass', guarantee)
+        ku.host_pass()
+        before = db._read_one('SELECT display_metadata FROM messages WHERE id=?', (msg,))[0]
+        clock[0] = deadline - 1
+        ku.host_pass()
+        assert calls == [1000.0]
+        assert not wakes
+        assert db._read_one('SELECT display_metadata FROM messages WHERE id=?', (msg,))[0] == before
+        clock[0] = deadline
+        assert len(ng.candidates(db, clock[0])) == 1
+        ku.host_pass()
+        assert calls == [1000.0, deadline]
+        assert len(wakes) == 1
+        after = json.loads(db._read_one('SELECT display_metadata FROM messages WHERE id=?', (msg,))[0])
+        assert after['closeout']['state'] == 'started'
+
+
 def test_independent_empty_subpasses_skip_but_fanout_stays_hot(host, monkeypatch, tmp_path):
     import sqlite3
     from tui_gateway import kanban_unloaded_gates as gates
