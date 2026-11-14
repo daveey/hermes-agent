@@ -129,6 +129,46 @@ CASE_PATTERN_FRAMES = [
 ]
 
 
+# A here-document body is data: a body line spelled `case x in` (or `;;`, `x)`) moves no case
+# state, so the `)` after the body still closes the substitution and the next command is read.
+HEREDOC_FRAMES = [
+    'echo "${x:-$(cat <<E\ncase x in\nE\n)}"; {cmd}',
+    'echo "${x:-$(cat <<\'E\'\ncase x in\nE\n)}"; {cmd}',
+    'echo "${x:-$(cat <<"E"\ncase x in\nE\n)}"; {cmd}',
+    'echo "${x:-$(cat <<-E\n\tcase x in\n\tE\n)}"; {cmd}',
+    'echo "${x:-$(cat << E\ncase x in\nE\n)}"; {cmd}',
+    'echo ${x:-"$(cat <<E\ncase x in\nE\n)"}; {cmd}',
+    'x="${y:-$(cat <<E\ncase x in\nE\n)}"; {cmd}',
+    'echo "${x:-$(cat <<E\ncase x in\nE\n)}" && {cmd}',
+    'echo "${x:-$(cat <<A <<B\na\nA\ncase x in\nB\n)}"; {cmd}',
+    'echo "${x:-$(cat <<E; case x in x) true;; esac\ncase x in\nE\n)}"; {cmd}',
+    'echo "${x:-$(case x in x) cat <<E\n;;\nx)\nE\n;; esac)}"; {cmd}',
+    # Nor does a paren, quote or comment in the body move the frame.
+    'echo "${x:-$(cat <<E\n(\nE\n)}"; {cmd}',
+    'echo "${x:-$(cat <<E\nit\'s\nE\n)}"; {cmd}',
+    'echo "${x:-$(cat <<\'E\'\nsay "hi\nE\n)}"; {cmd}',
+    'echo "${x:-$(cat <<E\n`\nE\n)}"; {cmd}',
+    # Inside `$(...)` a body also ends at a delimiter line followed by `)`.
+    'echo "${x:-$(cat <<E\ncase x in\nE)}"; {cmd}',
+    'echo "${x:-$(cat <<E\n(\nE )}"; {cmd}',
+    'echo "${x:-$(cat <<-E\ncase x in\n\tE)}"; {cmd}',
+    # `<<<` and arithmetic `<<` open no here-document; case tracking stays on.
+    'echo "${x:-$(cat <<<y; case x in (case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(echo $((1<<2)); case x in (case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(((1<<2)); case x in (case) true;; esac)}"; {cmd}',
+]
+
+
+@pytest.mark.parametrize("frame", HEREDOC_FRAMES)
+@pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
+def test_heredoc_body_does_not_open_case(tmp_path, frame, dangerous):
+    helpers._tree(tmp_path)
+    command = frame.replace("{cmd}", "bash ./r.sh" if dangerous else "python3 ./clean.py")
+    assert helpers._bash_runs(tmp_path, command) is dangerous
+    refused, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert refused is dangerous, reason
+
+
 @pytest.mark.parametrize("frame", CASE_PATTERN_FRAMES)
 @pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
 def test_case_word_as_pattern_does_not_hide_following_command(tmp_path, frame, dangerous):

@@ -108,6 +108,86 @@ class _CaseClauses:
         return True
 
 
+def _heredoc_delimiter(text: str, pos: int) -> tuple[str, bool] | None:
+    """The delimiter of a ``<<`` / ``<<-`` operator at *pos* (quotes removed), else None."""
+    if not text.startswith("<<", pos) or text.startswith("<<<", pos):
+        return None
+    pos += 2
+    strip_tabs = text.startswith("-", pos)
+    pos += strip_tabs
+    while pos < len(text) and text[pos] in " \t":
+        pos += 1
+    word: list[str] = []
+    while pos < len(text) and text[pos] not in _WORD_BREAKS:
+        char = text[pos]
+        if char in "'\"":
+            end = _quoted_end(text, pos + 1, char, escapes=char == '"')
+            word.append(text[pos + 1:end - 1])
+            pos = end
+            continue
+        if char == "\\":
+            word.append(text[pos + 1:pos + 2])
+            pos += 2
+            continue
+        word.append(char)
+        pos += 1
+    return ("".join(word), strip_tabs) if word else None
+
+
+def _heredoc_bodies_end(text: str, pos: int, delimiters: list[tuple[str, bool]]) -> int:
+    """End of the here-document bodies starting at *pos* (just after their command's newline).
+
+    Inside ``$(...)`` bash also ends a body at a line that starts with the delimiter and has a
+    ``)`` after it (``E)``, ``E )``); the rest of that line is shell again, so stop before it."""
+    for delimiter, strip_tabs in delimiters:
+        while pos < len(text):
+            end = text.find("\n", pos)
+            end = len(text) if end < 0 else end
+            line = text[pos:end].lstrip("\t") if strip_tabs else text[pos:end]
+            start, pos = end - len(line), end + 1
+            if line == delimiter:
+                break
+            if line.startswith(delimiter) and ")" in line[len(delimiter):]:
+                return start + len(delimiter)
+        else:
+            return -1  # unterminated: not skipped, so a misread operator hides nothing
+    return min(pos, len(text))
+
+
+class _HereDocs:
+    """Here-document operators of one ``$(...)`` frame. A body is data to bash: no paren, quote,
+    comment or ``case`` word in it moves the frame. Arithmetic (``$((1<<2))``) opens none."""
+
+    def __init__(self) -> None:
+        self._pending: list[tuple[str, bool]] = []
+        self._arith = -1
+
+    def bodies_end(self, text: str, pos: int, depth: int, *, word_start: bool) -> int:
+        """Advance on the character at *pos*; when it is the newline before complete bodies,
+        return the position after them, else *pos*."""
+        char = text[pos]
+        if char == "(" and self._arith < 0 and text.startswith("((", pos) and (
+                word_start or text[pos - 1] == "$"):
+            self._arith = depth
+        elif char == ")" and depth - 1 == self._arith:
+            self._arith = -1
+        elif char == "<" and self._arith < 0 and text[pos - 1] != "<":
+            delimiter = _heredoc_delimiter(text, pos)
+            if delimiter is not None:
+                self._pending.append(delimiter)
+        elif char == "\n" and self._pending:
+            end = _heredoc_bodies_end(text, pos + 1, self._pending)
+            self._pending = []
+            return max(end, pos)
+        return pos
+
+
+def _newline_breaks(breaks: list[int] | None, text: str, start: int, end: int,
+                    offset: int) -> None:
+    if breaks is not None:
+        breaks.extend(offset + i - start for i in range(start, end) if text[i] == "\n")
+
+
 def _command_span(text: str, start: int, *, shlex_quotes: bool,
                   breaks: list[int] | None = None) -> tuple[int, str]:
     """Find a substitution's closing parenthesis in its own shell comment frame.
@@ -119,9 +199,16 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
     word_start = True
     parts = ["$("]
     cases = _CaseClauses()
+    docs = _HereDocs()
     at_command = True
     while pos < len(text):
         char = text[pos]
+        end = docs.bodies_end(text, pos, depth, word_start=word_start)
+        if end > pos:
+            _newline_breaks(breaks, text, pos, end, _out_len(parts) + pos - copied)
+            pos = end
+            at_command = word_start = True
+            continue
         if char == "#" and word_start:
             end = text.find("\n", pos)
             end = len(text) if end < 0 else end
