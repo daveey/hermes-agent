@@ -67,15 +67,13 @@ def test_drain_packs_consecutive_rows_and_reads_back(tmp_path):
     journal.close()
 
 
-def test_oversized_inventory_does_not_poison_valid_batch(tmp_path, monkeypatch):
-    def resolve(entries, **kwargs):
-        test_id = entries[0]["test_id"]
-        if test_id.endswith("test_bad"):
-            kwargs["owner_notes"][test_id] = [{"candidate": "x" * 7000}]
-        return ["queued"]
-    monkeypatch.setattr(fk, "file_cards", resolve)
+def test_oversized_identity_does_not_poison_valid_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(fk, "file_cards", lambda *args, **kwargs: ["queued"])
     journal = intake.Journal(tmp_path / "queue.db")
-    journal.record("o/r", [(9, [{"test_id": f"tests/a.py::test_{s}"} for s in ("good", "bad", "last")])],
+    # Diagnostics are now bounded. A smaller test-only cap and valid long ID
+    # exercise size rejection without bypassing metadata validation.
+    monkeypatch.setattr(intake, "PAGE_BYTES", 700)
+    journal.record("o/r", [(9, [{"test_id": f"tests/a.py::test_{s}"} for s in ("good", "x" * 480, "last")])],
                    {"id": 1, "head_sha": "a" * 40})
     lines = fk.drain_intake(journal, "o/r", Board(), {"cards": {}}, None)
     assert any("intake_page_oversize" in line for line in lines)
