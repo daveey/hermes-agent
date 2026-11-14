@@ -309,6 +309,29 @@ def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
         False, None)
 
 
+@pytest.mark.parametrize("option", [
+    "--group root", "--group=root", "-g root", "-groot",
+    "--supp-group root", "--supp-group=root", "-G root", "-Groot",
+    "--whitelist-environment HOME", "--whitelist-environment=HOME", "-w HOME", "-wHOME",
+])
+@pytest.mark.parametrize("user", ["-u bob", "-ubob", "--user bob", "--user=bob", "-mu bob"])
+@pytest.mark.parametrize("first", [True, False])
+def test_runuser_value_options_preserve_direct_stdin(tmp_path, live_kanban_db, option, user, first):
+    """Option values must not hide direct-user mode: cat only receives inert input."""
+    options = f"{option} {user}" if first else f"{user} {option}"
+    text = f"runuser {options} -- cat <<< 't ( bash {live_kanban_db} )'"
+    assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
+        False, None)
+
+
+@pytest.mark.parametrize("option", ["--group", "--supp-group", "--whitelist-environment", "-g", "-G", "-w"])
+def test_runuser_option_value_is_not_user_switch(tmp_path, live_kanban_db, option):
+    """A flag-looking value cannot prove direct-user mode and suppress the shell walk."""
+    text = f"runuser {option} -u bob <<< 't ( bash {live_kanban_db} )'"
+    unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe and refusal is not None and "SQLite" in refusal
+
+
 @pytest.mark.parametrize("names", [frozenset(), frozenset({"zz"}), _STOCK_ALIASES])
 def test_card_repro_python_body_in_login_shell_stays_allowed(tmp_path, live_kanban_db, names):
     """The ssh `bash -ls` repro: its only `(` openers sit in a quoted `python3 -` body, which the

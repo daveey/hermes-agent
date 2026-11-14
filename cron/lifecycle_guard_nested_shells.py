@@ -103,9 +103,15 @@ _SUDO_VALUE_OPTIONS = frozenset("ugUCprtTh")
 _NESTED_SHELL_HINT_RE = re.compile(r"sh\b|\bsu(?:do)?\b|\b(?:exec|runuser|doas)\b")
 
 
-def _option_words(arguments: list[str], value_letters: frozenset[str]) -> tuple[list[str], int]:
-    """``(option words, index of the first operand)`` of a getopt-style argv tail; a short option
-    in *value_letters* consumes the next word unless the value is glued (``-uroot``)."""
+def _option_words(
+    arguments: list[str], value_letters: frozenset[str],
+    value_names: frozenset[str] = frozenset(),
+) -> tuple[list[str], int]:
+    """``(option words, index of the first operand)`` of a getopt-style argv tail.
+
+    Value-taking short and long options consume a separate value, but not a glued one.
+    Values never enter the returned option namespace, even when they look like flags.
+    """
     options: list[str] = []
     index = 0
     while index < len(arguments) and arguments[index].startswith("-") and arguments[index] != "-":
@@ -114,7 +120,9 @@ def _option_words(arguments: list[str], value_letters: frozenset[str]) -> tuple[
         if word == "--":
             break
         options.append(word)
-        if not word.startswith("--"):
+        if word.startswith("--"):
+            index += word in value_names  # `--name=value` already carries its value
+        else:
             for position, letter in enumerate(word[1:], 1):
                 if letter in value_letters:
                     index += position == len(word) - 1  # `-u root` takes the next word
@@ -169,7 +177,10 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
         direct_user = any(
             word == "--user" or word.startswith("--user=")
             or re.fullmatch(r"-[mpPl]*u.*", word)
-            for word in _option_words(options, frozenset("ucsg"))[0]
+            for word in _option_words(options, frozenset("ucsgGw"), frozenset({
+                "--user", "--command", "--session-command", "--shell", "--group",
+                "--supp-group", "--whitelist-environment",
+            }))[0]
         )
         if name == "su" or not direct_user:
             # Direct-user runuser executes argv, not a shell command string.
