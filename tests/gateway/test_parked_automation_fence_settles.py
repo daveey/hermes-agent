@@ -118,3 +118,30 @@ def test_every_pause_is_logged_at_warning(tmp_path, monkeypatch, caplog, reason)
     with db, caplog.at_level(logging.INFO, logger='gateway.session_authority'):
         owner._pause(REF, reason)
     assert [(r.getMessage(), r.levelno) for r in caplog.records] == [(f'Session s paused: {reason}', logging.WARNING)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid', [False, True])
+async def test_real_drain_delivers_spooled_row_before_follower(tmp_path, monkeypatch, invalid):
+    from gateway import session_finite, shutdown_flush
+    db, owner, _head, follower, calls = await _after_boot(tmp_path, monkeypatch, AUTOMATION)
+    monkeypatch.setattr(shutdown_flush, '_get_flush_dir', lambda: tmp_path / 'spool')
+    (tmp_path / 'spool').mkdir()
+    # TUI/headless owners have no messaging SessionStore: their DB is still the replay target.
+    monkeypatch.setattr(owner.runner, 'session_store', None, raising=False)
+    with db:
+        assert shutdown_flush.defer_row_for_parked_turn('s', {'role': 'user', 'content': 'DEFERRED'})
+        if invalid:
+            _void_proof(db)
+        previous = session_finite.execute_finite_admission
+
+        async def execute(authority, ref, row):
+            if row['payload']['text'] == 'FOLLOWER':
+                assert [m['content'] for m in db.get_messages('s')].count('DEFERRED') == 1
+            return await previous(authority, ref, row)
+
+        monkeypatch.setattr(session_finite, 'execute_finite_admission', execute)
+        await _drain(owner)
+        assert calls == (['FOLLOWER'] if invalid else ['resumed', 'FOLLOWER'])
+        assert _status(db, follower) == ('terminal', 'completed')
+        assert not list((tmp_path / 'spool').glob('pending-*.json'))

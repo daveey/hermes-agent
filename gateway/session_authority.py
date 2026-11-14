@@ -924,6 +924,8 @@ class SessionAuthority:
 
     async def _resolved_unknown(self, ref, admission_id, prepared, captured, row):
         self.pending_results.pop(admission_id, None)
+        from gateway.session_settlement_recovery import drain_deferred_rows
+        await drain_deferred_rows(self, ref)
         # A resolution racing recovery leaves publication, delivery and collection to the drain. A
         # conversation idle retirement let go between the commit and this follow-up has no drain:
         # bring it back first, so the captured answer reaches its viewers.
