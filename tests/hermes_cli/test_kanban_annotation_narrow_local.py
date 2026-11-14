@@ -15,8 +15,10 @@ from hermes_cli import kanban_annotation_local as own
 from hermes_cli import kanban_annotation_narrow as narrow
 from hermes_cli import kanban_session_activity as ksa
 from hermes_cli.kanban_db_sync import SHADOW_DIR
-from tests.hermes_cli.test_kanban_annotation_narrow import SCOPE, hub  # fixture
+from tests.hermes_cli import test_kanban_annotation_narrow as base
 
+SCOPE = base.SCOPE
+hub = base.hub  # the shared hub fixture, re-exported for this module's tests
 PROFILE = SCOPE[1]
 ME = "me"
 REQUEST = '{"action": "Reply A or B. Unblock = build it; archive = drop it.", "why_human": "taste", ' \
@@ -218,12 +220,54 @@ def test_failed_board_read_is_unknown_and_not_memoised(world, monkeypatch):
     world["conn"].execute("UPDATE tasks SET status='blocked' WHERE id='tx'")
     real = own._board_rows
 
-    def broken(conn):
+    def broken(conn, ids=None):
         raise sqlite3.DatabaseError("database disk image is malformed")
     monkeypatch.setattr(own, "_board_rows", broken)
     assert key(world) is None
     monkeypatch.setattr(own, "_board_rows", real)
     assert key(world) is not None
+
+
+@pytest.mark.parametrize("error", ["database is locked", "disk I/O error"])
+def test_failed_shadow_freshness_read_is_unknown(world, monkeypatch, error):
+    from contextlib import contextmanager
+
+    real = ksa.cached_ro
+
+    class Reader:
+        def __init__(self, conn):
+            self.conn = conn
+
+        @property
+        def row_factory(self):
+            return self.conn.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self.conn.row_factory = value
+
+        def execute(self, sql, *args):
+            if "SELECT pulled_at" in sql:
+                raise sqlite3.OperationalError(error)
+            return self.conn.execute(sql, *args)
+
+    @contextmanager
+    def failing(path, **kwargs):
+        with real(path, **kwargs) as conn:
+            yield Reader(conn) if path == world["shadow"] else conn
+
+    assert key(world) is not None
+    monkeypatch.setattr(ksa, "cached_ro", failing)
+    assert key(world) is None
+    monkeypatch.setattr(ksa, "cached_ro", real)
+    assert key(world) is not None
+
+
+def test_legacy_shadow_without_pull_stamp_is_stale(world):
+    before = key(world)
+    world["sconn"].execute("DROP TABLE kanban_sync_state")
+    after = key(world)
+    assert after is not None and after != before
 
 
 def test_board_read_once_then_patched_per_revision(world):

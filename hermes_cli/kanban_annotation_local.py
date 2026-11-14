@@ -266,7 +266,9 @@ def shadows_part(entries: list[tuple[str, Any]], profile: str, now: float | None
                 try:
                     row = conn.execute("SELECT pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
                     pulled = float(row[0]) if row and row[0] is not None else None
-                except sqlite3.OperationalError:  # replica written before pulls were stamped
+                except sqlite3.OperationalError as exc:  # replica written before pulls were stamped
+                    if "no such table" not in str(exc) and "no such column" not in str(exc):
+                        raise
                     pulled = None
             finally:
                 conn.row_factory = None
