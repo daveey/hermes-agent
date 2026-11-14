@@ -64,7 +64,7 @@ def _tool(name: str, args: dict) -> dict:
 
 def test_outside_schedule_of_a_live_claimed_card_is_refused_and_the_run_stays_open(home):
     tid, run_id = _claimed()
-    out = _tool("_handle_schedule", {"task_id": tid, "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z soak",
+    out = _tool("_handle_schedule", {"task_id": tid, "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z rate-limit cooldown",
                                      "clock_only": True})
     assert out.get("code") == "live_claim_park", out
     assert out.get("rejection") == "live_claim" and out.get("run_id") == run_id, out
@@ -86,7 +86,7 @@ def test_the_worker_still_parks_its_own_live_card(home, monkeypatch):
     tid, run_id = _claimed()
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    out = _tool("_handle_schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z soak", "clock_only": True})
+    out = _tool("_handle_schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z rate-limit cooldown", "clock_only": True})
     assert out.get("ok") is True and out["status"] == "scheduled", out
     assert _run(run_id)["outcome"] == "scheduled"
 
@@ -96,7 +96,7 @@ def test_an_unclaimed_ready_card_is_still_parked_from_outside(home):
     with _conn() as conn:
         tid = kb.create_task(conn, title="not started", assignee="default")
     assert _status(tid) == "ready"
-    out = _tool("_handle_schedule", {"task_id": tid, "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z soak",
+    out = _tool("_handle_schedule", {"task_id": tid, "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z rate-limit cooldown",
                                      "clock_only": True})
     assert out.get("ok") is True and out["status"] == "scheduled", out
 
@@ -104,7 +104,7 @@ def test_an_unclaimed_ready_card_is_still_parked_from_outside(home):
 def test_a_claim_whose_worker_is_gone_can_still_be_parked_from_outside(home):
     """A claim with no live worker protects no run (the same rule ``complete_task`` applies)."""
     tid, run_id = _claimed(live=False)
-    out = _tool("_handle_schedule", {"task_id": tid, "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z soak",
+    out = _tool("_handle_schedule", {"task_id": tid, "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z rate-limit cooldown",
                                      "clock_only": True})
     assert out.get("ok") is True and out["status"] == "scheduled", out
     assert _run(run_id)["outcome"] == "scheduled"

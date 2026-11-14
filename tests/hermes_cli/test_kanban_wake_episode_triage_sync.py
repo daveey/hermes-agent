@@ -19,7 +19,7 @@ from tests.hermes_cli import test_kanban_wake_episode as base
 from tests.hermes_cli import test_kanban_wake_episode_carry as carry
 
 kanban_home = base.kanban_home
-SOAK = "SCHEDULED_UNTIL=2026-09-13T00:00:00Z soak"
+COOLDOWN = "SCHEDULED_UNTIL=2026-09-13T00:00:00Z rate-limit cooldown"
 
 
 def _enable_sync(monkeypatch):
@@ -39,7 +39,7 @@ def _fresh(conn, tid):
 
 def _home_park_kinds(conn, tid):
     before = len(_kinds(conn, tid))
-    assert kb.schedule_task(conn, tid, reason=SOAK, clock_only=True)  # home still sees triage
+    assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)  # home still sees triage
     return [k for k in _kinds(conn, tid)[before:] if k != "commented"]
 
 

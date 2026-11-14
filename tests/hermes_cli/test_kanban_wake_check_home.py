@@ -170,7 +170,7 @@ def _parked(conn, *, wake_check):
     with kb.write_txn(conn):
         assert ktp.park(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", requested_kind="time",
                         source_status="running", wake_check=wake_check, check_every=300,
-                        awaiting=BUILD if wake_check else {"kind": "clock", "why": "a soak window"},
+                        awaiting=BUILD if wake_check else {"kind": "clock", "why": "rate-limit cooldown"},
                         clock_only=not wake_check)
     return tid
 
