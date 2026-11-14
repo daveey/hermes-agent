@@ -107,6 +107,38 @@ def test_newline_in_nested_substitution_separates_commands(tmp_path, frame, dang
     assert refused is dangerous, reason
 
 
+# In a case pattern list only a leading `esac` is reserved: a pattern spelled `case` (or `in`,
+# `esac` after `(`/`|`) opens nothing, so the real `)` still closes the substitution and the
+# command after a double-quoted frame stays visible.
+CASE_PATTERN_FRAMES = [
+    'echo "${x:-$(case x in (case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in a|case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in x) true;; case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in x) true;& case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in x) true;;& case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in\ncase) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in (esac) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in a|esac) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in (in) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case case in (case) true;; esac)}"; {cmd}',
+    'echo ${x:-"$(case x in (case) true;; esac)"}; {cmd}',
+    'x="${y:-$(case x in (case) true;; esac)}"; {cmd}',
+    'echo "${x:-$(case x in (case) true;; esac)}" && {cmd}',
+    'echo "${x:-$(case x in x) case y in (case) true;; esac;; esac)}"; {cmd}',
+]
+
+
+@pytest.mark.parametrize("frame", CASE_PATTERN_FRAMES)
+@pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
+def test_case_word_as_pattern_does_not_hide_following_command(tmp_path, frame, dangerous):
+    helpers._tree(tmp_path)
+    command = frame.replace("{cmd}", "bash ./r.sh" if dangerous else "python3 ./clean.py")
+    assert helpers._bash_runs(tmp_path, command) is dangerous
+    refused, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert refused is dangerous, reason
+
+
 @pytest.mark.parametrize("escape", [r"\0", r"\x00"])
 @pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
 def test_ansi_nul_truncates_only_quoted_span(tmp_path, escape, dangerous):

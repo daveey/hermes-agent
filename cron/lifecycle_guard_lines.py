@@ -61,11 +61,13 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
     depth = 1
     word_start = True
     parts = ["$("]
-    # Depths at which an open `case` waits for its `esac`: there a bare `)` ends a pattern,
-    # not the substitution (`$(case x in x) true;; esac)`).
-    case_depths: list[int] = []
+    # Open `case` statements as [depth, phase]. In a pattern list a bare `)` ends the pattern,
+    # not the substitution (`$(case x in x) true;; esac)`), and no word but a leading `esac`
+    # is reserved there (`(case)` is a pattern, not a nested `case`). Phases: "subject" and
+    # "in" before the clauses, "pattern" at a clause start, "pattern-word" inside a pattern
+    # list (after `(`, `|` or a word), "body" in a clause's command list.
+    cases: list[list] = []
     at_command = True
-    last_word = ""
     while pos < len(text):
         char = text[pos]
         if char == "#" and word_start:
@@ -80,13 +82,22 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
             continue
         if word_start and char not in _WORD_BREAKS:
             word = _plain_word(text, pos)
-            if word == "case" and at_command:
-                case_depths.append(depth)
-            elif (word == "esac" and case_depths and case_depths[-1] == depth
-                  and (at_command or last_word == "in")):
-                case_depths.pop()
-            at_command = word in _COMMAND_PREFIX_WORDS
-            last_word = word
+            top = cases[-1] if cases and cases[-1][0] == depth else [depth, ""]
+            phase = top[1]
+            if phase == "subject":
+                top[1] = "in"
+            elif phase == "in":
+                if word == "in":
+                    top[1] = "pattern"
+            elif phase == "pattern" and word == "esac":
+                cases.pop()
+            elif phase in ("pattern", "pattern-word"):
+                top[1] = "pattern-word"
+            elif word == "case" and at_command:
+                cases.append([depth, "subject"])
+            elif word == "esac" and phase == "body" and at_command:
+                cases.pop()
+            at_command = phase in ("", "body") and word in _COMMAND_PREFIX_WORDS
         if char == "\\":
             if text[pos + 1:pos + 2] != "\n":
                 word_start = False
@@ -111,12 +122,23 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
             pos = copied = end
             word_start = False
             continue
+        top = cases[-1] if cases and cases[-1][0] == depth else [depth, ""]
+        phase = top[1]
+        if char == ";" and phase == "body" and text[pos + 1:pos + 2] in (";", "&"):
+            # `;;`, `;&` or `;;&` ends a clause: a pattern list (or `esac`) follows.
+            pos += 3 if text.startswith(";;&", pos) else 2
+            top[1] = "pattern"
+            at_command = word_start = True
+            continue
         if char == "\n" and breaks is not None:
             breaks.append(_out_len(parts) + pos - copied)
+        elif char == "(" and phase == "pattern":
+            top[1] = "pattern-word"  # a pattern list's optional leading parenthesis
         elif char == "(":
             depth += 1
         elif char == ")":
-            if case_depths and case_depths[-1] == depth:
+            if phase in ("pattern", "pattern-word"):
+                top[1] = "body"
                 at_command = True  # a case pattern ends; its command list follows
             else:
                 depth -= 1
