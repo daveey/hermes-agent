@@ -190,8 +190,9 @@ def test_uv_run_readings():
 def test_hoisted_redirection_keeps_arguments():
     hoist = lifecycle_guard._hoist_command_redirections
     assert hoist(["<", "f.py", "python3"]) == ["python3", "<", "f.py"]
-    assert hoist(["A=1", "<f", "bash", "-x"]) == ["A=1", "bash", "-x", "<f"]
-    assert hoist(["python3<f.py", "-u"]) == ["python3", "-u", "<f.py"]
+    # Leading redirects precede later argv/redirects, preserving binding order.
+    assert hoist(["A=1", "<f", "bash", "-x"]) == ["A=1", "bash", "<f", "-x"]
+    assert hoist(["python3<f.py", "-u"]) == ["python3", "<f.py", "-u"]
     assert hoist(["sudo", "<", "f.sh", "bash"]) == ["sudo", "bash", "<", "f.sh"]
     # Arguments are never split: a glued `<` there may be quoted program text.
     assert hoist(["bash", "-c", "python3<f.py"]) == ["bash", "-c", "python3<f.py"]
