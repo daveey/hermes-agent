@@ -83,3 +83,7 @@ async def test_notifier_uses_replicated_attachment_and_not_foreign_paths(stores,
         changed = {**record, **changes}
         assert delivery.receipt_delivery_paths(home_conn, tid, [changed]) == []
     assert delivery.receipt_delivery_paths(home_conn, "other-task", [record]) == []
+    without_digest = {key: value for key, value in record.items() if key != "sha256"}
+    assert delivery.receipt_delivery_paths(home_conn, tid, [None, "bad", {}, without_digest]) == []
+    uploaded.unlink()
+    assert delivery.receipt_delivery_paths(home_conn, tid, [record]) == []

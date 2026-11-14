@@ -68,3 +68,21 @@ def test_scratch_copy_failure_does_not_destroy_existing_evidence(kanban_home, mo
         assert kb.get_task(conn, task).status == "running"
         assert not kb.list_attachments(conn, task)
         assert not [p for p in kb.task_attachments_dir(task).rglob("*") if p.is_file()]
+
+
+def test_incidental_metadata_cannot_launder_denied_source(kanban_home, monkeypatch):
+    from gateway.platforms import base
+    from hermes_cli.kanban_metadata_files import SKIPPED_KEY
+
+    with kbc.connect_closing() as conn:
+        task, ws, run = helpers._scratch_card(conn)
+        secret = ws / "credential"
+        secret.write_text("not for delivery")
+        denied = secret.resolve()
+        monkeypatch.setattr(base, "_path_under_denied_prefix", lambda p: p == denied)
+        monkeypatch.setattr(base, "_media_delivery_allowed_roots", list)
+        assert kb.complete_task(conn, task, summary="Report", expected_run_id=run,
+                                metadata={"report": str(secret)})
+        meta = kb.latest_run(conn, task).metadata
+        assert "denied" in meta[SKIPPED_KEY][str(secret)]
+        assert not kb.list_attachments(conn, task)

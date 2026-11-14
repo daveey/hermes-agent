@@ -99,6 +99,23 @@ def test_latest_receipt_survives_long_event_history():
     text = format_receipt(latest_receipt(events))
     assert "sha256: abc" in text
     assert "attachment_uid: uid" in text
+    newer = [{"machine": "worker-c", "path": "/new.md"}]
+    events.append(SimpleNamespace(kind="completed", payload={"artifact_receipt": newer}))
+    assert latest_receipt(events) == {"artifact_receipt": newer}
+
+
+def test_exact_attachment_cap_replicates_bytes(stores, monkeypatch):
+    home, worker, home_conn, conn, _, tid, round_at = stores
+    report = worker / "boundary.bin"
+    report.write_bytes(b"proof")
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 5)
+    record = complete(conn, tid, [str(report)])["artifact_receipt"][0]
+    assert record["attachment_uid"]
+    round_at(worker, "worker")
+    round_at(home, "hub")
+    rows = kb.list_attachments(home_conn, tid)
+    assert len(rows) == 1
+    assert Path(rows[0].stored_path).read_bytes() == b"proof"
 
 
 def test_external_receipt_ref_is_attached_without_rewriting_identity(stores):
