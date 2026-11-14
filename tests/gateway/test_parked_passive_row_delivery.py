@@ -217,6 +217,166 @@ def test_tui_model_switch_marker_is_atomic_when_the_turn_is_parked(parked, spool
     assert len(active()) == 1
 
 
+@pytest.mark.parametrize('entrypoint', ['settlement', 'store', 'boot', 'append'])
+def test_deferred_parent_rows_follow_compression_after_resume(parked, spool_home, monkeypatch, entrypoint):
+    import asyncio
+    from gateway.session import SessionStore
+    from gateway.session_settlement_recovery import drain_deferred_rows
+    db, _, row = parked
+    for message in [
+        {'role': 'user', 'content': 'first'},
+        {'role': 'user', 'content': 'new pivot', 'display_kind': 'model_switch'},
+        {'role': 'user', 'content': 'second'},
+    ]:
+        assert shutdown_flush.defer_row_for_parked_turn('s', message)
+    _resume(db, row)
+    for parent, child in [('s', 'mid'), ('mid', 'tip')]:
+        db.publish_compression_child(parent_session_id=parent, child_session_id=child, source='test',
+                                     messages=[{'role': 'user', 'content': 'old pivot',
+                                                'display_kind': 'model_switch'}], require_compression_lease=False)
+    before = db.get_messages('s')
+    assert shutdown_flush.defer_row_for_parked_turn('tip', {'role': 'user', 'content': 'third'})
+    if entrypoint == 'boot':
+        assert shutdown_flush.recover_pending_spool(db) == (4, set())
+    else:
+        store = None
+        if entrypoint in {'store', 'append'}:
+            store = object.__new__(SessionStore)
+            store._db = db
+            store._transcript_retry_lock = threading.Lock()
+            store._transcript_append_failures = {}
+            store._dirty_transcripts = {}
+            store._spooled_drop_sessions = {'s'}
+            monkeypatch.setattr(store, '_db_for_session_id', lambda sid: db)
+        authority = types.SimpleNamespace(db=db, runner=types.SimpleNamespace(session_store=store),
+                                          physical_target=lambda ref: 'tip')
+        # Both logical and physical refs now name only the tip: discover the parent spool from SQLite.
+        if entrypoint == 'append':
+            store.append_to_transcript('tip', {'role': 'user', 'content': 'fourth'})
+        else:
+            asyncio.run(drain_deferred_rows(authority, types.SimpleNamespace(session_id='tip')))
+    assert not _spool_files()
+    assert db.get_messages('s') == before
+    contents = [m['content'] for m in db.get_messages('tip')]
+    expected = ['first', 'new pivot', 'second', 'third'] + (['fourth'] if entrypoint == 'append' else [])
+    assert contents[-len(expected):] == expected
+    assert [m['content'] for m in db.get_messages('tip') if m.get('display_kind') == 'model_switch'] == ['new pivot']
+    assert shutdown_flush.recover_pending_spool(db) == (0, set())
+
+
+@pytest.mark.parametrize('defect', ['branch', 'reset', 'delegate', 'tool', 'noncompression', 'profile', 'ambiguous'])
+@pytest.mark.parametrize('entrypoint', ['drain', 'boot'])
+def test_deferred_rows_never_redirect_across_unproven_edges(parked, spool_home, defect, entrypoint):
+    db, _, row = parked
+    assert shutdown_flush.defer_row_for_parked_turn('s', {'role': 'user', 'content': 'keep custody'})
+    _resume(db, row)
+    config = {f'_{defect if defect != "branch" else "branched"}_from': 's'} if defect in {'branch', 'reset', 'delegate'} else {}
+    db.create_session('child', source='tool' if defect == 'tool' else 'test', parent_session_id='s', model_config=config)
+    db._execute_write(lambda c: c.execute("UPDATE sessions SET ended_at=1,end_reason=? WHERE id='s'",
+                                          ('manual' if defect == 'noncompression' else 'compression',)))
+    if defect == 'profile':
+        db._execute_write(lambda c: c.execute("UPDATE sessions SET profile_name='foreign' WHERE id='child'"))
+    if defect == 'ambiguous':
+        db.create_session('sibling', source='test', parent_session_id='s')
+    # Discovery from the child cannot steal the parent spool; nor may a parent/boot drain route to it.
+    assert shutdown_flush.replay_deferred_rows(db, 'child') == (0, 0)
+    # A noncompression-ended source may still accept its OWN passive rows; it must never
+    # redirect them to its child. Compression-ended sources cannot accept an append at all.
+    expected = int(defect == 'noncompression')
+    if entrypoint == 'drain':
+        assert shutdown_flush.replay_deferred_rows(db, 's')[0] == expected
+    else:
+        assert shutdown_flush.recover_pending_spool(db)[0] == expected
+    assert len(_spool_files()) == 1 - expected
+    assert not db.get_messages('child')
+    assert _contents(db).count('keep custody') == expected
+
+
+@pytest.mark.parametrize('entrypoint', ['drain', 'boot'])
+def test_compression_replay_failure_holds_later_tip_rows_in_order(parked, spool_home, monkeypatch, entrypoint):
+    import sqlite3
+    db, _, row = parked
+    assert shutdown_flush.defer_row_for_parked_turn('s', {'role': 'user', 'content': 'first'})
+    _resume(db, row)
+    db.publish_compression_child(parent_session_id='s', child_session_id='tip', source='test',
+                                 messages=[{'role': 'user', 'content': 'summary'}], require_compression_lease=False)
+    assert shutdown_flush.defer_row_for_parked_turn('tip', {'role': 'user', 'content': 'second'})
+    append = db.append_message
+    calls = []
+    def unavailable(**kwargs):
+        calls.append(kwargs['content'])
+        raise sqlite3.OperationalError('database is locked')
+    monkeypatch.setattr(db, 'append_message', unavailable)
+    if entrypoint == 'drain':
+        assert shutdown_flush.replay_deferred_rows(db, 'tip') == (0, 2)
+    else:
+        assert shutdown_flush.recover_pending_spool(db) == (0, {'tip'})
+    assert calls == ['first'] and len(_spool_files()) == 2
+    monkeypatch.setattr(db, 'append_message', append)
+    assert shutdown_flush.replay_deferred_rows(db, 'tip') == (2, 0)
+    assert [m['content'] for m in db.get_messages('tip')][-2:] == ['first', 'second']
+
+
+@pytest.mark.parametrize('entrypoint', ['settlement', 'store', 'boot', 'append'])
+def test_compression_replay_uses_only_the_owning_profile_spool(parked, tmp_path, monkeypatch, entrypoint):
+    import asyncio
+    from hermes_constants import get_hermes_home, set_hermes_home_override, reset_hermes_home_override
+    from gateway.session import SessionStore
+    from gateway.session_settlement_recovery import drain_deferred_rows
+    db, _, row = parked
+    from hermes_state import SessionDB
+    foreign_db = SessionDB(tmp_path / 'foreign.db')
+    foreign_db.create_session('s', source='test')
+    foreign_db.create_session('tip', source='test')
+    owner, ambient = tmp_path / 'owner', tmp_path / 'ambient'
+    owner.mkdir()
+    ambient.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(ambient))
+    token = set_hermes_home_override(str(owner))
+    try:
+        owner_file = shutdown_flush.defer_row_for_parked_turn('s', {'role': 'user', 'content': 'owner only'})
+    finally:
+        reset_hermes_home_override(token)
+    foreign_file = shutdown_flush.defer_row_for_parked_turn('s', {'role': 'user', 'content': 'foreign only'})
+    _resume(db, row)
+    db.publish_compression_child(parent_session_id='s', child_session_id='tip', source='test',
+                                 messages=[{'role': 'user', 'content': 'summary'}], require_compression_lease=False)
+    if entrypoint == 'boot':
+        token = set_hermes_home_override(str(owner))
+        try:
+            assert shutdown_flush.recover_pending_spool(db) == (1, set())
+        finally:
+            reset_hermes_home_override(token)
+    else:
+        store = None
+        if entrypoint in {'store', 'append'}:
+            store = object.__new__(SessionStore)
+            store._transcript_retry_lock = threading.Lock()
+            store._transcript_append_failures = {}
+            store._dirty_transcripts = {}
+            store._spooled_drop_sessions = {'s'}
+            # A shared SessionStore may have lost the old id's owner hint after compression.
+            # Settlement's authority still owns the canonical profile DB and must supply it.
+            monkeypatch.setattr(store, '_db_for_session_id', lambda sid: foreign_db if entrypoint == 'store' else db)
+            monkeypatch.setattr(store, '_owner_key_for_session_id', lambda sid: 'agent:owner:test')
+            monkeypatch.setattr(store, '_profile_home_for_key', lambda key: owner)
+        authority = types.SimpleNamespace(db=db, profile_id=str(owner),
+                                          runner=types.SimpleNamespace(session_store=store),
+                                          physical_target=lambda ref: 'tip')
+        if entrypoint == 'append':
+            assert store is not None
+            store.append_to_transcript('tip', {'role': 'user', 'content': 'live'})
+        else:
+            asyncio.run(drain_deferred_rows(authority, types.SimpleNamespace(session_id='tip')))
+    assert owner_file is not None and foreign_file is not None
+    assert not owner_file.exists() and foreign_file.exists()
+    expected = ['summary', 'owner only'] + (['live'] if entrypoint == 'append' else [])
+    assert [m['content'] for m in db.get_messages('tip')] == expected
+    assert get_hermes_home() == ambient
+    assert not foreign_db.get_messages('s') and not foreign_db.get_messages('tip')
+    foreign_db.close()
+
+
 def test_settlement_drains_deferred_rows_for_both_session_ids():
     import asyncio
     from gateway.session_settlement_recovery import drain_deferred_rows

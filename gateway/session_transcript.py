@@ -408,18 +408,39 @@ class SessionTranscriptMixin:
                     self._dirty_transcripts.pop(queue_session_id, None)
         return spooled
 
+    @contextlib.contextmanager
+    def _transcript_spool_home(self, session_id: str):
+        """Keep spool discovery in the same profile as the session's canonical database."""
+        from agent.runtime_scope import bind_profile_scope
+        key = self._owner_key_for_session_id(session_id)
+        home = self._profile_home_for_key(key) if key else None
+        with bind_profile_scope(home) if home is not None else contextlib.nullcontext():
+            yield
+
     def _drain_spooled_drops(self, session_id: str) -> Exception | None:
         """Replay cap-dropped spooled transcript messages after DB recovery; return the replay
         failure while some of them are still on disk, else None. Best-effort: replay failures keep
         the spool files for the next successful flush; nothing here may raise."""
         spooled_sessions = getattr(self, "_spooled_drop_sessions", None)
-        if not spooled_sessions or session_id not in spooled_sessions:
+        if not spooled_sessions:
+            return None
+        from gateway.shutdown_flush import deferred_transcript_route, replay_spooled_row
+        try:
+            db = self._db_for_session_id(session_id)
+            target, sources = deferred_transcript_route(db, session_id)
+        except Exception as exc:
+            logger.debug('Cannot resolve deferred transcript lineage for %s', session_id, exc_info=True)
+            return exc  # unreadable lineage does not prove the backlog absent
+        if not sources.intersection(spooled_sessions):
             return None
         failures: list[Exception] = []
 
         def replay(message: dict[str, Any]) -> None:
             try:
-                self._append_transcript_message(session_id, message)
+                if target == session_id:
+                    self._append_transcript_message(session_id, message)
+                else:
+                    replay_spooled_row(db, target, message)
             except Exception as exc:
                 failures.append(exc)
                 raise
@@ -430,11 +451,12 @@ class SessionTranscriptMixin:
             # replay attempt is only the order-preserving probe, so its failure stays at DEBUG.
             with self._transcript_retry_lock:
                 known_failing = bool(self._transcript_append_failures.get(session_id))
-            _replayed, remaining = drain_transcript_spool(
-                session_id, replay, db_known_failing=known_failing)
+            with self._transcript_spool_home(session_id):
+                _replayed, remaining = drain_transcript_spool(
+                    session_id, replay, db_known_failing=known_failing, source_session_ids=sources)
             if not remaining:
                 with self._transcript_retry_lock:
-                    spooled_sessions.discard(session_id)
+                    spooled_sessions.difference_update(sources)
                 return None
             return failures[-1] if failures else RuntimeError(
                 f"older spooled transcript rows for {session_id} still pending")
@@ -442,15 +464,27 @@ class SessionTranscriptMixin:
             logger.warning("Failed to drain transcript spool for %s: %s", session_id, exc)
             return None
 
-    def drain_deferred_transcript(self, session_id: str) -> None:
+    def drain_deferred_transcript(self, session_id: str, *, session_db=None) -> None:
         """Land the rows parked behind a turn's update checkpoint (this store's own deferred appends and the
         mirror / bot-DM rows other writers spooled) once that turn has resumed and settled. Still-parked
         sessions keep every file. Never raises."""
         try:
             with self._get_transcript_drain_lock():
+                from gateway.shutdown_flush import replay_deferred_rows
+                # An authority supplies its own DB under its profile scope: a compressed-away
+                # id may no longer have an owner hint in this shared routing store.
+                db = session_db if session_db is not None else self._db_for_session_id(session_id)
+                if db is None:
+                    return  # no proven owner; never fall back to the ambient database
+                scope = contextlib.nullcontext() if session_db is not None else self._transcript_spool_home(session_id)
+                with scope:
+                    _replayed, remaining = replay_deferred_rows(db, session_id)
                 with self._transcript_retry_lock:
-                    self._lazy("_spooled_drop_sessions", set).add(session_id)
-                self._drain_spooled_drops(session_id)
+                    pending = self._lazy("_spooled_drop_sessions", set)
+                    if remaining:
+                        pending.add(session_id)
+                    else:
+                        pending.discard(session_id)
         except Exception as exc:  # health: allow BLE001 -- the files stay for the next append or boot recovery
             logger.debug("Deferred transcript drain for %s failed: %s", session_id, exc)
 

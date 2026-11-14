@@ -244,12 +244,21 @@ async def drain_deferred_rows(authority, ref):
     for the next append or boot recovery otherwise."""
     store = getattr(getattr(authority, 'runner', None), 'session_store', None)
     drain = getattr(store, 'drain_deferred_transcript', None)
-    if not callable(drain):
+    if callable(drain) and getattr(authority, 'db', None) is not None:
+        from functools import partial
+        drain = partial(drain, session_db=authority.db)
+    elif not callable(drain):
         from gateway.shutdown_flush import replay_deferred_rows
         drain = lambda sid: replay_deferred_rows(authority.db, sid)
+    from contextlib import nullcontext
+    from agent.runtime_scope import bind_profile_scope
+    home = getattr(authority, 'profile_id', None)
     try:
-        for sid in dict.fromkeys((ref.session_id, authority.physical_target(ref))):
-            await asyncio.to_thread(drain, sid)
+        with bind_profile_scope(home) if home else nullcontext():
+            # Each drain discovers the proven ancestors of this tip. These ids are discovery
+            # anchors, not spool-source == append-destination assertions.
+            for sid in dict.fromkeys((ref.session_id, authority.physical_target(ref))):
+                await asyncio.to_thread(drain, sid)
     except Exception:
         logger.debug('Deferred transcript drain for %s failed', ref.session_id, exc_info=True)
 

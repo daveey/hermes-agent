@@ -143,7 +143,8 @@ def spool_dropped_transcript_message(session_id: str, message: dict[str, Any]) -
         return None
 
 
-def drain_transcript_spool(session_id: str, replay, *, db_known_failing: bool = False) -> tuple[int, int]:
+def drain_transcript_spool(session_id: str, replay, *, db_known_failing: bool = False,
+                           source_session_ids=None) -> tuple[int, int]:
     """Replay cap-dropped transcript messages spooled for *session_id*; return ``(replayed,
     remaining)``. ``replay(message_dict)`` runs per message in drop order; a spool file is deleted
     only after its replay succeeds. The first failure stops the drain (the DB is likely still
@@ -170,7 +171,7 @@ def drain_transcript_spool(session_id: str, replay, *, db_known_failing: bool = 
         # like unparseable JSON instead of letting ``.get`` abort the whole drain.
         if (not isinstance(payload, dict)
                 or payload.get("reason") != TRANSCRIPT_CAP_DROP_REASON
-                or payload.get("session_key") != session_id):
+                or payload.get("session_key") not in (source_session_ids or {session_id})):
             continue
         message = (payload.get("data") or {}).get("message")
         if not isinstance(message, dict):
@@ -217,13 +218,60 @@ def replay_spooled_row(session_db, session_id: str, message: dict[str, Any], *, 
     return session_db.append_message(**transcript_append_kwargs(session_id, message, fallback_ts=fallback_ts))
 
 
+def deferred_transcript_route(session_db, session_id: str) -> tuple[str, set[str]]:
+    """Prove one compression-only continuation in this DB, and discover its spool ancestors.
+
+    Unlike UI tip projection, recovery must not choose between competing children. Branches,
+    resets, delegates, tool children and profile changes cannot receive another conversation's rows.
+    A concurrent rotation after this read is harmless: the normal append fence refuses the old tip
+    and custody stays with the spool until the next pass.
+    """
+    from hermes_state_common import _non_continuation_child_sql
+    from hermes_state_compression import _CHAIN_CAP
+    read = getattr(session_db, '_read_ctx', None)
+    if not callable(read):  # legacy replay-only adapters cannot prove any redirection
+        return session_id, {session_id}
+    with read() as conn:
+        def successor(sid):
+            rows = conn.execute(
+                "SELECT c.id FROM sessions p JOIN sessions c ON c.parent_session_id=p.id "
+                "WHERE p.id=? AND p.end_reason='compression' "
+                "AND c.profile_name IS p.profile_name " + _non_continuation_child_sql('c.', 'p.id'),
+                (sid,)).fetchall()
+            return rows[0]['id'] if len(rows) == 1 else None
+
+        current, seen = session_id, {session_id}
+        for _ in range(_CHAIN_CAP):
+            child = successor(current)
+            if child is None:
+                break
+            if child in seen:
+                raise RuntimeError('cyclic deferred transcript lineage')
+            seen.add(child)
+            current = child
+        else:
+            raise RuntimeError('deferred transcript lineage exceeds bound')
+        tip, sources = current, set(seen)
+        for _ in range(_CHAIN_CAP):
+            row = conn.execute('SELECT parent_session_id FROM sessions WHERE id=?', (current,)).fetchone()
+            parent = row['parent_session_id'] if row else None
+            if not parent or parent in sources or successor(parent) != current:
+                break
+            sources.add(parent)
+            current = parent
+        else:
+            raise RuntimeError('deferred transcript ancestors exceed bound')
+        return tip, sources
+
+
 def replay_deferred_rows(session_db, session_id: str) -> tuple[int, int]:
-    """Land the rows :func:`defer_row_for_parked_turn` queued for *session_id*; ``(replayed, remaining)``.
-    Still parked: the first replay is refused again and everything stays on disk. Never raises."""
+    """Drain all proven compression ancestors in spool order into the live continuation.
+    Still parked/closed: the first replay is refused and every remaining file keeps custody."""
     try:
+        target, sources = deferred_transcript_route(session_db, session_id)
         return drain_transcript_spool(
-            session_id, lambda message: replay_spooled_row(session_db, session_id, message),
-            db_known_failing=True)
+            session_id, lambda message: replay_spooled_row(session_db, target, message),
+            db_known_failing=True, source_session_ids=sources)
     except Exception as exc:  # health: allow BLE001 -- best-effort post-resume drain; the files stay for the next one
         logger.debug("Deferred-row replay for %s failed: %s", session_id, exc)
         return 0, 1
@@ -423,21 +471,20 @@ def _recover_one_payload(session_db, path: Path, payload: dict[str, Any], *,
             logger.warning("Cannot recover structurally invalid transcript spool "
                            "file %s; preserved for manual inspection", path)
             return False
-        if spooled_sid in blocked_sessions:
-            # An older message for this session could not be replayed. Writing this one now would give
-            # it a lower row id than the message it follows, permanently inverting the transcript, so
-            # leave it for the next start.
-            blocked_sessions[spooled_sid] += 1
+        target_sid, _sources = deferred_transcript_route(session_db, spooled_sid)
+        if target_sid in blocked_sessions:
+            # Ordering belongs to the destination conversation, not one physical spool segment.
+            blocked_sessions[target_sid] += 1
             return False
         try:
-            replay_spooled_row(session_db, spooled_sid, message, fallback_ts=payload.get("ts"))
+            replay_spooled_row(session_db, target_sid, message, fallback_ts=payload.get("ts"))
         except Exception as exc:
             if is_row_rejection(exc):  # no retry can write it, so it must not hold the session back
                 _quarantine_spool_file(path, spooled_sid, exc)
                 return False
             # Same contract as drain_transcript_spool: stop this session's replay on the first failure
             # and keep the remaining spool files for the next attempt.
-            blocked_sessions[spooled_sid] = 1
+            blocked_sessions[target_sid] = 1
             raise
         return True
     session_key, data = payload.get("session_key", ""), payload.get("data", {})
