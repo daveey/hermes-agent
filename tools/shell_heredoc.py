@@ -18,6 +18,7 @@ import shlex
 from collections.abc import Iterator
 
 from tools.shell_arith_sink import DATE_PRODUCER_BODY, substitution_in_arithmetic
+from tools.shell_heredoc_words import delimiter_expansion
 
 # Non-shell interpreters whose quoted heredoc bodies are data for THAT interpreter, judged on the
 # command the owner actually runs: VAR=... assignments and stdin-passing wrappers (``timeout 20``,
@@ -359,6 +360,15 @@ def _parse_heredoc_operator(command: str, index: int):
             quoted = True
             delimiter.append(command[cursor + 1])
             cursor += 2
+        elif command.startswith('$"', cursor):  # locale quoting: the delimiter is the quoted text
+            cursor += 1
+        elif char == "`" or command.startswith(("$(", "${", "$'"), cursor):
+            part = delimiter_expansion(command, cursor)  # taken unexpanded, spaces and all
+            if part is None:
+                return None
+            cursor, text, part_quoted = part
+            delimiter.append(text)
+            quoted = quoted or part_quoted
         elif char in "'\"":
             quoted = True
             cursor += 1
