@@ -28,10 +28,11 @@ def evidence(monkeypatch):
         if "/check-suites?" in endpoint:
             if state.get("missing_suites"):
                 return [{"total_count": 1, "check_suites": []}]
-            if not state["runs"] and not state.get("empty_suite"):
-                return [{"total_count": 0, "check_suites": []}]
-            return [{"total_count": 1, "check_suites": [{"id": 7, "app": {"id": 1},
-                     "head_sha": SHA, "latest_check_runs_count": len(state["runs"])}]}]
+            rows = list(state.get("extra_suites", []))
+            if state["runs"] or state.get("empty_suite"):
+                rows.insert(0, {"id": 7, "app": {"id": 1}, "head_sha": SHA,
+                                "latest_check_runs_count": len(state["runs"])})
+            return [{"total_count": len(rows), "check_suites": rows}]
         if "/statuses?" in endpoint:
             return state.get("status_pages", [state["statuses"]])
         if "/pulls/" in endpoint:
@@ -165,3 +166,80 @@ def test_fallback_statuses_keep_producers_distinct(evidence):
     assert gate.collect_acceptance(URL, None)["classification"] == "failure"
     evidence["statuses"].append({"id": 3, "context": "ci", "state": "success", "creator": {"id": 1}})
     assert gate.collect_acceptance(URL, None)["classification"] == "success"
+
+
+OLD = "2026-01-01T00:00:00Z"
+
+
+def suite(id, app, *, status="queued", created=OLD, count=0):
+    return {"id": id, "app": {"id": app, "slug": f"app-{app}"}, "head_sha": SHA,
+            "status": status, "created_at": created, "latest_check_runs_count": count}
+
+
+@pytest.mark.parametrize("merged", [False, True])
+def test_idle_third_party_suites_do_not_strand_green_ci(evidence, merged):
+    # hermes-mods PRs carry 0-run queued suites from installed apps that never run.
+    evidence.update(merged=merged, runs=[run("success")],
+                    extra_suites=[suite(100 + n, 900 + n) for n in range(5)])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "success"
+    assert receipt["ok"] is True
+    assert [s["id"] for s in receipt["idle_suites"]] == [100, 101, 102, 103, 104]
+
+
+@pytest.mark.parametrize("outcome,expected", [("failure", "failure"), ("pending", "pending"),
+                                             ("cancelled", "infra")])
+def test_idle_suites_never_hide_red_ci(evidence, outcome, expected):
+    evidence.update(runs=[run(outcome)], extra_suites=[suite(100, 900)])
+    assert gate.collect_acceptance(URL, None)["classification"] == expected
+
+
+@pytest.mark.parametrize("merged", [False, True])
+def test_only_idle_suites_is_waivable_absence(evidence, merged):
+    evidence.update(merged=merged, extra_suites=[suite(100, 900), suite(101, 901)])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "no_required_checks"
+    assert receipt["ok"] is False
+
+
+@pytest.mark.parametrize("live", [
+    suite(100, 1),                                    # same app as a producing suite
+    suite(100, 900, status="in_progress"),            # started
+    suite(100, 900, created="2999-01-01T00:00:00Z"),  # inside the grace period
+    {**suite(100, 900), "created_at": None},          # unreadable age
+    {**suite(100, 900), "app": None},                 # unreadable app
+])
+def test_possibly_live_empty_suite_stays_missing(evidence, live):
+    evidence.update(runs=[run("success")], extra_suites=[live])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] in ("missing", "infra")
+    assert receipt["ok"] is False
+    assert not receipt.get("idle_suites")
+
+
+def test_possibly_live_empty_suite_blocks_absence_waiver(evidence):
+    evidence.update(merged=True, extra_suites=[suite(100, 900, status="in_progress")])
+    assert gate.collect_acceptance(URL, None)["classification"] == "missing"
+
+
+@pytest.mark.parametrize("conclusion", ["skipped", "neutral"])
+@pytest.mark.parametrize("merged", [False, True])
+def test_fallback_accepts_skipped_and_neutral(evidence, conclusion, merged):
+    evidence.update(merged=merged, runs=[run("success"), {**run(conclusion, id=2), "name": "cond"}])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "success"
+    assert [c["conclusion"] for c in receipt["checks"]] == ["success", conclusion]
+
+
+def test_skipped_on_another_head_is_not_success(evidence):
+    evidence["runs"] = [{**run("skipped"), "head_sha": "b" * 40}]
+    assert gate.collect_acceptance(URL, None)["classification"] != "success"
+
+
+def test_required_checks_keep_strict_conclusions():
+    from hermes_cli.kanban_pr_fallback import fallback_outcomes
+
+    receipt = {"head_sha": SHA, "checks": [{"classification": "infra"}]}
+    assert fallback_outcomes(receipt, {("ci", None)}, ["infra"], [run("skipped")], [], [],
+                             merged=False) == ["infra"]
+    assert receipt["checks"] == [{"classification": "infra"}]
