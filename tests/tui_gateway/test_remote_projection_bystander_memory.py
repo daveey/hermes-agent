@@ -184,6 +184,55 @@ def test_dead_claim_on_a_now_terminal_bystander_settles_as_on_main(tmp_path):
     assert type(projection._rows.get(ref)) is str
 
 
+@pytest.mark.parametrize("change", ["unchanged", "claimed_state", "recipient_profile"])
+def test_compact_late_load_rejects_a_new_sequence_before_settlement(tmp_path, change):
+    claimed_at = NOW - 3600
+    state = f"blocked@{int(claimed_at)}"
+    card = _bystander(9)
+    card["task"]["sessions"] = [{"gw": "elsewhere", "profile": "work", "session": CHAT, "rel": "shepherd"}]
+    replica = _hub(tmp_path, [card])
+    ledger = tmp_path / "remote-notices.db"
+    ref = f"hub/{card['key']}"
+    notice_key = f"remote:hub:{card['key']}:{state}:work:{CHAT}"
+    remote._reset_for_tests()
+    _, states = remote._sweep_snapshot(replica, "macbook")
+    snapshot_state, compact = states[ref]
+    assert isinstance(compact, projection.CompactTask)
+    assert snapshot_state != state
+    assert compact.load(replica) == card["task"]
+    with contextlib.closing(remote._ledger(ledger)) as conn, conn:
+        remote._swept(conn)
+        conn.execute("INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, notice_key, "
+                     "legacy_seen) VALUES (?,?,?,?,0,?,NULL,?,1)",
+                     (CHAT, ref, state, claimed_at + 5, _dead_pid(), notice_key))
+    before = _ledger_row(ledger, CHAT, ref)
+    if change != "unchanged":
+        if change == "claimed_state":
+            replacement = _card("t_by_9", CHAT, status="blocked", at=claimed_at)["task"]
+            replacement["sessions"] = card["task"]["sessions"]
+        else:
+            replacement = dict(card["task"], sessions=[{
+                "gw": "elsewhere", "profile": "different", "session": CHAT, "rel": "shepherd"}])
+        with sqlite3.connect(replica) as conn:
+            conn.execute("UPDATE replica SET seq=seq+1000, data=? WHERE gw='hub' AND key=?",
+                         (json.dumps(replacement), card["key"]))
+            seq, payload = conn.execute("SELECT seq, data FROM replica WHERE key=?", (card["key"],)).fetchone()
+        assert seq != compact.seq and json.loads(payload) == replacement
+    # Do not refresh the snapshot: settlement must reject the changed row at its late-load boundary.
+    settled = remote._settle_stale_claims(states, replica, ledger)
+    after = _ledger_row(ledger, CHAT, ref)
+    with sqlite3.connect(ledger) as conn:
+        swept = conn.execute("SELECT profile, session, notice_id, reason FROM swept").fetchall()
+    if change == "unchanged":
+        assert settled == 1
+        assert (after["delivered"], after["holder_pid"], after["settled"]) == (remote.SETTLED, None, "stale")
+        assert swept == [("work", CHAT, notice_key, "stale")]
+    else:
+        assert after == before, "changed-sequence late load must leave the current claim untouched"
+        assert settled == 0 and swept == []
+        assert compact.load(replica) is None
+
+
 def test_bystander_that_gains_a_legacy_alias_is_refetched_like_a_cold_read(tmp_path, monkeypatch):
     target = _bystander(5)
     replica = _hub(tmp_path, [_relevant(0), _relevant(1), target] + [_bystander(i) for i in range(6, 40)])
