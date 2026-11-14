@@ -3482,6 +3482,29 @@ dashboard:
 - `ws_orphan_activity_stale_s` (default `600`) — how long a detached **running** turn's activity clock (the same clock the `agent.turn_liveness` watchdog samples: API waits, stream tokens, tool heartbeats) must be idle before the orphan reaper interrupts it. A client-absent turn that is still actively producing keeps running to completion detached — closing the laptop, backgrounding the mobile app, or a desktop update no longer cancels healthy long turns; only a genuinely wedged turn is interrupted. Set `0` to interrupt at the grace window regardless of activity (old behavior).
 - `startup_orphan_sweep` (default `true`) — the WS-orphan reap timer above is in-process, so a gateway restart (update, crash, systemd) before it fires leaves the session row open forever — phantom "active" work in `/resume` and dashboards. On every gateway boot — both the stdio TUI (`entry.main`) and the desktop/dashboard WebSocket sidecar (`handle_ws`) — rows with source `tui` / `desktop` / `subagent` / `unknown` (a row the token-accounting guard had to materialize itself) whose start time **and** newest message are both older than the session TTL (`HERMES_TUI_SESSION_TTL_S`, default 6 hours) are closed with `end_reason: startup_orphan_reap`. Messaging-platform sessions (Telegram, Discord, …) are never touched, live in-memory sessions (a client that already resumed) are excluded, and swept sessions remain resumable.
 
+## Kanban shared blocker recovery
+
+`kanban.shared_blocker_checks` maps canonical blocker IDs to trusted, read-only
+shell commands. The built-in `github-rest-quota` command is
+`python3 <Hermes home>/bin/github_quota.py --reserve-ok`; it requires the companion
+quota helper supporting that flag. Set an entry to an empty string to disable it.
+Commands run as the dispatcher account outside SQLite write transactions, with a
+ten-second timeout; a bounded output tail is retained in task events.
+
+For an open blocker with a home-owned carrier card, the dispatcher checks every
+120 seconds even while an agent probe is running. Exit 0 clears the blocker and
+releases held cards in the same maintenance pass; exit 1 keeps it open. Three
+consecutive errors fall back to the normal worker-probe interval. Reassertions do
+not reset that error budget or postpone checks. A changed command or a new episode
+after recovery resets the budget. A stopped or delayed dispatcher cannot guarantee
+a two-minute wall-clock recovery bound.
+
+`kanban.shared_blocker_aliases` maps an alias to a canonical blocker ID in one hop.
+Targets must not be other aliases. Built-in GitHub REST/core quota spellings
+always normalize to `github-rest-quota`; configuration cannot split that family.
+Historical run and event payloads are normalized on read. Workers are instructed
+to run a registered check before deferring work that needs the blocked capability.
+
 ## Kanban central sync
 
 ```yaml
