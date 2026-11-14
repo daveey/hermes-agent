@@ -16,7 +16,7 @@ from cron.lifecycle_guard_substitutions import (
 
 def _shlex_tokens(line: str) -> list[str]:
     """POSIX-tokenize with word-start comments and redirection ampersands protected."""
-    lexer = shlex.shlex(protect_redirection_ampersands(strip_shell_comments(line)),
+    lexer = shlex.shlex(protect_redirection_ampersands(strip_shell_comments(line, shlex_quotes=True)),
                         posix=True, punctuation_chars=";&|()")
     lexer.whitespace_split = True
     lexer.commenters = ""

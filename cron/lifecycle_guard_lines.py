@@ -11,6 +11,76 @@ comment ends at its newline even after a backslash (``# x \\`` does not continue
 from __future__ import annotations
 
 import re
+import shlex
+
+from cron.lifecycle_guard_printf import decode_c_escapes
+
+
+def _quoted_end(text: str, start: int, closer: str, *, escapes: bool = True) -> int:
+    """Backticks close before their contents are parsed (even inside a comment)."""
+    pos = start
+    while pos < len(text):
+        if text[pos] == closer:
+            return pos + 1
+        pos += 2 if escapes and text[pos] == "\\" else 1
+    return len(text)
+
+
+def _parameter_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str]:
+    """Keep parameter words opaque to the OUTER comment/line scanner.
+
+    Nested expansions and quoted closing braces do not end the parameter. Contents
+    remain visible to the guard's separate substitution and referenced-command walks.
+    """
+    stack = ["}"]
+    pos = copied = start
+    parts = [text[start - 2:start]]
+    while pos < len(text) and stack:
+        char = text[pos]
+        if text.startswith("$'", pos):
+            end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes)
+            parts.extend((text[copied:pos], span))
+            pos = copied = end
+            continue
+        if char == "\\":
+            pos += 2
+            continue
+        if char in "'\"`":
+            pos = _quoted_end(text, pos + 1, char, escapes=char != "'")
+            continue
+        if text.startswith(("${", "$("), pos):
+            stack.append("}" if text[pos + 1] == "{" else ")")
+            pos += 2
+            continue
+        if char == stack[-1]:
+            stack.pop()
+        elif char == "(" and stack[-1] == ")":
+            stack.append(")")
+        pos += 1
+    parts.append(text[copied:pos])
+    return pos, "".join(parts)
+
+
+def _expansion(text: str, pos: int, *, in_double: bool, shlex_quotes: bool) -> tuple[int, str]:
+    """Return an opaque span, or an empty span when ordinary scanning should proceed."""
+    if text.startswith("${", pos):
+        return _parameter_span(text, pos + 2, shlex_quotes=shlex_quotes)
+    elif text[pos] == "`":
+        end = _quoted_end(text, pos + 1, "`")
+        if shlex_quotes and text[end - 1:end] == "`":
+            # A quote in the inner comment must not poison POSIX tokenization of
+            # the command AFTER this substitution either.
+            body = strip_shell_comments(text[pos + 1:end - 1], shlex_quotes=True)
+            return end, "`" + body + "`"
+    elif not in_double and text.startswith("$'", pos):
+        end = _quoted_end(text, pos + 2, "'")
+        if shlex_quotes and text[end - 1:end] == "'":
+            value = decode_c_escapes(text[pos + 2:end - 1], echo_style=False)
+            # Bash truncates this quoted span at NUL, not the rest of the word.
+            return end, shlex.quote(value.split("\0", 1)[0])
+    else:
+        return pos, ""
+    return end, text[pos:end]
 
 # Characters after which an unquoted `#` starts a word, so a comment (bash's metacharacters).
 _WORD_BREAKS = frozenset(" \t\n;&|()<>")
@@ -18,7 +88,7 @@ _WORD_BREAKS = frozenset(" \t\n;&|()<>")
 _CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
 
 
-def _scan(text: str, *, split: bool, keep_comments: bool) -> list[str]:
+def _scan(text: str, *, split: bool, keep_comments: bool, shlex_quotes: bool = False) -> list[str]:
     """*text* as one string or (*split*) as logical lines: newlines outside quotes separate them
     (a quoted newline is data). Honors quotes and escapes. Comments are dropped, or with
     *keep_comments* kept without the backslashes they end with (no continuation)."""
@@ -27,7 +97,16 @@ def _scan(text: str, *, split: bool, keep_comments: bool) -> list[str]:
     comment: list[str] = []
     in_single = in_double = escape = in_comment = False
     word_start = True
-    for ch in text:
+    end = 0
+    for pos, ch in enumerate(text):
+        if pos < end:
+            continue
+        if ch in "$`" and not in_comment and not in_single and not escape:
+            end, span = _expansion(text, pos, in_double=in_double, shlex_quotes=shlex_quotes)
+            if span:
+                current.append(span)
+                word_start = False
+                continue
         if in_comment:
             if ch != "\n":
                 comment.append(ch)
@@ -69,9 +148,9 @@ def _scan(text: str, *, split: bool, keep_comments: bool) -> list[str]:
     return lines
 
 
-def strip_shell_comments(text: str) -> str:
-    """*text* with each shell comment removed (its newline kept)."""
-    return _scan(text, split=False, keep_comments=False)[0]
+def strip_shell_comments(text: str, *, shlex_quotes: bool = False) -> str:
+    """Remove comments; optionally render ANSI-C words for POSIX shlex."""
+    return _scan(text, split=False, keep_comments=False, shlex_quotes=shlex_quotes)[0]
 
 
 def join_line_continuations(text: str) -> str:
