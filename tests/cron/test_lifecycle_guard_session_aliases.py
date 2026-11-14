@@ -243,6 +243,24 @@ _NESTED_FOREIGN_SHELLS = [
     "zsh -ec 't ( bash {db} )'",
     "bash -l <<'EOF'\npython3 - <<'PY'\nprint(1)\nPY\nt ( bash {db} )\nEOF",
     "bash -l {script}",
+    "bash -l <<< 't ( bash {db} )'",
+    "bash -l < {script}",
+    "bash -l 0< {script}",
+    "bash -l 0<<< 't ( bash {db} )'",
+    "bash -l <> {script}",
+    "runuser -c 't ( bash {db} )' bob",
+    "runuser --command='t ( bash {db} )' bob",
+    "su -c 't ( bash {db} )' bob",
+    "doas -u bob -s <<'EOF'\nt ( bash {db} )\nEOF",
+    "env BASH_ENV=x bash -c 't ( bash {db} )'",
+    "BASH_ENV=x bash {script}",
+    "runuser -l bob <<'EOF'\nt ( bash {db} )\nEOF",
+    "doas -s <<'EOF'\nt ( bash {db} )\nEOF",
+    "su --command='t ( bash {db} )' bob",
+    "BASH_ENV=x bash -c 't ( bash {db} )'",
+    "BASH_ENV=x bash <<< 't ( bash {db} )'",
+    "BASH_ENV=x bash < {script}",
+    "ENV=x sh -i -c 't ( bash {db} )'",
 ]
 
 
@@ -263,11 +281,24 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "bash <<'EOF'\nt ( bash {db} )\nEOF",  # a non-login, non-interactive child inherits no aliases
     "bash -s <<'EOF'\nt ( bash {db} )\nEOF",
     "t2 ( bash {db} )",
+    "bash <<< 't ( bash {db} )'",
+    "bash < {script}",
+    "bash -l 3<<< 't ( bash {db} )'",
+    "ENV=x sh -c 't ( bash {db} )'",
+    "BASH_ENV=x sh -c 't ( bash {db} )'",
+    "OTHER=x bash -c 't ( bash {db} )'",
+    "doas python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser -u bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser -ubob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser --user bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser --user=bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
     assert "alias" not in str(tmp_path).lower()
-    text = shape.format(db=live_kanban_db)
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(db=live_kanban_db, script=script)
     assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
         False, None)
 

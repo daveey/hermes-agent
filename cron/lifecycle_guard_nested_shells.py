@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from cron.lifecycle_guard import (
+    _REDIRECTION,
     _SHELL_EXECUTABLES,
     _command_token_index,
     _executable_name,
@@ -99,7 +100,7 @@ _LOGIN_SHELL_OPTION_RE = re.compile(r"-[A-Za-z]*[il][A-Za-z]*|--login|--interact
 _SUDO_SHELL_OPTION_RE = re.compile(r"-[A-Za-z]*[is][A-Za-z]*|--login|--shell")
 _SUDO_VALUE_OPTIONS = frozenset("ugUCprtTh")
 # Cheap pre-filter: every such shell's name ends in "sh" or is su/sudo/exec.
-_NESTED_SHELL_HINT_RE = re.compile(r"sh\b|\bsu(?:do)?\b|\bexec\b")
+_NESTED_SHELL_HINT_RE = re.compile(r"sh\b|\bsu(?:do)?\b|\b(?:exec|runuser|doas)\b")
 
 
 def _option_words(arguments: list[str], value_letters: frozenset[str]) -> tuple[list[str], int]:
@@ -163,12 +164,24 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
     if index is None:
         return None
     name = _executable_name(view[index])
-    if name == "su":
+    if name in ("su", "runuser"):
         options = view[index + 1:]
-        for position, word in enumerate(options[:-1]):
-            if word in ("-c", "--command"):
+        for position, word in enumerate(options):
+            if word.startswith("--command="):
+                return "payload", word.partition("=")[2]
+            if word in ("-c", "--command") and position + 1 < len(options):
                 return "payload", options[position + 1]
-        return "stdin", None
+        direct_user = any(
+            word == "--user" or word.startswith("--user=")
+            or re.fullmatch(r"-[mpPl]*u.*", word)
+            for word in _option_words(options, frozenset("ucsg"))[0]
+        )
+        if name == "su" or not direct_user:
+            return "stdin", None
+    if name == "doas":
+        options, _operand = _option_words(view[index + 1:], frozenset("uC"))
+        if any(re.fullmatch(r"-[A-Za-z]*s[A-Za-z]*", word) for word in options):
+            return "stdin", None
     if name == "sudo":
         options, operand = _option_words(view[index + 1:], _SUDO_VALUE_OPTIONS)
         if any(_SUDO_SHELL_OPTION_RE.fullmatch(word) for word in options):
@@ -189,7 +202,10 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
     if name not in _SHELL_EXECUTABLES:
         return None
     options_end = _shell_options_end(arguments, name)[0]
-    if name == "zsh" or login_exec or any(
+    # ENV is read by interactive POSIX shells (already covered by -i); BASH_ENV
+    # additionally lets a plain non-interactive bash define and enable aliases.
+    startup_env = name == "bash" and any(word.startswith("BASH_ENV=") for word in view[:peeled])
+    if name == "zsh" or login_exec or startup_env or any(
             _LOGIN_SHELL_OPTION_RE.fullmatch(word) for word in arguments[:options_end]):
         return _shell_inputs(arguments, name)
     return None
@@ -231,4 +247,26 @@ def _iter_nested_shell_inputs(
             yield value, None
         elif kind == "script" and value:
             for path in _resolved_or_nothing(value, cwd):
+                yield None, path
+        elif kind == "stdin":
+            yield from _redirected_shell_inputs(view, cwd=cwd)
+
+
+def _redirected_shell_inputs(
+    view: list[str], *, cwd: Optional[str],
+) -> Iterator[tuple[Optional[str], Optional[Path]]]:
+    """Keep stdin redirections in the consuming shell's scope, not the session's."""
+    words = iter(view)
+    for word in words:
+        match = _REDIRECTION.match(word)
+        if match is None:
+            continue
+        fd, operator, target = match.groups()
+        target = target or next(words, "")
+        if fd not in ("", "0"):
+            continue
+        if operator == "<<<":
+            yield target, None
+        elif operator in ("<", "<>"):
+            for path in _resolved_or_nothing(target, cwd):
                 yield None, path
