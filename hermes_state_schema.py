@@ -933,8 +933,10 @@ class SessionSchemaMixin:
     def _run_throttled_heals(self, cursor: sqlite3.Cursor) -> bool:
         """The data repairs a memoized open still owes the store, at most once per interval per store
         (hermes_state_schema_memo._maybe_heal). True when both completed."""
+        from hermes_cli.session_throughput_revision import settle_schema
+        throughput_ok = settle_schema(cursor.connection)
         delegate_ok = self._heal_reset_rows_carrying_a_delegate_marker(cursor)
-        return self._heal_null_active_rows(cursor) and delegate_ok
+        return self._heal_null_active_rows(cursor) and delegate_ok and throughput_ok
 
     def _index_healed_rows_for_trigram(self, cursor: sqlite3.Cursor, session_ids: list[str]) -> None:
         """The marker kept these sessions' messages out of the external-content trigram index (the triggers
@@ -1107,6 +1109,8 @@ class SessionSchemaMixin:
         if fts5_available:
             self._init_fts(cursor)
             self._stamp_settled_fts_layout(cursor)
+        from hermes_cli.session_throughput_revision import settle_schema
+        healed = settle_schema(cursor.connection) and healed
         self._conn.commit()
         # After the commit: the repair takes its own write transaction, and only once per store.
         advance_legacy_refusal_repair(self, self._conn)

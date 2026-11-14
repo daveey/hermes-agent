@@ -19,11 +19,16 @@ a drop, and 0 would read as a reset.
 """
 from __future__ import annotations
 
-from copy import deepcopy
 import sqlite3
 import time
+from copy import deepcopy
 from pathlib import Path
+from threading import RLock
 from typing import Callable, Optional
+
+from hermes_cli import machine_throughput_incremental as incremental
+
+_lock = RLock()
 
 FIELDS = ("tokens_io_total", "tokens_cache_total", "sessions_started_total", "sessions_ended_total")
 CACHE_TTL_S = 60.0
@@ -66,16 +71,26 @@ def _bounded_models(models: dict[str, list[int]]) -> dict[str, list[int]]:
 
 
 def _read(path: Path, models: Optional[dict[str, list[int]]] = None) -> tuple[int, int, int, int]:
-    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+    with _lock:
+        return _read_locked(path, models)
+
+
+def _read_locked(path: Path, models=None):
+    path = path.resolve()
+    key = str(path)
+    before = path.stat()
+    identity = (before.st_dev, before.st_ino)
+    db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
     try:
-        has_usage = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_model_usage'"
-                               ).fetchone()
-        if has_usage:
-            rows = db.execute(_USAGE_SQL.replace("SELECT ", "SELECT model, ", 1).format(
-                table="session_model_usage") + " GROUP BY model").fetchall()
+        db.execute("BEGIN")
+        result = incremental.read(db, key, identity)
+        if result is not None:
+            rows, started, ended = result
         else:
-            # Older schemas cannot supply a ledger breakdown; preserve their totals.
-            rows = [("unknown", *db.execute(_USAGE_SQL.format(table="sessions")).fetchone())]
+            rows, started, ended = _full_read(db)
+        after = path.stat()
+        if (after.st_dev, after.st_ino) != identity:
+            raise OSError("throughput database replaced during read")
         io = cache = 0
         for model, model_io, model_cache in rows:
             io += int(model_io)
@@ -84,18 +99,38 @@ def _read(path: Path, models: Optional[dict[str, list[int]]] = None) -> tuple[in
                 target = models.setdefault(str(model or "unknown")[:64], [0, 0])
                 target[0] += int(model_io)
                 target[1] += int(model_cache)
-        started, ended = db.execute(_SESSIONS_SQL).fetchone()
+        return int(io), int(cache), int(started), int(ended)
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        incremental.forget(key)
+        raise
     finally:
         db.close()
-    return int(io), int(cache), int(started), int(ended)
+
+
+def _full_read(db):
+    has_usage = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_model_usage'"
+                           ).fetchone()
+    if has_usage:
+        rows = db.execute(_USAGE_SQL.replace("SELECT ", "SELECT model, ", 1).format(
+            table="session_model_usage") + " GROUP BY model").fetchall()
+    else:
+        rows = [("unknown", *db.execute(_USAGE_SQL.format(table="sessions")).fetchone())]
+    started, ended = db.execute(_SESSIONS_SQL).fetchone()
+    return rows, started, ended
 
 
 def counters(root: Optional[Path] = None) -> dict:
     """Host totals and model breakdown, or ``{}`` if any database is unreadable (or absent)."""
+    with _lock:
+        return _counters_locked(root)
+
+
+def _counters_locked(root):
     totals, seen = [0, 0, 0, 0], set()
     models: dict[str, list[int]] = {}
     try:
         paths = state_db_paths(root)
+        incremental.prune(paths)
         for path in paths:
             stat = path.stat()
             identity = (stat.st_dev, stat.st_ino)
@@ -114,6 +149,11 @@ def counters(root: Optional[Path] = None) -> dict:
 
 
 def cached_counters(root: Optional[Path] = None, *, clock: Callable[[], float] = time.monotonic) -> dict:
+    with _lock:
+        return _cached_locked(root, clock)
+
+
+def _cached_locked(root, clock):
     global _cache
     now, key = clock(), str(root)
     if _cache is not None and _cache[0] == key and 0 <= now - _cache[1] < CACHE_TTL_S:
@@ -125,4 +165,6 @@ def cached_counters(root: Optional[Path] = None, *, clock: Callable[[], float] =
 
 def reset_cache() -> None:
     global _cache
-    _cache = None
+    with _lock:
+        _cache = None
+        incremental.reset()
