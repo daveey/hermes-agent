@@ -226,11 +226,13 @@ def deferred_transcript_route(session_db, session_id: str) -> tuple[str, set[str
     A concurrent rotation after this read is harmless: the normal append fence refuses the old tip
     and custody stays with the spool until the next pass.
     """
-    from hermes_state_common import _non_continuation_child_sql
-    from hermes_state_compression import _CHAIN_CAP
     read = getattr(session_db, '_read_ctx', None)
     if not callable(read):  # legacy replay-only adapters cannot prove any redirection
         return session_id, {session_id}
+    # Imported only once a real SessionDB is proven: hermes_state_common pulls ~28 MB of agent modules, which a
+    # replay-only adapter (and the bounded-memory recovery of a large spool backlog) must not pay for.
+    from hermes_state_common import _non_continuation_child_sql
+    from hermes_state_compression import _CHAIN_CAP
     with read() as conn:
         def successor(sid):
             rows = conn.execute(

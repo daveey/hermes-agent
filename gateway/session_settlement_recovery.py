@@ -251,10 +251,17 @@ async def drain_deferred_rows(authority, ref):
         from gateway.shutdown_flush import replay_deferred_rows
         drain = lambda sid: replay_deferred_rows(authority.db, sid)
     from contextlib import nullcontext
-    from agent.runtime_scope import bind_profile_scope
+    from pathlib import Path
     home = getattr(authority, 'profile_id', None)
     try:
-        with bind_profile_scope(home) if home else nullcontext():
+        # Secret-source hydration can run an external CLI (1Password, vault): the async scope loads it
+        # off the owner loop, never ``bind_profile_scope`` here.
+        if home:
+            from gateway.run import _async_profile_runtime_scope
+            scope = _async_profile_runtime_scope(Path(home))
+        else:
+            scope = nullcontext()  # supports ``async with``
+        async with scope:
             # Each drain discovers the proven ancestors of this tip. These ids are discovery
             # anchors, not spool-source == append-destination assertions.
             for sid in dict.fromkeys((ref.session_id, authority.physical_target(ref))):
