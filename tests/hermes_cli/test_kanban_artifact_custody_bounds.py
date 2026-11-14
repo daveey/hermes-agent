@@ -82,6 +82,62 @@ def test_large_file_changed_after_pre_lock_read_is_not_claimed(kanban_home, monk
     assert "not hashed" in record["warning"]
 
 
+@pytest.mark.parametrize("change_during_read", [True, False])
+def test_prestage_rejects_source_changed_during_hash_and_cleans_copy(
+    kanban_home, monkeypatch, change_during_read,
+):
+    from hermes_cli import kanban_artifact_prestage as prestage
+
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
+    monkeypatch.setattr(prestage, "_CHUNK", 4)
+    with kbc.connect_closing() as conn:
+        task, ws, _ = helpers._scratch_card(conn)
+        source = ws / "during-read.bin"
+        source.write_bytes(BIG)
+        real_sha256 = hashlib.sha256
+        updates = []
+
+        class WritingDigest:
+            def __init__(self):
+                self.digest = real_sha256()
+
+            def update(self, chunk):
+                self.digest.update(chunk)
+                updates.append(chunk)
+                if change_during_read and len(updates) == 1:
+                    # A real size change between the first read and final stat;
+                    # no timestamp-resolution assumptions or racing threads.
+                    with source.open("ab") as stream:
+                        stream.write(b"changed")
+
+            def hexdigest(self):
+                return self.digest.hexdigest()
+
+        monkeypatch.setattr(prestage.hashlib, "sha256", WritingDigest)
+        cache = {}
+        prestage._fill(conn, task, {"artifacts": [str(source)]}, cache)
+        entry = cache[str(source)]
+        directory = kb.task_attachments_dir(task) / "local-artifacts"
+        try:
+            assert len(updates) > 1, "mutation must occur during a multi-chunk read"
+            if change_during_read:
+                assert source.read_bytes() == BIG + b"changed"
+                assert "error" in entry, "prestage accepted a source changed during hashing"
+                assert "changed while it was read" in entry["error"]
+                # Check immediately after _fill, not after prestaged's finally:
+                # rejected partial bytes must already have been removed.
+                assert list(directory.iterdir()) == []
+            else:
+                assert "error" not in entry
+                assert entry["sha256"] == real_sha256(BIG).hexdigest()
+                assert entry["signature"] == prestage.signature(source.stat())
+                assert entry["temp"].read_bytes() == BIG
+                assert list(directory.iterdir()) == [entry["temp"]]
+        finally:
+            if entry.get("temp") is not None:
+                entry["temp"].unlink(missing_ok=True)
+
+
 @pytest.mark.parametrize("second_as", ["artifact", "evidence"])
 def test_large_scratch_file_named_under_two_spellings_is_retained_once(kanban_home, monkeypatch, second_as):
     # `<ws>/./x` and `<ws>/x` are distinct declared strings but one prestage
