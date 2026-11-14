@@ -122,13 +122,20 @@ def _large(conn, task_id: str, source: Path, stat, record: dict, staged: list[Pa
         record["warning"] = f"Over {kb.KANBAN_ATTACHMENT_MAX_BYTES} bytes and not hashed: {reason}"
         return
     if managed:
-        # Large files cannot use blob sync, but must outlive scratch GC.
-        directory = kb.task_attachments_dir(task_id, board=board) / "local-artifacts"
-        dest = kb._unique_attachment_path(directory, source.name, set(staged))
-        staged.append(dest)
-        observed["temp"].rename(dest)
-        observed["temp"] = None
-        record["retained_path"] = str(dest)
+        # Large files cannot use blob sync, but must outlive scratch GC. One
+        # file declared under two spellings (``<ws>/x``, ``<ws>/./x``, ``~/…``)
+        # shares one pre-lock entry: later records reuse the first claim.
+        retained = observed.get("retained_path")
+        if retained is None:
+            if observed["temp"] is None:
+                raise kb.ArtifactPreservationError("no pre-lock copy was staged; retry")
+            directory = kb.task_attachments_dir(task_id, board=board) / "local-artifacts"
+            dest = kb._unique_attachment_path(directory, source.name, set(staged))
+            staged.append(dest)
+            observed["temp"].rename(dest)
+            observed["temp"] = None
+            observed["retained_path"] = retained = str(dest)
+        record["retained_path"] = retained
     record["sha256"] = observed["sha256"]
 
 

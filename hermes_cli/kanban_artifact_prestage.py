@@ -57,6 +57,8 @@ def _fill(conn, task_id: str, metadata: dict, cache: dict) -> None:
 
     for raw in declared_files(metadata):
         source = Path(raw).expanduser()
+        if str(source) in cache:
+            continue  # Another spelling of a file already read; one copy serves both.
         dest = None
         try:
             if not source.is_file() or validate_media_delivery_path(str(source)) is None:

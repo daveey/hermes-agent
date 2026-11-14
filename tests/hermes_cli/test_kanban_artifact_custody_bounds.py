@@ -82,6 +82,48 @@ def test_large_file_changed_after_pre_lock_read_is_not_claimed(kanban_home, monk
     assert "not hashed" in record["warning"]
 
 
+@pytest.mark.parametrize("second_as", ["artifact", "evidence"])
+def test_large_scratch_file_named_under_two_spellings_is_retained_once(kanban_home, monkeypatch, second_as):
+    # `<ws>/./x` and `<ws>/x` are distinct declared strings but one prestage
+    # entry: the second record must reuse the first claim, not crash on it.
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
+    with kbc.connect_closing() as conn:
+        task, ws, run = helpers._scratch_card(conn)
+        (ws / "checkpoint.bin").write_bytes(BIG)
+        spellings = [str(ws / "checkpoint.bin"), f"{ws}/./checkpoint.bin"]
+        metadata = {"artifacts": spellings} if second_as == "artifact" else {
+            "artifacts": spellings[:1], "completion_receipt": receipt(spellings[1])}
+        assert kb.complete_task(conn, task, summary="Checkpoint", expected_run_id=run, metadata=metadata)
+        assert kb.get_task(conn, task).status == "done"
+        records = kb.latest_run(conn, task).metadata["artifact_receipt"]
+    assert [r["path"] for r in records] == spellings
+    assert {r["retained_path"] for r in records} == {records[0]["retained_path"]}
+    assert {r["sha256"] for r in records} == {hashlib.sha256(BIG).hexdigest()}
+    retained = Path(records[0]["retained_path"])
+    assert retained.read_bytes() == BIG
+    assert [p.name for p in retained.parent.iterdir()] == [retained.name]
+
+
+def test_managed_large_file_without_a_pre_lock_copy_fails_closed(kanban_home, monkeypatch):
+    from hermes_cli import kanban_artifact_prestage as prestage
+    from hermes_cli import kanban_artifact_receipt as custody
+
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
+    with kbc.connect_closing() as conn:
+        task, ws, _ = helpers._scratch_card(conn)
+        source = ws / "checkpoint.bin"
+        source.write_bytes(BIG)
+        stat = source.stat()
+        # Prestage judged the file unmanaged (no copy); the lock-time check disagrees.
+        token = prestage._CACHE.set({str(source): {
+            "signature": prestage.signature(stat), "sha256": "0" * 64, "temp": None}})
+        try:
+            with pytest.raises(kb.ArtifactPreservationError, match="no pre-lock copy"):
+                custody._large(conn, task, source, stat, {}, [], kb.DEFAULT_BOARD)
+        finally:
+            prestage._CACHE.reset(token)
+
+
 def test_evidence_refs_keep_custody_but_only_declared_artifacts_upload(kanban_home, tmp_path):
     from hermes_cli import kanban_artifact_delivery as delivery
     from hermes_cli.kanban_artifact_receipt import format_receipt
