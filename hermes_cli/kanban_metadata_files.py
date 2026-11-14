@@ -252,12 +252,15 @@ def stage_completion_artifacts(
     (:func:`preserve_metadata_files`). [daveey]"""
     from hermes_cli import kanban_db as kb
 
+    from hermes_cli.kanban_artifact_receipt import declared_files, record_files
+
+    originals = declared_files(metadata)
+    metadata.pop("artifact_receipt", None)
     staged: list[Path] = []
-    if "completion_receipt" in metadata:
-        # Only this staging pass can attest relocation; caller-provided maps
-        # must not make missing receipt evidence appear preserved.
-        metadata.pop(ATTACHED_KEY, None)
-        metadata.pop(SKIPPED_KEY, None)
+    # Only this staging pass can attest relocation; caller-provided maps
+    # must not make missing evidence appear preserved.
+    metadata.pop(ATTACHED_KEY, None)
+    metadata.pop(SKIPPED_KEY, None)
     with discard_on_error(staged):
         declared = kb._cleaned_artifact_paths(metadata)
         kb._persist_scratch_completion_artifacts(conn, task_id, metadata)
@@ -277,6 +280,8 @@ def stage_completion_artifacts(
         ))
         if uploaded_by == "kanban_complete" and "completion_receipt" in metadata:
             _verify_receipt_files(conn, task_id, metadata)
+        record_files(conn, task_id, metadata, originals, now, staged, uploaded_by=uploaded_by,
+                     relocated=dict(zip(declared, kb._cleaned_artifact_paths(metadata))))
     return staged
 
 

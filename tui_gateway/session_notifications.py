@@ -588,9 +588,10 @@ def _kb_first_line(value: Any, limit: int) -> str:
 
 def _kb_completed(task, payload: dict, title: str) -> str:
     from hermes_cli.kanban_final_send import public_summary
+    from hermes_cli.kanban_artifact_receipt import format_receipt
     handoff = (_kb_first_line(payload["summary"], 200) if payload.get("summary")
                else _kb_first_line(public_summary(getattr(task, "result", None)), 160))
-    return f" done — {title}{handoff}{_kb_left_open(payload)}"
+    return f" done — {title}{handoff}{_kb_left_open(payload)}{format_receipt(payload)}"
 
 
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
@@ -638,8 +639,9 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     if getattr(ev, "kind", "") == "completed":
         # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]
         from hermes_cli.kanban_final_send import final_send_for_chat
+        from hermes_cli.kanban_artifact_receipt import format_receipt
         if final := final_send_for_chat(payload, str(sub.get("chat_id") or "")):
-            return f"{prefix}Kanban {task_id} done — {title}\n{final}{_kb_left_open(payload)}"
+            return f"{prefix}Kanban {task_id} done — {title}\n{final}{_kb_left_open(payload)}{format_receipt(payload)}"
     return f"{prefix}Kanban {task_id}{fmt(task, payload, title)}"
 
 

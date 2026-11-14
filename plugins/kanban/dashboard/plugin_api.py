@@ -424,8 +424,10 @@ def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type:
     _attach_diagnostics(task_d, _compute_task_diagnostics(conn, task_ids=[task_id]).get(task_id) or [])
     from hermes_cli import kanban_wake_check as kwc
     task_d["wake_check"] = kwc.get_state(conn, task_id)  # condition wake probe [daveey]
+    from hermes_cli.kanban_artifact_receipt import latest_receipt
     return {
         "task": task_d,
+        **latest_receipt(kanban_db.list_events(conn, task_id)),
         "comments": [asdict(c) for c in kanban_db.list_comments(conn, task_id)],
         "events": [asdict(e) for e in kanban_db.list_events(conn, task_id)],
         "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],

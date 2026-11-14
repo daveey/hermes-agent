@@ -529,6 +529,9 @@ def _fmt_completed(ev, n) -> tuple:
     from hermes_cli.kanban_pr_landing import left_open_notice
     if disposition := left_open_notice(ev.payload):
         wake_handoff = f"{wake_handoff}\n{disposition}" if wake_handoff else disposition
+    from hermes_cli.kanban_artifact_receipt import format_receipt
+    if custody := format_receipt(ev.payload):
+        wake_handoff = (wake_handoff or "") + custody
     handoff = f"\n{wake_handoff}" if wake_handoff is not None else ""
     return t("gateway.kanban.ping.completed", head=n.head, title=n.title, handoff=handoff), wake_handoff, None
 

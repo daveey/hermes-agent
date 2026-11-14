@@ -716,6 +716,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
             return _err(f"no such task: {args.task_id}{not_here_note(conn, args.task_id)}")
         comments = kb.list_comments(conn, args.task_id)
         events = kb.list_events(conn, args.task_id)
+        from hermes_cli.kanban_artifact_receipt import latest_receipt, format_receipt
+        custody = latest_receipt(events)
         parents = kb.parent_ids(conn, args.task_id)
         children = kb.child_ids(conn, args.task_id)
         runs = kb.list_runs(conn, args.task_id, **rsk)
@@ -737,6 +739,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if want_json:
         _print_json({
             "task": _task_to_dict(task), "latest_summary": latest_summary, "parents": parents, "children": children,
+            **custody,
             "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
@@ -795,6 +798,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if comments:
         _print_section(f"Comments ({len(comments)}):",
                        (f"  [{_fmt_ts(c.created_at)}] {c.author}: {c.body}" for c in comments))
+    print(format_receipt(custody), end="")
     if events:
         _print_section(f"Events ({len(events)}):", (
             f"  [{_fmt_ts(e.created_at)}]{f' [run {e.run_id}]' if e.run_id else ''} {e.kind}"

@@ -64,12 +64,14 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
         details = kqp.detail_fields(conn, task, args.get("board"))
     from hermes_cli.kanban_hub_admission_placement import describe, latest_verdict
     from hermes_cli.kanban_wake_summary import wakes
+    from hermes_cli.kanban_artifact_receipt import latest_receipt
     verdict = latest_verdict(conn, tid)
     if verdict and details.get("queue_note"):
         details["queue_note"] = f"{details['queue_note']} ({describe(verdict)})"
     return {
         "task": kt._fields(task, kt._TASK_FIELDS),
         "source": "replica" if replica else "live",
+        **latest_receipt(kb.list_events(conn, tid)),
         **capsule,
         "queue_reason": kqr.latest(conn, tid),
         "wakes": wakes(conn, task),  # [daveey] {check, next_probe_at, backstop_at} while scheduled

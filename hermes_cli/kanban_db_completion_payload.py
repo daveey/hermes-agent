@@ -34,6 +34,8 @@ def completed_event_payload(
         elif isinstance(owner := landing.get("landing_owner"), str):
             payload["landing_owner"] = owner
     if isinstance(metadata, dict):
+        if metadata.get("artifact_receipt"):
+            payload["artifact_receipt"] = metadata["artifact_receipt"]
         cleaned = _cleaned_artifact_paths(metadata)
         if cleaned:
             payload["artifacts"] = cleaned
