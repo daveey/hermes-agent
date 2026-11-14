@@ -154,6 +154,8 @@ def may_set_integer_attributes(command: str) -> bool:
     """Conservative attribute hint, including declarations without a substitution."""
     from cron import lifecycle_guard as guard
 
+    if not any(hint in command for hint in (*_INTEGER_DECLARERS, "source", ".", "$", "`")):
+        return False
     for segment in guard._iter_command_segments(command):
         if _INTEGER_DECLARATION_RE.search(" ".join(segment)):
             return True
@@ -205,6 +207,6 @@ def iter_arithmetic_word_payloads(command: str, *, integer_context: bool = False
             if "[" not in operand or not any(o in operand for o in _SUBSTITUTION_OPENERS):
                 continue
             payload = _BACKTICK_SPAN_RE.sub(r"$(\1)", operand)
-            if payload not in seen:
+            if payload != command and payload not in seen:
                 seen.add(payload)
                 yield payload
