@@ -12,6 +12,8 @@ import sqlite3
 import tracemalloc
 from array import array
 
+import pytest
+
 from hermes_state import SessionDB
 from tests.tui_gateway.test_kanban_remote_arrival import _hub
 from tests.tui_gateway.test_kanban_remote_notices import CHAT, _card, _dead_pid, _ledger_row
@@ -256,6 +258,42 @@ def test_replaced_replica_reclassifies_compact_bystander_with_unchanged_seq(tmp_
         (str(replica.resolve()), f"hub/{card['key']}", f"done@{int(NOW - 60)}", NOW),
     ]
     assert obs.observe(replica, ledger, NOW + 20) == fresh
+
+
+def test_failed_bystander_write_retries_unchanged_replica(tmp_path):
+    replica = _hub(tmp_path, [])
+    ledger = tmp_path / "remote-notices.db"
+    remote._reset_for_tests()
+    assert obs.observe(replica, ledger, NOW) == {}  # establish the source before these old states arrive
+    source = str(replica.resolve())
+    cards = [_bystander(i, at=NOW - 8 * 3600) for i in range(2)]
+    with sqlite3.connect(replica) as conn:
+        conn.executemany("INSERT INTO replica VALUES ('hub','tasks',?,?,?)",
+                         [(card["key"], json.dumps(card["task"]), i + 101) for i, card in enumerate(cards)])
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute("SELECT source FROM observation_sources").fetchall() == [(source,)]
+        # Fail a real INSERT, after the first row was inserted, so the whole batch must roll back.
+        conn.execute("CREATE TRIGGER fail_bystander BEFORE INSERT ON observations "
+                     "WHEN (SELECT count(*) FROM observations) = 1 "
+                     "BEGIN SELECT RAISE(ABORT, 'bystander ledger failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="bystander ledger failure"):
+        obs.observe(replica, ledger, NOW + 10)
+    (flight,) = obs._retained.values()
+    assert len(flight.lane.table) == 2 and flight.decoded == {}  # not relevant rows that naturally retry
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute("SELECT * FROM observations").fetchall() == []
+        conn.execute("DROP TRIGGER fail_bystander")
+    # Do not reset the caches, replace either file, or change any replica row before retrying.
+    assert obs.observe(replica, ledger, NOW + 20) == {}
+    expected = sorted((source, f"hub/{card['key']}", f"done@{int(NOW - 8 * 3600)}", NOW + 20)
+                      for card in cards)
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute("SELECT source, ref, state, first_seen FROM observations ORDER BY ref").fetchall() == expected
+    assert obs.observe(replica, ledger, NOW + 30) == {}
+    remote._reset_for_tests()  # cold reconstruction must retain the successful retry's first_seen, too
+    assert obs.observe(replica, ledger, NOW + 40) == {}
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute("SELECT source, ref, state, first_seen FROM observations ORDER BY ref").fetchall() == expected
 
 
 def test_bystander_linked_after_an_in_place_gateway_rename_is_observed(tmp_path):
