@@ -400,6 +400,14 @@ _NESTED_FOREIGN_SHELLS = [
     "f() {{ su -l bob; }}; g() {{ f; }}; g < {script}",
     "f() {{ su -l bob; }}; f 0<&3 3< {script}",
     "f() ( su -l bob ); f < {script}",
+    # A variable target resolved from the command's own assignments (t_01a1daf4b486a755).
+    "S={script}; su -l bob < $S",
+    "P={script}; ssh -o BatchMode=yes host 'bash -s' < $P",
+    "D={tmp}; su -l bob < \"$D/inner.sh\"",
+    "export S={script}; su -l bob < ${{S}}",
+    "D={tmp}; P=$D/inner.sh; su -l bob < $P",
+    "S={script}; exec 3< $S; su -l bob <&3",
+    "S={script}\nfor h in a b; do ssh $h sh -s < $S; done",
 ]
 
 
@@ -465,7 +473,7 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     assert "alias" not in str(tmp_path).lower()
     script = tmp_path / "inner.sh"
     script.write_text(f"t ( bash {live_kanban_db} )\n")
-    text = shape.format(db=live_kanban_db, script=script)
+    text = shape.format(db=live_kanban_db, script=script, tmp=tmp_path)
     for names in (frozenset({"zz"}), frozenset(), None):
         unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
         assert unsafe is True and refusal is not None and "SQLite" in refusal, (shape, names)
@@ -622,11 +630,14 @@ def test_multiline_group_without_a_fed_shell_stays_allowed(tmp_path, live_kanban
 @pytest.mark.parametrize("shape", [
     "su -l bob < <(cat {script})",
     "while read l; do su -l bob; done < <(cat {script})",
-    "S={script}; su -l bob < $S",
     "su -l bob < $S",
     "su -l bob < \"$S\"",
     "su -l bob < ${{S}}",
     "su -l bob < $(echo {script})",
+    "S=$(echo {script}); su -l bob < $S",  # an assigned value the walk cannot name
+    "S={script} su -l bob < $S",  # a prefix assignment does not reach the redirection
+    "su -l bob < \"$1\"",
+    "for f in {script}; do su -l bob < $f; done",
     "su -l bob <$(echo {script})",
     "su -l bob < `echo {script}`",
     "su -l bob < {tmp}/*.sh",
@@ -636,10 +647,11 @@ def test_multiline_group_without_a_fed_shell_stays_allowed(tmp_path, live_kanban
     "su -l bob 0<&3 3< $S",
     "su -l bob 0<&3 3<<'EOF'\nt ( bash {db} )\nEOF",
 ])
-def test_nested_login_shell_unresolvable_stdin_fails_closed(tmp_path, live_kanban_db, shape):
+def test_nested_login_shell_unresolvable_stdin_fails_closed(tmp_path, live_kanban_db, shape, monkeypatch):
     """t_01a1daf4b486a755: a stdin whose content the walk cannot name (a variable, a command or
     process substitution, a glob, an unknown descriptor) fed to a login shell is refused, not
     skipped as if it held nothing."""
+    monkeypatch.delenv("S", raising=False)
     assert "alias" not in str(tmp_path).lower()
     script = tmp_path / "inner.sh"
     script.write_text(f"t ( bash {live_kanban_db} )\n")
@@ -659,6 +671,22 @@ def test_unresolvable_login_shell_stdin_in_a_mentioned_file_is_not_refused(tmp_p
     unsafe, refusal = scan_gateway_lifecycle(f"bash {script}", cwd=str(tmp_path),
                                              session_aliases=frozenset({"zz"}))
     assert unsafe is True and refusal is not None and "cannot resolve `$S`" in refusal
+
+
+def test_nested_login_shell_stdin_variable_from_the_environment(tmp_path, live_kanban_db,
+                                                                 monkeypatch):
+    """A variable the command does not assign expands as the guard's own environment holds it
+    (`$TMPDIR`, `$HERMES_KANBAN_WORKSPACE`: the local terminal inherits them)."""
+    (tmp_path / "inner.sh").write_text(f"t ( bash {live_kanban_db} )\n")
+    monkeypatch.setenv("T01A1DAF4_DIR", str(tmp_path))
+    for text in ("ssh host 'bash -s' < \"$T01A1DAF4_DIR/inner.sh\"",
+                 "su -l bob < ${T01A1DAF4_DIR}/inner.sh"):
+        unsafe, refusal = scan_gateway_lifecycle(text, cwd="/", session_aliases=frozenset({"zz"}))
+        assert unsafe is True and refusal is not None and "SQLite" in refusal, text
+    monkeypatch.delenv("T01A1DAF4_DIR")
+    unsafe, refusal = scan_gateway_lifecycle("su -l bob < $T01A1DAF4_DIR/inner.sh", cwd="/",
+                                             session_aliases=frozenset({"zz"}))
+    assert unsafe is True and refusal is not None and "cannot resolve" in refusal
 
 
 @pytest.mark.parametrize("option", [

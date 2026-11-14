@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import os
 import re
 import shlex
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 from cron.lifecycle_guard import (
     _REDIRECTION,
@@ -813,7 +814,9 @@ def _iter_nested_shell_inputs(
     # redirection overrides it: with a stdin-reading one anywhere, every compound command's
     # redirections count, failing closed.
     grouped = any(found == ("stdin", None) for _view, found in classified)
-    fds = _descriptor_sources(view for view, _found in classified) if grouped else {}
+    sources = _StdinSources(
+        _descriptor_sources(view for view, _found in classified),
+        _assigned_variables(view for view, _found in classified)) if grouped else None
     # So does a function body's (`f() { su -l bob; }; f < f`): a call to any function the
     # command defines counts, whichever body holds the shell (`g() { f; }; g < f`).
     functions = _defined_functions(walk_command) if grouped else frozenset()
@@ -824,7 +827,7 @@ def _iter_nested_shell_inputs(
         yield from _fed_shell_inputs(walk_command, cwd=cwd)
     for view, found in classified:
         if grouped and (_compound_redirections(view) or _calls_function(view, functions)):
-            yield from _redirected_shell_inputs(view, cwd=cwd, fds=fds)
+            yield from _redirected_shell_inputs(view, cwd=cwd, sources=sources)
         if found is None:
             continue
         kind, value = found
@@ -834,7 +837,15 @@ def _iter_nested_shell_inputs(
             for path in _resolved_or_nothing(value, cwd):
                 yield None, path
         elif kind == "stdin":
-            yield from _redirected_shell_inputs(view, cwd=cwd, fds=fds)
+            yield from _redirected_shell_inputs(view, cwd=cwd, sources=sources)
+
+
+class _StdinSources(NamedTuple):
+    """What the command itself says about its stdin targets: each descriptor's input
+    redirections (``_descriptor_sources``) and each variable's values (``_assigned_variables``)."""
+
+    fds: dict[str, list[tuple[str, str]]]
+    variables: dict[str, list[str]]
 
 
 def _fed_shell_inputs(walk_command: str, *, cwd: Optional[str]) -> Iterator[tuple[None, Path]]:
@@ -876,15 +887,65 @@ def _descriptor_sources(views: Iterator[list[str]]) -> dict[str, list[tuple[str,
     return sources
 
 
+_ASSIGNMENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
+_DECLARATION_WORDS = frozenset({"export", "readonly", "declare", "typeset", "local"})
+
+
+def _assigned_variables(views: Iterator[list[str]]) -> dict[str, list[str]]:
+    """``{name: [value, …]}`` for every standalone assignment in the command (``S=f``,
+    ``export S=f``; not a prefix assignment, ``S=f cmd``, which no redirection expands). Which
+    value a later expansion sees depends on order and scope the walk does not track, so each
+    counts."""
+    variables: dict[str, list[str]] = {}
+    for view in views:
+        words = view[1:] if view and view[0] in _DECLARATION_WORDS else view
+        matches = [_ASSIGNMENT_RE.fullmatch(word) for word in words if not word.startswith("-")]
+        if matches and all(matches):
+            for match in filter(None, matches):
+                variables.setdefault(match.group(1), []).append(match.group(2))
+    return variables
+
+
+_VARIABLE_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_MAX_EXPANSIONS = 16  # words and substitutions per target: past it, fail closed
+
+
+def _expanded_targets(target: str, variables: dict[str, list[str]]) -> Optional[list[str]]:
+    """Each word *target* may expand to, its ``$NAME``/``${NAME}`` taken from the command's own
+    assignments, else from this process's environment (the local terminal inherits ``$TMPDIR``,
+    ``$HERMES_KANBAN_WORKSPACE``). ``None`` when any part cannot be named (an unknown variable,
+    ``$1``, a substitution, a glob, a self-referencing value)."""
+    words: list[str] = []
+    pending = [target]
+    steps = 0
+    while pending:
+        word = pending.pop()
+        match = _VARIABLE_RE.search(word)
+        if match is None:
+            if _unresolvable(word):
+                return None
+            words.append(word)
+            continue
+        name = match.group(1) or match.group(2)
+        values = variables.get(name) or ([os.environ[name]] if name in os.environ else [])
+        steps += len(values)
+        if not values or steps > _MAX_EXPANSIONS:
+            return None
+        pending.extend(word[:match.start()] + value + word[match.end():] for value in values)
+    return words
+
+
 _FD_PATH_RE = re.compile(r"/(?:dev|proc/self)/fd/(\d+)")
 
 
 def _redirected_shell_inputs(
-    view: list[str], *, cwd: Optional[str], fds: Optional[dict[str, list[tuple[str, str]]]] = None,
+    view: list[str], *, cwd: Optional[str], sources: Optional[_StdinSources] = None,
 ) -> Iterator[tuple[Optional[str], Optional[Path]]]:
     """Keep stdin redirections in the consuming shell's scope, not the session's. ``/dev/null``
     feeds the shell nothing (and is no regular file to walk). A stdin duplicated from another
-    descriptor (``0<&3``, ``< /dev/fd/3``) reads that descriptor's sources (*fds*)."""
+    descriptor (``0<&3``, ``< /dev/fd/3``) reads that descriptor's sources; a ``$NAME`` target
+    expands from the command's assignments or the environment (*sources*)."""
+    fds, variables = sources or _StdinSources({}, {})
     for fd, operator, target in _redirections(view):
         if fd not in ("", "0"):
             continue
@@ -893,28 +954,33 @@ def _redirected_shell_inputs(
             continue  # stdin closed, or left as it is
         if operator == "<&" or (duplicated and duplicated.group(1) != "0"):
             source = duplicated.group(1) if duplicated else target
-            sources = (fds or {}).get(source, ())
-            if not sources or any(dup_operator not in ("<", "<>", "<<<")
-                                  for dup_operator, _dup_target in sources):
+            dups = fds.get(source, ())
+            if not dups or any(dup_operator not in ("<", "<>", "<<<")
+                               for dup_operator, _dup_target in dups):
                 yield Unresolved(f"{operator}{target}"), None
-            for dup_operator, dup_target in sources:
-                yield from _stdin_source(dup_operator, dup_target, cwd)
+            for dup_operator, dup_target in dups:
+                yield from _stdin_source(dup_operator, dup_target, cwd, variables)
         else:
-            yield from _stdin_source(operator, target, cwd)
+            yield from _stdin_source(operator, target, cwd, variables)
 
 
 def _stdin_source(
-    operator: str, target: str, cwd: Optional[str],
+    operator: str, target: str, cwd: Optional[str], variables: dict[str, list[str]],
 ) -> Iterator[tuple[Optional[str], Optional[Path]]]:
     """What one input redirection (``< f``, ``<> f``, ``<<< T``) hands the shell reading it; an
-    ``Unresolved`` text when the walk cannot name it (see ``_unresolvable``)."""
+    ``Unresolved`` text when the walk cannot name it (see ``_expanded_targets``)."""
     if operator == "<<<":
         yield target, None
-    elif operator in ("<", "<>") and _unresolvable(target):
+        return
+    if operator not in ("<", "<>"):
+        return
+    expanded = _expanded_targets(target, variables)
+    if expanded is None:
         yield Unresolved(target), None
-    elif operator in ("<", "<>") and target != "/dev/null":
-        for path in _resolved_or_nothing(target, cwd):
-            yield None, path
+    for word in expanded or ():
+        if word != "/dev/null":
+            for path in _resolved_or_nothing(word, cwd):
+                yield None, path
 
 
 class Unresolved(str):
