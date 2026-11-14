@@ -224,7 +224,7 @@ def _db_content_sig(db_path: Path, cache: dict, read, *, fallback=lambda mtime: 
         return None
     try:
         with watch_store.observed(db_path) as (key, conn):
-            if cached is not None and cached[0] == key:
+            if key is not watch_store.TRANSIENT and cached is not None and cached[0] == key:
                 return cached[1]
             signature, is_fallback = read(conn, key)
     except Exception:  # health: allow BLE001 -- any failed read (busy, locked, foreign schema) falls back like a busy one
@@ -241,9 +241,12 @@ def _session_digest(conn, available: set, mtime) -> tuple:
     import hashlib
     fields = tuple(field for field in _SESSION_SIGNATURE_FIELDS if field in available)
     if not fields:
-        # A state.db without a readable sessions table (foreign schema, legacy
-        # or transient file): keep the old mtime contract so any move still
-        # wakes the sidebar instead of silently never broadcasting.
+        from tui_gateway import watch_store
+        if mtime is watch_store.TRANSIENT:
+            # No durable revision and no sessions to digest. Only this foreign-schema
+            # fallback scans the full image, within the caller's snapshot and throttle.
+            # Connection generations churn; fresh data_version counters miss commits.
+            mtime = hashlib.blake2b(conn.serialize(), digest_size=32).digest()
         return ("mtime-fallback", mtime)
     order = " ORDER BY id" if "id" in available else ""
     digest = hashlib.blake2b(digest_size=16)
@@ -283,7 +286,7 @@ def _session_db_content_sig(db_path: Path):
     key = None
     try:
         with watch_store.observed(db_path) as (key, conn):
-            if cached is not None and cached[0] == key:
+            if key is not watch_store.TRANSIENT and cached is not None and cached[0] == key:
                 return cached[1]
             if (not revision_cached and cached is not None and cached[1] is not None
                     and now - _sessions_digest_at.get(cache_key, -SESSION_DIGEST_MIN_S) < SESSION_DIGEST_MIN_S):

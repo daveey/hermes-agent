@@ -22,12 +22,16 @@ from collections import OrderedDict
 from pathlib import Path
 
 MAX_STORES = 32
+# No cross-connection data_version comparison: consumers must read semantic content.
+TRANSIENT = object()
 _lock = threading.RLock()
 # path -> [(dev, ino), conn, generation, {sidecar suffix: (dev, ino)}]. A new generation never equals an old key,
 # so a reopened store re-reads.
 _held: OrderedDict[str, list] = OrderedDict()
 _generation = 0
-_released: set[str] = set()
+_released_roots: set[Path] = set()
+_release_all = False
+_reactivated: set[str] = set()
 
 
 def _sidecars(path: str) -> dict:
@@ -44,10 +48,13 @@ def _drop(path: str) -> None:
 
 def reset() -> None:
     """Close every kept connection (tests, and a process forgetting its memos)."""
+    global _release_all
     with _lock:
         while _held:
             _drop(next(iter(_held)))
-        _released.clear()
+        _released_roots.clear()
+        _reactivated.clear()
+        _release_all = False
 
 
 def forget(db_path) -> None:
@@ -61,13 +68,37 @@ def release_under(root=None) -> int:
     ``hermes_state_registry.close_all``/``close_all_under`` before the header probes are released, so a profile
     delete's rmtree meets no kept descriptor. Later idle passes use transient readers until
     another tracked owner has reopened the store."""
+    global _release_all
     from hermes_state_common import path_is_under
     with _lock:
-        doomed = [path for path in _held if root is None or path_is_under(Path(path), Path(root))]
+        if root is None:
+            _release_all = True
+            _released_roots.clear()
+            _reactivated.clear()
+        else:
+            root = Path(root).resolve()
+            _reactivated.difference_update({p for p in _reactivated if path_is_under(Path(p), root)})
+            if not _release_all:
+                _released_roots.difference_update({p for p in _released_roots if path_is_under(p, root)})
+                if not any(path_is_under(root, p) for p in _released_roots):
+                    _released_roots.add(root)
+        doomed = [path for path in _held if root is None or path_is_under(Path(path), root)]
         for path in doomed:
-            _released.add(path)
             _drop(path)
     return len(doomed)
+
+
+def _transient(path: str) -> bool:
+    from hermes_state_common import path_is_under
+    from hermes_cli.sqlite_safe_read import has_live_connection
+    released = _release_all or any(path_is_under(Path(path), root) for root in _released_roots)
+    if not released or path in _reactivated:
+        return False
+    # Check before opening our own tracked observer, which must never reactivate itself.
+    if has_live_connection(path):
+        _reactivated.add(path)
+        return False
+    return True
 
 
 def _open(path: str, ident: tuple[int, int]) -> list:
@@ -105,18 +136,15 @@ def _stranded(held: list, path: str) -> bool:
 
 @contextlib.contextmanager
 def observed(db_path):
-    """``(key, conn)`` for ``db_path`` under the module lock: equal keys mean no commit was published between them.
+    """``(key, conn)`` under the module lock; non-TRANSIENT equal keys permit signature reuse.
+    Retained readers use connection-local commit counters. Released ownerless readers yield
+    TRANSIENT: consumers read semantic content, never compare counters across fresh connections.
     ``conn`` is autocommit; a caller wanting one snapshot over several statements wraps them in BEGIN/COMMIT and
     must not leave a transaction open. Raises OSError/sqlite3.Error when the store cannot be read; any error
-    inside the block drops the connection, so the next call reopens (a new generation: no stale key matches)."""
+    inside the block drops the connection."""
     path = str(db_path)
     with _lock:
-        transient = path in _released
-        if transient:
-            from hermes_cli.sqlite_safe_read import has_live_connection
-            if has_live_connection(path):
-                _released.discard(path)
-                transient = False
+        transient = _transient(path)
         try:
             st = os.stat(path)
             ident = (st.st_dev, st.st_ino)
@@ -129,12 +157,16 @@ def observed(db_path):
                 held = _open(path, ident)
             _held.move_to_end(path)
             conn = held[1]
-            version = conn.execute("PRAGMA data_version").fetchone()[0]
+            if transient:
+                key = TRANSIENT
+            else:
+                version = conn.execute("PRAGMA data_version").fetchone()[0]
+                key = (*ident, held[2], st.st_size, st.st_mtime_ns, version)
         except BaseException:
             _drop(path)
             raise
         try:
-            yield (*ident, held[2], st.st_size, st.st_mtime_ns, version), conn
+            yield key, conn
         except BaseException:
             _drop(path)
             raise
