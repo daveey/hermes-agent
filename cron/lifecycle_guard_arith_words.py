@@ -36,6 +36,7 @@ _INT_OPERATORS = frozenset({"-eq", "-ne", "-lt", "-le", "-gt", "-ge"})
 _INTEGER_DECLARERS = frozenset({"declare", "typeset", "local", "readonly", "export"})
 _BACKTICK_SPAN_RE = re.compile(r"`([^`]*)`")
 _SUBSTITUTION_OPENERS = ("$(", "`")
+_ASSIGNMENT_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[.*\])?\+?=", re.DOTALL)
 # A declare-family name followed, anywhere later in the dequoted segment, by an option word
 # carrying ``i``. Matched on the joined words so ``eval "declare -i x"`` and
 # ``builtin declare -xi x`` count; over-matching only makes the walk read more files.
@@ -164,10 +165,13 @@ def may_set_integer_attributes(command: str) -> bool:
         # Do not evaluate expansions or source files to discover attributes. Either
         # can introduce an integer declaration; allow the later subscript walk now,
         # before referenced files are traversed. Unknown commands may be declare.
-        if name in {"source", "."} or any(char in name for char in "$`"):
+        if name in {"source", "."} or (
+            any(char in name for char in "$`") and not _ASSIGNMENT_WORD_RE.match(words[index])
+        ):
             return True
         if name in _INTEGER_DECLARERS and any(
-            "$" in word or "`" in word for word in words[index + 1:]
+            ("$" in word or "`" in word) and not _ASSIGNMENT_WORD_RE.match(word)
+            for word in words[index + 1:]
         ):
             return True
     return False

@@ -9,6 +9,7 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 
 
 SHAPES = [
+    r'let "a[\`SCRIPT\`]=1"',
     r"declare -i x; eval 'x=a[\$\(SCRIPT\)]'",
     r"declare -i x; eval 'x=a[\`SCRIPT\`]'",
     r"typeset -i x; eval 'x+=a[\$\(SCRIPT\)]'",
