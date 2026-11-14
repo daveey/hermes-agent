@@ -103,6 +103,15 @@ def test_post_merge_evidence_is_not_absence_after_suite_disappears():
     assert receipt["classification"] == "missing"
 
 
+def test_merged_fallback_keeps_same_name_workflows_distinct(evidence):
+    failed = run("failure")
+    passed = {**run("success", id=2), "check_suite": {"id": 8}}
+    evidence.update(merged=True, runs=[failed, passed])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "failure"
+    assert [c["id"] for c in receipt["checks"]] == [1, 2]
+
+
 def test_fallback_merge_cutoff(evidence):
     evidence.update(merged=True, runs=[run("failure"), run("success", id=2, started="2026-11-02T14:00:00Z")])
     receipt = gate.collect_acceptance(URL, None)

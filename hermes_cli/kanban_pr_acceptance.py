@@ -258,7 +258,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         statuses = complete_statuses(_api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                           paginate=True, profile_home=profile_home), sha)
         phase = "selecting merge-time evidence"
-        runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses)
+        runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses, distinct_suites=not required)
         outcomes = []
         app_of_bot: dict[str, int | None] = {}
         for context, app_id in sorted(required, key=str):

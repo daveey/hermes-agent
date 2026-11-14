@@ -27,7 +27,7 @@ def check_receipt(check, sha):
             "classification": _classify(check, sha, outcome, is_run), "conclusion": outcome}
 
 
-def partition_at_merge(checks, merged_at, *, runs):
+def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False):
     """Latest pre-merge execution per producer, plus every later execution.
 
     App identities stay distinct: an unpinned context must not hide another app's
@@ -41,6 +41,8 @@ def partition_at_merge(checks, merged_at, *, runs):
 
     def key_of(check):
         if runs:
+            if distinct_suites:
+                return (check["name"], check["app"]["id"], check["check_suite"]["id"])
             return (check["name"], check["app"]["id"])
         return (check["context"], (check.get("creator") or {}).get("id"))
 
@@ -72,12 +74,12 @@ def partition_at_merge(checks, merged_at, *, runs):
     return [entry[1] for entry in latest.values()], post
 
 
-def merge_evidence(receipt, pr, repo, runs, statuses):
+def merge_evidence(receipt, pr, repo, runs, statuses, *, distinct_suites=False):
     if pr["state"] != "MERGED":
         return runs, statuses
     merged_at = pr["mergedAt"]
     receipt["merged_at"] = merged_at
-    runs, post_runs = partition_at_merge(runs, merged_at, runs=True)
+    runs, post_runs = partition_at_merge(runs, merged_at, runs=True, distinct_suites=distinct_suites)
     statuses, post_statuses = partition_at_merge(statuses, merged_at, runs=False)
     sha = receipt["head_sha"]
     receipt["post_merge_checks"] = [check_receipt(c, sha) for c in post_runs + post_statuses]
