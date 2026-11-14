@@ -205,7 +205,9 @@ def admit_limit(pace: PoolPace, avg_running: float, *, deferrable: bool, cfg: Pa
     host does the same, and the fleet's burn lands on the sustainable rate. Deferrable work (review lane,
     negative priority, scheduled wakes) gets ``deferrable_share`` of that, so it yields first. Just behind pace
     (factor < ``OPEN_RAMP_FACTOR``) the host may grow to ``factor`` x its recent concurrency (at least one run),
-    so a pool coming off a hold ramps up instead of bursting back into the wall."""
+    so a pool coming off a hold ramps up instead of bursting back into the wall. PACED also has headroom:
+    retain a one-run floor after the deferrable share, otherwise idle hosts remain at zero forever. HELD
+    alone means no readable headroom and keeps a zero allowance."""
     if pace.state == UNKNOWN or (pace.state == OPEN and (pace.factor is None or pace.factor >= OPEN_RAMP_FACTOR)):
         return None
     if pace.state == HELD:
@@ -213,4 +215,4 @@ def admit_limit(pace: PoolPace, avg_running: float, *, deferrable: bool, cfg: Pa
     if pace.state == OPEN:
         return max(1, math.ceil(max(0.0, avg_running) * float(pace.factor or 1.0)))
     limit = math.floor(max(0.0, avg_running) * float(pace.factor or 0.0))
-    return math.floor(limit * cfg.deferrable_share) if deferrable else limit
+    return max(1, math.floor(limit * cfg.deferrable_share) if deferrable else limit)

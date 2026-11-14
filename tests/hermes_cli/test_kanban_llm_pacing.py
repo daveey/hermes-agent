@@ -153,6 +153,7 @@ def _opus_card(conn, title="work", **kw):
 def test_pool_ahead_of_pace_defers_spawns(paced_board, monkeypatch):
     _write_cfg(paced_board)
     _usage(monkeypatch, 70, 6 * DAY)  # 70% in the week's first day: ~490% projected at reset
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     with kbc.connect() as conn:
         tid = _opus_card(conn)
         seen, result = _dispatch(conn)

@@ -136,6 +136,7 @@ def test_paced_hold_records_a_skip_the_notices_and_diagnostics_name(paced_board,
     _config(paced_board)
     _paced_reads(monkeypatch)
     monkeypatch.setattr(qp, "_running_and_limit", lambda *_a: (1, 7))  # free slots: the unrecorded case
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     start = time.time()
     with kbc.connect() as conn:
         tid = _opus(conn, "paced", session_id="chat")
@@ -144,7 +145,7 @@ def test_paced_hold_records_a_skip_the_notices_and_diagnostics_name(paced_board,
         assert result.llm_paced and result.llm_paced[0][:3] == (tid, "anthropic paced", None)
         [skip] = _skips(conn, tid)
         assert (skip["reason"], skip["detail"]) == (skips.LLM_PACED, "anthropic paced")
-        assert skip["providers"] == [{"provider": "anthropic", "state": lp.PACED, "limit": 0, "running": 0}]
+        assert skip["providers"] == [{"provider": "anthropic", "state": lp.PACED, "limit": 1, "running": 1}]
         _tick(conn)
         assert len(_skips(conn, tid)) == 1  # one row per episode, not one per tick
 
@@ -197,6 +198,7 @@ def test_held_pool_skip_carries_the_reset(paced_board, monkeypatch):
 
 
 def test_dry_run_records_the_hold_on_the_result_only(paced_board, monkeypatch):
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     _config(paced_board)
     _paced_reads(monkeypatch)
     with kbc.connect() as conn:
@@ -247,6 +249,7 @@ def _class_config(home, *providers):
 
 
 def test_class_selector_is_paced_on_its_class_providers(paced_board, monkeypatch):
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     _class_config(paced_board, "anthropic")
     _paced_reads(monkeypatch)
     with kbc.connect() as conn:
