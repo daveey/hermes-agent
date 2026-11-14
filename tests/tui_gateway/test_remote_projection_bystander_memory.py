@@ -345,6 +345,54 @@ def test_failed_bystander_write_retries_unchanged_replica(tmp_path):
         assert conn.execute("SELECT source, ref, state, first_seen FROM observations ORDER BY ref").fetchall() == expected
 
 
+def test_warm_observation_transactions_prune_historical_known_states(tmp_path):
+    target, stable = _relevant(0), _relevant(1)
+    replica = _hub(tmp_path, [target, stable])
+    ledger = tmp_path / "remote-notices.db"
+    source = str(replica.resolve())
+    slot = (str(ledger), source)
+    remote._reset_for_tests()
+    first = obs.observe(replica, ledger, NOW)
+    history = {(f"{gw}/{key}", state): obs.first_seen_of(first, (gw, key, state)) for gw, key, state in first}
+    assert obs._known[slot][1] == history
+    ledger_id = obs._file_id(ledger)
+
+    # Keep every cache warm and the ledger inode stable across committed replica changes.
+    for step, status in enumerate(("blocked", "done", "blocked"), 1):
+        target = _card("t_rel_0", CHAT, status=status, at=NOW + step)
+        with sqlite3.connect(replica) as conn:
+            conn.execute("UPDATE replica SET data=?, seq=seq+1000 WHERE key=?",
+                         (json.dumps(target["task"]), target["key"]))
+        transactions = obs.stats["transactions"]
+        fresh = obs.observe(replica, ledger, NOW + step + 10)
+        current = {(f"{gw}/{key}", state): obs.first_seen_of(fresh, (gw, key, state)) for gw, key, state in fresh}
+        assert len(current) == 2
+        assert obs.stats["transactions"] == transactions + 1
+        assert obs._file_id(ledger) == ledger_id
+        assert obs._known[slot][1] == current  # historical states must not accumulate in memory
+        history.update(current)
+
+    # Relevance alone can take _persist's no-missing/no-extra fast path. Change the terminal state too,
+    # so the newly compact bystander forces persistence and pruning, not an unconditional deletion claim.
+    target = _card("t_rel_0", CHAT, status="done", at=NOW + 100)
+    target["task"]["sessions"][0]["gw"] = "elsewhere"
+    with sqlite3.connect(replica) as conn:
+        conn.execute("UPDATE replica SET data=?, seq=seq+1000 WHERE key=?",
+                     (json.dumps(target["task"]), target["key"]))
+    transactions = obs.stats["transactions"]
+    fresh = obs.observe(replica, ledger, NOW + 110)
+    assert obs.stats["transactions"] == transactions + 1
+    assert {key for _gw, key, _state in fresh} == {stable["key"]}
+    assert obs._known[slot][1] == {
+        (f"{gw}/{key}", state): obs.first_seen_of(fresh, (gw, key, state)) for gw, key, state in fresh
+    }
+    history[(f"hub/{target['key']}", f"done@{int(NOW + 100)}")] = NOW + 110
+    with sqlite3.connect(ledger) as conn:
+        persisted = {(ref, state): at for ref, state, at in conn.execute(
+            "SELECT ref, state, first_seen FROM observations WHERE source=?", (source,))}
+    assert persisted == history  # pruning the warm cache must preserve insert-only ledger history
+
+
 def test_bystander_linked_after_an_in_place_gateway_rename_is_observed(tmp_path):
     # The replica's meta.gateway changes in place: a row that was a bystander for the old name and is linked to the
     # new one must be re-classified at once (as main decodes every row), not stay compact until its seq moves.
