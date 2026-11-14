@@ -2,7 +2,8 @@
 
 Actual dispatcher argv, real ``gateway.run`` owners on one disposable home, loopback model. The first
 owner is stopped (SIGTERM: the runtime Stop of a gateway shutdown/restart) while the card's turn waits
-on the model (or, with ``PROBE_MID_TOOL=1``, while its ``terminal`` tool call runs); a second owner then starts on the same home. The run's submitter (the real
+on the model (or, with ``PROBE_MID_TOOL=1``, while its ``terminal`` tool call runs); the real submitter
+starts the second owner on the same home as it reconnects. The run's submitter (the real
 ``hermes_cli.kanban_worker_client``) must survive the gap and the second owner must continue the same
 turn in the same session: one run, one claim, one worker pid, no reclaim/crash/failure.
 """
@@ -17,7 +18,45 @@ import sys
 import threading
 import time
 
-from local_recovery_probe import daemon, isolate_host_policy
+import psutil
+
+from tests.gateway.fixtures.local_recovery_probe import control, daemon, isolate_host_policy
+from tests.waiting import wait_until
+
+
+def restarted_owner(home, previous):
+    """The real submitter ensures its next owner; never race it with a second launcher."""
+    def ready():
+        try:
+            desc = control(home, 'identify')
+        except (OSError, ValueError):
+            return None
+        if desc.get('state') != 'ready':
+            return None
+        assert desc['pid'] != previous['pid'], desc
+        assert desc['instance_id'] != previous['instance_id'], desc
+        return desc
+
+    desc = wait_until(ready, timeout=120, what='submitter-started replacement owner ready')
+    assert desc is not None
+    return desc
+
+
+def stop_descendants(processes):
+    """Identity-bound teardown, including an owner whose submitter has already exited."""
+    for proc in processes:
+        try:
+            proc.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(processes, timeout=10)
+    for proc in alive:
+        try:
+            proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(alive, timeout=10)
+    assert not alive, alive
 
 CONTINUE_PREFIX = '[Kanban run continued after a gateway restart]'
 
@@ -107,6 +146,7 @@ def main():
                              assignee='default', workspace_kind='dir', workspace_path=str(workspace))
     env = dict(os.environ)
     receipt, clients = {'task_id': tid, 'policy_root': policy_root}, []
+    successor = None
     original_popen = subprocess.Popen
 
     def spawn(*args, **kwargs):
@@ -124,7 +164,8 @@ def main():
     try:
         subprocess.Popen = spawn
         with closing(connect(board='owned')) as conn:
-            with daemon(root, home, env, barrier=False) as (proc, _desc):
+            with daemon(root, home, env, barrier=False) as (proc, first):
+                assert first['pid'] == proc.pid, first
                 receipt['owner_pids'] = [proc.pid]
                 launched = _wait(lambda: spawned(conn), 60, 'dispatcher claim and spawn')
                 assert [s[0] for s in launched.spawned] == [tid], launched
@@ -143,9 +184,12 @@ def main():
                            gap_worker_pid=mid.worker_pid)
             # The dispatcher ticks during the gap: its stale/dead sweeps must leave the live run alone.
             dispatch.dispatch_once(conn, board='owned', max_spawn=0)
-            with daemon(root, home, env, barrier=False) as (proc, _desc):
-                receipt['owner_pids'].append(proc.pid)
-                _wait(lambda: clients[0].poll() is not None, 300, 'worker exit after continuation')
+            # connect_gateway ensures an owner during reconnect. A competing Popen either loses
+            # startup or appears ready via that owner's socket while recording the wrong PID.
+            second = restarted_owner(home, first)
+            successor = psutil.Process(second['pid'])
+            receipt['owner_pids'].append(successor.pid)
+            _wait(lambda: clients[0].poll() is not None, 300, 'worker exit after continuation')
             dispatch.reap_worker_zombies()
             receipt['client_exit'] = list(dispatch._classify_worker_exit(clients[0].pid) or ())
             dispatch._recent_worker_exits.clear()
@@ -166,10 +210,16 @@ def main():
     finally:
         subprocess.Popen = original_popen
         peer.release.set()
+        # Capture still-starting descendants before killing the submitter. Stop it first so it
+        # cannot start another owner during cleanup; retain an adopted owner after reparenting.
+        descendants = psutil.Process().children(recursive=True)
+        if successor is not None and successor not in descendants:
+            descendants.append(successor)
         for child in clients:
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=10)
+        stop_descendants(descendants)
         peer.shutdown()
         peer.server_close()
         (home / 'model-requests.json').write_text(json.dumps(peer.requests, indent=2), encoding='utf-8')
