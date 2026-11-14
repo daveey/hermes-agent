@@ -255,7 +255,7 @@ def test_awaited_review_fixture_holds_without_the_review(clock, monkeypatch):
 
 
 @pytest.mark.parametrize("metadata", [
-    {"verdict": "request_changes", "reviewed_sha": HEAD, "reviewed_pr": URL},
+    {"verdict": "request_changes", "reviewed_sha": "b" * 40, "reviewed_pr": URL},
     {"verdict": "approve", "reviewed_sha": "b" * 40, "reviewed_pr": URL},
     {"verdict": "approve", "reviewed_sha": HEAD, "reviewed_pr": OTHER},
     {"verdict": "approve", "reviewed_sha": HEAD},
@@ -343,6 +343,9 @@ def test_awaited_review_changes_are_not_outvoted_by_another_awaited_approval(clo
             payload["awaiting"] = {"kind": "card", "ref": second}
             conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), row["id"]))
         assert rev != second
+        # This resumes repair, not merge: a change request is not an approval.
+        assert prs.active_pr_reason(conn, tid, clock[0] + 10) is None
+        kb.claim_task(conn, tid)
         assert prs.active_pr_reason(conn, tid, clock[0] + 10) == "active_pr"
 
 

@@ -1,4 +1,4 @@
-"""An awaited review that approved the PR's current head resumes its parked owner. [daveey]
+"""An awaited exact-head review resumes its parked owner for landing or repair. [daveey]
 
 A PR owner that parks with ``kanban_schedule``/``kanban_continue`` waiting on a review card
 (its wake-check ``hermes kanban wait-check task <id>``, or ``awaiting`` kind ``card``) is
@@ -12,13 +12,13 @@ One continuation is permitted only when all of these hold:
 * the card's :func:`kanban_pr_same_run_park.latest_parked_run` (its latest executed run,
   ended as the assignee's orderly ``scheduled``/``continued`` park) names the awaited card(s);
 * each awaited card is done with a claimed completion that ended at or after the park;
-* none requested changes; together they approve every holding PR by name
+* each approves or requests changes; together they cover every holding PR by name
   (``pr``/``reviewed_pr``) at a full ``reviewed_sha`` equal to that PR's current GitHub head,
   read by ``pr_state``'s own ``gh pr view`` and re-read before it releases (a cached head
   only refuses).
 
-A request-changes verdict, an approval of another head or PR, an unknown head (gh failure),
-or a crash/reclaim after the park keeps the hold. It never authorizes a merge.
+A change request resumes repair, not approval. Another head or PR, an unknown head
+(gh failure), or a crash/reclaim after the park keeps the hold. It never authorizes a merge.
 """
 from __future__ import annotations
 
@@ -81,6 +81,10 @@ def _park(conn: sqlite3.Connection, task_id: str):
     run = latest_parked_run(conn, task_id)
     if run is None:
         return None
+    # Use event FKs (sync remaps them by stable run UID), never a JSON/local run id.
+    if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='claimed'",
+                    (task_id, run["id"])).fetchone() is None:
+        return None
     event = conn.execute(
         "SELECT payload, created_at FROM task_events WHERE task_id = ? AND run_id = ? AND kind = ? "
         "ORDER BY id DESC LIMIT 1", (task_id, run["id"], run["outcome"])).fetchone()
@@ -90,8 +94,8 @@ def _park(conn: sqlite3.Connection, task_id: str):
     return run, kb._json_dict(event["payload"]), parked_at
 
 
-def _approved_at_head(conn, card: str, parked_at: int, run_id: int, urls: set[str]) -> Optional[set[str]]:
-    """PRs ``card`` approved at their current head; None when it is unfinished or requested changes."""
+def _reviewed_at_head(conn, card: str, parked_at: int, run_id: int, urls: set[str]) -> Optional[set[str]]:
+    """PRs reviewed at their current head; None without a completed exact-head verdict."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_dependency_review as review
 
@@ -99,19 +103,18 @@ def _approved_at_head(conn, card: str, parked_at: int, run_id: int, urls: set[st
     if row is None:
         return None  # an awaited card still open (or finished before the park) keeps the hold
     data = kb._json_dict(row["metadata"])
-    if review._requests_changes(row, data):
-        return None
     verdict = data.get("verdict")
     sha = data.get("reviewed_sha")
-    if (not isinstance(verdict, str) or verdict.strip().lower() not in review._APPROVALS
-            or not isinstance(sha, str)):
-        return set()
+    approval = isinstance(verdict, str) and verdict.strip().lower() in review._APPROVALS
+    if (not (approval or review._requests_changes(row, data))
+            or not isinstance(sha, str) or not review._SHA.fullmatch(sha)):
+        return None  # every awaited review must supply a verdict at a full exact head
     named = review._named_prs(data, urls) or set()  # must name the PR: no checkpoint binds scope
     return {u for u in named if _at_head(u, sha.lower())}  # pr_head is a full 40-hex sha or None
 
 
 def resumes_awaited_review(conn: sqlite3.Connection, task_id: str, pr_urls: Iterable[str]) -> bool:
-    """One continuation of a timed park whose awaited review approved every holding PR at head."""
+    """One continuation of a timed park whose awaited reviews cover every holding PR at head."""
     from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
 
     urls = {norm_pr(u) for u in pr_urls}
@@ -123,8 +126,8 @@ def resumes_awaited_review(conn: sqlite3.Connection, task_id: str, pr_urls: Iter
     for card in awaited_cards(payload):
         if card == task_id:
             continue
-        approved = _approved_at_head(conn, card, parked_at, run["id"], urls)
-        if approved is None:
-            return False  # an open awaited card or a change request is never outvoted by a sibling
-        covered |= approved
+        reviewed = _reviewed_at_head(conn, card, parked_at, run["id"], urls)
+        if not reviewed:
+            return False  # unfinished, unbound or stale reviews cannot be outvoted by a sibling
+        covered |= reviewed
     return urls.issubset(covered)
