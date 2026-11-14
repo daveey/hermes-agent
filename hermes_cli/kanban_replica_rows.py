@@ -29,7 +29,7 @@ _COLUMNS = "gw, key, data, updated_at, {version}, seq, octet_length(data)"
 # every row was a 256 MB string (UCS-4) plus its decode, a ~400 MB peak per full read on the mini.
 _PAGE = 1000
 _PAGE_BYTES = 2 << 20
-_PAGE_SQL = (f"SELECT json_group_array(json_array({_COLUMNS})), max(rowid) FROM (SELECT rowid, * FROM replica"
+_PAGE_SQL = (f"SELECT CAST(json_group_array(json_array({_COLUMNS})) AS BLOB), max(rowid) FROM (SELECT rowid, * FROM replica"
              " WHERE coll = 'tasks' AND rowid > ? {where} ORDER BY rowid LIMIT ?)")
 _FULL_SQL = _PAGE_SQL.format(version="{version}", where="")
 _DELTA_SQL = _PAGE_SQL.format(version="{version}", where="AND seq > ?")
@@ -55,9 +55,18 @@ class Rows:
     base_gen: int | None = None  # the view ``changed``/``removed`` are relative to (None: a full read)
     changed: frozenset = field(default_factory=frozenset)
     removed: frozenset = field(default_factory=frozenset)
+    bystanders: dict = field(default_factory=dict)
+    relevant: dict = field(default_factory=dict)
+    me: str | None = None
 
     def rows(self) -> list[tuple]:
-        """Every row as ``_read_remote_links`` reads it, ``(gw, key, data, updated_at, version)``, in key order."""
+        """Raw rows for unfiltered views; filtered payloads exist only in the read snapshot.
+
+        Use ``SnapshotRows.rows()`` instead of ``consume()`` inside that snapshot when
+        raw payloads are required. Consumed scalar views deliberately cannot rehydrate.
+        """
+        if self.me is not None:
+            raise RuntimeError('raw rows require the unconsumed replica snapshot')
         by_key = self.by_key
         return [_unpacked(by_key[k]) for k in sorted(by_key, key=_sort_key)]
 
@@ -110,12 +119,18 @@ def page_rows(probe) -> int:
 
 def _paged(conn: sqlite3.Connection, sql: str, probe, args: tuple = ()):
     """Every row ``sql`` (``_FULL_SQL``/``_DELTA_SQL``) selects, one page decoded at a time."""
+    from hermes_cli.kanban_replica_transport import iter_page
+
     size, after = page_rows(probe), -1 << 63
+    encoding = conn.execute('PRAGMA encoding').fetchone()[0]
     while True:
         packed, last = conn.execute(sql, (after, *args, size)).fetchone()
-        rows = _decode(packed) if last is not None else []
-        yield from rows
-        if len(rows) < size:  # a short page is the last: no extra query to find the end
+        count = 0
+        for row in iter_page(packed, encoding):
+            count += 1
+            yield row
+        del packed
+        if count < size:  # a short page is the last: no extra query to find the end
             return
         after = last
 
@@ -187,17 +202,20 @@ def _delta(conn: sqlite3.Connection, base: Rows, probe) -> Rows | None:
                 base.gen, frozenset(changed), frozenset(removed))
 
 
-def read(conn: sqlite3.Connection, path, version_column: str, probe, ident) -> Rows:
+def read(conn: sqlite3.Connection, path, version_column: str, probe, ident, *, me: str | None = None):
     """The task rows in ``conn``'s open read transaction. ``probe`` is ``_REPLICA_PROBE`` read in that same
     transaction, ``ident`` the file identity taken before ``conn`` was opened. The caller reads here only a replica
     whose every task row carries a ``seq`` (``probe[0] == probe[1]``) and that has a ``version`` column."""
+    if me is not None:
+        from hermes_cli.kanban_replica_scalar_rows import SnapshotRows
+        return SnapshotRows(conn, path, version_column, probe, ident, me)
     tag = str(path)
     if ident is None:  # no file identity, so no base to trust
         return _full(conn, tag, None, version_column, probe)
     with _lock:
         base = _views.get(tag)
     view = None
-    if base is not None and base.ident == ident:
+    if base is not None and base.ident == ident and base.me is None and base.version_column == version_column:
         view = _delta(conn, base, probe)
     if view is None:
         view = _full(conn, tag, ident, version_column, probe)

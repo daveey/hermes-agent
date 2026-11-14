@@ -26,7 +26,8 @@ is decoded for that state, which keeps its whole record.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from collections import ChainMap
+from dataclasses import dataclass, field
 from typing import Any
 
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases
@@ -241,6 +242,7 @@ class _State:
     linked: set
     order: dict  # tkey -> its (gw, key) in ``stages``
     closed: set  # released tkeys whose owner verified the completion
+    bystanders: dict = field(default_factory=dict)
 
 
 _MAX_STATES = 16
@@ -249,7 +251,7 @@ _lock = threading.Lock()
 _states: dict[tuple, _State] = {}
 # replica path -> (gw, key) -> the stage of a row that links no session of the origin it was staged for, shared by
 # every state of that replica whose origin it does not link either (``_shareable``). Dropped with the path's last state.
-_shared: dict[str, dict[tuple, _Stage]] = {}
+_shared: dict[str, ChainMap] = {}
 stats = {"projected": 0, "rebuilt": 0, "historical": 0, "considered": 0, "rehydrated": 0, "shared": 0}
 
 
@@ -342,21 +344,33 @@ def _settle_seen(s: _State) -> None:
 
 def _advance(s: _State, view, me: str, origin_profile: str) -> None:
     """Bring ``s`` to ``view``'s rows, re-projecting only rows whose stored text changed."""
+    rows = view.relevant if view.me is not None else view.by_key
+    shared_view = _shared.setdefault(s.tag, ChainMap({}, {}))
+    # Count actual reuse of scalar projections, just as _stage counts reused stages.
+    prior = shared_view.maps[1]
+    stats['shared'] += sum(1 for rk, value in view.bystanders.items()
+                           if s.bystanders.get(rk) != value and prior.get(rk) == value)
+    shared_view.maps[1] = view.bystanders
+    s.bystanders = view.bystanders
     if s.gen is not None and view.base_gen == s.gen:
         removed, candidates = view.removed, view.changed
     else:  # not the view ``s`` was advanced from: compare every row (no decode for unchanged ones)
-        removed = s.stages.keys() - view.by_key.keys()
-        candidates = view.by_key.keys()
-    shared = _shared.setdefault(s.tag, {})
+        removed = s.stages.keys() - rows.keys()
+        candidates = rows.keys()
+    shared = shared_view.maps[0]
     # A new scope has no removed rows of its own. Reconcile the shared cache against the replica itself,
     # or deleted rows survive indefinitely when their older scopes are evicted before reading again.
-    for rk in shared.keys() - view.by_key.keys():
+    for rk in shared.keys() - rows.keys():
         del shared[rk]
     for rk in removed:
         if rk in s.stages:
             _unapply(s, rk)
     for rk in candidates:
-        row = view.by_key[rk]
+        if rk not in rows:
+            if rk in s.stages:
+                _unapply(s, rk)
+            continue
+        row = rows[rk]
         old = s.stages.get(rk)
         if old is not None and (old.row is row or old.row == row):  # (gw, profile) is in the state's key
             continue
@@ -373,23 +387,33 @@ def _rekeyed(old: _State, key: tuple) -> _State:
     for rk, st in old.stages.items():
         _apply(s, rk, st)
     s.gen = old.gen
+    s.bystanders = old.bystanders
     return s
 
 
 def project(view, now: float, me: str, info_rows: list, last_ok: float | None, offline: float | None, *,
             fresh: frozenset, qualified_out: set | None = None, owners_out: set | None = None,
             seen_out: dict | None = None, moved_out: dict | None = None,
-            closed_out: set | None = None) -> list[dict[str, Any]]:
+            closed_out: set | None = None, aggregates_out: dict | None = None) -> list[dict[str, Any]]:
     """``_project_replica(path, now, me, view.rows(), info_rows, last_ok, offline, ...)``, incrementally.
     ``fresh`` is ``fresh_scopes`` of ``info_rows``' heartbeats at ``now``: all the projection reads of them."""
     from hermes_cli.profiles import get_active_profile_name
 
+    from hermes_cli.kanban_replica_scalar_rows import SnapshotRows
+    if isinstance(view, SnapshotRows):
+        view = view.consume()
     origin_profile = get_active_profile_name()
     stale = offline is not None or last_ok is None or now - last_ok > _hub_stale_after()
     key = (me, origin_profile, stale, fresh)
     slot = (view.path, me, origin_profile)
     with _lock:
         s = _states.pop(slot, None)
+        # A profile that is not polled again must not pin a now-bystander payload.
+        # Keep its generation unchanged so its next read still reconciles normally.
+        for other in _states.values():
+            if other.tag == view.path and other.key[0] == me:
+                for rk in other.stages.keys() & view.bystanders.keys():
+                    _unapply(other, rk)
         try:
             if s is None:
                 s = _new_state(view.path, key)
@@ -404,7 +428,8 @@ def project(view, now: float, me: str, info_rows: list, last_ok: float | None, o
             _states.pop(next(iter(_states)))
         _forget_unused_shared()
         return _emit(s, me, origin_profile, last_ok, stale, fresh, qualified_out=qualified_out,
-                     owners_out=owners_out, seen_out=seen_out, moved_out=moved_out, closed_out=closed_out)
+                     owners_out=owners_out, seen_out=seen_out, moved_out=moved_out, closed_out=closed_out,
+                     aggregates_out=aggregates_out)
 
 
 def _forget_unused_shared() -> None:
@@ -420,18 +445,22 @@ def _hub_stale_after() -> float:
 
 
 def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: frozenset, *, qualified_out,
-          owners_out, seen_out, moved_out, closed_out=None) -> list[dict[str, Any]]:
+          owners_out, seen_out, moved_out, closed_out=None, aggregates_out=None) -> list[dict[str, Any]]:
     if s.errors:
         raise s.errors[min(s.errors, key=lambda rk: s.errors[rk].order)].error
     _settle_seen(s)
+    from hermes_cli.kanban_replica_aggregates import snapshot
+    aggregates = snapshot(s)
     if seen_out is not None:
-        seen_out.update(s.seen)
-    if owners_out is not None and not stale:
-        owners_out.update(s.owners)
+        seen_out.update(aggregates['seen'])
+    if owners_out is not None:
+        owners_out.update(aggregates['owners'])
     if closed_out is not None:  # ``s.closed`` is empty on a stale replica (``_apply``)
-        closed_out.update(s.closed)
-    if moved_out is not None and not stale:
-        moved_out.update({'published': dict(s.published_out), 'live_scopes': fresh})
+        closed_out.update(aggregates['closed'])
+    if moved_out is not None:
+        moved_out.update(aggregates['moved'])
+    if aggregates_out is not None:
+        aggregates_out.update(aggregates)
     # Fold only the legacy records and every qualified record sharing their (gw, board, id): exactly the inputs
     # ``_fold_legacy_aliases`` reads for them when given every record.
     sub = {tk: s.tasks[tk] for tk in s.legacy_keys}
@@ -443,6 +472,8 @@ def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: 
     folded = {tk for tk in before if tk not in sub}
     if qualified_out is not None:
         qualified_out.update((gw, board, tid) for gw, _, board, tid in folded)
+    if aggregates_out is not None:
+        aggregates_out['qualified'] = frozenset((gw, board, tid) for gw, _, board, tid in folded)
     changed = {tk for tk, t in sub.items() if t is not before[tk]}
     found: dict[tuple, dict] = {}
     for tk in sorted((s.linked | changed) - folded, key=lambda tk: s.stages[s.order[tk]].order):
@@ -459,7 +490,7 @@ def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: 
         if st.historical is None:
             stats["historical"] += 1
             st.historical = historical_fields(record, tk)
-        owner_seen = s.seen.get(gw) or None
+        owner_seen = aggregates['seen'].get(gw) or None
         synced = min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)
         inputs = (t, sids, tk in s.released, synced, stale, me, origin_profile)
         cached = st.cards

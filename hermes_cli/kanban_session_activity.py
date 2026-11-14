@@ -643,7 +643,11 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                     closed_out.update(memo[10])
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
         if key is not None:  # [daveey] a miss reads and re-projects only the rows whose seq moved
-            view = _replica_rows.read(conn, path, version_column, probe, ident)
+            from hermes_cli.kanban_replica_memo import finish
+            view = _replica_rows.read(conn, path, version_column, probe, ident, me=me)
+            return finish(view, now, me, info_rows, last_ok, offline, key, stale,
+                          qualified_out=qualified_out, owners_out=owners_out,
+                          moved_out=moved_out, closed_out=closed_out)
         else:
             # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
             # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
@@ -656,32 +660,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         return _project_replica(path, now, me, rows, info_rows, last_ok, offline,
                                 qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out,
                                 closed_out=closed_out)
-    qualified: set = set()
-    owners: set = set()
-    moved: dict = {}
-    closed: set = set()
-    seen_at: dict[str, float] = {}
-    cards = _replica_projection.project(view, now, me, info_rows, last_ok, offline, fresh=key[3],
-                                        qualified_out=qualified, owners_out=owners, seen_out=seen_at,
-                                        moved_out=moved, closed_out=closed)
-    # Heartbeat cut-offs are the live verdicts in ``key``, hub staleness the ``stale`` check; a clock step back rereads.
-    memos = dict(_remote_read_memo or {})
-    memos.pop((key[0], me, key[6]), None)
-    memos[(key[0], me, key[6])] = (key, now, None, list(cards),
-                                   frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
-                                   dict(seen_at), dict(moved), frozenset(closed))
-    while len(memos) > _REMOTE_READ_MEMOS:
-        del memos[next(iter(memos))]
-    _remote_read_memo = memos
-    if qualified_out is not None:
-        qualified_out.update(qualified)
-    if owners_out is not None:
-        owners_out.update(owners)
-    if moved_out is not None:
-        moved_out.update(moved)
-    if closed_out is not None:
-        closed_out.update(closed)
-    return cards
+
 
 
 def _replica_synced(seen_at: dict[str, float], last_ok: float | None) -> tuple:
@@ -1107,9 +1086,11 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
         if path is None:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
-        closed: set[tuple[str, str | None, str, str]] = set()
+        from hermes_cli.kanban_replica_aggregates import BorrowedSet, remembered_publications
+        closed = BorrowedSet()
         moved: dict[str, Any] = {}
         cards = _read_remote_links(path, qualified_out=qualified, closed_out=closed, moved_out=moved)
+        remembered_publications(moved, previous)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
             if path is not None:
