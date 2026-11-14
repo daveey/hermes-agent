@@ -61,15 +61,20 @@ def test_parameter_data_and_closed_arithmetic_are_not_sinks(command, tmp_path):
     ("v/1/", "v=1;"), ("v//1/", "v=1;"),
     ("v/#1/", "v=1;"), ("v/%1/", "v=1;"),
     ("a[0]/1/", "a=(1);"),
+    ("v:-a[0] + ", "unset v; a=(0);"),
+    ("v:-(1) + ", "unset v;"),
+    ("v/1/a[0] + ", "v=1; a=(0);"),
+    ("v/1/(1) + ", "v=1;"),
     ("v/${w:-1}/", "v=1; unset w;"),
     ('v/"1"/', "v=1;"),
 ])
-def test_subscript_and_replacement_output_executes(tmp_path, parameter, prelude):
+@pytest.mark.parametrize("shape", ["x=$(( {word} ))", "x=$[{word}]"])
+def test_subscript_and_replacement_output_executes(tmp_path, parameter, prelude, shape):
     marker = tmp_path / "marker"
     big = tmp_path / "big.sh"
     big.write_text("# padding\n" * 130000 + f"printf RAN > {marker}\n", encoding="utf-8")
     value = "$(echo 'b[$(bash " + str(big) + ")]')"
-    command = prelude + "x=$(( ${" + parameter + value + "} ))"
+    command = prelude + shape.replace("{word}", "${" + parameter + value + "}")
     result = subprocess.run(
         ["/bin/bash"], input=command, text=True, encoding="utf-8", capture_output=True,
         timeout=20, check=False, env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
@@ -91,6 +96,10 @@ def test_subscript_and_replacement_output_executes(tmp_path, parameter, prelude)
     'v=1; x=$(( ${v/"unused/$(printf unused)"/0} ))',
     "v=1; x=$(( ${v/unused/1} )); y=$(echo data)",
     "a=(1); x=$(( ${a[0]:-1} )); y=$(echo data)",
+    "unset v; x=${v:-a[0] + $(echo data)}",
+    "unset v; x=${v:-(1) + $(echo data)}",
+    "v=1; x=$[${v:-a[a[0]]}]; y=$(echo data)",
+    "v=1; x=$(( ${v:-(1)} )); y=$(echo data)",
 ])
 def test_replacement_pattern_and_subscript_controls(command, tmp_path):
     result = subprocess.run(

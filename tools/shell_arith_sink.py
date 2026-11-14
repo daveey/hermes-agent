@@ -185,9 +185,8 @@ def _parameter_token(token, start, pos, stack) -> int:
         stack[-1][0] = _PARAM_ARITH
     elif token == "}":
         stack.pop()
-    elif token in (")", "]", "]]") and len(stack) > 1:
-        stack.pop()  # a parameter frame never closes on these: recover outward
-        return start
+    # Parentheses and brackets are literal parameter-word text, not closers
+    # for enclosing arithmetic. Only } ends this lexical frame.
     return pos
 
 
