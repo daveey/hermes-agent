@@ -138,10 +138,16 @@ def env(tmp_path, monkeypatch):
             store.write_text(json.dumps(s))
 
         def remote(self, gw, key, status, title, body=""):
+            import time
             c = sqlite3.connect(hub / "hub.db")
             data = {"id": key.rsplit("/", 1)[-1], "board": key.split("/")[-2], "status": status, "title": title,
                     "body": body, "gateway": gw, "last_comments": []}
             c.execute("INSERT INTO replica VALUES (?, 'tasks', ?, 1, 1, ?, 0)", (gw, key, json.dumps(data)))
+            parts = key.split("/")
+            info = {"gateway": gw, "task_scopes": [{"profile": parts[0] if len(parts) == 3 else "default",
+                    "board": parts[-2], "state": "ok", "observed_at": time.time()}]}
+            c.execute("INSERT OR REPLACE INTO replica VALUES (?, 'gateway', 'info', 1, 1, ?, 0)",
+                      (gw, json.dumps(info)))
             c.commit()
             c.close()
 
@@ -221,8 +227,10 @@ def test_cross_gateway_owner_with_failed_delivery_is_not_appended_not_recorded_a
     env.refuse({"id": "t_remote", "gateway": "macbook", "board": "hermes", "status": "ready", "title": "z"})
     monkeypatch.setenv("FAKE_HUB_MODE", "reject")
     state_path = env.tmp / "state.json"
+    assert fk.main(["--initialize-intake", "--state", str(state_path)]) == 0
 
-    rc = fk.main(["--report", str(_report(env)), "--run-url", RUN, "--hermes", env.hermes, "--state", str(state_path)])
+    rc = fk.main(["--report", str(_report(env)), "--run-url", RUN, "--repo", "o/r", "--branch", "a" * 40,
+                  "--hermes", env.hermes, "--state", str(state_path)])
 
     out = capsys.readouterr().out
     assert rc != 0
@@ -253,8 +261,10 @@ def test_cross_gateway_owner_gets_the_comment_and_it_is_read_back(env, capsys):
     env.remote("macbook", key, "ready", f"Deflake {TEST}", f"Flaky test: `{TEST}`")
     env.refuse({"id": "t_remote", "gateway": "macbook", "board": "hermes", "status": "ready", "title": "z"})
     state_path = env.tmp / "state.json"
+    assert fk.main(["--initialize-intake", "--state", str(state_path)]) == 0
 
-    rc = fk.main(["--report", str(_report(env)), "--run-url", RUN, "--hermes", env.hermes, "--state", str(state_path)])
+    rc = fk.main(["--report", str(_report(env)), "--run-url", RUN, "--repo", "o/r", "--branch", "a" * 40,
+                  "--hermes", env.hermes, "--state", str(state_path)])
 
     out = capsys.readouterr().out
     assert rc == 0, out
@@ -266,7 +276,8 @@ def test_cross_gateway_owner_gets_the_comment_and_it_is_read_back(env, capsys):
     assert not env.kanban()["cards"]                                 # no local duplicate
 
     # The next flake of the same test goes straight to the recorded remote owner, also read back.
-    rc = fk.main(["--report", str(_report(env)), "--run-url", RUN + "0", "--hermes", env.hermes,
+    rc = fk.main(["--report", str(_report(env)), "--run-url", RUN + "0", "--repo", "o/r", "--branch", "a" * 40,
+                  "--hermes", env.hermes,
                   "--state", str(state_path)])
     assert rc == 0 and f"appended @task:hermes@macbook/t_remote {TEST}" in capsys.readouterr().out
     assert len(env.hub_calls()) == 2

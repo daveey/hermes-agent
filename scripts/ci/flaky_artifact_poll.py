@@ -184,8 +184,10 @@ def _artifact_id(artifacts: list[dict[str, Any]], name: str) -> int:
     return live[0]["id"]
 
 
-def _entries(meta: dict[str, Any]) -> list[dict[str, str]]:
-    return [{"test_id": e["test_id"], "retried": e["retried"], "first_attempt_excerpt": ""} for e in meta["flaky"]]
+def _entries(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    provenance = {k: meta[k] for k in ("run_attempt", "source_sha", "slice", "slices")}
+    return [{"test_id": e["test_id"], "retried": e["retried"], "first_attempt_excerpt": "", **provenance}
+            for e in meta["flaky"]]
 
 
 def assess_run(repo: str, run: dict[str, Any], fetch: FetchJson, token: str) -> RunResult:

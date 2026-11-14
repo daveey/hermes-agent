@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+from types import SimpleNamespace
 import pytest
 
 from scripts.ci import flaky_artifact as fa
@@ -46,7 +47,7 @@ def test_api_get_retries_http_read_failures(monkeypatch, kind):
         calls.append(req.get_method())
         return replies.pop(0)
 
-    monkeypatch.setattr(fk.urllib.request, "urlopen", open_response)
+    monkeypatch.setattr(fk.urllib.request, "build_opener", lambda *a: SimpleNamespace(open=open_response))
     monkeypatch.setattr(fk.time, "sleep", lambda _: None)
     assert fk._gh("https://api.github.com/repos/o/r/actions/runs", "tok") == {"jobs": []}
     assert calls == ["GET", "GET"]
@@ -72,12 +73,14 @@ def test_exhausted_http_reads_have_fixed_receipts_and_persist_retryable_state(tm
             return ReadResponse(_read_error(kind))
         return ReadResponse(json.dumps(fake.gh(url, "tok")).encode())
 
-    monkeypatch.setattr(fk.urllib.request, "urlopen", open_response)
+    monkeypatch.setattr(fk.urllib.request, "build_opener", lambda *a: SimpleNamespace(open=open_response))
     monkeypatch.setattr(fk.time, "sleep", lambda _: None)
     monkeypatch.setattr(fk, "CliBoard", lambda *a, **k: FakeBoard())
     monkeypatch.setattr(fk, "HubRelay", lambda *a, **k: None)
     monkeypatch.setenv("GH_TOKEN", "tok")
     path = tmp_path / "state.json"
+    assert fk.main(["--initialize-intake", "--state", str(path)]) == 0
+    capsys.readouterr()
     initial = {"cards": {"tests/old.py": {"card": "t_old", "generation": 0}}, "runs": ["4/1"]}
     fk.save_state(path, initial)
     # A run-listing failure is red at once; an unreadable run waits one poll, then turns red if it persists.

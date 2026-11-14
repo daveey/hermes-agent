@@ -35,6 +35,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+try:
+    from scripts.ci import flaky_http as transport
+except ImportError:  # direct scripts/ci entry point
+    import flaky_http as transport
+
 VERSION = 1
 MEMBER = "flaky-metadata.json"
 ARTIFACT_PREFIX = "flaky-metadata-v1"
@@ -258,12 +263,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _fetch(url: str, headers: dict[str, str], limit: int) -> tuple[int, str | None, bytes]:
     """One HTTP GET without following redirects: ``(status, Location, body up to limit + 1 bytes)``."""
-    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with opener.open(urllib.request.Request(url, headers=headers), timeout=60) as resp:
-            return resp.status, resp.headers.get("Location"), resp.read(limit + 1)
+        return transport.read(urllib.request.Request(url, headers=headers), limit, _NoRedirect())
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.headers.get("Location") if exc.headers else None, b""
+        try:
+            return exc.code, exc.headers.get("Location") if exc.headers else None, b""
+        finally:
+            exc.close()
 
 
 def _signed_url_ok(url: Any) -> bool:
@@ -286,11 +292,13 @@ def download_zip(repo: str, artifact_id: int, token: str) -> bytes:
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "hermes-ci-flaky-cards"}
     try:
+        transport.remaining()
         status, location, _ = _fetch(api_url, headers, 0)
         if status == 410:
             raise ArtifactError("expired")
         if status not in (301, 302, 303, 307, 308) or location is None or not _signed_url_ok(location):
             raise ArtifactError("download_unavailable")
+        transport.remaining()
         status, _, body = _fetch(location, {"User-Agent": "hermes-ci-flaky-cards"}, MAX_ZIP)
     except (OSError, ValueError, http.client.HTTPException):
         raise ArtifactError("download_unavailable") from None

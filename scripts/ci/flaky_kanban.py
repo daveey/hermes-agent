@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
-"""File ONE Kanban deflake card per flaky test id (t_94f2c8ba).
+"""Journal every CI flake and batch unowned tests into one daily intake.
 
 scripts/run_tests_parallel.py retries a failed test once in the same job. A
 test that passes only on that retry keeps the job green but must never pass
 silently: the runner writes it to ``--flaky-report`` JSON, the CI step
 ``flaky_artifact.py`` exports a metadata-only artifact (bounded test identity plus
 run provenance, no failure output; scripts/ci/flaky_artifact.py) and the hub cron
-downloads those artifacts and files one card per test id. ``--annotate`` still prints
-local warning annotations (``FLAKY (passed only on retry)``) for a report.
+downloads those artifacts into a durable metadata journal. ``--annotate`` still
+prints local warning annotations (``FLAKY (passed only on retry)``) for a report.
 
-* first flake of a test id: create a card (idempotency key ``deflake:<id>``)
-* later flakes while that card is open: append a comment to it
-* flake after its card was closed (done/archived): open a new card that links
-  the old one, since the fix did not hold
-* a card anyone filed (any status) already cites the job URL: never open another;
-  comment it if open, else record it and skip. An open card about the test id that
-  this cron did not file gets the comment too (found via ``hermes kanban list``)
-* the core overlap guard refuses the create (create_overlap): a match owns the flake
-  only if it is open and about this test id (its title/body names it, or its key is
-  ``deflake:<id>``). The comment goes to that owner (through ``hermes-hub request``
-  when it lives on another gateway) and is read back before anything logs "appended"
-  or records it in state. No qualifying match: create anyway, ``--distinct-from`` the
-  matches. A delivery that fails or is not confirmed is logged ``FAILED``, its run is
-  left unprocessed (retried on the next poll) and the script exits 1 (t_01a189b2c78e9005)
+* new unowned occurrences: one intake per repo per UTC observation day, keyed
+  ``ci-flaky-intake:<repo>:<day>``, with bounded structured manifest pages
+* existing exact-test/job owners: deduplicated comments, confirmed by readback;
+  batching never reassigns or archives those cards
+* failed/ambiguous delivery: durable retry, never advance delivery acknowledgement
+  on a write receipt alone
+* done intake: supported reopen; archived intake: durable carry to the next day,
+  preserving original occurrence provenance rather than making a same-day replacement
+
+See docs/ci-flaky-intake.md for backlog inspection, recovery and rollback. The
+legacy file_cards helper retains per-test creation for callers without on_unowned;
+production CLI admission uses the journal and daily intake instead.
 
 Modes:
 
@@ -55,8 +53,10 @@ from typing import Any, Callable, Iterable, Protocol
 
 try:
     from scripts.ci import flaky_artifact_poll as fap
+    from scripts.ci.flaky_intake import Journal
 except ImportError:  # run as a script: scripts/ci is sys.path[0]
     import flaky_artifact_poll as fap  # type: ignore[no-redef]
+    from flaky_intake import Journal  # type: ignore[no-redef]
 
 ANNOTATION_TITLE = "FLAKY (passed only on retry)"
 CLOSED = {"done", "archived"}
@@ -145,9 +145,17 @@ class CliBoard:
     def list_cards(self) -> list[dict[str, Any]]:
         return list(json.loads(self._run("list", "--archived", "--json")))
 
+    def reopen(self, card_id: str) -> None:
+        self._run("reopen", card_id)
+
     def comments(self, card_id: str, board: str | None = None) -> list[str]:
         data = self._show(card_id, board) or {}
-        return [str(c.get("body") or "") for c in data.get("comments") or []]
+        comments = data.get("comments")
+        if not isinstance(comments, list) or any(
+            not isinstance(c, dict) or not isinstance(c.get("body"), str) for c in comments
+        ):
+            raise RuntimeError("comments unavailable")
+        return [c["body"] for c in comments]
 
 
 class HubRelay:
@@ -195,6 +203,15 @@ class HubRelay:
                 best = data
                 break
         return best
+
+    def require_fresh(self, gw: str, data: dict[str, Any]) -> None:
+        from hermes_cli.kanban_scope_heartbeat import fresh_scopes, scope_heartbeats
+
+        parts = str(data.get("_route") or "").split("/")
+        rows = self._query("SELECT gw,data FROM replica WHERE coll='gateway' AND key='info'")
+        scopes = fresh_scopes(scope_heartbeats(rows), time.time())
+        if len(parts) != 3 or (gw, parts[0], parts[1]) not in scopes:
+            raise RuntimeError("owner scope freshness unavailable")
 
     def comment(self, gw: str, board: str, card_id: str, text: str, marker: list[str]) -> tuple[bool | None, str]:
         """``(True, how)`` delivered and read back, ``(False, why)`` refused, ``(None, why)`` not confirmed yet."""
@@ -335,7 +352,9 @@ def _is_about(card: dict[str, Any], test_id: str) -> bool:
 
 
 def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, board: Board,
-               state: dict[str, Any], relay: HubRelay | None = None) -> list[str]:
+               state: dict[str, Any], relay: HubRelay | None = None,
+               on_unowned: Callable[[], str] | None = None,
+               owner_notes: dict[str, list[dict[str, str]]] | None = None) -> list[str]:
     """Open or append one card per distinct test id; returns one log line per id.
 
     Before opening a card it checks the whole board, since other workers (CI watch) file
@@ -353,10 +372,14 @@ def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, 
         if test_id in seen:
             continue
         seen.add(test_id)
-        ctx = _Flake(test_id, run_url, branch, entry.get("first_attempt_excerpt") or "", board, state, relay, self_gw)
+        ctx = _Flake(test_id, run_url, branch, entry.get("first_attempt_excerpt") or "", board, state, relay, self_gw,
+                     require_fresh=on_unowned is not None)
         known = state["cards"].get(test_id)
         recorded_generation = (known or {}).get("generation", 0)
         owner = ctx.resolve(known) if known else None
+        if on_unowned is not None and known and (owner is None or owner.get("status") is None):
+            log.append(f"FAILED {test_id}: cached owner unreadable; durable retry pending")
+            continue
         if owner is not None and owner.get("status") not in CLOSED | {None}:
             log.append(_append(ctx, owner, recorded_generation))
             continue
@@ -372,6 +395,19 @@ def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, 
             state["cards"][test_id] = {"card": owner["id"], "generation": recorded_generation}
             log.append(f"skipped {test_id}: {run_url} already cited by {owner['id']} ({owner.get('status')})")
             continue
+        if on_unowned is not None:
+            foreign = _foreign_owner(ctx)
+            if foreign is not None and foreign.get("status") in CLOSED:
+                ctx.record(foreign, recorded_generation)
+                log.append(f"skipped {test_id}: {run_url} already cited by {ctx.ref(foreign)} "
+                           f"({foreign['status']})")
+            elif foreign is not None:
+                log.append(_append(ctx, foreign, recorded_generation, "existing exact owner"))
+            else:
+                if owner_notes is not None:
+                    owner_notes[test_id] = list(ctx.owner_notes)
+                log.append(on_unowned())
+            continue
         generation = recorded_generation + (1 if known else 0)
         key = f"deflake:{test_id}" + (f"#{generation}" if generation else "")
         body = _card_body(entry, run_url, branch, (known or {}).get("card"))
@@ -383,9 +419,12 @@ class _Flake:
     """One flaky test id being filed: where its comment goes and how to tell it already landed."""
 
     def __init__(self, test_id: str, run_url: str, branch: str, excerpt: str, board: Board, state: dict[str, Any],
-                 relay: HubRelay | None, self_gw: str | None) -> None:
+                 relay: HubRelay | None, self_gw: str | None, *, require_fresh: bool = False) -> None:
         self.test_id, self.run_url, self.board, self.state, self.relay, self.self_gw = (
             test_id, run_url, board, state, relay, self_gw)
+        self.require_fresh = require_fresh
+        # Unverifiable prior-owner candidates, named in the intake manifest for triage.
+        self.owner_notes: list[dict[str, str]] = []
         # The test id and job URL lead the comment: a cross-gateway read-back sees only the first 500 chars.
         self.comment = f"Flaked again: `{test_id}` in {run_url} (branch `{branch}`)." + (
             f"\n\n```\n{excerpt[-1500:]}\n```" if excerpt else "")
@@ -404,6 +443,8 @@ class _Flake:
             data = self.board.card(card_id, slug) if slug else self.board.card(card_id)
             return {**data, "id": card_id, "board": slug, "gateway": None} if data else None
         data = self.relay.card(gw, slug or "default", card_id) if self.relay else None
+        if data and self.require_fresh:
+            self.relay.require_fresh(gw, data)
         return {**data, "id": card_id, "board": slug or "default", "gateway": gw} if data else None
 
     def owns(self, card: dict[str, Any]) -> bool:
@@ -440,6 +481,180 @@ class _Flake:
         if card.get("gateway"):
             return f"@task:{card['board']}@{card['gateway']}/{card['id']}"
         return f"@task:{card['board']}/{card['id']}" if card.get("board") else card["id"]
+
+
+def _foreign_owner(ctx: _Flake) -> dict[str, Any] | None:
+    """Enumerate replica owners before batching; retain the exact ownership predicate."""
+    if ctx.relay is None:
+        return None
+    if not ctx.relay.db.is_file():
+        raise RuntimeError("owner inventory unavailable")
+    conn = sqlite3.connect(f"file:{ctx.relay.db}?mode=ro", uri=True, timeout=5)
+    try:
+        refs = conn.execute("SELECT gw,key,data FROM replica WHERE coll='tasks'").fetchall()
+    finally:
+        conn.close()
+    candidates: list[tuple[int, str, dict[str, Any]]] = []
+    uncertain: list[dict[str, str]] = []
+    unavailable: RuntimeError | None = None
+    for gw, key, raw in refs:
+        data = json.loads(raw)
+        if not isinstance(data, dict) or not _is_about(data, ctx.test_id):
+            continue
+        parts = key.split("/")
+        if len(parts) not in (2, 3):
+            continue
+        try:
+            owner = ctx.resolve({"id": parts[-1], "board": parts[-2], "gateway": gw})
+        except RuntimeError as exc:
+            unavailable = exc
+            continue
+        if owner is None or owner.get("status") not in OPEN | CLOSED:
+            unavailable = RuntimeError("owner readback unavailable")
+            continue
+        text = f"{owner.get('title') or ''}\n{owner.get('body') or ''}\n" + "\n".join(
+            str(c.get("body") or "") for c in owner.get("last_comments") or [])
+        cites = _cites_job(text, ctx.run_url)
+        if ctx.owns(owner) or (owner.get("status") in CLOSED and cites):
+            rank = (0 if owner.get("status") in OPEN else 1) if cites else 2
+            candidates.append((rank, ctx.ref(owner), owner))
+        elif owner.get("status") in CLOSED and not _complete_foreign_history(owner):
+            # Clipped history cannot prove this closed card never cited the job.
+            # Holding the row would strand every recurrence of a test whose old
+            # card is closed with >3 comments; the intake names it for triage.
+            uncertain.append({"candidate": ctx.ref(owner), "status": str(owner["status"]),
+                              "reason": "closed_history_incomplete"})
+    # Match local precedence, independent of replica row order. Unknown history
+    # cannot erase a known positive, but it must never become absence evidence.
+    if candidates:
+        return min(candidates, key=lambda candidate: candidate[:2])[2]
+    if unavailable is not None:
+        raise unavailable
+    ctx.owner_notes = sorted(uncertain, key=lambda note: note["candidate"])
+    return None
+
+
+def _complete_foreign_history(owner: dict[str, Any]) -> bool:
+    """Only an untruncated replica can establish absence of a closed-job receipt.
+
+    The producer publishes a total count and last three comments, clips comments
+    at 500 characters, body at 4000 and title at 300. Boundary lengths are
+    deliberately conservative: they cannot prove an untruncated source.
+    """
+    comments, total = owner.get("last_comments"), owner.get("comments")
+    return (type(total) is int and isinstance(comments, list) and total == len(comments)
+            and all(isinstance(c, dict) and isinstance(c.get("body"), str)
+                    and len(c["body"]) < 500 for c in comments)
+            and all(isinstance(owner.get(k), str) and len(owner[k]) < limit
+                    for k, limit in (("body", 4000), ("title", 300))))
+
+
+def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: HubRelay | None,
+                 *, deadline: float | None = None) -> list[str]:
+    log = []
+    journal.recheck_unattempted(repo)
+    # Reserve half the remaining drain window for already-attempted pages. Resolve
+    # and deliver one occurrence at a time: a later slow owner cannot strand a
+    # whole newly resolved prefix behind the deadline on every invocation.
+    now = time.monotonic()
+    resolve_deadline = None if deadline is None else now + max(0, deadline - now) / 2
+    old_pages = {r[0] for r in journal.db.execute(
+        "SELECT id FROM pages WHERE repo=? AND delivered=0", (repo,))}
+    def create(title, body, key, page):
+        return _create_intake(journal, repo, board, state, relay, title, body, key, page, deadline)
+    for row in journal.pending(repo):
+        if resolve_deadline is not None and time.monotonic() >= resolve_deadline:
+            log.append("FAILED intake_budget; durable retry pending")
+            break
+        journal.rotate(repo, "occurrence", str(row["id"]))
+        meta = json.loads(row["metadata"])
+        url = f"https://github.com/{repo}/actions/runs/{meta['run_id']}/job/{meta['job_id']}"
+        notes: dict[str, list[dict[str, str]]] = {}
+        try:
+            lines = file_cards([meta], run_url=url, branch=meta["head_sha"], board=board, state=state,
+                               relay=relay, on_unowned=lambda: "queued", owner_notes=notes)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            log.append(f"FAILED {meta['test_id']}: owner delivery unavailable; durable retry pending")
+            continue
+        if lines == ["queued"]:
+            journal.plan_pages(repo, [row], owner_check={row["id"]: notes.get(meta["test_id"], [])})
+            page_id = journal.db.execute("SELECT page FROM occurrences WHERE id=?", (row["id"],)).fetchone()[0]
+            log += journal.deliver(repo, board, deadline=deadline, create=create, page_ids={page_id})
+        elif lines and not any(line.startswith("FAILED") for line in lines):
+            journal.acknowledge(row["id"], json.dumps(state["cards"][meta["test_id"]], sort_keys=True))
+        log += lines
+    return log + journal.deliver(repo, board, deadline=deadline, create=create, page_ids=old_pages)
+
+
+def _create_intake(journal, repo, board, state, relay, title, body, key, page, deadline):
+    """Reconcile definitive overlap refusals without dissolving ambiguous pages."""
+    distinct = []
+    rows = journal.db.execute("SELECT metadata FROM occurrences WHERE page=?", (page["id"],)).fetchall()
+    contexts = []
+    for row in rows:
+        meta = json.loads(row[0])
+        url = f"https://github.com/{repo}/actions/runs/{meta['run_id']}/job/{meta['job_id']}"
+        contexts.append(_Flake(meta["test_id"], url, meta["head_sha"], "", board, state,
+                               relay, relay.self_gateway() if relay else None, require_fresh=True))
+    for _ in range(3):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RuntimeError("intake_budget")
+        try:
+            with journal.db:
+                journal.db.execute("UPDATE pages SET attempted=1 WHERE id=?", (page["id"],))
+            if not distinct:
+                return board.create(title, body, key)
+            return board.create(title, body, key, distinct_from=distinct,
+                                distinct_reason="Daily intake only admits unowned occurrences; "
+                                "read-back overlap matches do not own any test in this manifest.")
+        except CreateRefused as refused:
+            # A previous lost create response cannot be disproved by this later refusal.
+            if page["attempted"] or not contexts:
+                raise
+            with journal.db:
+                journal.db.execute("UPDATE pages SET attempted=0 WHERE id=?", (page["id"],))
+            fresh = [m for m in refused.matches if m.get("id") and m["id"] not in distinct]
+            if not fresh:
+                raise
+            owners = []
+            for match in fresh:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError("intake_budget")
+                owner = contexts[0].resolve(match)
+                if owner is None or owner.get("status") not in OPEN | CLOSED:
+                    # Definitive refusal, so a later drain may safely recheck this page.
+                    journal.unplan_page(page["id"])
+                    raise RuntimeError("intake overlap owner unreadable") from None
+                owners.append(owner)
+            exact = [(ctx, owner) for ctx in contexts for owner in owners if _overlap_owns(ctx, owner)]
+            if exact:
+                for ctx, owner in exact:
+                    if ctx.owns(owner):
+                        generation = state["cards"].get(ctx.test_id, {}).get("generation", 0)
+                        ctx.record(owner, generation)
+                journal.unplan_page(page["id"])
+                return None
+            distinct.extend(m["id"] for m in fresh)
+    raise RuntimeError("intake overlap still refused")
+
+
+def _overlap_owns(ctx: _Flake, owner: dict[str, Any]) -> bool:
+    if not _is_about(owner, ctx.test_id):
+        return False
+    if ctx.owns(owner):
+        return True
+    text = f"{owner.get('title') or ''}\n{owner.get('body') or ''}"
+    if _cites_job(text, ctx.run_url):
+        return True
+    if owner.get("gateway"):
+        history = "\n".join(str(c.get("body") or "") for c in owner.get("last_comments") or [])
+        if _cites_job(history, ctx.run_url):
+            return True
+        if not _complete_foreign_history(owner):
+            raise RuntimeError("closed foreign owner history unavailable")
+        return False
+    scope = (owner["board"],) if owner.get("board") else ()
+    return _cites_job("\n".join(ctx.board.comments(owner["id"], *scope)), ctx.run_url)
 
 
 def _append(ctx: _Flake, card: dict[str, Any], generation: int, why: str = "") -> str:
@@ -480,9 +695,12 @@ def _create_or_defer(ctx: _Flake, title: str, body: str, key: str, generation: i
 
 def read_report(raw: bytes | str) -> list[dict[str, str]]:
     data = json.loads(raw)
-    if data.get("version") != 1:
-        raise ValueError(f"unknown flaky report version: {data.get('version')!r}")
-    return list(data.get("flaky") or [])
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise ValueError("invalid flaky report")
+    entries = data.get("flaky", [])
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        raise ValueError("invalid flaky report")
+    return entries
 
 
 # --- CI side: report -> annotations --------------------------------------------
@@ -513,12 +731,16 @@ def _gh(url: str, token: str) -> Any:
     attempts = 4 if req.get_method() == "GET" else 1
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return json.loads(resp.read())
+            _, _, body = fap.fa.transport.read(req, 16 * 1024 * 1024, fap.fa._NoRedirect())
+            if len(body) > 16 * 1024 * 1024:
+                raise ValueError("GitHub response exceeds size limit")
+            return json.loads(body)
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
             if (isinstance(exc, urllib.error.HTTPError) and exc.code < 500) or attempt == attempts - 1:
                 raise
-            time.sleep(2 ** attempt)
+            time.sleep(fap.fa.transport.remaining(2 ** attempt))
 
 
 def _completed_runs(api: str, token: str, *, since: float, per_page: int = 100) -> list[dict[str, Any]]:
@@ -565,7 +787,7 @@ def _filing(result: Any, run: dict[str, Any], repo: str, board: Board, state: di
 
 
 def _poll_run(repo: str, token: str, run: dict[str, Any], board: Board, state: dict[str, Any],
-              relay: HubRelay | None) -> tuple[str, list[str], str | None]:
+              relay: HubRelay | None, journal: Journal | None = None) -> tuple[str, list[str], str | None]:
     """``(outcome, log lines, unavailable code)``; outcome is complete|empty|not_applicable|unavailable
     (unavailable = retry later). The code is set when the run's data could not be read (``fap.Unavailable``);
     ``poll_github`` turns it into a RETRY/WAITING/FAILED line by how long it has persisted."""
@@ -577,7 +799,11 @@ def _poll_run(repo: str, token: str, run: dict[str, Any], board: Board, state: d
     if result.kind == "not_applicable":
         state["runs"].append(key)
         return "not_applicable", [], None
-    lines = _filing(result, run, repo, board, state, relay)
+    if journal is not None:
+        journal.record(repo, result.jobs, run)
+        lines = []
+    else:
+        lines = _filing(result, run, repo, board, state, relay)
     if any(line.startswith("FAILED") for line in lines):
         return "unavailable", lines, None
     state["runs"].append(key)
@@ -615,10 +841,11 @@ def _unavailable_line(key: str, code: str, run: dict[str, Any], tracked: dict[st
     return f"WAITING run={key} code={code} polls={polls}"
 
 
+@fap.fa.transport.scoped_poll
 def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
                 lookback_hours: float = 6.0, relay: HubRelay | None = None,
                 deadline: float | None = None, checkpoint: Callable[[], None] | None = None,
-                grace: float = GRACE_SECONDS) -> list[str]:
+                grace: float = GRACE_SECONDS, journal: Journal | None = None) -> list[str]:
     """File cards from the metadata artifacts of recently completed runs not seen before.
 
     ``lookback_hours`` must outlast the slowest workflow plus any cron outage, and stay
@@ -635,6 +862,9 @@ def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
       inside ``grace``.
     * ``FAILED run=<k> code=<c> polls=<n>``: unavailable in this and the previous poll and
       completed at least ``grace`` ago. Only this one turns the cron red.
+    * ``FAILED run=<k> code=<c> polls=<n> retired=unlisted`` (journal only): the same, for a stored
+      run that a successful listing no longer includes. The run is marked complete, so this
+      terminal line appears once; a failed listing never retires anything.
 
     Cancelled/timed-out jobs and incomplete reports remain unavailable and unprocessed, except a
     cancelled run superseded by a newer run of its workflow and branch (``not_applicable``). Every
@@ -652,11 +882,21 @@ def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
     api = f"https://api.github.com/repos/{repo}"
     done = set(state["runs"])
     since = time.time() - lookback_hours * 3600
+    log: list[str] = []
+    listed: set[str] | None = None      # keys GitHub listed this poll; None when the listing failed
     try:
         runs = _completed_runs(api, token, since=since)
+        listed = {f"{r['id']}/{r.get('run_attempt', 1)}" for r in runs}
     except (OSError, ValueError, http.client.HTTPException):
-        return ["FAILED runs_unavailable"]
-    log: list[str] = []
+        if journal is None:
+            return ["FAILED runs_unavailable"]
+        runs = []
+        log.append("FAILED runs_unavailable")
+    if journal is not None:
+        runs = journal.remember_runs(repo, runs)
+        # The durable journal is authoritative. A crash between the JSON checkpoint
+        # and journal completion must not strand an unfinished stored descriptor.
+        done = set()
     counts = {"complete": 0, "empty": 0, "unavailable": 0, "not_applicable": 0}
     now = time.time()
     prior_seq = state.get("poll_seq")
@@ -664,7 +904,8 @@ def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
     prior = state.get("unavailable")
     tracked: dict[str, Any] = prior if isinstance(prior, dict) else {}
     keys = [f"{r['id']}/{r.get('run_attempt', 1)}" for r in runs]
-    fresh = [r for r in sorted(runs, key=lambda r: r["id"]) if f"{r['id']}/{r.get('run_attempt', 1)}" not in done]
+    ordered = runs if journal is not None else sorted(runs, key=lambda r: r["id"])
+    fresh = [r for r in ordered if f"{r['id']}/{r.get('run_attempt', 1)}" not in done]
     # Bounded: only attempts still listed and unprocessed are remembered.
     state["unavailable"] = tracked = {k: tracked[k] for k in keys if k in tracked and k not in done}
     for index, run in enumerate(fresh):
@@ -672,9 +913,22 @@ def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
             log.append(f"FAILED poll_budget deferred={len(fresh) - index}")
             break
         key = f"{run['id']}/{run.get('run_attempt', 1)}"
-        outcome, lines, code = _poll_run(repo, token, run, board, state, relay)
+        if journal is not None:
+            journal.rotate(repo, "run", key)
+        outcome, lines, code = _poll_run(repo, token, run, board, state, relay, journal)
+        if journal is not None and outcome != "unavailable":
+            journal.finish_run(repo, key)
         if code is not None:
-            lines = [_unavailable_line(key, code, run, tracked, seq, now, grace)]
+            if journal is not None:
+                tracked[key] = {"seq": seq - 1, "polls": journal.note_unavailable(repo, key) - 1}
+            line = _unavailable_line(key, code, run, tracked, seq, now, grace)
+            if journal is not None and listed is not None and key not in listed and line.startswith("FAILED"):
+                # A stored run that a successful listing no longer includes, still unavailable past grace,
+                # is retired with one terminal line, as the non-journal path drops it from the listing.
+                line += " retired=unlisted"
+                journal.finish_run(repo, key)
+                tracked.pop(key, None)
+            lines = [line]
         else:
             tracked.pop(key, None)
         log += lines
@@ -699,6 +953,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--from-github", action="store_true")
     ap.add_argument("--repo", default="softmax-universe/daveey-hermes")
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    ap.add_argument("--initialize-intake", action="store_true", help="one-time journal bootstrap; never polls")
+    ap.add_argument("--intake-identity", type=Path, help="independently retained journal identity anchor")
     ap.add_argument("--hermes", default=os.environ.get("HERMES_BIN", "hermes"))
     ap.add_argument("--assignee", default="default")
     ap.add_argument("--hub-cli", default="hermes-hub", help="hermes-hub CLI, for cards on other gateways")
@@ -723,20 +979,57 @@ def main(argv: list[str] | None = None) -> int:
 
     board = CliBoard(args.hermes, args.assignee)
     relay = HubRelay(args.hub_db, args.hub_cli, wait=args.hub_wait)
+    journal = None
+    try:
+        queue = args.state.with_suffix(".intake.sqlite3").resolve()
+        home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        identity = args.intake_identity or (home / "intake-identities" /
+                    (hashlib.sha256(str(queue).encode("utf-8")).hexdigest() + ".uuid"))
+        journal = Journal(queue, identity_path=identity, initialize=args.initialize_intake)
+        if args.initialize_intake:
+            print("Intake initialized; preserve journal and independent identity anchor")
+            return 0
+        return _run_intake(args, board, relay, journal)
+    except (ValueError, OSError, RuntimeError, sqlite3.Error, subprocess.TimeoutExpired):
+        print("FAILED intake unavailable; durable retry pending", file=sys.stderr)
+        return 1
+    finally:
+        if journal is not None:
+            journal.close()
+
+
+def _run_intake(args: argparse.Namespace, board: Board, relay: HubRelay, journal: Journal) -> int:
     state = load_state(args.state)
+    deadline = time.monotonic() + args.budget
     if args.from_github:
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         if not token:
             print("flaky_kanban: GH_TOKEN/GITHUB_TOKEN not set", file=sys.stderr)
             return 2
-        log = poll_github(args.repo, token, board, state, relay=relay,
-                          deadline=time.monotonic() + args.budget, grace=args.grace_minutes * 60,
-                          checkpoint=lambda: save_state(args.state, state))
+        # Persisted delivery gets a bounded first turn even when discovery is slow.
+        # The remaining budget still belongs to CI assessment; network failures
+        # remain red and newly discovered rows can drain on the next invocation.
+        log = drain_intake(journal, args.repo, board, state, relay,
+                           deadline=time.monotonic() + max(0, args.budget) / 2)
+        save_state(args.state, state)
+        log += poll_github(args.repo, token, board, state, relay=relay,
+                          deadline=deadline, grace=args.grace_minutes * 60,
+                          checkpoint=lambda: save_state(args.state, state), journal=journal)
     else:
         entries: list[dict[str, str]] = []
         for path in args.report:
             entries += read_report(Path(path).read_text(encoding="utf-8-sig"))
-        log = file_cards(entries, run_url=args.run_url, branch=args.branch, board=board, state=state, relay=relay)
+        match = _GH_JOB_URL.fullmatch(args.run_url)
+        if match is None or not args.run_url.startswith(f"https://github.com/{args.repo}/"):
+            raise ValueError("intake requires a repository job URL")
+        if not fap.fa._SHA.fullmatch(args.branch) or any(
+            fap.fa.canonical_test_id(e.get("test_id")) != e.get("test_id") for e in entries
+        ):
+            raise ValueError("invalid intake metadata")
+        run_id = int(match.group(1).rsplit("/", 1)[1])
+        journal.record(args.repo, [(int(match.group(2)), entries)], {"id": run_id, "head_sha": args.branch})
+        log = []
+    log += drain_intake(journal, args.repo, board, state, relay, deadline=deadline)
     save_state(args.state, state)
     for line in log:  # silent when nothing flaked (no-agent cron delivers stdout)
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}")

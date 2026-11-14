@@ -2,6 +2,7 @@
 import io
 from email.message import Message
 from unittest.mock import Mock
+from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
@@ -20,7 +21,7 @@ def http_error(code):
 def transport(monkeypatch):
     opening = Mock()
     sleeping = Mock()
-    monkeypatch.setattr(fk.urllib.request, "urlopen", opening)
+    monkeypatch.setattr(fk.urllib.request, "build_opener", lambda *a: SimpleNamespace(open=opening))
     monkeypatch.setattr(fk.time, "sleep", sleeping)
     return opening, sleeping
 
@@ -29,7 +30,9 @@ def transport(monkeypatch):
                                   TimeoutError("timeout"), ConnectionError("reset")])
 def test_get_recovers_after_transient_error(transport, error):
     opening, sleeping = transport
-    opening.side_effect = [error, io.BytesIO(b'{"workflow_runs": []}')]
+    response = io.BytesIO(b'{"workflow_runs": []}')
+    response.status, response.headers = 200, {}
+    opening.side_effect = [error, response]
     assert fk._gh(URL, "test-token") == {"workflow_runs": []}
     assert opening.call_count == 2
     assert [c.args for c in sleeping.call_args_list] == [(1,)]

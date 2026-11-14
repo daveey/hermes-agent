@@ -46,10 +46,15 @@ def _cancelled(gh, run_id=43179810118, branch=BRANCH, workflow=WF):
 
 
 def _main(tmp_path, monkeypatch, capsys):
+    from tests.ci.test_flaky_intake import Board
+
     monkeypatch.setenv("GH_TOKEN", "tok")
-    monkeypatch.setattr(fk, "CliBoard", lambda *a, **k: FakeBoard())
+    board = Board()
+    monkeypatch.setattr(fk, "CliBoard", lambda *a, **k: board)
     monkeypatch.setattr(fk, "HubRelay", lambda *a, **k: None)
     argv = ["--from-github", "--repo", "o/r", "--state", str(tmp_path / "s.json")]
+    assert fk.main(["--initialize-intake", "--state", str(tmp_path / "s.json")]) == 0
+    capsys.readouterr()
 
     def run() -> tuple[int, str]:
         rc = fk.main(argv)
@@ -129,7 +134,12 @@ def test_fresh_missing_artifact_retries_without_failed_and_is_ingested_next_poll
     assert rc == 0 and "RETRY run=5/1 code=missing" in out and "FAILED" not in out
     gh.artifacts[5] = listed
     rc, out = poll()
-    assert rc == 0 and "opened" in out and A in out
+    assert rc == 0 and "intake delivered" in out
+    import json
+    import sqlite3
+    with sqlite3.connect(tmp_path / "s.intake.sqlite3") as conn:
+        rows = conn.execute("SELECT metadata,delivered FROM occurrences").fetchall()
+    assert len(rows) == 1 and json.loads(rows[0][0])["test_id"] == A and rows[0][1] == 1
     state = fk.load_state(tmp_path / "s.json")
     assert state["runs"] == ["5/1"] and state["unavailable"] == {}
 

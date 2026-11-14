@@ -240,6 +240,8 @@ def test_main_exits_one_once_an_unavailable_run_persists(gh, tmp_path, monkeypat
     monkeypatch.setattr(fk, "CliBoard", lambda *a, **k: FakeBoard())
     monkeypatch.setattr(fk, "HubRelay", lambda *a, **k: None)
     argv = ["--from-github", "--repo", "o/r", "--state", str(tmp_path / "s.json")]
+    assert fk.main(["--initialize-intake", "--state", str(tmp_path / "s.json")]) == 0
+    capsys.readouterr()
     assert fk.main(argv) == 0
     out = capsys.readouterr().out
     assert "WAITING run=5/1 code=missing polls=1" in out and "FAILED" not in out and "POLL complete=0" in out
@@ -329,7 +331,8 @@ def test_assess_run_results_are_card_free(gh):
     _two_slices(gh)
     result = fap.assess_run("o/r", gh.runs[0], lambda url: gh.gh(url, "tok"), "tok")
     assert result.kind == "complete" and [j for j, _ in result.jobs] == [9, 10]
-    assert result.jobs[0][1] == [{"test_id": A, "retried": "tests", "first_attempt_excerpt": ""}]
+    assert result.jobs[0][1] == [{"test_id": A, "retried": "tests", "first_attempt_excerpt": "",
+                                  "run_attempt": 1, "source_sha": "b" * 40, "slice": 1, "slices": 2}]
     assert fap.Unavailable("missing").code == "missing"
 
 

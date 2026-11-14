@@ -65,18 +65,21 @@ def test_main_saves_each_finished_run_before_a_kill(gh, monkeypatch, tmp_path):
     monkeypatch.setattr(fa, "download_zip", download)
     monkeypatch.setenv("GH_TOKEN", "tok")
     path = tmp_path / "state.json"
+    assert fk.main(["--initialize-intake", "--state", str(path)]) == 0
     with pytest.raises(Killed):
         fk.main(["--from-github", "--repo", "o/r", "--state", str(path)])
-    assert json.loads(path.read_text())["runs"] == ["5/1"]
+    assert json.loads(path.read_text())["runs"] == ["7/1"]
     monkeypatch.setattr(fa, "download_zip", gh.download)
     gh.downloads.clear()
     assert fk.main(["--from-github", "--repo", "o/r", "--state", str(path)]) == 0
-    assert json.loads(path.read_text())["runs"] == ["5/1", "6/1", "7/1"] and gh.downloads == [101, 102]
+    # FIFO preserves discovery order, then rotates the interrupted run behind queued work.
+    assert json.loads(path.read_text())["runs"] == ["7/1", "5/1", "6/1"] and gh.downloads == [100, 101]
 
 
 def test_main_budget_defers_unstarted_runs_and_fails_the_cron(gh, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GH_TOKEN", "tok")
     path = tmp_path / "state.json"
+    assert fk.main(["--initialize-intake", "--state", str(path)]) == 0
     assert fk.main(["--from-github", "--repo", "o/r", "--state", str(path), "--budget", "0"]) == 1
     out = capsys.readouterr().out
     assert "FAILED poll_budget deferred=3" in out and gh.downloads == []
