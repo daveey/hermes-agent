@@ -316,3 +316,161 @@ def test_payload_json_roundtrip(kanban_home):
         raw = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
                            (tid, ksb.EVENT)).fetchone()[0]
         assert json.loads(raw)["limits"] == {"runs": ksb.DEFAULT_RUNS, "cache_read_tokens": ksb.DEFAULT_CACHE_READ}
+
+
+# --- t_01a1daf392bf6005: a human answer re-authorizes; a card can carry its own limit --------------------
+
+def _blocked_and_answered(conn, tid: str, *, writer_kind: str, relay: bool = False) -> None:
+    """The card blocked needs_input after spending its budget; someone answered and unblocked it."""
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+        kb._append_event(conn, tid, "blocked", {"kind": "needs_input", "reason": "which ring?"})
+    kwargs = {"relayed_human": {"session": "chat-1", "message_id": 7, "at": int(time.time())}} if relay else {}
+    kb.add_comment(conn, tid, "david" if writer_kind == "human" else "default", "The left ring.",
+                   writer_kind=writer_kind, **kwargs)
+    assert kb.unblock_task(conn, tid)
+
+
+@pytest.mark.parametrize("writer_kind, relay", [("human", False), ("agent", True)], ids=["human", "relayed"])
+def test_a_human_answer_opens_a_new_window(kanban_home, writer_kind, relay):
+    """Defect 1: David answered a needs_input card that had spent its budget while blocked; the next tick
+    triaged it with no run, undoing his answer. A human (or verified relayed) answer now opens a new window."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="asked David", assignee="default")
+        _runs(conn, tid, ksb.DEFAULT_RUNS)
+        _blocked_and_answered(conn, tid, writer_kind=writer_kind, relay=relay)
+        assert ksb.spend(conn, tid).runs == 0
+        spawns = Spawns()
+        res = kbd.dispatch_once(conn, spawn_fn=spawns)
+        assert res.no_progress_held == [] and spawns.ids == [tid]
+        assert _events(conn, tid, ksb.EVENT) == []
+
+
+def test_an_agent_comment_and_a_bare_unblock_do_not_reopen_the_budget(kanban_home):
+    """Agent notes are what a loop produces, and a bare unblock carries no actor: neither opens a window."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="loops", assignee="default")
+        _runs(conn, tid, ksb.DEFAULT_RUNS)
+        _blocked_and_answered(conn, tid, writer_kind="agent")
+        kb.add_comment(conn, tid, "default", "legacy note without a kind")
+        spawns = Spawns()
+        assert kbd.dispatch_once(conn, spawn_fn=spawns).no_progress_held == [(tid, "spend_budget:triage")]
+        assert spawns.ids == [] and kb.get_task(conn, tid).status == "triage"
+
+
+def test_per_card_exemption_is_explicit_and_audited(kanban_home):
+    """Defect 2: a standing shepherd card went to triage every 15 runs. An explicit per-card override
+    (0 = no limit) lets it run, and it is recorded as an event naming who set it and why."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Upkeep shepherd", assignee="default")
+        other = kb.create_task(conn, title="Upkeep shepherd", assignee="default")  # same title: not exempt
+        ksb.set_override(conn, tid, runs=0, cache_read_tokens=0, by="david", reason="standing shepherd")
+        for card in (tid, other):
+            _runs(conn, card, ksb.DEFAULT_RUNS * 3, usage={"cache_read_tokens": 2_000_000})
+        spawns = Spawns()
+        res = kbd.dispatch_once(conn, spawn_fn=spawns)
+        assert spawns.ids == [tid] and res.no_progress_held == [(other, "spend_budget:triage")]
+        (event,) = _events(conn, tid, ksb.OVERRIDE_EVENT)
+        assert event.payload == {"runs": 0, "cache_read_tokens": 0, "by": "david", "reason": "standing shepherd"}
+        assert any("standing shepherd" in c.body and "david" in c.body for c in kb.list_comments(conn, tid))
+
+
+def test_per_card_limit_override_newest_wins_and_clears(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="long", assignee="default")
+        _runs(conn, tid, ksb.DEFAULT_RUNS)
+        ksb.set_override(conn, tid, runs=40, by="david", reason="big migration")
+        assert ksb.card_limits(conn, tid, LIMITS) == (40, ksb.DEFAULT_CACHE_READ)  # unset field keeps the board's
+        assert ksb.hold(conn, tid, lim=LIMITS) is None
+        ksb.set_override(conn, tid, by="david", reason="back to normal")  # nothing set = board limits again
+        assert ksb.card_limits(conn, tid, LIMITS) == LIMITS
+        assert ksb.hold(conn, tid, lim=LIMITS) == "triage"
+        (event,) = _events(conn, tid, ksb.EVENT)
+        assert event.payload["limits"] == {"runs": ksb.DEFAULT_RUNS, "cache_read_tokens": ksb.DEFAULT_CACHE_READ}
+        assert event.payload["override"] is False
+
+
+def test_a_lowered_card_limit_trips_and_says_so(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="cheap", assignee="default")
+        ksb.set_override(conn, tid, runs=3, by="david", reason="should be quick")
+        _runs(conn, tid, 3)
+        assert ksb.hold(conn, tid, lim=LIMITS) == "triage"
+        (event,) = _events(conn, tid, ksb.EVENT)
+        assert event.payload["limits"]["runs"] == 3 and event.payload["override"] is True
+        assert "this card's override" in event.payload["reason"]
+
+
+def test_a_card_limit_applies_when_the_board_disables_the_budget(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="cheap", assignee="default")
+        ksb.set_override(conn, tid, runs=3, by="david", reason="should be quick")
+        _runs(conn, tid, 3)
+        assert ksb.hold(conn, tid, lim=ksb.Limits(0, 0)) == "triage"
+
+
+def test_override_set_between_read_and_lock_wins(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        _runs(conn, tid, ksb.DEFAULT_RUNS)
+        real = kb.write_txn
+
+        def racing(c, **kw):
+            monkeypatch.setattr(kb, "write_txn", real)
+            ksb.set_override(c, tid, runs=0, cache_read_tokens=0, by="david", reason="standing")
+            return real(c, **kw)
+
+        monkeypatch.setattr(kb, "write_txn", racing)
+        assert ksb.hold(conn, tid, lim=LIMITS) is None
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+@pytest.mark.parametrize("kw", [
+    {"runs": -1}, {"cache_read_tokens": "lots"}, {"runs": True}, {"reason": " "}, {"by": ""},
+])
+def test_override_refuses_bad_input(kanban_home, kw):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        with pytest.raises(ValueError):
+            ksb.set_override(conn, tid, **{"by": "david", "reason": "why", **kw})
+        assert _events(conn, tid, ksb.OVERRIDE_EVENT) == []
+
+
+def test_override_refuses_an_unknown_card(kanban_home):
+    with kbc.connect_closing() as conn:
+        with pytest.raises(ValueError):
+            ksb.set_override(conn, "t_missing", runs=1, by="david", reason="why")
+
+
+def test_malformed_override_payload_falls_back_to_board_limits(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, ksb.OVERRIDE_EVENT, {"runs": "x", "cache_read_tokens": -4})
+        assert ksb.card_limits(conn, tid, LIMITS) == LIMITS
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, 'nope', ?)",
+                         (tid, ksb.OVERRIDE_EVENT, int(time.time())))
+        assert ksb.card_limits(conn, tid, LIMITS) == LIMITS
+
+
+def test_cli_sets_and_shows_the_card_override(kanban_home):
+    from hermes_cli import kanban as kc
+
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Upkeep shepherd", assignee="default")
+    out = kc.run_slash(f"spend-budget {tid} --exempt --reason 'standing shepherd'")
+    assert "no spend budget" in out, out
+    shown = json.loads(kc.run_slash(f"spend-budget {tid} --json"))
+    assert shown["override"]["runs"] == 0 and shown["override"]["reason"] == "standing shepherd"
+    assert shown["limits"] == {"runs": 0, "cache_read_tokens": 0}
+    assert "--reason" in kc.run_slash(f"spend-budget {tid} --runs 30")  # a change needs a reason
+    kc.run_slash(f"spend-budget {tid} --runs 30 --reason 'bounded after all'")
+    with kbc.connect_closing() as conn:
+        assert ksb.card_limits(conn, tid, LIMITS) == (30, ksb.DEFAULT_CACHE_READ)
+    kc.run_slash(f"spend-budget {tid} --clear --reason done")
+    with kbc.connect_closing() as conn:
+        assert ksb.card_limits(conn, tid, LIMITS) == LIMITS
+        assert len(_events(conn, tid, ksb.OVERRIDE_EVENT)) == 3
+    assert "unknown" in kc.run_slash("spend-budget t_missing --exempt --reason x")
+    assert "--exempt" in kc.run_slash(f"spend-budget {tid} --exempt --runs 3 --reason x")

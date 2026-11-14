@@ -32,6 +32,7 @@ from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
 from hermes_cli import kanban_remote_stop as _remote_stop
 from hermes_cli import kanban_review_contract as _review_contract
+from hermes_cli import kanban_spend_budget_cli as _spend_budget_cli
 from hermes_cli import kanban_worker_shell as _worker_shell
 from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
 from hermes_cli.kanban_cli_flags import (parse_branch_flag as _parse_branch_flag,
@@ -260,7 +261,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",
-    "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests",
+    "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
@@ -1879,7 +1880,7 @@ _HANDLERS = {
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
-    "gc": _cmd_gc, "sync": _cmd_sync, "queue": _cmd_queue,
+    "gc": _cmd_gc, "sync": _cmd_sync, "queue": _cmd_queue, "spend-budget": _spend_budget_cli.command,
 }
 
 

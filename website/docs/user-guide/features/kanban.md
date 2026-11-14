@@ -656,8 +656,14 @@ budget bounds the total instead. Before claiming a `ready` or `review` card the
 dispatcher counts its *spending runs* (closed runs that lasted at least 60 s;
 quota walls, released claims and spawn failures end in seconds and are not
 counted) since the card last handed work on (a run that ended `completed`,
-`review_requested` or `changes_requested`) or was last sent to triage by this
-budget, and sums the tokens those runs reported. Each managed worker books its
+`review_requested` or `changes_requested`), since a human last answered on it,
+or since it was last sent to triage by this budget, and sums the tokens those
+runs reported. A human answer is a comment typed by a person (dashboard, CLI,
+`/kanban`) or a chat's verified relay of the user's reply
+(`kanban_comment(relays_user_message=true)`), the same rule the no-progress
+budget uses: answering a `needs_input` card that spent its budget while
+blocked gets it a run instead of sending it straight to triage. Agent comments
+and a bare `unblock` do not open a new window. Each managed worker books its
 agent's session tokens (`usage`: input, output, cache-read, cache-write, estimated
 cost) on the run's `worker_result` event, on whichever host ran it, so the
 card's home board sees the whole spend.
@@ -671,6 +677,25 @@ to `triage` with a `spend_budget_triaged` event and a comment showing the spend
 auto-decomposer skips cards that already ran, so triage holds the card until
 someone splits, re-scopes, archives or promotes it; a promote starts a new
 budget window.
+
+A card can carry its own limits, so a standing card meant to run indefinitely
+(an upkeep shepherd) is not sent to triage every 15 runs:
+
+```bash
+hermes kanban spend-budget <id>                    # effective limits, override, current spend
+hermes kanban spend-budget <id> --exempt --reason "standing shepherd"
+hermes kanban spend-budget <id> --runs 40 --reason "long migration"
+hermes kanban spend-budget <id> --clear --reason "back to normal"
+```
+
+`--runs` / `--cache-read-tokens` take 0 for no limit; a field not given keeps
+the board's value; `--exempt` sets both to 0. Every change needs `--reason` and
+is recorded as a `spend_budget_set` event (who, why, the limits) plus a card
+comment; the newest one wins. A card over its own limit is triaged with
+`override: true` on the `spend_budget_triaged` event. Exemptions are explicit
+per card, never inferred from a title, and worker and `delegate_task` shells
+are fenced from the verb like every other board write, so a card cannot
+exempt itself.
 
 #### Workers and systemd cgroups
 
