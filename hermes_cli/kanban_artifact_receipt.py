@@ -51,6 +51,9 @@ def declared_files(metadata: dict) -> list[str]:
     receipt = metadata.get("completion_receipt")
     if isinstance(receipt, dict):
         for item in receipt.get("items", []):
+            superseded = item.get("superseded_by", "")
+            if isinstance(superseded, str) and superseded.startswith(("/", "~/")):
+                paths.append(superseded)
             for evidence in item.get("evidence", []):
                 ref = evidence.get("ref", "")
                 if isinstance(ref, str) and ref.startswith(("/", "~/")):
@@ -89,6 +92,11 @@ def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: 
         try:
             if not source.is_file():
                 record["warning"] = "File missing or not a regular file on executing machine"
+                continue
+            from gateway.platforms.base import validate_media_delivery_path
+
+            if validate_media_delivery_path(str(source)) is None:
+                record["warning"] = "Artifact denied by delivery policy on executing machine"
                 continue
             size = source.stat().st_size
             record["size"] = size

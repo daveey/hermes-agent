@@ -197,6 +197,11 @@ def preserve_metadata_files(
         if not src.is_file():
             skipped[raw] = "not a regular file"
             continue
+        from gateway.platforms.base import validate_media_delivery_path
+
+        if validate_media_delivery_path(str(src)) is None:
+            skipped[raw] = "denied by delivery policy"
+            continue
         size = src.stat().st_size
         if total + size > budget:
             skipped[raw] = (

@@ -232,7 +232,7 @@ class GatewayKanbanWatchersMixin:
         """Undo a claimed notification cursor after send failure."""
         self._kanban_sub_op(board, "rewind_notify_cursor", sub, claimed_cursor=claimed_cursor, old_cursor=old_cursor)
 
-    async def _deliver_kanban_artifacts(self, *, adapter, chat_id: str, metadata: dict, event_payload: Optional[dict], task) -> None:
+    async def _deliver_kanban_artifacts(self, *, adapter, chat_id: str, metadata: dict, event_payload: Optional[dict], task, board=None) -> None:
         """Upload artifact files referenced by a completed kanban task.
 
         Sources, in priority order: ``event_payload['artifacts']``,
@@ -256,6 +256,13 @@ class GatewayKanbanWatchersMixin:
         # prose mentions of it must not upload the file a second time.
         staged_names = {os.path.basename(p) for p in raw_paths}
         raw_paths += [p for p in prose_paths if os.path.basename(p) not in staged_names]
+        if isinstance(event_payload, dict) and "artifact_receipt" in event_payload:
+            # New completions have explicit custody. Never fall back to prose or
+            # writer-local paths, even when blob synchronization is still pending.
+            from hermes_cli.kanban_artifact_delivery import delivery_paths
+
+            records = event_payload["artifact_receipt"]
+            raw_paths = delivery_paths(task.id, records, board) if task is not None and isinstance(records, list) else []
         candidates: list[str] = []
         for path in raw_paths:
             expanded = os.path.expanduser(path) if path else ""
