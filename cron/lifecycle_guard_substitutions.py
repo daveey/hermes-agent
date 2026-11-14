@@ -131,6 +131,23 @@ def _backtick_end(text: str, start: int) -> int:
     return len(text)
 
 
+# Recognize active continuations only at an expansion opener, in its own quote
+# frame. A global newline rewrite would change single quotes and comment ends.
+_PAREN_OPENER = re.compile(r'\$(?:\\\n)*\(')
+_ARITHMETIC_PAREN = re.compile(r'(?:\\\n)*\(')
+
+
+def _opener_end(text: str, start: int) -> int:
+    match = _PAREN_OPENER.match(text, start) if text[start:start + 1] == '$' else None
+    return match.end() if match else 0
+
+
+def _arithmetic_start(text: str, start: int) -> int:
+    end = _opener_end(text, start)
+    match = _ARITHMETIC_PAREN.match(text, end) if end else None
+    return match.end() if match else 0
+
+
 _HEREDOC_OPERATOR = re.compile(r"<<(-?)[ \t]*((?:'[^']*'|\"[^\"]*\"|\\.|[^\s;&|()<>])+)")
 _COMMAND_KEYWORDS = frozenset({'then', 'do', 'else', 'elif', 'if', 'while', 'until', '!'})
 
@@ -140,7 +157,7 @@ class _ParenScan:
 
     def __init__(self, text: str, start: int, nesting: int) -> None:
         self.text, self.start, self.nesting = text, start, nesting
-        self.index, self.depth = start + 2, 1
+        self.index, self.depth = _opener_end(text, start), 1
         self.quote = ''
         self.command_position = True
         # (phase, parenthesis depth); phases: subject, in, pattern-start, pattern, body.
@@ -152,7 +169,7 @@ class _ParenScan:
 
     def step_heredoc_operator(self) -> bool:
         text, index = self.text, self.index
-        if (self.quote or text.startswith('$((', self.start)
+        if (self.quote or _arithmetic_start(text, self.start)
                 or not text.startswith('<<', index) or text.startswith('<<<', index)):
             return False
         # A delimiter is a shell word, not executable expansion syntax. Queue
@@ -214,7 +231,7 @@ class _ParenScan:
             self.index += 2
             self.command_position = False
             return True
-        if self.quote not in {"'", "$'"} and text.startswith('$(', index):
+        if self.quote not in {"'", "$'"} and _opener_end(text, index):
             self.index = _paren_end(text, index, self.nesting + 1)
             self.command_position = False
             return True
@@ -357,11 +374,13 @@ def separate_substitutions(text: str, *, _nesting: int = 0,
             out.append("$'")
             index += 2
             continue
-        if quote not in {"'", "$'"} and (text.startswith('$(', index) or ch == '`'):
+        if quote not in {"'", "$'"} and (_opener_end(text, index) or ch == '`'):
             backtick = ch == '`'
             end = _backtick_end(text, index) if backtick else _paren_end(text, index)
-            arithmetic = text.startswith('$((', index) and text[index:end].endswith('))')
-            lead = 1 if backtick else (3 if arithmetic else 2)
+            arithmetic_start = 0 if backtick else _arithmetic_start(text, index)
+            arithmetic = bool(arithmetic_start) and text[index:end].endswith('))')
+            lead = 1 if backtick else (
+                (arithmetic_start if arithmetic else _opener_end(text, index)) - index)
             tail = 1 if backtick else (2 if arithmetic else 1)
             closed = text[index:end].endswith('`' if backtick else ')' * tail)
             body = text[index + lead:end - tail if closed else end]

@@ -29,6 +29,32 @@ def test_nested_quote_comment_boundary(tmp_path, body, wrapper, script, dangerou
     assert scan_gateway_lifecycle(command, cwd=str(tmp_path))[0] is dangerous
 
 
+@pytest.mark.parametrize('opener', ['$\\\n(', '$\\\n\\\n('])
+@pytest.mark.parametrize('wrapper', ['echo "OPENERBODY)"', 'echo "$(echo "OPENERBODY)")"'])
+@pytest.mark.parametrize('body', [
+    'echo " # "; bash ./r.sh',
+    'bash 2>$(echo /dev/null) < ./r.sh',
+])
+@pytest.mark.parametrize('dangerous', [True, False])
+def test_continued_substitution_openers(tmp_path, opener, wrapper, body, dangerous):
+    _tree(tmp_path)
+    if not dangerous:
+        body = body.replace('bash', 'python3').replace('./r.sh', './clean.py')
+    command = wrapper.replace('OPENER', opener).replace('BODY', body)
+    assert _bash_runs(tmp_path, command) is dangerous
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path))[0] is dangerous
+
+
+@pytest.mark.parametrize('opener', ['$\\\n((', '$(\\\n(', '$\\\n(\\\n('])
+@pytest.mark.parametrize('dangerous', [True, False])
+def test_continued_arithmetic_opener(tmp_path, opener, dangerous):
+    _tree(tmp_path)
+    script = 'bash ./r.sh' if dangerous else 'python3 ./clean.py'
+    command = 'echo "' + opener + '$( ' + script + '; echo 1) + 1))"'
+    assert _bash_runs(tmp_path, command) is dangerous
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path))[0] is dangerous
+
+
 def test_separation_precedes_flat_comment_stripping():
     command = 'echo "$(echo " # "; bash ./r.sh)"'
     assert any('./r.sh' in words for words in _iter_command_token_lists(command))
@@ -38,6 +64,9 @@ def test_separation_precedes_flat_comment_stripping():
     '# $(bash ./r.sh)\npython3 ./clean.py',
     'echo "$(echo ok # bash ./r.sh\n)"',
     "echo '$(echo \" # \"; bash ./r.sh)'",
+    "echo '$\\\n(bash ./r.sh)'",
+    'echo "\\$\\\n(bash ./r.sh)"',
+    '# $\\\n(echo ignored)\npython3 ./clean.py',
 ])
 def test_inert_comment_and_single_quote_controls(tmp_path, command):
     _tree(tmp_path)
