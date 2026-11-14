@@ -1,5 +1,6 @@
 """Recoverable subscription capacity refusals without entering legacy paid fallback."""
 from agent.model_routing import ModelRoutingError
+from agent.credential_pool_disabled import enabled_entries
 
 
 class SubscriptionQuotaUnavailable(ModelRoutingError):
@@ -55,7 +56,7 @@ def auth_churned(pool, model):
         return False
     now = time.time()
     return any(entry.auth_type == "oauth" and entry.last_status != STATUS_DEAD and auth_benched(entry, model, now)
-               for entry in pool.entries())
+               for entry in enabled_entries(pool.provider, pool.entries()))
 
 
 def _quota_scan(pool, model):
@@ -70,7 +71,9 @@ def _quota_scan(pool, model):
     if pool is None:
         return False, []
     now = time.time()
-    entries = [entry for entry in pool.entries() if entry.auth_type == "oauth" and entry.last_status != STATUS_DEAD]
+    # Disabled rows are neither usable capacity nor evidence of a quota/auth wall.
+    entries = [entry for entry in enabled_entries(pool.provider, pool.entries())
+               if entry.auth_type == "oauth" and entry.last_status != STATUS_DEAD]
     waits, unproven = [], False
     for entry in entries:
         account = _exhausted_until(entry, sole_credential=len(entries) <= 1)
