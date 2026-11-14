@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -181,6 +182,46 @@ def test_held_pool_names_the_reset_and_repeats_no_event(paced_board, monkeypatch
         events = [e.payload for e in kb.list_events(conn, tid) if e.kind == pd.EVENT_KIND]
     assert len(events) == 1 and events[0]["providers"][0]["state"] == lp.HELD
     assert abs(result.clock_held[tid][1] - (time.time() + 9 * HOUR)) < 120
+
+
+@pytest.mark.parametrize("persisted", [True, False], ids=["shared-state", "memory-only"])
+def test_dispatch_reuses_usage_until_read_interval_expires(paced_board, monkeypatch, persisted):
+    monkeypatch.setenv("HOME", str(paced_board.parent))
+    monkeypatch.setattr(pd, "_CLASS_CACHE", {})
+    monkeypatch.setattr(pd, "_WARNED", {})
+    interval = 60
+    _write_cfg(paced_board, llm_pacing={"enabled": True, "read_interval_seconds": interval})
+    assert pd.load_config().read_interval == interval
+    start = time.time()
+    clock = SimpleNamespace(now=start)
+    monkeypatch.setattr(pd, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.now))
+    path = paced_board / ("shared" if persisted else "unavailable") / "llm_pacing.json"
+    if persisted:
+        path.parent.mkdir()
+    # A failed shared-state save must not defeat the in-process read budget.
+    monkeypatch.setattr(pd, "state_path", lambda: path)
+    reads = []
+
+    def read(provider, now):
+        reads.append((provider, now))
+        used = 90 if len(reads) == 1 else 5
+        return [_r("account", lp.SEVEN_DAY, used, 6 * DAY, now)]
+
+    monkeypatch.setattr(pd, "read_pool", read)
+    with kbc.connect() as conn:
+        tid = _opus_card(conn)
+        for offset in (0, 1, interval - 1):
+            clock.now = start + offset
+            seen, result = _dispatch(conn)
+            assert reads == [("anthropic", start)]
+            assert seen == []
+            assert (tid, lp.GUARD_REASON) in result.respawn_guarded
+        assert path.exists() is persisted
+        # Expiry is measured from the producer read, not the latest cache hit.
+        clock.now = start + interval
+        seen, _ = _dispatch(conn)
+        assert reads == [("anthropic", start), ("anthropic", start + interval)]
+        assert seen == [tid]
 
 
 def test_governor_off_is_todays_behaviour(paced_board, monkeypatch):
