@@ -332,7 +332,9 @@ def test_pytest_never_registers_in_the_real_account_inventory(monkeypatch, tmp_p
     """monkeypatch.undo() drops conftest's policy_root isolation; register must still refuse."""
     monkeypatch.setattr(hermes_constants, '_account_home', lambda: tmp_path)
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path / '.hermes')
-    conn = sqlite3.connect(tmp_path / 'board.db')
+    board = tmp_path / '.hermes/profiles/production/kanban.db'
+    board.parent.mkdir(parents=True)
+    conn = sqlite3.connect(board)
     try:
         with pytest.raises(RuntimeError, match='real account worker inventory'):
             inventory.register(conn)
@@ -353,7 +355,7 @@ def test_pytest_never_registers_in_the_real_account_inventory(monkeypatch, tmp_p
         inventory.register(conn)
     finally:
         conn.close()
-    assert inventory.paths() == [(tmp_path / 'board.db').resolve()]
+    assert inventory.paths() == [board.resolve()]
 
 
 def test_stripped_env_child_with_isolation_marker_is_refused(tmp_path):

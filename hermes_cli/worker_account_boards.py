@@ -108,6 +108,29 @@ def _retire_collected(directory: Path) -> None:
             record.unlink(missing_ok=True)
 
 
+def _account_board(path: Path) -> bool:
+    """Only canonical account boards may enter the real host inventory.
+
+    Explicit isolated test policy roots retain their multi-installation fixtures.
+    HOME/HERMES_HOME never authorize a new real-account board location.
+    """
+    from hermes_constants import _account_home
+    root = capacity.policy_root().resolve()
+    if root != (_account_home() / '.hermes').resolve():
+        return True
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root):
+        return False
+    parts = resolved.relative_to(root).parts
+    if len(parts) >= 3 and parts[0] == 'profiles':
+        parts = parts[2:]
+    from hermes_cli import kanban_db as kb
+    return parts == ('kanban.db',) or (
+        len(parts) == 4 and parts[:2] == ('kanban', 'boards')
+        and kb._BOARD_SLUG_RE.fullmatch(parts[2]) is not None
+        and parts[3] == 'kanban.db')
+
+
 def register(conn) -> None:
     """Record *conn*'s board. Caller holds the account admission fence."""
     _refuse_test_registration()
@@ -116,6 +139,8 @@ def register(conn) -> None:
     if not raw:
         raise ValueError('worker admission requires a file-backed board')
     path = Path(raw).resolve(strict=True)
+    if not _account_board(path):
+        return
     # A fresh admission invalidates any interrupted pre-rename idle proof.
     # The caller retains the account fence through the subsequent claim.
     _, intent = retirement.record_paths(path)
@@ -243,6 +268,8 @@ def paths() -> list[Path]:
                 raise ValueError('invalid registered board path')
             if record.stem != hashlib.sha256(raw.encode()).hexdigest():
                 raise ValueError('invalid registered board identity')
+            if not _account_board(Path(raw)):
+                continue
             try:
                 Path(raw).stat()  # disappearance is unknown, including default boards
             except FileNotFoundError:
@@ -250,4 +277,4 @@ def paths() -> list[Path]:
                     raise
                 continue  # read-only: register() retires it under the fence
             found.append(Path(raw))
-    return found
+    return [path for path in found if _account_board(path)]
