@@ -209,9 +209,13 @@ def _index(path: Path) -> tuple[str, dict]:
     return me, index
 
 
-def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple) -> tuple[str, dict[str, Any], dict]:
+def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple,
+                own: bool = False) -> tuple[str, dict[str, Any], dict]:
     """``(me, {sid: [card, ...]}, observed)`` for one chat: the host's published copy when it is of the replica's
-    current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]"""
+    current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]
+
+    On the host's ``own`` replica and ledger a miss is left to a live holder for at most one poll
+    (:func:`kanban_remote_index.defer`): no cards this poll, nothing read or claimed."""
     from tui_gateway import kanban_remote_index as published
     from tui_gateway.kanban_replica_observer import fingerprint
 
@@ -220,8 +224,10 @@ def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple) -> tu
     hit = published.lookup(path, ledger_file, stamp, profile, sids)
     if hit is not None:
         return hit
-    me, index, observed = published.compute(path, ledger, ledger_file, now,
-                                            published.current_key(path, ledger_file, stamp))
+    key = published.current_key(path, ledger_file, stamp)
+    if own and published.defer(path, ledger_file, profile, sids, key):
+        return "", {}, {}
+    me, index, observed = published.compute(path, ledger, ledger_file, now, key)
     return me, {sid: index.get((profile, sid), ()) for sid in sids}, observed
 
 
@@ -676,7 +682,8 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
         if hub_db is None and ledger is None:  # the host's own replica: keep its published copy current
             from tui_gateway.kanban_remote_index import ensure_holder
             ensure_holder("serve")  # once per process; a gateway's own later claim upgrades the role
-        me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids)
+        me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids,
+                                              own=hub_db is None and ledger is None)
         cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
             return []
