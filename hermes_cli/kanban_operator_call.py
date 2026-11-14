@@ -178,8 +178,8 @@ def _db_path(conn: sqlite3.Connection) -> Optional[str]:
 
 @contextmanager
 def _replica(conn: sqlite3.Connection) -> Iterator[Optional[sqlite3.Connection]]:
-    from hermes_cli import kanban_foreign_card as kfc
-    with kfc.open_replica(_db_path(conn)) as rep:
+    from hermes_cli import kanban_replica_reader
+    with kanban_replica_reader.open_replica(_db_path(conn)) as rep:
         yield rep
 
 

@@ -170,7 +170,7 @@ def _replica_finished(conn: sqlite3.Connection) -> Optional[dict[str, tuple[str,
     """``{waiting card: (awaited card, its replica status)}`` for each scheduled park naming a card the replica has
     done/archived; None when there is no readable replica (nothing to judge by)."""
     from hermes_cli import kanban_db_connect as kbc
-    from hermes_cli.kanban_foreign_card import open_replica
+    from hermes_cli.kanban_replica_reader import open_replica
 
     with open_replica(kbc._main_db_file(conn)) as replica:
         if replica is None:
