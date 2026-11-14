@@ -257,8 +257,10 @@ def consumed_hub_cpu():
     return getattr(_consumed, "evidence", None)
 
 
-def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, event_extra=None, gate=None):
-    """CAS to running and publish its run/event. Caller owns the fenced transaction."""
+def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, event_extra=None, gate=None,
+                       expect_assignee=None):
+    """CAS to running and publish its run/event. Caller owns the fenced transaction. With
+    ``expect_assignee`` the CAS also loses when the card was reassigned since the dispatch gates (#147534)."""
     from hermes_cli import kanban_db as kb
 
     # Activity belongs to this run, not the previous worker. Seed it atomically
@@ -278,8 +280,10 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
                claim_expires = ?, started_at = COALESCE(started_at, ?),
                last_heartbeat_at = ?
          WHERE id = ? AND claim_lock IS NULL AND (status = ? OR (? AND status = 'running' AND current_run_id = ?))
+           AND (? IS NULL OR assignee = ?)
         """,
-        (lock, expires, now, now, task_id, source_status, echo is not None, echo.run_id if echo else None),
+        (lock, expires, now, now, task_id, source_status, echo is not None, echo.run_id if echo else None,
+         expect_assignee, expect_assignee),
     )
     if cur.rowcount != 1:
         return None

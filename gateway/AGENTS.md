@@ -93,9 +93,8 @@ replaced by #92091's `pause-for-update`. Do NOT "fix" gateway-dies-with-app by r
 gateway under the backend, and do NOT "fix" update locks by widening the tree-kill. Gateways stamp
 `code_sha`/`code_version` into `gateway_state.json` (`status.py`) so the updater can verify a fleet.
 
-**Control socket peer check:** the home's "no symlinked ancestor" verdict is cached 30 s (passes
-only), so an ancestor swapped for a symlink is admitted for up to 30 s. Details: developer-guide
-`gateway-internals.md`, "Home check and its cache".
+**Control socket peer check:** a passing "no symlinked ancestor" verdict is cached 30 s
+(`gateway-internals.md`, "Home check and its cache").
 
 ## Profile scope (adapters, turns, and everything between turns)
 
@@ -135,7 +134,7 @@ only), so an ancestor swapped for a symlink is admitted for up to 30 s. Details:
   | shared credential → satellite (`profile_routes`) | routed | receiving adapter | receiving adapter (`_is_shared_bot_satellite` after restart) |
   | shared bot → profile that owns its own bot | routed | receiving adapter | receiving adapter (conversation continuity; #70625's "routed bot" reading was not adopted) |
   | secondary-owned bot → `default` (`bot_profile`) | default (`agent:main`) | receiving adapter | receiving adapter |
-  | restored / hand-built, no live provenance | stored `source.profile` | **`None`** | unique owner of `(platform, runtime)`; a disconnected secondary → `None`, never the default bot |
+  | restored / hand-built, no live provenance | stored `source.profile` | **`None`** | unique owner of `(platform, runtime)`, else the Relay that `fronts_platform` (`_fronting_relay`); a disconnected secondary → `None`, never the default bot |
 - **Identity survives the process.** `SessionEntry.transport_profile` (routing index +
   `sessions.transport_profile`, nullable, reconciled by `SCHEMA_SQL`) persists the receiving bot
   next to the key namespace; the namespace says where a lane RUNS, the column says which bot may
@@ -143,7 +142,8 @@ only), so an ancestor swapped for a symlink is admitted for up to 30 s. Details:
   plugin injection, background-process events) reads `entry.origin` through
   `authz_mixin.py::_restored_source`, which re-pins a `RoutingIdentity(transport=None)` via
   `session_identity.restore_identity`; `_delivery_adapter_for` then delivers through that bot's
-  adapter or nothing (never the default bot by heuristic). Rows without the column (pre-PR-5)
+  adapter or nothing (never the default bot by heuristic). Restored relay lanes use `_fronting_relay`;
+  revival paths warm egress with `delivery.prime_revived_egress`. Rows without the column (pre-PR-5)
   keep the `_is_shared_bot_satellite` fallback. Deferred callbacks capture the identity/home at
   command time (`/model` picker); `_run_in_executor_with_context` carries the scope over thread
   hops. Relay: `_with_scope` echoes the routed `profile` on every outbound frame and `follow_up`

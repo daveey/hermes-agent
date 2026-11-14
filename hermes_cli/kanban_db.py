@@ -2026,13 +2026,11 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None, admission_check=None,
+    claimer: Optional[str] = None, admission_check=None, expect_assignee: Optional[str] = None,
 ) -> Optional[Task]:
-    """Atomically transition ``ready -> running``.
-
-    Returns the claimed ``Task``; ``None`` if already claimed, not ``ready``, or the write-free
-    ``admission_check()`` (run in the claim txn before any write) refused it. [daveey]
-    """
+    """Atomic ``ready -> running``: the claimed ``Task``; ``None`` if already claimed, not ``ready``, no
+    longer ``expect_assignee``'s (#147534), or the write-free ``admission_check()`` (run in the claim txn
+    before any write) refused it. [daveey]"""
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2059,7 +2057,8 @@ def claim_task(
         _reclaim_dangling_run(
             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
         )
-        run_id = claim_and_open_run(conn, task_id, "ready", lock, gate.expires, now, gate=gate)
+        run_id = claim_and_open_run(conn, task_id, "ready", lock, gate.expires, now, gate=gate,
+                                    expect_assignee=expect_assignee)
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
@@ -2069,7 +2068,7 @@ def claim_task(
 
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None, admission_check=None,
+    claimer: Optional[str] = None, admission_check=None, expect_assignee: Optional[str] = None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
@@ -2098,6 +2097,7 @@ def claim_review_task(
             return None
         run_id = claim_and_open_run(
             conn, task_id, "review", lock, gate.expires, now, event_extra={"source_status": "review"}, gate=gate,
+            expect_assignee=expect_assignee,
         )
         if run_id is None:
             return None
