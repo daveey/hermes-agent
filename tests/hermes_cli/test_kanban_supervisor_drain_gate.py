@@ -171,6 +171,39 @@ def test_terminal_request_update_invalidates_without_task_write(executor, board,
     drain.assert_called_once()
 
 
+def test_incoming_failure_preserves_local_result(executor, board, monkeypatch):
+    executor.execute(
+        "INSERT INTO supervisor_requests(requester_task_id,ops_json,dedupe_key,created_at) "
+        "VALUES (?, '[]', 'incoming-error', 0)", (board["requester"],))
+    executor.commit()
+    monkeypatch.setattr(kox, "apply_incoming", Mock(side_effect=RuntimeError("incoming unavailable")))
+    assert sr.dispatcher_drain(executor) == [(1, "rejected")]
+    sr.dispatcher_drain(executor)
+    assert kox.apply_incoming.call_count == 2
+
+
+@pytest.mark.parametrize("kind", ["socket", "process"])
+def test_replay_rejects_swallowed_side_effects(executor, monkeypatch, kind):
+    import runpy
+    import socket
+    import subprocess
+    from pathlib import Path
+
+    def incoming(_conn):
+        if kind == "socket":
+            with socket.socket() as sock:
+                sock.connect(("127.0.0.1", 1))
+        else:
+            from tools.environments.local import build_subprocess_env
+            subprocess.Popen(["never-executed"], env=build_subprocess_env())
+
+    monkeypatch.setattr(kox, "apply_incoming", incoming)
+    script = Path(__file__).resolve().parents[2] / "scripts/kanban_supervisor_replay_bench.py"
+    replay = runpy.run_path(str(script))["replay"]
+    with pytest.raises(AssertionError, match="attempted network or process"):
+        replay(executor, 2)
+
+
 def test_unstubbed_drain_replay(executor, monkeypatch, tmp_path):
     import json
     import runpy
@@ -180,7 +213,13 @@ def test_unstubbed_drain_replay(executor, monkeypatch, tmp_path):
     monkeypatch.setattr(kox, "apply_incoming", _APPLY_INCOMING)
     script = Path(__file__).resolve().parents[2] / "scripts/kanban_supervisor_replay_bench.py"
     replay = runpy.run_path(str(script))["replay"]
+    from hermes_cli import config
+    loads = Mock(return_value={})
+    monkeypatch.setattr(config, "load_config_readonly", loads)
     report = replay(executor, 40)
+    # The old dispatcher loaded config each tick; benchmarking bare drain drops
+    # precisely the policy-read cost this gate removes. Include one warmup each.
+    assert loads.call_count == 43
     (tmp_path / "supervisor-replay.json").write_text(json.dumps(report), encoding="utf-8")
     assert report["ungated"]["executor_upserts"] == 40
     assert report["gated"]["executor_upserts"] == 8

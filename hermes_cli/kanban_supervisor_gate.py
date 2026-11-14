@@ -49,5 +49,8 @@ def dispatch(conn: sqlite3.Connection, board: str | None) -> list:
                         extra=_key, due=_due, skipped={"processed": []})
     # Replica calls, retry holds and label-process completions must not be hidden by
     # a local-board/request gate. They retain their own scanner and watermark.
-    kox.apply_incoming(conn)
+    try:
+        kox.apply_incoming(conn)
+    except Exception:  # health: allow BLE001 -- incoming retries next tick; keep committed local results
+        sr._log.warning("kanban: applying incoming operator calls failed", exc_info=True)
     return result["processed"]

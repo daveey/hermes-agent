@@ -9,6 +9,8 @@ import pytest
 from hermes_cli import kanban_capability_registry as reg
 from hermes_cli import kanban_sweep_gate as gate
 
+_REAL_CONFIG = reg._config
+
 
 @pytest.fixture
 def refresh_state(tmp_path, monkeypatch):
@@ -17,7 +19,7 @@ def refresh_state(tmp_path, monkeypatch):
     path.write_text(json.dumps({"schema": reg.SCHEMA, "refreshed_at": 1000}))
     monkeypatch.setattr(reg, "registry_path", lambda: path)
     config = {"refresh_seconds": 120}
-    load = Mock(side_effect=lambda: dict(config))
+    load = Mock(side_effect=lambda **_kwargs: dict(config))
     monkeypatch.setattr(reg, "_config", load)
     revision = [1]
     monkeypatch.setattr(gate, "config_key", lambda: revision[0])
@@ -92,4 +94,23 @@ def test_clock_rollback_rechecks_record(refresh_state):
     _, _, load, _, _, _ = refresh_state
     assert reg.maybe_refresh_async(now=1050) is False
     assert reg.maybe_refresh_async(now=1000) is False
+    assert load.call_count == 2
+
+
+@pytest.mark.parametrize("old", [{"enabled": False}, {"refresh_seconds": 900}])
+def test_refresh_invalidation_bypasses_real_config_ttl(refresh_state, monkeypatch, old):
+    from hermes_cli import config
+    _, _, _, _, revision, factory = refresh_state
+    monkeypatch.setattr(reg, "_config", _REAL_CONFIG)
+    monkeypatch.setattr(reg, "_config_cache", (0.0, {}))
+    monotonic = Mock(return_value=100.0)
+    monkeypatch.setattr(reg.time, "monotonic", monotonic)
+    load = Mock(return_value={"kanban": {"capabilities": old}})
+    monkeypatch.setattr(config, "load_config_readonly", load)
+    assert reg.maybe_refresh_async(now=1050) is False
+    load.return_value = {"kanban": {"capabilities": {"enabled": True, "refresh_seconds": 60}}}
+    revision[0] += 1
+    monotonic.return_value = 101.0  # still inside the old inner cache's TTL
+    assert reg.maybe_refresh_async(now=1060) is True
+    factory.return_value.start.assert_called_once()
     assert load.call_count == 2

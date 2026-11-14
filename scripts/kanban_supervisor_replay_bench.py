@@ -22,27 +22,52 @@ def _refuse(*_args, **_kwargs):
     raise AssertionError("supervisor replay must not access network or spawn processes")
 
 
+def _ungated_dispatch(conn):
+    """Pre-gate dispatcher composition, including its per-tick policy load."""
+    from hermes_cli import kanban_supervisor_requests as sr
+    from hermes_cli.config import load_config_readonly
+    if sr._non_worker_refusal():
+        raise AssertionError("replay requires an isolated non-worker home")
+    cfg = ((load_config_readonly() or {}).get("kanban") or {}).get("supervisor_requests") or {}
+    if cfg.get("enabled", True) is not False:
+        return sr.drain(conn)
+    return {"processed": []}
+
+
 def replay(conn, ticks: int) -> dict:
     from hermes_cli import kanban_supervisor_requests as sr
     from hermes_cli import kanban_sweep_gate as gate
 
+    forbidden = []
+
+    def refuse(*args, **kwargs):
+        forbidden.append(True)  # production catches exceptions; retain independent evidence
+        _refuse(*args, **kwargs)
+
     gate.reset()
     start = int(time.time())
     result = {}
-    for name, run in (("ungated", sr.drain), ("gated", sr.dispatcher_drain)):
+    for name, run in (("ungated", _ungated_dispatch), ("gated", sr.dispatcher_drain)):
+        with patch.object(socket.socket, "connect", refuse), patch.object(subprocess, "Popen", refuse):
+            run(conn)  # imports/config bootstrap are not steady-state callback CPU
         gate.reset()
         # Reset the executor clock to the beginning of this identical simulated timeline.
         conn.execute("DELETE FROM supervisor_executors")
         conn.commit()
         statements = []
         conn.set_trace_callback(statements.append)
-        cpu = time.thread_time()
-        with patch.object(socket.socket, "connect", _refuse), patch.object(subprocess, "Popen", _refuse):
+        elapsed = 0.0
+        clock = [start]
+        with (patch.object(socket.socket, "connect", refuse),
+              patch.object(subprocess, "Popen", refuse),
+              patch.object(sr.time, "time", lambda: clock[0])):
             for tick in range(ticks):
-                with patch.object(sr.time, "time", return_value=start + 15 * tick):
-                    run(conn)
-        elapsed = time.thread_time() - cpu
+                clock[0] = start + 15 * tick
+                cpu = time.thread_time()
+                run(conn)
+                elapsed += time.thread_time() - cpu
         conn.set_trace_callback(None)
+        assert not forbidden, "supervisor replay attempted network or process side effects"
         result[name] = {
             "ticks": ticks, "cpu_ms_per_tick": 1000 * elapsed / ticks,
             "core_pct_at_15s": 100 * elapsed / (15 * ticks),

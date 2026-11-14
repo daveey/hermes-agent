@@ -96,11 +96,11 @@ def satisfies(held: str, need: str) -> bool:
 _config_cache: tuple[float, dict] = (0.0, {})
 
 
-def _config() -> dict:
+def _config(*, fresh: bool = False) -> dict:
     """``kanban.capabilities`` (cached for CONFIG_TTL seconds: the dispatcher tick reads it)."""
     global _config_cache
     at, cached = _config_cache
-    if time.monotonic() - at < CONFIG_TTL and at:
+    if not fresh and time.monotonic() - at < CONFIG_TTL and at:
         return cached
     try:
         from hermes_cli.config import load_config_readonly
@@ -342,7 +342,9 @@ def maybe_refresh_async(*, now: Optional[float] = None) -> bool:
             if held is not None and held[0] == key and held[1] <= now < held[2]:
                 return False
             _refresh_gate = None
-            cfg = _config()
+            # The outer due gate owns reuse: never stamp a changed signature with
+            # an old TTL-cached policy (disabled could otherwise stick forever).
+            cfg = _config(fresh=True)
             if cfg.get("enabled") is False:
                 _refresh_gate = (key, now, float("inf"))
                 return False
