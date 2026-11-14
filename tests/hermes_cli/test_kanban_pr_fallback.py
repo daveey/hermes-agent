@@ -33,6 +33,11 @@ def evidence(monkeypatch):
                 rows.insert(0, {"id": 7, "app": {"id": 1}, "head_sha": SHA,
                                 "latest_check_runs_count": len(state["runs"])})
             return [{"total_count": len(rows), "check_suites": rows}]
+        if "/actions/jobs/" in endpoint:
+            job = state.get("jobs", {}).get(int(endpoint.rsplit("/", 1)[1]))
+            if job is None:
+                raise gate._GateAuthError("HTTP 404 on " + endpoint)
+            return job
         if "/statuses?" in endpoint:
             return state.get("status_pages", [state["statuses"]])
         if "/pulls/" in endpoint:
@@ -131,10 +136,23 @@ def rerun_pair(first, *, second="success", second_start="2026-11-02T12:30:00Z", 
     return [earlier, later]
 
 
+ACTIONS = 15368
+
+
+def as_actions(evidence, runs, attempts, *, run_id=99):
+    """Make ``runs`` Actions jobs of workflow run ``run_id`` at the given attempts."""
+    for check in runs:
+        check["app"] = {"id": ACTIONS}
+    evidence["jobs"] = {c["id"]: {"run_id": run_id, "run_attempt": a, "head_sha": SHA,
+                                  "check_run_url": f"https://api.github.com/repos/acme/repo/check-runs/{c['id']}"}
+                        for c, a in zip(runs, attempts)}
+    return runs
+
+
 @pytest.mark.parametrize("first", ["failure", "cancelled", "timed_out"])
 def test_merged_fallback_rerun_before_merge_supersedes_failure(evidence, first):
     # hermes-mods #183/#178: a failed job re-run to success before the merge.
-    evidence.update(merged=True, runs=rerun_pair(first))
+    evidence.update(merged=True, runs=as_actions(evidence, rerun_pair(first), [1, 2]))
     receipt = gate.collect_acceptance(URL, None)
     assert receipt["classification"] == "success"
     assert receipt["ok"] is True
@@ -156,7 +174,7 @@ def test_merged_fallback_red_rerun_stays_red(evidence, second, expected):
     {"suite": 8},                              # another workflow suite, not a rerun
 ])
 def test_merged_fallback_unproven_supersession_keeps_failure(evidence, kw):
-    evidence.update(merged=True, runs=rerun_pair("failure", **kw))
+    evidence.update(merged=True, runs=as_actions(evidence, rerun_pair("failure", **kw), [1, 2]))
     receipt = gate.collect_acceptance(URL, None)
     assert receipt["classification"] == "failure"
     assert receipt["ok"] is False
@@ -181,7 +199,7 @@ def test_merged_fallback_rerun_after_merge_keeps_failure(evidence):
 def test_merged_fallback_rerun_finishing_after_merge_is_pending(evidence):
     runs = rerun_pair("failure", second_start="2026-11-02T12:50:00Z")
     runs[1]["completed_at"] = "2026-11-02T13:10:00Z"
-    evidence.update(merged=True, runs=runs)
+    evidence.update(merged=True, runs=as_actions(evidence, runs, [1, 2]))
     assert gate.collect_acceptance(URL, None)["classification"] == "pending"
 
 

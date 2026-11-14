@@ -27,7 +27,7 @@ def check_receipt(check, sha):
             "classification": _classify(check, sha, outcome, is_run), "conclusion": outcome}
 
 
-def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False):
+def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False, attempt_of=None):
     """Latest pre-merge execution per producer, plus every later execution.
 
     App identities stay distinct: an unpinned context must not hide another app's
@@ -82,36 +82,69 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False):
         if key not in latest or order > latest[key][0]:
             latest[key] = (order, check)
     if runs and distinct_suites:
-        return [c for group in latest.values() for c in _unsuperseded(group, start)], post
+        family = {}
+        for check in checks:
+            family.setdefault(key_of(check), []).append(check)
+        return [c for key, group in latest.items()
+                for c in _unsuperseded(group, start, family[key], attempt_of)], post
     return [entry[1] for entry in latest.values()], post
 
 
-def _unsuperseded(group, start):
-    """Drop a same-name, same-suite run only when another started after it ended.
+def _unsuperseded(group, start, family, attempt_of):
+    """Drop a same-name, same-suite run only when a proven rerun of it followed.
 
-    That is a rerun (GitHub re-runs a failed job in the same suite). Overlapping or
-    tied runs can be concurrent sibling jobs, and a run that never completed has no
-    end to start after, so both stay as evidence (fail closed).
+    Chronology alone cannot tell a rerun from a later same-named sibling job in
+    the suite (a max-parallel:1 matrix with a static job name). A rerun is proven
+    only by its Actions identity: the same workflow run at a higher run_attempt,
+    each attempt holding exactly one job of this name (``family`` is every
+    same-key run, pre- and post-merge). Overlapping, tied, never-completed and
+    unprovable runs all stay as evidence (fail closed).
     """
     def ended(check):
         done = check.get("completed_at")
         return timestamp(done) if check.get("status") == "completed" and done else None
 
-    starts = [start(c) for c in group]
+    cache = {}
+
+    def attempt(check):
+        if check["id"] not in cache:
+            cache[check["id"]] = attempt_of(check) if attempt_of else None
+        return cache[check["id"]]
+
+    def attempts_unique():
+        seen = [attempt(c) for c in family]
+        return None not in seen and len(seen) == len(set(seen))
+
     kept = []
     for check in group:
         end = ended(check)
-        if end is None or not any(s > end for s in starts):
-            kept.append(check)
+        later = [c for c in group if end is not None and start(c) > end]
+        mine = attempt(check) if later else None
+        if mine and attempts_unique() and any(
+                (other := attempt(c)) and other[0] == mine[0] and other[1] > mine[1] for c in later):
+            continue
+        kept.append(check)
     return kept
 
 
-def merge_evidence(receipt, pr, repo, runs, statuses, *, distinct_suites=False):
+def job_attempt(job, check):
+    """(workflow run id, run_attempt) of an Actions job, only if it is this check run."""
+    url, run_id, run_attempt = job.get("check_run_url"), job.get("run_id"), job.get("run_attempt")
+    if not (isinstance(url, str) and url.endswith(f"/check-runs/{check['id']}")
+            and job.get("head_sha") == check.get("head_sha")):
+        return None
+    if any(type(v) is not int for v in (run_id, run_attempt)):
+        return None
+    return run_id, run_attempt
+
+
+def merge_evidence(receipt, pr, repo, runs, statuses, *, distinct_suites=False, attempt_of=None):
     if pr["state"] != "MERGED":
         return runs, statuses
     merged_at = pr["mergedAt"]
     receipt["merged_at"] = merged_at
-    runs, post_runs = partition_at_merge(runs, merged_at, runs=True, distinct_suites=distinct_suites)
+    runs, post_runs = partition_at_merge(runs, merged_at, runs=True, distinct_suites=distinct_suites,
+                                         attempt_of=attempt_of)
     statuses, post_statuses = partition_at_merge(statuses, merged_at, runs=False)
     sha = receipt["head_sha"]
     receipt["post_merge_checks"] = [check_receipt(c, sha) for c in post_runs + post_statuses]
