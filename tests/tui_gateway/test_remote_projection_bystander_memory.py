@@ -233,6 +233,48 @@ def test_compact_late_load_rejects_a_new_sequence_before_settlement(tmp_path, ch
         assert compact.load(replica) is None
 
 
+def test_moved_compact_row_does_not_abort_later_stale_claims(tmp_path):
+    claimed_at = NOW - 3600
+    state = f"blocked@{int(claimed_at)}"
+    cards = [_bystander(i) for i in range(2)]
+    replica = _hub(tmp_path, cards)
+    ledger = tmp_path / "remote-notices.db"
+    refs = [f"hub/{card['key']}" for card in cards]
+    remote._reset_for_tests()
+    _, states = remote._sweep_snapshot(replica, "macbook")
+    assert all(isinstance(states[ref][1], projection.CompactTask) for ref in refs)
+    conn = remote._ledger(ledger)
+    try:
+        with conn:
+            for ref in refs:
+                conn.execute(
+                    "INSERT INTO notices (session, ref, state, at, delivered, holder_pid, holder_start, "
+                    "notice_key, legacy_seen) VALUES (?,?,?,?,0,?,NULL,?,1)",
+                    (CHAT, ref, state, claimed_at + 5, _dead_pid(), f"stale:{ref}:{state}"))
+        # Verify the actual batch order: the missing row must precede the settleable claim.
+        assert [row[0] for row in conn.execute(
+            "SELECT ref FROM notices WHERE delivered=0 AND holder_pid IS NOT NULL")] == refs
+    finally:
+        conn.close()
+    before = dict(_ledger_row(ledger, CHAT, refs[0]))
+    # The snapshot still names this compact row, but its lazy load now finds nothing.
+    with sqlite3.connect(replica) as conn:
+        conn.execute("DELETE FROM replica WHERE key=?", (cards[0]["key"],))
+    assert states[refs[0]][1].load(replica) is None
+    assert states[refs[1]][1].load(replica) is not None
+
+    settled = remote._settle_stale_claims(states, replica, ledger)
+
+    assert dict(_ledger_row(ledger, CHAT, refs[0])) == before
+    later = _ledger_row(ledger, CHAT, refs[1])
+    assert (later["delivered"], later["holder_pid"], later["holder_start"], later["settled"]) == (
+        remote.SETTLED, None, None, "stale")
+    assert settled == 1
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute("SELECT notice_id, reason FROM swept").fetchall() == [
+            (f"stale:{refs[1]}:{state}", "stale")]
+
+
 def test_bystander_that_gains_a_legacy_alias_is_refetched_like_a_cold_read(tmp_path, monkeypatch):
     target = _bystander(5)
     replica = _hub(tmp_path, [_relevant(0), _relevant(1), target] + [_bystander(i) for i in range(6, 40)])
