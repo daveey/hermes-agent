@@ -7,10 +7,11 @@ and that run row sat in the outbox for 15 min: the push before a round's pulls h
 ``task_runs`` row on (``kanban_sync_backlog.sendable_before_head``), so it went out only with the push at the end of
 that first round. The Board kept the lease meanwhile, the canary read ``running`` and the enrollment failed.
 
-So a process that runs (or is about to run) this host's sync loop claims nothing on a ``primary`` board until one
+So a process that holds this host's sync lock claims nothing on a ``primary`` board until one
 of its rounds on that board COMPLETED with the replica and live pulls at the feed head (``note_round``). The gate
 fails closed: before the loop's first round, during it, and after a round that ended behind. Once open it stays open
-for the process (a later catch-up, e.g. after a Mac sleeps, keeps claiming as before).
+for that lock tenure (a later catch-up, e.g. after a Mac sleeps, keeps claiming as before).
+Watchers waiting for the lock use its current owner's record; without a live record they fail closed.
 
 - A process with no sync loop (``hermes kanban claim``/``dispatch`` from a shell) is not gated here, unless another
   live process's loop recorded the board held in :func:`state_path` (a profile gateway can hold the dispatcher lock
@@ -37,7 +38,8 @@ DEFERRAL = "sync_first_round"
 class _State:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.loop = False  # this process runs or is about to run the host's sync loop
+        self.expected = False  # watcher may be waiting for another process's lock
+        self.loop = False  # this process actually holds the host sync lock
         self.open: dict[str, str] = {}  # realpath -> slug: a completed round of this process reached the head
         self.logged: set[str] = set()  # boards whose hold was logged (one INFO line per board per hold)
 
@@ -59,13 +61,29 @@ def loop_expected() -> None:
     """This process will run the sync loop (the gateway's sync watcher, before it holds the host sync lock): its
     dispatcher holds claims from now on, so a tick before the loop's first round cannot slip a claim through."""
     with _STATE.lock:
-        _STATE.loop = True
+        _STATE.expected = True
 
 
 def loop_started() -> None:
     """The sync loop starts in this process: record that its boards hold claims until a round reaches the head."""
     loop_expected()
+    with _STATE.lock:
+        _STATE.loop = True
+        _STATE.open.clear()
     _write()
+
+
+def loop_stopped() -> None:
+    """Release local readiness when a sync tenure ends, including normal return and crashes."""
+    with _STATE.lock:
+        _STATE.loop = False
+        _STATE.open.clear()
+    record = _read()
+    if record and record.get("pid") == os.getpid():
+        try:
+            state_path().unlink(missing_ok=True)
+        except OSError:
+            _log.warning("kanban sync: cannot remove stopped claim gate", exc_info=True)
 
 
 def note_round(slug: str, path: Any, *, at_head: bool) -> None:
@@ -93,8 +111,9 @@ def held(conn: sqlite3.Connection) -> bool:
     with _STATE.lock:
         if key in _STATE.open:
             return False
-        local = _STATE.loop
-    if not local and not _held_elsewhere(key):
+        local, expected = _STATE.loop, _STATE.expected
+    elsewhere = None if local else _held_elsewhere(key)
+    if not (local or (expected if elsewhere is None else elsewhere)):
         return False
     with _STATE.lock:
         first = key not in _STATE.logged
@@ -105,11 +124,11 @@ def held(conn: sqlite3.Connection) -> bool:
     return True
 
 
-def _held_elsewhere(key: str) -> bool:
+def _held_elsewhere(key: str) -> Optional[bool]:
     """Another live process's sync loop recorded this board held (no round of it at the head yet)."""
     record = _read()
     if not record or record.get("pid") == os.getpid() or not _alive(record.get("pid")):
-        return False
+        return None
     return key not in (record.get("open") or {})
 
 
@@ -121,9 +140,12 @@ def describe(path: Any, mode: str) -> str:
     with _STATE.lock:
         if key in _STATE.open:
             return "open"
+        local, expected = _STATE.loop, _STATE.expected
+    if local:
+        return HELD
     record = _read()
-    if not record or not _alive(record.get("pid")):
-        return "no live sync loop recorded"
+    if not record or record.get("pid") == os.getpid() or not _alive(record.get("pid")):
+        return HELD if expected else "no live sync loop recorded"
     return "open" if key in (record.get("open") or {}) else HELD
 
 

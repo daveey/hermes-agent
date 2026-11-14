@@ -198,6 +198,47 @@ def test_another_live_process_loop_record_holds_and_opens_claims(live, kanban_ho
     assert not claims.held(live)
 
 
+@pytest.mark.parametrize("previous_tenure", [False, True])
+def test_waiting_sync_gateway_uses_current_lock_owners_record(live, kanban_home, previous_tenure):
+    """A watcher waiting for .sync.lock must not override the root loop's readiness."""
+    tid = kb.create_task(live, title="split watcher", assignee="default")
+    claims.loop_expected()
+    assert claims.held(live)  # no owner has finished the initial round
+    if previous_tenure:
+        from hermes_cli.kanban_sync_stop import run_loop
+        run_loop(lambda *_: None, lambda: True, 1)
+    path = claims.state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = os.path.realpath(kanban_home / "kanban.db")
+    path.write_text(json.dumps({"pid": os.getppid(), "open": {key: BOARD}}))
+    assert not claims.held(live)
+    assert claims.describe(kanban_home / "kanban.db", "primary") == "open"
+    assert kb.claim_task(live, tid, ttl_seconds=900)
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_ended_sync_tenure_discards_its_readiness(live, kanban_home, crash):
+    from hermes_cli.kanban_sync_stop import run_loop
+    path = kanban_home / "kanban.db"
+
+    def loop(*_):
+        claims.note_round(BOARD, path, at_head=True)
+        assert not claims.held(live)
+        if crash:
+            raise RuntimeError("loop failed")
+
+    if crash:
+        with pytest.raises(RuntimeError, match="loop failed"):
+            run_loop(loop, lambda: True, 1)
+    else:
+        run_loop(loop, lambda: True, 1)
+    assert not claims.state_path().exists()
+    assert claims.held(live)
+    assert claims.describe(path, "primary") == claims.HELD
+    claims.loop_started()
+    assert claims.held(live)  # a new tenure must finish its own round
+
+
 def test_sync_status_shows_the_gate(live, svc, kanban_home, capsys):
     from hermes_cli import kanban_sync_cli
     _board_history(svc, 3)
