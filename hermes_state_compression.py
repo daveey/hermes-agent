@@ -750,8 +750,10 @@ class SessionCompressionMixin:
     ) -> bool:
         """Atomically acquire the cross-process turn lease for a conversation (keyed by the
         lineage root). The walk, the INSERT, and reclaim of expired or dead-local-PID leases
-        share one write transaction."""
+        share one write transaction. Right after a host suspend an expired row of a holder not
+        provably dead stays held for a short awake grace (``hermes_state_wake_grace``) [daveey]."""
         from hermes_state import _compression_lock_holder_process_is_dead
+        from hermes_state_wake_grace import lapsed_row_reclaimable
         if not session_id or not holder:
             return False
         now = time.time()
@@ -767,8 +769,8 @@ class SessionCompressionMixin:
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             return _claim_lease_row(
                 conn, "session_turn_leases", "conversation_id", conversation_id, holder, now, expires_at,
-                lambda h, e: (float(e) <= now or _compression_lock_holder_process_is_dead(h)
-                              or _turn_lease_abandoned(db_path, h)),
+                lambda h, e: (_compression_lock_holder_process_is_dead(h) or _turn_lease_abandoned(db_path, h)
+                              or lapsed_row_reclaimable(h, e, now)),
             )
         acquired, reclaimed_holder = self._execute_write(_do, patience_s=patience_s)
         if reclaimed_holder and _turn_lease_abandoned(db_path, reclaimed_holder):

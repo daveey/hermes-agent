@@ -925,6 +925,7 @@ def _worker_turn(db, conn, session_id, payload, operation):
     import time
     from hermes_state_compression import _claim_lease_row
     from hermes_state import _compression_lock_holder_process_is_dead
+    from hermes_state_wake_grace import lapsed_row_reclaimable
     allowed = {'holder'} if operation == 'turn.release' else {'holder', 'ttl_seconds'}
     if set(payload) != allowed:
         raise RuntimeStoreError('invalid_params')
@@ -937,7 +938,7 @@ def _worker_turn(db, conn, session_id, payload, operation):
     if operation == 'turn.acquire':
         value = _claim_lease_row(conn, 'session_turn_leases', 'conversation_id', key,
             holder, now, now + ttl,
-            lambda h, e: float(e) <= now or _compression_lock_holder_process_is_dead(h))[0]
+            lambda h, e: _compression_lock_holder_process_is_dead(h) or lapsed_row_reclaimable(h, e, now))[0]
     elif operation == 'turn.renew':
         value = conn.execute('UPDATE session_turn_leases SET expires_at=? WHERE conversation_id=? AND holder=?',
                              (now + ttl, key, holder)).rowcount > 0
