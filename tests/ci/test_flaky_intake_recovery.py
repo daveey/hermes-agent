@@ -4,6 +4,67 @@ import sqlite3
 import pytest
 
 from scripts.ci.flaky_intake import Journal
+from tests.ci.test_flaky_intake import Board, record
+
+
+@pytest.mark.parametrize("readback", ["missing", "altered", "unavailable", "exact"])
+def test_successful_submission_requires_exact_final_readback(tmp_path, monkeypatch, readback):
+    class DelayedBoard(Board):
+        submitted = False
+        confirmed = False
+
+        def comment(self, cid, body):
+            super().comment(cid, body)  # Accepted successfully, no ambiguous-write exception.
+            self.submitted = True
+
+        def comments(self, cid):
+            if self.confirmed or readback == "exact":
+                return super().comments(cid)
+            if self.submitted and readback == "unavailable":
+                raise RuntimeError("comments unavailable")
+            if self.submitted and readback == "altered":
+                return [body + " altered" for body in self.notes[cid]]
+            return []
+
+    path = tmp_path / "queue.sqlite3"
+    board = DelayedBoard()
+    journal = Journal(path)
+    try:
+        record(journal, count=1)
+        original = tuple(journal.db.execute("SELECT id,payload FROM pages").fetchone())
+        acknowledgments = []
+        acknowledge = journal.acknowledge_page
+
+        def observed_ack(page_id, card):
+            acknowledgments.append((page_id, card))
+            acknowledge(page_id, card)
+
+        monkeypatch.setattr(journal, "acknowledge_page", observed_ack)
+        if readback != "exact":
+            for _ in range(2):
+                board.submitted = False  # Pre-submission reads work; final read is faulty.
+                lines = journal.deliver("o/r", board)
+                assert journal.db.execute("SELECT delivered FROM pages").fetchone()[0] == 0
+                assert journal.db.execute("SELECT delivered FROM occurrences").fetchone()[0] == 0
+                assert acknowledgments == []
+                assert len(lines) == 1 and lines[0].startswith("FAILED intake delivery")
+                assert tuple(journal.db.execute("SELECT id,payload FROM pages").fetchone()) == original
+            assert board.notes["card0"] == [original[1], original[1]]
+            board.confirmed = True
+
+        submissions = len(board.notes.get("card0", []))
+        lines = journal.deliver("o/r", board)
+        assert len(lines) == 1 and lines[0].startswith("intake delivered")
+        assert acknowledgments == [(original[0], "card0")]
+        assert journal.db.execute("SELECT delivered FROM pages").fetchone()[0] == 1
+        assert journal.db.execute("SELECT delivered,owner FROM occurrences").fetchone()[:] == (1, "card0")
+        assert journal.pending("o/r") == []
+        assert len(board.notes["card0"]) == (1 if readback == "exact" else submissions)
+        assert journal.deliver("o/r", board) == []
+        assert acknowledgments == [(original[0], "card0")]
+        assert len(board.cards) == 1
+    finally:
+        journal.close()
 
 
 def test_pending_rows_and_immutable_pages_survive_backup_restore(tmp_path):
