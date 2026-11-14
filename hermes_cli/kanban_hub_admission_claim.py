@@ -85,7 +85,7 @@ _SCREENABLE = ("status IN ('ready', 'review') AND claim_lock IS NULL AND (runs_o
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Screenable cards in the claim pass's own dispatch order, so the per-tick judge budget covers the cards the
     claims reach first and never lets lower-priority work jump a deferred higher-priority card."""
-    from hermes_cli.kanban_db_dispatch_queries import lane_rows
+    from hermes_cli.kanban_admission_pools import lane_rows
     rows = {row["id"]: row for row in conn.execute(f"SELECT * FROM tasks WHERE {_SCREENABLE}").fetchall()}
     lanes = lane_rows(conn, "ready") + lane_rows(conn, "review")
     return [rows[row["id"]] for row in lanes if row["id"] in rows]
@@ -278,7 +278,7 @@ def print_deferred(ids: list[str]) -> None:
 
 def screened_lanes(conn: sqlite3.Connection, dry_run: bool, review_enabled: bool, deferred=()) -> tuple:
     """Freeze claim candidates before judging. Async wakes during the screen wait for the next tick."""
-    from hermes_cli.kanban_db_dispatch_queries import lane_rows
+    from hermes_cli.kanban_admission_pools import lane_rows
     from hermes_cli.kanban_db_sync import board_mode
 
     ready = lane_rows(conn, "ready")

@@ -79,7 +79,7 @@ def test_wake_after_screen_waits_for_next_judged_pass(gws, hub_judge, monkeypatc
     (False, "replica", True), (False, "primary", False),
 ])
 def test_screened_lanes_preserves_dispatch_controls(monkeypatch, dry_run, mode, review_enabled):
-    from hermes_cli import kanban_db_dispatch_queries as queries
+    from hermes_cli import kanban_admission_pools as queries
     from hermes_cli import kanban_db_sync as sync
     calls = []
 
