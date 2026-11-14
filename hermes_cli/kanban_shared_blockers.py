@@ -63,6 +63,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from hermes_cli.kanban_blocker_inputs import input_pass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -316,6 +317,7 @@ def _note_window_exit(out: Optional[list], asserting) -> None:
         out.append(min(kb._to_epoch(r["ended_at"]) or 0 for r in asserting) + _LOOKBACK_SECONDS + 1)
 
 
+@input_pass
 def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
                    oldest_out: Optional[list] = None) -> dict[str, BlockerState]:
     """Derive every recently asserted blocker's state from ``task_runs`` (read-only).

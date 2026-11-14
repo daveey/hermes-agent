@@ -12,6 +12,8 @@ import shlex
 import subprocess
 import time
 
+from hermes_cli.kanban_blocker_inputs import input_pass, read
+
 logger = logging.getLogger(__name__)
 CHECK_EVENT = "shared_blocker_check"
 # Raced/discarded runs: cadence only, never evidence (not read by apply_check_clears or the fence).
@@ -55,6 +57,11 @@ def _lookback(now) -> int:
 
 
 def _assertion_tokens(conn, now=None) -> dict[str, str]:
+    ts = int(time.time()) if now is None else int(now)
+    return read('tokens', conn, ts, lambda: _read_assertion_tokens(conn, ts))
+
+
+def _read_assertion_tokens(conn, now=None) -> dict[str, str]:
     """Portable fingerprint of the latest assertion timestamp's complete cohort.
 
     Synced run UIDs survive integer-id remapping and same-second runs. Sorting
@@ -130,15 +137,25 @@ def _result_key(payload, token) -> tuple:
             json.dumps(payload, sort_keys=True, ensure_ascii=True))
 
 
-def _latest_results(conn, now=None) -> dict[str, dict]:
+def _check_payloads(conn, now):
     from hermes_cli import kanban_db as kb
+
+    now = int(time.time()) if now is None else int(now)
+
+    def load():
+        return [kb._json_dict(row['payload']) for row in conn.execute(
+            'SELECT payload FROM task_events WHERE kind=? AND created_at >= ? ORDER BY id',
+            (CHECK_EVENT, _lookback(now)))]
+
+    return read('checks', conn, now, load)
+
+
+def _latest_results(conn, now=None) -> dict[str, dict]:
     from hermes_cli.kanban_shared_blockers import normalize_blocker_id
 
     results = {}
     tokens = _assertion_tokens(conn, now)
-    for row in conn.execute("SELECT payload FROM task_events WHERE kind=? AND created_at >= ? ORDER BY id",
-                            (CHECK_EVENT, _lookback(now))):
-        payload = kb._json_dict(row["payload"])
+    for payload in _check_payloads(conn, now):
         bid = normalize_blocker_id(payload.get("blocker_id"))
         token = tokens.get(bid)
         if bid and (bid not in results or _result_key(payload, token) > _result_key(results[bid], token)):
@@ -186,6 +203,7 @@ def _run_check(command: str) -> tuple[object, str]:
         return "timeout", output[-OUTPUT_TAIL_CHARS:].strip()
 
 
+@input_pass
 def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
     """Check each open registered wall on its home, even with a worker probe in flight.
 

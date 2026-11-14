@@ -6,15 +6,12 @@ import uuid
 
 def _winning_checks(conn, bid, now):
     """Historical recovery survives new cohorts, but losing tied results do not."""
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_shared_blockers import _LOOKBACK_SECONDS, normalize_blocker_id
-    from hermes_cli.kanban_shared_blocker_checks import CHECK_EVENT, _assertion_tokens, _checked, _result_key
+    from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+    from hermes_cli.kanban_shared_blocker_checks import _check_payloads, _assertion_tokens, _checked, _result_key
 
     token = _assertion_tokens(conn, now).get(bid)
     winners = {}
-    for row in conn.execute('SELECT payload FROM task_events WHERE kind=? AND created_at>=?',
-                            (CHECK_EVENT, now - _LOOKBACK_SECONDS)):
-        payload = kb._json_dict(row['payload'])
+    for payload in _check_payloads(conn, now):
         checked = _checked(payload)
         if normalize_blocker_id(payload.get('blocker_id')) != bid or checked > now:
             continue
