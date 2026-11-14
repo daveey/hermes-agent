@@ -298,6 +298,37 @@ def test_possibly_live_empty_suite_stays_missing(evidence, live):
     assert not receipt.get("idle_suites")
 
 
+@pytest.mark.parametrize("same_app", [True, False])
+def test_nonempty_sibling_suite_marks_app_active_without_runs(same_app):
+    from datetime import UTC, datetime
+    from hermes_cli.kanban_pr_fallback import idle_suites
+
+    # Exercise the inventory policy directly: collector completeness checks can
+    # reject missing runs before reaching it and thus mask this regression.
+    empty = suite(100, 900)
+    active = suite(101, 900 if same_app else 901, count=1)
+    assert idle_suites([empty, active], [], datetime(2026, 11, 2, tzinfo=UTC)) == (
+        [] if same_app else [empty])
+
+
+@pytest.mark.parametrize("started,expected", [
+    ("2026-11-02T13:00:00Z", "pending"),
+    ("2026-11-02T13:00:01Z", "success"),
+])
+def test_merge_cutoff_sibling_does_not_inherit_earlier_run_gate(evidence, started, expected):
+    earlier = run("success")
+    sibling = {**run("success", id=2, started=started),
+               "completed_at": "2026-11-02T13:10:00Z"}
+    evidence.update(merged=True, runs=[earlier, sibling])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == expected
+    assert receipt["ok"] is (expected == "success")
+    assert [(c["id"], c["classification"]) for c in receipt["checks"]] == (
+        [(1, "success"), (2, "pending")] if expected == "pending" else [(1, "success")])
+    assert [(c["id"], c["classification"]) for c in receipt["post_merge_checks"]] == (
+        [] if expected == "pending" else [(2, "success")])
+
+
 def test_possibly_live_empty_suite_blocks_absence_waiver(evidence):
     evidence.update(merged=True, extra_suites=[suite(100, 900, status="in_progress")])
     assert gate.collect_acceptance(URL, None)["classification"] == "missing"
