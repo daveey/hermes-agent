@@ -35,3 +35,36 @@ def test_comment_mask_preserves_generated_executed_payloads(tmp_path):
         marker.unlink()
         unsafe, _refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
         assert unsafe, command
+
+
+@pytest.mark.spawns_gateway_lookalike
+def test_pending_heredoc_multiline_groups_preserve_executed_hash(tmp_path):
+    """A newline inside a group starts pending heredocs, unlike quoted newlines."""
+    from tools.shell_comments import mask_root_comment_lines
+    from tools.shell_heredoc import output_reaches_shell
+
+    executable = tmp_path / 'hermes'
+    executable.write_text('#!/bin/sh\nprintf reached > seen\n', encoding='utf-8')
+    executable.chmod(0o700)
+    marker = tmp_path / 'seen'
+    groups = [('( :', ')'), ('{ :', '}'), ('[[ -n x', ']]'), ('f() ( :', ')')]
+    delimiters = ["<<'E'", '<<"E"', "<<-'E'"]
+    prefixes = ['', '# inert; `auth`\n']
+    for (opening, closing), delimiter, prefix in itertools.product(groups, delimiters, prefixes):
+        command = (
+            prefix + "emit() { printf '%s %s %s' hermes '\"gateway\"' restart; }\n"
+            + f'cat {delimiter}; {opening}\nE\n{closing}\n:\n: "\nE\n'
+            + '# $(emit | bash)\n" #"'
+        )
+        result = subprocess.run(
+            ['bash', '-c', command], cwd=tmp_path,
+            env={'PATH': f'{tmp_path}:/usr/bin:/bin'},
+            capture_output=True, check=False, text=True, encoding='utf-8', timeout=5,
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        assert marker.read_text() == 'reached', command
+        marker.unlink()
+        assert output_reaches_shell(command), command
+        unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+        assert unsafe, (command, refusal)
+        assert mask_root_comment_lines(command) == command, command

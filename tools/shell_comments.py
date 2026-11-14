@@ -112,6 +112,10 @@ def mask_root_comment_lines(command: str) -> str:
             end = _opaque_end(command, pos, opening.group())
             if end is None:
                 return command
+            # A pending heredoc can start at a newline inside a compound group.
+            # Opaque balancing cannot identify that grammar boundary reliably.
+            if heredocs and "\n" in command[pos:end]:
+                return command
             pos = end
             boundary = False
         else:
