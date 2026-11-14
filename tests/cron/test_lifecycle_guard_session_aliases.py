@@ -276,6 +276,21 @@ _NESTED_FOREIGN_SHELLS = [
     "runuser --com 't ( bash {db} )' bob",
     "su --sess='t ( bash {db} )' bob",
     "doas -a style -s <<< 't ( bash {db} )'",
+    # A stdin file fed to a login-shell launcher is that shell's script (review 5903452583 B1).
+    "su -l bob < {script}",
+    "su - bob < {script}",
+    "su bob < {script}",
+    "su -l bob 0< {script}",
+    "su -l bob <> {script}",
+    "runuser -l bob < {script}",
+    "runuser - bob < {script}",
+    "doas -s < {script}",
+    "doas -u bob -s < {script}",
+    "sudo -i < {script}",
+    "sudo -s < {script}",
+    "sudo -u bob -i < {script}",
+    "ssh host < {script}",
+    "ssh -p 22 host bash -s < {script}",
 ]
 
 
@@ -287,7 +302,7 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     script = tmp_path / "inner.sh"
     script.write_text(f"t ( bash {live_kanban_db} )\n")
     text = shape.format(db=live_kanban_db, script=script)
-    for names in (frozenset({"zz"}), frozenset()):
+    for names in (frozenset({"zz"}), frozenset(), None):
         unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
         assert unsafe is True and refusal is not None and "SQLite" in refusal, (shape, names)
 
@@ -315,6 +330,15 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "runuser --u=bob -- printf '%s\\\\n' -c 't ( bash {db} )'",
     "runuser --white HOME -u bob -- cat <<< 't ( bash {db} )'",
     "runuser --supp=root --us=bob -- cat <<< 't ( bash {db} )'",
+    # Direct-user runuser and non-shell commands read a stdin file as data.
+    "runuser -fu bob -- cat <<< 't ( bash {db} )'",
+    "runuser -f -u bob -- cat <<< 't ( bash {db} )'",
+    "runuser -u bob -- cat < {script}",
+    "runuser -fu bob -- cat < {script}",
+    "cat < {script}",
+    "sudo cat < {script}",
+    "doas cat < {script}",
+    "ssh host cat < {script}",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""

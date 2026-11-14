@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -78,17 +78,23 @@ def unvisited_scopes(
 
 def collect_nested_shell_inputs(
     command: str, walk_command: str, *, cwd: Optional[str], budget: _LifecycleScanBudget,
+    session_payloads: Sequence[str] = (),
 ) -> tuple[list[str], set[Path]]:
     """``(texts, resolved scripts)`` a nested shell holding its own aliases parses in *command*
-    (see ``_iter_nested_shell_inputs``). Already unknown alias names need no second walk."""
+    (see ``_iter_nested_shell_inputs``). Under already unknown alias names a heredoc body needs
+    no second walk (the session walk reads it in the same scope), but ``-c`` payloads, here-strings
+    and scripts are still returned: `su -lc T`, `runuser --comm=T`, `su -l bob < f` hand the
+    shell text or a path no ordinary walk names (review 5903452583 B1). There the session scope is
+    at least as strict as the nested one (it may also unmask heredoc bodies), so a text among
+    *session_payloads* (walked in the session scope anyway) is left out: walked and charged once."""
     texts: list[str] = []
     scripts: set[Path] = set()
-    if budget.alias_names is None:
-        return texts, scripts
-    for text, script in _iter_nested_shell_inputs(command, walk_command, cwd=cwd):
+    unknown_names = budget.alias_names is None
+    for text, script in _iter_nested_shell_inputs(command, walk_command, cwd=cwd,
+                                                  heredocs=not unknown_names):
         if script is not None:
             scripts.add(_resolve_lenient(script))
-        elif text:
+        elif text and not (unknown_names and text in session_payloads):
             texts.append(text)
     return texts, scripts
 
@@ -225,7 +231,7 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
         options = [_su_long_option(word) for word in view[index + 1:]]
         direct_user = name == "runuser" and any(
             word == "--user" or word.startswith("--user=")
-            or re.fullmatch(r"-[mpPl]*u.*", word)
+            or re.fullmatch(r"-[fmpPl]*u.*", word)
             for word in _option_words(options, frozenset("ucsgGw"), frozenset({
                 "--user", "--command", "--session-command", "--shell", "--group",
                 "--supp-group", "--whitelist-environment",
@@ -285,16 +291,17 @@ def _feeds_nested_shell(owner: Optional[str]) -> bool:
 
 
 def _iter_nested_shell_inputs(
-    command: str, walk_command: str, *, cwd: Optional[str],
+    command: str, walk_command: str, *, cwd: Optional[str], heredocs: bool = True,
 ) -> Iterator[tuple[Optional[str], Optional[Path]]]:
     """``(text, None)`` or ``(None, script)``: what a nested shell holding its own aliases parses
-    from *command*: heredoc bodies fed to it (at any depth, read from the unmasked *command*),
-    its ``-c`` payload and its script (from *walk_command*, as the ordinary walk reads them)."""
+    from *command*: heredoc bodies fed to it (at any depth, read from the unmasked *command*;
+    skipped unless *heredocs*), its ``-c`` payload and its script (from *walk_command*, as the
+    ordinary walk reads them)."""
     if not _NESTED_SHELL_HINT_RE.search(command):
         return
     from tools.shell_heredoc import iter_heredoc_bodies
 
-    for owner, body in iter_heredoc_bodies(command):
+    for owner, body in (iter_heredoc_bodies(command) if heredocs else ()):
         if _feeds_nested_shell(owner):
             yield body, None
     for view in _iter_command_segment_views(walk_command):

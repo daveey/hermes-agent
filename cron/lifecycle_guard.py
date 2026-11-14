@@ -1731,8 +1731,10 @@ def _contains_unsafe_gateway_action(
     from cron.lifecycle_guard_nested_shells import (
         collect_nested_shell_inputs, shell_scope, unvisited_scopes)
 
+    session_payloads = list(itertools.chain(_iter_shell_command_payloads(walk_command),
+                                            _iter_printed_shell_payloads(walk_command)))
     nested_texts, nested_scripts = collect_nested_shell_inputs(
-        command, walk_command, cwd=cwd, budget=budget)
+        command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
     from cron.lifecycle_guard_output import iter_recursive_payloads
 
     for payload, nested, covered in iter_recursive_payloads(
@@ -1741,8 +1743,12 @@ def _contains_unsafe_gateway_action(
         if recurse(payload, cwd, executed, source, nested=nested, covered_quotes=covered):
             return True
 
-    for script_path, candidate_executed, python_source in _walk_candidates(
-            command, walk_command, cwd=cwd, executed=executed, budget=budget):
+    # A nested shell's script may be a path the ordinary candidates never name: a stdin file
+    # redirected into `su -l bob`, `doas -s`, `sudo -i` or `ssh host` (review 5903452583 B1). It
+    # comes from the executed view, so it is executed, and is walked first in both scopes.
+    nested_only = ((path, executed, False) for path in sorted(nested_scripts))
+    for script_path, candidate_executed, python_source in itertools.chain(nested_only, _walk_candidates(
+            command, walk_command, cwd=cwd, executed=executed, budget=budget)):
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
         if _on_cloud_path(script_path):
             if candidate_executed:
