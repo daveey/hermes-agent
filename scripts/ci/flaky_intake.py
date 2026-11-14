@@ -435,4 +435,4 @@ class Journal:
             ):
                 self.db.execute(f"DELETE FROM scheduling WHERE repo=? AND kind=? AND NOT EXISTS "
                                 f"(SELECT 1 FROM {table} t WHERE t.repo=scheduling.repo "
-                                f"AND CAST(t.{key} AS TEXT)=scheduling.item AND {pending})", (repo, kind))
+                                f"AND t.{key}=scheduling.item AND {pending})", (repo, kind))

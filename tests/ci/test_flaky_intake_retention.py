@@ -1,12 +1,54 @@
 """Bounded terminal history, preserving durable retries and FIFO custody."""
 import json
 import sqlite3
+import time
 
 import pytest
 
 from scripts.ci import flaky_intake as intake
 from scripts.ci import flaky_kanban as fk
 from tests.ci.test_flaky_intake import Board
+
+
+def test_scheduling_cleanup_scales_with_retained_history(tmp_path):
+    """Count VM work, not wall time: correlated key scans must stay indexed."""
+    costs = []
+    for size in (500, 2000):
+        journal = intake.Journal(tmp_path / f"queue-{size}.db")
+        now = time.time()
+        with journal.db:
+            journal.db.executemany(
+                "INSERT INTO occurrences(id,repo,identity,day,target_day,metadata,delivered,retained_at) "
+                "VALUES (?,'o/r',?,'2026-01-01','2026-01-01','{}',?,?)",
+                ((i, str(i), int(i != size), now) for i in range(1, size + 1)))
+            journal.db.executemany(
+                "INSERT INTO pages(id,repo,day,payload,delivered,retained_at) "
+                "VALUES (?,'o/r','2026-01-01','{}',?,?)",
+                ((i, int(i != size), now) for i in range(1, size + 1)))
+            journal.db.executemany(
+                "INSERT INTO runs(repo,key,descriptor,complete,retained_at) VALUES ('o/r',?,'{}',?,?)",
+                ((f"{i}/1", int(i != size), now) for i in range(1, size + 1)))
+            for kind in ('occurrence', 'page', 'run'):
+                journal.db.executemany(
+                    "INSERT INTO scheduling VALUES ('o/r',?,?,?)",
+                    ((kind, f"{i}/1" if kind == 'run' else str(i), i) for i in range(1, size + 1)))
+        steps = [0]
+        def count_steps():
+            steps[0] += 1
+            return 0
+        journal.db.set_progress_handler(count_steps, 1000)
+        start = time.monotonic()
+        journal.prune('o/r')
+        elapsed = time.monotonic() - start
+        journal.db.set_progress_handler(None, 0)
+        costs.append(steps[0])
+        print(f"retained={size} vm_batches={steps[0]} elapsed={elapsed:.4f}s")
+        assert [tuple(r) for r in journal.db.execute(
+            "SELECT kind,item,ticket FROM scheduling ORDER BY kind")] == [
+                ('occurrence', str(size), size), ('page', str(size), size), ('run', f'{size}/1', size)]
+        journal.close()
+    assert costs[1] < costs[0] * 6  # 4x rows: linear work, not 16x scans.
+
 
 
 def test_drain_packs_consecutive_rows_and_reads_back(tmp_path):
