@@ -93,7 +93,11 @@ def test_review_admission_failure_never_spawns_or_spends_retry(board, monkeypatc
     with kbc.connect() as conn:
         t = task(conn, OPUS)
         kb.claim_task(conn, t.id)
-        kb.request_review(conn, t.id, metadata={"review_model": []} if failure == "bad_metadata" else None)
+        kb.request_review(conn, t.id)
+        if failure == "bad_metadata":
+            conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (
+                json.dumps({"review_model": []}), t.id))
+            conn.commit()
         if failure == "receipt_write":
             config(board, strong=FABLE)
             original = kb._append_event
@@ -196,7 +200,8 @@ def test_bad_override_fails_closed(board, metadata):
     with kbc.connect() as conn:
         t = task(conn)
         kb.claim_task(conn, t.id)
-        kb.request_review(conn, t.id, metadata=metadata)
+        kb.request_review(conn, t.id)
+        conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (json.dumps(metadata), t.id))
         with pytest.raises(ReviewModelUnavailable):
             tier.apply_model_tier(conn, t, lane="review", cfg=cfg)
 

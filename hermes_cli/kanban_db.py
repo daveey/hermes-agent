@@ -3009,19 +3009,7 @@ def block_task(
     return True
 
 
-def redact_review_value(value: Any) -> Any:
-    """Redact secrets at the domain boundary for durable review handoffs."""
-    if isinstance(value, str):
-        from agent.redact import redact_sensitive_text
-
-        return redact_sensitive_text(value, force=True)
-    if isinstance(value, dict):
-        return {key: redact_review_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [redact_review_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(redact_review_value(item) for item in value)
-    return value
+from hermes_cli.kanban_review_model import redact_review_value
 
 
 @publication_guard
@@ -3053,6 +3041,11 @@ def request_review(
 
     summary = redact_review_value(summary)
     metadata = redact_review_value(metadata)
+    from hermes_cli.kanban_review_model import ReviewModelUnavailable, validate_review_override
+    try:
+        validate_review_override(metadata or {})
+    except ReviewModelUnavailable as exc:
+        return _ret(False, str(exc))
     # Declared (metadata["artifacts"]) and prose-referenced files
     # must be durable BEFORE anything can clean the scratch workspace up: for a
     # review-bound card the reviewer's completion is the cleanup trigger.

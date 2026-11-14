@@ -2,8 +2,25 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from agent.model_routing import ModelRoutingError, eligible_routes, is_class_selector, validate_policy
+
+
+def redact_review_value(value: Any) -> Any:
+    """Redact secrets at the domain boundary for durable review handoffs."""
+    if isinstance(value, str):
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(value, force=True)
+    if isinstance(value, dict):
+        return {key: redact_review_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_review_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_review_value(item) for item in value)
+    return value
+
 
 # model_tier reason when this host's routing registry refuses the handoff's review_model: the review runs on a
 # registered model distinct from the implementer instead of spawning a worker that dies at startup.
@@ -29,7 +46,11 @@ def _handoff(conn, task):
 
 
 def _override(conn, task):
-    metadata = _handoff(conn, task)[1]
+    return validate_review_override(_handoff(conn, task)[1])
+
+
+def validate_review_override(metadata):
+    """Shared ingress/dispatch contract, including legacy automatic class routing."""
     model = metadata.get("review_model")
     if model is None:
         return None
@@ -41,8 +62,10 @@ def _override(conn, task):
         raise ReviewModelUnavailable("review_provider must be a nonempty provider identifier")
     model = model.strip()
     provider = (provider or ("auto" if is_class_selector(model) else infer_provider(model)))
-    if is_class_selector(model) and provider != "auto":
-        raise ReviewModelUnavailable("A review class requires provider auto")
+    if is_class_selector(model):
+        if provider not in ("auto", "board-default"):
+            raise ReviewModelUnavailable("A review class requires provider auto")
+        provider = "auto"  # Historical handoffs used the board-default sentinel.
     return model, provider, "review_override"
 
 
