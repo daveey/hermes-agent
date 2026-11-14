@@ -198,7 +198,7 @@ def _hold_reasons() -> list[str]:
         return ["update_hold_unreadable"]
 
 
-def _window_status(now: int) -> tuple[dict[str, Any], list[str]]:
+def _window_status(now: int, *, remaining_s: int = MAX_LEASE_S) -> tuple[dict[str, Any], list[str]]:
     status: dict[str, Any] = {"collision": False, "window_state": None, "window_age_s": None}
     try:
         from hermes_cli import kanban_deploy_window as window
@@ -211,7 +211,7 @@ def _window_status(now: int) -> tuple[dict[str, Any], list[str]]:
     status["window_age_s"] = now - record["observed_at"]
     safe = record["state"] == "idle" or (
         record["state"] == "batching"
-        and record["window_at"] - now >= MAX_LEASE_S + UPDATE_WINDOW_SAFETY_MARGIN_S)
+        and record["window_at"] - now >= remaining_s + UPDATE_WINDOW_SAFETY_MARGIN_S)
     return status, ([] if safe else [f"update_window_{record['state']}"])
 
 
@@ -375,7 +375,7 @@ class QuietControl:
         read("held_turn_leases", leases)
         return out, reasons
 
-    def _update_status(self) -> tuple[dict[str, Any], list[str]]:
+    def _update_status(self, *, remaining_s: int = MAX_LEASE_S) -> tuple[dict[str, Any], list[str]]:
         """Collision with a core update, from the existing typed markers (never English parsing)."""
         runner = self._runner
         reasons = _hold_reasons()
@@ -383,7 +383,7 @@ class QuietControl:
             reasons.append("runner_draining")
         if getattr(runner, "_restart_requested", False):
             reasons.append("restart_requested")
-        status, window_reasons = _window_status(int(time.time()))
+        status, window_reasons = _window_status(int(time.time()), remaining_s=remaining_s)
         reasons += window_reasons
         status["collision"] = bool(reasons)
         status["reasons"] = reasons
@@ -391,7 +391,8 @@ class QuietControl:
 
     # -- measurement -------------------------------------------------------------------------
 
-    def _measure(self, episode_id: str, phase: str, *, full: bool = True) -> dict[str, Any]:
+    def _measure(self, episode_id: str, phase: str, *, full: bool = True,
+                 deadline_ns: int | None = None) -> dict[str, Any]:
         """One snapshot: reads outside the registry lock, epoch/generation checked before and after."""
         registry = self._registry()
         reasons: list[str] = []
@@ -405,7 +406,11 @@ class QuietControl:
                           if callable(getattr(registry, "membership_generation", None)) else None)
             view, _ = self._registry_view(registry)
             predicates, pred_reasons = self._predicates() if full else ({}, [])
-            update, update_reasons = self._update_status() if full else ({}, [])
+            mono = self._mono()
+            # Admission reserves the full horizon; capture needs only the unexpired lease.
+            remaining = (max(0, math.ceil((deadline_ns - mono) / 1_000_000_000))
+                         if deadline_ns is not None and mono is not None else MAX_LEASE_S)
+            update, update_reasons = self._update_status(remaining_s=remaining) if full else ({}, [])
             after = registry.snapshot().epoch
             gen_after = (registry.membership_generation()
                          if callable(getattr(registry, "membership_generation", None)) else None)
@@ -523,7 +528,7 @@ class QuietControl:
                 self._episode = {"episode_id": episode_id, "peer": peer, "token": _digest(token),
                                  "token_plain": token, "deadline_ns": params["deadline_mono_ns"],
                                  "incarnation": self._incarnation}
-        result = self._measure(episode_id, "started")
+        result = self._measure(episode_id, "started", deadline_ns=params["deadline_mono_ns"])
         result["observer_token"] = token
         return result
 
@@ -585,7 +590,7 @@ class QuietControl:
                     while len(self._ended) > _ENDED_KEPT:
                         self._ended.pop(next(iter(self._ended)))
             return self._refuse(episode_id, "refused", reasons)
-        return self._measure(episode_id, "snapshot")
+        return self._measure(episode_id, "snapshot", deadline_ns=episode["deadline_ns"])
 
     def end(self, params, peer):
         episode = self._follow(params, peer, "end")

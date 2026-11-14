@@ -205,6 +205,33 @@ def test_far_batch_does_not_mask_mid_episode_collision(env, collision):
     assert not snapshot['valid'] and snapshot['update']['collision'], snapshot
 
 
+@pytest.mark.parametrize('elapsed', [1, 300, 479])
+@pytest.mark.parametrize('advance_window', [False, True])
+def test_admitted_batch_survives_elapsed_lease(env, monkeypatch, elapsed, advance_window):
+    helpers.attest(env)
+    from hermes_cli import kanban_deploy_window as window
+    wall = int(__import__('time').time())
+    mono = env.lease.deadline_ns - 480 * 1_000_000_000
+    monkeypatch.setattr(quiet_control.time, 'time', lambda: wall)
+    monkeypatch.setattr(env.control, '_mono', lambda: mono)
+    helpers.write_window(env.root, 'batching')
+    path = window.window_path()
+    data = json.loads(path.read_text())
+    data['window_at'] = wall + 600
+    path.write_text(json.dumps(data))
+    start = env.control.start(helpers.start_params(env), helpers.PEER)
+    assert start['valid'], start
+    wall += elapsed
+    mono += elapsed * 1_000_000_000
+    if advance_window:
+        # Moving the update one second inside the remaining-lease safety margin refuses.
+        data['window_at'] -= 1
+        path.write_text(json.dumps(data))
+    snapshot = env.control.snapshot(helpers.follow_params(env, start['observer_token']), helpers.PEER)
+    assert snapshot['valid'] is (not advance_window), snapshot
+    assert snapshot['update']['collision'] is advance_window
+
+
 def test_check_unreadable_predicate_is_informational(env):
     helpers.attest(env)
     env.runner._turn_leases = None
