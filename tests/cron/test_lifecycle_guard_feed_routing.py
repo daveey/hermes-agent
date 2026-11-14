@@ -223,8 +223,8 @@ def test_redirection_ampersands_survive_tokenizing():
 def test_glued_ampersand_redirection_splits_from_its_word():
     from cron.lifecycle_guard_groups import split_glued_redirections as split
 
-    assert split("python3 f.py&>x") == "python3 f.py &>x"
-    assert split("a 'b'&>>y") == "a 'b' &>>y"
+    assert split("python3 f.py&>x") == r"python3 f.py \&>x"
+    assert split("a 'b'&>>y") == r"a 'b' \&>>y"
     # Main's fd normalizer escapes duplication punctuation for shlex; it stays one token.
     assert split("a 2>&1 >&2") == r"a 2>\&1 >\&2"
     # Control operators, quoted ampersands and lone `&` remain unchanged. An escaped `&`
