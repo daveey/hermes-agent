@@ -21,7 +21,7 @@ def drain_exited_pty(pty, handle_chunk, max_bytes: int) -> None:
     try:
         while drained < max_bytes and waiter.wait(0):
             try:
-                chunk = pty.read(4096)
+                chunk = pty.read(min(4096, max_bytes - drained))
             except (EOFError, OSError):  # EIO: the slave side is closed and the buffer is empty
                 return
             if not chunk:
