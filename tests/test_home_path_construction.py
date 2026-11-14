@@ -1,4 +1,5 @@
 """Only immutable Path construction is memoized; home selection/expansion remains live."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 from pathlib import Path
 
 import hermes_constants as hc
