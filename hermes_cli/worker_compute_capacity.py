@@ -191,10 +191,13 @@ def _override_temp_roots() -> list[Path]:
     if account.is_relative_to(tmp) or home.is_relative_to(tmp):
         return roots
     macos = [Path(os.path.realpath(parent)) for parent in MACOS_USER_TEMP_PARENTS]
+    # The scratch dir is resolved like tmp (the mini's ~/.hermes and cache/scratch are both symlinks,
+    # t_01a1d974a89f6ff6), and last: realpath reads the account home, so a TMPDIR the system or macOS
+    # rules already admit never touches it.
     ephemeral = (any(tmp.is_relative_to(root) for root in roots)
-                 or tmp.is_relative_to(account / '.hermes' / 'cache' / 'scratch')
                  or any(tmp.is_relative_to(parent) and tmp.relative_to(parent).parts[2:3] == ('T',)
-                        for parent in macos))
+                        for parent in macos)
+                 or tmp.is_relative_to(Path(os.path.realpath(account / '.hermes' / 'cache' / 'scratch'))))
     if ephemeral:
         roots.append(tmp)
     return roots
