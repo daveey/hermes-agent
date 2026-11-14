@@ -20,6 +20,12 @@ A LATER assignment to an integer variable is arithmetic too: after
 variable state, so once the text sets an integer attribute anywhere (``eval``
 strings and function bodies included) every word holding a subscript and an opener
 is a payload. Without such a declaration a plain ``x=a[\\$\\(S\\)]`` stays data.
+
+The recursive walk carries this hint across eval and referenced texts. Source/dot,
+an expanded command name, or expanded declare-family arguments may establish the
+attribute too: conservatively scan subscript payloads without evaluating any text.
+The hint is sticky for one scan (even across child shells), not variable/scope
+tracking. It may read extra files, but clean script twins remain allowed.
 """
 from __future__ import annotations
 
@@ -143,7 +149,31 @@ def _implicit_arithmetic_expansion(command: str) -> bool:
     return False
 
 
-def iter_arithmetic_word_payloads(command: str) -> Iterator[str]:
+def may_set_integer_attributes(command: str) -> bool:
+    """Conservative attribute hint, including declarations without a substitution."""
+    from cron import lifecycle_guard as guard
+
+    for segment in guard._iter_command_segments(command):
+        if _INTEGER_DECLARATION_RE.search(" ".join(segment)):
+            return True
+        words = segment[guard._peel_reserved_words(segment):]
+        index = guard._executed_command_index(words)
+        if index is None:
+            continue
+        name = guard._executable_name(words[index])
+        # Do not evaluate expansions or source files to discover attributes. Either
+        # can introduce an integer declaration; allow the later subscript walk now,
+        # before referenced files are traversed. Unknown commands may be declare.
+        if name in {"source", "."} or any(char in name for char in "$`"):
+            return True
+        if name in _INTEGER_DECLARERS and any(
+            "$" in word or "`" in word for word in words[index + 1:]
+        ):
+            return True
+    return False
+
+
+def iter_arithmetic_word_payloads(command: str, *, integer_context: bool = False) -> Iterator[str]:
     """Yield dequoted arithmetic operands of *command* whose subscript may run a substitution."""
     from cron import lifecycle_guard as guard
 
@@ -154,7 +184,7 @@ def iter_arithmetic_word_payloads(command: str) -> Iterator[str]:
     seen: set[str] = set()
     segments = list(guard._iter_command_segments(command))
     # With an integer attribute set anywhere, any word may be an assignment to it.
-    integer_text = any(
+    integer_text = integer_context or any(
         _INTEGER_DECLARATION_RE.search(" ".join(segment)) for segment in segments
     )
     # Arithmetic recursively evaluates variable values. Recover earlier dequoted

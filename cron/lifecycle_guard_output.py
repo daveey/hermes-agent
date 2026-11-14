@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 
-from cron.lifecycle_guard_arith_words import iter_arithmetic_word_payloads
+from cron.lifecycle_guard_arith_words import iter_arithmetic_word_payloads, may_set_integer_attributes
 
 _QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r'(?="([^"]+)")'))
 _ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
@@ -18,17 +18,18 @@ _ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
 
 def quote_scope(cwd, executed, budget) -> tuple:
     """Snapshot the interpretation under which a parent's quotes are walked."""
-    return cwd, executed, budget.alias_names, budget.mask_heredocs
+    return cwd, executed, budget.alias_names, budget.mask_heredocs, budget.integer_context
 
 
 def iter_recursive_payloads(command, nested_texts, *, cwd, executed, budget, covered_scope):
     from cron import lifecycle_guard as guard
 
+    budget.integer_context |= may_set_integer_attributes(command)
     for payload in nested_texts:
         yield payload, True, None
     for payload in guard._iter_shell_command_payloads(command):
         yield payload, False, None
-    for payload in iter_arithmetic_word_payloads(command):
+    for payload in iter_arithmetic_word_payloads(command, integer_context=budget.integer_context):
         yield payload, False, None
     # Snapshot after preceding nested-shell walks; shared budget state may have changed.
     scope = quote_scope(cwd, executed, budget)

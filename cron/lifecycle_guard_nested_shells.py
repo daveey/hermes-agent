@@ -74,7 +74,7 @@ def unvisited_scopes(
         wanted.append((True, (None, True)))  # nested_shell_scope's state
     keys: dict[tuple, bool] = {}
     for flag, scope in wanted:
-        keys.setdefault((resolved, "shell", scope), flag)
+        keys.setdefault((resolved, "shell", scope, budget.integer_context), flag)
     return [(flag, key) for key, flag in keys.items() if key not in visited]
 
 

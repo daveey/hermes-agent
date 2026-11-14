@@ -512,6 +512,7 @@ class _LifecycleScanBudget:
         "alias_names",
         "aliases_defined",
         "bytes_remaining",
+        "integer_context",
         "lines_remaining",
         "mask_heredocs",
         "overrun",
@@ -547,6 +548,7 @@ class _LifecycleScanBudget:
             and all(isinstance(name, str) for name in session_aliases) else None)
         # Sticky: some walked text may define or enable an alias (see `note_aliases`).
         self.aliases_defined = False
+        self.integer_context = False  # Sticky possible integer attributes across recursive text.
         # False when a session alias may shadow a heredoc consumer, wrapper or shell name
         # (`alias python3=bash`): then no heredoc body is provably inert, so none is masked.
         self.mask_heredocs = not _session_aliases_shadow_consumers(session_aliases)
