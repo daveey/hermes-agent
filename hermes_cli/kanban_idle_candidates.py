@@ -64,8 +64,9 @@ def sweep_shared_blockers(conn, result) -> None:
     """Skip proven-empty lanes; positive candidates still obey time-based policy.
 
     G2b: the three lanes share one blocker-input scope (``kanban_blocker_inputs``): a lane's write, a
-    peer's commit or a config alias change still invalidates every retained input, and no derived
-    ``BlockerState`` is shared.
+    peer's commit or a config alias change still invalidates every retained input. G2c: the lanes also share one
+    ``blocker_states`` walk under that key (each lane gets a private copy and applies check clears and the fence
+    itself); it is never kept past this pass.
 
     [daveey] G2: each lane also skips while the board's content revision, this gateway's id and the config hold
     and none of its clocks ran out (``kanban_sweep_gate``). Both lanes read only content rows (``task_runs``

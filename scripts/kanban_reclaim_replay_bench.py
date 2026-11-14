@@ -2,11 +2,13 @@
 ticks over a COPY of a board in a scratch home, CPU per tick per sweep from ``loop_accounting``.
 
 usage: scripts/hermes-python scripts/kanban_reclaim_replay_bench.py <worktree> <board copy> <ticks>
-           [--churn N | --replay SECONDS] [--json out] [--profile]
+           [--churn N | --replay SECONDS] [--blockers N] [--json out] [--profile]
 
 --churn N       before every Nth tick, one content write (a comment), so the board revision moves; 0 = write-free.
 --replay S      replay the copy's own write cadence: tick i writes iff the i-th 15 s bucket of the last S seconds
                 of the board's history had a content event (heartbeats excluded: they never move the revision).
+--blockers N    after the ticks, N dirty-tick passes of ``sweep_shared_blockers`` alone (a comment write before each
+                pass), reported as ``dirty_shared_blockers`` median/min/max CPU ms per pass (G2c).
 
 Side effects are stubbed: wake-check probes, the CI sweep, the capability refresh, worker placement (Board),
 spawns (max_spawn=0), signals and subprocesses; any DB path outside the scratch home opens an empty read-only file.
@@ -25,6 +27,7 @@ wt, src, ticks = sys.argv[1], sys.argv[2], int(sys.argv[3])
 churn = int(sys.argv[sys.argv.index("--churn") + 1]) if "--churn" in sys.argv else 0
 replay = int(sys.argv[sys.argv.index("--replay") + 1]) if "--replay" in sys.argv else 0
 out = sys.argv[sys.argv.index("--json") + 1] if "--json" in sys.argv else None
+blocker_ticks = int(sys.argv[sys.argv.index("--blockers") + 1]) if "--blockers" in sys.argv else 0
 schedule = None
 if replay:
     ro = sqlite3.connect(f"file:{os.path.abspath(src)}?mode=ro", uri=True)
@@ -140,9 +143,28 @@ for k, v in la.counters().items():
         b = base.get(k, {})
         res[k] = {"runs": v["runs"] - b.get("runs", 0), "skips": v["skips"] - b.get("skips", 0),
                   "cpu_ms_per_tick": round(1000 * (v["cpu_s"] - b.get("cpu_s", 0.0)) / ticks, 3)}
+blockers = None
+if blocker_ticks:
+    # G2c dirty-tick blocker case: one content write (a comment), then one ``sweep_shared_blockers`` pass (its three
+    # lanes), so every pass misses the revision gates the way the hub's busy board does. CPU per pass, ms.
+    from types import SimpleNamespace
+    from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
+    samples = []
+    for i in range(blocker_ticks):
+        if t_open:
+            with kb.write_txn(conn):
+                kb._insert_comment(conn, t_open, "bench", f"blocker churn {i}", int(time.time()))
+        b0 = time.thread_time()
+        sweep_shared_blockers(conn, SimpleNamespace())
+        samples.append(1000 * (time.thread_time() - b0))
+    samples.sort()
+    blockers = {"passes": blocker_ticks, "median_ms": round(samples[len(samples) // 2], 3),
+                "min_ms": round(samples[0], 3), "max_ms": round(samples[-1], 3)}
 summary = {"board": os.path.basename(src), "ticks": ticks, "churn": churn, "replay_s": replay,
            "write_ticks": writes, "cpu_ms_per_tick_total": round(1000 * cpu / ticks, 3),
            "core_pct_at_interval": round(100 * cpu / ticks / INTERVAL, 3), "wall_s": round(wall, 2), "sweeps": res}
+if blockers is not None:
+    summary["dirty_shared_blockers"] = blockers
 print(json.dumps(summary, indent=1))
 if out:
     with open(out, "w", encoding="utf-8") as f:

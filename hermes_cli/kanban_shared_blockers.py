@@ -331,78 +331,93 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
     """Derive every recently asserted blocker's state from ``task_runs`` (read-only).
 
     ``oldest_out`` (G2) receives the moment the oldest assertion inside the lookback window leaves it: then
-    this derivation can change with no row changing."""
-    from hermes_cli import kanban_db as kb
+    this derivation can change with no row changing.
+
+    G2c: each task's own rows come decoded from ``kanban_blocker_rows`` (kept across passes, re-read only for tasks
+    the per-task change cursor names). The walk over them (:func:`_walk`) is shared by the lanes of one pass under
+    ``kanban_blocker_inputs.read``'s key (commit counters, file identity, alias snapshot) plus the set of in-window
+    assertion run ids, so a lane write or a peer commit recomputes it. Check clears and the quota fence run live on
+    each consumer's private copy."""
+    from hermes_cli import kanban_blocker_rows as rows
+    from hermes_cli.kanban_blocker_inputs import read
 
     now = int(time.time()) if now is None else int(now)
-    asserting = conn.execute(
-        "SELECT id, task_id, started_at, ended_at, outcome, metadata, summary FROM task_runs "
-        "WHERE ended_at IS NOT NULL AND ended_at >= ? AND metadata LIKE '%\"blocker_id\"%' "
-        "ORDER BY id",
-        (now - _LOOKBACK_SECONDS,),
-    ).fetchall()
+    window, _tasks = rows.inputs(conn, now)
+    states, asserting = read("walk", conn, ("walk", frozenset(r.id for r in window)),
+                             lambda: _walk(conn, *rows.inputs(conn, now)))
     _note_window_exit(oldest_out, asserting)
+    if not states:
+        return states
+    from hermes_cli.kanban_shared_blocker_checks import apply_check_clears
+    apply_check_clears(conn, states, now=now)
+    from hermes_cli.kanban_shared_blocker_fence import fence_stale_quota_assertions
+    fence_stale_quota_assertions(conn, states, asserting, now=now)
+    return states
+
+
+def _walk(conn: sqlite3.Connection, asserting, tasks) -> tuple[dict[str, BlockerState], tuple]:
+    """The run-history walk of :func:`blocker_states`, before check clears and the fence.
+
+    ``asserting``: the in-window assertion-scan rows sorted by run id; ``tasks``: each task's decoded runs and status
+    (``kanban_blocker_rows``). Routes and condition_met evidence are read live on every walk."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_blocker_inputs import memo
+
     states: dict[str, BlockerState] = {}
     scopes: dict[str, set[Optional[str]]] = {}
     task_ids: set[str] = set()
     for row in asserting:
-        effect, bid = run_effect(row["outcome"], row["metadata"])
-        if effect != "assert" or bid is None:
+        bid = row.bid
+        if row.effect != "assert" or bid is None:
             continue
         st = states.setdefault(bid, BlockerState(bid))
-        ended = kb._to_epoch(row["ended_at"]) or 0
-        meta = kb._json_dict(row["metadata"])
-        scopes.setdefault(bid, set()).add(_provider(meta.get("blocker_provider")))
-        if ended >= st.asserted_at:
-            st.asserted_at = ended
-            st.reason = kb._first_line(row["summary"], 300)
-            st.blocker_model = _optional_text(meta.get("blocker_model"))
-            st.blocker_lane = _optional_text(meta.get("blocker_lane"))
-        task_ids.add(row["task_id"])
+        raw = row.provider
+        scopes.setdefault(bid, set()).add(memo("blocker_provider", raw, lambda: _provider(raw)))
+        if row.ended >= st.asserted_at:   # rows are in id order: a tie goes to the higher run id
+            st.asserted_at = row.ended
+            st.reason = row.reason
+            st.blocker_model = row.model
+            st.blocker_lane = row.lane
+        task_ids.add(row.task_id)
     if not states:
-        return states
+        return states, asserting
     for bid, st in states.items():
         # Union of every recent assertion: any unscoped or differing provider keeps it board-wide.
         providers = scopes.get(bid, set())
         st.blocker_provider = next(iter(providers)) if len(providers) == 1 else None
-    for tid in task_ids:
-        status_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
-        live = status_row is not None and status_row["status"] not in ("done", "archived")
-        runs = conn.execute(
-            "SELECT id, outcome, started_at, ended_at, metadata FROM task_runs "
-            "WHERE task_id = ? ORDER BY id", (tid,),
-        ).fetchall()
+    for tid in sorted(task_ids):
+        entry = tasks[tid]
+        live = entry.status is not None and entry.status not in ("done", "archived")
         current: Optional[tuple[str, int]] = None   # (blocker, asserting ended_at)
         asserting_run: Optional[int] = None
-        for run in runs:
-            started = kb._to_epoch(run["started_at"]) or 0
+        for run in entry.runs:
             applicable = True
             if current is not None and current[0] in states:
                 st = states[current[0]]
                 provider = None
                 if st.blocker_provider:
-                    provider = (_run_route(conn, tid, run["id"])[1] if run["ended_at"] is not None
+                    provider = (_run_route(conn, tid, run.id)[1] if run.ended_raw is not None
                                 else task_route(conn, tid)[1])
                 applicable = _run_is_evidence(st, provider)
                 if applicable:
-                    st.probe_starts[tid] = max(st.probe_starts.get(tid, 0), started)
-            if run["ended_at"] is None:
+                    st.probe_starts[tid] = max(st.probe_starts.get(tid, 0), run.started)
+            if run.ended_raw is None:
                 continue
-            ended = kb._to_epoch(run["ended_at"]) or 0
-            effect, bid = run_effect(run["outcome"], run["metadata"])
+            effect, bid = run.effect, run.bid
             if effect == "assert" and bid is not None:
                 if applicable and current is not None and current[0] != bid and current[0] in states:
-                    _mark_cleared(states[current[0]], tid, run["id"], ended)
-                current, asserting_run = (bid, ended), int(run["id"])
+                    _mark_cleared(states[current[0]], tid, run.id, run.ended)
+                current, asserting_run = (bid, run.ended), run.id
                 continue
-            if effect == "pass" or not (applicable or _explicit_clear(kb, run["metadata"])):
+            if effect == "pass" or not (applicable or run.explicit_clear):
                 continue
             if current is not None and current[0] in states:
-                _mark_cleared(states[current[0]], tid, run["id"], ended)
+                _mark_cleared(states[current[0]], tid, run.id, run.ended)
             current = None
         if current is not None and current[0] in states:
             # The card's own wake_check exiting 0 after it parked behind X is evidence too.
-            # Ordered by event id after the asserting run's own events (same-second safe).
+            # Ordered by event id after the asserting run's own events (same-second safe). Read live, never
+            # cached: a late heartbeat of the asserting run moves MAX(id) without marking the task.
             met = conn.execute(
                 "SELECT id, created_at, payload FROM task_events WHERE task_id = ? AND kind = ? AND id > COALESCE("
                 "(SELECT MAX(id) FROM task_events WHERE task_id = ? AND run_id = ?), 0) "
@@ -416,11 +431,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
     for st in states.values():
         # Probe starts only count once the card is (still) behind the blocker.
         st.probe_starts = {t: s for t, s in st.probe_starts.items() if t in st.behind}
-    from hermes_cli.kanban_shared_blocker_checks import apply_check_clears
-    apply_check_clears(conn, states, now=now)
-    from hermes_cli.kanban_shared_blocker_fence import fence_stale_quota_assertions
-    fence_stale_quota_assertions(conn, states, asserting, now=now)
-    return states
+    return states, asserting
 
 
 def _probe_parked_behind(conn: sqlite3.Connection, kb, task_id: str, met, blocker_id: str) -> bool:
@@ -671,11 +682,13 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
     Returns only task ids whose lane changed (ready/review cards remain queued)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban_blocker_rows import foreign_among
 
     # Retained executor copies own host-local wake probes, not shared-wall policy writes.
-    foreign = kwc.foreign_ids(conn)
+    states = blocker_states(conn, now=now, oldest_out=oldest_out)
+    foreign = foreign_among(conn, (t for st in states.values() for t in st.behind))   # G2c: only the asked cards
     released: list[str] = []
-    for st in blocker_states(conn, now=now, oldest_out=oldest_out).values():
+    for st in states.values():
         if st.is_open or st.cleared_by is None:
             continue
         by_task, by_run = st.cleared_by
@@ -735,14 +748,15 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
     assertion is oldest is unblocked; it then spawns as the probe. Cards carrying a human ask
     (``human_request``) are left for the human. [daveey]"""
     from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban_blocker_rows import foreign_among
 
-    foreign = kwc.foreign_ids(conn)
     now = int(time.time()) if now is None else int(now)
     if interval is None:
         interval = probe_interval_seconds()
     probed: list[str] = []
-    for st in blocker_states(conn, now=now, oldest_out=due_out).values():
+    states = blocker_states(conn, now=now, oldest_out=due_out)
+    foreign = foreign_among(conn, (t for st in states.values() for t in st.behind))   # G2c: only the asked cards
+    for st in states.values():
         if not st.is_open or not st.behind:
             continue
         if st.blocker_provider and due_out is not None:

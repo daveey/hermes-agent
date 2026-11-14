@@ -1,7 +1,9 @@
 """Call-scoped, validated input reuse for shared-blocker derivation.
 
-Never retain derived BlockerState or a transaction across a shell probe. Values
-are privately copied; a caller cannot mutate a later consumer's observations.
+Never retain a transaction across a shell probe. Derived BlockerState is retained only within one pass, under
+``read``'s key (G2c: the ``blocker_states`` walk before check clears and the fence, keyed with the in-window
+assertion run ids), never across passes. Values are privately copied; a caller cannot mutate a later consumer's
+observations.
 """
 from __future__ import annotations
 

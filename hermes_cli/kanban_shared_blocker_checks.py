@@ -67,25 +67,23 @@ def _read_assertion_tokens(conn, now=None) -> dict[str, str]:
     Synced run UIDs survive integer-id remapping and same-second runs. Sorting
     identities also survives opposite import order. Older assertions aging out
     must not revoke a successful check. Unsynced legacy schemas use task/time.
-    """
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_shared_blockers import run_effect
 
+    G2c: the cohort is every in-window assertion of the id whose ended_at epoch is the newest, an
+    order-free function of the assertion scan, so it reads the rows ``blocker_states`` decoded
+    (``kanban_blocker_rows``; afresh inside a transaction).
+    """
+    from hermes_cli import kanban_blocker_rows as rows
+
+    ts = int(time.time()) if now is None else int(now)
+    window, _tasks = rows.inputs(conn, ts)
     tokens, newest = {}, {}
-    columns = {row[1] for row in conn.execute('PRAGMA table_info(task_runs)')}
-    identity = 'uid' if 'uid' in columns else 'NULL AS uid'
-    for row in conn.execute(
-            f"SELECT id, {identity}, task_id, started_at, ended_at, outcome, metadata FROM task_runs "
-            "WHERE ended_at IS NOT NULL AND ended_at >= ? AND metadata LIKE '%\"blocker_id\"%' "
-            "ORDER BY ended_at, id", (_lookback(now),)):
-        effect, bid = run_effect(row["outcome"], row["metadata"])
-        if effect == "assert":
-            raw = str(row['uid'] or (f"{row['task_id']}|{kb._to_epoch(row['started_at']) or 0}|"
-                                     f"{kb._to_epoch(row['ended_at']) or 0}|{bid}"))
-            ended = kb._to_epoch(row['ended_at']) or 0
-            if ended > newest.get(bid, -1):
-                newest[bid], tokens[bid] = ended, []
-            if ended == newest[bid]:
+    for row in window:
+        if row.effect == "assert":
+            bid = row.bid
+            raw = str(row.uid or f"{row.task_id}|{row.started}|{row.ended}|{bid}")
+            if row.ended > newest.get(bid, -1):
+                newest[bid], tokens[bid] = row.ended, []
+            if row.ended == newest[bid]:
                 tokens[bid].append(raw)
     return {bid: hashlib.sha256('\n'.join(sorted(ids)).encode()).hexdigest()
             for bid, ids in tokens.items()}
@@ -213,7 +211,7 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_shared_blockers import blocker_states
-    from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli import kanban_blocker_rows as blocker_rows
 
     if conn.in_transaction:
         raise ValueError("shared blocker checks must run outside a write transaction")
@@ -221,7 +219,7 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
     commands = registered_checks(cfg)
     states = blocker_states(conn, now=ts)
     apply_check_clears(conn, states, ts)
-    foreign = foreign_ids(conn)
+    foreign = blocker_rows.foreign_among(conn, (t for st in states.values() for t in st.behind))   # G2c
     tokens, previous = _assertion_tokens(conn, ts), _latest_results(conn, ts)
     attempts = _latest_attempts(conn, ts)
     cleared = []
@@ -263,7 +261,7 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
                    "started_at": ts, "checked_at": checked_at, "assertion_id": token, "fails": fails}
         with kb.write_txn(conn):
             # A shell check can overlap a new assertion or a home ownership change.
-            if homes[0] in foreign_ids(conn):
+            if blocker_rows.foreign_among(conn, (homes[0],)):
                 continue
             if _assertion_tokens(conn, ts).get(bid) != token:
                 kb._append_event(conn, homes[0], ATTEMPT_EVENT, {

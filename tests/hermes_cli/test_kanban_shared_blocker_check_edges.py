@@ -57,14 +57,27 @@ def test_older_text_stamped_assertion_does_not_join_newest_cohort(kanban_home, m
         assert not blockers.blocker_states(conn)[WALL].is_open
 
 
-def test_check_evidence_lands_on_home_card_when_a_foreign_card_sorts_first(kanban_home, monkeypatch, clock):
+def _own_gateway(conn, monkeypatch):
+    """Make this board a synced home (``own_gateway``) whose cards carry ``created_on`` (foreign when not ours)."""
     from hermes_cli import kanban_wake_check as wake
 
+    if "created_on" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        conn.execute("ALTER TABLE tasks ADD COLUMN created_on TEXT")
+    monkeypatch.setattr(wake, "own_gateway", lambda _conn: "home-gw")
+
+
+def _created_on(conn, tid, gateway):
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET created_on = ? WHERE id = ?", (gateway, tid))
+
+
+def test_check_evidence_lands_on_home_card_when_a_foreign_card_sorts_first(kanban_home, monkeypatch, clock):
     with kbc.connect_closing() as conn:
         first = _blocked_behind(conn, "a", blocker_id=WALL)
         second = _blocked_behind(conn, "b", blocker_id=WALL)
         foreign, home = sorted([first, second])
-        monkeypatch.setattr(wake, "foreign_ids", lambda _conn: {foreign})
+        _own_gateway(conn, monkeypatch)
+        _created_on(conn, foreign, "worker-gw")
         monkeypatch.setattr(checks, "_run_check", lambda c: (0, "recovered"))
         clock[0] += 30
         assert checks.run_due_checks(conn, cfg=CFG) == [WALL]
@@ -74,15 +87,12 @@ def test_check_evidence_lands_on_home_card_when_a_foreign_card_sorts_first(kanba
 
 
 def test_home_turning_foreign_during_check_writes_no_evidence(kanban_home, monkeypatch, clock):
-    from hermes_cli import kanban_wake_check as wake
-
     with kbc.connect_closing() as conn:
         tid = _blocked_behind(conn, "home", blocker_id=WALL)
-        foreign = set()
-        monkeypatch.setattr(wake, "foreign_ids", lambda _conn: set(foreign))
+        _own_gateway(conn, monkeypatch)
 
         def handed_over(_command):
-            foreign.add(tid)  # ownership moved to another gateway while the shell ran
+            _created_on(conn, tid, "worker-gw")  # ownership moved to another gateway while the shell ran
             return 0, ""
 
         monkeypatch.setattr(checks, "_run_check", handed_over)

@@ -27,8 +27,9 @@ def test_derivation_loads_config_per_pass_not_per_run(kanban_home, monkeypatch):
         calls = _counting_config(monkeypatch, {'kanban': {'shared_blocker_aliases': {}}})
         states = blockers.blocker_states(conn)
         assert len(states['test-wall'].behind) == 12
-        # The snapshot itself plus each validated input read (tokens, check events): not one per row.
-        assert len(calls) <= 6, len(calls)
+        # The snapshot itself plus each validated input read (tokens, check events, the G2c shared walk), each
+        # keyed before and after: not one per row.
+        assert len(calls) <= 7, len(calls)
 
 
 def test_sweep_lanes_share_one_snapshot(kanban_home, monkeypatch):

@@ -119,15 +119,23 @@ def test_three_errors_stop_checks_without_clearing(kanban_home, caplog):
 
 
 def test_home_authority_uses_foreign_ids(kanban_home, monkeypatch):
+    from hermes_cli import kanban_blocker_rows as blocker_rows
     from hermes_cli import kanban_shared_blocker_checks as checks
     from hermes_cli import kanban_wake_check as wake
 
     with kbc.connect_closing() as conn:
         tid = _blocked_behind(conn, "foreign copy", blocker_id="test-wall")
-        monkeypatch.setattr(wake, "foreign_ids", lambda _: {tid})
+        if "created_on" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+            conn.execute("ALTER TABLE tasks ADD COLUMN created_on TEXT")
+        monkeypatch.setattr(wake, "own_gateway", lambda _conn: "home-gw")
+        conn.execute("UPDATE tasks SET created_on = 'worker-gw' WHERE id = ?", (tid,))
+        conn.commit()
+        assert blocker_rows.foreign_among(conn, [tid]) == {tid}
         assert checks.run_due_checks(conn, cfg=_cfg("exit 0")) == []
         assert not [e for e in kb.list_events(conn, tid) if e.kind == checks.CHECK_EVENT]
-        monkeypatch.setattr(wake, "foreign_ids", lambda _: set())
+        conn.execute("UPDATE tasks SET created_on = 'home-gw' WHERE id = ?", (tid,))
+        conn.commit()
+        assert blocker_rows.foreign_among(conn, [tid]) == frozenset()
         assert checks.run_due_checks(conn, cfg=_cfg("exit 0")) == ["test-wall"]
 
 

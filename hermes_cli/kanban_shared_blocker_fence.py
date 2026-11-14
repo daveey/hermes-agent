@@ -60,9 +60,7 @@ def fence_stale_quota_assertions(conn, states, asserting, *, now):
     after the recovery can report a genuinely new wall: ``run_due_checks`` runs
     the cheap check only while a wall is open, so it never re-opens one.
     """
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_shared_blockers import _mark_cleared, run_effect
-    from hermes_cli.kanban_shared_blocker_checks import run_identity
+    from hermes_cli.kanban_shared_blockers import _mark_cleared
 
     st = states.get('github-rest-quota')
     if st is None:
@@ -79,11 +77,10 @@ def fence_stale_quota_assertions(conn, states, asserting, *, now):
         return
     eligible = []
     for row in asserting:
-        effect, bid = run_effect(row['outcome'], row['metadata'])
-        if effect != 'assert' or bid != st.blocker_id:
+        # G2c: ``asserting`` holds ``kanban_blocker_rows.AssertRow``s, decoded once per task and run.
+        if row.effect != 'assert' or row.bid != st.blocker_id:
             continue
-        started = kb._to_epoch(row['started_at']) or 0
-        ended = kb._to_epoch(row['ended_at']) or 0
+        started, ended = row.started, row.ended
         known = in_flight.get(st.cleared_at, False)
         if known is False:
             admitted = started <= st.cleared_at        # non-check clear: unchanged
@@ -92,7 +89,7 @@ def fence_stale_quota_assertions(conn, states, asserting, *, now):
         else:
             # Snapshot absence does not prove freshness: a remote claim may not
             # have synced yet. Its portable UUID can carry earlier clock evidence.
-            identity = run_identity(conn, row['id'])
+            identity = str(row.uid or f"{row.task_id}|{started}")   # == run_identity(conn, row.id)
             admitted = started < st.cleared_at or (
                 started == st.cleared_at and (identity in known or
                     _uid_before_check(identity, started, receipts.get(st.cleared_at, {}))))
