@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import faulthandler
 import importlib
+import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -20,13 +22,16 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _diagnose_loop_command_hang():
-    """Keep blocked-thread evidence before the per-file runner's hard timeout."""
-    faulthandler.dump_traceback_later(30)
+def _diagnose_loop_command_hang(capfd):
+    """A hard-killed pytest never flushes capture: preserve the runner's stderr FD."""
+    with capfd.disabled():
+        fd = os.dup(sys.stderr.fileno())
     try:
+        faulthandler.dump_traceback_later(30, file=fd)
         yield
     finally:
         faulthandler.cancel_dump_traceback_later()
+        os.close(fd)
 
 
 @pytest.fixture()
