@@ -409,12 +409,24 @@ def test_holder_backoff_restarts_on_a_new_replica_stamp(tmp_path, monkeypatch):
         thread.join(5)
 
 
-def test_serve_holder_hands_the_lease_to_a_gateway_claim_in_the_same_process(tmp_path, monkeypatch):
+@pytest.mark.parametrize("delay_metadata", [False, True], ids=["ordinary", "held-before-metadata"])
+def test_serve_holder_hands_the_lease_to_a_gateway_claim_in_the_same_process(tmp_path, monkeypatch, delay_metadata):
     """Two real ``HostLoopLease`` objects in one process: the serve refresher holds, a gateway claim stops it, its
     ``release()`` unlocks, and the gateway lease's blocked ``LOCK_EX`` waiter becomes the holder and publishes."""
     import agent.memory_provider as mp
     from hermes_cli import host_loop_lease as hll
 
+    metadata_observed = threading.Event()
+    real_write = hll.HostLoopLease._write_meta
+
+    def write_meta(lease, *, held):
+        if delay_metadata and lease.role == "gateway" and held:
+            # Hold the actual acquisition-to-publication gap until the reader
+            # observes it, rather than hoping thread scheduling exposes it.
+            assert metadata_observed.wait(15)
+        real_write(lease, held=held)
+
+    monkeypatch.setattr(hll.HostLoopLease, "_write_meta", write_meta)
     monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path))
     replica, _ = _home(tmp_path, _cards())
     ledger = krn.ledger_path()
@@ -439,13 +451,29 @@ def test_serve_holder_hands_the_lease_to_a_gateway_claim_in_the_same_process(tmp
         serve_thread.join(15)
         assert not serve_thread.is_alive() and not serve._held  # the serve refresher stopped and released
         wait_until(lambda: gateway._held, timeout=15, what="the gateway lease takes over the released lock")
-        meta = json.loads(gateway.path.read_text())
+        # _held describes the acquired flock, not completion of _become_holder's
+        # subsequent metadata write. Observe publication before asserting its fields.
+        meta = {}
+
+        def gateway_metadata_published():
+            nonlocal meta
+            try:
+                meta = json.loads(gateway.path.read_text())
+            except json.JSONDecodeError:  # lock-free reader may overlap an in-place write
+                return False
+            if delay_metadata and not metadata_observed.is_set():
+                assert meta["held"] is False and meta["role"] == "serve"
+            metadata_observed.set()
+            return meta.get("held") is True and meta.get("role") == "gateway"
+
+        wait_until(gateway_metadata_published, timeout=15, what="gateway lease metadata publication")
         assert meta["held"] is True and meta["role"] == "gateway" and meta["pid"] == os.getpid()
         assert not gateway._waiting
         _add(replica, _linked("t_new", CHAT), 50)  # the gateway refresher publishes the next state
         wait_until(lambda: kri.published_key(ledger) == kri.replica_key(replica), timeout=15,
                    what="gateway publish")
     finally:
+        metadata_observed.set()
         kri.reset()
         for thread, _lease in spawned:
             thread.join(15)
