@@ -251,6 +251,40 @@ def test_bound_spares_the_job_while_the_custody_hosts_retry_runs(board, procs, m
     assert _wait_dead(ship, start)
 
 
+@pytest.mark.parametrize("status", ["done", "archived"])
+@pytest.mark.parametrize("bound_offset", [-1, 1])
+def test_terminal_card_releases_custody_without_signalling_job(
+        board, procs, monkeypatch, status, bound_offset):
+    tid = _running_card(board, max_runtime=60)
+    ship = _ready(procs(SLEEPER))
+    start = custody._start_ticks(ship)
+    assert start is not None
+    _checkpoint(board, _entry(ship, persist=True, command="ship"))
+    monkeypatch.setattr(custody, "own_host", lambda conn: HOST)
+    until = _requeue(board, tid)["custody"]["until"]
+    assert kb.claim_task(board, tid) is not None
+    if status == "done":
+        assert kb.complete_task(board, tid, summary="finished", fire_lifecycle_hook=False)
+    else:
+        assert kb.archive_task(board, tid, signal_fn=lambda *_: None)
+    assert kb.get_task(board, tid).status == status
+    assert custody._alive(ship, start)
+
+    signalled = []
+    def terminate_spy(processes):
+        signalled.extend(processes)
+        return custody.terminate(processes)
+
+    assert custody.sweep(board, now=until + bound_offset, terminate_fn=terminate_spy) == [tid]
+    assert signalled == []
+    assert custody._alive(ship, start)
+    (released,) = [e for e in kb.list_events(board, tid) if e.kind == custody.RELEASED_EVENT]
+    assert released.payload["outcome"] == "terminal"
+    assert released.payload["status"] == status
+    assert custody.sweep(board, now=until + 2, terminate_fn=terminate_spy) == []
+    assert signalled == [] and custody._alive(ship, start)
+
+
 def test_liveness_without_proc_uses_the_registry_fingerprint(procs, monkeypatch):
     """Review nit of 478094ef: on macOS (no /proc) every pid read as dead, so no custody was ever recorded.
     Without /proc the fingerprint is the process registry's own (psutil), matching checkpoint entries."""

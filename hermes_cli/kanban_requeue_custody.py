@@ -293,6 +293,13 @@ def sweep(conn: sqlite3.Connection, *, now: Optional[float] = None,
         for task_id, _run, custody in _custodies(conn, None, moment - SWEEP_WINDOW_SECONDS):
             if custody.get("host") != me:
                 continue
+            row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is not None and row["status"] in {"done", "archived"}:
+                # Terminal cards cannot be claimed elsewhere. Custody no longer protects a retry,
+                # and must not shorten the lifetime of its persist_on_release jobs.
+                _release(conn, task_id, custody, "terminal", {"status": row["status"]})
+                released.append(task_id)
+                continue
             procs = [p for p in custody["processes"] if isinstance(p, dict)]
             live = [p for p in procs if _alive(p.get("pid"), p.get("start"))]
             if live and (moment < float(custody.get("until") or 0) or _held_here(conn, task_id)):
