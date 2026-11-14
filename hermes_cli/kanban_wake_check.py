@@ -888,6 +888,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 kb.add_comment(conn, task_id, "kanban-dispatcher", note)
             return woke
         if rc == 1 and not output_error(out):
+            from hermes_cli.kanban_wait_baseline import record_departure
+            record_departure(conn, task_id, cmd, out)
             if dead_ancestry:
                 from hermes_cli.kanban_dead_ancestry import wake_once
                 woke = wake_once(conn, task_id, cmd, dead_ancestry)

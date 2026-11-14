@@ -242,6 +242,11 @@ def run(args) -> int:
         # Implicit --from, for dispatcher probe runs only (a worker running wait-check by hand sees the plain
         # status): the status the waiter already handled (see handled_status).
         seen = handled_status(os.environ.get("HERMES_KANBAN_TASK"), os.environ.get("HERMES_KANBAN_DB"), args.target)
+        if not args.until:
+            from hermes_cli.kanban_wait_baseline import park_status
+            found, parked = park_status(os.environ.get("HERMES_KANBAN_TASK"), os.environ.get("HERMES_KANBAN_DB"), args.target)
+            if found:
+                seen = parked
         since = (seen,) if seen else ()
     gw = getattr(args, "gateway", None)
     if args.check == "capability-owner":

@@ -168,6 +168,8 @@ def normalize(value: Any) -> Optional[dict]:
     if kind not in KINDS:
         raise AwaitingError(INVALID_AWAITING, f"awaiting.kind must be one of {list(KINDS)} (got {kind!r})")
     out = {"kind": kind}
+    if value.get("auto_card_probe") is True:
+        out["auto_card_probe"] = True
     for key in ("ref", "why", "gateway", "board"):
         raw = value.get(key)
         if raw is not None and not isinstance(raw, str):
@@ -444,6 +446,8 @@ def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: st
         done = _completed_at(owner, ref)
         if done:
             raise producer_done_error(ref, done)
+        row = owner.execute("SELECT status FROM tasks WHERE id = ?", (ref,)).fetchone()
+        awaiting["observed"] = f"{ref} {row[0]}"
 
 
 def _check_run(conn, task_id, awaiting, text) -> None:
@@ -931,6 +935,8 @@ def card_probe(awaiting: Optional[dict]) -> Optional[str]:
         argv += ["--gateway", awaiting["gateway"]]
     if awaiting.get("board"):
         argv += ["--board", awaiting["board"]]
+    if not awaiting.get("inferred"):
+        awaiting["auto_card_probe"] = True
     return shlex.join(argv)
 
 
