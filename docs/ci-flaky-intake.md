@@ -79,9 +79,11 @@ Unattempted pages are rechecked against exact owners before each drain. Once cre
 comment delivery has been attempted, the page remains immutable so an ambiguous response
 cannot change its replay identity. A definitive `create_overlap` refusal is different:
 read back every named match, route exact-test owners through the existing owner path, and
-retry unrelated matches only with supported `distinct_from` evidence. A refusal after an
-earlier ambiguous attempt cannot dissolve that earlier page. Unreadable overlap matches
-remain retryable, never an excuse to declare unknown work distinct. The shared polling budget also stops starting new owner
+retry unrelated matches only with supported `distinct_from` evidence. After an earlier
+ambiguous attempt, successful complete board listing must first establish that the intake
+key is absent. A subsequent definitive refusal can then be reconciled; unreadable overlap
+matches retain the immutable attempted page and remain pending, never an excuse to declare
+unknown work distinct. The shared polling budget also stops starting new owner
 resolutions and page deliveries; deferred rows remain durable and the poll reports failure.
 Board/courier operations already started may still consume their existing transport timeout.
 Before GitHub discovery, a drain gets half the invocation budget and checkpoints the JSON
@@ -137,6 +139,24 @@ an active database file alone is not a consistent backup. Preserve the lock mark
 backup, but never replace an actively held lock inode.
 
 ## Recovery and rollback
+
+At cutover the journal may replay legacy cursor runs. Journal-mode owner delivery recognizes
+an exact test/job citation in the owner's body as well as its comments, so initial legacy
+filings do not receive redundant "Flaked again" comments. Different jobs still get comments;
+the legacy non-journal helper retains its original comment behavior.
+
+An unreadable cached local owner is evicted only when a successful complete local board
+listing (including archived cards) proves its ID absent. Normal owner discovery then runs
+again before intake admission. An inventory error, a listed but unreadable owner, or a stale
+foreign scope never proves absence. No retry count silently abandons a known OPEN owner.
+For a permanently gone cross-board/foreign cached owner, stop the producer, back up the JSON
+cursor, and verify deletion on the owning gateway/profile/board through its authoritative
+Board surface (not absence in the hub replica). Remove only that exact test's entry from
+`state['cards']` in the JSON cursor and resume the producer. This is the manual escape hatch
+for scopes the local listing cannot prove absent. Do not remove entries for merely offline
+or unreadable owners; restore read access/freshness instead. Retain the deletion evidence.
+Never edit the journal or its identity/lock files for this recovery. Rediscovery still holds
+stale/unreadable matching OPEN replica owners pending even after cache eviction.
 
 Loss of only the JSON cursor is replay-safe while the journal remains intact. Missing or
 corrupt journal state must not be treated as an empty queue. Missing queue or anchor and a

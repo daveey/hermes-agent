@@ -378,8 +378,10 @@ def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, 
         recorded_generation = (known or {}).get("generation", 0)
         owner = ctx.resolve(known) if known else None
         if on_unowned is not None and known and (owner is None or owner.get("status") is None):
-            log.append(f"FAILED {test_id}: cached owner unreadable; durable retry pending")
-            continue
+            if not ctx.cached_owner_absent(known):
+                log.append(f"FAILED {test_id}: cached owner unreadable; durable retry pending")
+                continue
+            del state["cards"][test_id]
         if owner is not None and owner.get("status") not in CLOSED | {None}:
             log.append(_append(ctx, owner, recorded_generation))
             continue
@@ -429,8 +431,20 @@ class _Flake:
         self.comment = f"Flaked again: `{test_id}` in {run_url} (branch `{branch}`)." + (
             f"\n\n```\n{excerpt[-1500:]}\n```" if excerpt else "")
 
+    def cached_owner_absent(self, ref: dict[str, Any]) -> bool:
+        """Only a complete local inventory proves a cached owner is gone.
+
+        Replica absence or repeated read failures are not deletion receipts.
+        Other boards require operator reconciliation on their owning scope.
+        """
+        if ref.get("gateway") not in (None, "", "local", self.self_gw):
+            return False
+        if ref.get("board") not in (None, "", "default"):
+            return False
+        return not any(c.get("id") == ref.get("card") for c in self.board.list_cards())
+
     def noted(self, comments: Iterable[str]) -> bool:
-        return any(self.run_url in c and self.test_id in c for c in comments)
+        return any(_cites_job(c, self.run_url) and _mentions(c, self.test_id) for c in comments)
 
     def resolve(self, ref: dict[str, Any]) -> dict[str, Any] | None:
         """``ref`` (an overlap match or a state entry) read from its owner: this board, another board here, or
@@ -455,6 +469,10 @@ class _Flake:
 
     def deliver(self, card: dict[str, Any]) -> tuple[bool | None, str]:
         """Comment ``card`` and read the comment back. ``(True, how)``, ``(False, why)`` or ``(None, pending)``."""
+        # Legacy owners put the initial job receipt in the body, not a comment.
+        current = self.resolve(card) if self.require_fresh else None
+        if current is not None and self.noted([str(current.get("body") or "")]):
+            return True, "already noted in owner body for this job"
         if card.get("gateway"):
             if self.relay is None:
                 return False, "no hermes-hub relay on this host"
@@ -608,11 +626,10 @@ def _create_intake(journal, repo, board, state, relay, title, body, key, page, d
                                 distinct_reason="Daily intake only admits unowned occurrences; "
                                 "read-back overlap matches do not own any test in this manifest.")
         except CreateRefused as refused:
-            # A previous lost create response cannot be disproved by this later refusal.
-            if page["attempted"] or not contexts:
+            # deliver() proved the key absent before calling us. Keep the old
+            # ambiguity fence until every overlap match has also been read back.
+            if not contexts:
                 raise
-            with journal.db:
-                journal.db.execute("UPDATE pages SET attempted=0 WHERE id=?", (page["id"],))
             fresh = [m for m in refused.matches if m.get("id") and m["id"] not in distinct]
             if not fresh:
                 raise
@@ -622,8 +639,9 @@ def _create_intake(journal, repo, board, state, relay, title, body, key, page, d
                     raise RuntimeError("intake_budget")
                 owner = contexts[0].resolve(match)
                 if owner is None or owner.get("status") not in OPEN | CLOSED:
-                    # Definitive refusal, so a later drain may safely recheck this page.
-                    journal.unplan_page(page["id"])
+                    # Preserve earlier ambiguity when match readback is unavailable.
+                    if not page["attempted"]:
+                        journal.unplan_page(page["id"])
                     raise RuntimeError("intake overlap owner unreadable") from None
                 owners.append(owner)
             exact = [(ctx, owner) for ctx in contexts for owner in owners if _overlap_owns(ctx, owner)]

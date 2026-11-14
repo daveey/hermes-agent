@@ -189,6 +189,9 @@ def test_unreadable_cached_owner_never_admits_to_intake():
         def card(self, cid):
             return None
 
+        def list_cards(self):
+            return [{"id": "missing", "status": "running", "title": "Deflake tests/a.py::test_a"}]
+
     state = {"cards": {"tests/a.py::test_a": {"card": "missing", "generation": 0}}}
     admitted = []
     lines = fk.file_cards([{"test_id": "tests/a.py::test_a"}], run_url="https://github.com/o/r/actions/runs/1/job/9",
@@ -351,6 +354,9 @@ def test_prior_ambiguous_create_followed_by_refusal_never_repartitions(tmp_path)
     class Refusing(Board):
         def create(self, *args, **kwargs):
             raise fk.CreateRefused("overlap", [{"id": "unknown"}])
+
+        def card(self, cid):
+            return None
 
     journal = intake.Journal(tmp_path / "queue.sqlite3")
     record(journal, count=1)
