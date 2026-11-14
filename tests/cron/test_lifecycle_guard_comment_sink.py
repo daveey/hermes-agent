@@ -122,6 +122,15 @@ def test_uncertain_regions_abandon_masking(text):
     assert output_reaches_shell(text)
 
 
+@pytest.mark.parametrize("opener", ["$(", "${", '"$(', "("])
+def test_unclosed_opener_after_root_comment_abandons_masking(opener):
+    from tools.shell_comments import mask_root_comment_lines
+
+    text = "# cat payload.sh | bash\necho " + opener
+    assert mask_root_comment_lines(text) == text
+    assert output_reaches_shell(text)
+
+
 @pytest.mark.parametrize("tabs", [False, True])
 def test_unquoted_heredoc_false_close_runs_real_substitution(tmp_path, tabs):
     from tools.shell_comments import mask_root_comment_lines
