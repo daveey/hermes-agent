@@ -886,6 +886,19 @@ def skill_index_triggers_enabled() -> bool:
     return is_truthy_value(_skills_cfg_get("index_triggers"), default=True)
 
 
+KANBAN_WORKER_INDEX_MODES = ("full", "compact", "names")
+
+
+def kanban_worker_skill_index_mode() -> str:
+    """``skills.index_in_kanban_worker`` for a dispatcher-owned Kanban worker's skills index. [daveey]
+
+    ``full``: the chat index. ``compact`` (default): descriptions without the ``triggers:`` text, which
+    matches a user's own phrasing and so earns its ~8 KB per call only in chats. ``names``: every
+    category on one names-only line. No mode hides a skill name; an unknown value reads as ``compact``."""
+    raw = str(_skills_cfg_get("index_in_kanban_worker") or "").strip().lower()
+    return raw if raw in KANBAN_WORKER_INDEX_MODES else "compact"
+
+
 def _one_line(value: Any) -> str:
     return " ".join(str(value).split())
 

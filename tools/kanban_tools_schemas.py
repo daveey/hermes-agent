@@ -67,10 +67,13 @@ KANBAN_SHOW_SCHEMA = _schema(
         "pre-formatted ``worker_context`` string suitable for inclusion "
         "verbatim in your reasoning. Outside a dispatcher-spawned worker "
         "there is no default task: a bare call returns a pointer to "
-        "``kanban_list`` instead of task state."
+        "``kanban_list`` instead of task state. A dispatcher worker gets a compact payload "
+        "(repeated heartbeat/guard events collapsed, capacity diagnostics omitted); "
+        "pass verbose=true for everything."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "verbose": _prop("boolean", "Full diagnostic payload (every event row, capacity evidence)."),
     },
     [],
 )
