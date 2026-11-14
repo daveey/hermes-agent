@@ -814,9 +814,6 @@ def _iter_nested_shell_inputs(
     # redirection overrides it: with a stdin-reading one anywhere, every compound command's
     # redirections count, failing closed.
     grouped = any(found == ("stdin", None) for _view, found in classified)
-    sources = _StdinSources(
-        _descriptor_sources(view for view, _found in classified),
-        _assigned_variables(view for view, _found in classified)) if grouped else None
     # So does a function body's (`f() { su -l bob; }; f < f`): a call to any function the
     # command defines counts, whichever body holds the shell (`g() { f; }; g < f`).
     functions = _defined_functions(walk_command) if grouped else frozenset()
@@ -825,9 +822,12 @@ def _iter_nested_shell_inputs(
             yield body, None
     if grouped:
         yield from _fed_shell_inputs(walk_command, cwd=cwd)
-    for view, found in classified:
+    from cron.lifecycle_guard_stdin_provenance import source_contexts
+
+    contexts = source_contexts(walk_command, [view for view, _found in classified])
+    for (view, found), local_sources in zip(classified, contexts):
         if grouped and (_compound_redirections(view) or _calls_function(view, functions)):
-            yield from _redirected_shell_inputs(view, cwd=cwd, sources=sources)
+            yield from _redirected_shell_inputs(view, cwd=cwd, sources=local_sources)
         if found is None:
             continue
         kind, value = found
@@ -837,12 +837,14 @@ def _iter_nested_shell_inputs(
             for path in _resolved_or_nothing(value, cwd):
                 yield None, path
         elif kind == "stdin":
-            yield from _redirected_shell_inputs(view, cwd=cwd, sources=sources)
+            yield from _redirected_shell_inputs(view, cwd=cwd, sources=local_sources)
 
 
 class _StdinSources(NamedTuple):
-    """What the command itself says about its stdin targets: each descriptor's input
-    redirections (``_descriptor_sources``) and each variable's values (``_assigned_variables``)."""
+    """Proven reaching descriptor sources and variable values before one command.
+
+    Unknown values carry an unresolvable ``$`` sentinel, not an empty safe union.
+    """
 
     fds: dict[str, list[tuple[str, str]]]
     variables: dict[str, list[str]]
@@ -873,18 +875,6 @@ def _redirections(view: list[str]) -> Iterator[tuple[str, str, str]]:
         if match is not None:
             fd, operator, target = match.groups()
             yield fd, operator, target or next(words, "")
-
-
-def _descriptor_sources(views: Iterator[list[str]]) -> dict[str, list[tuple[str, str]]]:
-    """``{fd: [(operator, target), …]}`` for every input redirection of a descriptor above 2
-    anywhere in the command (``3< f``, ``exec 3<> f``, ``3<<< T``): which one a later ``0<&3``
-    duplicates depends on order and scope the walk does not track, so each counts."""
-    sources: dict[str, list[tuple[str, str]]] = {}
-    for view in views:
-        for fd, operator, target in _redirections(view):
-            if fd.isdigit() and int(fd) > 2 and operator.startswith("<"):
-                sources.setdefault(fd, []).append((operator, target))
-    return sources
 
 
 _ASSIGNMENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
@@ -945,9 +935,13 @@ def _redirected_shell_inputs(
     feeds the shell nothing (and is no regular file to walk). A stdin duplicated from another
     descriptor (``0<&3``, ``< /dev/fd/3``) reads that descriptor's sources; a ``$NAME`` target
     expands from the command's assignments or the environment (*sources*)."""
-    fds, variables = sources or _StdinSources({}, {})
+    from cron.lifecycle_guard_stdin_provenance import descriptor_definition
+
+    inherited, variables = sources or _StdinSources({}, {})
+    fds = dict(inherited)
     for fd, operator, target in _redirections(view):
         if fd not in ("", "0"):
+            fds[fd] = descriptor_definition(operator, target, fds, variables)
             continue
         duplicated = _FD_PATH_RE.fullmatch(target) if operator in ("<", "<>") else None
         if operator == "<&" and target in ("-", "0"):

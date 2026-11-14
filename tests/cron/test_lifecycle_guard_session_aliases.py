@@ -476,7 +476,21 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     text = shape.format(db=live_kanban_db, script=script, tmp=tmp_path)
     for names in (frozenset({"zz"}), frozenset(), None):
         unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
-        assert unsafe is True and refusal is not None and "SQLite" in refusal, (shape, names)
+        # A source formerly inferred from a future fd definition or flattened
+        # compound scope now fails closed before any file can be named.
+        unresolved_source = shape in {
+            "su -l bob 0<&3 3< {script}",
+            "{{ su -l bob; }} 0<&3 3< {script}",
+            "{{ su -l bob; }} <&3 3< {script}",
+            "exec 3< {script}; {{ su -l bob; }} 0<&3",
+            "su -l bob < /dev/fd/3 3< {script}",
+            "su -l bob < /proc/self/fd/3 3<> {script}",
+            "su -l bob 0<&3 3<<< 't ( bash {db} )'",
+            "f() {{ su -l bob; }}; f 0<&3 3< {script}",
+            "S={script}\nfor h in a b; do ssh $h sh -s < $S; done",
+        }
+        reason = "cannot resolve" if unresolved_source else "SQLite"
+        assert unsafe is True and refusal is not None and reason in refusal, (shape, names)
 
 
 @pytest.mark.parametrize("shape", [
