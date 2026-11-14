@@ -1128,11 +1128,11 @@ class SessionAuthority:
             from gateway.session_notifier_drain import eligible, queued_head
             # A started update checkpoint precedes every queued row; only queued selection skips
             # notifier wakes held by a core-update drain.
-            checkpoint = checkpoint_head(self, ref)
+            checkpoint = await asyncio.to_thread(checkpoint_head, self, ref)
             if checkpoint is not None and update_held(self):
                 return UPDATE_PAUSED, None
-            first = (get_session_admission(self.db, admission_id=checkpoint['admission_id']) if checkpoint
-                     else queued_head(pending))
+            first = (await asyncio.to_thread(get_session_admission, self.db, admission_id=checkpoint['admission_id'])
+                     if checkpoint else queued_head(pending))
             if attempted is not None:
                 attempted[:] = [first]
             if checkpoint is None and first is None and any(row['status'] == 'queued' for row in pending):
@@ -1309,7 +1309,8 @@ class SessionAuthority:
                     refusing = None
                 # Remember the attempted FIFO identity, including a started checkpoint. A
                 # refusal must never select a queued follower behind unfinished work.
-                attempted = next(iter(list_session_admissions(self.db, session_id=ref.session_id)), None)
+                attempted = next(iter(await asyncio.to_thread(
+                    list_session_admissions, self.db, session_id=ref.session_id)), None)
                 # The row the claim actually validated: a held notifier wake is skipped, so the
                 # queued FIFO front is not necessarily the attempted queued identity.
                 selected = _Attempt()

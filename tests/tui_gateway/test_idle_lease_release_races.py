@@ -151,7 +151,9 @@ def test_a_refused_loop_tick_never_clears_a_user_turn_that_started_in_the_gap(ch
     user_turn = []
 
     def emit(event, sid, payload=None, **_kw):
-        if event == "error" and not user_turn:  # the refusal frame: running is already False here
+        # [daveey] the fork closes a refused turn with an error message.complete frame (_emit_terminal_turn_error)
+        if (event == "error" or (event == "message.complete" and (payload or {}).get("status") == "error")) \
+                and not user_turn:  # the refusal frame: running is already False here
             competitor.release()
             err, _fields = server._lock_in_submit_turn(
                 "user", chat.sid, chat.record, "hello", {}, False, None, None, None)

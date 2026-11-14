@@ -146,7 +146,9 @@ def _user_turn_in_refusal_gap(chat, monkeypatch, competitor):
     user_turn = []
 
     def emit(event, sid, payload=None, **_kw):
-        if event == "error" and not user_turn:  # admission already set running=False here
+        # [daveey] the fork closes a refused turn with an error message.complete frame (_emit_terminal_turn_error)
+        if (event == "error" or (event == "message.complete" and (payload or {}).get("status") == "error")) \
+                and not user_turn:  # admission already set running=False here
             competitor.release()
             err, _ = server._lock_in_submit_turn("user", chat.sid, chat.record, "hello", {}, False, None, None, None)
             user_turn.append(err)
@@ -212,7 +214,9 @@ def _user_turn_after_refusal(chat, monkeypatch):
     user_turn = []
 
     def emit(event, sid, payload=None, **_kw):
-        if event == "error" and not user_turn:
+        # [daveey] the fork closes a refused turn with an error message.complete frame (_emit_terminal_turn_error)
+        if (event == "error" or (event == "message.complete" and (payload or {}).get("status") == "error")) \
+                and not user_turn:
             chat.lease.release()
             # The user's own turn claims running in the gap (any admitted turn source does the same).
             with chat.record["history_lock"]:

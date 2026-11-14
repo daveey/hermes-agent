@@ -270,7 +270,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                     # Durable before the absence check: if that check is lost too, journal
                     # recovery still knows the owner refused this fire as not ready.
                     record['submit_refused'] = refused
-                    save()
+                    await save()
                 state = await call('recover', params)
                 if state['status'] == 'missing' and refused:
                     # [daveey] Refused while draining for a restart and proven never admitted:

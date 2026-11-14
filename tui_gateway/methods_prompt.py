@@ -996,7 +996,8 @@ def _(rid, params: dict) -> dict:
             busy_transport = t or session.get("transport")
         if not busy:
             err, survivor_fields = _claim_submit_turn(
-                rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
+                rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind,
+                internal_hosted_submit)
             if err is None:
                 break
             if (err.get("error", {}).get("data") or {}).get("reason") == "turn_claim_busy":

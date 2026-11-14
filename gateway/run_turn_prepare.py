@@ -192,6 +192,16 @@ def _resolve_channel_runtime(runner, source, model, runtime_kwargs) -> tuple[str
     return model, runtime_kwargs
 
 
+def _unavailable_override_notice(notice, unavailable_override, runtime_kwargs, model):
+    """The fallback notice for a turn whose session /model provider was unavailable (unless the
+    runtime resolution already carried one)."""
+    if not unavailable_override or notice:
+        return notice
+    from hermes_cli.fallback_config import pre_agent_fallback_notice
+    return pre_agent_fallback_notice(
+        unavailable_override["provider"], unavailable_override.get("model"), runtime_kwargs.get("provider"), model)
+
+
 class GatewayTurnPrepareMixin:
     def _resolve_session_agent_runtime(
         self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
@@ -287,10 +297,7 @@ class GatewayTurnPrepareMixin:
         if runtime_model:
             logger.info("Runtime provider supplied explicit model override: %s -> %s", model, runtime_model)
             model = runtime_model
-        if unavailable_override and not notice:
-            from hermes_cli.fallback_config import pre_agent_fallback_notice
-            notice = pre_agent_fallback_notice(
-                unavailable_override["provider"], unavailable_override.get("model"), runtime_kwargs.get("provider"), model)
+        notice = _unavailable_override_notice(notice, unavailable_override, runtime_kwargs, model)
         if record_notice:
             self._pre_agent_fallback_notice = notice
 

@@ -25,10 +25,7 @@ from agent.secret_scope import get_secret as _get_secret, get_secret_str
 from hermes_cli.auth_plugin_providers import plugin_refresh_hook
 from agent.credential_pool_plugin import apply_plugin_refresh_result, plugin_row_is_expiring, recover_failed_plugin_refresh
 from agent.credential_persistence import (
-    fingerprint_secret_value,
-    is_borrowed_credential_source,
-    sanitize_borrowed_credential_payload,
-)
+    fingerprint_secret_value, is_borrowed_credential_source, sanitize_borrowed_credential_payload)
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth_oauth_grants import owned_profile_reads_root_state
 from hermes_cli.auth import (

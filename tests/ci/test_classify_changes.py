@@ -626,7 +626,9 @@ def test_every_lane_reaches_the_composite_action():
 def test_classifier_runs_in_the_detect_jobs_sparse_checkout(tmp_path):
     """The detect job checks out only its sparse list; an import outside it fails CI on every PR."""
     steps = _yaml(".github/workflows/ci.yaml")["jobs"]["detect"]["steps"]
-    sparse = next(s["with"]["sparse-checkout"] for s in steps if "sparse-checkout" in s.get("with", {}))
+    sparse = next((s["with"]["sparse-checkout"] for s in steps if "sparse-checkout" in s.get("with", {})), None)
+    if sparse is None:
+        pytest.skip("[daveey] the fork's detect job checks out the full tree: nothing outside it to import")
     for rel in sparse.split():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         if (_REPO / rel).is_dir():

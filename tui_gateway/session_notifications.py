@@ -499,14 +499,6 @@ def _maybe_fire_tui_heartbeat_tick(sid: str, session: dict) -> None:
             mgr.abandon_fire()
 
 
-def _loop_route_is_gateway_chat(state) -> bool:
-    """A /loop set from a messaging chat carries the gateway's ``route`` (platform + chat_id); its wakeup scanner
-    (``gateway/run_goals.py::_loop_wakeup_fire_one``) fires those and skips route-less CLI/TUI loops. Mirror it here
-    so a Desktop viewer of the same session never consumes the tick and strands the reply off the chat."""
-    route = getattr(state, "route", None) or {}
-    return bool(route.get("platform") and route.get("chat_id"))
-
-
 def _session_owns_live_wakeup_schedule(session: dict) -> bool:
     """True while THIS process's notification poller is the only driver of an active /loop or /heartbeat for
     ``session`` — the reapers must then keep the detached session (and with it the poller) alive, or the schedule

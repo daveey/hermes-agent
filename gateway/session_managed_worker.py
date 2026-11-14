@@ -714,7 +714,7 @@ def _unsupported_command_result(row):
     session's frozen route and never binds a preset, so every route into it (raw ``prompt.submit``,
     a queued row, a slash.exec that got past its own check) is refused here instead of handing the
     worker the literal command. A finite prompt's exit code is its only verdict, so it fails."""
-    text = row['payload'].get('text')
+    text = (row.get('payload') or {}).get('text')
     if not isinstance(text, str):
         return None
     from gateway.platforms.event import MessageEvent

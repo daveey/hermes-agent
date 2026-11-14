@@ -533,26 +533,26 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
     def _wrap_command(self, command: str, cwd: str) -> str:
         """Full bash script: source snapshot, cd, run, re-dump env, emit CWD markers.
 
-        Inside a delegate_task child the script reads and writes that child's overlay snapshot
-        (falling back to the enclosing child's, then the parent's), because children share the
-        parent's environment object: without it a child's ``export HERMES_KANBAN_DB=...`` landed
-        in the shared snapshot and every later parent command sourced it. [daveey] Outside the fork's
-        delegate scope, upstream's per-task alias chain (``shell_state_scope``) does the same by task id."""
+        Inside a delegate_task child the script reads and writes that child's own snapshot, because
+        children share the parent's environment object: without it a child's ``export HERMES_KANBAN_DB=...``
+        landed in the shared snapshot and every later parent command sourced it. Upstream's per-task alias
+        chain (``shell_state_scope``, set by terminal_tool) keys it by task id, seeded from the ancestors.
+        [daveey] A child command outside that scope uses the fork's per-delegation overlay instead
+        (falling back to the enclosing child's, then the parent's)."""
         kwargs = self._snapshot_script_kwargs(cwd)
         fallbacks: list[str] = []
         seeds: list[str] = []
         from agent.delegation_context import delegated_child_scope_chain
-        chain = delegated_child_scope_chain()
-        if chain:
+        if task_chain := [self._task_snapshot_path(t) for t in _shell_state_chain.get()]:
+            seeds = [self._quote_shell_path(p) for p in (*task_chain[1:], self._snapshot_path)]
+            kwargs = self._snapshot_script_kwargs(cwd, task_chain[0])
+        elif chain := delegated_child_scope_chain():
             paths = [self._child_snapshot_path(scope) for scope in chain]
             own = paths[-1]
             fallbacks = [self._quote_shell_path(p) for p in reversed(paths[:-1])]
             fallbacks.append(kwargs["quoted_snap"])
             kwargs["quoted_snap"] = self._quote_shell_path(own)
             kwargs["snap_tmp_template"] = self._quote_shell_path(own + _SNAP_TMP_SUFFIX)
-        elif task_chain := [self._task_snapshot_path(t) for t in _shell_state_chain.get()]:
-            seeds = [self._quote_shell_path(p) for p in (*task_chain[1:], self._snapshot_path)]
-            kwargs = self._snapshot_script_kwargs(cwd, task_chain[0])
         return _wrap_command_script(
             command,
             passthrough_names=self._snapshot_excluded_passthrough_names(),

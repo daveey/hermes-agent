@@ -931,7 +931,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
         session["running"] = True
-        session["_notif_turn_claim"] = claim = object()  # the exception release below frees only this claim
+        session["_notif_turn_claim"] = object()  # [daveey] _dispatch_claimed_queue reads it back: its release frees only this claim
         queued_transport = queued.get("transport")
         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
@@ -945,6 +945,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
 
 
 def _dispatch_claimed_queue(rid, sid, session, queued, queue_generation):
+    claim = session.get("_notif_turn_claim")  # set by _drain_queued_prompt's claim just before
     use_compute_host = _session_uses_compute_host(session)
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:

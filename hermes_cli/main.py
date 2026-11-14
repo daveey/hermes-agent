@@ -413,8 +413,7 @@ def _s6_supervised_gateway_run(argv: list) -> bool:
     current profile, and it is the image's own CMD. Following the sticky ``active_profile`` there
     started that profile's named slot on every container boot: the one the boot reconciler just
     registered down, because a started named slot is a second gateway beside the multiplexer.
-    ``--no-supervise`` (or any abbreviation argparse accepts) keeps the foreground run, which follows
-    ``active_profile`` as before (#22502).
+    ``--no-supervise`` (or an argparse abbreviation) keeps the foreground run on ``active_profile`` (#22502).
     """
     words = [a for a in argv if not a.startswith("-")]
     if words[:2] != ["gateway", "run"]:

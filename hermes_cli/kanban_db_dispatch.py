@@ -2514,7 +2514,7 @@ def _open_worker_log(task: Task, board: Optional[str]):
     log_path = log_dir / f"{task.id}.log"
     from hermes_cli.kanban_worker_log import open_worker_log
     log = open_worker_log(log_path)
-    log.write(f'\n[kanban-worker-start] run_id={task.current_run_id}\n'.encode())
+    log.write(f'\n[kanban-worker-start] run_id={getattr(task, "current_run_id", None)}\n'.encode())
     log.flush()  # must reach disk before a child can fail (even before importing its client)
     return log
 
