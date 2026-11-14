@@ -460,7 +460,8 @@ def blocker_for_task(states: dict[str, BlockerState], task_id: str) -> Optional[
     return None
 
 
-def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_id: str) -> bool:
+def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_id: str, *,
+                               own_only: bool = False) -> bool:
     """True when ``task_id`` was unblocked after the newest event asserting ``blocker_id``
     (event ids, not seconds: a bulk unblock and a re-assertion often share a second)."""
     from hermes_cli import kanban_db as kb
@@ -471,9 +472,11 @@ def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_i
     if unblocked is None:
         return False
     for row in conn.execute(
-        "SELECT payload FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
+        "SELECT task_id, payload FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
         "AND id>=? AND payload LIKE '%\"blocker_id\"%' ORDER BY id DESC", (unblocked,),
     ):
+        if own_only and row["task_id"] != task_id:
+            continue
         if normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == blocker_id:
             return False
     return True
@@ -489,6 +492,12 @@ def shared_blocker_guard(
     states = blocker_states(conn, now=now)
     st = blocker_for_task(states, task_id)
     if st is None or not st.is_open or not task_applies(conn, st, task_id):
+        return None
+    from hermes_cli.kanban_shared_blocker_checks import registered_checks
+    if st.blocker_id in registered_checks() and _unblocked_since_assertion(
+            conn, task_id, st.blocker_id, own_only=True):
+        # This wall has an independent dispatcher probe. A peer's long run or
+        # reassertion cannot revoke the operator's explicit release of this card.
         return None
     others = [t for t in st.behind if t != task_id and task_applies(conn, st, t)]
     if others:
