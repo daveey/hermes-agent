@@ -18,7 +18,52 @@ from hermes_cli.kanban_lifecycle_diagnostics import LifecycleLock
 
 _lock = threading.RLock()
 _connections: weakref.WeakSet = weakref.WeakSet()
-_reader_caches: list = []
+
+
+class _ReaderCaches:
+    """Non-owning callbacks; callers hold _lock while reading or changing entries."""
+
+    def __init__(self):
+        self._entries = []
+
+    def _snapshot(self):
+        live, entries = [], []
+        for entry in self._entries:
+            callback = entry() if isinstance(entry, weakref.ReferenceType) else entry
+            if callback is not None:
+                live.append(callback)
+                entries.append(entry)
+        self._entries = entries
+        return live
+
+    def __iter__(self):
+        with _lock:
+            return iter(self._snapshot())
+
+    def __len__(self):
+        with _lock:
+            return len(self._snapshot())
+
+    def discard(self, callback):
+        for index, current in enumerate(self._snapshot()):
+            if current == callback:
+                del self._entries[index]
+                return True
+        return False
+
+    def append(self, callback):
+        self._snapshot()
+        try:
+            entry = weakref.WeakMethod(callback)
+        except TypeError:
+            try:
+                entry = weakref.ref(callback)
+            except TypeError:
+                entry = callback  # Some extension callables cannot be weakly referenced.
+        self._entries.append(entry)
+
+
+_reader_caches = _ReaderCaches()
 _poisoned: set[str] = set()
 _lifecycle_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
@@ -209,6 +254,12 @@ def register_reader_cache(evict) -> None:
     with _lock:
         if evict not in _reader_caches:
             _reader_caches.append(evict)
+
+
+def unregister_reader_cache(evict) -> bool:
+    """Remove one registered eviction callback; repeated removal is harmless."""
+    with _lock:
+        return _reader_caches.discard(evict)
 
 
 @contextmanager
