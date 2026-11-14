@@ -34,6 +34,7 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hub-state"))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: (GATEWAY, {GATEWAY, "away"}))
+    monkeypatch.setattr(kanban_origin, "gateway_name", lambda: GATEWAY)
     monkeypatch.setattr(observations, "local_scope", lambda: (GATEWAY, PROFILE))
     activity._reset_cache_for_tests()
     path = kb.kanban_db_path(board="default")

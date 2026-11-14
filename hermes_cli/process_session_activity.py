@@ -242,7 +242,8 @@ def annotate_background_activity(rows: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def process_observations(proc_ids: Iterable[Any], *, owner: str | None, profile: str | None = None,
-                         exited: Iterable[Any] = (), owner_resolved: bool = False) -> dict[str, dict[str, Any]]:
+                         exited: Iterable[Any] = (), owner_resolved: bool = False,
+                         scope: tuple[str | None, str | None] | None = None) -> dict[str, dict[str, Any]]:
     """``{registry process id: v1 observation}`` for exact registry processes an owning stored session names.
 
     Reuses the sidebar's bounded, three-second-cached collection, so the probe time is the original
@@ -261,8 +262,11 @@ def process_observations(proc_ids: Iterable[Any], *, owner: str | None, profile:
         _log.debug("process evidence unavailable", exc_info=True)
         evidence = {}
     try:
-        from hermes_cli.kanban_execution_observations import local_scope
-        gateway, local_profile = local_scope()
+        if scope is not None:  # the caller's per-request local_scope(), read once for all its owners
+            gateway, local_profile = scope
+        else:
+            from hermes_cli.kanban_execution_observations import local_scope
+            gateway, local_profile = local_scope()
     except ADAPTER_ERRORS:
         _log.debug("process gateway identity unavailable", exc_info=True)
         gateway = local_profile = None

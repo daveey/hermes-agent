@@ -25,6 +25,7 @@ def root(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hub-state"))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: (GATEWAY, {GATEWAY}))
+    monkeypatch.setattr(kanban_origin, "gateway_name", lambda: GATEWAY)
     monkeypatch.setattr(observations, "_gateway_name", lambda: GATEWAY)
     return tmp_path
 

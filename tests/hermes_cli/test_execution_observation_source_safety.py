@@ -82,21 +82,21 @@ def test_local_scope_reads_no_key_and_survives_every_lookup_failure(monkeypatch)
 
     monkeypatch.setattr(client, "load_identity", forbidden)
     monkeypatch.setattr(client.sync, "sync_config", lambda: {"gateway": "cfg-gw"})
-    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("", set()))
+    monkeypatch.setattr(kanban_origin, "gateway_name", lambda: "")
     assert keo.local_scope()[0] == "cfg-gw"
 
     monkeypatch.setattr(client.sync, "sync_config", dict)
-    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("hub-gw", {"hub-gw"}))
+    monkeypatch.setattr(kanban_origin, "gateway_name", lambda: "hub-gw")
     assert keo.local_scope()[0] == "hub-gw"
 
     def boom(*a, **k):
         raise RuntimeError("lookup failed")
 
     monkeypatch.setattr(client.sync, "sync_config", boom)
-    monkeypatch.setattr(kanban_origin, "gateway_names", boom)
+    monkeypatch.setattr(kanban_origin, "gateway_name", boom)
     assert keo.local_scope()[0] is None  # unknown, not an exception
 
-    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("", set()))
+    monkeypatch.setattr(kanban_origin, "gateway_name", lambda: "")
     monkeypatch.setattr(client.sync, "sync_config", dict)
     assert keo.local_scope()[0] is None
 

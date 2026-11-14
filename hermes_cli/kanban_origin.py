@@ -122,8 +122,7 @@ def gateway_names() -> tuple[str, set[str]]:
     and each uncached answer opens hub.db (4% of hub gateway CPU, 2026-11-12). [daveey]"""
     global _names_memo
     path, cfg = _hub_db(), _mail_config()
-    key = (str(path), _stat_sig(path) if path else None, _stat_sig(Path(f"{path}-wal")) if path else None,
-           str(cfg), _stat_sig(cfg))
+    key = _names_key(path, cfg)
     memo, now = _names_memo, time.monotonic()
     if memo is not None and memo[0] == key and now - memo[1] < _NAMES_MAX_AGE_S:
         return memo[2], set(memo[3])
@@ -137,8 +136,27 @@ def gateway_names() -> tuple[str, set[str]]:
     return me, known
 
 
+def gateway_name() -> str:
+    """This gateway's own name: exactly ``gateway_names()[0]``, without the known-gateway set.
+
+    A still-valid ``gateway_names`` memo answers; otherwise only the hub.db ``meta`` row (a primary-key lookup) and
+    the mail config are read, never the ``replica`` scan whose cost grows with replica rows. Not memoized itself:
+    the hub writes hub.db's WAL continuously, so a memo keyed on it would almost never be kept. [daveey]"""
+    path, cfg = _hub_db(), _mail_config()
+    memo = _names_memo
+    if memo is not None and time.monotonic() - memo[1] < _NAMES_MAX_AGE_S and memo[0] == _names_key(path, cfg):
+        return memo[2]
+    return _read_gateway_names(path, cfg, names=False)[0]
+
+
+def _names_key(path: Optional[Path], cfg: Path) -> tuple:
+    """Identity of the gateway-name inputs: hub.db, its WAL and the mail config."""
+    return (str(path), _stat_sig(path) if path else None, _stat_sig(Path(f"{path}-wal")) if path else None,
+            str(cfg), _stat_sig(cfg))
+
+
 def _read_gateway_names(path: Optional[Path], cfg: Path,
-                        failed: Optional[list[sqlite3.Error]] = None) -> tuple[str, set[str]]:
+                        failed: Optional[list[sqlite3.Error]] = None, *, names: bool = True) -> tuple[str, set[str]]:
     me, known = "", set()
     if path is not None:
         try:
@@ -146,7 +164,8 @@ def _read_gateway_names(path: Optional[Path], cfg: Path,
             try:
                 row = conn.execute("SELECT v FROM meta WHERE k = 'gateway'").fetchone()
                 me = str(row[0]) if row and row[0] else ""
-                known = {str(r[0]) for r in conn.execute("SELECT DISTINCT gw FROM replica") if r[0]}
+                if names:
+                    known = {str(r[0]) for r in conn.execute("SELECT DISTINCT gw FROM replica") if r[0]}
             finally:
                 conn.close()
         except sqlite3.Error as exc:

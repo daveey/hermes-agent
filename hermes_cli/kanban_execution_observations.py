@@ -31,7 +31,7 @@ _STATE_EVENTS = {"blocked": {"blocked"}, "scheduled": {"scheduled"}, "review": {
 def _gateway_name():
     """Configured gateway name from non-secret metadata only; never the hub key file.
 
-    ``kanban.sync.gateway`` first, then the hub's own gateway metadata (``kanban_origin.gateway_names``:
+    ``kanban.sync.gateway`` first, then the hub's own gateway name (``kanban_origin.gateway_name``:
     hub.db meta, else the hermes-mail config name). Any failure or absence is None (unknown).
     """
     try:
@@ -43,9 +43,9 @@ def _gateway_name():
     except ADAPTER_ERRORS:
         _log.debug("kanban.sync gateway name unavailable", exc_info=True)
     try:
-        from hermes_cli.kanban_origin import gateway_names
+        from hermes_cli.kanban_origin import gateway_name
 
-        name = gateway_names()[0]
+        name = gateway_name()
         return name.strip() if isinstance(name, str) and name.strip() else None
     except ADAPTER_ERRORS:
         _log.debug("hub gateway name unavailable", exc_info=True)

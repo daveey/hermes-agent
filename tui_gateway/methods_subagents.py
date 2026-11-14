@@ -50,17 +50,34 @@ def _visible_subagent_records(session_id, transport, owner):
             or _owns_subagent_record(r, agent)]
 
 
-def _subagent_observation(record, profile):
-    """One v1 observation for a registry record (own activity clock, else spawn time); None on adapter failure."""
-    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
+def _subagent_observation(record, profile, scope=None):
+    """One v1 observation for a registry record (own activity clock, else spawn time); None on adapter failure.
+
+    ``scope``: the RPC's ``_observation_scope()``, read once per request instead of once per record."""
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
     from hermes_cli.turn_process_execution_observations import registry_subagent as subagent
 
     try:
-        gateway, local_profile = local_scope()
+        gateway, local_profile = _observation_scope() if scope is None else scope
         return subagent(record, gateway=gateway, profile=profile or local_profile, now=time.time())
     except ADAPTER_ERRORS:
         logger.debug("subagent execution observation unavailable", exc_info=True)
         return None
+
+
+def _observation_scope():
+    """``(gateway, local profile)`` for this request's observations; ``(None, None)`` when unavailable.
+
+    Call-invariant within one RPC (process-wide config, hub.db and the launch profile, never a per-row
+    home), so a handler reads it once rather than once per child or process: per owner it cost about
+    0.7 ms of a 0.9 Hz sidebar poll."""
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
+
+    try:
+        return local_scope()
+    except ADAPTER_ERRORS:
+        logger.debug("execution observation scope unavailable", exc_info=True)
+        return None, None
 
 
 def _profile_label(home):
@@ -78,10 +95,11 @@ def _(rid, params):
         return _err(rid, 4001, "session not found or not owned by this transport")
     live = _visible_subagent_records(session_id, transport, owner)
     profile = _profile_label(owner.get("profile_home"))
+    scope = _observation_scope() if live else None
     rows = []
     for r in live:
         row = {**{key: r.get(key) for key in _SUBAGENT_SNAPSHOT_FIELDS}, "child_session_id": _child_session_id(r)}
-        if (obs := _subagent_observation(r, profile)) is not None:
+        if (obs := _subagent_observation(r, profile, scope)) is not None:
             row["execution_observations"] = [obs]
         rows.append(row)
     return _ok(rid, {
@@ -172,23 +190,24 @@ def _(rid, params):
                 counts.setdefault(sid, {"subagents": 0, "background": 0})[kind] += 1
                 work.setdefault(sid, []).append((kind, item))
     profile = _profile_label(profile_home)
+    scope = _observation_scope() if counts else None
     sessions = []
     for sid, c in counts.items():
         row = {"session_id": sid, **c}
-        if observations := _roster_observations(sid, work[sid], profile):
+        if observations := _roster_observations(sid, work[sid], profile, scope):
             row["execution_observations"] = observations
         sessions.append(row)
     return _ok(rid, {"sessions": sessions})
 
 
-def _roster_observations(sid, items, profile):
+def _roster_observations(sid, items, profile, scope=None):
     """Observations for one conversation's counted children and processes (same projector as ``subagent.list``)."""
     from hermes_cli.process_session_activity import process_observations
 
     observations = [o for kind, item in items if kind == "subagents"
-                    if (o := _subagent_observation(item, profile)) is not None]
+                    if (o := _subagent_observation(item, profile, scope)) is not None]
     procs = [item for kind, item in items if kind == "background"]
-    observations += process_observations(procs, owner=sid, profile=profile, owner_resolved=True).values()
+    observations += process_observations(procs, owner=sid, profile=profile, owner_resolved=True, scope=scope).values()
     return observations
 
 
