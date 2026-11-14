@@ -922,11 +922,8 @@ def _runs_under_uv(segment: list[str], index: int) -> bool:
 
 
 def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
-    """``(arguments without redirections, files redirected to stdin)``. A heredoc, here-string or
-    descriptor duplication is stripped but feeds no file; ``<`` and ``<>`` on fd 0 do, and so does
-    ``<&N`` after ``N<f`` opened a file on that descriptor (``bash 3<f.sh <&3``)."""
+    """Strip redirections and follow opened inputs through ordered fd copies/moves to stdin."""
     kept: list[str] = []
-    stdin: list[str] = []
     opened: dict[str, str] = {}
     index = 0
     while index < len(arguments):
@@ -939,13 +936,17 @@ def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
         if not target and index < len(arguments):
             target = arguments[index]
             index += 1
+        fd = fd or ("0" if operator.startswith("<") else "1")
+        source = target.removesuffix("-")
+        provenance = opened.get(source) if operator in ("<&", ">&") else None
+        opened.pop(fd, None)  # Every redirection replaces the destination's old binding.
         if operator in ("<", "<>") and target:
-            opened[fd or "0"] = target
-        elif operator == "<&" and fd in ("", "0") and target in opened:
-            operator, target = "<", opened[target]
-        if operator in ("<", "<>") and fd in ("", "0") and target:
-            stdin.append(target)
-    return kept, stdin
+            opened[fd] = target
+        elif provenance is not None:
+            opened[fd] = provenance
+        if operator in ("<&", ">&") and target.endswith("-"):
+            opened.pop(source, None)  # A move copies first, then closes its source.
+    return kept, [opened["0"]] if "0" in opened else []
 
 
 def _cat_operands(segment: Optional[list[str]]) -> list[str]:
