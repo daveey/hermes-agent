@@ -477,3 +477,176 @@ def test_a_delta_is_no_store_and_a_whole_answer_keeps_the_handlers_cache_control
     delta = client.get(path, headers={**ASK, "X-Hermes-Delta-Base": whole.headers[wdr.HASH_HEADER]})
     assert delta.headers[wdr.DELTA_HEADER] == "zstd"
     assert delta.headers.get_list("cache-control") == ["no-store"]
+
+
+# ── persisted bases (BodyStore disk_dir): a rolled or restarted backend still decodes against what was sent ──
+
+
+def _served_by(store):
+    state = {"board": board(2000)}
+
+    async def get_board(request):
+        return JSONResponse(state["board"])
+
+    app = Starlette(routes=[Route("/board", get_board)])
+    app.add_middleware(wdr.DeltaResponseMiddleware, store=store)
+    return TestClient(app), state
+
+
+ALICE = {**ASK, "X-Hermes-Session-Token": "alice"}
+
+
+@needs_zstd
+def test_a_base_survives_a_store_reopen_and_gives_a_verified_delta(tmp_path):
+    client, state = _served_by(wdr.BodyStore(disk_dir=tmp_path))
+    first = client.get("/board", headers=ALICE)
+    digest = first.headers[wdr.HASH_HEADER]
+
+    rolled, state = _served_by(wdr.BodyStore(disk_dir=tmp_path))  # a new backend process, nothing in memory
+    state["board"] = board(2001, done=3)
+    answer = rolled.get("/board", headers={**ALICE, "X-Hermes-Delta-Base": digest})
+
+    assert answer.headers[wdr.DELTA_HEADER] == "zstd"
+    assert len(answer.content) < len(first.content) / 50
+    current = decode(answer.content, first.content)
+    assert json.loads(current) == state["board"]
+    assert answer.headers[wdr.HASH_HEADER] == wdr.body_hash(current)
+
+
+@needs_zstd
+@pytest.mark.parametrize("damage", ["truncate", "flip", "empty"])
+def test_a_damaged_persisted_base_gives_the_whole_body_and_is_removed(tmp_path, damage):
+    client, _ = _served_by(wdr.BodyStore(disk_dir=tmp_path))
+    first = client.get("/board", headers=ALICE)
+    digest = first.headers[wdr.HASH_HEADER]
+    [path] = [p for p in tmp_path.iterdir() if p.name.endswith(digest)]
+    data = path.read_bytes()
+    flipped = data[:100] + bytes([data[100] ^ 1]) + data[101:]
+    path.write_bytes({"truncate": data[: len(data) // 2], "flip": flipped, "empty": b""}[damage])
+
+    other, state = _served_by(wdr.BodyStore(disk_dir=tmp_path))
+    answer = other.get("/board", headers={**ALICE, "X-Hermes-Delta-Base": digest})
+    assert wdr.DELTA_HEADER not in answer.headers
+    assert answer.json() == state["board"]
+    assert answer.headers[wdr.HASH_HEADER] == wdr.body_hash(answer.content)
+    # The damaged file is gone; the whole body just sent took its place under the same (correct) digest.
+    assert path.read_bytes() == answer.content
+
+
+@needs_zstd
+def test_another_credential_cannot_use_a_persisted_base(tmp_path):
+    client, _ = _served_by(wdr.BodyStore(disk_dir=tmp_path))
+    digest = client.get("/board", headers=ALICE).headers[wdr.HASH_HEADER]
+
+    for other in ({"X-Hermes-Session-Token": "bob"}, {"Authorization": "Bearer alice"}, {}):
+        fresh, _ = _served_by(wdr.BodyStore(disk_dir=tmp_path))
+        probe = fresh.get("/board", headers={**ASK, **other, "X-Hermes-Delta-Base": digest})
+        assert wdr.DELTA_HEADER not in probe.headers, other
+    fresh, _ = _served_by(wdr.BodyStore(disk_dir=tmp_path))
+    assert fresh.get("/board", headers={**ALICE, "X-Hermes-Delta-Base": digest}).headers[wdr.DELTA_HEADER] == "zstd"
+
+
+def test_persisted_files_are_private_and_never_hold_the_credential(tmp_path):
+    root = tmp_path / "delta-bodies"
+    store = wdr.BodyStore(disk_dir=root)
+    namespace = "a" * 32
+    body = b'{"x":"' + b"y" * 20000 + b'"}'
+    store.put(f"{namespace}:{wdr.body_hash(body)}", body)
+    [path] = list(root.iterdir())
+    assert path.name == f"{namespace}-{wdr.body_hash(body)}"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert path.read_bytes() == body
+
+
+def test_the_disk_is_bounded_least_recently_used_first(tmp_path):
+    import os
+    import time
+
+    tmp_path = tmp_path / "bases"  # the conftest's HERMES_HOME files live in tmp_path itself
+    store = wdr.BodyStore(max_bytes=3000, disk_dir=tmp_path)
+    bodies = {name: name.encode() * 1000 for name in "abcd"}
+    keys = {name: f":{wdr.body_hash(body)}" for name, body in bodies.items()}
+    for at, name in enumerate("abc"):
+        store.put(keys[name], bodies[name])
+        os.utime(tmp_path / f"_-{keys[name][1:]}", ns=(at * 10**9, at * 10**9))
+    reopened = wdr.BodyStore(max_bytes=3000, disk_dir=tmp_path)
+    assert reopened.get(keys["a"]) == bodies["a"]  # read from disk: a is now the most recently used
+    assert (tmp_path / f"_-{keys['a'][1:]}").stat().st_mtime > time.time() - 60
+    reopened.put(keys["d"], bodies["d"])
+    names = {p.name for p in tmp_path.iterdir()}
+    assert f"_-{keys['b'][1:]}" not in names
+    assert {f"_-{keys[n][1:]}" for n in "acd"} <= names
+    assert sum(p.stat().st_size for p in tmp_path.iterdir()) <= 3000
+
+
+def test_a_base_memory_keeps_serving_stays_on_disk_for_the_next_backend(tmp_path, monkeypatch):
+    """The disk budget must not drop the base polled most while newer bodies churn past it."""
+    import os
+
+    root = tmp_path / "bases"
+    monkeypatch.setattr(wdr, "DISK_TOUCH_S", 0.0)
+    store = wdr.BodyStore(max_bytes=3000, disk_dir=root)
+    bodies = {name: name.encode() * 1000 for name in "habcdef"}
+    keys = {name: f":{wdr.body_hash(body)}" for name, body in bodies.items()}
+
+    def file(name):
+        return root / f"_-{keys[name][1:]}"
+
+    store.put(keys["h"], bodies["h"])
+    for at, name in enumerate("abcdef", start=1):
+        os.utime(file("h"), ns=(0, 0))  # as old as a file gets: only a refresh keeps it
+        assert store.get(keys["h"]) == bodies["h"]  # the poll: a memory hit
+        store.put(keys[name], bodies[name])
+        os.utime(file(name), ns=(at * 10**9, at * 10**9))
+    assert file("h").exists()
+    assert wdr.BodyStore(max_bytes=3000, disk_dir=root).get(keys["h"]) == bodies["h"]  # the rolled backend
+    # dropped by the budget anyway (another backend's churn): the next use writes it again
+    file("h").unlink()
+    store.put(keys["h"], bodies["h"])  # served again, unchanged
+    assert file("h").read_bytes() == bodies["h"]
+    assert sum(p.stat().st_size for p in root.iterdir()) <= 3000
+
+
+def test_the_disk_refresh_is_rate_limited_and_forgets_bases_memory_dropped(tmp_path):
+    import os
+
+    root = tmp_path / "bases"
+    store = wdr.BodyStore(max_bytes=3000, disk_dir=root)
+    body = b"h" * 1000
+    key = f":{wdr.body_hash(body)}"
+    store.put(key, body)
+    os.utime(root / f"_-{key[1:]}", ns=(0, 0))
+    store.get(key)
+    store.put(key, body)
+    assert (root / f"_-{key[1:]}").stat().st_mtime_ns == 0  # within DISK_TOUCH_S: no syscall per poll
+    for fill in b"abc":
+        other = bytes([fill]) * 1000
+        store.put(f":{wdr.body_hash(other)}", other)
+    assert key not in store._touched and len(store._touched) == len(store) == 3
+
+
+@pytest.mark.parametrize("key", ["../../etc:" + "a" * 32, "ns:" + "../x", ":" + "A" * 32, "x" * 32 + "/y:" + "a" * 32])
+def test_a_key_that_is_not_two_hex_hashes_is_never_a_path(tmp_path, key):
+    store = wdr.BodyStore(disk_dir=tmp_path / "d")
+    store.put(key, b"z" * 20000)
+    assert store.get(key) == b"z" * 20000  # memory still holds it
+    assert not (tmp_path / "d").exists() or not any((tmp_path / "d").iterdir())
+    assert wdr.BodyStore(disk_dir=tmp_path / "d").get(key) is None
+
+
+def test_the_dashboard_store_persists_under_the_hermes_home_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    store = wdr.DeltaResponseMiddleware(lambda *a: None).store
+    body = b"q" * 20000
+    store.put(f":{wdr.body_hash(body)}", body)
+    assert (tmp_path / "cache" / "delta-bodies" / f"_-{wdr.body_hash(body)}").read_bytes() == body
+
+
+def test_an_unwritable_directory_leaves_the_store_in_memory(tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("not a dir")
+    store = wdr.BodyStore(disk_dir=blocker / "sub")
+    body = b"w" * 20000
+    store.put(f":{wdr.body_hash(body)}", body)
+    assert store.get(f":{wdr.body_hash(body)}") == body

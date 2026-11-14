@@ -105,9 +105,13 @@ class FakeFork:
             f'[user]\n\temail = t@t\n\tname = t\n[url "{bare}"]\n\tinsteadOf = {URL}\n')
 
     @staticmethod
-    def adopt(clone: Path) -> None:
+    def adopt(clone: Path, upstream: Path) -> None:
         """Point ``clone``'s origin at the GitHub-named URL (resolved to the bare repo) and give it the gate."""
         subprocess.run(["git", "-C", str(clone), "remote", "set-url", "origin", URL], check=True)
+        # Keep the real upstream-identity check and fetch, but route all traffic to the fixture.
+        upstream_url = "https://github.com/NousResearch/hermes-agent.git"
+        subprocess.run(["git", "-C", str(clone), "config", f"url.{upstream}.insteadOf", upstream_url], check=True)
+        subprocess.run(["git", "-C", str(clone), "remote", "set-url", "upstream", upstream_url], check=True)
         gate = clone / "scripts" / "ci" / "upstream_sync.py"
         gate.parent.mkdir(parents=True, exist_ok=True)
         for sibling in GATE.parent.glob("upstream_sync*.py"):  # the gate and the helper modules it imports

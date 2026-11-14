@@ -106,7 +106,7 @@ def test_historical_parent_lifecycle_activity_invalidates_exemption(board, monke
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("event", ["archived", "worker_result", "wake_episode_evidence"])
+@pytest.mark.parametrize("event", ["archived", "workspace_archived", "worker_result", "wake_episode_evidence"])
 def test_historical_parent_bookkeeping_does_not_rearm_hold(board, monkeypatch, legacy, event):
     task, historical = mixed_park(board, monkeypatch, legacy=legacy)
     with kb.write_txn(board):
@@ -115,6 +115,21 @@ def test_historical_parent_bookkeeping_does_not_rearm_hold(board, monkeypatch, l
         kb._append_event(board, historical, event, {})
     monkeypatch.setattr(prs, "pr_state", lambda url: "MERGED" if url == OLD_PR else "OPEN")
     assert dispatch.check_respawn_guard(board, task) is None
+    assert kb.claim_task(board, task) is not None
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+    assert kb.reclaim_task(board, task, reason="crash", signal_fn=lambda *_: None)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("event", ["unblocked", "claimed", "completed", "unknown_housekeeping"])
+def test_archive_does_not_hide_lifecycle_or_unknown_events(board, monkeypatch, legacy, event):
+    task, historical = mixed_park(board, monkeypatch, legacy=legacy)
+    with kb.write_txn(board):
+        kb._append_event(board, historical, "workspace_archived", {"reason": "disk_pressure"})
+        kb._append_event(board, historical, event, {})
+    monkeypatch.setattr(prs, "pr_state", lambda url: "CLOSED" if url == OLD_PR else "OPEN")
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
 
 
 def test_comment_on_finished_historical_parent_does_not_rearm_hold(board, monkeypatch):

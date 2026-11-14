@@ -128,3 +128,49 @@ def test_memo_hits_are_p1_skips(served):
     after = la.counters()["delta.encode"]
     assert after["runs"] - before["runs"] == 4
     assert after["skips"] - before["skips"] == 2
+
+
+def test_a_frame_no_smaller_than_its_body_is_never_served_from_the_memo(monkeypatch):
+    """An encode that came out no smaller than the body is remembered as "send the whole body", so the
+    memo hit sends the whole body too, not the oversized frame."""
+    calls = []
+    monkeypatch.setattr(wdr, "encode_delta", lambda body, base: calls.append(1) or b"z" * (len(body) + 1))
+    store = wdr.BodyStore()
+    base = b"b" * 20000
+    store.put(f"ns:{wdr.body_hash(base)}", base)
+    body = b"n" * 20000
+    first = wdr._encode(body, wdr.body_hash(base), "ns", store)
+    again = wdr._encode(body, wdr.body_hash(base), "ns", store)
+    assert first == (wdr.body_hash(body), None)
+    assert again == (wdr.body_hash(body), None)
+    assert len(calls) == 1  # the second answer came from the memo
+
+
+def test_an_oversize_frame_is_not_remembered_and_evicts_nothing():
+    store = wdr.BodyStore(frames_max_bytes=100)
+    for i in range(3):
+        store.put_frame(f"k{i}", b"x" * 30)
+    store.put_frame("big", b"x" * 101)
+    assert store.frame("big") == (False, None)
+    assert [store.frame(f"k{i}")[0] for i in range(3)] == [True, True, True]
+    assert store._frames_bytes == 90
+
+
+def test_a_frame_memo_hit_is_most_recently_used(monkeypatch):
+    monkeypatch.setattr(wdr, "FRAMES_MAX_ENTRIES", 3)
+    store = wdr.BodyStore(frames_max_bytes=1000)
+    for i in range(3):
+        store.put_frame(f"k{i}", b"x" * 10)
+    assert store.frame("k0") == (True, b"x" * 10)  # k0 is now the newest
+    store.put_frame("k3", b"x" * 10)
+    assert [store.frame(f"k{i}")[0] for i in range(4)] == [True, False, True, True]
+
+
+def test_putting_a_remembered_frame_again_counts_its_bytes_once():
+    store = wdr.BodyStore(frames_max_bytes=100)
+    for _ in range(3):
+        store.put_frame("k", b"x" * 40)
+    assert store._frames_bytes == 40
+    assert store.frame("k") == (True, b"x" * 40)
+    store.put_frame("j", b"y" * 40)
+    assert store.frame("k")[0] and store.frame("j")[0]

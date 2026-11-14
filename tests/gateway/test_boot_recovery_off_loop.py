@@ -119,3 +119,106 @@ def test_startup_prune_reads_end_reasons_in_batches_not_full_rows(tmp_path, monk
         assert sorted(store._entries) == ['kc', 'kd']
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_native_recovery_binds_only_routes_with_pending_owners(monkeypatch):
+    import gateway.session_detached as detached
+    from gateway.run_runtime import recover_profile_native_sessions
+
+    monkeypatch.setattr(detached, 'recover_detached_sessions', lambda authority, pending: [])
+    authority = _Authority([
+        {'target_session_id': 'queued-root', 'status': 'queued'},
+        {'target_session_id': 'unknown-root', 'status': 'unknown'},
+    ], [])
+    owners = {'queued-tip': 'queued-root', 'unknown-tip': 'unknown-root', 'idle-tip': 'idle-root'}
+    monkeypatch.setattr(authority, 'logical_owner', owners.__getitem__)
+    entries = [SimpleNamespace(session_id=sid, origin=sid) for sid in owners]
+    adapters = []
+
+    def adapter_for_source(origin):
+        adapters.append(origin)
+        return f'adapter:{origin}'
+
+    runner = SimpleNamespace(
+        session_store=SimpleNamespace(list_sessions=lambda: entries),
+        _adapter_for_source=adapter_for_source,
+    )
+    assert await recover_profile_native_sessions(runner, authority) == {}
+    assert authority.bindings == [
+        ('queued-root', 'queued-tip', 'adapter:queued-tip'),
+        ('unknown-root', 'unknown-tip', 'adapter:unknown-tip'),
+    ]
+    assert adapters == ['queued-tip', 'unknown-tip']
+
+
+def _prune_store(tmp_path, monkeypatch):
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(SessionStore, '_ensure_loaded', lambda self: None)
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    store._loaded = True
+    monkeypatch.setattr(store, '_save', lambda: None)
+    return store
+
+
+def _route(key, sid):
+    now = datetime.now()
+    return SessionEntry(session_key=key, session_id=sid, created_at=now,
+                        updated_at=now, platform=Platform.TELEGRAM, chat_type='dm')
+
+
+def test_startup_prune_processes_ended_sessions_beyond_first_chunk(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from hermes_state_common import _SQL_IN_CHUNK
+
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        store = _prune_store(tmp_path, monkeypatch)
+        store._db = db
+        # Missing routes fill the first batch; an ended row in each batch makes
+        # truncation visible without manufacturing hundreds of session writes.
+        ids = [f'missing-{i}' for i in range(_SQL_IN_CHUNK - 1)]
+        ids += ['ended-first', 'ended-second', 'live-second', 'missing-second']
+        for sid in ('ended-first', 'ended-second', 'live-second'):
+            db.create_session(sid, source='telegram')
+        for sid in ('ended-first', 'ended-second'):
+            db.end_session(sid, 'agent_close')
+        store._entries = {sid: _route(sid, sid) for sid in ids}
+
+        store._prune_stale_sessions_locked()
+
+        assert set(store._entries) == set(ids) - {'ended-first', 'ended-second'}
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize('first_profile', ['alpha', 'beta'])
+def test_startup_prune_keeps_same_id_rows_isolated_by_profile(tmp_path, monkeypatch, first_profile):
+    from contextlib import ExitStack
+    from hermes_state import SessionDB
+
+    with ExitStack() as cleanup:
+        dbs = {}
+        for profile in ('alpha', 'beta'):
+            db = SessionDB(db_path=tmp_path / f'{profile}.db')
+            cleanup.callback(db.close)
+            dbs[profile] = db
+            for sid in ('shared-a', 'shared-b'):
+                db.create_session(sid, source='telegram')
+        dbs['alpha'].end_session('shared-a', 'agent_close')
+        dbs['beta'].end_session('shared-b', 'session_reset')
+        store = _prune_store(tmp_path, monkeypatch)
+        # Supply owned DB handles at the resolver seam; the real batch queries
+        # and stale-route verdicts must preserve their independent row states.
+        key_dbs = {}
+        profiles = [first_profile, 'beta' if first_profile == 'alpha' else 'alpha']
+        for profile in profiles:
+            for sid in ('shared-a', 'shared-b'):
+                key = f'{profile}:{sid}'
+                store._entries[key] = _route(key, sid)
+                key_dbs[key] = dbs[profile]
+        monkeypatch.setattr(store, '_db_for_key', key_dbs.__getitem__)
+
+        store._prune_stale_sessions_locked()
+
+        assert set(store._entries) == {'alpha:shared-b', 'beta:shared-a'}

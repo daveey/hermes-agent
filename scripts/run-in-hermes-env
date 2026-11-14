@@ -27,6 +27,12 @@ fi
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/_activation.sh
 . "$_here/_activation.sh"
-hermes_ensure_env "$(dirname "$_here")" || exit 1
+_repo="$(dirname "$_here")"
+# A faked HOME (a review card's scratch home) provisions from the account's
+# tool store, as scripts/run_tests.sh does, instead of a private ~1.5 GB
+# tools/. Only when a sync is due: an inherited current environment keeps the
+# store it was composed from.
+hermes_activation_current "$_repo" || hermes_borrow_account_store "$_repo" || :
+hermes_ensure_env "$_repo" || exit 1
 
 exec "$@"

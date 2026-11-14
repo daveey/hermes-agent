@@ -148,11 +148,10 @@ def live_gateway_ticking(home: Optional[Path | str] = None) -> Optional[dict]:
     return record if record_serves_profile(record, home) else None
 
 
-def _claim_owner_is_dead(claim: dict[str, Any]) -> bool:
-    """True when the claim's ``by`` names a process on THIS host that provably no longer exists.
-    ``_machine_id()`` stamps ``host:pid[:token]``; a foreign host, an explicit HERMES_MACHINE_ID,
-    or any liveness-probe failure returns False (fail safe: only a proven death shortens the TTL)."""
-    parts = str(claim.get("by") or "").split(":")
+def _process_is_dead(ident: Any) -> bool:
+    """True when *ident* (``host:pid[:token]``) names a process on THIS host that provably no longer
+    exists; a foreign host, an explicit HERMES_MACHINE_ID or any probe failure returns False."""
+    parts = str(ident or "").split(":")
     if len(parts) < 2 or not parts[1].isdigit():
         return False
     try:
@@ -161,5 +160,18 @@ def _claim_owner_is_dead(claim: dict[str, Any]) -> bool:
             return False
         from gateway.status import _pid_exists
         return not _pid_exists(int(parts[1]))
-    except Exception:
+    except (ImportError, OSError, ValueError, OverflowError):
         return False
+
+
+def _claim_owner_is_dead(claim: dict[str, Any]) -> bool:
+    """True when the claim's ``by`` names a process on THIS host that provably no longer exists,
+    and so does its ``runner`` when one is stamped. ``_machine_id()`` stamps ``host:pid[:token]``; a
+    foreign host, an explicit HERMES_MACHINE_ID, or any liveness-probe failure returns False (fail
+    safe: only a proven death shortens the TTL). ``runner`` is the process heartbeating the claim
+    (``cron.jobs._refresh_claim``): a restart-safe external worker still running the fire after its
+    claiming gateway exited keeps the claim live, so the next gateway's tick cannot re-fire over it."""
+    if not _process_is_dead(claim.get("by")):
+        return False
+    runner = claim.get("runner")
+    return runner is None or _process_is_dead(runner)

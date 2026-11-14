@@ -3,7 +3,8 @@
 Usage: python -I -B scripts/tool_store_pins.py REPO STORE
 (on success prints the pinned Python major.minor)
 
-scripts/run_tests.sh asks this before sharing the account's tool store with a
+scripts/_activation.sh (hermes_borrow_account_store: scripts/run_tests.sh and
+scripts/run-in-hermes-env) asks this before sharing the account's tool store with a
 run whose Hermes root is not the account's: a faked HOME, or a HERMES_HOME
 outside the account root (a card's fake home, a probe home). Such a root holds
 no store of its own, so without sharing setup-hermes.sh downloads the whole

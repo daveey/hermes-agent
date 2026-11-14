@@ -114,6 +114,24 @@ def test_replaced_argv_without_the_marker_is_never_held(monkeypatch):
         reg.kill_all()
 
 
+@pytest.mark.parametrize("split", [12, -1], ids=["inside-marker", "before-final-lf"])
+def test_overflow_preserves_split_marker_line(split):
+    from tools.process_registry_bg_shell import START_HOLD_MAX_CHARS, gate_start_output, release_start_output
+
+    marker = "__hermes_bg_start_overflow__"
+    marker_line = f"\r\n{marker}\r\n"
+    session = ProcessSession(id="proc_split_overflow", command="x", start_marker=marker)
+    flood = "x" * START_HOLD_MAX_CHARS
+    # The overflow read ends mid-marker or at the CR/LF seam of its terminator.
+    released = gate_start_output(session, flood + "banner-tail" + marker_line[:split])
+    assert released and released.startswith("x")
+    assert "__hermes" not in released
+    completed = gate_start_output(session, marker_line[split:] + "command-output\r\n")
+    assert completed == "command-output\r\n"
+    assert release_start_output(session) == ""
+    assert gate_start_output(session, "later-output\n") == "later-output\n"
+
+
 def test_gate_holds_split_marker_and_bounds_the_hold():
     from tools.process_registry_bg_shell import START_HOLD_MAX_CHARS, gate_start_output, release_start_output
 

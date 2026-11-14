@@ -216,6 +216,7 @@ import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
 import { registerDeepLinkProtocol as registerDeepLinkProtocolWith } from './deep-link-protocol'
+import { persistDeltaBases } from './delta-reads'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine, formatLogStamp } from './desktop-log-line'
 import {
@@ -788,6 +789,8 @@ if (!isPrimaryInstance) {
   console.error('[hermes] another Hermes Desktop instance holds the single-instance lock; exiting')
   app.exit(0)
 }
+
+persistDeltaBases(app) // [daveey] delta-reads.ts: remote reads' copies outlive a relaunch, so the first read is a delta
 
 // `hermes desktop` shortens TMPDIR only so the lock above can bind its socket (#124688). The
 // backend and every other child get the real one (the profile scratch dir) back.
@@ -14855,12 +14858,7 @@ async function fetchJsonForBackendOnce(descriptor: any, path: string, opts: Back
       throw new Error('File uploads are not supported against OAuth-gated remote backends yet.')
     }
 
-    const options = {
-      method: opts.method,
-      body: opts.body,
-      timeoutMs,
-      headers: descriptor.headers
-    }
+    const options = { method: opts.method, body: opts.body, timeoutMs, headers: descriptor.headers }
 
     const answer = await requestWithOauthFallback(descriptor.baseUrl, {
       ensureNativeAccessToken,

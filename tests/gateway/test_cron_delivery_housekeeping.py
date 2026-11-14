@@ -3,6 +3,8 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
+
 from cron import scheduler
 from cron import scheduler_preflight as sched_preflight
 import gateway.run as gateway_run
@@ -327,6 +329,67 @@ def test_a_write_in_the_same_mtime_granule_still_wakes_the_watch(tmp_path, monke
     # Seen a granule after its mtime the stamp is trustworthy: no wake without a write.
     now_ns[0] = mtime_ns + 2 * queue_watch.MTIME_GRANULARITY_NS
     assert watch.changed() is True, "the previous look was still racy"
+    assert watch.changed() is False
+    assert watch.changed() is False
+
+
+@pytest.mark.parametrize("newest_name", ["deliveries.db", "deliveries.db-wal"])
+def test_newest_queue_file_keeps_an_unchanged_stamp_racy(tmp_path, monkeypatch, newest_name):
+    """An old DB must not hide a recent WAL, nor an old WAL a recent DB."""
+    import os
+
+    from cron import delivery_queue
+    from gateway import run_delivery_queue_watch as queue_watch
+
+    granule = queue_watch.MTIME_GRANULARITY_NS
+    mtime_ns = 10 * granule
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", tmp_path / "deliveries.db")
+    for name in ("deliveries.db", "deliveries.db-wal"):
+        path = tmp_path / name
+        path.write_bytes(b"pending!")
+        stamp_ns = mtime_ns if name == newest_name else mtime_ns - 3 * granule
+        os.utime(path, ns=(stamp_ns, stamp_ns))
+    now_ns = [mtime_ns]
+    monkeypatch.setattr(queue_watch, "_now_ns", lambda: now_ns[0])
+    watch = queue_watch.DeliveryQueueWatch(lambda: [None], lambda: None)
+
+    newest = tmp_path / newest_name
+    before = newest.stat()
+    newest.write_bytes(b"settled!")
+    os.utime(newest, ns=(mtime_ns, mtime_ns))
+    assert newest.stat().st_mtime_ns == before.st_mtime_ns == mtime_ns
+    assert newest.stat().st_size == before.st_size
+    assert watch.changed() is True, "the old file hid a same-stamp write to the newest file"
+
+    now_ns[0] = mtime_ns + granule + 1
+    assert watch.changed() is True, "the previous recent stamp still owes a recheck"
+    assert watch.changed() is False
+    assert watch.changed() is False
+
+
+@pytest.mark.parametrize("age_past_granule_ns", [0, 1])
+def test_queue_stamp_granule_boundary_is_inclusive(tmp_path, monkeypatch, age_past_granule_ns):
+    """Integer wall-clock age equal to one granule still owes a conservative recheck."""
+    import os
+
+    from cron import delivery_queue
+    from gateway import run_delivery_queue_watch as queue_watch
+
+    granule = queue_watch.MTIME_GRANULARITY_NS
+    mtime_ns = 10 * granule
+    queue = tmp_path / "deliveries.db"
+    queue.write_bytes(b"pending!")
+    os.utime(queue, ns=(mtime_ns, mtime_ns))
+    assert queue.stat().st_mtime_ns == mtime_ns
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", queue)
+    now_ns = [mtime_ns + granule + age_past_granule_ns]
+    monkeypatch.setattr(queue_watch, "_now_ns", lambda: now_ns[0])
+    watch = queue_watch.DeliveryQueueWatch(lambda: [None], lambda: None)
+
+    # Move beyond the boundary before polling: the remembered observation, not
+    # the current clock, determines whether this unchanged file needs a recheck.
+    now_ns[0] = mtime_ns + 2 * granule
+    assert watch.changed() is (age_past_granule_ns == 0)
     assert watch.changed() is False
     assert watch.changed() is False
 

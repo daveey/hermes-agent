@@ -110,6 +110,10 @@ _local = threading.local()
 _exited_tids: collections.deque = collections.deque()  # tids whose thread ended; folded under _lock
 _started_at = time.time()
 _state: dict[str, Any] = {"role": None, "thread": None, "stop": None, "pid": os.getpid()}
+# Bumped by the at-fork hook in the child, with the child's thread and wall clocks at the fork: a pass opened
+# before the fork books only the child's CPU and wall since the fork (the child's thread clock restarts at 0,
+# so the parent's start mark would book negative CPU).
+_fork: dict[str, Any] = {"gen": 0, "c0": 0.0, "w0": 0.0}
 
 
 class _ThreadExit:
@@ -171,7 +175,7 @@ class Pass:
     """One accounted pass (a context manager); see the module docstring. Mark the outcome with
     :meth:`skip`, :meth:`change`, :meth:`fallback` and :meth:`rows` at any point before it exits."""
 
-    __slots__ = ("_c0", "_outer", "_w0", "changed", "fell_back", "name", "nrows", "skipped")
+    __slots__ = ("_c0", "_gen", "_outer", "_w0", "changed", "fell_back", "name", "nrows", "skipped")
 
     def __init__(self, name: str, skipped: bool = False, changed: Optional[bool] = None, fallback: bool = False,
                  rows: Optional[int] = None) -> None:
@@ -197,15 +201,19 @@ class Pass:
         depth = getattr(_local, "depth", 0)
         _local.depth = depth + 1
         self._outer = depth == 0
+        self._gen = _fork["gen"]
         self._w0 = _perf()
         self._c0 = _thread_time()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        cpu = _thread_time() - self._c0
-        wall = _perf() - self._w0
-        # Clamped: a fork while a nested pass is open clears the child's depth, so its exits would go negative
-        # and the thread would never count another outermost pass.
+        if self._gen == _fork["gen"]:
+            cpu = _thread_time() - self._c0
+            wall = _perf() - self._w0
+        else:  # opened before an os.fork, closing in the child: only the child's part, from the fork
+            cpu = _thread_time() - _fork["c0"]
+            wall = _perf() - _fork["w0"]
+        # Defensive clamp for callers that cleared thread-local state while a pass was open.
         _local.depth = max(0, getattr(_local, "depth", 1) - 1)
         tid = _own_tid() if self._outer else 0
         with _lock:
@@ -598,8 +606,11 @@ def _after_fork_child() -> None:
     _started_at = time.time()
     _state.pop("exited_accounted", None)
     _state.update(thread=None, stop=None, pid=os.getpid(), role=None)
+    depth = getattr(_local, "depth", 0)  # this thread's open passes survive on the child's stack
     _local.__dict__.clear()  # drops this thread's _ThreadExit, queueing the parent's tid: cleared next
+    _local.depth = depth  # child-opened passes remain nested until the inherited outer pass exits
     _exited_tids.clear()
+    _fork.update(gen=_fork["gen"] + 1, c0=_thread_time(), w0=_perf())
 
 
 if hasattr(os, "register_at_fork"):

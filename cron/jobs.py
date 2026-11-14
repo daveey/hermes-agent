@@ -2729,10 +2729,15 @@ def claim_dispatch(job_id: str) -> bool:
 
 
 def _refresh_claim(jobs: list[dict[str, Any]], claim: Any, expected_owner: str) -> bool:
-    """Compare-and-refresh a claim's ``at`` stamp; False unless *expected_owner* still holds it."""
+    """Compare-and-refresh a claim's ``at`` stamp; False unless *expected_owner* still holds it.
+
+    Also stamps ``runner``, the process refreshing it: a restart-safe external worker runs the fire
+    under its claiming gateway's ``by`` and outlives that gateway, so liveness must see the runner
+    too (``_claim_owner_is_dead``) or the next gateway's tick re-fires the job over the live run."""
     if not isinstance(claim, dict) or claim.get("by") != expected_owner:
         return False
     claim["at"] = _hermes_now().isoformat()
+    claim["runner"] = _machine_id()
     save_jobs(jobs)
     return True
 

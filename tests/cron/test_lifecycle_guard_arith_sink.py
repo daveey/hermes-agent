@@ -149,6 +149,7 @@ def test_output_run_inside_arithmetic_still_fails_closed(tmp_path, shape):
     "date() { echo 'a[$(bash x)]'; }\n", "function date { :; }\n", "date () { :; }; ",
     "alias date=evil\n", "PATH=/tmp/evil:$PATH\n", "export PATH=/tmp/evil\n", "hash -p /tmp/evil date\n",
     "source lib.sh\n", ". lib.sh\n", "BASH_ENV=evil.sh ", "enable -f x date\n", "declare -f date\n",
+    "typeset -fx date\n", "command_not_found_handle() { echo 'a[$(bash x)]'; }\n", "ENV=evil.sh ",
 ])
 def test_rebound_date_is_still_a_sink(prefix):
     assert output_reaches_shell(prefix + "x=$(( $(date +%s) + 1 ))\n")

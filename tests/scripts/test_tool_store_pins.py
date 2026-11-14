@@ -1,4 +1,4 @@
-"""run_tests.sh shares the account's tool store only when it can run from it as is.
+"""run_tests.sh and run-in-hermes-env share the account's tool store only when they can run from it as is.
 
 A store whose facts match the checkout's pins must still not be shared when
 running from it would write to it: a missing or non-executable binary sends
@@ -189,3 +189,95 @@ def test_a_root_with_its_own_store_keeps_it(tmp_path):
     (borrower / "tools").mkdir(parents=True)
     (borrower / "tools" / "facts.json").write_text('{"packages": {}, "schema": 1}')
     assert not _shares(store, hermes_home=borrower)
+
+
+def _entry_points_repo(tmp_path: Path) -> tuple[Path, Path]:
+    """A checkout whose scripts, pm and sources are this one's, but whose setup-hermes.sh only
+    records the HERMES_RUNTIME_DIR / UV_PYTHON_INSTALL_DIR it was provisioned with (and fails,
+    so nothing downloads). Returns the repo and that record."""
+    repo, record = tmp_path / "repo", tmp_path / "provisioned-with"
+    (repo / "scripts").mkdir(parents=True)
+    for entry in ROOT.iterdir():
+        if entry.name not in {"scripts", "setup-hermes.sh", ".venv", "venv", ".git"}:
+            (repo / entry.name).symlink_to(entry)
+    for entry in (ROOT / "scripts").iterdir():
+        (repo / "scripts" / entry.name).symlink_to(entry)
+    setup = repo / "setup-hermes.sh"
+    setup.write_text(f'#!/bin/sh\nprintf "%s\\n%s\\n" "${{HERMES_RUNTIME_DIR-}}" "${{UV_PYTHON_INSTALL_DIR-}}" > "{record}"\nexit 1\n')
+    setup.chmod(0o755)
+    # hermes_bootstrap_python's first candidate: this interpreter, with its own site.
+    _executable(repo / ".venv" / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    return repo, record
+
+
+def _provision_from_faked_home(
+    tmp_path: Path, repo: Path, entry: list[str], *, overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run ENTRY from REPO the way a review card does: env cut to PATH, a fresh fake HOME, and an
+    OS account (getent) whose home is tmp_path/account."""
+    stubs = tmp_path / "stubs"
+    _executable(stubs / "getent").write_text(f'#!/bin/sh\necho "me:x:{os.getuid()}:{os.getgid()}::{tmp_path / "account"}:/bin/sh"\n')
+    env = {"PATH": f"{stubs}:{os.environ['PATH']}", "HOME": str(tmp_path / "fake-home")}
+    env.update(overrides or {})
+    return subprocess.run(["bash", *entry], cwd=repo, env=env, capture_output=True, text=True,
+                          timeout=120, check=False)
+
+
+ENTRY_POINTS = {
+    "run-in-hermes-env": ["scripts/run-in-hermes-env", "true"],
+    "run_tests.sh": ["scripts/run_tests.sh", "tests/scripts/test_tool_store_pins.py"],
+}
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("entry", sorted(ENTRY_POINTS))
+def test_every_entry_point_provisions_a_faked_home_from_the_account_store(tmp_path, entry):
+    """worker-7: review cards call run-in-hermes-env directly from a scratch HOME, and only
+    run_tests.sh borrowed, so each card staged a private ~1.4 GB tools/ (python, node, chromium)."""
+    store = _account_store(tmp_path)
+    py_minor = ".".join(Lockfile(ROOT / "pm" / "lock.json").version("python").split("+")[0].split(".")[:2])
+    uv_pythons = tmp_path / "account" / ".local" / "share" / "uv" / "python"
+    (uv_pythons / f"cpython-{py_minor}.0-linux-x86_64-gnu").mkdir(parents=True)
+    repo, record = _entry_points_repo(tmp_path)
+    result = _provision_from_faked_home(tmp_path, repo, ENTRY_POINTS[entry])
+    assert record.is_file(), result.stderr
+    assert record.read_text().splitlines() == [str(store), str(uv_pythons)], result.stderr
+    assert not (tmp_path / "fake-home" / ".hermes" / "tools").exists()
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("entry", sorted(ENTRY_POINTS))
+def test_no_entry_point_borrows_an_account_store_at_other_pins(tmp_path, entry):
+    store = _account_store(tmp_path)
+    _drop_fact(store, "node")
+    repo, record = _entry_points_repo(tmp_path)
+    result = _provision_from_faked_home(tmp_path, repo, ENTRY_POINTS[entry])
+    assert record.is_file(), result.stderr
+    assert record.read_text().splitlines() == ["", ""], result.stderr
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("case", ["runtime", "uv", "optout", "stderr"])
+def test_direct_entry_respects_borrowing_controls(tmp_path, case):
+    """Exercise activation itself, not only the Python store eligibility check."""
+    store = _account_store(tmp_path)
+    py_minor = ".".join(Lockfile(ROOT / "pm" / "lock.json").version("python").split("+")[0].split(".")[:2])
+    uv_pythons = tmp_path / "account" / ".local" / "share" / "uv" / "python"
+    (uv_pythons / f"cpython-{py_minor}.0-linux-x86_64-gnu").mkdir(parents=True)
+    explicit_runtime, explicit_uv = tmp_path / "explicit-runtime", tmp_path / "explicit-uv"
+    overrides, expected = {
+        "runtime": ({"HERMES_RUNTIME_DIR": str(explicit_runtime)}, [str(explicit_runtime), ""]),
+        "uv": ({"UV_PYTHON_INSTALL_DIR": str(explicit_uv)}, [str(store), str(explicit_uv)]),
+        "optout": ({"HERMES_PM_ACCOUNT_SEED": " no "}, ["", ""]),
+        "stderr": ({}, [str(store), str(uv_pythons)]),
+    }[case]
+    repo, record = _entry_points_repo(tmp_path)
+    result = _provision_from_faked_home(
+        tmp_path, repo, ENTRY_POINTS["run-in-hermes-env"], overrides=overrides,
+    )
+    assert result.returncode != 0, "the recording setup stub must stop before any downloads"
+    assert record.is_file(), result.stderr
+    assert record.read_text().splitlines() == expected, result.stderr
+    assert result.stdout == "", "activation diagnostics must not contaminate command output"
+    assert ("borrowed Hermes root" in result.stderr) == (case in {"uv", "stderr"})
+    assert not (tmp_path / "fake-home" / ".hermes" / "tools").exists()

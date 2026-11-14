@@ -12,8 +12,9 @@ remerge-diff files and a test fixup with no review; t_01a1d6945ea46bd0).
 The review gate is ``hermes-core-wt ship``'s own, loaded from ``hermes-core-wt-land`` (state repo; installed at
 ``~/.hermes/bin`` on the hub and ``~/.hermes/lib/core-tools`` on pool workers, or ``$HERMES_CORE_WT_LAND``): the
 exact-head review card under its idempotency key ``core-wt-review:<repo>#<pr>:<sha>`` (filed with
-``request_review``), then ``review_gate`` on the PR's exact head, then ``review_reply_guard`` for non-blocking
-points. A host without that tool cannot judge a review, so a fork-authored sync is refused there, never landed.
+``request_review``), or a completed off-key receipt bound to that exact PR URL and full head SHA when no keyed
+card exists. Both routes use ``review_gate`` on the PR's exact head, then ``review_reply_guard`` for non-blocking
+points. Replica discovery only supplies candidate IDs, never approval. A host without the tool refuses.
 """
 from __future__ import annotations
 
@@ -24,8 +25,10 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -192,6 +195,7 @@ class ReviewUnavailable(Exception):
 # The ship-gate entry points this gate calls, with the parameters it passes: an installed tool that drifted
 # from them refuses here instead of failing mid-judgement (or, worse, judging with a changed meaning).
 SHIP_GATE_CONTRACT = {
+    "board_db_paths": (),
     "keyed_review_card": ("slug", "number", "sha"),
     "request_review": ("wt", "slug", "number", "sha", "old", "base", "prior_review", "impl_task", "gh"),
     "review_gate": ("gh", "slug", "pr", "sha", "branch", "base", "review_task", "impl_task"),
@@ -213,6 +217,38 @@ def contract_errors(mod) -> list[str]:
 
 class _NeverRaised(Exception):
     """Stands in for a ship-tool exception class an older tool lacks."""
+
+
+def off_key_review_cards(mod, slug: str, number: int, sha: str) -> list[str]:
+    """Discover exact-head completion receipts, never grant approval from replica metadata.
+
+    Ship's review_gate must still re-read each candidate's authoritative execution record,
+    latest verdict and independent session, plus the unchanged GitHub review restrictions.
+    A keyed card takes precedence, so a pending/rejected keyed review cannot be bypassed.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return []
+    cards = []
+    for path in mod.board_db_paths():
+        try:
+            with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                rows = db.execute(
+                    "SELECT t.id, r.metadata FROM tasks t JOIN task_runs r ON r.task_id = t.id "
+                    "WHERE t.status = 'done' AND r.status = 'done' AND r.outcome = 'completed' "
+                    "ORDER BY r.ended_at DESC"
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            continue
+        for card, raw in rows:
+            try:
+                md = json.loads(raw or "null")
+            except (TypeError, ValueError):
+                continue
+            if (isinstance(md, dict) and md.get("verdict") in ("approve", "request_changes") and md.get("reviewed_sha") == sha
+                    and md.get("reviewed_pr") == f"https://github.com/{slug}/pull/{number}"
+                    and isinstance(card, str) and re.fullmatch(r"t_[0-9a-f]+", card) and card not in cards):
+                cards.append(card)
+    return cards
 
 
 class ShipReview:
@@ -258,11 +294,21 @@ class ShipReview:
         gh = mod.Gh(self.repo)
         pr = {"number": number}
         card = mod.keyed_review_card(gh_repo, number, head)
-        try:
-            receipt = mod.review_gate(gh, gh_repo, pr, head, branch, "main", card, impl_task=self.impl_task)
-        except mod.ReviewRefused as exc:
-            refusal = str(exc)
-        else:
+        candidates = [card] if card else [*off_key_review_cards(mod, gh_repo, number, head), ""]
+        receipts = []
+        rejected = (getattr(mod, "ReviewRejected", _NeverRaised),
+                    getattr(mod, "ReviewChangesRequested", _NeverRaised))
+        for candidate in candidates:
+            try:
+                receipt = mod.review_gate(gh, gh_repo, pr, head, branch, "main", candidate, impl_task=self.impl_task)
+            except rejected as exc:
+                return False, str(exc)
+            except mod.ReviewRefused as exc:
+                refusal = str(exc)
+                continue
+            receipts.append(receipt)
+        # Inspect every candidate before accepting: an approval cannot mask a rejection.
+        for receipt in receipts:
             code, why = mod.review_reply_guard(gh, gh_repo, pr, receipt, self.reply)
             if code is not None:
                 return False, (f"{why} (answer with `upstream_sync.py --head {head[:12]} --review-reply "

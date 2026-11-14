@@ -171,6 +171,12 @@ def plan(repo: Path, changed: list[str], full_reason: str | None = None) -> dict
     in_suite = set(universe)
     selected = {c for c in changed if c in in_suite}
     changed_modules = {m for c in changed if not c.startswith("tests/") and (m := module_name(c))}
+    # FakeFork copies upstream_sync*.py into fixture clones and executes the gate
+    # in a subprocess. AST imports cannot see that edge; seed its helper so all
+    # current/future consumers (including indirect imports) join the closure.
+    # Match changed paths, not existing files: deletions and renames count too.
+    if any(re.fullmatch(r"scripts/ci/upstream_sync[^/]*\.py", c) for c in changed):
+        changed_modules.add("tests.hermes_cli.upstream_gate_fake")
     selected |= importers(repo, changed_modules) & in_suite
     string_refs = [re.compile(rf"[\"']{re.escape(m)}([\"']|\.)") for m in changed_modules]
     path_refs = [re.escape(c) for c in changed if "/" in c and Path(c).name not in GENERIC]

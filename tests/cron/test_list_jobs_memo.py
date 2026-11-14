@@ -97,3 +97,74 @@ def test_memo_hits_are_p1_skips(store):
     after = la.counters()["cron.list_jobs"]
     assert after["runs"] - before["runs"] == 3
     assert after["skips"] - before["skips"] == 2
+
+
+def test_a_caller_mutating_a_memo_hit_does_not_change_the_next_answer(store):
+    cj.create_job(prompt="first", schedule="every 1h", name="one")
+    cj.list_jobs(include_disabled=True)  # miss: fills the memo
+    hit = cj.list_jobs(include_disabled=True)
+    hit[0]["name"] = "mutated"
+    hit[0]["schedule"]["kind"] = "mutated"
+    hit.append({"name": "extra"})
+    assert _names() == ["one"]
+    assert cj.list_jobs(include_disabled=True)[0]["schedule"]["kind"] != "mutated"
+
+
+def test_a_read_that_a_write_raced_is_not_remembered(store, monkeypatch):
+    """The stamp moved while jobs.json was being read, so what was read is not filed under the pre-read
+    stamp: even when the file's stamp later reads the same again (a same-size in-place edit whose mtime
+    is put back, e.g. ``cp -p``/``touch -r``), the next list parses the file instead of serving the read."""
+    import os
+    cj.create_job(prompt="first", schedule="every 1h", name="aaa")
+    path = cj._current_cron_store().jobs_file
+    before = path.stat()
+    edited = path.read_text().replace('"aaa"', '"bbb"')
+    real = cj._parse_jobs_file
+    raced: list[int] = []
+
+    def racing_parse(p):
+        parsed = real(p)
+        if not raced:
+            raced.append(1)
+            with open(p, "r+") as fh:  # in place: same inode, same size, new mtime
+                fh.write(edited)
+                fh.truncate()
+            os.utime(p, ns=(before.st_atime_ns, before.st_mtime_ns + 10**9))
+        return parsed
+
+    monkeypatch.setattr(cj, "_parse_jobs_file", racing_parse)
+    assert _names() == ["aaa"]  # this read saw the file before the write
+    assert raced
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert cj._jobs_file_stamp(path) == (before.st_mtime_ns, before.st_size, before.st_ino)
+    assert _names() == ["bbb"]
+
+
+def test_a_memo_hit_inside_the_jobs_lock_lets_the_save_skip_the_merge_parse(store):
+    """Like load_jobs, a hit records the jobs file's stamp for the enclosing ``_jobs_lock()`` section, so a
+    save in that section sees disk unchanged without parsing it again."""
+    cj.create_job(prompt="first", schedule="every 1h", name="one")
+    cj.list_jobs(include_disabled=True)  # fills the memo
+    with cj._jobs_lock():
+        assert _names() == ["one"]  # a hit
+        parsed = len(store)
+        assert cj._unmerged_disk_jobs([], None) == []
+        assert len(store) == parsed
+
+
+def test_alternating_profile_stores_each_keep_their_memo(tmp_path, monkeypatch):
+    """A Desktop poll walks every profile's store in turn: each jobs file keeps its own memo slot, so a
+    second walk parses nothing."""
+    parses = []
+    real = cj._parse_jobs_file
+    monkeypatch.setattr(cj, "_parse_jobs_file", lambda path: parses.append(path) or real(path))
+    for name in ("a", "b", "c"):
+        with cj.use_cron_store(tmp_path / name):
+            cj.create_job(prompt=f"job {name}", schedule="every 1h", name=f"job-{name}")
+            assert _names() == [f"job-{name}"]
+    parsed = len(parses)
+    for _ in range(2):
+        for name in ("a", "b", "c"):
+            with cj.use_cron_store(tmp_path / name):
+                assert _names() == [f"job-{name}"]
+    assert len(parses) == parsed

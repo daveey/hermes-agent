@@ -326,6 +326,107 @@ def test_gitlink_it_cannot_archive_still_refuses(board, shape):
     assert _gc() == 0 and (path / "wt" / ".git").is_file()
 
 
+def test_dir_whose_gitdir_points_elsewhere_is_not_bare(board, remote, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    parent = tmp_path / "parent.git"
+    _run("clone", "-q", "--bare", str(remote), str(parent))
+    candidate = parent / "fixture"
+    (candidate / "objects").mkdir(parents=True)
+    (candidate / "refs").mkdir()
+    (candidate / "HEAD").write_text("not a ref\n")
+    assert _run("rev-parse", "--absolute-git-dir", cwd=candidate) == str(parent)
+    with pytest.raises(sa.ArchiveRefused, match="looks like a bare repository but git resolves"):
+        sa.archive_repo(candidate, tmp_path / "archive", task_id="fixture", completed_at=base.OLD, bare=True)
+
+
+def test_archive_never_touches_the_repo_index(board, remote, tmp_path, monkeypatch):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    outside = tmp_path / "outside"
+    _run("clone", "-q", str(remote), str(outside))
+    tid, path = _task()
+    wt = path / "wt"
+    _run("worktree", "add", "-q", "-b", "side", str(wt), cwd=outside)
+    index = outside / ".git" / "worktrees" / "wt" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    real = sa._archive_worktree
+    refreshed = []
+
+    def refresh(repo, dest, env, head, files, extra):
+        # Force an actual index write, independent of Git's optional refresh policy.
+        # A diff implementation may refresh its index; only the private copy is writable.
+        sa._git(repo, env, "update-index", "--force-write-index")
+        refreshed.append(env.get("GIT_INDEX_FILE"))
+        assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+        return real(repo, dest, env, head, files, extra)
+
+    monkeypatch.setattr(sa, "_archive_worktree", refresh)
+    sa.archive_workspace(path, _archive(tid), task_id=tid, completed_at=base.OLD)
+    assert len(refreshed) == 1 and refreshed[0] != str(index)
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+    assert not list(_archive(tid).rglob(".index-*"))
+
+
+def test_gitlink_changed_after_scan_refuses(board, remote, monkeypatch):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _task(remote=remote)
+    _run("worktree", "add", "-q", "-b", "side", str(path / "wt"), cwd=path / "repo")
+    marker = path / "wt" / ".git"
+    real = sa._write_payload
+    changed = []
+
+    def change_then_scan(*args, **kwargs):
+        marker.write_text(marker.read_text() + "\n")  # still valid, but no longer the judged file
+        changed.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sa, "_write_payload", change_then_scan)
+    with pytest.raises(sa.ArchiveRefused, match=r"a \.git file changed after it was judged"):
+        sa.archive_workspace(path, _archive(tid), task_id=tid, completed_at=base.OLD)
+    assert changed == [True] and marker.exists()
+    assert not _archive(tid).exists()
+
+
+def test_outside_gitdir_commits_are_not_bundled(board, remote, tmp_path):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    outside = tmp_path / "outside"
+    _run("clone", "-q", str(remote), str(outside))
+    tid, path = _task()
+    wt = path / "wt"
+    _run("worktree", "add", "-q", "-b", "side", str(wt), cwd=outside)
+    (wt / "tracked.txt").write_text("private unpushed work\n")
+    _run("commit", "-q", "-am", "local only", cwd=wt)
+    head = _run("rev-parse", "HEAD", cwd=wt)
+    assert head != _run("rev-parse", "origin/main", cwd=wt)
+    before = _fingerprint(outside / ".git")
+    sa.archive_workspace(path, _archive(tid), task_id=tid, completed_at=base.OLD)
+    meta = _meta(tid, "wt")
+    assert meta["head"] == head and meta["gitdir_inside"] is False
+    assert meta["unpushed_refs"] == [] and "commits.bundle" not in meta["files"]
+    assert not list(_archive(tid).rglob("commits.bundle"))
+    assert _fingerprint(outside / ".git") == before
+
+
+def test_bare_repo_contents_are_not_walked_as_workspace_files(board, remote):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _task()
+    bare = path / "mirror.git"
+    _run("clone", "-q", "--bare", str(remote), str(bare))
+    # Metadata may contain a file named .git; it is payload, not a nested worktree.
+    marker = bare / "hooks" / ".git"
+    marker.write_text("gitdir: /nonexistent/archive-test-metadata\n")
+    sa.archive_workspace(path, _archive(tid), task_id=tid, completed_at=base.OLD)
+    assert _meta(tid, "mirror.git")["bare"] is True
+    with tarfile.open(_archive(tid) / PAYLOAD / "tree.tar.gz") as tar:
+        member = tar.extractfile("mirror.git/hooks/.git")
+        assert member is not None and member.read() == marker.read_bytes()
+    assert not (_archive(tid) / "mirror.git" / "hooks" / "meta.json").exists()
+
+
 # --- 4. fifos, sockets, devices ------------------------------------------------------------
 
 def test_fifo_and_socket_are_recorded_without_content_and_removed(board, monkeypatch):

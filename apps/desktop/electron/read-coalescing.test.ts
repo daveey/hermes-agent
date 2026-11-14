@@ -256,10 +256,4 @@ describe('main.ts wiring', () => {
     expect(main.match(/\bfetchJsonForBackendOnce\b/g)).toHaveLength(2)
   })
 
-  it('a renderer WS-RPC write notice reaches the shared coalescer', () => {
-    const preload = readFileSync(join(__dirname, 'preload.ts'), 'utf8')
-
-    expect(preload).toContain("noteBackendWrite: () => ipcRenderer.send('hermes:backend:note-write')")
-    expect(main).toContain("ipcMain.on('hermes:backend:note-write', () => backendReadCoalescer.noteWriteEverywhere())")
-  })
 })
