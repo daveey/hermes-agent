@@ -2,6 +2,8 @@
 if not __name__.startswith("tests."):
     raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")
 
+from copy import deepcopy
+import json
 from pathlib import Path
 
 import pytest
@@ -83,6 +85,45 @@ def test_late_run_write_failure_removes_receipt_copies(kanban_home, monkeypatch)
         assert kb.get_task(conn, task).status == "running"
         assert not kb.list_attachments(conn, task)
         assert not list(kb.task_attachments_dir(task).glob("*"))
+
+
+@pytest.mark.parametrize("surface", ["display", "worker-context"])
+def test_legacy_attachment_path_is_display_only_filtered(surface):
+    from hermes_cli.kanban_artifact_receipt import display_metadata
+    from hermes_cli.kanban_db_context import _ctx_metadata_line
+
+    # Old persisted receipts carry a path meaningful only on their executor.
+    # Generating this with complete_task would silently test only the new format.
+    legacy = {
+        "artifacts": ["/scratch/report.md", "~/report.md", "relative.md"],
+        "artifact_receipt": [{
+            "machine": "worker-b", "path": "/scratch/report.md",
+            "attachment_path": "/executor-only/attachments/report.md",
+            "attachment_id": 17, "attachment_uid": "legacy-attachment-uid",
+            "sha256": "a" * 64, "role": "artifact",
+        }],
+        "completion_receipt": receipt("/scratch/report.md"),
+    }
+    original = deepcopy(legacy)
+    if surface == "display":
+        shown = display_metadata(legacy)
+    else:
+        line = _ctx_metadata_line(legacy)
+        assert line is not None
+        assert line.startswith("_metadata_: `") and line.endswith("`")
+        shown = json.loads(line[len("_metadata_: `"):-1])
+    assert "attachment_path" not in shown["artifact_receipt"][0]
+    assert "/executor-only/attachments/report.md" not in json.dumps(shown)
+    assert shown["artifact_receipt"] == [{
+        "machine": "worker-b", "path": "/scratch/report.md",
+        "attachment_id": 17, "attachment_uid": "legacy-attachment-uid",
+        "sha256": "a" * 64, "role": "artifact",
+    }]
+    assert shown["artifacts"] == [
+        "worker-b:/scratch/report.md", "worker-b:~/report.md", "relative.md",
+    ]
+    assert shown["completion_receipt"] == original["completion_receipt"]
+    assert legacy == original
 
 
 def test_prefix_replacement_cannot_mutate_receipt():
