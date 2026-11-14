@@ -37,6 +37,7 @@ _FOLD_HEADER = ('[IMPORTANT: {count} Kanban task updates arrived while this sess
 # The live statuses under which a wake's premise still holds. A kind absent here reports an outcome
 # (completed, review_requested, ...) and is never relabelled.
 _PREMISE_HOLDS = {
+    'spend_budget_decision_ready': frozenset({'triage'}),
     'chat_wait_unclaimed': frozenset({'triage', 'todo', 'ready'}),
     'blocked': frozenset({'blocked', 'triage'}),
     'block_loop_detected': frozenset({'blocked', 'triage'}),

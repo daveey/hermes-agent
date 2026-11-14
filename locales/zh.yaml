@@ -241,6 +241,7 @@ gateway:
       block_loop_detected: "反复阻塞后被转入待分诊，需要编排关注"
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
+      spend_budget_decision_ready: "已达到支出预算，等待重新启动或归档的决定"
       status_default: "状态变化"
       status_joiner: "，"
       message: "[kanban] 任务 {task_id} {status}。\n标题: {title}\n执行者: @{assignee}\n看板: {board}\n\n请检查结果或决定下一步动作。"

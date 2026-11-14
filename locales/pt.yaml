@@ -241,6 +241,7 @@ gateway:
       block_loop_detected: "routed to triage after repeated blocks; orchestration attention needed"
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
+      spend_budget_decision_ready: "atingiu o orçamento; aguarda uma decisão de retomar ou arquivar"
       status_default: "status changed"
       status_joiner: ", "
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."

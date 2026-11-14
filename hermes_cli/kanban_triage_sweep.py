@@ -124,9 +124,13 @@ def sweep_stale_triage(
 
     # Retained executor copies have no triage policy authority. Local cap keys cannot
     # arbitrate supervisor creation across gateways, even when neither has synced yet.
+    from hermes_cli.kanban_spend_decision import pending as spend_decision_pending, safe_ensure_producer
     copies = foreign_ids(conn)
     for row in rows:
         if row["id"] in copies:
+            continue
+        if spend_decision_pending(conn, row["id"]):
+            safe_ensure_producer(conn, row["id"])
             continue
         if row["human_request"] or open_recovery_card(conn, row["id"]) or current_park(conn, row['id']):
             continue  # a human owns it, or its kernel recovery card is its producer
@@ -148,6 +152,8 @@ def sweep_stale_triage(
         if _TRIAGE_BRIEF.strip() not in body:
             body += _TRIAGE_BRIEF
         with _kb.write_txn(conn):
+            if spend_decision_pending(conn, row["id"]):
+                continue
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",
                 (assignee, body, row["id"]),

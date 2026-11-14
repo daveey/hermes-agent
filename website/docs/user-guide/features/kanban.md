@@ -674,9 +674,15 @@ At `kanban.spend_budget_runs` spending runs (default 15) or
 the write lock and never under another dispatcher's live claim, moves the card
 to `triage` with a `spend_budget_triaged` event and a comment showing the spend
 (`dispatch --json` key `no_progress_held`, action `spend_budget:triage`). The
-auto-decomposer skips cards that already ran, so triage holds the card until
-someone splits, re-scopes, archives or promotes it; a promote starts a new
-budget window.
+auto-decomposer skips cards that already ran, and the stale-triage sweep cannot
+release a spend hold. Only a recorded manual promote (after splitting or
+re-scoping, if needed) or archive releases it; a promote starts a new budget
+window. Changing status or disabling the budget does not clear an existing hold.
+
+Each stop records its producer in `spend_budget_decision_ready.producer`: owning chats
+receive one Kanban notice with spend and decision options, or a card with no
+chat gets one board-supervisor decision card. The supervisor uses
+`kanban.orchestrator_profile`, falling back to `default`. No Inbox post is made.
 
 A card can carry its own limits, so a standing card meant to run indefinitely
 (an upkeep shepherd) is not sent to triage every 15 runs:
