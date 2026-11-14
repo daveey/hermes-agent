@@ -1302,9 +1302,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
             if proof is None:
                 apply_attempt_note(conn, row["id"], pid, dead)
             else:
-                dead.event_payload.update({k: v for k, v in proof.items() if k != 'result'})
-                dead.event_payload['reconciled_at'] = int(time.time())
-                dead.event_payload['reconciled_by'] = 'observer' if failed_results_only else 'dispatcher'
+                from hermes_cli.kanban_lost_result import annotate_loss
+                annotate_loss(dead, proof, int(time.time()), failed_results_only)
             _owner_death.note(dead, conn, row["id"], row["current_run_id"])  # owner died under it [daveey]
             _guard_refusal.note(dead, conn, row["id"], row["current_run_id"])  # host refused its kanban calls [daveey]
             dead.run_id = row["current_run_id"]

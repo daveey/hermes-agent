@@ -462,9 +462,11 @@ def record_worker_loss(policy, reason, *, pid=None, bound=False):
                                (context['task_id'],)).fetchone()
             if row is None or row[0] != 'running' or row[1] != run_id:
                 return
+            from hermes_cli.kanban_lost_result import loss_identity_fields
+            witness = loss_identity_fields(conn, context, pid, bound)
             kb._append_event(conn, context['task_id'], 'worker_lost',
                              {'reason': str(reason)[:200], 'claim_lock': context['claim_lock'],
-                              'run_id': run_id, 'pid': pid, 'bound': bool(bound)},
+                              'run_id': run_id, 'pid': pid, 'bound': bool(bound), **witness},
                              run_id=run_id)
     except Exception:
         import logging

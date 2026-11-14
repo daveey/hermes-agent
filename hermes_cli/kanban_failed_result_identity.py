@@ -22,8 +22,8 @@ def owner_restart_identity_fields(conn, context, task):
                 and payload['pid'] == task.worker_pid
                 and payload.get('started_at') == birth
                 and valid_birth(birth)):
-            rows = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
-                                "AND kind IN ('worker_result','worker_bound')", params).fetchall()
+            from hermes_cli.kanban_lost_result import evidence_rows
+            rows = evidence_rows(conn, *params)
             sequences = [p['result_sequence'] for row in rows
                          if (p := _payload(row)) and type(p.get('result_sequence')) is int]
             return {'death_proof_version': 1, 'result_role': 'owner_restart',
@@ -138,15 +138,14 @@ def result_identity_fields(conn, context):
                          "AND kind='worker_bound' ORDER BY id DESC LIMIT 1", params).fetchone()
     if bound is None or (payload := _payload(bound)) is None:
         raise ValueError('result binding missing')
+    from hermes_cli.kanban_lost_result import evidence_rows
+    history = evidence_rows(conn, *params)
     sequences = [0]
-    for event in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
-                              "AND kind='worker_result'", params):
+    for event in history:
         prior = _payload(event)
         seq = prior.get('result_sequence') if prior else None
         if type(seq) is int and seq > 0:
             sequences.append(seq)
-    history = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
-                           "AND kind IN ('worker_result','worker_bound')", params).fetchall()
     return {'bound_event_identity': _identity(bound, payload), 'result_sequence': max(sequences) + 1,
             'causal_predecessors': [_event_identity(event) for event in history]}
 
@@ -158,9 +157,9 @@ def attributable_events(conn, task_id, run_id):
     with distinct identities also require ordinary operator recovery, not an
     inferred causal order from replica-local integers.
     """
-    rows = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
-                        "AND kind IN ('worker_result','worker_bound') ORDER BY id", (task_id, run_id)).fetchall()
-    results = [(row, _payload(row)) for row in rows if row['kind'] == 'worker_result']
+    from hermes_cli.kanban_lost_result import evidence_rows
+    rows = evidence_rows(conn, task_id, run_id)
+    results = [(row, _payload(row)) for row in rows if row['kind'] != 'worker_bound']
     bounds = [(row, _payload(row)) for row in rows if row['kind'] == 'worker_bound']
     if not results:
         return None
@@ -178,6 +177,8 @@ def attributable_events(conn, task_id, run_id):
         return _observed_history(rows, results, bounds)
     result = results[sequences.index(max(cast(list[int], sequences)))]
     assert result[1] is not None  # validated alongside its positive sequence above
+    if result[0]['kind'] == 'worker_lost':
+        return _observed_history(rows, results, bounds)
     if 'result_role' in result[1] or 'outer_event_identity' in result[1]:
         return None  # owner roles are accepted only through their witnessed path
     identity = result[1].get('bound_event_identity')

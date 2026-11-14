@@ -152,7 +152,10 @@ def failed_result_receipt(conn, task_id, run_id, claim_lock, *, allow_continuabl
     if owner and (bound.get('pid'), bound.get('started_at')) != (row['worker_pid'], row['worker_started_at']):
         return None
     code = result.get('exit_code')
-    if (not isinstance(code, int) or isinstance(code, bool) or (code == 0 and not (allow_clean and modern))
+    loss = result_event['kind'] == 'worker_lost' and result.get('loss_receipt') is True
+    if loss and (result.get('bound') is not True or code is not None):
+        return None
+    if ((not loss and (not isinstance(code, int) or isinstance(code, bool))) or (code == 0 and not (allow_clean and modern))
             or (result.get('continuable') and not (owner and allow_continuable))
             or (not modern and result_event['id'] <= bound_event['id'])
             or result.get('pid') != bound.get('pid')):
