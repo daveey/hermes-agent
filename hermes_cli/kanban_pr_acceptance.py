@@ -197,7 +197,16 @@ def collect_acceptance(contract: str, published_pr: str | None,
         url = contract if declared else published_pr
         match = _PR.fullmatch(url or "")
         if not match or (not declared and match[1] != contract) or (declared and published_pr and published_pr != contract):
-            receipt["detail"] = "Supply metadata.published_pr matching the persisted completion contract."
+            receipt.update(
+                classification="contract_mismatch" if published_pr else "missing",
+                completion_contract=contract,
+                detail=f"Persisted completion contract: {contract}. "
+                       f"metadata.published_pr: {published_pr or 'not supplied'}.",
+                recovery="Retry completion with metadata.published_pr matching that contract "
+                         "(an exact PR URL for a repository-only contract). A different PR belongs "
+                         "in separate evidence, not in place of the bound PR. This is a metadata "
+                         "error, not a CI failure; no acceptance checks have run.",
+            )
             return receipt
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
