@@ -1227,6 +1227,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     # Same ordering rule as the ``tasks`` indexes above: index after column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON task_events(run_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind_task_id ON task_events(kind, task_id, id)")
+    conn.execute(_EVENT_BLOCKER_ASSERT_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
 
     if _table_exists(conn, "kanban_notify_subs"):
         notify_cols = _column_names(conn, "kanban_notify_subs")
@@ -1356,6 +1357,14 @@ _RUN_PARTIAL_INDEXES = (
     "CREATE INDEX idx_runs_rate_limited ON task_runs(ended_at) WHERE outcome = 'rate_limited'",
     "CREATE INDEX idx_runs_blocker_assert ON task_runs(ended_at) WHERE metadata LIKE '%\"blocker_id\"%'",
 )
+# [daveey] The same for task_events: ``kanban_shared_blockers._unblocked_since_assertion`` asks, per ready card
+# behind a blocker per tick, for the board's assertions at or after the card's unblock second. Without this
+# index that read walked every blocked/scheduled event (~19k of ~886k on the hub board, ~18-60 ms per call);
+# ~1k of them carry a blocker id. Its WHERE is repeated verbatim by that query, which names it (INDEXED BY).
+_EVENT_BLOCKER_ASSERT_INDEX = (
+    "CREATE INDEX idx_events_blocker_assert ON task_events(created_at) WHERE kind IN "
+    "('blocked', 'scheduled', 'continued', 'block_loop_detected') AND payload LIKE '%\"blocker_id\"%'"
+)
 
 
 def _ensure_run_partial_indexes(conn: sqlite3.Connection) -> None:
@@ -1377,6 +1386,7 @@ _REBUILD_SPECS = {
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
             "CREATE INDEX idx_events_kind_task_id ON task_events(kind, task_id, id)",
+            _EVENT_BLOCKER_ASSERT_INDEX,
         ),
     ),
     "task_comments": (

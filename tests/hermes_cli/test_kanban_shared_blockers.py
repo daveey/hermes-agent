@@ -155,6 +155,97 @@ def test_unblock_reports_shared_guard(kanban_home, monkeypatch, capsys, entry, r
     assert expected in result
 
 
+DEGRADED = "shared-blocker verdict unavailable: RuntimeError"
+
+
+def _broken_evaluator(monkeypatch):
+    def boom(*_a, **_kw):
+        raise RuntimeError("evaluator broke")
+
+    monkeypatch.setattr(ksb, "_shared_blocker_hold", boom)
+
+
+def test_verdict_failure_keeps_committed_tool_unblock(kanban_home, monkeypatch):
+    """The verdict runs after the unblock committed: its failure must not report the unblock as failed."""
+    from tools.kanban_tools_self_heal import handle_unblock
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with kbc.connect_closing() as conn:
+        target = _blocked_behind(conn, "target")
+    _broken_evaluator(monkeypatch)
+    result = json.loads(handle_unblock({"task_id": target}))
+    assert result.get("ok") is True, result
+    assert result["shared_blocker_verdict"] == DEGRADED
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, target).status == "ready"
+
+
+def test_verdict_failure_keeps_bulk_cli_unblock_going(kanban_home, monkeypatch, capsys):
+    """One failing verdict must not abort the remaining ids of ``hermes kanban unblock a b c``."""
+    from argparse import Namespace
+    from hermes_cli import kanban
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with kbc.connect_closing() as conn:
+        ids = [_blocked_behind(conn, f"card {n}") for n in range(3)]
+    _broken_evaluator(monkeypatch)
+    assert kanban._cmd_unblock(Namespace(task_ids=ids, reason=None)) == 0
+    out = capsys.readouterr().out
+    with kbc.connect_closing() as conn:
+        assert [kb.get_task(conn, tid).status for tid in ids] == ["ready"] * 3
+    for tid in ids:
+        assert f"Unblocked {tid}; {DEGRADED}" in out
+
+
+@pytest.mark.parametrize("own_only, indexed, index", [
+    (False, True, "idx_events_blocker_assert (created_at>?)"),
+    (False, False, "idx_events_kind_task_id (kind=?)"),   # a board this core has not migrated
+    (True, True, "(task_id=?"),
+])
+def test_assertion_scan_reads_only_the_unblock_window(kanban_home, own_only, indexed, index):
+    """The guard runs per held card per tick: its assertion read must be an index range from the
+    unblock's second, not a walk of every blocked/scheduled event on the board (PR #2946 review)."""
+    with kbc.connect_closing() as conn:
+        target = _blocked_behind(conn, "target")
+        assert kb.unblock_task(conn, target)
+        if not indexed:
+            with kb.write_txn(conn):
+                conn.execute("DROP INDEX idx_events_blocker_assert")
+        with kb.write_txn(conn):   # a newer assertion in the window still decides
+            kb._append_event(conn, target, "scheduled", {"blocker_id": BID})
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            assert ksb._unblocked_since_assertion(conn, target, BID, own_only=own_only) is False
+        finally:
+            conn.set_trace_callback(None)
+        scans = [s for s in statements if "blocker_id" in s]
+        assert len(scans) == 1, statements
+        plan = " ".join(r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + scans[0]))
+        assert index in plan and "SCAN" not in plan, plan
+        assert own_only is False or "idx_events_blocker_assert" not in plan, plan
+
+
+def test_drifted_task_events_rebuild_keeps_the_assertion_index(kanban_home):
+    """DROP TABLE in the drift rebuild takes every index down; the rebuild must restore this one too."""
+    import sqlite3
+    from hermes_cli import kanban_db_connect as kdc
+
+    db_path = kanban_home / "legacy-events.db"
+    seed = sqlite3.connect(db_path)
+    seed.execute("CREATE TABLE task_events (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, kind TEXT NOT NULL,"
+                 " payload TEXT, created_at INTEGER NOT NULL)")
+    seed.execute("INSERT INTO task_events VALUES ('e1', 't1', 'scheduled', '{\"blocker_id\": \"x\"}', 5)")
+    seed.commit()
+    seed.close()
+    conn = kdc.connect(db_path)
+    try:
+        assert not kdc._table_has_drifted(conn, "task_events")
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' "
+                            "AND name='idx_events_blocker_assert'").fetchone() is not None
+    finally:
+        conn.close()
+
 
 @pytest.fixture
 def scoped_routing(monkeypatch):

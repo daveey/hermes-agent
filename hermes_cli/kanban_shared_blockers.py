@@ -512,6 +512,14 @@ def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_i
 
     Replication assigns new local ids to old events. UUIDv7 milliseconds (or legacy
     created_at seconds) preserve occurrence order; tied bulk events retain id order.
+
+    :func:`_event_order` always falls inside the row's own ``created_at`` second, so an
+    assertion recorded in an earlier second than the unblock can never order after it:
+    the ``created_at`` window below is exact, not a heuristic. Board-wide, it is an index
+    range over ``idx_events_blocker_assert`` (named, since without statistics the planner
+    prefers the far larger kind index); unbounded, this walked every blocked/scheduled event
+    (PR #2946 review: ~37 ms per call on an 863k-event board). A board the running core has
+    not migrated lacks the index and keeps the kind-index plan.
     """
     from hermes_cli import kanban_db as kb
 
@@ -521,9 +529,13 @@ def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_i
     if unblocked is None:
         return False
     own = " AND task_id=?" if own_only else ""
+    named = "" if own_only or conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_events_blocker_assert'"
+    ).fetchone() is None else " INDEXED BY idx_events_blocker_assert"
     for row in conn.execute(
-        "SELECT * FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
-        "AND payload LIKE '%\"blocker_id\"%'" + own, (task_id,) if own_only else (),
+        "SELECT * FROM task_events" + named + " WHERE kind IN ('blocked', 'scheduled', 'continued', "
+        "'block_loop_detected') AND payload LIKE '%\"blocker_id\"%' AND created_at >= ?" + own,
+        (unblocked[0] // 1000, *((task_id,) if own_only else ())),
     ):
         if (_event_order(row) >= unblocked and
                 normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == blocker_id):
@@ -574,7 +586,19 @@ def shared_blocker_guard(
 
 
 def unblock_verdict(conn: sqlite3.Connection, task_id: str) -> str:
-    """Read-only shared-blocker verdict, not a promise about other admission gates."""
+    """Read-only shared-blocker verdict, not a promise about other admission gates.
+
+    Callers report it after the unblock has already committed, so a failure here must
+    never turn that committed unblock into an error (or abort a bulk unblock's remaining
+    ids): it degrades to an "unavailable" verdict instead. [daveey]"""
+    try:
+        return _unblock_verdict(conn, task_id)
+    except Exception as exc:  # health: allow BLE001 -- the unblock already committed; the verdict is advisory
+        logger.warning("shared-blocker verdict failed for %s", task_id, exc_info=True)
+        return f"shared-blocker verdict unavailable: {type(exc).__name__}"
+
+
+def _unblock_verdict(conn: sqlite3.Connection, task_id: str) -> str:
     hold = _shared_blocker_hold(conn, task_id)
     if hold is None:
         return "released: claimable on the next tick"
