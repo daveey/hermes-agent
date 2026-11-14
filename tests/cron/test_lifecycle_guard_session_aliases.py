@@ -315,6 +315,21 @@ _NESTED_FOREIGN_SHELLS = [
     "{{ doas -s; }} < {script}",
     "{{ ssh host; }} < {script}",
     "{{ su -l bob < /dev/null; }} < {script}",  # fails closed: own redirections are not tracked
+    # A file piped into the login shell (t_01a1dae7a625be0c): base walked none of these in
+    # nested scope, and handed a piped file to `su`/`sudo`/`ssh` in no scope at all.
+    "cat {script} | su -l bob",
+    "cat {script} | {{ su -l bob; }}",
+    "cat {script} | ( su -l bob )",
+    "cat {script} |& su -l bob",
+    "cat {script} |\nsu -l bob",
+    "cat < {script} | su -l bob",
+    "cat {script} | bash -l",
+    "cat {script} | sudo -i",
+    "cat {script} | ssh host",
+    "cat {script} | {{\nsu -l bob\n}}",
+    "cat {script} | while read l; do\nsu -l bob\ndone",
+    "(\nsu -l bob\n) < {script}",
+    "while true; do\nsu -l bob\ndone < {script}",
 ]
 
 
@@ -378,6 +393,16 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "su -l bob < /dev/null",
     "ssh host < /dev/null",
     "{{ su -l bob; }} < /dev/null",
+    # A piped file or a multi-line group's redirection with no login shell reading it.
+    "cat {script} | cat",
+    "{{\ncat\n}} < {script}",
+    "(\ncat\n) < {script}",
+    "(\nbash\n) < {script}",
+    "{{\nbash\n}} < {script}",
+    "while true; do\nbash\ndone < {script}",
+    "cat {script}; su -l bob",
+    "su -l bob | cat {script}",
+    "cat {script} | su -l bob -c true",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
@@ -387,6 +412,45 @@ def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     text = shape.format(db=live_kanban_db, script=script)
     assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
         False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "( bash ) < {script}",  # one line: refused before this change too
+    # The group spans lines (t_01a1dae7a625be0c): the session walk read one line at a time, so
+    # the closer's redirection or the pipe never reached the shell lines earlier.
+    "(\nbash\n) < {script}",
+    "{{\nbash\n}} < {script}",
+    "while true; do\nbash\ndone < {script}",
+    "if true; then\nsh\nfi < {script}",
+    "{{\ntrue\n{{\nbash\n}}\n}} < {script}",
+    "cat {script} | {{\nbash\n}}",
+    "cat {script} | while read l; do\nbash\ndone",
+    "cat {script} | (\nbash\n)",
+])
+def test_multiline_group_feeds_its_plain_shell_in_session_walk(tmp_path, live_kanban_db, shape):
+    """With unknown names the walked file's `t (` may be a subshell: refused as on one line."""
+    assert "alias" not in str(tmp_path).lower()
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(script=script)
+    unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=None)
+    assert unsafe is True and refusal is not None and "SQLite" in refusal, shape
+    assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
+        False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "{{\ncat\n}} < {script}",
+    "(\ncat\n) < {script}",
+    "{{\nbash\n}}\ncat < {script}",  # the group closed before the redirected command
+    "{{\nbash\n}}; cat {script} | cat",
+    "cat {script} | {{\ncat\n}}\nbash",  # the pipe feeds only the group
+])
+def test_multiline_group_without_a_fed_shell_stays_allowed(tmp_path, live_kanban_db, shape):
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(script=script)
+    assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=None) == (False, None)
 
 
 @pytest.mark.parametrize("option", [

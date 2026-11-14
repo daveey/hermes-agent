@@ -534,6 +534,8 @@ def _iter_nested_shell_inputs(
     for owner, body in (iter_heredoc_bodies(command) if heredocs else ()):
         if _feeds_nested_shell(owner) or (grouped and _closes_compound(owner or "")):
             yield body, None
+    if grouped:
+        yield from _fed_shell_inputs(walk_command, cwd=cwd)
     for view, found in classified:
         if grouped and _compound_redirections(view):
             yield from _redirected_shell_inputs(view, cwd=cwd)
@@ -547,6 +549,23 @@ def _iter_nested_shell_inputs(
                 yield None, path
         elif kind == "stdin":
             yield from _redirected_shell_inputs(view, cwd=cwd)
+
+
+def _fed_shell_inputs(walk_command: str, *, cwd: Optional[str]) -> Iterator[tuple[None, Path]]:
+    """Files fed to such a shell's stdin by a pipe or an enclosing group's redirection (``cat f |
+    su -l bob``, ``cat f | { su -l bob; }``, ``{``⏎``su -l bob``⏎``} < f``): the ordinary walk
+    hands a piped file only to a plain shell, and in the session's scope. A call-argument segment
+    counts too (``t ( su -l bob )``): unknown alias names may make that ``(`` a subshell."""
+    from cron.lifecycle_guard import _command_segment_views, _iter_segment_contexts
+
+    for segment, _call_argument, piped in _iter_segment_contexts(walk_command):
+        if piped and any(_nested_shell_input(view) == ("stdin", None)
+                         for view in _command_segment_views(segment)):
+            for source in piped:
+                if source == "/dev/null":
+                    continue  # feeds the shell nothing (and is no regular file to walk)
+                for path in _resolved_or_nothing(source, cwd):
+                    yield None, path
 
 
 def _redirected_shell_inputs(
