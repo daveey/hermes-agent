@@ -291,7 +291,7 @@ _WORDS = {
     "per_profile_capped": "skipped: assignee {detail} is at its per-profile worker cap",
     "skipped_ineligible": "skipped: this machine cannot lease it ({detail})",
     "capsule_refused": "skipped: capsule admission refused it ({detail})",
-    "no_progress_held": "held: no-progress budget spent ({detail})",
+    "no_progress_held": "held: run budget spent ({detail})",  # no-progress or spend budget [daveey]
     "claim_deferred": "skipped: the Board deferred its claim ({detail})",
     "owner_down": "held: the assignee's gateway service is down ({detail})",
 }

@@ -33,6 +33,12 @@ def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str
     if not dry_run and (held := no_progress_hold(conn, task_id)) is not None:
         result.no_progress_held.append((task_id, held))
         return True
+    # Spend budget: N spending runs (or M cache-read tokens) with no hand-off send the card to triage
+    # (kanban_spend_budget). Shares the no_progress_held bucket: both are budget holds. [daveey]
+    from hermes_cli.kanban_spend_budget import hold as spend_hold
+    if not dry_run and (held := spend_hold(conn, task_id)) is not None:
+        result.no_progress_held.append((task_id, f"spend_budget:{held}"))
+        return True
     # A fresh card pinned to a quota-walled model would only spawn into the wall (kanban_dispatch_skip). [daveey]
     from hermes_cli.kanban_dispatch_skip import hold_pinned_quota
     return hold_pinned_quota(conn, task_id, result, lane=lane)
