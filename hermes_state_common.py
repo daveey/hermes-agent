@@ -67,7 +67,15 @@ def escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-_PREVIEW_CONTENT_SQL = "REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' ')"
+_PREVIEW_CONTENT_SQL = "REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' ')"  # the reference the window equals
+
+
+def _sql_preview_window(start: int, length: "int | None" = None) -> str:
+    """``SUBSTR(<_PREVIEW_CONTENT_SQL>, start[, length])`` cut BEFORE the newline replacement: one character
+    replaced by one keeps every position, so the result is identical, without copying a 50 KB worker prompt
+    twice per listed row (~half the page projection on the hub, t_01a1d59ed6d15f90)."""
+    cut = f"SUBSTR(m.content, {start})" if length is None else f"SUBSTR(m.content, {start}, {length})"
+    return f"REPLACE(REPLACE({cut}, X'0A', ' '), X'0D', ' ')"
 # User-invoked and gateway auto-load scaffolds both get the head+tail excerpt window:
 # the typed request sits at the tail (auto-load) or behind the instruction marker.
 # No LIKE wildcards in either prefix, so no ESCAPE clause is needed.
@@ -154,10 +162,10 @@ _PREVIEW_RAW_SELECT = (
     f"CASE WHEN {_PREVIEW_STANDALONE_SUMMARY_SQL} THEN {_PREVIEW_FORCE_USER_REMAINDER_SQL}"
     f" WHEN {_PREVIEW_MERGED_SUMMARY_SQL} THEN {_PREVIEW_MERGED_PRIOR_UNWRAPPED_SQL}"
     f" WHEN {_PREVIEW_SCAFFOLDED_SQL} AND LENGTH(m.content) > {_PREVIEW_SCAFFOLD_WINDOW * 2}"
-    f" THEN SUBSTR({_PREVIEW_CONTENT_SQL}, 1, {_PREVIEW_SCAFFOLD_WINDOW}) || '{SKILL_EXCERPT_JOINT}'"
-    f" || SUBSTR({_PREVIEW_CONTENT_SQL}, -{_PREVIEW_SCAFFOLD_WINDOW})"
-    f" WHEN {_PREVIEW_SCAFFOLDED_SQL} THEN SUBSTR({_PREVIEW_CONTENT_SQL}, 1, {_PREVIEW_SCAFFOLD_WINDOW * 2})"
-    f" ELSE SUBSTR({_PREVIEW_CONTENT_SQL}, 1, {_PREVIEW_HEAD_CHARS}) END")
+    f" THEN {_sql_preview_window(1, _PREVIEW_SCAFFOLD_WINDOW)} || '{SKILL_EXCERPT_JOINT}'"
+    f" || {_sql_preview_window(-_PREVIEW_SCAFFOLD_WINDOW)}"
+    f" WHEN {_PREVIEW_SCAFFOLDED_SQL} THEN {_sql_preview_window(1, _PREVIEW_SCAFFOLD_WINDOW * 2)}"
+    f" ELSE {_sql_preview_window(1, _PREVIEW_HEAD_CHARS)} END")
 
 
 def _shape_preview(raw: Any) -> str:

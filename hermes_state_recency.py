@@ -40,9 +40,23 @@ from hermes_state_common import _sql_session_last_active, _sql_session_last_acti
 from hermes_cli.timefmt import EPOCH_MAX
 
 ENABLED = True  # tests flip it to compare against the unrestricted query
+# [daveey] D2: every profile's store must stay resident (the hub serves 11 profiles; an LRU of 8 evicted
+# and rebuilt a store on each fan-out). The routes reserve ``profiles + 4`` (reserve_stores).
 _MAX_STORES = 8
+_reserved_stores = 0
 _STORES: "OrderedDict[tuple, _StoreRecency]" = OrderedDict()
 _STORES_LOCK = threading.Lock()
+
+
+def reserve_stores(count: int) -> None:
+    """Keep at least ``count`` stores resident for the rest of this process (never shrinks)."""
+    global _reserved_stores
+    with _STORES_LOCK:
+        _reserved_stores = max(_reserved_stores, int(count))
+
+
+def max_stores() -> int:
+    return max(_MAX_STORES, _reserved_stores)
 
 
 def _msg_max_sql(session_id_expr: str) -> str:
@@ -130,6 +144,8 @@ class _StoreRecency:
         self.watermark: Optional[int] = None  # None: never built
         self.msg_max: dict[str, Any] = {}
         self.stale = False
+        from hermes_state_rank_memo import RankMemo
+        self.rank_memo = RankMemo(self.lock)  # [daveey] D2: ranked page ids + previews (same lock)
 
     def probe(self, conn, ids) -> None:
         ids = list(ids)
@@ -173,7 +189,7 @@ def _store_for(path: str) -> Optional[_StoreRecency]:
         if store is None:
             store = _STORES[key] = _StoreRecency()
         _STORES.move_to_end(key)
-        while len(_STORES) > _MAX_STORES:
+        while len(_STORES) > max(_MAX_STORES, _reserved_stores):
             _STORES.popitem(last=False)
         return store
 
@@ -229,6 +245,16 @@ def ranked_rows(db, where_clauses: list[str], params: list, select_head: str, pr
     store = _store_for(path) if ENABLED and path and not (id_needle or search_needle) else None
     if store is None or limit is None or limit <= 0 or (offset or 0) < 0:
         return db._read_all(query, query_params)
+    import hermes_state_rank_memo as rank_memo
+    if not offset and rank_memo.enabled():
+        try:
+            return _memo_rows(db, store, rank_memo, where_sql, where_clauses, params, outer_where, id_params,
+                              seed_from, select_head, prompt_join, need)
+        except sqlite3.Error:
+            with store.lock:
+                store.stale = True
+                store.rank_memo._reset()
+            return db._read_all(query, query_params)
     try:
         with db._read_ctx() as conn:
             began = not conn.in_transaction
@@ -250,3 +276,43 @@ def ranked_rows(db, where_clauses: list[str], params: list, select_head: str, pr
         with store.lock:
             store.stale = True
         return db._read_all(query, query_params)  # reports a real storage fault through its own path
+
+
+def _memo_rows(db, store, rank_memo, where_sql, where_clauses, params, outer_where, id_params, seed_from,
+               select_head, prompt_join, need) -> list:
+    """[daveey] D2: the first page from the store's ranked-id memo (hermes_state_rank_memo), projected in
+    the same snapshot. Same rows and columns as the exact query."""
+    from hermes_state_common import _sql_preview_raw
+    from hermes_state_sessions import _where_sql
+    ids_head = rank_memo._IDS_HEAD
+    key = (where_sql, repr(tuple(params)), seed_from, need)
+
+    def restricted(ids, limit):
+        narrowed = _where_sql([*where_clauses, "s.id IN (SELECT value FROM json_each(?))"])
+        narrowed_params = [*params, json.dumps(ids)]
+        return conn.execute(ranked_query(narrowed, narrowed, seed_from, ids_head, ""),
+                            narrowed_params + narrowed_params + [limit, 0]).fetchall()
+
+    def exact_ids():
+        picked = _candidates(conn, store, where_clauses, params, need)
+        if picked is None:
+            return conn.execute(ranked_query(where_sql, outer_where, seed_from, ids_head, ""),
+                                params + params + id_params + [need, 0]).fetchall()
+        return restricted(picked, need)
+
+    with db._read_ctx() as conn:
+        began = not conn.in_transaction
+        if began:
+            conn.execute("BEGIN")  # one snapshot: the clock, the ranking and the projection
+        try:
+            with store.lock:
+                ids_rows = rank_memo.ranked_ids(conn, store.rank_memo, key, need, exact_ids,
+                                                lambda ids: restricted(ids, -1))
+                generation = store.rank_memo.generation
+            if not ids_rows:
+                return []
+            return rank_memo.project(conn, store.rank_memo, ids_rows, select_head, prompt_join, _sql_preview_raw(),
+                                     _sql_session_last_active("s"), generation)
+        finally:
+            if began and conn.in_transaction:
+                conn.execute("ROLLBACK")

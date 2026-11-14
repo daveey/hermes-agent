@@ -174,6 +174,9 @@ def _profile_targets(log_label: str) -> list[tuple[str, Path]]:
         targets = []
     if not targets:
         targets.append(("default", profiles_mod.get_profile_dir("default")))
+    # [daveey] D2: keep every profile's ranked-id memo resident across a fan-out (+4 for transient stores).
+    import hermes_state_recency
+    hermes_state_recency.reserve_stores(len(targets) + 4)
     return scope_to_launch_profile(targets, lambda target: target[0])
 
 
