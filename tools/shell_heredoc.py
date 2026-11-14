@@ -524,7 +524,10 @@ def output_reaches_shell(command: str) -> bool:
     shell, so ``| grep bash`` / ``| grep -c bash`` count as sinks too: telling a wrapper's operand
     from a filter's pattern needs a per-command grammar, and the false sink only fails closed
     (review 5890784121 nit 3; ``| grep bash.sh`` is no sink only because of the word end)."""
+    from tools.shell_comments import mask_root_comment_lines
+
     date_exempt = not _DATE_REBIND_RE.search(command)
+    command = mask_root_comment_lines(command)
     sink = _SHELL_SINK_NUMERIC_RE if date_exempt else _SHELL_SINK_RE
     # The regex sees a substitution only in command position; inside arithmetic bash also runs
     # code from its output wherever it sits (`$(( 1 + $(…) ))`, `a[$(…)]`; t_01a1d6ae05c19594).
