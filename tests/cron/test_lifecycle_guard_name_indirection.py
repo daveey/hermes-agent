@@ -27,6 +27,13 @@ SHAPES = [
     r"read -r a[\$\(SCRIPT\)] <<< 1",
     r"x=a['$'\(SCRIPT\)]; y=x; echo $((y))",
     "declare x='a[$(SCRIPT)]'; echo $((x))",
+    "x='a[$(SCRIPT)]'; test -v 'a[x]'",
+    r"x=a[\$\(SCRIPT\)]; [ -v 'a[x]' ]",
+    "x='a[$(SCRIPT)]'; printf -v 'a[x]' 1",
+    "x='a[$(SCRIPT)]'; read 'a[x]' <<< 1",
+    "x='a[$(SCRIPT)]'; declare -a a=([0]=1); unset 'a[x]'",
+    "x='a[$(SCRIPT)]'; builtin test -v 'a[x]'",
+    "x='a[$(SCRIPT)]'; command printf -v 'a[x]' 1",
 ]
 
 
@@ -51,6 +58,14 @@ def test_name_and_indirection_scripts_are_scanned(tmp_path, shape):
     r"test -n a[\$\(SCRIPT\)]",
     r"echo 'x=a[$(SCRIPT)]'; echo $((1))",
     r"printf '%s' 'x=a[$(SCRIPT)]; ((x))'",
+    "x='a[$(SCRIPT)]'; test -n 'a[x]'",
+    "x='a[$(SCRIPT)]'; printf '%s' 'a[x]'",
+    "x='a[$(SCRIPT)]'; echo 'a[x]'",
+    "x='a[$(SCRIPT)]'; test -v x",
+    "x='a[$(SCRIPT)]'; printf -v x 1",
+    "x='a[$(SCRIPT)]'; read x <<< 1",
+    "x='a[$(SCRIPT)]'; unset x",
+    "echo 'x=a[$(SCRIPT)]'; test -v 'a[x]'",
 ])
 def test_inert_name_words_stay_allowed(tmp_path, shape):
     command = shape.replace("SCRIPT", str(tmp_path / "payload.sh"))

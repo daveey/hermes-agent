@@ -47,6 +47,12 @@ def _integer_declaration(arguments: list[str]) -> bool:
     )
 
 
+def _name_taking_mode(name: str, arguments: list[str]) -> bool:
+    return name in {"unset", "read", "mapfile", "readarray"} or (
+        name in {"test", "[", "printf"} and "-v" in arguments
+    ) or (name == "wait" and "-p" in arguments)
+
+
 def _arithmetic_operands(segment: list[str]) -> Iterator[str]:
     from cron import lifecycle_guard as guard
 
@@ -67,9 +73,7 @@ def _arithmetic_operands(segment: list[str]) -> Iterator[str]:
     # NAME-taking builtins evaluate array subscripts after shell quote removal.
     # Scan all arguments once the name-taking mode is present: options and operands
     # can be interleaved, and scanning a benign referenced script remains allowed.
-    if name in {"unset", "read", "mapfile", "readarray"} or (
-        name in {"test", "[", "printf"} and "-v" in arguments
-    ) or (name == "wait" and "-p" in arguments):
+    if _name_taking_mode(name, arguments):
         yield from arguments
 
 
@@ -81,8 +85,13 @@ def _recursive_arithmetic_segment(segment: list[str]) -> bool:
     if index is None:
         return False
     name = guard._executable_name(words[index])
+    arguments = words[index + 1:]
+    # NAME subscripts recursively evaluate variables just like explicit arithmetic.
+    # A plain NAME does not: `read x` must not activate earlier data assignments.
     return name == "let" or (
-        name == "[[" and any(token in _INT_OPERATORS for token in words[index + 1:])
+        name == "[[" and any(token in _INT_OPERATORS for token in arguments)
+    ) or (
+        _name_taking_mode(name, arguments) and any("[" in token for token in arguments)
     )
 
 
