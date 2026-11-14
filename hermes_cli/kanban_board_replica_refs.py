@@ -125,6 +125,12 @@ def hub_tasks_found(conn: sqlite3.Connection, path: Path, ids: list[str]) -> set
         probe = None
     if ident is None or probe is None or probe[0] != probe[1] or probe[2] is None:
         return {tid for tid, hit in lookup(ids).items() if hit}
+    # The pathname may have been replaced after this connection opened its
+    # snapshot (including before the stat above). Bind answers to the actual
+    # borrowed connection too: a reopened reader must never adopt old answers
+    # even when both files have identical probe tuples. Keep the object itself,
+    # not id(conn), so a later connection cannot reuse a recycled identity.
+    ident = (conn, ident)
     key, tag = (ident, probe), str(path)
     with _hub_lock:
         memo = _hub_memo.get(tag)

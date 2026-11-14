@@ -210,6 +210,46 @@ def test_a_replaced_hub_file_is_reread(host, tmp_path):
     assert refs.unresolved_after_replica([HUB_ONLY]) == [HUB_ONLY]
 
 
+@pytest.mark.parametrize("seam", ["metadata", "lookup"])
+def test_replacement_during_read_does_not_poison_next_generation(host, tmp_path, monkeypatch, seam):
+    replacement = _hub(tmp_path / "replacement", [
+        ("gw-a", f"default/{NOWHERE}"), ("gw-b", "p/default/t_01a1cf0000000001")])
+    original_ident = refs._file_ident(host)
+    replaced = False
+
+    def replace_once():
+        nonlocal replaced
+        if not replaced:
+            replacement.replace(host)
+            replaced = True
+            assert refs._file_ident(host) != original_ident
+
+    if seam == "metadata":
+        original = ksa._meta_float
+
+        def meta(conn, key):
+            result = original(conn, key)
+            if key == "last_digest":
+                replace_once()
+            return result
+
+        monkeypatch.setattr(ksa, "_meta_float", meta)
+    else:
+        original = kanban_prose_refs.hub_replica_lookup
+
+        def lookup(*args):
+            replace_once()
+            return original(*args)
+
+        monkeypatch.setattr(kanban_prose_refs, "hub_replica_lookup", lookup)
+
+    # The in-flight snapshot may answer from the old file, but cannot poison
+    # the next borrowed generation with either a false positive or negative.
+    assert ksa.replica_task_resolution([HUB_ONLY, NOWHERE]) == ({HUB_ONLY}, True)
+    assert replaced
+    assert ksa.replica_task_resolution([HUB_ONLY, NOWHERE]) == ({NOWHERE}, True)
+
+
 def test_a_board_replica_row_landing_later_is_seen_through_the_kept_reader(host):
     assert refs.unresolved_after_replica([NOWHERE]) == [NOWHERE]
     replica = kbc.connect(ksc.shadow_path("bb"))
