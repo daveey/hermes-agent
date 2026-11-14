@@ -11,6 +11,8 @@ import json
 import sqlite3
 import time
 
+import pytest
+
 from hermes_state import SessionDB
 from tui_gateway import kanban_remote_notices as krn
 from tui_gateway.kanban_remote_notices import sweep_remote_notices
@@ -196,3 +198,36 @@ def test_alternation_repair_keeps_one_copy_of_a_notice_and_its_api_content():
     messages = [{"role": "assistant", "content": "ok"}, dict(passive), other]
     repair_message_sequence(None, messages)
     assert messages[-1]["content"].count(text) == 2
+
+
+@pytest.mark.parametrize("woken_first", [False, True])
+def test_notice_dedupe_never_discards_a_previously_folded_other_notice(woken_first):
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    a = {"role": "user", "content": "notice A", "display_kind": "kanban_notice",
+         "display_metadata": {"notice_id": "A"}, "_row_id": 10}
+    b = {"role": "user", "content": "notice B", "display_kind": "kanban_notice",
+         "display_metadata": {"notice_id": "B"}, "_row_id": 11}
+    woken = {**a, "_row_id": 12, "api_content": "notice A\n[ask-gate] live state"}
+    messages = [{"role": "assistant", "content": "ok"},
+                *([woken, b, a] if woken_first else [a, b, woken])]
+    repair_message_sequence(None, messages)
+    assert "notice B" in messages[-1]["content"]
+    assert "notice A" in messages[-1]["content"]
+    assert {10, 11, 12} <= {messages[-1]["_row_id"], *messages[-1].get("_absorbed_row_ids", [])}
+
+
+@pytest.mark.parametrize("marker", ["_merged_turn_prefix", "_merged_durable_rows", "_absorbed_row_ids"])
+def test_notice_dedupe_refuses_premerged_rows(marker):
+    from agent.agent_runtime_helpers_user_rows import keep_one_notice_row
+    from agent.conversation_compression_archive import MERGED_DURABLE_ROWS
+    from agent.message_metadata import MERGED_TURN_PREFIX
+
+    key = {"_merged_turn_prefix": MERGED_TURN_PREFIX, "_merged_durable_rows": MERGED_DURABLE_ROWS,
+           "_absorbed_row_ids": "_absorbed_row_ids"}[marker]
+    passive = {"role": "user", "content": "A and other input", "display_kind": "kanban_notice",
+               "display_metadata": {"notice_id": "A"}, key: [1] if marker == "_absorbed_row_ids" else 1}
+    woken = {"role": "user", "content": "A", "api_content": "A live state",
+             "display_kind": "kanban_notice", "display_metadata": {"notice_id": "A"}}
+    assert keep_one_notice_row(passive, woken) is None
+    assert keep_one_notice_row(woken, passive) is None
