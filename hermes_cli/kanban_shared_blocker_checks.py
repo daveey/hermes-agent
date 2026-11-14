@@ -5,6 +5,7 @@ at the end of blocker_states. No subprocess runs under a SQLite write lock.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import shlex
 import subprocess
@@ -35,49 +36,81 @@ def registered_checks(cfg=None) -> dict[str, str]:
     overrides = (cfg.get("kanban") or {}).get("shared_blocker_checks") or {}
     if isinstance(overrides, dict):
         for raw, command in overrides.items():
-            bid = normalize_blocker_id(raw)
+            bid = normalize_blocker_id(raw, cfg=cfg)
             if bid:
                 commands[bid] = command.strip() if isinstance(command, str) else ""
     return {bid: cmd for bid, cmd in commands.items() if cmd}
 
 
-def _assertion_tokens(conn) -> dict[str, int]:
-    """Run ids fence same-second reassertions and results racing a worker's park."""
+def _lookback(now) -> int:
+    from hermes_cli.kanban_shared_blockers import _LOOKBACK_SECONDS
+
+    return (int(time.time()) if now is None else int(now)) - _LOOKBACK_SECONDS
+
+
+def _assertion_tokens(conn, now=None) -> dict[str, str]:
+    """Portable fingerprint of the latest assertion timestamp's complete cohort.
+
+    Synced run UIDs survive integer-id remapping and same-second runs. Sorting
+    identities also survives opposite import order. Older assertions aging out
+    must not revoke a successful check. Unsynced legacy schemas use task/time.
+    """
+    from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_shared_blockers import run_effect
 
-    tokens = {}
-    for row in conn.execute("SELECT id, outcome, metadata FROM task_runs WHERE ended_at IS NOT NULL "
-                            "AND metadata LIKE '%\"blocker_id\"%' ORDER BY id"):
+    tokens, newest = {}, {}
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(task_runs)')}
+    identity = 'uid' if 'uid' in columns else 'NULL AS uid'
+    for row in conn.execute(
+            f"SELECT id, {identity}, task_id, started_at, ended_at, outcome, metadata FROM task_runs "
+            "WHERE ended_at IS NOT NULL AND ended_at >= ? AND metadata LIKE '%\"blocker_id\"%' "
+            "ORDER BY ended_at, id", (_lookback(now),)):
         effect, bid = run_effect(row["outcome"], row["metadata"])
         if effect == "assert":
-            tokens[bid] = int(row["id"])
-    return tokens
+            raw = str(row['uid'] or (f"{row['task_id']}|{kb._to_epoch(row['started_at']) or 0}|"
+                                     f"{kb._to_epoch(row['ended_at']) or 0}|{bid}"))
+            ended = kb._to_epoch(row['ended_at']) or 0
+            if ended > newest.get(bid, -1):
+                newest[bid], tokens[bid] = ended, []
+            if ended == newest[bid]:
+                tokens[bid].append(raw)
+    return {bid: hashlib.sha256('\n'.join(sorted(ids)).encode()).hexdigest()
+            for bid, ids in tokens.items()}
 
 
-def _latest_results(conn) -> dict[str, dict]:
+def _checked(payload) -> int:
+    try:
+        return int(payload.get("checked_at") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _latest_results(conn, now=None) -> dict[str, dict]:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_shared_blockers import normalize_blocker_id
 
     results = {}
-    for row in conn.execute("SELECT payload FROM task_events WHERE kind=? ORDER BY id", (CHECK_EVENT,)):
+    for row in conn.execute("SELECT payload FROM task_events WHERE kind=? AND created_at >= ? ORDER BY id",
+                            (CHECK_EVENT, _lookback(now))):
         payload = kb._json_dict(row["payload"])
         bid = normalize_blocker_id(payload.get("blocker_id"))
-        if bid:
+        if bid and (bid not in results or _checked(payload) >= _checked(results[bid])):
             results[bid] = payload
     return results
 
 
-def apply_check_clears(conn, states) -> None:
+def apply_check_clears(conn, states, now=None) -> None:
     """Fold durable success into derived states; the event carrier is NOT the clearer."""
     from hermes_cli.kanban_shared_blockers import _mark_cleared
 
-    results = _latest_results(conn)
+    results = _latest_results(conn, now)
     if not results:
         return
-    tokens = _assertion_tokens(conn)
+    tokens = _assertion_tokens(conn, now)
     for bid, result in results.items():
         st = states.get(bid)
-        if st is not None and result.get("rc") == 0 and result.get("assertion_run_id") == tokens.get(bid):
+        if (st is not None and result.get("rc") == 0 and result.get("assertion_id")
+                and result.get("assertion_id") == tokens.get(bid)):
             _mark_cleared(st, "", None, max(int(result["checked_at"]), st.asserted_at + 1), via="check")
 
 
@@ -122,9 +155,9 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
     ts = int(time.time()) if now is None else int(now)
     commands = registered_checks(cfg)
     states = blocker_states(conn, now=ts)
-    apply_check_clears(conn, states)
+    apply_check_clears(conn, states, ts)
     foreign = foreign_ids(conn)
-    tokens, previous = _assertion_tokens(conn), _latest_results(conn)
+    tokens, previous = _assertion_tokens(conn, ts), _latest_results(conn, ts)
     cleared = []
     for bid, st in states.items():
         command = commands.get(bid)
@@ -132,25 +165,33 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
         homes = sorted(set(st.behind) - foreign)
         if not st.is_open or not command or not homes:
             continue
-        token = tokens[bid]
+        token = tokens.get(bid)
+        if token is None:
+            continue
         last = previous.get(bid, {})
-        if last.get("assertion_run_id") != token or last.get("command") != command:
+        # Backoff belongs to the open episode, not the newest assertion: a worker re-park must
+        # neither reset the error count nor postpone the check. A success, a command change
+        # or a clear since the last result starts a new episode.
+        if last.get("command") != command or last.get("rc") == 0 or _checked(last) < st.cleared_at:
             last = {}
         fails = int(last.get("fails", 0))
         if fails >= BROKEN_AFTER:
             continue
-        due = int(last.get("checked_at", ts - CHECK_EVERY_SECONDS)) + CHECK_EVERY_SECONDS
+        due = int(last.get("started_at", last.get("checked_at", ts - CHECK_EVERY_SECONDS))) + CHECK_EVERY_SECONDS
         if due > ts:
             if due_out is not None:
                 due_out.append(due)
             continue
         rc, output = _run_check(command)
+        # Fence workers admitted while the command was in flight as well. An
+        # explicit now is the caller's deterministic clock for replay/tests.
+        checked_at = int(time.time()) if now is None else ts
         fails = 0 if rc in (0, 1) else fails + 1
         payload = {"blocker_id": bid, "command": command, "rc": rc, "output": output,
-                   "checked_at": ts, "assertion_run_id": token, "fails": fails}
+                   "started_at": ts, "checked_at": checked_at, "assertion_id": token, "fails": fails}
         with kb.write_txn(conn):
             # A shell check can overlap a new assertion or a home ownership change.
-            if _assertion_tokens(conn).get(bid) != token or homes[0] in foreign_ids(conn):
+            if _assertion_tokens(conn, ts).get(bid) != token or homes[0] in foreign_ids(conn):
                 continue
             kb._append_event(conn, homes[0], CHECK_EVENT, payload)
         if rc == 0:

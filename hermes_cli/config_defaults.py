@@ -1970,10 +1970,9 @@ DEFAULT_CONFIG = {
         "soft_deadline_fraction": 0.85,
         # Bound on back-to-back kanban_continue runs without a completion; past it the worker must complete or block.
         "max_continuations": 12,
-        # Shared external blockers (kanban_block/kanban_continue blocker_id): while one is open,
-        # the dispatcher spawns at most one card behind it per this many seconds (one probe at a
-        # time either way); a human unblock lets that card probe at once. [daveey]
-        "shared_blocker_probe_seconds": 1800,
+        "shared_blocker_probe_seconds": 1800,  # One worker probe per interval; see docs/shared-blocker-recovery.md.
+        "shared_blocker_checks": {},  # Command overrides; empty string disables a built-in check.
+        "shared_blocker_aliases": {},  # One-hop aliases; built-in GitHub aliases cannot be split.
         # Default model tier [daveey] (hermes_cli/kanban_model_tier.py): model (+ optional provider) the
         # dispatcher runs a card on when the card pins no model. "" = upstream (the profile's own model).
         # Cards keep the profile model when pinned, in the review lane, retried after a failed run or

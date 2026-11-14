@@ -113,13 +113,25 @@ def run_effect(outcome: Optional[str], metadata) -> tuple[str, Optional[str]]:
 _ID_RE = re.compile(r"[^a-z0-9._-]+")
 
 
-def normalize_blocker_id(raw) -> Optional[str]:
-    """Canonical external-wall slug, including historical GitHub quota aliases."""
+def normalize_blocker_id(raw, *, cfg=None) -> Optional[str]:
+    """Canonical slug; configured aliases augment (never split) built-in families."""
     if not isinstance(raw, str):
         return None
     slug = _ID_RE.sub("-", raw.strip().lower()).strip("-._")[:MAX_BLOCKER_ID_CHARS]
     if re.fullmatch(r"github(-(shared|rest|core))*-quota(-reserve)?", slug):
         return "github-rest-quota"
+    if cfg is None:
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_backend import ConfigBackendUnavailable
+        try:
+            cfg = load_config_readonly()
+        except ConfigBackendUnavailable:
+            return slug or None
+    aliases = (cfg.get("kanban") or {}).get("shared_blocker_aliases", {})
+    target = aliases.get(slug) if isinstance(aliases, dict) else None
+    if isinstance(target, str) and target.strip():
+        # One hop only: cycles cannot recurse; targets must be canonical ids.
+        return normalize_blocker_id(target, cfg={})
     return slug or None
 
 
@@ -301,7 +313,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
 
     now = int(time.time()) if now is None else int(now)
     asserting = conn.execute(
-        "SELECT id, task_id, ended_at, outcome, metadata, summary FROM task_runs "
+        "SELECT id, task_id, started_at, ended_at, outcome, metadata, summary FROM task_runs "
         "WHERE ended_at IS NOT NULL AND ended_at >= ? AND metadata LIKE '%\"blocker_id\"%' "
         "ORDER BY id",
         (now - _LOOKBACK_SECONDS,),
@@ -382,7 +394,9 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
         # Probe starts only count once the card is (still) behind the blocker.
         st.probe_starts = {t: s for t, s in st.probe_starts.items() if t in st.behind}
     from hermes_cli.kanban_shared_blocker_checks import apply_check_clears
-    apply_check_clears(conn, states)
+    apply_check_clears(conn, states, now=now)
+    from hermes_cli.kanban_shared_blocker_fence import fence_stale_quota_assertions
+    fence_stale_quota_assertions(conn, states, asserting, now=now)
     return states
 
 
@@ -451,18 +465,18 @@ def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_i
     (event ids, not seconds: a bulk unblock and a re-assertion often share a second)."""
     from hermes_cli import kanban_db as kb
 
-    newest = 0
+    unblocked = conn.execute(
+        "SELECT MAX(id) FROM task_events WHERE task_id=? AND kind='unblocked'", (task_id,)
+    ).fetchone()[0]
+    if unblocked is None:
+        return False
     for row in conn.execute(
-        "SELECT id, payload FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
-        "AND payload LIKE ? ORDER BY id DESC LIMIT 50", (f'%"{blocker_id}"%',),
+        "SELECT payload FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
+        "AND id>=? AND payload LIKE '%\"blocker_id\"%' ORDER BY id DESC", (unblocked,),
     ):
         if normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == blocker_id:
-            newest = int(row["id"])
-            break
-    return conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'unblocked' AND id > ? LIMIT 1",
-        (task_id, newest),
-    ).fetchone() is not None
+            return False
+    return True
 
 
 def shared_blocker_guard(

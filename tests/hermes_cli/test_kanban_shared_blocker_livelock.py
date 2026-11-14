@@ -19,6 +19,22 @@ def test_github_wall_has_one_identity(alias):
     assert blockers.normalize_blocker_id(alias) == 'github-rest-quota'
 
 
+def test_config_alias_and_legacy_event_reader(kanban_home, monkeypatch):
+    from hermes_cli import config
+    cfg = {'kanban': {'shared_blocker_aliases': {'quota-limited': 'github-quota-reserve'}}}
+    monkeypatch.setattr(config, 'load_config_readonly', lambda: cfg)
+    assert blockers.normalize_blocker_id('quota-limited') == ALIASES[0]
+    assert blockers.normalize_blocker_id('unknown-wall') == 'unknown-wall'
+    with kbc.connect_closing() as conn:
+        tid = helpers._blocked_behind(conn, 'wall', blocker_id=ALIASES[0])
+        assert kb.unblock_task(conn, tid)
+        assert blockers._unblocked_since_assertion(conn, tid, ALIASES[0])
+        # Persist an old spelling, not the current writer's normalized spelling.
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, 'scheduled', {'blocker_id': ALIASES[2]})
+        assert not blockers._unblocked_since_assertion(conn, tid, ALIASES[0])
+
+
 def test_new_assertions_do_not_postpone_oldest_probe(kanban_home, monkeypatch):
     with kbc.connect_closing() as conn:
         tids = []
@@ -49,6 +65,36 @@ def test_dispatch_tick_clears_all_aliases_and_carrier(kanban_home, monkeypatch):
         for tid in tids:
             events = [e for e in kb.list_events(conn, tid) if e.kind == blockers.CLEARED_EVENT]
             assert events[-1].payload['cleared_via'] == 'check'
+
+
+@pytest.mark.parametrize('via_check', [False, True])
+def test_pre_clear_run_cannot_reopen_quota_wall(kanban_home, monkeypatch, via_check):
+    from hermes_cli import kanban_shared_blocker_checks as checks
+
+    clock = [1800000000]
+    monkeypatch.setattr(blockers.time, 'time', lambda: clock[0])
+    with kbc.connect_closing() as conn:
+        carrier = helpers._blocked_behind(conn, 'carrier', blocker_id=ALIASES[0])
+        stale = kb.create_task(conn, title='already running with old context', assignee='default')
+        assert kb.claim_task(conn, stale)
+        clock[0] += 30
+        if via_check:
+            checks.run_due_checks(conn, cfg={'kanban': {'shared_blocker_checks': {ALIASES[0]: 'exit 0'}}})
+        else:
+            assert kb.unblock_task(conn, carrier)
+            assert kb.claim_task(conn, carrier)
+            assert kb.block_task(conn, carrier, reason='other wait', kind='time', clear_blocker=True, clock_only=True)
+        cleared_at = clock[0]
+        clock[0] += 30
+        assert kb.block_task(conn, stale, reason='stale quota context', kind='capability', blocker_id=ALIASES[2])
+        state = blockers.blocker_states(conn)[ALIASES[0]]
+        assert not state.is_open
+        assert state.cleared_at == cleared_at
+        assert stale in blockers.release_cleared_blockers(conn)
+        # A genuinely new run after the clear may still report a new outage.
+        clock[0] += 30
+        helpers._blocked_behind(conn, 'new outage', blocker_id=ALIASES[3])
+        assert blockers.blocker_states(conn)[ALIASES[0]].is_open
 
 
 def test_non_probe_context_requires_live_check(kanban_home):
