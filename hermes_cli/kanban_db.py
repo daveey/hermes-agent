@@ -985,7 +985,6 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     inflight_start INTEGER, inflight_at INTEGER, created_event_id INTEGER,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
-
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 -- Condition-wake probe of a ``scheduled`` card (``kanban_wake_check``): one row per
 -- card, rewritten per probe instead of one event per probe. [daveey]
