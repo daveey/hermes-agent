@@ -179,6 +179,17 @@ def test_the_raw_pattern_reads_backtick_substitution(body):
     assert re.search(kp.HERMES_STATE_PATH, body, re.IGNORECASE)
 
 
+def test_beyond_depth_bound_preserves_plain_text_fallback():
+    """Beyond three balanced levels, chained cd resumes plain-text span termination (#2735)."""
+    within_bound = "Run pytest, then cd ~ && (echo x && cd repo && ((pwd))) && cat .hermes/.env"
+    beyond_bound = "Run pytest, then cd ~ && (echo x && cd repo && (((pwd)))) && cat .hermes/.env"
+
+    local = helpers._hub({"title": "Maintenance", "body": within_bound})
+    assert local["where"] == "local" and "runs_on" not in local, local
+    portable = helpers._hub({"title": "Maintenance", "body": beyond_bound})
+    assert portable.get("runs_on") == ["machine:worker-1"], portable
+
+
 @pytest.mark.parametrize("unit", [
     "(cd ~) x=$(cd a && (cd b) && `cd c`) step {i} padded out to a realistic length ",
     "cd ~ && (( ( ( x=` step {i} padded out to a realistic length\n",
