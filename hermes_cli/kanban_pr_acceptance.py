@@ -37,10 +37,10 @@ def validate_contract(value: str | None) -> str:
 
 
 NO_REQUIRED_CHECKS_DETAIL = (
-    "No repository-required checks are configured on {where}, so this PR contract can never pass CI "
-    "acceptance. If the work is verified another way, retry completion with "
+    "No repository-required checks are configured on {where}. All reported exact-head checks must pass; "
+    "only when complete evidence is empty, and the work is verified another way, retry completion with "
     "metadata.contract_waiver={{\"reason\": \"<how it was verified>\"}} (honoured only while the repo has "
-    "no required checks; logged as a contract_waived event). Otherwise {repoint} Never edit "
+    "no required checks AND no reported CI; logged as a contract_waived event). Otherwise {repoint} Never edit "
     "completion_contract in kanban.db.")
 
 
@@ -237,13 +237,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
                     required.update((r["context"], r.get("integration_id"))
                                     for r in rule["parameters"]["required_status_checks"])
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
-        if not required:
-            # A contract that can never pass. Name the one supported way out: nothing can edit
-            # completion_contract after creation, so "use local-only" sent workers to hand-edit
-            # kanban.db (agent-650ad5206a). [daveey]
-            receipt.update(classification="no_required_checks", detail=NO_REQUIRED_CHECKS_DETAIL.format(
-                where=f"{repo}@{branch}", repoint=_REPOINT_HINT))
-            return receipt
+
         phase = "reading check runs"
         # OPEN: GitHub's latest view (each suite's latest attempt), proven complete
         # against every suite's latest_check_runs_count. MERGED: every run, cut at merge.
@@ -251,15 +245,18 @@ def collect_acceptance(contract: str, published_pr: str | None,
         run_filter = "all" if pr["state"] == "MERGED" else "latest"
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter={run_filter}",
                      paginate=True, profile_home=profile_home)
-        if run_filter == "latest":
+        suites = []
+        if run_filter == "latest" or not required:
             suites = _api(f"repos/{repo}/commits/{sha}/check-suites?per_page=100",
                           paginate=True, profile_home=profile_home)
+        if run_filter == "latest":
             runs = proven_latest_runs(pages, suites, sha)
         else:
             runs = complete_runs(pages)
         phase = "reading commit statuses"
-        statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
-                                                       paginate=True, profile_home=profile_home) for s in page]
+        from hermes_cli.kanban_pr_fallback import complete_statuses, fallback_outcomes, mark_absence
+        statuses = complete_statuses(_api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
+                                          paginate=True, profile_home=profile_home), sha)
         phase = "selecting merge-time evidence"
         runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses)
         outcomes = []
@@ -280,6 +277,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
                 evidence = check_receipt(check, sha)
                 outcomes.append(evidence["classification"])
                 receipt["checks"].append(evidence)
+        outcomes = fallback_outcomes(receipt, required, outcomes, runs, statuses, suites,
+                                     merged=pr["state"] == "MERGED")
         # Re-read after all pages: old-head successes are never transferable.
         phase = "re-reading the PR head"
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
@@ -294,6 +293,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         receipt["pr_state"] = "MERGED" if current.get("merged") else current["state"].upper()
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
+        mark_absence(receipt, required, outcomes, suites, f"{repo}@{branch}")
         return receipt
     except _GateSetupError as exc:
         receipt.update(classification="setup", detail=str(exc))

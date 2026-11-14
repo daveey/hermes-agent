@@ -59,6 +59,10 @@ def github(tmp_path, monkeypatch):
             else:
                 self.send_error(404)
                 return
+            if state.get("no_ci") and "/check-runs" in self.path:
+                value = [{"total_count": 0, "check_runs": []}]
+            if state.get("no_ci") and "/check-suites" in self.path:
+                value = [{"total_count": 0, "check_suites": []}]
             self.send_response(200)
             self.end_headers()
             self.wfile.write(json.dumps(value).encode())
@@ -292,7 +296,7 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
 # --- contract waiver: an OWNER/REPO contract on a repo with NO required checks (agent-650ad5206a) ---
 # Such a contract could never pass acceptance and nothing could change it after creation, so workers
 # stalled and then rewrote completion_contract in kanban.db by hand. The supported way out is
-# metadata.contract_waiver, honoured only when a fresh read shows zero required checks.
+# metadata.contract_waiver, honoured only when a fresh read shows no required or reported CI.
 
 _PR7 = "https://github.com/acme/repo/pull/7"
 _WAIVER = {"reason": "repo has no CI; tests ran locally"}
@@ -307,7 +311,7 @@ def _events(conn, tid, kind):
 def test_no_required_checks_names_the_waiver_and_waiver_completes(github):
     from hermes_cli.kanban_origin_ledger import observe_owner_task
 
-    github["no_required"] = True
+    github.update(no_required=True, no_ci=True)
     with connect() as conn:
         tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
         assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": _PR7})
@@ -354,7 +358,7 @@ def test_waiver_never_bypasses_configured_required_checks(github):
 def test_waiver_via_kanban_complete_tool(github, monkeypatch):
     from tools import kanban_tools as kt
 
-    github["no_required"] = True
+    github.update(no_required=True, no_ci=True)
     with connect() as conn:
         tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
         run_id = kb.claim_task(conn, tid).current_run_id
@@ -374,7 +378,7 @@ def test_waiver_via_kanban_complete_tool(github, monkeypatch):
 def test_waiver_via_cli_complete(github):
     from hermes_cli import kanban as kc
 
-    github["no_required"] = True
+    github.update(no_required=True, no_ci=True)
     with connect() as conn:
         tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
     meta = json.dumps({"published_pr": _PR7})
@@ -393,7 +397,7 @@ def test_create_warns_when_contract_repo_has_no_required_checks(github, monkeypa
     from tools import kanban_tools as kt
 
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    github["no_required"] = True
+    github.update(no_required=True, no_ci=True)
     out = json.loads(kt._handle_create({"title": "pr work", "assignee": "default", "requires": [],
                                         "completion_contract": "acme/repo"}))
     assert out["ok"] is True and "contract_waiver" in out.get("contract_warning", "")

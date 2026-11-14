@@ -126,7 +126,7 @@ def test_no_landing_bypasses(github, monkeypatch, surface, mode):
     github["pr_state"] = "OPEN"
     metadata = {"published_pr": PR}
     if mode == "waiver":
-        github["no_required"] = True
+        github.update(no_required=True, no_ci=True)
         metadata["contract_waiver"] = {"reason": "Local tests green"}
     if mode == "blank_reason":
         metadata["pr_left_open"] = {"reason": " "}
@@ -156,6 +156,7 @@ def test_left_open_exception_preserves_ci_gate(github, monkeypatch, surface, fau
         github[fault] = True
     metadata = {"pr_left_open": {"reason": "Intentional draft"}}
     if fault == "no_required":
+        github["no_ci"] = True
         metadata["contract_waiver"] = {"reason": "Local tests passed; no repo checks configured"}
     with connect() as conn:
         tid = kb.create_task(conn, title="CI still applies", completion_contract=PR)

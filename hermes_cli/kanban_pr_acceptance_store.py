@@ -67,8 +67,8 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     annotate_main_health_owner(conn, receipt)
     reason = _kpa.waiver_reason(metadata)
     if reason and receipt.get("classification") == "no_required_checks":
-        # The only waivable classification, judged on THIS fresh read: a repo that gained
-        # required checks (or a failing/missing/pending check) is never waived. [daveey]
+        # The collector proves no required contexts AND no reported CI on THIS
+        # fresh read. Failed, pending, missing and unreadable evidence is never waived.
         receipt["waived"] = {"reason": reason}
     from hermes_cli.kanban_pr_landing import check_landing
     check_landing(conn, task_id, receipt, metadata)
