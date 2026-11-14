@@ -202,6 +202,28 @@ def hold_until(conn, task_id, now=None):
     return max(s['until'] for s in outstanding) if outstanding else None
 
 
+def release_at(conn, task, now=None, *, lane=None):
+    """When the guard stops holding *task*: the earliest known wall reset at which :func:`decision` admits it, else
+    :func:`hold_until`. None when no episode holds. Read-only; advisory (the dispatcher re-decides every tick). [daveey]
+
+    Hub 2026-11-14 (t_01a1d95da6382c64): unpinned default cards walled on codex until 11-20 waited only for
+    anthropic, the class's other route, whose session wall reset at 09:20Z; they rerouted minutes later. Every
+    deadline shown (pickup skip, stuck warning, chat wait) read 11-20, so the hold looked like a missing fallback."""
+    from hermes_cli.kanban_provider_walls import active_walls
+    now = time.time() if now is None else now
+    until = hold_until(conn, task.id, now)
+    if until is None:
+        return None
+    state = episode(conn, task.id) or {}
+    resets = {float(v) for v in active_walls(now=now).values() if isinstance(v, (int, float))}
+    resets |= {float(s['until']) for s in _outstanding(conn, task.id, state, now) if state}
+    lane = lane or getattr(task, 'status', None) or 'ready'
+    for reset in sorted(r for r in resets if now < r < until):
+        if decision(conn, task, lane=lane, now=reset + 1)[0] is None:
+            return reset
+    return until
+
+
 def _strong_class(base):
     """True for an unpinned strong-tier class route (``retry_after_*``/``pattern:*``/``review`` on
     ``class:<x>``/``auto``): the worker would allocate any route of that class, so a wall on one provider
@@ -395,7 +417,8 @@ def _notice_action(conn, task_id, state):
     route = decision(conn, task, lane=task.status)[1] if task is not None else None
     if route:
         return f'reroute to {route[0]} ({route[1]})'
-    until = datetime.fromtimestamp(state['until'], ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M')
+    until = (release_at(conn, task, lane=task.status) if task is not None else None) or state['until']
+    until = datetime.fromtimestamp(until, ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M')
     return f'wait until {until} PT'
 
 

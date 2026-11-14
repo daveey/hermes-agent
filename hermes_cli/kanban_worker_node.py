@@ -622,7 +622,7 @@ def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tupl
     With no episode (the card never ran), the pre-claim ``pinned_quota_wall`` hold
     (:func:`kanban_dispatch_skip.pinned_quota_hold`): worker-1 2026-11-14, a fresh mandatory pin on a walled model
     was copied, held and evicted ~700 times in 3 h while a card pinned here waited (t_01a1d95eabbd2b9d)."""
-    from hermes_cli.kanban_quota_episode import decision, episode, hold_until
+    from hermes_cli.kanban_quota_episode import decision, episode, release_at
     try:
         if not episode(replica, card["id"]):
             return _pin_walled(replica, card)
@@ -631,7 +631,7 @@ def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tupl
         guard = decision(replica, task, lane=card["status"])[0] if task is not None else None
         if guard is None:
             return None
-        until = hold_until(replica, card["id"])
+        until = release_at(replica, task, lane=card["status"])
     except Exception:  # health: allow BLE001 -- a hold prediction must never stop a pickup
         _log.warning("kanban worker node: quota hold check for %s failed", card["id"], exc_info=True)
         return None
