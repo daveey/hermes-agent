@@ -64,6 +64,39 @@ def _arithmetic_operands(segment: list[str]) -> Iterator[str]:
     arguments = words[index + 1:]
     if name == "let" or (name in _INTEGER_DECLARERS and _integer_declaration(arguments)):
         yield from arguments
+    # NAME-taking builtins evaluate array subscripts after shell quote removal.
+    # Scan all arguments once the name-taking mode is present: options and operands
+    # can be interleaved, and scanning a benign referenced script remains allowed.
+    if name in {"unset", "read", "mapfile", "readarray"} or (
+        name in {"test", "[", "printf"} and "-v" in arguments
+    ) or (name == "wait" and "-p" in arguments):
+        yield from arguments
+
+
+def _recursive_arithmetic_segment(segment: list[str]) -> bool:
+    from cron import lifecycle_guard as guard
+
+    words = segment[guard._peel_reserved_words(segment):]
+    index = guard._executed_command_index(words)
+    if index is None:
+        return False
+    name = guard._executable_name(words[index])
+    return name == "let" or (
+        name == "[[" and any(token in _INT_OPERATORS for token in words[index + 1:])
+    )
+
+
+def _indirect_assignment_words(segment: list[str]) -> Iterator[str]:
+    from cron import lifecycle_guard as guard
+
+    words = segment[guard._peel_reserved_words(segment):]
+    index = guard._executed_command_index(words)
+    if index is None:
+        yield from words
+    else:
+        yield from words[:index]
+        if guard._executable_name(words[index]) in _INTEGER_DECLARERS:
+            yield from words[index + 1:]
 
 
 def iter_arithmetic_word_payloads(command: str) -> Iterator[str]:
@@ -80,8 +113,16 @@ def iter_arithmetic_word_payloads(command: str) -> Iterator[str]:
     integer_text = any(
         _INTEGER_DECLARATION_RE.search(" ".join(segment)) for segment in segments
     )
+    # Arithmetic recursively evaluates variable values. Recover earlier dequoted
+    # assignments too, not just the word at the evaluation site. Preserve argv
+    # boundaries so a quoted shell program or echo argument is not an assignment.
+    recursive_text = "((" in command or any(
+        _recursive_arithmetic_segment(segment) for segment in segments
+    )
     for segment in segments:
-        operands = segment if integer_text else _arithmetic_operands(segment)
+        operands = list(segment if integer_text else _arithmetic_operands(segment))
+        if recursive_text:
+            operands.extend(_indirect_assignment_words(segment))
         for operand in operands:
             if "[" not in operand or not any(o in operand for o in _SUBSTITUTION_OPENERS):
                 continue
