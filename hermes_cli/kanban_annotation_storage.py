@@ -18,7 +18,14 @@ def signature(path: Path) -> tuple[int, ...] | None:
 def custody(path: Path, *, writer: bool):
     # Fail closed on unsupported hosts or contention: this is a cache, never a
     # reason to block a request. A stable lock inode is never removed by pruning.
-    import fcntl
+    try:
+        import fcntl
+    except ImportError:  # Windows: no flock; msvcrt below (ImportError there too = no copy)
+        fcntl = None
+    if fcntl is None:
+        with _msvcrt_custody(path):
+            yield
+        return
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix('.host.lock').open('a') as lock:
@@ -28,6 +35,23 @@ def custody(path: Path, *, writer: bool):
             yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _msvcrt_custody(path: Path):
+    # msvcrt.locking has no shared mode, so readers take the same exclusive byte-0 lock as writers: a reader that
+    # meets another holder fails closed (reads for itself), exactly like flock contention on POSIX.
+    import msvcrt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix('.host.lock').open('a+b') as lock:
+        lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def body_matches(path: Path, parts: list) -> bool:
