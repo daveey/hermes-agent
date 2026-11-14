@@ -671,10 +671,16 @@ def gateway_lifecycle_block(
         mounted_host=getattr(env, "host_cwd", None),
         env=env,
     )
+    # A local backend shares this host's disk: a path the scan cannot find here cannot run there
+    # either, so a backend read would repeat the miss and spend the remote-read cap (a large tool
+    # script naming ~100 non-file words once failed closed on "remote reads").
+    read_remote_script = None if env_type == "local" else (
+        lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES)
+    )
     unsafe, refusal = scan_gateway_lifecycle(
         command,
         cwd=guard_cwd,
-        read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES),
+        read_remote_script=read_remote_script,
         session_aliases=_session_aliases_for_guard(env),
     )
     if unsafe and refusal:
