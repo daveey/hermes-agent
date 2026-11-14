@@ -85,6 +85,40 @@ def test_busy_pool_notice_reports_queue_place_and_does_not_advise_re_placement(h
     assert "claimed 3 such card(s)" in note and "do not re-place it or drop its labels" in note, note
 
 
+def test_ready_hint_preserves_busy_pool_advice(hub):
+    tid = _seed(hub.conn, claims=1)
+    hint = kpu.ready_hint(hub.conn, kb.get_task(hub.conn, tid))
+    assert hint is not None
+    assert "Not a placement problem, do not re-place" in hint, hint
+    assert "re-place on a capable gateway" not in hint, hint
+
+
+def test_predecessors_must_have_exact_labels(hub):
+    from hermes_cli import kanban_label_backlog as klb
+    tid = _seed(hub.conn, claims=0)
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET runs_on=? WHERE title=?", (json.dumps(["pool:worker"]), "older 0"))
+        hub.conn.execute("UPDATE tasks SET runs_on=? WHERE title=?",
+                         (json.dumps([*LABELS, "machine:worker-3"]), "older 1"))
+    backlog = klb.read(hub.conn, tid, LABELS, machines={"worker-3"})
+    assert backlog["known"] and backlog["ahead"] == 0, backlog
+
+
+def test_target_claim_in_same_second_as_ready_episode_is_not_pool_evidence(hub, monkeypatch):
+    from hermes_cli import kanban_label_backlog as klb
+    now = int(time.time())
+    monkeypatch.setattr(time, "time", lambda: now)
+    tid = _seed(hub.conn, claims=0)
+    with kb.write_txn(hub.conn):
+        kb._append_event(hub.conn, tid, "claimed", {"holder": "worker-3"})
+        kb._append_event(hub.conn, tid, "continued", {"status": "ready"})
+    # Timestamp filtering alone cannot distinguish the previous claim in this second.
+    backlog = klb.read(hub.conn, tid, LABELS, machines={"worker-3"}, now=now)
+    assert backlog["known"] and backlog["claimed_recent"] == 0, backlog
+    assert backlog["claimers"] == [] and not klb.busy(backlog), backlog
+    assert klb.move_refusal(hub.conn, tid, "ready", LABELS, ["pool:worker"], machines=POOL, now=now) is None
+
+
 def test_no_recent_same_label_claims_keeps_the_capacity_advice(hub):
     tid = _seed(hub.conn, claims=0)
     payload, text = _notice(hub.conn, tid)
