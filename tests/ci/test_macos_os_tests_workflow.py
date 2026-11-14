@@ -62,6 +62,20 @@ def test_test_job_waits_for_the_gate_and_runs_the_marked_selection_on_the_mini()
     assert '-m "platforms and not integration"' in command
 
 
+def test_native_lane_provisions_real_tools_and_messaging_before_tests():
+    import json
+
+    steps = _workflow()["jobs"]["macos-os-tests"]["steps"]
+    setup_index = next(i for i, step in enumerate(steps)
+                       if step.get("uses") == "./.github/actions/setup-pm")
+    options = steps[setup_index]["with"]
+    assert options["toolchain"] == "all"  # includes real uv, Node and paired npm
+    assert options["test-environment"] == "true"
+    assert {"all", "messaging"} <= set(json.loads(options["extras"]))
+    assert setup_index < next(i for i, step in enumerate(steps)
+                              if "scripts/run_tests.sh" in step.get("run", ""))
+
+
 def _api(runs: dict[str, list[dict]], jobs: dict[int, list[dict]], calls: list[str] | None = None):
     def api(path: str):
         if calls is not None:

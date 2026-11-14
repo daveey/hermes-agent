@@ -190,6 +190,7 @@ def test_acceptance_runs_gh_as_the_assignee_profile(tmp_path, monkeypatch):
     `auth` naming the repository — not a retryable `infra` failure."""
     from pathlib import Path
 
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)  # resolver must not probe the real ~/.local/bin/gh
     launch_home = tmp_path / "home"
     launch_home.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(launch_home))
@@ -233,6 +234,9 @@ def test_assignee_without_own_gh_login_never_falls_through_to_ambient_login(tmp_
     """An assignee profile with no GH_TOKEN/GH_CONFIG_DIR of its own must not inherit the
     launch user's ~/.config/gh (HOME/XDG_CONFIG_HOME stay the launch process's): gh is pinned
     to a profile-owned config dir, its 'not logged in' exit is classified `auth` naming the profile."""
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)  # resolver must not probe the real ~/.local/bin/gh
     launch_home = tmp_path / "home"
     launch_home.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(launch_home))

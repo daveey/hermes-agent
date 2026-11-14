@@ -259,6 +259,13 @@ def test_a_browser_that_exited_during_startup_is_not_signalled(tmp_path, caplog,
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [r.getMessage() for r in caplog.records]
 
 
+def _only_processes(monkeypatch, *pids: int) -> None:
+    """Enumerate only fixture-owned pids: unrelated host Chromium argv can name protected real-home
+    profiles. The real per-process cmdline/start-time checks still run on those pids."""
+    import psutil
+    monkeypatch.setattr(psutil, "process_iter", lambda *a, **kw: iter([psutil.Process(p) for p in pids]))
+
+
 def _write_orphan_record(records: Path, pid: int, udd: str) -> Path:
     dead_owner = subprocess.Popen([sys.executable, "-c", "pass"])
     dead_owner.wait()
@@ -271,9 +278,10 @@ def _write_orphan_record(records: Path, pid: int, udd: str) -> Path:
 
 @pytest.mark.platforms("posix")
 @pytest.mark.live_system_guard_bypass  # the fake browser's reparented helper is ours to stop
-def test_orphan_reap_refuses_a_pid_whose_cmdline_lacks_the_recorded_user_data_dir(tmp_path, fake_chromium):
+def test_orphan_reap_refuses_a_pid_whose_cmdline_lacks_the_recorded_user_data_dir(tmp_path, monkeypatch, fake_chromium):
     stranger = subprocess.Popen(["sleep", "3001"])
     try:
+        _only_processes(monkeypatch, stranger.pid)
         record = _write_orphan_record(_records(), stranger.pid, str(tmp_path / "some-profile"))
         assert launcher.reap_orphaned_browsers() == 0
         assert stranger.poll() is None  # never signalled
@@ -285,7 +293,7 @@ def test_orphan_reap_refuses_a_pid_whose_cmdline_lacks_the_recorded_user_data_di
 
 @pytest.mark.platforms("posix")
 @pytest.mark.live_system_guard_bypass  # the fake browser's reparented helper is ours to stop
-def test_orphan_reap_stops_a_crashed_owners_browser(tmp_path, fake_chromium):
+def test_orphan_reap_stops_a_crashed_owners_browser(tmp_path, monkeypatch, fake_chromium):
     from tests.waiting import wait_until
     udd, log = tmp_path / "orphan-profile", tmp_path / "orphan-chromium.log"
     with open(log, "wb") as out:
@@ -295,14 +303,18 @@ def test_orphan_reap_stops_a_crashed_owners_browser(tmp_path, fake_chromium):
                what="the fake browser to write DevToolsActivePort")
     assert proc.poll() is None, f"the fake browser exited during startup ({proc.returncode}): {log.read_text()[-2000:]}"
     _write_orphan_record(_records(), proc.pid, str(udd))
+    _only_processes(monkeypatch, proc.pid)
     assert launcher.reap_orphaned_browsers() == 1
     proc.wait(timeout=10)
 
 
 @pytest.mark.platforms("posix")
 @pytest.mark.live_system_guard_bypass  # the fake browser's reparented helper is ours to stop
-def test_records_of_a_live_owner_are_left_alone(tmp_path, fake_chromium):
+def test_records_of_a_live_owner_are_left_alone(tmp_path, monkeypatch, fake_chromium):
     launcher.launch_chromium("mine", env=dict(os.environ))
+    mine = launcher.get_browser("mine")
+    assert mine is not None and mine.pid is not None
+    _only_processes(monkeypatch, mine.pid)
     assert launcher.reap_orphaned_browsers() == 0
     assert launcher.get_browser("mine") is not None
     assert list(_records().glob("*.json"))

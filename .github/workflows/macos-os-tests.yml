@@ -79,6 +79,15 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Set up isolated locked test tools and dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          # Real uv, Node and npm must live outside the runner's protected home.
+          toolchain: all
+          test-environment: 'true'
+          # `all` intentionally excludes messaging; platform tests need its SDKs.
+          extras: '["all", "messaging"]'
+
       - name: Run macOS-marked tests
         # Same selection as tests-os.yml's macOS row: the helper narrows which
         # files are imported; `-m "platforms and not integration"` decides which

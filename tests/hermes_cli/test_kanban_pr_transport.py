@@ -32,6 +32,7 @@ def test_gh_in_user_bin(tmp_path, monkeypatch):
 def test_profile_wrapper_vends_only_to_gh(tmp_path, monkeypatch):
     import os
 
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)  # resolver must not probe the real ~/.local/bin/gh
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
