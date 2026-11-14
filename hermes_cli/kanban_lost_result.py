@@ -32,6 +32,16 @@ def loss_identity_fields(conn, context, pid, bound):
     payload = json.loads(event['payload'])
     if (payload.get('pid'), payload.get('claim_lock')) != (pid, context['claim_lock']):
         return {}
+    from hermes_cli.kanban_failed_result_identity import modern_receipt
+    _, selected = modern_receipt(conn, context['task_id'], context['run_id'], context['claim_lock'])
+    if selected is not None:
+        result = selected[1]
+        if (type(result.get('exit_code')) is int
+                and result['exit_code'] != 0 and not result.get('continuable')
+                and not result.get('result_role')):
+            # The interpreter already explained this failed execution. The owner's
+            # EOF/unknown echo is diagnostic, not a new result that erases its quota.
+            return {}
     return {'death_proof_version': 1, 'loss_receipt': True, 'exit_code': None,
             **result_identity_fields(conn, context)}
 
