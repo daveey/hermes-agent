@@ -61,7 +61,21 @@ class BorrowedSet:
 def remembered_publications(moved, previous):
     published = moved.get('published')
     if isinstance(published, Published):
-        keys = {(c.get('board'), c.get('id'), c.get('created_at')) for c in previous or ()}
+        keys = set()
+        for card in previous or ():
+            # Match _retire_moved's eligibility before touching publication keys.
+            if card.get('ownership_state') != 'qualified' or card.get('created_at') is None:
+                continue
+            scope = (card.get('gateway'), card.get('owner_profile'), card.get('board'))
+            if scope not in moved.get('live_scopes', ()):
+                continue
+            key = (card.get('board'), card.get('id'), card.get('created_at'))
+            try:
+                hash(key)
+            except TypeError:
+                # Leave malformed eligible cards to the original retirement path.
+                continue
+            keys.add(key)
         moved['published'] = published.lookup_many(keys)
 
 

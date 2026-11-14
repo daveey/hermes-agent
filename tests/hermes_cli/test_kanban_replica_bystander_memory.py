@@ -388,6 +388,25 @@ def test_legacy_reader_borrows_closed_and_bulk_resolves_publications(hub, monkey
     activity._legacy_remote_links()
 
 
+@pytest.mark.parametrize('ownership,created', [('unknown', []), ('unknown', {}), ('qualified', [])])
+def test_ineligible_remembered_publication_does_not_poison_reads(hub, monkeypatch, ownership, created):
+    from hermes_cli import kanban_session_activity as activity
+    path, put, _, _ = hub
+    monkeypatch.setattr(activity, '_hub_db_path', lambda: path)
+    monkeypatch.setattr(activity, '_remote_snapshot', lambda *args: [])
+    put('t_current')
+    previous = [{'id': 't_old', 'key': 'absent/build/t_old', 'gateway': 'absent',
+                 'owner_profile': 'work', 'board': 'build', 'session': 's1',
+                 'created_at': created, 'ownership_state': ownership}]
+    activity._remote_last = previous
+    activity._remote_scope = activity._origin_scope()
+    first = activity._legacy_remote_links()
+    assert any(c['id'] == 't_current' and not c.get('stale') for c in first)
+    put('t_next')
+    second = activity._legacy_remote_links()
+    assert any(c['id'] == 't_next' and not c.get('stale') for c in second)
+
+
 @pytest.mark.parametrize('outcome', ['closed', 'moved', 'same-gateway-profile'])
 def test_remembered_bystander_retirement_matches_full_reader(hub, monkeypatch, outcome):
     import json
