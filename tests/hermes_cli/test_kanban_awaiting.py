@@ -359,6 +359,7 @@ def test_long_continue_on_an_agent_wall_is_refused(kanban_home, monkeypatch) -> 
 # -- re-parks escalate --------------------------------------------------------------------------------
 
 def test_third_park_on_the_same_premise_goes_to_the_supervisor(kanban_home, monkeypatch) -> None:
+    monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
     reason = "Waiting for vendor ticket 4711 (AWS quota increase), evidence: case opened {n}"
     awaiting = {"kind": "external", "ref": "AWS support case 4711", "why": "quota increase pending"}
     with kbc.connect_closing() as conn:
@@ -376,8 +377,8 @@ def test_third_park_on_the_same_premise_goes_to_the_supervisor(kanban_home, monk
         assert out.get("code") == "repark_escalated" and out.get("status") == "todo", out
         owner = out["owner_task_id"]
         card = kb.get_task(conn, owner)
-        # No capable supervisor is configured here: the issue lands in triage, never on the parking worker.
-        assert card.status == "triage" and card.assignee != "worker" and "parked 3x" in card.title
+        # A single-profile installation must have a dispatchable producer, not unassigned triage.
+        assert card.status == "ready" and card.assignee == "worker" and "parked 3x" in card.title
         assert "not a question for David" in card.body and card.human_request is None
         assert conn.execute("SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?", (owner, tid)).fetchone()
         assert kwc.get_state(conn, tid) is None
@@ -396,6 +397,46 @@ def test_third_park_on_the_same_premise_goes_to_the_supervisor(kanban_home, monk
         _as_worker(monkeypatch, conn, tid)
         assert _tool("schedule", {"reason": "again", "wake_check": "exit 1",
                                   "awaiting": awaiting}).get("status") == "scheduled"
+
+
+def test_shared_clear_wakes_do_not_exhaust_repark_budget(kanban_home, monkeypatch) -> None:
+    from hermes_cli import kanban_shared_blockers as ksb
+    awaiting = {"kind": "external", "ref": "vendor ticket 4711", "why": "vendor response pending"}
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        for n in range(4):
+            _as_worker(monkeypatch, conn, tid)
+            out = _tool("schedule", {"reason": "waiting for vendor", "wake_check": "exit 1", "awaiting": awaiting})
+            assert out.get("status") == "scheduled", (n, out)
+            if n < 3:
+                with kb.write_txn(conn):
+                    assert kwc._wake(conn, tid, ksb.CLEARED_EVENT, {"blocker_id": "github-rest-quota"})
+                assert kb.claim_task(conn, tid, claimer="worker")
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == kaw.ESCALATED_EVENT]
+
+
+@pytest.mark.parametrize("status", [None, "scheduled"])
+def test_clear_annotation_does_not_reset_repark_budget(kanban_home, status):
+    from hermes_cli import kanban_shared_blockers as ksb
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        with kb.write_txn(conn):
+            for _ in range(2):
+                kb._append_event(conn, tid, "scheduled", {"awaiting": {"premise": "same"}})
+            kb._append_event(conn, tid, ksb.CLEARED_EVENT, {"status": status})
+        assert kaw.prior_same_premise(conn, tid, "same") == 2
+
+
+def test_escalation_without_any_assignee_uses_default(kanban_home, monkeypatch):
+    monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET assignee=NULL WHERE id=?", (tid,))
+            owner = kaw.escalate(conn, tid, record={"premise": "same"}, reason="stuck")
+        card = kb.get_task(conn, owner)
+        assert (card.status, card.assignee) == ("ready", "default")
+        assert kb.claim_task(conn, owner)
 
 
 def test_escalation_goes_to_a_capable_supervisor(kanban_home, monkeypatch) -> None:

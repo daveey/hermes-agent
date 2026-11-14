@@ -706,10 +706,11 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
     froze t_f6d930b7 behind owner cards nothing could run and dropped the working idle trigger. [daveey]"""
     from hermes_cli.kanban_deploy_window import is_healthy
     from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT
+    from hermes_cli.kanban_shared_blockers import CLEARED_EVENT
     count = 0
     for kind, payload in conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?,?) "
-            "ORDER BY id DESC LIMIT 20", (task_id, ESCALATED_EVENT, CONDITION_MET_EVENT)):
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?,?,?) "
+            "ORDER BY id DESC LIMIT 20", (task_id, ESCALATED_EVENT, CONDITION_MET_EVENT, CLEARED_EVENT)):
         if kind == ESCALATED_EVENT:
             break
         try:
@@ -717,6 +718,11 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
             got = data.get("awaiting") or {}
         except (ValueError, AttributeError):
             data, got = {}, {}
+        if kind == CLEARED_EVENT:
+            # Only a real wake interrupts the premise streak; hold-retirement annotations do not.
+            if data.get("status") in ("ready", "review"):
+                break
+            continue
         if kind == CONDITION_MET_EVENT:
             if probe and isinstance(data, dict) and data.get("wake_check") and _probe_key(data["wake_check"]) == probe:
                 break
@@ -847,7 +853,7 @@ def resource_apply(record: Optional[dict], reason: Optional[str],
 # --- re-park escalation ------------------------------------------------------------------------
 
 def _supervisor_profile(task) -> Optional[str]:
-    """A capable supervisor other than the worker that keeps parking, or None (the card goes to triage)."""
+    """A capable distinct supervisor, or None (escalation falls back to the owner's profile)."""
     from hermes_cli.kanban_assignment_routing import _supervisor
     name, _required = _supervisor(task)
     return name
@@ -878,7 +884,7 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
     existing = conn.execute("SELECT id, status FROM tasks WHERE idempotency_key = ?", (key,)).fetchone()
     owner = existing[0] if existing and existing[1] not in ("done", "archived") else None
     if owner is None:
-        supervisor = _supervisor_profile(task)
+        supervisor = _supervisor_profile(task) or task.assignee or "default"
         fired = record.get("fired_reparks")
         title = (f"Unstick {task_id}: probe fired {fired}x, re-parked each time" if fired
                  else f"Unstick {task_id}: parked 3x on the same premise")
@@ -894,7 +900,7 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
                   "do the action (grant, install, fix) where the capability lives, or route the card to the "
                   "profile/gateway that can, or prove the premise false. Then complete this card with the "
                   f"evidence; {task_id} waits on it and resumes when it is done."),
-            assignee=supervisor, created_by=task.assignee, workspace_kind="scratch", triage=supervisor is None,
+            assignee=supervisor, created_by=task.assignee, workspace_kind="scratch", triage=False,
             idempotency_key=None if existing else key, creator_task_id=task.id, session_id=task.session_id,
             tenant=task.tenant, priority=task.priority,
         )

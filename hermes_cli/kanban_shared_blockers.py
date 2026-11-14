@@ -581,9 +581,13 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
                 continue
             payload = {"blocker_id": st.blocker_id, "cleared_by_task": by_task, "cleared_by_run": by_run,
                        "cleared_via": st.cleared_via or "run"}
-            if row["status"] in ("ready", "review"):
-                # Admission may be capacity-limited before the guard is evaluated again.
-                # Retire the historical hold without changing lanes or bypassing admission.
+            from hermes_cli.kanban_continuation import pending_wake
+            park = pending_wake(conn, tid) or {}
+            awaiting = park.get("awaiting") or {}
+            own_wait = (row["status"] == "scheduled" and kwc.get_state(conn, tid) is not None
+                        and (awaiting.get("shared_blocker") or park.get("blocker_id")) != st.blocker_id)
+            if row["status"] in ("ready", "review") or own_wait:
+                # Retire the historical hold, not an independent park's probe/backstop.
                 with kb.write_txn(conn):
                     kb._append_event(conn, tid, CLEARED_EVENT, payload)
                 continue

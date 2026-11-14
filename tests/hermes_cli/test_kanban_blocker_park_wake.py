@@ -222,6 +222,42 @@ def test_completion_clears_and_wakes_parked_cards(kanban_home, monkeypatch):
         assert ev and ev[0].payload["cleared_by_task"] == a
 
 
+@pytest.mark.parametrize("current_blocker", [None, "other-wall", BID])
+def test_clear_respects_current_park(kanban_home, monkeypatch, current_blocker):
+    with kbc.connect_closing() as conn:
+        clearing = _worker_block_behind(monkeypatch, conn, "wall probe")
+        waiting = _worker_block_behind(monkeypatch, conn, "lane waiter")
+    if current_blocker != BID:
+        _repark(monkeypatch, "schedule", "parent", waiting)
+    with kbc.connect_closing() as conn:
+        if current_blocker == "other-wall":
+            with kb.write_txn(conn):
+                wake = pending_wake(conn, waiting)
+                wake["awaiting"]["shared_blocker"] = current_blocker
+                kb._append_event(conn, waiting, "scheduled", wake)
+        before = kwc.get_state(conn, waiting)
+        park = pending_wake(conn, waiting)
+        comments = kb.list_comments(conn, waiting)
+        assert kb.unblock_task(conn, clearing)
+        assert kb.claim_task(conn, clearing)
+        assert kb.complete_task(conn, clearing, result="wall gone")
+        released = ksb.release_cleared_blockers(conn)
+        if current_blocker == BID:
+            assert released == [waiting]
+            assert kb.get_task(conn, waiting).status == "ready"
+        else:
+            assert released == []
+            assert kb.get_task(conn, waiting).status == "scheduled"
+            assert kwc.get_state(conn, waiting) == before
+            assert pending_wake(conn, waiting) == park
+            assert park["wake_at"] and before["cmd"] == WAKE
+            assert kb.list_comments(conn, waiting) == comments
+        events = [e for e in kb.list_events(conn, waiting) if e.kind == ksb.CLEARED_EVENT]
+        assert len(events) == 1
+        assert events[0].payload["cleared_by_task"] == clearing
+        assert ksb.release_cleared_blockers(conn) == []
+
+
 def test_explicit_clear_blocker_opt_out(kanban_home, monkeypatch):
     with kbc.connect_closing() as conn:
         a = _worker_block_behind(monkeypatch, conn, "a")
@@ -340,8 +376,8 @@ def test_woken_card_reparked_by_parent_before_running_is_not_rewoken(kanban_home
         assert len(_cleared_events(conn, a)) == 1
 
 
-def test_newer_clear_after_a_repark_wakes_the_card_again(kanban_home, monkeypatch):
-    """Control: the skip is per clear. A card that re-parked after one clear is woken by a LATER clear."""
+def test_newer_clear_after_an_independent_repark_retires_only_the_hold(kanban_home, monkeypatch):
+    """A new assertion episode does not take over the card's independent park."""
     with kbc.connect_closing() as conn:
         a = _worker_block_behind(monkeypatch, conn, "a")
         b = _worker_block_behind(monkeypatch, conn, "b")
@@ -355,7 +391,11 @@ def test_newer_clear_after_a_repark_wakes_the_card_again(kanban_home, monkeypatc
         c = _worker_block_behind(monkeypatch, conn, "c")     # X re-asserted by a third card ...
         _clear_via_wake_check(conn, c)                      # ... and cleared again, later
         assert ksb.blocker_states(conn)[BID].cleared_by[0] == c
-        assert a in ksb.release_cleared_blockers(conn)
+        before = pending_wake(conn, a), kwc.get_state(conn, a), _dispatcher_comments(conn, a)
+        assert a not in ksb.release_cleared_blockers(conn)
+        assert kb.get_task(conn, a).status == "scheduled"
+        assert (pending_wake(conn, a), kwc.get_state(conn, a), _dispatcher_comments(conn, a)) == before
+        assert len(_cleared_events(conn, a)) == 2
 
 
 def _age_all(conn, seconds: int) -> None:
@@ -436,7 +476,7 @@ def test_redundant_clear_by_another_card_does_not_rewake(kanban_home, monkeypatc
         assert len(_cleared_events(conn, c)) == 1
 
 
-def test_clear_after_a_reassertion_still_wakes_after_a_redundant_clear(kanban_home, monkeypatch):
+def test_clear_after_reassertion_keeps_independent_park_after_redundant_clear(kanban_home, monkeypatch):
     _a, _b, c = _two_clears_in_sequence(monkeypatch)
     with kbc.connect_closing() as conn:
         assert ksb.release_cleared_blockers(conn) == []
@@ -447,7 +487,10 @@ def test_clear_after_a_reassertion_still_wakes_after_a_redundant_clear(kanban_ho
         _clear_via_wake_check(conn, d)                      # ... then cleared by a run's probe
         st = ksb.blocker_states(conn)[BID]
         assert not st.is_open and st.cleared_by[0] == d
-        assert c in ksb.release_cleared_blockers(conn)
+        before = pending_wake(conn, c), kwc.get_state(conn, c), _dispatcher_comments(conn, c)
+        assert c not in ksb.release_cleared_blockers(conn)
+        assert kb.get_task(conn, c).status == "scheduled"
+        assert (pending_wake(conn, c), kwc.get_state(conn, c), _dispatcher_comments(conn, c)) == before
         assert len(_cleared_events(conn, c)) == 2
 
 
