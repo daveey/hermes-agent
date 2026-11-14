@@ -1501,7 +1501,8 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         if rc:
             return rc
         op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
-        return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
+        from hermes_cli.kanban_shared_blockers import unblock_verdict
+        return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}; {unblock_verdict(conn, tid)}",
                            lambda tid: kb.unblock_refusal(conn, tid) or f"cannot unblock {tid} (not blocked/scheduled?)", conn=conn)
 
 

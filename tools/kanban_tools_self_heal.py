@@ -118,6 +118,7 @@ def _forward_missing_parent_unblock(env_tid: str, tid: str) -> Optional[str]:
 def handle_unblock(args: dict, **kw) -> str:
     """Transition a blocked/triage/scheduled task, or a card this worker holds a requeue grant for."""
     from tools import kanban_tools as kt
+    from hermes_cli.kanban_shared_blockers import unblock_verdict
 
     kt._reject_delegated_child_mutation("kanban_unblock")
     tid = args.get("task_id")
@@ -173,11 +174,13 @@ def handle_unblock(args: dict, **kw) -> str:
                         "actor": tool_actor(worker_task=env_tid), "repair_task_id": source, "via": via})
                     kt._check(ok, f"could not unblock {tid} (missing-parent repair grant no longer holds)")
                     _log_requeue(conn, kb, tid, env_tid, via, source)
-                    return kt._ok(task_id=tid, via=via, **kt._fields(kb.get_task(conn, tid), ("status",)))
+                    return kt._ok(task_id=tid, via=via, shared_blocker_verdict=unblock_verdict(conn, tid),
+                                  **kt._fields(kb.get_task(conn, tid), ("status",)))
                 ok = kb.unblock_task(conn, tid, precondition=precondition)
                 kt._check(ok, f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
                 _log_requeue(conn, kb, tid, env_tid, via, source)
-                return kt._ok(task_id=tid, via=via, **kt._fields(kb.get_task(conn, tid), ("status",)))
+                return kt._ok(task_id=tid, via=via, shared_blocker_verdict=unblock_verdict(conn, tid),
+                                  **kt._fields(kb.get_task(conn, tid), ("status",)))
     kt._require_orchestrator_tool("kanban_unblock")
     kt._enforce_worker_task_ownership(tid)
     with kt._board(args.get("board")) as (kb, conn):
@@ -199,6 +202,7 @@ def handle_unblock(args: dict, **kw) -> str:
         subscribed = kt._maybe_subscribe_on_touch(conn, tid)
         task = kb.get_task(conn, tid)
         return kt._ok(task_id=tid, **kt._fields(task, ("status",)),
+                      shared_blocker_verdict=unblock_verdict(conn, tid),
                       **({"priority_raised": raised} if raised else {}),
                       **cw.unblock_fields(conn, task, args.get("board")),
                       **({"subscribed": True} if subscribed else {}))

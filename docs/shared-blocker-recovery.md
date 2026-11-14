@@ -45,3 +45,23 @@ Check events use a fingerprint of portable run identities, not local integer
 row ids. This fences results racing new assertions and survives synced id
 remapping and import order. Recovery is not inferred from a failed command,
 and commands never run under the board's writer lock.
+
+## Operator unblock verdict
+
+An explicit unblock is ordered against assertions using the event UUIDv7's
+millisecond timestamp, falling back to `created_at` for legacy or non-v7
+identities. Only exact time ties use local event ids; delayed replication of an
+older assertion cannot revoke a newer release. UUID random suffixes are not
+clocks. This is wall-clock ordering, not protection against gateway clock skew.
+
+For unregistered walls a running sibling still holds the card; otherwise a
+release newer than every assertion bypasses the probe interval. Registered walls
+retain their own-card release rule, before the sibling check.
+
+`hermes kanban unblock` prints the shared-blocker verdict after the transition;
+`kanban_unblock` returns it as `shared_blocker_verdict`. It either says
+`released: claimable on the next tick`, or names the blocking sibling or the
+probe interval's due time in PT. Reporting uses the same read-only decision as
+the dispatcher guard, without clearing the wall or electing another probe.
+This is a snapshot of the shared-blocker gate only: dependencies, placement,
+capacity and later assertions can still delay actual dispatch.

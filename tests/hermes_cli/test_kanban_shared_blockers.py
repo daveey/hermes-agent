@@ -24,6 +24,105 @@ import tools.kanban_tools as kt
 BID = "github-actions-billing"
 
 
+def _event_uid(ms, suffix):
+    import uuid
+    return str(uuid.UUID(int=(ms << 80) | (7 << 76) | (2 << 62) | suffix))
+
+
+@pytest.mark.parametrize("own_only", [False, True])
+@pytest.mark.parametrize("delta,expected", [(-1, True), (0, False), (1, False)])
+@pytest.mark.parametrize("identity", ["v7", "missing", "v4"])
+def test_operator_release_event_time(kanban_home, own_only, delta, expected, identity):
+    """Remote insertion order is not occurrence order; ties retain local order."""
+    with kbc.connect_closing() as conn:
+        target = _blocked_behind(conn, "target")
+        peer = _blocked_behind(conn, "peer")
+        assert kb.unblock_task(conn, target)
+        ms = int(time.time()) * 1000 + 500
+        uid = lambda stamp, suffix: (_event_uid(stamp, suffix) if identity == "v7" else
+                                    None if identity == "missing" else "00000000-0000-4000-8000-000000000001")
+        # Unsynced fixture schema has no transport columns.
+        conn.execute("ALTER TABLE task_events ADD COLUMN uid TEXT")
+        # Keep the initial assertions older than the release, including their UUIDs.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET uid=NULL, created_at=?", (ms // 1000 - 10,))
+            conn.execute("UPDATE task_events SET uid=?, created_at=? WHERE task_id=? AND kind='unblocked'",
+                         (uid(ms, 1), ms // 1000, target))
+            kb._append_event(conn, target if own_only else peer, "scheduled", {"blocker_id": BID})
+            conn.execute("UPDATE task_events SET uid=?, created_at=?, origin_gateway='remote' WHERE id=(SELECT MAX(id) FROM task_events)",
+                         (uid(ms + delta, 2), ms // 1000 + (-delta if identity == "v7" else delta)))
+        assert ksb._unblocked_since_assertion(conn, target, BID, own_only=own_only) is expected
+        assert ksb.shared_blocker_guard(conn, target, interval=3600) == (None if expected else ksb.GUARD_REASON)
+
+
+@pytest.mark.parametrize("own_only", [False, True])
+def test_release_selects_latest_clock_not_latest_local_id(kanban_home, own_only):
+    with kbc.connect_closing() as conn:
+        target = _blocked_behind(conn, "target")
+        assert kb.unblock_task(conn, target)
+        conn.execute("ALTER TABLE task_events ADD COLUMN uid TEXT")
+        ms = int(time.time()) * 1000
+        with kb.write_txn(conn):
+            # All earlier assertions and the unblock share the same millisecond.
+            # The UUID's random bits deliberately oppose local event order.
+            conn.execute("UPDATE task_events SET uid=?", (_event_uid(ms, 999),))
+            conn.execute("UPDATE task_events SET uid=? WHERE kind='unblocked'", (_event_uid(ms, 1),))
+            kb._append_event(conn, target, "unblocked", {})
+            conn.execute("UPDATE task_events SET uid=? WHERE id=(SELECT MAX(id) FROM task_events)",
+                         (_event_uid(ms - 1000, 2),))
+        assert ksb._unblocked_since_assertion(conn, target, BID, own_only=own_only)
+        assert ksb.shared_blocker_guard(conn, target, interval=3600) is None
+
+
+@pytest.mark.parametrize("entry", ["cli", "tool"])
+@pytest.mark.parametrize("running_peer", [False, True, "interval"])
+def test_unblock_reports_shared_guard(kanban_home, monkeypatch, capsys, entry, running_peer):
+    from argparse import Namespace
+    from hermes_cli import kanban
+    from tools.kanban_tools_self_heal import handle_unblock
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with kbc.connect_closing() as conn:
+        target = _blocked_behind(conn, "target")
+        peer = _blocked_behind(conn, "peer")
+        if running_peer is True:
+            assert kb.unblock_task(conn, peer)
+            assert kb.claim_task(conn, peer)
+    if running_peer == "interval":
+        # An assertion arriving between the unblock commit and its readback.
+        original = kb.unblock_task
+
+        def reassert(conn, tid, **kwargs):
+            ok = original(conn, tid, **kwargs)
+            with kb.write_txn(conn):
+                kb._append_event(conn, peer, "scheduled", {"blocker_id": BID})
+            return ok
+
+        monkeypatch.setattr(kb, "unblock_task", reassert)
+    if entry == "cli":
+        assert kanban._cmd_unblock(Namespace(task_ids=[target], reason=None)) == 0
+        result = capsys.readouterr().out
+    else:
+        result = handle_unblock({"task_id": target})
+    with kbc.connect_closing() as conn:
+        assert ksb.shared_blocker_guard(conn, target) == (ksb.GUARD_REASON if running_peer else None)
+    expected = (f"still held by shared blocker {BID}: running sibling {peer}" if running_peer is True else
+                "released: claimable on the next tick")
+    if running_peer == "interval":
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        with kbc.connect_closing() as conn:
+            state = ksb.blocker_states(conn)[BID]
+            due = min(state.behind.values()) + ksb.probe_interval_seconds()
+            at = datetime.fromtimestamp(due, ZoneInfo("America/Los_Angeles"))
+            expected = f"still held by shared blocker {BID}: probe interval due at {at:%Y-%m-%d %H:%M:%S} PT"
+            writes = conn.total_changes
+            assert ksb.unblock_verdict(conn, target) == expected
+            assert conn.total_changes == writes
+    assert expected in result
+
+
+
 @pytest.fixture
 def scoped_routing(monkeypatch):
     from hermes_cli import kanban_model_tier as tier

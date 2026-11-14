@@ -473,24 +473,37 @@ def blocker_for_task(states: dict[str, BlockerState], task_id: str) -> Optional[
     return None
 
 
+def _event_order(row) -> tuple[int, int]:
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_shared_blocker_fence import uid_milliseconds
+
+    stamp = uid_milliseconds(row["uid"] if "uid" in row.keys() else None)
+    if stamp is None:
+        stamp = (kb._to_epoch(row["created_at"]) or 0) * 1000
+    return stamp, int(row["id"])
+
+
 def _unblocked_since_assertion(conn: sqlite3.Connection, task_id: str, blocker_id: str, *,
                                own_only: bool = False) -> bool:
-    """True when ``task_id`` was unblocked after the newest event asserting ``blocker_id``
-    (event ids, not seconds: a bulk unblock and a re-assertion often share a second)."""
+    """Compare portable event clocks, using local ids only for exact time ties.
+
+    Replication assigns new local ids to old events. UUIDv7 milliseconds (or legacy
+    created_at seconds) preserve occurrence order; tied bulk events retain id order.
+    """
     from hermes_cli import kanban_db as kb
 
-    unblocked = conn.execute(
-        "SELECT MAX(id) FROM task_events WHERE task_id=? AND kind='unblocked'", (task_id,)
-    ).fetchone()[0]
+    unblocked = max((_event_order(row) for row in conn.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND kind='unblocked'", (task_id,)
+    )), default=None)
     if unblocked is None:
         return False
+    own = " AND task_id=?" if own_only else ""
     for row in conn.execute(
-        "SELECT task_id, payload FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
-        "AND id>=? AND payload LIKE '%\"blocker_id\"%' ORDER BY id DESC", (unblocked,),
+        "SELECT * FROM task_events WHERE kind IN ('blocked', 'scheduled', 'continued', 'block_loop_detected') "
+        "AND payload LIKE '%\"blocker_id\"%'" + own, (task_id,) if own_only else (),
     ):
-        if own_only and row["task_id"] != task_id:
-            continue
-        if normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == blocker_id:
+        if (_event_order(row) >= unblocked and
+                normalize_blocker_id(kb._json_dict(row["payload"]).get("blocker_id")) == blocker_id):
             return False
     return True
 
@@ -501,6 +514,27 @@ def shared_blocker_guard(
 ) -> Optional[str]:
     """:data:`GUARD_REASON` when ``task_id`` sits behind an open blocker and must wait for the
     probe; None when it may spawn (no blocker, blocker cleared, or this card is the probe)."""
+    return GUARD_REASON if _shared_blocker_hold(conn, task_id, now=now, interval=interval) else None
+
+
+def unblock_verdict(conn: sqlite3.Connection, task_id: str) -> str:
+    """Read-only shared-blocker verdict, not a promise about other admission gates."""
+    hold = _shared_blocker_hold(conn, task_id)
+    if hold is None:
+        return "released: claimable on the next tick"
+    bid, sibling, due = hold
+    if sibling:
+        why = f"running sibling {sibling}"
+    else:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        at = datetime.fromtimestamp(due, ZoneInfo("America/Los_Angeles"))
+        why = f"probe interval due at {at:%Y-%m-%d %H:%M:%S} PT"
+    return f"still held by shared blocker {bid}: {why}"
+
+
+def _shared_blocker_hold(conn, task_id, *, now=None, interval=None) -> Optional[tuple[str, Optional[str], int]]:
+    """The guard and reporting share one read-only decision, including its reason."""
     now = int(time.time()) if now is None else int(now)
     states = blocker_states(conn, now=now)
     st = blocker_for_task(states, task_id)
@@ -515,10 +549,11 @@ def shared_blocker_guard(
     others = [t for t in st.behind if t != task_id and task_applies(conn, st, t)]
     if others:
         marks = ",".join("?" * len(others))
-        if conn.execute(
-            f"SELECT 1 FROM tasks WHERE id IN ({marks}) AND status = 'running' LIMIT 1", others,
-        ).fetchone():
-            return GUARD_REASON   # a probe is already in flight
+        sibling = conn.execute(
+            f"SELECT id FROM tasks WHERE id IN ({marks}) AND status = 'running' ORDER BY id LIMIT 1", others,
+        ).fetchone()
+        if sibling:
+            return st.blocker_id, sibling["id"], 0   # a probe is already in flight
     if _released_as_probe(conn, st, task_id):
         return None
     if interval is None:
@@ -529,7 +564,7 @@ def shared_blocker_guard(
     # A human unblock after the newest assertion is a deliberate "try again now".
     if _unblocked_since_assertion(conn, task_id, st.blocker_id):
         return None
-    return GUARD_REASON
+    return st.blocker_id, None, last + interval
 
 
 def _released_as_probe(conn: sqlite3.Connection, st: BlockerState, task_id: str) -> bool:

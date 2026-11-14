@@ -23,20 +23,25 @@ def _winning_checks(conn, bid, now):
     return winners
 
 
+def uid_milliseconds(identity):
+    """Portable UUIDv7 event/claim clock; other identities have no precision."""
+    try:
+        uid = uuid.UUID(identity)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return uid.int >> 80 if uid.version == 7 else None
+
+
 def _uid_before_check(identity, started, payload):
     """UUIDv7 carries claim-initiation milliseconds, not remote commit order.
 
     Use only consistent, strictly earlier clock evidence. Missing/invalid/tied
     precision retains the legacy fallback; UUID random suffixes never order runs.
     """
-    try:
-        uid = uuid.UUID(identity)
-    except (ValueError, AttributeError):
-        return False
+    claimed_ms = uid_milliseconds(identity)
     checked_ms = payload.get('checked_at_ms')
-    if uid.version != 7 or type(checked_ms) is not int:
+    if claimed_ms is None or type(checked_ms) is not int:
         return False
-    claimed_ms = uid.int >> 80
     return (claimed_ms // 1000 == started == checked_ms // 1000
             and claimed_ms < checked_ms)
 
