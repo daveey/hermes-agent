@@ -52,7 +52,9 @@ def _scan(root):
                 strings = [(node.lineno, node.value) for node in ast.walk(ast.parse(source))
                            if isinstance(node, ast.Constant) and isinstance(node.value, str)]
             else:
-                strings = [(1, source)]
+                # Raw JS/TS strings may escape SQL identifier quotes. This is a
+                # conservative source scan, not a JavaScript string evaluator.
+                strings = [(1, source.replace('\\"', '"'))]
             for line, text in strings:
                 for table in _violations(text):
                     failures.append(f"{relative}:{line}: REPLACE writes watched table {table}")
@@ -109,6 +111,16 @@ def test_scan_finds_scratch_caller_and_excludes_tests(tmp_path, directory):
     failures = _scan(tmp_path)
     assert len(failures) == 2
     assert all(f"{directory}/writer.py:" in failure for failure in failures)
+
+
+@pytest.mark.parametrize("suffix", [".js", ".ts", ".mjs"])
+@pytest.mark.parametrize("table", WATCHED)
+def test_scan_escaped_quoted_identifiers(tmp_path, suffix, table):
+    target = tmp_path / "plugins"
+    target.mkdir()
+    source = f'db.exec("REPLACE INTO \\"{table}\\" VALUES (?)")'
+    (target / f"writer{suffix}").write_text(source, encoding="utf-8")
+    assert len(_scan(tmp_path)) == 1
 
 
 def test_scan_covers_non_python_sources(tmp_path):
