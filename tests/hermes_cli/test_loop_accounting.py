@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -49,6 +50,56 @@ def test_pass_counts_an_error_and_reraises():
             raise ValueError("x")
     assert la.counters()["boom"]["errors"] == 1
     assert la.counters()["boom"]["runs"] == 1
+
+
+OperationalError = sqlite3.OperationalError  # the class the chat-closeout live check saw
+
+
+def test_errors_are_counted_by_exception_class():
+    for exc in (OperationalError, OperationalError, KeyError):
+        with pytest.raises(exc):
+            with la.pass_("kinds"):
+                raise exc("x")
+    with la.pass_("kinds") as p:  # a handled fallback is no error
+        p.fallback()
+    c = la.counters()["kinds"]
+    assert (c["runs"], c["errors"], c["fallbacks"]) == (4, 3, 1)
+    assert c["error_kinds"] == {"OperationalError": 2, "KeyError": 1}
+    with la.pass_("clean"):
+        pass
+    assert la.counters()["clean"]["error_kinds"] == {}
+
+
+def test_error_kinds_cap_names_and_fold_the_rest_into_other():
+    names = [f"E{i}" for i in range(la.MAX_ERROR_KINDS + 3)]
+    for name in names + names[:2]:
+        with pytest.raises(Exception):
+            with la.pass_("many"):
+                raise type(name, (Exception,), {})("x")
+    c = la.counters()["many"]
+    kinds = c["error_kinds"]
+    assert len(kinds) == la.MAX_ERROR_KINDS + 1  # 8 class names plus "other"
+    assert {n: kinds[n] for n in names[:la.MAX_ERROR_KINDS]} == dict.fromkeys(names[:la.MAX_ERROR_KINDS], 1) | {
+        names[0]: 2, names[1]: 2}  # an already-kept class keeps counting under its own name
+    assert kinds[la.ERROR_KIND_OTHER] == 3
+    assert sum(kinds.values()) == c["errors"] == len(names) + 2
+
+
+def test_record_and_span_errors_carry_a_kind_or_count_as_unknown():
+    la.record("rec", error=True, error_kind="TimeoutError")
+    la.record("rec", error=True)
+    la.record("rec", error=False, error_kind="Ignored")
+    la.span_close(la.span_open("span"), error=True)
+    assert la.counters()["rec"]["error_kinds"] == {"TimeoutError": 1, la.ERROR_KIND_UNKNOWN: 1}
+    assert la.counters()["span"]["error_kinds"] == {la.ERROR_KIND_UNKNOWN: 1}
+
+
+def test_snapshot_carries_error_kinds_next_to_errors():
+    with pytest.raises(OperationalError):
+        with la.pass_("snap"):
+            raise OperationalError("locked")
+    loop = json.loads(json.dumps(la.snapshot()))["loops"]["snap"]
+    assert (loop["errors"], loop["error_kinds"]) == (1, {"OperationalError": 1})
 
 
 def test_cpu_is_thread_time_sum_and_max():
@@ -694,6 +745,7 @@ def test_real_fork_subtracts_nonzero_clocks_from_inherited_passes():
     # A subprocess confines the registered at-fork hook and child assertions.
     result = subprocess.run([sys.executable, "-c", '''
 import os
+import sqlite3
 from hermes_cli import loop_accounting as la
 
 clock = [50.0, 1000.0]

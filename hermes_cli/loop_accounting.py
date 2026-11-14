@@ -10,6 +10,11 @@ measured CPU unattributed). Per pass name it counts:
 * ``fallbacks``: passes that took the full / fallback path;
 * ``rows``: rows the pass changed or processed, where the loop knows it;
 * ``errors``: passes that raised;
+* ``error_kinds``: those errors by exception class name (``{"OperationalError": 2}``), at most
+  ``MAX_ERROR_KINDS`` names plus ``other`` for the rest; an error reported without a class (``record`` /
+  ``span_close`` with ``error=True`` and no ``error_kind``) counts as ``unknown``. A designed fallback the
+  caller handles must not escape the pass (call :meth:`Pass.fallback` instead): this map tells a live
+  check reading ``errors`` what actually raised;
 * ``cpu_s`` / ``cpu_max_s``: ``time.thread_time()`` spent inside the pass (sum / worst), and ``wall_s``.
 
 Per process it also records every live thread's CPU (``/proc/self/task/<tid>/stat`` on Linux) next to the
@@ -70,6 +75,9 @@ SCHEMA_VERSION = 1
 DEFAULT_INTERVAL_S = 60.0
 MAX_NAMES = 2048  # distinct pass names; later names fold into OVERFLOW (a per-method name must not grow forever)
 OVERFLOW = "_overflow"
+MAX_ERROR_KINDS = 8  # distinct exception class names per pass name; later ones count under ERROR_KIND_OTHER
+ERROR_KIND_OTHER = "other"
+ERROR_KIND_UNKNOWN = "unknown"
 PRUNE_AFTER_S = 3600.0
 
 _thread_time = time.thread_time
@@ -82,6 +90,7 @@ class _Stat:
         "changes",
         "cpu_max_s",
         "cpu_s",
+        "error_kinds",
         "errors",
         "fallbacks",
         "last_at",
@@ -95,10 +104,23 @@ class _Stat:
         self.runs = self.skips = self.changes = self.fallbacks = self.rows = self.errors = 0
         self.cpu_s = self.cpu_max_s = self.wall_s = 0.0
         self.last_at = 0.0
+        self.error_kinds: Optional[dict[str, int]] = None  # created on the first error
+
+    def error(self, kind: Optional[str]) -> None:
+        """Count one error of exception class ``kind`` (caller holds ``_lock``); the map stays bounded."""
+        self.errors += 1
+        kinds = self.error_kinds
+        if kinds is None:
+            kinds = self.error_kinds = {}
+        kind = kind or ERROR_KIND_UNKNOWN
+        if kind not in kinds and len(kinds) - (ERROR_KIND_OTHER in kinds) >= MAX_ERROR_KINDS:
+            kind = ERROR_KIND_OTHER
+        kinds[kind] = kinds.get(kind, 0) + 1
 
     def as_dict(self) -> dict[str, Any]:
         return {"runs": self.runs, "skips": self.skips, "changes": self.changes, "fallbacks": self.fallbacks,
-                "rows": self.rows, "errors": self.errors, "cpu_s": round(self.cpu_s, 6),
+                "rows": self.rows, "errors": self.errors, "error_kinds": dict(self.error_kinds or {}),
+                "cpu_s": round(self.cpu_s, 6),
                 "cpu_max_s": round(self.cpu_max_s, 6), "wall_s": round(self.wall_s, 6),
                 "last_at": round(self.last_at, 3)}
 
@@ -227,7 +249,7 @@ class Pass:
                 st.fallbacks += 1
             st.rows += self.nrows
             if exc_type is not None:
-                st.errors += 1
+                st.error(getattr(exc_type, "__name__", None))
             st.cpu_s += cpu
             st.cpu_max_s = max(st.cpu_max_s, cpu)
             st.wall_s += wall
@@ -244,8 +266,9 @@ def pass_(name: str, *, skipped: bool = False, changed: Optional[bool] = None, f
 
 def record(name: str, *, cpu_s: float = 0.0, wall_s: float = 0.0, skipped: bool = False,
            changed: Optional[bool] = None, fallback: bool = False, rows: int = 0, error: bool = False,
-           outer: bool = True) -> None:
-    """Account a pass measured elsewhere (``cpu_s`` from the caller's own ``thread_time`` delta, on this thread)."""
+           outer: bool = True, error_kind: Optional[str] = None) -> None:
+    """Account a pass measured elsewhere (``cpu_s`` from the caller's own ``thread_time`` delta, on this thread).
+    ``error_kind`` names the exception class of an ``error`` (else it counts as ``unknown``)."""
     outer = outer and getattr(_local, "depth", 0) <= 0
     tid = _own_tid() if outer else 0
     with _lock:
@@ -255,7 +278,8 @@ def record(name: str, *, cpu_s: float = 0.0, wall_s: float = 0.0, skipped: bool 
         st.changes += bool(changed)
         st.fallbacks += bool(fallback)
         st.rows += int(rows or 0)
-        st.errors += bool(error)
+        if error:
+            st.error(error_kind)
         st.cpu_s += cpu_s
         st.cpu_max_s = max(st.cpu_max_s, cpu_s)
         st.wall_s += wall_s
@@ -275,8 +299,9 @@ def span_open(name: str) -> tuple:
     return name, tid, _thread_time(), _perf(), acc0
 
 
-def span_close(token: tuple, *, error: bool = False) -> bool:
-    """Close a :func:`span_open` token. False (nothing recorded) when called on another thread."""
+def span_close(token: tuple, *, error: bool = False, error_kind: Optional[str] = None) -> bool:
+    """Close a :func:`span_open` token. False (nothing recorded) when called on another thread. ``error_kind``
+    names the exception class of an ``error`` (else it counts as ``unknown``)."""
     name, tid, c0, w0, acc0 = token
     if tid != _native_id():
         return False
@@ -285,7 +310,8 @@ def span_close(token: tuple, *, error: bool = False) -> bool:
     with _lock:
         st = _stat(name)
         st.runs += 1
-        st.errors += bool(error)
+        if error:
+            st.error(error_kind)
         st.cpu_s += cpu
         st.cpu_max_s = max(st.cpu_max_s, cpu)
         st.wall_s += wall
