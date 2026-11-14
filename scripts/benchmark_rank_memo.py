@@ -111,13 +111,13 @@ def replay(n: int, rounds: int, store: str | None = None) -> dict:
         with tempfile.TemporaryDirectory() as tmp:  # TMPDIR: never beside the live store
             if store:  # a real store: replay on a consistent private copy (sqlite backup API)
                 import sqlite3
-                src = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
-                dst = sqlite3.connect(Path(tmp) / "state.db")
+                src = sqlite3.connect(f"file:{store}?mode=ro", uri=True)  # health: allow HX015 -- read-only source of a scratch copy for the benchmark
+                dst = sqlite3.connect(Path(tmp) / "state.db")  # health: allow HX015 -- private scratch copy, not a live store
                 src.backup(dst)
                 src.close()
                 dst.close()
             db = SessionDB(db_path=Path(tmp) / "state.db")
-            real_enabled = memo.enabled
+            real_enabled = memo.ENABLED
             try:
                 if store:
                     with db._read_ctx() as conn:
@@ -129,7 +129,7 @@ def replay(n: int, rounds: int, store: str | None = None) -> dict:
                 recency.clear()
                 memo.OUTCOMES.clear()
                 if mode == "exact":
-                    memo.enabled = lambda: False  # type: ignore[assignment]  # today's exact ranking
+                    memo.ENABLED = False  # today's exact ranking
                 spent, clock, per_slice = 0.0, BASE + n * 40, {}
                 for _ in range(rounds):
                     for _ in range(r.randrange(0, 6)):  # writes between two Desktop refreshes
@@ -159,7 +159,7 @@ def replay(n: int, rounds: int, store: str | None = None) -> dict:
                                  per_slice_ms={f"limit{SLICES[i]['limit']}": round(v / rounds, 2)
                                                for i, v in per_slice.items()})
             finally:
-                memo.enabled = real_enabled  # type: ignore[assignment]
+                memo.ENABLED = real_enabled
                 db.close()
                 recency.clear()
     out["ratio"] = round(out["memo"]["cpu_ms_per_refresh"] / out["exact"]["cpu_ms_per_refresh"], 3)

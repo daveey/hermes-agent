@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
 import threading
@@ -319,8 +318,8 @@ def _account(outcome: str) -> None:
                   fallback=outcome.startswith("fallback/"), outer=False)
         if outcome.startswith("fallback/"):
             la.record(f"recency.rank_memo.{outcome}", outer=False)
-    except Exception:
-        pass
+    except (ImportError, AttributeError, TypeError, ValueError):  # accounting never fails a read
+        logger.debug("rank memo pass accounting failed", exc_info=True)
 
 
 def ranked_ids(conn, memo: RankMemo, key: tuple, need: int, exact_ids, restricted_ids) -> list:
@@ -398,5 +397,8 @@ def project(conn, memo: RankMemo, ids_rows: list, select_head: str, prompt_join:
     return rows
 
 
+ENABLED = True  # tests and the benchmark flip it to compare against the exact ranking
+
+
 def enabled() -> bool:
-    return os.environ.get("HERMES_RANK_MEMO", "1") != "0"
+    return ENABLED
