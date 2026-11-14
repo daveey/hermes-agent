@@ -47,6 +47,7 @@ class DeliveryQueueWatch:
         self._homes = homes
         self.drain = drain
         self._served: list = list(homes())
+        self._paths: dict = {}
         self._seen = self._stamp()
         self._seen_racy = self._is_racy(self._seen, first_sight=True)
 
@@ -54,13 +55,23 @@ class DeliveryQueueWatch:
         """Re-resolve the served profiles once per tick (a directory read under multiplex),
         not on every poll; a profile that appears mid-interval is drained by the tick itself."""
         self._served = list(self._homes())
+        self._paths = {}
+
+    def _queue_path(self, home: Optional[Path]) -> Path:
+        """``queue_path(home)``, resolved once per tick: it realpaths the home (an lstat per path
+        component), which the one-second poll otherwise repeats for every served profile."""
+        from cron import delivery_queue
+
+        key = (home, delivery_queue.DELIVERY_DB)
+        path = self._paths.get(key)
+        if path is None:
+            path = self._paths[key] = delivery_queue.queue_path(home)
+        return path
 
     def _stamp(self) -> tuple:
-        from cron.delivery_queue import queue_path
-
         stamps = []
         for home in self._served:
-            path = queue_path(home)
+            path = self._queue_path(home)
             for candidate in (path, path.with_name(path.name + "-wal")):
                 try:
                     info = os.stat(candidate)
