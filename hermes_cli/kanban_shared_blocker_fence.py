@@ -29,18 +29,27 @@ def uid_milliseconds(identity):
     return uid.int >> 80 if uid.version == 7 else None
 
 
+def consistent_uid_milliseconds(identity, seconds):
+    """UUIDv7 milliseconds only when they fall in the row's own recorded second.
+
+    Sync backfills uid-less rows with a v7 uid stamped at backfill time, so a
+    uid whose second disagrees with the row's seconds clock is not event time.
+    """
+    ms = uid_milliseconds(identity)
+    return ms if ms is not None and ms // 1000 == seconds else None
+
+
 def _uid_before_check(identity, started, payload):
     """UUIDv7 carries claim-initiation milliseconds, not remote commit order.
 
     Use only consistent, strictly earlier clock evidence. Missing/invalid/tied
     precision retains the legacy fallback; UUID random suffixes never order runs.
     """
-    claimed_ms = uid_milliseconds(identity)
+    claimed_ms = consistent_uid_milliseconds(identity, started)
     checked_ms = payload.get('checked_at_ms')
     if claimed_ms is None or type(checked_ms) is not int:
         return False
-    return (claimed_ms // 1000 == started == checked_ms // 1000
-            and claimed_ms < checked_ms)
+    return started == checked_ms // 1000 and claimed_ms < checked_ms
 
 
 def fence_stale_quota_assertions(conn, states, asserting, *, now):

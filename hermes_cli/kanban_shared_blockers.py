@@ -485,11 +485,13 @@ def blocker_for_task(states: dict[str, BlockerState], task_id: str) -> Optional[
 
 def _event_order(row) -> tuple[int, int]:
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_shared_blocker_fence import uid_milliseconds
+    from hermes_cli.kanban_shared_blocker_fence import consistent_uid_milliseconds
 
-    stamp = uid_milliseconds(row["uid"] if "uid" in row.keys() else None)
+    created = kb._to_epoch(row["created_at"]) or 0
+    # A backfilled uid carries backfill time: trust it only inside created_at's second.
+    stamp = consistent_uid_milliseconds(row["uid"] if "uid" in row.keys() else None, created)
     if stamp is None:
-        stamp = (kb._to_epoch(row["created_at"]) or 0) * 1000
+        stamp = created * 1000
     return stamp, int(row["id"])
 
 

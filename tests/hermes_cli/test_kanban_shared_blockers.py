@@ -50,7 +50,7 @@ def test_operator_release_event_time(kanban_home, own_only, delta, expected, ide
                          (uid(ms, 1), ms // 1000, target))
             kb._append_event(conn, target if own_only else peer, "scheduled", {"blocker_id": BID})
             conn.execute("UPDATE task_events SET uid=?, created_at=?, origin_gateway='remote' WHERE id=(SELECT MAX(id) FROM task_events)",
-                         (uid(ms + delta, 2), ms // 1000 + (-delta if identity == "v7" else delta)))
+                         (uid(ms + delta, 2), ms // 1000 + (0 if identity == "v7" else delta)))
         assert ksb._unblocked_since_assertion(conn, target, BID, own_only=own_only) is expected
         assert ksb.shared_blocker_guard(conn, target, interval=3600) == (None if expected else ksb.GUARD_REASON)
 
@@ -65,13 +65,46 @@ def test_release_selects_latest_clock_not_latest_local_id(kanban_home, own_only)
         with kb.write_txn(conn):
             # All earlier assertions and the unblock share the same millisecond.
             # The UUID's random bits deliberately oppose local event order.
-            conn.execute("UPDATE task_events SET uid=?", (_event_uid(ms, 999),))
+            conn.execute("UPDATE task_events SET uid=?, created_at=?", (_event_uid(ms, 999), ms // 1000))
             conn.execute("UPDATE task_events SET uid=? WHERE kind='unblocked'", (_event_uid(ms, 1),))
             kb._append_event(conn, target, "unblocked", {})
-            conn.execute("UPDATE task_events SET uid=? WHERE id=(SELECT MAX(id) FROM task_events)",
-                         (_event_uid(ms - 1000, 2),))
+            conn.execute("UPDATE task_events SET uid=?, created_at=? WHERE id=(SELECT MAX(id) FROM task_events)",
+                         (_event_uid(ms - 1000, 2), ms // 1000 - 1))
         assert ksb._unblocked_since_assertion(conn, target, BID, own_only=own_only)
         assert ksb.shared_blocker_guard(conn, target, interval=3600) is None
+
+
+@pytest.mark.parametrize("own_only", [False, True])
+@pytest.mark.parametrize("other_uid", ["v7", "missing"])
+@pytest.mark.parametrize("backfilled,expected", [
+    pytest.param("unblock", False, id="older-unblock-with-later-backfilled-uid-stays-held"),
+    pytest.param("assertion", True, id="older-assertion-with-later-backfilled-uid-releases"),
+])
+def test_backfilled_uid_orders_by_created_at(kanban_home, own_only, other_uid, backfilled, expected):
+    """Sync backfills uid-less rows with a v7 uid stamped at backfill time, not event
+    time: a uid whose second disagrees with created_at must not outrank created_at."""
+    with kbc.connect_closing() as conn:
+        target = _blocked_behind(conn, "target")
+        peer = _blocked_behind(conn, "peer")
+        assert kb.unblock_task(conn, target)
+        conn.execute("ALTER TABLE task_events ADD COLUMN uid TEXT")
+        older = int(time.time()) - 100
+        newer = older + 5
+        backfill_ms = (older + 60) * 1000 + 250     # stamped long after both events
+        consistent = lambda sec, suffix: _event_uid(sec * 1000 + 500, suffix) if other_uid == "v7" else None
+        unblock_at = older if backfilled == "unblock" else newer
+        assert_at = older if backfilled == "assertion" else newer
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET uid=NULL, created_at=?", (older - 10,))
+            conn.execute("UPDATE task_events SET uid=?, created_at=? WHERE task_id=? AND kind='unblocked'",
+                         (_event_uid(backfill_ms, 1) if backfilled == "unblock" else consistent(unblock_at, 1),
+                          unblock_at, target))
+            kb._append_event(conn, target if own_only else peer, "scheduled", {"blocker_id": BID})
+            conn.execute("UPDATE task_events SET uid=?, created_at=? WHERE id=(SELECT MAX(id) FROM task_events)",
+                         (_event_uid(backfill_ms, 2) if backfilled == "assertion" else consistent(assert_at, 2),
+                          assert_at))
+        assert ksb._unblocked_since_assertion(conn, target, BID, own_only=own_only) is expected
+        assert ksb.shared_blocker_guard(conn, target, interval=3600) == (None if expected else ksb.GUARD_REASON)
 
 
 @pytest.mark.parametrize("entry", ["cli", "tool"])
