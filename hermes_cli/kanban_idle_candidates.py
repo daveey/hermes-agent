@@ -1,8 +1,6 @@
 """Memoize structural candidates, never time or process-liveness decisions."""
-from pathlib import Path
 import sqlite3
 
-from hermes_cli import kanban_activity_revision as revision
 from hermes_cli.kanban_blocker_inputs import input_pass
 
 
@@ -14,49 +12,38 @@ def event_candidates(conn: sqlite3.Connection, statuses: tuple[str, ...], kinds:
 
 def candidate_task_ids(conn: sqlite3.Connection, statuses: tuple[str, ...], kinds: tuple[str, ...],
                        *, exclude_statuses: bool = False) -> tuple[str, ...]:
-    """Retain an observer so fresh dispatcher connections share the structural memo.
+    """Ids of the tasks whose status is (or, with ``exclude_statuses``, is not) in ``statuses`` and that carry an
+    event of one of ``kinds``, sorted.
 
-    Caller transactions see their uncommitted writes. File/WAL generation fences
-    belong to the shared reader; no stat-only cache of commit-visible data.
+    [daveey] G2c: a per-task memo (``kanban_task_memo``). The answer for a task reads only its own status and its
+    own events, so a write marks exactly the tasks whose answer can move; only those are re-read. The memo it
+    replaces was keyed on the whole-board revision (plus a BEGIN and ``sqlite_master`` scan per call), which moved
+    on nearly every hub tick. Inside a caller's transaction the answer includes its uncommitted writes and is not
+    stored.
     """
-    from hermes_cli.kanban_reader_retention import reader
+    from hermes_cli import kanban_task_memo as memo
 
-    if not conn.in_transaction:
-        path = conn.execute('PRAGMA database_list').fetchone()[2]
-        if path:
-            try:
-                with reader(Path(path).resolve()) as observer:
-                    return _on_connection(observer, statuses, kinds, exclude_statuses)
-            except (sqlite3.Error, OSError):
-                pass  # use the caller's connection if the optional observer is unavailable
-    return _on_connection(conn, statuses, kinds, exclude_statuses)
-
-
-def _on_connection(conn, statuses, kinds, exclude_statuses=False):
-    stamp = None
-    if not conn.in_transaction and hasattr(conn, '__dict__'):
-        try:
-            stamp = revision.read_key(conn, ('tasks', 'task_events'))
-        except sqlite3.Error:
-            stamp = None  # a failed optimization must not suppress the real query
-    key = (statuses, kinds, exclude_statuses)
-    cache = getattr(conn, '_idle_candidates', {})
-    if stamp is not None and cache.get(key, (None,))[0] == stamp:
-        return cache[key][1]
+    statuses, kinds = tuple(statuses), tuple(kinds)
     operator = 'NOT IN' if exclude_statuses else 'IN'
-    # [daveey] G2: drive from the event-kind index (a handful of rows) rather than probing it once per task in the
-    # status set (~6k done/archived cards on the hub board, ~5 ms a call, 5 calls a tick). Same rows.
-    found = tuple(row[0] for row in conn.execute(
-        f"SELECT t.id FROM tasks t WHERE t.status {operator} ({','.join('?' * len(statuses))}) AND t.id IN "
-        f"(SELECT e.task_id FROM task_events e WHERE e.kind IN ({','.join('?' * len(kinds))}))",
-        (*statuses, *kinds),
-    ).fetchall())
-    if stamp is not None:
-        if len(cache) >= 16:
-            cache.clear()
-        cache[key] = stamp, found
-        conn._idle_candidates = cache
-    return found
+    # Drive from the event-kind index (a handful of rows) rather than probing it once per task in the status set.
+    sql = (f"SELECT t.id FROM tasks t WHERE t.status {operator} ({','.join('?' * len(statuses))}) AND t.id IN "
+           f"(SELECT e.task_id FROM task_events e WHERE e.kind IN ({','.join('?' * len(kinds))}))")
+
+    def full(c):
+        return {row[0]: True for row in c.execute(sql, (*statuses, *kinds)).fetchall()}
+
+    def partial(c, ids):
+        # Driven from the ids (primary key), each probing the (kind, task_id) event index.
+        return {row[0]: True for row in c.execute(
+            f"SELECT t.id FROM tasks t WHERE t.id IN ({','.join('?' * len(ids))}) "
+            f"AND t.status {operator} ({','.join('?' * len(statuses))}) AND EXISTS (SELECT 1 FROM task_events e "
+            f"WHERE e.task_id = t.id AND e.kind IN ({','.join('?' * len(kinds))}))",
+            (*ids, *statuses, *kinds)).fetchall()}
+
+    st = memo.state(f"idle_candidates:{statuses!r}:{kinds!r}:{bool(exclude_statuses)}", conn, full=full,
+                    partial=partial, columns={'tasks': ('status',), 'task_events': ('kind', 'task_id')},
+                    event_kinds=kinds)
+    return st.view('sorted', lambda values: tuple(sorted(values)))
 
 
 @input_pass

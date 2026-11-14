@@ -321,17 +321,26 @@ def foreign_ids(conn: sqlite3.Connection, own: Optional[str] = None) -> set[str]
     if not own:
         return set()
 
-    def scan(c: sqlite3.Connection) -> frozenset[str]:
-        rows = c.execute("SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ?", (own,))
-        return frozenset(r[0] for r in rows.fetchall())
+    sql = "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ?"
 
-    # [daveey] Structural (``created_on`` is a content column, so any change moves the task-table revision):
-    # reuse the scan while the revision holds. It ran ~7 times a tick, a full ``tasks`` scan each (G2).
-    from hermes_cli.kanban_sweep_gate import memo
+    def full(c: sqlite3.Connection) -> dict[str, bool]:
+        return {r[0]: True for r in c.execute(sql, (own,)).fetchall()}
+
+    def partial(c: sqlite3.Connection, ids: list[str]) -> dict[str, bool]:
+        marks = ",".join("?" * len(ids))
+        return {r[0]: True for r in c.execute(f"SELECT id FROM tasks WHERE id IN ({marks}) AND created_on IS NOT NULL "
+                                              "AND created_on != ?", (*ids, own)).fetchall()}
+
+    # [daveey] Structural: a card's ``created_on`` is its own content column, so a change marks that card in the
+    # per-task change cursor. G2c: refresh only the marked cards; the whole-board revision moved on nearly every
+    # hub tick, and the full ``tasks`` scan (~5 ms) ran several times a tick.
+    from hermes_cli import kanban_task_memo as memo
     try:
-        return memo(f"foreign_ids:{own}", conn, scan)
+        st = memo.state("foreign_ids", conn, full=full, partial=partial, extra=own,
+                        columns={"tasks": ("created_on",)})
     except sqlite3.OperationalError:
         return set()
+    return st.view("ids", frozenset)
 
 
 def foreign_copy(conn: sqlite3.Connection, task_id: str) -> bool:

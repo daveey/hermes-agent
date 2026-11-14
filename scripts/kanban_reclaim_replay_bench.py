@@ -2,13 +2,16 @@
 ticks over a COPY of a board in a scratch home, CPU per tick per sweep from ``loop_accounting``.
 
 usage: scripts/hermes-python scripts/kanban_reclaim_replay_bench.py <worktree> <board copy> <ticks>
-           [--churn N | --replay SECONDS] [--blockers N] [--json out] [--profile]
+           [--churn N | --replay SECONDS | --phases] [--blockers N] [--json out] [--profile]
 
 --churn N       before every Nth tick, one content write (a comment), so the board revision moves; 0 = write-free.
 --replay S      replay the copy's own write cadence: tick i writes iff the i-th 15 s bucket of the last S seconds
                 of the board's history had a content event (heartbeats excluded: they never move the revision).
 --blockers N    after the ticks, N dirty-tick passes of ``sweep_shared_blockers`` alone (a comment write before each
                 pass), reported as ``dirty_shared_blockers`` median/min/max CPU ms per pass (G2c).
+--phases        dirty-tick case: instead of whole ticks, <ticks> rounds of (one comment write, then one reclaim-phase
+                entry point: apply_remote_archives, wake_due_continuations, recompute_ready, sweep_shared_blockers),
+                reporting each phase's median CPU per call. Every call sees a moved board revision.
 
 Side effects are stubbed: wake-check probes, the CI sweep, the capability refresh, worker placement (Board),
 spawns (max_spawn=0), signals and subprocesses; any DB path outside the scratch home opens an empty read-only file.
@@ -117,6 +120,44 @@ def tick():
 
 
 tick()  # warm: first tick installs triggers and imports
+if "--phases" in sys.argv:
+    # Dirty-tick case (G2c, t_01a1db079d8d4505): one content write before every round, then each reclaim-phase entry
+    # point alone, CPU per call (``time.process_time``). Matches the G2b replay (t01a1d701_dirty.py), whose revision-
+    # keyed memos missed on every such round.
+    import statistics
+    import types
+    from hermes_cli.kanban_continuation import wake_due_continuations
+    from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
+    from hermes_cli.kanban_owner_archive_relay import apply_remote_archives
+    phases = {
+        "apply_remote_archives": lambda: apply_remote_archives(conn),
+        "wake_due_continuations": lambda: wake_due_continuations(conn),
+        "recompute_ready": lambda: kb.recompute_ready(conn),
+        "sweep_shared_blockers": lambda: sweep_shared_blockers(conn, types.SimpleNamespace()),
+    }
+    for fn in phases.values():  # warm each phase's memos
+        fn()
+    samples: dict = {name: [] for name in phases}
+    for i in range(ticks):
+        for name, fn in phases.items():
+            if t_open:
+                with kb.write_txn(conn):
+                    kb._insert_comment(conn, t_open, "bench", f"dirty {i} {name}", int(time.time()))
+            c = time.process_time()
+            try:
+                fn()
+            except Exception as exc:  # health: allow BLE001 -- a stubbed side effect; the CPU spent still counts
+                print(f"bench: {name}: {exc!r}"[:200], file=sys.stderr)
+            samples[name].append(time.process_time() - c)
+    summary = {"board": os.path.basename(src), "rounds": ticks, "dirty_phase_ms": {
+        name: {"median": round(1000 * statistics.median(s), 3), "min": round(1000 * min(s), 3)}
+        for name, s in samples.items()}}
+    print(json.dumps(summary, indent=1))
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=1)
+    shutil.rmtree(home, ignore_errors=True)
+    sys.exit(0)
 base = {k: dict(v) for k, v in la.counters().items()}
 prof = None
 if "--profile" in sys.argv:
