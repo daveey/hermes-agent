@@ -339,6 +339,36 @@ def test_recover_blob_git_failure_refuses(world, monkeypatch, phase):
         review._recover_blob(checkout, oid.decode("ascii"))
 
 
+def test_recover_blob_zero_exit_wrong_store_identity_refuses(world, monkeypatch):
+    _, checkout = world
+    data = b"\x00\xff\r\n\x80"
+    oid = subprocess.run(["git", "hash-object", "--stdin"], input=data, capture_output=True, check=True).stdout.strip()
+    wrong_oid = b"0" * len(oid)
+    assert wrong_oid != oid
+    monkeypatch.setattr(sync, "gh_cli", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps({
+        "encoding": "base64", "content": base64.b64encode(data).decode("ascii")}), ""))
+    run = subprocess.run
+    phases = []
+
+    def wrong_store_identity(cmd, **kwargs):
+        if "hash-object" not in cmd:
+            return run(cmd, **kwargs)
+        assert kwargs["input"] == data
+        if "-w" in cmd:
+            assert phases == ["hash"]
+            phases.append("store")
+            return subprocess.CompletedProcess(cmd, 0, wrong_oid + b"\n", b"")
+        result = run(cmd, **kwargs)
+        assert result.returncode == 0 and result.stdout.strip() == oid
+        phases.append("hash")
+        return result
+
+    monkeypatch.setattr(review.subprocess, "run", wrong_store_identity)
+    with pytest.raises(review.ClassifyError, match="cannot store"):
+        review._recover_blob(checkout, oid.decode("ascii"))
+    assert phases == ["hash", "store"]
+
+
 # --- Controls ---------------------------------------------------------------------------------------------------
 
 def test_mechanical_sync_lands_without_any_review(world, land_stub):
