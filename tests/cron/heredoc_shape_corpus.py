@@ -158,6 +158,13 @@ REDIRECT_PREFIXES = (
 # Prefixes above that are ordinary words, not redirections: bash runs ./restart.sh only when one
 # is an operand of `bash -s` (elsewhere it is the command word or the script operand).
 REDIRECT_PLAIN_WORDS = frozenset({"{a[x", "{a[1 2]}"})
+# Substitution-bearing words exercise the same independent places/wrappers/nestings/targets.
+SUBSTITUTION_PREFIXES = (
+    '2>$(echo /dev/null)', '2>/dev/$(echo null)', '2>&$((1+1))',
+    '{a[$((1+1))]}>/dev/null', '{a[$(echo 1)]}>/dev/null',
+    '{a[`echo 1`]}>/dev/null', '2>`echo /dev/null`',
+    '2>$(echo "$(echo /dev/null)")',
+)
 REDIRECT_PLACES = ("lead", "wrapped", "operand")
 REDIRECT_TARGETS = {
     "operand": ("bash", "./restart.sh"),
@@ -314,7 +321,8 @@ def generate_full_corpus() -> list[Case]:
         cases.setdefault(key, Case(key, command, "bash", (), "sink", wrapper, nesting,
                                    f"{consumer}-{line}", sink=sink))
     for prefix, place, wrapper, nesting, target in itertools.product(
-            REDIRECT_PREFIXES, REDIRECT_PLACES, WRAPPERS, REDIRECT_NESTINGS, REDIRECT_TARGETS):
+            (*REDIRECT_PREFIXES, *SUBSTITUTION_PREFIXES), REDIRECT_PLACES, WRAPPERS,
+            REDIRECT_NESTINGS, REDIRECT_TARGETS):
         command = build_redirect_command(prefix, place, wrapper, nesting, target)
         key = hashlib.sha1(command.encode()).hexdigest()[:16]
         cases.setdefault(key, Case(key, command, "bash", (prefix,), "redirect", wrapper, nesting,

@@ -13,7 +13,7 @@ import itertools
 import logging
 import os
 import re
-import shlex
+import shlex  # unused here; tests reach shlex.shlex through lifecycle_guard.shlex
 import stat
 import sys
 from pathlib import Path
@@ -22,16 +22,14 @@ from typing import Callable, Iterator, Optional
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import (
-    heredoc_scripts, iter_script_segment_contexts, join_continued_lines,
-    protect_redirection_ampersands, restore_redirection_ampersands)
+    heredoc_scripts, iter_script_segment_contexts, join_continued_lines)
 from cron.lifecycle_guard_words import redirection_parts, tokenize_redirections
-from cron.lifecycle_guard_lines import (  # newlines outside quotes, word-start `#` comments
-    _split_logical_lines, join_line_continuations, strip_shell_comments,
-)
-
+from cron.lifecycle_guard_lines import join_line_continuations
 # Lines a printer may print, walked as the sink's command (moved out for FILE_LINES).
 from cron.lifecycle_guard_printf import printed_argument_lines as _printed_argument_lines
 from cron.lifecycle_guard_printf import with_escapes_decoded as _with_escapes_decoded
+from cron.lifecycle_guard_substitutions import SubstitutionNestingLimit
+from cron.lifecycle_guard_tokens import _iter_command_token_lists, _shlex_tokens
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
 
@@ -713,16 +711,6 @@ def _refuse_unreadable(budget: _LifecycleScanBudget, path: Path, reason: str) ->
 
 # --- shell tokenization -----------------------------------------------------------------------
 
-def _shlex_tokens(line: str) -> list[str]:
-    """POSIX-tokenize a shell line; only word-start `#` comments. A redirection's
-    ``&`` stays in its word, never a background operator. Raises ValueError."""
-    lexer = shlex.shlex(protect_redirection_ampersands(strip_shell_comments(line)),
-                        posix=True, punctuation_chars=";&|()")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    return [restore_redirection_ampersands(token) for token in lexer]
-
-
 def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterator[list[str]]:
     """Yield non-empty runs of *tokens* between control-operator tokens; with *keep_controls* each
     control token is also yielded as its own segment so the line can be rebuilt in order."""
@@ -738,23 +726,6 @@ def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterat
         segment.append(token)
     if segment:
         yield segment
-
-
-def _iter_command_token_lists(command: str) -> Iterator[list[str]]:
-    """Yield the shell tokens of each logical line; a line shlex rejects (unbalanced quotes) falls
-    back to per-physical-line tokenization. An unquoted ``<``/``>`` glued to a word starts a word
-    of its own (``python3 -<f.py``), as in the shell."""
-    for line in _split_logical_lines(strip_shell_comments(command).replace("\\\n", "")):
-        try:
-            tokens = tokenize_redirections(line, _shlex_tokens, _REDIRECTION)
-        except ValueError:
-            for physical_line in line.splitlines():
-                try:
-                    yield tokenize_redirections(physical_line, _shlex_tokens, _REDIRECTION)
-                except ValueError:
-                    continue
-            continue
-        yield tokens
 
 
 def _iter_command_segments(command: str) -> Iterator[list[str]]:
@@ -1814,6 +1785,9 @@ def scan_gateway_lifecycle(
             read_remote_script=read_remote_script, source=source,
         )
         return unsafe, budget.refusal if unsafe else None
+    except SubstitutionNestingLimit:
+        # Retrying the direct scanner would hit the same parser limit again.
+        return True, 'the substitution nesting limit was reached'
     except Exception:
         logger.warning(
             "lifecycle guard referenced-script walk failed; "

@@ -903,12 +903,13 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
     # Card t_01a1d5f876488f96: every redirection word at every place x target, under every
     # wrapper and nesting form.
     redirect = [case for case in cases if case.s_position == "redirect"]
+    prefixes = (*corpus.REDIRECT_PREFIXES, *corpus.SUBSTITUTION_PREFIXES)
     assert {(case.words[0], case.place, case.payload) for case in redirect} == set(
-        itertools.product(corpus.REDIRECT_PREFIXES, corpus.REDIRECT_PLACES, corpus.REDIRECT_TARGETS))
+        itertools.product(prefixes, corpus.REDIRECT_PLACES, corpus.REDIRECT_TARGETS))
     assert {(case.words[0], case.wrapper) for case in redirect} == set(
-        itertools.product(corpus.REDIRECT_PREFIXES, corpus.WRAPPERS))
+        itertools.product((*corpus.REDIRECT_PREFIXES, *corpus.SUBSTITUTION_PREFIXES), corpus.WRAPPERS))
     assert {(case.words[0], case.nesting) for case in redirect} == set(
-        itertools.product(corpus.REDIRECT_PREFIXES, corpus.REDIRECT_NESTINGS))
+        itertools.product((*corpus.REDIRECT_PREFIXES, *corpus.SUBSTITUTION_PREFIXES), corpus.REDIRECT_NESTINGS))
 
     started = time.monotonic()
     results = corpus.evaluate(tmp_path, cases)
