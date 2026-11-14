@@ -95,14 +95,19 @@ def _snapshots(provider: str) -> list[tuple[str, Any]]:
 
 
 def read_pool(provider: str, now: float) -> list[lp.Reading]:
-    """This moment's account-wide usage windows for every readable account of ``provider``."""
+    """This moment's account-wide usage windows for every readable account of ``provider``. An account whose read
+    succeeded with no account window at all (``/api/oauth/usage`` reports an idle or brand-new account's
+    ``five_hour`` and ``seven_day`` as ``null``, so the snapshot is not even ``available``) reads as two fresh
+    windows, 0% with no reset: :func:`kanban_llm_pacing._sustainable` counts each as a full window of headroom
+    (PR #3058 review). A failed read (None) or an unavailable one stays unknown."""
     readings = []
     for label, snapshot in _snapshots(provider):
-        if snapshot is None or not snapshot.available:
+        if snapshot is None or snapshot.unavailable_reason:
             continue
-        for window in snapshot.windows:
-            if window.scope != "account" or window.used_percent is None:
-                continue
+        account = [w for w in snapshot.windows if w.scope == "account" and w.used_percent is not None]
+        if not account:
+            readings += [lp.Reading(now, label, kind, 0.0, None) for kind in (lp.FIVE_HOUR, lp.SEVEN_DAY)]
+        for window in account:
             reset = window.reset_at.timestamp() if window.reset_at is not None else None
             readings.append(lp.Reading(now, label, lp.window_kind(window.label), float(window.used_percent), reset))
     return readings
