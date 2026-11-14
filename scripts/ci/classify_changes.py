@@ -384,6 +384,7 @@ _UPDATE_PIPELINE = (
     "hermes_cli/venv_sync.py",  # completion obligation + launch-time tail
     "hermes_cli/_launch_template.py",  # venv_sync's relaunch prefix text
     "hermes_cli/launch_probe.py",  # venv_sync's bounded launch-time currency probe
+    "hermes_cli/launch_malloc.py",  # venv_sync's launch-time allocator environment
     "hermes_cli/source_",  # source_completion/_build/_releases/_check/_stamp
     "hermes_cli/_launchers.py",
     "hermes_cli/release_channels.py",
