@@ -23,7 +23,7 @@ from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_sha
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import (
     heredoc_scripts, iter_script_segment_contexts, join_continued_lines,
-    protect_redirection_ampersands, restore_redirection_ampersands, split_glued_redirections)
+    protect_redirection_ampersands, restore_redirection_ampersands)
 from cron.lifecycle_guard_words import redirection_parts, tokenize_redirections
 from cron.lifecycle_guard_lines import (  # newlines outside quotes, word-start `#` comments
     _split_logical_lines, join_line_continuations, strip_shell_comments,
