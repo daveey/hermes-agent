@@ -521,13 +521,18 @@ def launch_handoff_env() -> dict[str, str]:
     return {LAUNCH_HANDOFF_ENV: f"{verdict}:{os.getpid()}:{root}"}
 
 
-def exec_launch(python: Path, command: list[str]) -> None:
+def exec_launch(python: Path, command: list[str], argv: list[str] | None = None) -> None:
     """POSIX: exec into the managed interpreter, handing it this launch's verdict.
 
     Only returns by raising. A failed exec keeps running in this process, so the verdict is
     withdrawn first: it must not reach subprocesses or a later same-pid re-exec (which would
     then skip its own currency check)."""
+    import sys
+
+    from hermes_cli.launch_malloc import launch_env
+
     handoff = launch_handoff_env()
+    handoff.update(launch_env(argv or [], os.environ, sys.platform))
     os.environ.update(handoff)
     try:
         os.execv(str(python), command)

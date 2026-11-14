@@ -634,7 +634,11 @@ if not _pm_repair:
                 import subprocess
 
                 raise RelaunchExit(subprocess.call(_command))
-            exec_launch(_launch_python, _command)
+            exec_launch(_launch_python, _command, sys.argv[1:])
+        else:
+            from hermes_cli import launch_malloc
+
+            launch_malloc.ensure(sys.argv[1:])
     except Exception as exc:
         if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
             print(f"hermes: {message}", file=sys.stderr)

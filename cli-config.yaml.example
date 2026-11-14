@@ -44,6 +44,10 @@ database:
 # process (Linux/glibc only; child commands keep glibc's default). An explicit
 # MALLOC_ARENA_MAX (exported or in .env) wins. 0, false, or null = glibc default
 # (8 per CPU core). Default: 4.
+# On macOS, gateway / serve / dashboard start with MallocSpaceEfficient=1;
+# child commands do not inherit Hermes' setting. Export
+# HERMES_MALLOC_SPACE_EFFICIENT=0 to opt out (environment only: config is not
+# loaded at exec time). An operator-exported MallocSpaceEfficient value wins.
 runtime:
   nofile_soft_limit: 4096
   malloc_arena_max: 4
