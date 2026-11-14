@@ -299,6 +299,14 @@ def test_nonfailure_postmerge_checks_do_not_claim_main_is_red(evidence, conclusi
     assert receipt["post_merge_checks"][0]["conclusion"] == conclusion
 
 
+@pytest.mark.parametrize("conclusion", ["failure", "startup_failure", "timed_out", "action_required"])
+def test_red_postmerge_conclusions_claim_main_is_red(evidence, conclusion):
+    # startup_failure: the workflow could not start on the landed sha (red, not cancelled).
+    evidence["runs"][0]["conclusion"] = conclusion
+    receipt = collect()
+    assert receipt["ok"] and "ci-main-watch" in receipt["main_health"]["detail"]
+
+
 def test_completed_landing_proof_survives_github_expiry(evidence, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect

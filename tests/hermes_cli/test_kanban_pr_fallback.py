@@ -17,6 +17,7 @@ def evidence(monkeypatch):
                 "headRefOid": SHA, "baseRefName": "main",
                 "state": "MERGED" if state["merged"] else "OPEN",
                 "mergedAt": "2026-11-02T13:00:00Z",
+                "mergeCommit": {"oid": state["landed"]} if state.get("landed") else None,
                 "baseRef": {"branchProtectionRule": None}}}}}
         if "/rules/" in endpoint:
             return [[]]
