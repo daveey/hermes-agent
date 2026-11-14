@@ -80,6 +80,18 @@ def test_printed_and_herestring_writes_are_scanned(tmp_path, big, template):
     "rev > F <<'R'\nREVERSED\nR\nbash F\n",
     "cat > F <<R\n$(printf '%s' 'BODY')\nR\nbash F\n",
     "base64 -d > F <<< B64; bash F\n",
+    # A redirection with no command word, or a persistent `exec` redirection (review of #3001).
+    "(echo 'BODY') > F; bash F\n",
+    "{ echo 'BODY'; } > F; bash F\n",
+    "exec > F; echo 'BODY'; exec > /dev/null; bash F\n",
+    "exec 3>F; echo 'BODY' >&3; exec 3>&-; bash F\n",
+    "if true; then echo 'BODY'; fi > F; bash F\n",
+    # A generated file copied or moved before it runs.
+    "cat > G <<'R'\nBODY\nR\ncp G F; bash F\n",
+    "cat > G <<'R'\nBODY\nR\nmv G F && bash F\n",
+    "cat > G <<'R'\nBODY\nR\ncp G sub/; bash sub/G\n",
+    "cat > G <<'R'\nBODY\nR\ncp -t sub G; bash sub/G\n",
+    "cat > G <<'R'\nBODY\nR\nln -s G F; bash F\n",
 ])
 def test_unpredictable_writer_then_execute_fails_closed(tmp_path, big, template):
     command = (template.replace("REVERSED", big[::-1]).replace("BODY", big)
@@ -107,6 +119,11 @@ def test_generated_lifecycle_command_is_refused(tmp_path, transport):
     "python3 -c 'print(1)' > gen.py; python3 gen.py\n",
     # `bash <> F` reads F as its program; it is not a write.
     "printf 'echo hi\\n' > F; bash <> F\n",
+    # A redirection or copy whose target is never executed.
+    "(echo hi) > out.log; exec 2> err.log; cat out.log\n",
+    "cp a.txt b.txt; bash run.sh\n",
+    # Known content after a prefix redirection is still read as written.
+    "> F echo 'echo hi'; bash F\n",
 ])
 def test_inert_or_benign_generated_files_are_allowed(tmp_path, command):
     unsafe, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))

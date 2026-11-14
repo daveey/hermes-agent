@@ -8,8 +8,10 @@ recorded here with what it writes, and the walk scans that text wherever it runs
 - ``cat``/``tee`` fed by a heredoc or here-string: the body (a quoted heredoc verbatim; an
   unquoted one whose body holds a substitution writes output nobody can predict, so unknown);
 - ``echo``/``printf`` with literal arguments: the lines they may print (escapes decoded);
-- any other writer (``curl … > F``, ``python3 gen.py > F``, ``cat a b > F``, stderr, ``3<> F``):
-  unknown (``<> F`` on stdin is input, as in ``bash <> F``). Executing a path with an unknown
+- any other writer (``curl … > F``, ``python3 gen.py > F``, ``cat a b > F``, stderr, ``3<> F``,
+  a redirection with no command word such as ``(echo P) > F`` or ``exec > F`` / ``exec 3>F``,
+  and the destination of ``cp``/``mv``/``ln``/``install``): unknown (``<> F`` on stdin is input,
+  as in ``bash <> F``). Executing a path with an unknown
   write fails closed; mentioning it does not, and a Python interpreter's file never fails closed
   (as everywhere in the walk).
 
@@ -21,6 +23,7 @@ lexical model the rest of the walk uses.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -48,6 +51,34 @@ UNKNOWN: None = None
 _DYNAMIC_MARKS = ("$(", "`", "<(", ">(")
 _STDIN_COPIERS = frozenset({"cat", "tee"})
 _PRINTERS = frozenset({"echo", "printf"})
+# File copiers: what lands at the destination is another file's content, so it is unknown here.
+_COPIERS = frozenset({"cp", "mv", "ln", "install"})
+_COPIER_MENTION = re.compile(r"\b(?:cp|mv|ln|install)\b")
+
+
+def _copier_targets(operands: list[str]) -> list[str]:
+    """Paths a ``cp``/``mv``/``ln``/``install`` may create: ``DIR/<basename>`` of each source with
+    ``-t DIR``/``--target-directory=DIR``, else the last operand and ``<last>/<basename>`` of each
+    other operand (``cp G sub/``). An option value read as an operand only adds paths."""
+    paths: list[str] = []
+    directory: Optional[str] = None
+    words = iter(operands)
+    for word in words:
+        if word in ("-t", "--target-directory"):
+            directory = next(words, None)
+        elif word.startswith("--target-directory="):
+            directory = word.split("=", 1)[1]
+        elif not word.startswith("-"):
+            paths.append(word)
+    if directory is None:
+        if not paths:
+            return []
+        directory = paths.pop()
+        targets = [directory]
+    else:
+        targets = []
+    base = directory.rstrip("/") or directory
+    return targets + [f"{base}/{Path(source).name}" for source in paths if Path(source).name]
 
 
 def _owner_has_unquoted_heredoc(owner: str) -> bool:
@@ -84,19 +115,35 @@ def _opens_heredoc(word: str) -> bool:
     return match is not None and match.group(2) in ("<<", "<<-")
 
 
-def _writes(view: list[str], index: int) -> tuple[list[str], list[str], dict]:
-    """``(stdout targets, other written targets, inputs)`` of the command at *index*."""
+def _command_word(view: list[str], index: int) -> Optional[int]:
+    """Index of the command word at or after *index*, skipping redirections there; ``None`` when
+    only redirections follow. ``(echo P) > F`` leaves the view ``['>', 'F']`` and ``exec > F``
+    (peeled to the ``>``) has no command at all: their writer is unknown (``exec`` sends all
+    later output of the shell to F)."""
+    while index < len(view):
+        match = _REDIRECTION.match(view[index])
+        if match is None:
+            return index
+        index += 1 if match.group(3) else 2
+    return None
+
+
+def _writes(view: list[str], index: Optional[int]) -> tuple[list[str], list[str], dict]:
+    """``(stdout targets, other written targets, inputs)`` of the command at *index* (``None``:
+    a bare redirection). Every redirection of the view counts, before the command word too
+    (``> F echo``, ``exec 3>F``); only words after the command are its operands."""
     stdout: list[str] = []
     other: list[str] = []
     inputs = {"heredoc": False, "herestrings": [], "stdin_file": False, "operands": []}
-    words = iter(view[index + 1:])
-    for word in words:
+    words = iter(enumerate(view))
+    for position, word in words:
         match = _REDIRECTION.match(word)
         if match is None:
-            inputs["operands"].append(word)
+            if index is not None and position > index:
+                inputs["operands"].append(word)
             continue
         fd, operator, target = match.groups()
-        target = target or next(words, "")
+        target = target or next(words, (None, ""))[1]
         if operator in ("<<", "<<-"):
             inputs["heredoc"] = True
         elif operator == "<<<":
@@ -119,11 +166,14 @@ def _view_writes(
     index = _executed_command_index(view)
     if index is None:
         return
-    name = _executable_name(view[index])
+    index = _command_word(view, index)
+    name = _executable_name(view[index]) if index is not None else ""
     stdout, other, inputs = _writes(view, index)
     targets = list(stdout)
     if name == "tee":
         targets += [word for word in inputs["operands"] if not word.startswith("-")]
+    if name in _COPIERS:
+        other += _copier_targets(inputs["operands"])
     if not targets and not other:
         return
     contents: list[Optional[str]] = [UNKNOWN]
@@ -152,7 +202,7 @@ def note_generated_scripts(budget: _LifecycleScanBudget, command: str, cwd: Opti
     """Record in *budget* every file *command* writes and what it writes (see module docstring).
     Shared across the whole walk, so a generated script that runs another one the root command
     generated is followed too."""
-    if ">" not in command and "tee" not in command:
+    if ">" not in command and "tee" not in command and not _COPIER_MENTION.search(command):
         return  # nothing written: skip a second tokenization
     bodies = _bodies_by_view(command) if "<<" in command else {}
     for view in _iter_command_segment_views(command):
