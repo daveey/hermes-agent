@@ -1,6 +1,7 @@
 """Kept read connections for Kanban board readers (``kanban_kept_reader``). [daveey]
 
-Change-proportional design, card I: a read caller keeps one connection per (thread, board file), so
+Change-proportional design, card I: read callers share a process-wide pool of kept connections (at most
+``MAX_PER_BOARD`` per board file, t_01a1db28414ae096), so
 ``kanban_generation.prepare_connection`` (and the OFD lock guard it applies) runs once per kept connection, and
 the connection is reopened whenever the board file, its WAL generation or its init state changes under it.
 """
@@ -239,45 +240,48 @@ def _is_closed(conn: sqlite3.Connection) -> bool:
     return False
 
 
-def _thread_map() -> dict:
-    return dict(kept._mine())
+def _kept_keys() -> list[str]:
+    """Board keys of the pool's open entries, least recently borrowed first."""
+    return [e.key for e in list(kept._registry) if not e.closed]
 
 
-def test_cap_eviction_skips_a_borrowed_entry_and_closes_the_idle_one(board):
-    """RED on main: opening ``MAX_PER_THREAD`` other boards inside a borrow of board A popped A (the oldest) from
-    the thread map although it was borrowed; A was then never closed explicitly (left to GC) and was no longer
-    reachable by recovery or ``close_all``. The cap must evict the oldest IDLE entry, close it, and keep A."""
-    others = _boards(board, kept.MAX_PER_THREAD)
+def test_cap_eviction_skips_a_borrowed_entry_and_closes_the_idle_one(board, monkeypatch):
+    """Opening ``MAX_KEPT`` other boards inside a borrow of board A must not evict A (the least recently borrowed,
+    but borrowed): the cap closes the least recently borrowed IDLE entry and keeps A."""
+    monkeypatch.setattr(kept, "MAX_KEPT", 4)
+    others = _boards(board, kept.MAX_KEPT)
     key_a = gen._resolved(str(board))
     with kept.reading(board) as a:
         opened = []
         for path in others:
             with kept.reading(path) as conn:
                 opened.append(conn)
-        assert key_a in _thread_map(), "a borrowed entry was evicted from the thread map"
+        assert key_a in _kept_keys(), "a borrowed entry was evicted from the pool"
         assert a.execute("SELECT 1").fetchone()[0] == 1
     assert _is_closed(opened[0]), "the evicted idle connection was left to GC instead of closed"
     assert all(not _is_closed(c) for c in opened[1:])
-    assert len(_thread_map()) == kept.MAX_PER_THREAD
+    assert len(_kept_keys()) == kept.MAX_KEPT
     with kept.reading(board) as again:
         assert again is a  # still kept, reachable by close_all/recovery
-    assert kept.close_all() == kept.MAX_PER_THREAD
+    assert kept.close_all() == kept.MAX_KEPT
     assert _is_closed(a)
 
 
-def test_cap_overflow_with_every_entry_borrowed_closes_the_evicted_one_on_exit(board):
-    """Every kept entry borrowed (nested borrows of MAX_PER_THREAD + 1 boards): the oldest is detached from the map
-    and its connection is closed when its own borrow exits, not leaked."""
-    others = _boards(board, kept.MAX_PER_THREAD)
+def test_cap_overflow_with_every_entry_borrowed_closes_the_evicted_one_on_exit(board, monkeypatch):
+    """Every kept entry borrowed (nested borrows of MAX_KEPT + 1 boards): the newest is not kept, and its
+    connection is closed when its own borrow exits, not leaked; no borrowed entry is closed under its borrower."""
+    monkeypatch.setattr(kept, "MAX_KEPT", 4)
+    others = _boards(board, kept.MAX_KEPT)
     with contextlib.ExitStack() as stack:
         a = stack.enter_context(kept.reading(board))
-        for path in others:
-            stack.enter_context(kept.reading(path))
-        assert len(_thread_map()) == kept.MAX_PER_THREAD
-        assert gen._resolved(str(board)) not in _thread_map()
-        assert a.execute("SELECT 1").fetchone()[0] == 1  # never closed under its borrower
-    assert _is_closed(a)
-    assert len(_thread_map()) == kept.MAX_PER_THREAD
+        conns = [stack.enter_context(kept.reading(path)) for path in others]
+        assert len(_kept_keys()) == kept.MAX_KEPT
+        assert gen._resolved(str(others[-1])) not in _kept_keys()
+        assert gen._resolved(str(board)) in _kept_keys()
+        assert all(c.execute("SELECT 1").fetchone()[0] == 1 for c in (a, *conns))  # never closed under a borrower
+    assert _is_closed(conns[-1])
+    assert not _is_closed(a)
+    assert len(_kept_keys()) == kept.MAX_KEPT
 
 
 def test_sqlite_error_in_body_drops_the_connection(board):
@@ -289,7 +293,9 @@ def test_sqlite_error_in_body_drops_the_connection(board):
         assert conn is not first
 
 
-def test_exited_thread_connections_are_closed_by_the_next_borrow(board):
+def test_exited_thread_connections_stay_in_the_pool_and_close_all_closes_them(board):
+    """A kept connection outlives the thread that opened it (it belongs to the pool), and ``close_all`` on another
+    thread closes it."""
     got: dict = {}
 
     def other():
@@ -301,7 +307,84 @@ def test_exited_thread_connections_are_closed_by_the_next_borrow(board):
     worker.join(10)
     import gc
     gc.collect()
-    with kept.reading():
-        pass
+    with kept.reading() as conn:
+        assert conn is got["conn"]
+    assert kept.close_all() == 1
     with pytest.raises(sqlite3.ProgrammingError):
         got["conn"].execute("SELECT 1")
+
+
+def test_a_failed_kept_open_releases_its_board_slot(board, monkeypatch):
+    """An open that raises must give its ``MAX_PER_BOARD`` slot back, or the board degrades to per-call opens."""
+    real = kept._open
+
+    def failing(*a, **kw):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(kept, "_open", failing)
+    for _ in range(kept.MAX_PER_BOARD):
+        with pytest.raises(sqlite3.OperationalError):
+            with kept.reading():
+                pass
+    monkeypatch.setattr(kept, "_open", real)
+    assert kept._opening == {}
+    opens = kept.stats["opens"]
+    with kept.reading() as conn:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    assert kept.stats["opens"] == opens + 1
+
+
+def test_an_unkeepable_open_releases_its_board_slot(board, monkeypatch):
+    """A fenced or read-only-schema open is per-call; its ``MAX_PER_BOARD`` slot must come back."""
+    real = kept._open
+    plain: list = []
+
+    def unkeepable(path, key, board_slug):
+        conn = kept._plain(path, board_slug)
+        plain.append(conn)
+        return conn, None
+
+    monkeypatch.setattr(kept, "_open", unkeepable)
+    for _ in range(kept.MAX_PER_BOARD):
+        with kept.reading() as conn:
+            assert conn.execute("SELECT 1").fetchone()[0] == 1
+    assert all(_is_closed(c) for c in plain)
+    monkeypatch.setattr(kept, "_open", real)
+    assert kept._opening == {}
+    opens = kept.stats["opens"]
+    with kept.reading() as conn:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    assert kept.stats["opens"] == opens + 1
+
+
+def test_an_open_in_flight_counts_toward_max_per_board(board, monkeypatch):
+    """Two threads reaching an empty board at once must not both keep a connection past MAX_PER_BOARD."""
+    monkeypatch.setattr(kept, "MAX_PER_BOARD", 1)
+    real = kept._open
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(*a, **kw):
+        entered.set()
+        assert release.wait(10)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(kept, "_open", slow)
+
+    def first():
+        with kept.reading() as conn:
+            conn.execute("SELECT 1")
+
+    worker = threading.Thread(target=first)
+    worker.start()
+    try:
+        assert entered.wait(10)
+        monkeypatch.setattr(kept, "_open", real)
+        fallbacks = kept.stats["fallbacks"]
+        with kept.reading() as conn:  # the first open is still in flight: this borrow is per-call
+            assert conn.execute("SELECT 1").fetchone()[0] == 1
+        assert kept.stats["fallbacks"] == fallbacks + 1
+        assert _is_closed(conn)
+    finally:
+        release.set()
+        worker.join(10)
+    assert len(_kept_keys()) == 1

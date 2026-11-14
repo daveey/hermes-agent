@@ -1,7 +1,7 @@
 """Close this process's kept handles on boards whose files were removed. [daveey]
 
 Several process-wide caches keep a connection (or a raw fd) per board file and revalidate it only when that same
-path is read again: the sync loop's ``BoardWatch``, the shared ``cached_ro`` readers, the per-thread
+path is read again: the sync loop's ``BoardWatch``, the shared ``cached_ro`` readers, the pooled
 ``kanban_kept_reader`` connections and ``sqlite_safe_read``'s pread fds. Once a whole board directory is removed,
 nothing reads that path again, so the kept handle pinned the deleted ``kanban.db``, ``-wal`` and ``-shm`` inodes
 until the process exited (hermes-hub 2026-11-13: two gateways held the removed probe board

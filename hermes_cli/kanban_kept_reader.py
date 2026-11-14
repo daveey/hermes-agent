@@ -1,11 +1,18 @@
-"""Thread-local kept read connections for Kanban board read callers. [daveey]
+"""Process-wide pool of kept read connections for Kanban board read callers. [daveey]
 
 A ``connect_closing`` open of a board costs a realpath, the board lifecycle lock, generation recovery, the
 SQLite open, eight PRAGMAs, the OFD lock guard (``kanban_lockguard._apply``, whose fd-table scan grows with every
 descriptor the process holds) and ``kanban_generation.prepare_connection``, and the close undoes it all. Loops that
 only read paid that on every pass: 11.4% of the hub gateway's samples were connection opens (t_01a1d563324d7e8e
-card I). :func:`reading` keeps one connection per (thread, board file) instead, so ``prepare_connection`` and the
-guard run once per kept connection, not once per read.
+card I). :func:`reading` keeps connections instead, so ``prepare_connection`` and the guard run once per kept
+connection, not once per read.
+
+Kept connections belong to the process, not to a thread: at most ``MAX_PER_BOARD`` per board file and
+``MAX_KEPT`` in total (past it the least recently borrowed idle one is closed). Kept per (thread, board), the
+gateway's never-exiting executor threads each ended up holding one connection to every board (daveey-mini
+2026-11-14: 12 threads x 4 boards = 48 connections, ~0.9 MB each, t_01a1db28414ae096). A borrow takes an idle
+entry of its board without waiting; when every entry of the board is borrowed it gets an ordinary per-call
+connection, closed on exit.
 
 A kept connection is handed out only while it still reads the live board. Before every borrow it is checked
 against, and reopened through :func:`kanban_db_connect.connect` on any change of:
@@ -17,15 +24,14 @@ against, and reopened through :func:`kanban_db_connect.connect` on any change of
   re-runs the init path) and the generation's poison flag;
 - the connection itself (closed by generation recovery: ``kanban_generation.forget`` drops it).
 
-Generation recovery in another thread must be able to retire an idle kept connection, or a stale one parked on an
-idle thread would refuse every other thread's open (``DeletedWalGenerationError``). So kept connections are opened
-with ``check_same_thread=False`` and registered with ``kanban_generation.register_reader_cache``; a borrowed one is
-never closed under its borrower (recovery is told to retry, as for ``kanban_session_activity``'s cache).
+Generation recovery must be able to retire an idle kept connection, or a stale one would refuse every other
+thread's open (``DeletedWalGenerationError``). So kept connections are opened with ``check_same_thread=False`` and
+registered with ``kanban_generation.register_reader_cache``; a borrowed one is never closed under its borrower
+(recovery is told to retry, as for ``kanban_session_activity``'s cache).
 
 Kept connections are ``PRAGMA query_only``: a caller that writes through one fails loudly instead of
 committing through a shared handle. A body that leaves a transaction open, or raises ``sqlite3.Error``, loses its
-connection. A nested borrow of the same board on one thread, a fenced (delegated) board and a read-only-schema
-board get an ordinary per-call connection.
+connection. A fenced (delegated) board and a read-only-schema board get an ordinary per-call connection.
 
 The lock guard's fd scan itself is untouched (design C14): it is a corruption guard, and fewer opens is the only
 saving claimed for it here.
@@ -36,60 +42,39 @@ import contextlib
 import os
 import sqlite3
 import threading
-import weakref
 from collections import OrderedDict
 from pathlib import Path
 from typing import Iterator, Optional
 
 from hermes_cli import kanban_generation as _gen
 
-# Boards one thread keeps at once; past this the oldest idle one is closed (each holds db + -wal + -shm fds).
-# A borrowed entry is never evicted under its borrower: if every older entry is borrowed, the oldest is detached
-# and closed by its own borrow's exit.
-MAX_PER_THREAD = 16
+# Kept connections per board file. Further concurrent borrowers of one board get a per-call connection.
+MAX_PER_BOARD = 2
+# Kept connections in total (each holds db + -wal + -shm fds and ~1 MB of schema and cache); past this the least
+# recently borrowed idle one is closed. A borrowed entry is never closed under its borrower: when every other entry
+# is borrowed, the new one is not kept and its own borrow's exit closes it.
+MAX_KEPT = 32
 
 
 class _Entry:
-    __slots__ = ("__weakref__", "closed", "conn", "ident", "key", "lock")
+    __slots__ = ("closed", "conn", "ident", "key", "lock")
 
     def __init__(self, key: str, conn: sqlite3.Connection, ident: tuple[int, int]) -> None:
         self.key = key
         self.conn = conn
         self.ident = ident
-        self.lock = threading.Lock()  # held while borrowed; never re-entered (a nested borrow gets its own conn)
+        self.lock = threading.Lock()  # held while borrowed; never waited on (a busy entry is skipped)
         self.closed = False
 
 
-_tls = threading.local()
-_registry: weakref.WeakSet[_Entry] = weakref.WeakSet()
+# Every kept entry, least recently borrowed first.
+_registry: OrderedDict[_Entry, None] = OrderedDict()
 _registry_lock = threading.Lock()  # map operations only: never held across SQL, a close or another lock
-# Entries of exited threads: closed by the next borrow on a live thread, never from a finalizer (a close takes the
-# board lifecycle lock, and a finalizer can run on any thread while that thread holds another).
-_orphans: list[_Entry] = []
+# Kept opens in flight per board, so concurrent borrowers never keep more than MAX_PER_BOARD.
+_opening: dict[str, int] = {}
 
 # Observability for tests and P1 readback: opens = kept connections opened, reuses = borrows served warm.
 stats = {"opens": 0, "reuses": 0, "reopens": 0, "fallbacks": 0}
-
-
-def _orphan(entries: OrderedDict[str, _Entry]) -> None:
-    with _registry_lock:
-        _orphans.extend(entries.values())
-    entries.clear()
-
-
-class _ThreadEntries:
-    """Per-thread map; when the thread exits its entries move to ``_orphans``."""
-
-    def __init__(self) -> None:
-        self.entries: OrderedDict[str, _Entry] = OrderedDict()
-        weakref.finalize(self, _orphan, self.entries)
-
-
-def _mine() -> OrderedDict[str, _Entry]:
-    holder = getattr(_tls, "holder", None)
-    if holder is None:
-        holder = _tls.holder = _ThreadEntries()
-    return holder.entries
 
 
 def _close(entry: _Entry) -> None:
@@ -98,22 +83,9 @@ def _close(entry: _Entry) -> None:
         return
     entry.closed = True
     with _registry_lock:
-        _registry.discard(entry)
+        _registry.pop(entry, None)
     with contextlib.suppress(Exception):
         entry.conn.close()
-
-
-def _drain_orphans() -> None:
-    if not _orphans:
-        return
-    with _registry_lock:
-        dead, _orphans[:] = list(_orphans), []
-    for entry in dead:
-        if entry.lock.acquire(blocking=False):
-            try:
-                _close(entry)
-            finally:
-                entry.lock.release()
 
 
 def _file_identity(path: str) -> Optional[tuple[int, int]]:
@@ -139,7 +111,7 @@ def _still_live(entry: _Entry) -> bool:
 
 
 def _evict(path: str) -> None:
-    """``kanban_generation.recover`` hook: retire every idle kept connection to *path*, from any thread."""
+    """``kanban_generation.recover`` hook: retire every idle kept connection to *path*."""
     with _registry_lock:
         entries = [e for e in _registry if e.key == path and not e.closed]
     for entry in entries:
@@ -180,47 +152,80 @@ def _open(path: Path, key: str, board: Optional[str]) -> tuple[sqlite3.Connectio
     return conn, _Entry(key, conn, before)
 
 
+def _borrow_idle(key: str) -> Optional[_Entry]:
+    """Take an idle kept entry of *key* (its lock acquired), least recently borrowed first; never waits."""
+    with _registry_lock:
+        candidates = [e for e in _registry if e.key == key and not e.closed]
+    for entry in candidates:
+        if entry.lock.acquire(blocking=False):
+            return entry  # one closed since the snapshot is refused by the caller's ``_still_live``
+    return None
+
+
+def _reserve(key: str) -> bool:
+    """Claim one of *key*'s ``MAX_PER_BOARD`` slots for a kept open; False when every slot is taken."""
+    with _registry_lock:
+        held = sum(1 for e in _registry if e.key == key and not e.closed) + _opening.get(key, 0)
+        if held >= MAX_PER_BOARD:
+            return False
+        _opening[key] = _opening.get(key, 0) + 1
+        return True
+
+
+def _unreserve(key: str, entry: Optional[_Entry] = None) -> None:
+    """Release *key*'s open slot; with *entry*, register it in the same step (the slot becomes the entry)."""
+    with _registry_lock:
+        left = _opening.get(key, 0) - 1
+        if left > 0:
+            _opening[key] = left
+        else:
+            _opening.pop(key, None)
+        if entry is not None:
+            _registry[entry] = None
+
+
 @contextlib.contextmanager
 def reading(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> Iterator[sqlite3.Connection]:
     """Drop-in for ``kanban_db_connect.connect_closing`` in callers that only READ the board.
 
-    Same path resolution, row factory and text factory; the connection is kept for this thread's next read.
-    Writes fail (``query_only``)."""
+    Same path resolution, row factory and text factory; the connection is kept in the process pool for the next
+    read of this board, from any thread. Writes fail (``query_only``)."""
     from hermes_cli import kanban_db as kb
 
-    _drain_orphans()
     path = Path(db_path) if db_path is not None else kb.kanban_db_path(board=board)
     key = _gen._resolved(os.fspath(path))
-    mine = _mine()
-    entry = mine.get(key)
-    if entry is not None and not entry.lock.acquire(blocking=False):
-        # A nested borrow of this board on this thread: the outer borrow keeps the entry, the inner one gets an
-        # ordinary connection.
-        stats["fallbacks"] += 1
-        with contextlib.closing(_plain(path, board)) as conn:
-            yield conn
-        return
+    entry = _borrow_idle(key)
     if entry is not None:
         if _still_live(entry):
             stats["reuses"] += 1
         else:
-            mine.pop(key, None)
             _close(entry)
             entry.lock.release()
             entry = None
             stats["reopens"] += 1
     if entry is None:
-        conn, entry = _open(path, key, board)
+        if not _reserve(key):
+            # Every kept entry of this board is borrowed (a nested borrow included): never wait for one.
+            stats["fallbacks"] += 1
+            with contextlib.closing(_plain(path, board)) as conn:
+                yield conn
+            return
+        try:
+            conn, entry = _open(path, key, board)
+        except BaseException:
+            _unreserve(key)
+            raise
         if entry is None:
+            _unreserve(key)
             with contextlib.closing(conn):
                 yield conn
             return
         entry.lock.acquire()
-        with _registry_lock:
-            _registry.add(entry)
-        mine[key] = entry
-        _enforce_cap(mine)
-    mine.move_to_end(key)
+        _unreserve(key, entry)
+        _enforce_cap(entry)
+    with _registry_lock:
+        if entry in _registry:
+            _registry.move_to_end(entry)
     conn = entry.conn
     keep = False
     try:
@@ -234,29 +239,33 @@ def reading(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> I
         keep = not entry.closed and not _in_transaction(conn)
         raise
     finally:
-        if mine.get(key) is not entry:
-            keep = False  # detached from the map while borrowed (the cap): nothing else would close it
+        with _registry_lock:
+            if entry not in _registry:
+                keep = False  # detached while borrowed (the cap): nothing else would close it
         if not keep:
-            if mine.get(key) is entry:
-                mine.pop(key, None)
             _close(entry)
         entry.lock.release()
 
 
-def _enforce_cap(mine: OrderedDict[str, _Entry]) -> None:
-    """Close this thread's oldest idle entries past ``MAX_PER_THREAD``. A borrowed entry is skipped; only when
-    every older entry is borrowed is the oldest detached, and its borrow's exit closes it."""
-    while len(mine) > MAX_PER_THREAD:
-        for old_key, old in list(mine.items()):  # the entry just added is borrowed, so never picked
+def _enforce_cap(new: _Entry) -> None:
+    """Close the least recently borrowed idle entries past ``MAX_KEPT``. A borrowed entry is skipped; when every
+    other entry is borrowed, *new* (borrowed by the caller) is detached and its borrow's exit closes it."""
+    while True:
+        with _registry_lock:
+            if len(_registry) <= MAX_KEPT:
+                return
+            candidates = [e for e in _registry if e is not new]
+        for old in candidates:
             if old.lock.acquire(blocking=False):
                 try:
-                    mine.pop(old_key, None)
                     _close(old)
                 finally:
                     old.lock.release()
                 break
         else:
-            mine.popitem(last=False)
+            with _registry_lock:
+                _registry.pop(new, None)
+            return
 
 
 def _in_transaction(conn: sqlite3.Connection) -> bool:
@@ -272,11 +281,8 @@ def _plain(path: Path, board: Optional[str]) -> sqlite3.Connection:
     return kbc.connect(path, board=board)
 
 
-def close_all() -> int:
-    """Close every idle kept connection on every thread (tests, shutdown). Returns how many closed."""
-    _drain_orphans()
-    with _registry_lock:
-        entries = [e for e in _registry if not e.closed]
+def _close_idle(entries: list[_Entry]) -> int:
+    """Close each of *entries* that is idle and still open; returns how many closed."""
     closed = 0
     for entry in entries:
         if entry.lock.acquire(blocking=False):
@@ -286,36 +292,27 @@ def close_all() -> int:
                     closed += 1
             finally:
                 entry.lock.release()
-    holder = getattr(_tls, "holder", None)
-    if holder is not None:
-        for key in [k for k, e in holder.entries.items() if e.closed]:
-            holder.entries.pop(key, None)
     return closed
+
+
+def close_all() -> int:
+    """Close every idle kept connection (tests, shutdown). Returns how many closed."""
+    with _registry_lock:
+        entries = [e for e in _registry if not e.closed]
+    return _close_idle(entries)
 
 
 def release_gone() -> int:
-    """Close every idle kept connection, on any thread, whose board file no longer exists; returns how many.
+    """Close every idle kept connection whose board file no longer exists; returns how many.
 
     A borrow revalidates only the board it is asked for, so a board whose directory was removed is never borrowed
     again and its kept connection pinned the deleted db, -wal and -shm until the process exited (hermes-hub
-    2026-11-13). The owning thread's map keeps the closed entry until it is evicted or that key is borrowed (which
-    reopens: ``_still_live`` refuses a closed entry). A borrowed entry is left to its borrower."""
+    2026-11-13). A borrowed entry is left to its borrower."""
     from hermes_cli.kanban_sync_board_watch import path_gone
 
-    _drain_orphans()
     with _registry_lock:
         entries = [e for e in _registry if not e.closed]
-    closed = 0
-    for entry in entries:
-        if not path_gone(entry.key) or not entry.lock.acquire(blocking=False):
-            continue
-        try:
-            if not entry.closed:
-                _close(entry)
-                closed += 1
-        finally:
-            entry.lock.release()
-    return closed
+    return _close_idle([e for e in entries if path_gone(e.key)])
 
 
-__all__ = ["MAX_PER_THREAD", "close_all", "reading", "release_gone", "stats"]
+__all__ = ["MAX_KEPT", "MAX_PER_BOARD", "close_all", "reading", "release_gone", "stats"]
