@@ -340,6 +340,19 @@ def is_ordering(skip: Optional[dict[str, Any]]) -> bool:
                            or skip.get("reason") == "per_profile_capped")
 
 
+# The details a skip carries when it says only that the machine which recorded it cannot lease the card: the Board's
+# eligibility refusals for that machine (``kanban_worker_node.eligible``) and its own unreachable Board. A tuple, not
+# a set: a synced payload's detail may be any JSON value.
+_RECORDER_ONLY = ("labels_mismatch", "pinned_only", "held", "offline")
+
+
+def recorder_cannot_lease(skip: dict[str, Any]) -> bool:
+    """True when ``skip`` says only that the machine which recorded it cannot lease the card. It is no verdict on
+    the machines that can, so a notice may still name what holds them (``kanban_parent_unclaimed``,
+    t_01a1db9d9538716b); any other skip came from a dispatcher able to lease the card, and its verdict stands."""
+    return skip.get("reason") in ("skipped_ineligible", "claim_deferred") and skip.get("detail") in _RECORDER_ONLY
+
+
 def advice(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     """What to do about a non-ordering skip; never a priority change. A quota wall whose ``until`` has passed by
     ``now`` (default ``time.time()``) drops "starts on its own when that wall resets": :func:`pool_replace_helps`

@@ -1,6 +1,7 @@
 """LLM quota pacing governor: pool math and Kanban dispatch admission (t_01a1d975f57bb7b8). [daveey]"""
 from __future__ import annotations
 
+import ast
 import pathlib
 import time
 from types import SimpleNamespace
@@ -264,10 +265,62 @@ def test_ungoverned_provider_is_not_throttled(paced_board, monkeypatch):
 
 
 def test_only_kanban_dispatch_consults_the_governor():
-    """Chats, cron and notice delivery never import it: only the dispatcher's claim path does."""
+    """Chats, cron and notice delivery never hold a card on it, read usage through it or write its state: only the
+    dispatcher's claim path does. The one other reader is the stall notice (``kanban_parent_unclaimed``,
+    t_01a1db9d9538716b), and it may take only the read-only view of the stored pace (``NOTICE_VIEW``)."""
     root = pathlib.Path(pd.__file__).resolve().parents[1]
     users = sorted(str(p.relative_to(root)) for top in ("agent", "gateway", "cron", "hermes_cli", "tui_gateway")
                    if (root / top).is_dir() for p in (root / top).rglob("*.py")
                    if "kanban_llm_pacing" in p.read_text(encoding="utf-8", errors="ignore"))
     assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_llm_pacing.py",
-                     "hermes_cli/kanban_llm_pacing_dispatch.py"]
+                     "hermes_cli/kanban_llm_pacing_dispatch.py", "hermes_cli/kanban_parent_unclaimed.py"]
+    assert _governor_names(root / "hermes_cli/kanban_parent_unclaimed.py") == NOTICE_VIEW
+
+
+# What the stall notice may take from the governor: no hold(), no usage read, no state write.
+NOTICE_VIEW = {"kanban_llm_pacing_dispatch": {"admission", "admission_skip", "paced_pools"}}
+
+
+def _governor_names(path: pathlib.Path) -> dict[str, set[str]]:
+    """Each governor module ``path`` imports, with every name it imports from it or reads off it as ``alias.name``.
+    A dotted ``import`` of one, or its alias used any other way (passed on, stored), is listed as such."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    aliases: dict[str, str] = {}
+    names: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if "kanban_llm_pacing" in alias.name:
+                    names.setdefault(alias.name, set()).add("<module import>")
+        elif isinstance(node, ast.ImportFrom) and "kanban_llm_pacing" in (node.module or ""):
+            names.setdefault(node.module.rsplit(".", 1)[-1], set()).update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if "kanban_llm_pacing" in alias.name:
+                    aliases[alias.asname or alias.name] = alias.name
+                    names.setdefault(alias.name, set())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in aliases and isinstance(node.ctx, ast.Load):
+            parent = parents.get(node)
+            names[aliases[node.id]].add(parent.attr if isinstance(parent, ast.Attribute) and parent.value is node
+                                        else "<bare module use>")
+    return names
+
+
+@pytest.mark.parametrize("source, seen", [
+    ("from hermes_cli import kanban_llm_pacing_dispatch as p\np.admission(p.paced_pools(c, t))\np.admission_skip(a)\n",
+     NOTICE_VIEW),
+    ("from hermes_cli import kanban_llm_pacing_dispatch as p\np.paced_pools(c, t)\np.hold(c, r, 'ready', x)\n",
+     {"kanban_llm_pacing_dispatch": {"paced_pools", "hold"}}),
+    ("from hermes_cli import kanban_llm_pacing_dispatch as p\nkeep(p)\n", {"kanban_llm_pacing_dispatch": {"<bare module use>"}}),
+    ("from hermes_cli.kanban_llm_pacing_dispatch import read_pool\n", {"kanban_llm_pacing_dispatch": {"read_pool"}}),
+    ("import hermes_cli.kanban_llm_pacing_dispatch\n", {"hermes_cli.kanban_llm_pacing_dispatch": {"<module import>"}}),
+    ("from hermes_cli import kanban_llm_pacing as lp\nlp.admit_limit(x)\n", {"kanban_llm_pacing": {"admit_limit"}}),
+])
+def test_the_notice_view_pin_sees_every_way_to_reach_the_governor(tmp_path, source, seen):
+    """The pin above holds only if ``_governor_names`` reports a hold(), a usage read, the module passed on or a
+    dotted import; anything beyond the allowed view must differ from ``NOTICE_VIEW``."""
+    module = tmp_path / "notice.py"
+    module.write_text(source, encoding="utf-8")
+    assert _governor_names(module) == seen

@@ -97,22 +97,34 @@ def _pool_suffix(payload: dict[str, Any]) -> str:
 
 def _observation(payload: dict[str, Any]) -> str:
     """``board <b>, observed <HH:MM:SSZ>, admission reason <r | unknown>`` for the notice text (empty on an old
-    payload without those fields)."""
+    payload without those fields). A pacing admission names the hold and its until time after the reason."""
     if "observed_at" not in payload:
         return ""
-    stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["observed_at"])))
+    at = int(payload["observed_at"])
     admission = payload.get("admission") if isinstance(payload.get("admission"), dict) else {}
     reason = admission.get("reason") or "unknown"
-    return f" [board {payload.get('board') or 'unknown'}, observed {stamp}, admission reason {reason}]"
+    from hermes_cli import kanban_llm_pacing_dispatch as pacing
+    held = pacing.admission_skip(admission)
+    if held:
+        from hermes_cli.kanban_dispatch_skip import words
+        reason = f"{reason}: {words(held, now=at)}"
+    return (f" [board {payload.get('board') or 'unknown'}, observed {time.strftime('%H:%M:%SZ', time.gmtime(at))}, "
+            f"admission reason {reason}]")
 
 
 def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None,
              payload: Optional[dict[str, Any]] = None, now: Optional[float] = None) -> str:
     """Capacity advice, or the recorded skip's (or the unrecorded skip's) advice without priority changes. A card
-    whose matching machines claimed same-label cards during the wait is queued, so no re-place is offered."""
+    whose matching machines claimed same-label cards during the wait is queued, so no re-place is offered; one whose
+    pool the LLM pacing governor holds starts on its own, so neither is a priority change or a re-place."""
     from hermes_cli import kanban_label_backlog as klb
     if klb.busy((payload or {}).get("label_backlog")):
         return f"Not a placement problem, do not re-place: {klb.ADVICE}"
+    from hermes_cli import kanban_llm_pacing_dispatch as pacing
+    from hermes_cli.kanban_dispatch_skip import advice as skip_advice
+    held = pacing.admission_skip((payload or {}).get("admission"))
+    if held:
+        return f"{NO_FIX}: " + skip_advice(held, now=now)
     from hermes_cli.kanban_dispatch_skip import notice_advice
     from hermes_cli.kanban_priority import advice
     return f"{NO_FIX}: " + (notice_advice(payload or {}, now=now) or advice(parent_id, evidence))
@@ -211,6 +223,30 @@ def _already_posted(conn, task_id: str, waiting_on: str, wait_key: Any, kind: st
                                         (task_id, kind)))
 
 
+def _pacing_admission(conn, task_id: str, place: dict[str, Any], extra: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The ``admission`` for a card that only other machines can lease while this gateway's own LLM pacing governor
+    holds every provider it may run on (t_01a1db9d9538716b); None otherwise, so the notice keeps its words.
+
+    Workers import other gateways' cards in priority order, so a low-ranked card gets no verdict from any dispatcher
+    able to lease it, and its wait is the pool's pace (``kanban_llm_pacing_dispatch.paced_pools``: pool workers draw
+    the same accounts from this gateway's relay). A hold on every matching machine, a card the Board does not hold, a
+    verdict from a dispatcher able to lease the card and a read that fails or is not positive all leave it alone."""
+    if place.get("lane") != "machine" or (extra or {}).get("missing_shared_board"):
+        return None
+    if set(place.get("machines") or ()) <= {*(place.get("held") or ()), *(place.get("draining") or ())}:
+        return None  # every machine that could lease it is on hold or draining: that wait ends differently
+    try:
+        from hermes_cli import kanban_dispatch_skip as skips
+        from hermes_cli import kanban_llm_pacing_dispatch as pacing
+        if not all(skips.recorder_cannot_lease(skip) for skip in skips.episode_skips(conn, task_id)):
+            return None  # a dispatcher able to lease it recorded a verdict: the notice does not talk over it
+        paces = pacing.paced_pools(conn, task_id)
+        return pacing.admission(paces) if paces else None
+    except Exception:  # health: allow BLE001 -- the governor read is advisory; the notice still goes out as before
+        _log.debug("parent-unclaimed: pacing read unavailable for %s", task_id, exc_info=True)
+        return None
+
+
 def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_seconds: float,
                 ready_seconds: float, parent_title: Optional[str] = None, kind: str = NOTICE_KIND,
                 extra: Optional[dict[str, Any]] = None) -> bool:
@@ -230,7 +266,8 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": klb.REASON, "status": "queued"} if busy
-                              else {"reason": None, "status": "unknown"})}
+                              else _pacing_admission(conn, waiting_on, place, extra)
+                              or {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     pool_hint = "" if guard else _pool_sentence(place, observed["observed_at"])  # outside the queue clause (#1821)
     checkpoint = last_checkpoint.notice_fields(conn, waiting_on)  # same lookup supplies fields and evidence [daveey]

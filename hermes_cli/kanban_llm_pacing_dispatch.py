@@ -9,7 +9,9 @@ before any claim (:func:`hold`). Pool math and the incident are in ``kanban_llm_
 * Each governed provider's OAuth pool is read (``/api/oauth/usage``, read-only) at most every
   ``read_interval`` seconds per Hermes home; samples and this host's running count on the provider are kept in
   ``<kanban home>/llm_pacing.json`` for burn rates and average concurrency.
-* Only Kanban dispatch consults this module: chats, cron and notice delivery never do.
+* Only Kanban dispatch consults this module: chats, cron and notice delivery never do. The one reader outside the
+  claim path is :func:`paced_pools`, the stall notices' view of the pace this home stored: it reads usage never,
+  writes nothing and holds nothing.
 * Any read or resolve fault starts the card (fail open, warned once per interval).
 * ``kanban.llm_pacing.enabled: false`` restores the ungoverned behaviour.
 """
@@ -29,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 READ_DEADLINE_SECONDS = 10.0
 EVENT_KIND = "llm_paced"
+ADMISSION_REASON = "llm_pacing"  # the ``admission.reason`` of a stall notice for a pool the governor holds
 EVENT_REPEAT_SECONDS = 3600
+# A stored pace older than this many read intervals is no read: a dispatcher on this home replaces it every interval
+# while any governed card passes it, so a gap this long means nothing has judged the pool since.
+STALE_READ_INTERVALS = 3
 _STATE_FILE = "llm_pacing.json"
 _CACHE: dict[str, tuple[float, lp.PoolPace]] = {}
 _CLASS_CACHE: dict[str, tuple[float, list[str]]] = {}
@@ -261,19 +267,82 @@ def _record(conn: sqlite3.Connection, task_id: str, verdicts: list[dict], result
         kb._append_event(conn, task_id, EVENT_KIND, {"providers": verdicts, "until": until})
 
 
+def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingConfig) -> Optional[tuple[Any, list[str]]]:
+    """``(task, providers)`` for a card the governor judges on ``lane``; None when it starts regardless: no such card,
+    a mandatory pin, an unknown route or a provider the governor does not govern."""
+    from hermes_cli import kanban_db as kb
+    task = kb.get_task(conn, task_id)
+    if task is None or int(getattr(task, "model_pin_mandatory", 0) or 0):
+        return None
+    providers = candidate_providers(conn, task, lane)
+    if not providers or any(p not in cfg.providers for p in providers):
+        return None
+    return task, providers
+
+
+def _stored_pace(entry: Any, now: float, cfg: lp.PacingConfig) -> Optional[lp.PoolPace]:
+    """The pace a dispatcher on this home stored for one provider; None when it is absent, malformed, stamped in the
+    future or older than :data:`STALE_READ_INTERVALS` read intervals."""
+    read_at = entry.get("read_at") if isinstance(entry, dict) else None
+    if not isinstance(read_at, (int, float)):
+        return None
+    return lp.PoolPace.from_dict(entry.get("pace")) if 0 <= now - read_at < STALE_READ_INTERVALS * cfg.read_interval else None
+
+
+def paced_pools(conn: sqlite3.Connection, task_id: str) -> Optional[list[lp.PoolPace]]:
+    """The pools holding ready card ``task_id``, for a stall notice: one :class:`~kanban_llm_pacing.PoolPace` per
+    candidate provider when EVERY candidate is stored as ``paced`` or ``held``; else None (no positive read).
+
+    A notice describes the hold, it never makes one: this reads the pace the dispatchers of this home stored
+    (``llm_pacing.json``; pool workers draw the same accounts from the hub's relay), makes no usage read and writes
+    nothing. It judges the card as :func:`hold` does (:func:`_governed`) and, like :func:`_verdicts`, finds no hold as
+    soon as one candidate is open, unknown or unread: the card may start there. The pool's state, not this host's slot
+    math: the hosts that would run the card keep their own concurrency, so a held pool admits nothing anywhere and a
+    paced pool limits every host. Faults propagate; the caller fails open."""
+    cfg = load_config()
+    judged = _governed(conn, task_id, "ready", cfg) if cfg.enabled else None
+    if judged is None:
+        return None
+    stored, now = _load_state(state_path()), time.time()
+    paces: list[lp.PoolPace] = []
+    for provider in judged[1]:
+        pace = _stored_pace(stored.get(provider), now, cfg)
+        if pace is None or pace.state not in (lp.PACED, lp.HELD):
+            return None
+        paces.append(pace)
+    return paces
+
+
+def admission(paces: list[lp.PoolPace]) -> dict[str, Any]:
+    """The ``admission`` a stall notice carries for :func:`paced_pools`: each pool's state, and ``until`` when known."""
+    return {"reason": ADMISSION_REASON, "status": "held", "providers": [
+        {"provider": p.provider, "state": p.state, **({"until": int(p.until)} if p.until else {})} for p in paces]}
+
+
+def admission_skip(stored: Any) -> Optional[dict[str, Any]]:
+    """The ``llm_paced`` skip a stored :func:`admission` stands for, so a notice words and advises it as the
+    dispatcher's own hold does (``kanban_dispatch_skip``): every pool, and the earliest ``until``. None for any other
+    admission and for a malformed one."""
+    if not isinstance(stored, dict) or stored.get("reason") != ADMISSION_REASON:
+        return None
+    listed = stored.get("providers")
+    pools = [p for p in listed if isinstance(p, dict) and p.get("provider") and p.get("state") in (lp.PACED, lp.HELD)
+             ] if isinstance(listed, list) else []
+    if not pools:
+        return None
+    until = [p["until"] for p in pools if isinstance(p.get("until"), (int, float)) and not isinstance(p["until"], bool)]
+    return {"reason": EVENT_KIND, "detail": ", ".join(f"{p['provider']} {p['state']}" for p in pools),
+            **({"until": min(until)} if until else {})}
+
+
 def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run: bool = False) -> bool:
     """True when the card must wait for its provider's pool to come back to pace (recorded on ``result``)."""
     try:
         cfg = load_config()
-        if not cfg.enabled:
+        judged = _governed(conn, row["id"], lane, cfg) if cfg.enabled else None
+        if judged is None:
             return False
-        from hermes_cli import kanban_db as kb
-        task = kb.get_task(conn, row["id"])
-        if task is None or int(getattr(task, "model_pin_mandatory", 0) or 0):
-            return False
-        providers = candidate_providers(conn, task, lane)
-        if not providers or any(p not in cfg.providers for p in providers):
-            return False
+        task, providers = judged
         verdicts = _verdicts(conn, task, providers, lane, cfg)
         if verdicts is None:
             return False
