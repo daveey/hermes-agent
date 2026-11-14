@@ -113,11 +113,27 @@ def run_effect(outcome: Optional[str], metadata) -> tuple[str, Optional[str]]:
 _ID_RE = re.compile(r"[^a-z0-9._-]+")
 
 
+def _blocker_slug(raw: str) -> str:
+    return _ID_RE.sub("-", raw.strip().lower()).strip("-._")[:MAX_BLOCKER_ID_CHARS]
+
+
+def _configured_alias(slug: str, aliases) -> Optional[str]:
+    """First valid original key in lexical order wins normalized collisions."""
+    if not slug or not isinstance(aliases, dict):
+        return None
+    for key in sorted(key for key in aliases if isinstance(key, str)):
+        if _blocker_slug(key) == slug:
+            target = normalize_blocker_id(aliases[key], cfg={})
+            if target:
+                return target
+    return None
+
+
 def normalize_blocker_id(raw, *, cfg=None) -> Optional[str]:
     """Canonical slug; configured aliases augment (never split) built-in families."""
     if not isinstance(raw, str):
         return None
-    slug = _ID_RE.sub("-", raw.strip().lower()).strip("-._")[:MAX_BLOCKER_ID_CHARS]
+    slug = _blocker_slug(raw)
     if re.fullmatch(r"github(-(shared|rest|core))*-quota(-reserve)?", slug):
         return "github-rest-quota"
     if cfg is None:
@@ -128,11 +144,8 @@ def normalize_blocker_id(raw, *, cfg=None) -> Optional[str]:
         except ConfigBackendUnavailable:
             return slug or None
     aliases = (cfg.get("kanban") or {}).get("shared_blocker_aliases", {})
-    target = aliases.get(slug) if isinstance(aliases, dict) else None
-    if isinstance(target, str) and target.strip():
-        # One hop only: cycles cannot recurse; targets must be canonical ids.
-        return normalize_blocker_id(target, cfg={})
-    return slug or None
+    # Resolve one hop only; targets cannot follow configured aliases or recurse.
+    return _configured_alias(slug, aliases) or slug or None
 
 
 def probe_interval_seconds(cfg: Optional[dict] = None) -> int:

@@ -90,7 +90,7 @@ def sweep_shared_blockers(conn, result) -> None:
     try:
         gated("dispatch.shared_blocker_checks", conn, check, conn, skipped=([], None),
               extra=lambda c: (own_gateway(c), config_key()), run_due=lambda r: r[1])
-    except (OSError, sqlite3.Error, ValueError):
+    except Exception:  # health: allow BLE001 -- a failed check must not suppress independent maintenance lanes
         kb._log.warning('kanban: shared blocker checks failed', exc_info=True)
 
     for statuses, handler, field in (

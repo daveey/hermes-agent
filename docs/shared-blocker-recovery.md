@@ -22,6 +22,10 @@ The check scheduler cannot promise a two-minute wall-clock bound if the
 machine/dispatcher itself is stopped or its maintenance loop is delayed.
 
 `kanban.shared_blocker_aliases` adds one-hop `alias: canonical-id` mappings.
+Keys use the input slug function and length limit. Collisions select the
+lexicographically smallest original string key with a valid nonempty target,
+regardless of mapping order. Non-string keys, invalid/empty targets and empty
+input slugs are ignored.
 Targets should be canonical slugs, not other aliases. Built-in GitHub REST/core
 quota spellings always collapse to `github-rest-quota`; config cannot split
 that family. Historical run and event payloads are normalized on read.

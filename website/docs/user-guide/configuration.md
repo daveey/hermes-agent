@@ -3522,6 +3522,10 @@ after recovery resets the budget. A stopped or delayed dispatcher cannot guarant
 a two-minute wall-clock recovery bound.
 
 `kanban.shared_blocker_aliases` maps an alias to a canonical blocker ID in one hop.
+Keys use the same slug normalization (including length limit) as blocker inputs.
+On collisions, the lexicographically smallest original string key with a valid
+nonempty target wins, independent of mapping order. Non-string keys and invalid
+or empty targets are ignored; empty input slugs cannot be aliases.
 Targets must not be other aliases. Built-in GitHub REST/core quota spellings
 always normalize to `github-rest-quota`; configuration cannot split that family.
 Historical run and event payloads are normalized on read. Workers are instructed
