@@ -291,6 +291,30 @@ _NESTED_FOREIGN_SHELLS = [
     "sudo -u bob -i < {script}",
     "ssh host < {script}",
     "ssh -p 22 host bash -s < {script}",
+    # A compound command's stdin redirection or heredoc reaches the login shell inside it
+    # (PR #2911 review follow-up). Pre-existing: base walked none of these in nested scope.
+    "{{ su -l bob; }} < {script}",
+    "( su -l bob ) < {script}",
+    "{{ su -l bob; }} <<< 't ( bash {db} )'",
+    "( su -l bob ) <<< 't ( bash {db} )'",
+    "{{ su -l bob; }} <<'EOF'\nt ( bash {db} )\nEOF",
+    "{{ su -l bob; }} <<-EOF\n\tt ( bash {db} )\n\tEOF",
+    "if true; then su -l bob; fi < {script}",
+    "if true; then su -l bob; fi <<'EOF'\nt ( bash {db} )\nEOF",
+    "while read l; do su -l bob; done < {script}",
+    "while read l; do su -l bob; done <<'EOF'\nt ( bash {db} )\nEOF",
+    "for x in 1; do su -l bob; done < {script}",
+    "case x in x) su -l bob;; esac < {script}",
+    "{{ su -l bob; }} 0< {script}",
+    "{{ su -l bob; }} <> {script}",
+    "{{ true; {{ su -l bob; }}; }} < {script}",
+    "{{\nsu -l bob\n}} < {script}",  # the group opens lines before its redirection
+    "{{\nsu -l bob\n}} <<'EOF'\nt ( bash {db} )\nEOF",
+    "{{ bash -l; }} < {script}",
+    "{{ sudo -i; }} < {script}",
+    "{{ doas -s; }} < {script}",
+    "{{ ssh host; }} < {script}",
+    "{{ su -l bob < /dev/null; }} < {script}",  # fails closed: own redirections are not tracked
 ]
 
 
@@ -339,6 +363,21 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "sudo cat < {script}",
     "doas cat < {script}",
     "ssh host cat < {script}",
+    # A compound command's redirection with no login shell inside keeps the session's names.
+    "{{ cat; }} < {script}",
+    "( bash ) < {script}",
+    "{{ bash -s; }} <<< 't ( bash {db} )'",
+    "{{ cat; }} <<'EOF'\nt ( bash {db} )\nEOF",
+    "while read l; do echo \"$l\"; done < {script}",
+    "{{ su -l bob; }} 3< {script}",  # not stdin
+    # A login shell reading stdin elsewhere does not make other commands' input its own.
+    "su -l bob < /dev/null; cat < {script}",
+    "su -l bob < /dev/null; cat <<'EOF'\nt ( bash {db} )\nEOF",
+    "su -l bob -c true; {{ cat; }} < {script}",
+    # /dev/null feeds a login shell nothing.
+    "su -l bob < /dev/null",
+    "ssh host < /dev/null",
+    "{{ su -l bob; }} < /dev/null",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
@@ -463,6 +502,15 @@ def test_nested_shell_input_shapes():
     assert found == []  # *walk_command* holds the segments; *command* only its heredocs
     text = "bash -l -c 'x ( y )'; bash -c 'z'"
     assert list(_iter_nested_shell_inputs(text, text, cwd="/")) == [("x ( y )", None)]
+    from cron.lifecycle_guard_nested_shells import _closes_compound
+
+    for owner in (" } <<'E'", "} <<'E'", " fi <<E", " done <<-E", " esac <<E", " <<E", "} } <<E"):
+        assert _closes_compound(owner), owner
+    for owner in ("cat <<'E'", "su -l bob <<'E'", "echo } <<E", "x=} <<E"):
+        assert not _closes_compound(owner), owner
+    # Benign input through a compound command into a login shell stays allowed.
+    benign = "{ su -l bob; } < /dev/null; { su -l bob; } <<< 'echo hi'"
+    assert list(_iter_nested_shell_inputs(benign, benign, cwd="/")) == [("echo hi", None)]
 
 
 # PR #2560 review 5897863903 B1: one script referenced both by a nested login shell and by the

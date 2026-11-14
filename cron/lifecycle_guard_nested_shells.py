@@ -27,6 +27,7 @@ from cron.lifecycle_guard import (
     _shell_options_end,
     _split_redirections,
 )
+from cron.lifecycle_guard_groups import _CLOSERS
 
 if TYPE_CHECKING:
     from cron.lifecycle_guard import _LifecycleScanBudget
@@ -362,11 +363,20 @@ def _iter_nested_shell_inputs(
         return
     from tools.shell_heredoc import iter_heredoc_bodies
 
+    classified = [(view, _nested_shell_input(view))
+                  for view in _iter_command_segment_views(walk_command)]
+    # Such a shell inside a compound command reads that command's stdin redirections and
+    # heredocs (`{ su -l bob; } < f`, `( su -l bob ) <<< T`, `if …; then su -l bob; fi <<E`).
+    # Where the group opens is not tracked (it may be lines earlier), nor whether the shell's own
+    # redirection overrides it: with a stdin-reading one anywhere, every compound command's
+    # redirections count, failing closed.
+    grouped = any(found == ("stdin", None) for _view, found in classified)
     for owner, body in (iter_heredoc_bodies(command) if heredocs else ()):
-        if _feeds_nested_shell(owner):
+        if _feeds_nested_shell(owner) or (grouped and _closes_compound(owner or "")):
             yield body, None
-    for view in _iter_command_segment_views(walk_command):
-        found = _nested_shell_input(view)
+    for view, found in classified:
+        if grouped and _compound_redirections(view):
+            yield from _redirected_shell_inputs(view, cwd=cwd)
         if found is None:
             continue
         kind, value = found
@@ -382,7 +392,8 @@ def _iter_nested_shell_inputs(
 def _redirected_shell_inputs(
     view: list[str], *, cwd: Optional[str],
 ) -> Iterator[tuple[Optional[str], Optional[Path]]]:
-    """Keep stdin redirections in the consuming shell's scope, not the session's."""
+    """Keep stdin redirections in the consuming shell's scope, not the session's. ``/dev/null``
+    feeds the shell nothing (and is no regular file to walk)."""
     words = iter(view)
     for word in words:
         match = _REDIRECTION.match(word)
@@ -394,6 +405,18 @@ def _redirected_shell_inputs(
             continue
         if operator == "<<<":
             yield target, None
-        elif operator in ("<", "<>"):
+        elif operator in ("<", "<>") and target != "/dev/null":
             for path in _resolved_or_nothing(target, cwd):
                 yield None, path
+
+
+def _compound_redirections(view: list[str]) -> bool:
+    """Whether *view* holds only a compound command's closers and its redirections (``} < f``,
+    ``done <<< T``, and after a ``)`` just the redirections: ``< f``)."""
+    return all(word in _CLOSERS for word in _split_redirections(view)[0])
+
+
+def _closes_compound(owner: str) -> bool:
+    """Whether a heredoc's *owner* text is a compound command's closer (``} <<'E'``, ``fi <<E``):
+    the body is then the stdin of the commands that compound command holds."""
+    return any(_compound_redirections(view) for view in _iter_command_segment_views(owner))
