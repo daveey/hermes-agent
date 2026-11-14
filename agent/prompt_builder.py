@@ -1332,14 +1332,15 @@ def _skill_should_show(
 
 def _plugin_skill_prompt_rows(
     disabled: set[str], available_tools: set[str] | None, available_toolsets: set[str] | None,
-    session_platform: str | None,
+    session_platform: str | None, with_triggers: bool | None = None,
 ) -> list[tuple[str, str]]:
     """``(qualified_name, description)`` for every skill registered by an ENABLED plugin
     (``ctx.register_skill``), filtered through the same offer-time gates as on-disk skills.
     Plugin skills live in the plugin-manager registry — never under the profile skills tree —
     so the disk scans above cannot see them; this is their one path into ``<available_skills>``.
     The qualified ``plugin:skill`` name is exactly what ``skill_view`` resolves, and disabling
-    or unloading a plugin removes its registry entries, so enablement gating is inherent."""
+    or unloading a plugin removes its registry entries, so enablement gating is inherent.
+    ``with_triggers=False`` drops the ``triggers:`` suffix, as on-disk rows do in a lean index."""
     rows: list[tuple[str, str]] = []
     try:
         from hermes_cli.plugins import discover_plugins, get_plugin_manager
@@ -1356,7 +1357,8 @@ def _plugin_skill_prompt_rows(
                                       available_toolsets, session_platform):
                 continue
             desc = extract_skill_description(
-                {**frontmatter, "description": meta.get("description") or frontmatter.get("description") or ""})
+                {**frontmatter, "description": meta.get("description") or frontmatter.get("description") or ""},
+                with_triggers=with_triggers)
             rows.append((name, desc))
     except Exception:
         logger.debug("Plugin skill prompt rows unavailable", exc_info=True)
@@ -1448,7 +1450,8 @@ def _build_skills_system_prompt_inner(
     disabled = get_disabled_skill_names(_platform_hint or None)
     # Plugin-registered skills (ctx.register_skill) are registry state, not files under any scanned
     # root — the snapshot manifest can't see them change, so they participate in the cache key.
-    plugin_rows = _plugin_skill_prompt_rows(disabled, available_tools, available_toolsets, _platform_hint or None)
+    plugin_rows = _plugin_skill_prompt_rows(disabled, available_tools, available_toolsets, _platform_hint or None,
+                                            with_triggers=None if index_mode == "full" else False)
     # Skill files are part of the key: another process (a hub install in a second terminal, the curator
     # inside the gateway, a git pull of an external dir) never clears this process's LRU, so a key of
     # config alone served the pre-change index to every running session until restart (#92313).

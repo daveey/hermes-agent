@@ -48,6 +48,34 @@ def test_failed_empty_suite_after_merge_is_post_merge_evidence(evidence):
     assert [c["id"] for c in receipt["post_merge_checks"]] == [100]
 
 
+@pytest.mark.parametrize("conclusion", ["failure", "startup_failure", "timed_out", "action_required"])
+def test_failed_empty_suite_after_merge_raises_main_health(evidence, conclusion):
+    # The row joins post_merge_checks after merge_evidence ran: health must see it.
+    evidence.update(merged=True, landed=SHA, runs=[run("success")],
+                    extra_suites=[failed_suite(conclusion, created=POST_MERGE)])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "success"
+    assert receipt["main_health"]["idempotency_key"] == f"ci-red:acme/repo:{SHA}"
+    assert "ci-main-watch" in receipt["main_health"]["detail"]
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "stale", None])
+def test_cancelled_or_unknown_empty_suite_after_merge_is_not_main_health(evidence, conclusion):
+    # Concurrency cancels superseded main runs routinely: not a red base signal.
+    evidence.update(merged=True, landed=SHA, runs=[run("success")],
+                    extra_suites=[failed_suite(conclusion, created=POST_MERGE)])
+    receipt = gate.collect_acceptance(URL, None)
+    assert [c["id"] for c in receipt["post_merge_checks"]] == [100]
+    assert "main_health" not in receipt
+
+
+def test_failed_empty_suite_after_merge_on_unlanded_head_is_not_main_health(evidence):
+    # A rebase landed another sha: red on the PR head is not base CI.
+    evidence.update(merged=True, landed="b" * 40, runs=[run("success")],
+                    extra_suites=[failed_suite(created=POST_MERGE)])
+    assert "main_health" not in gate.collect_acceptance(URL, None)
+
+
 @pytest.mark.parametrize("created", [None, "not a time", "2026-11-02T13:00:00Z"])
 def test_failed_empty_suite_unprovable_or_tied_age_fails_closed(evidence, created):
     evidence.update(merged=True, runs=[run("success")], extra_suites=[failed_suite(created=created)])

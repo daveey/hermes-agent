@@ -27,6 +27,8 @@ REPOSITORY = Path(__file__).resolve().parents[3]
 # The update child (generation 1) starts generation 2 through an intermediate that exits at once,
 # so generation 2 is reparented away from it (no ancestry to lean on), then waits for its verdict.
 # Generation 2 runs this repository's real UpdateLock against the marker the real posix.sh wrote.
+# It publishes its verdict with os.replace: generation 1 reads the file as soon as it exists, and a
+# plain write_text creates it empty before writing, which generation 1 could read as invalid JSON.
 SECOND_GENERATION = """
 import os, sys, json, subprocess, time
 from pathlib import Path
@@ -37,9 +39,11 @@ if sys.argv[1:2] == ['update'] and '--help' not in sys.argv:  # not the --keep-s
         "from hermes_cli.update_lock import UpdateLock, update_marker_path\\n"
         "lock = UpdateLock(path=update_marker_path())\\n"
         "ok = lock.acquire()\\n"
-        "Path(sys.argv[1]).write_text(json.dumps({'adopted': ok, 'pid': os.getpid(), "
+        "part = Path(sys.argv[1] + '.part')\\n"
+        "part.write_text(json.dumps({'adopted': ok, 'pid': os.getpid(), "
         "'holder': lock.holder.pid if lock.holder else None, "
         "'told': os.environ.get('HERMES_UPDATE_HANDOFF_PID')}), encoding='utf-8')\\n"
+        "os.replace(part, sys.argv[1])\\n"
         "ok and lock.release()\\n")
     env = {k: v for k, v in os.environ.items() if not k.startswith('PYTHON')}
     env['PYTHONPATH'] = os.environ['GEN2_REPO']

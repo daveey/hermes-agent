@@ -1,7 +1,6 @@
 """Idle heartbeat/loop gates reuse a proven-EMPTY answer only while the store's committed revision holds.
 
-The gates scan ``state_meta`` by prefix (a full-table LIKE plus a JSON parse of every retained row) on
-every poll tick. These contracts pin the reuse: an unchanged store is scanned once across K checks; any
+The gates read ``state_meta`` by prefix (a JSON parse of every retained row) on every poll tick. These contracts pin the reuse: an unchanged store is scanned once across K checks; any
 commit (this process's writer or another connection) is seen on the very next check; active work,
 unparseable rows and read errors are never remembered, so they are re-examined on every check.
 """
@@ -234,3 +233,26 @@ def test_root_loop_gate_does_not_warn_on_a_corrupt_row_every_tick(work, caplog):
         assert warned == []
     finally:
         root_db.close()
+
+
+def test_conn_meta_prefix_read_is_a_literal_index_range_not_a_table_scan():
+    """The gate's own prefix read reaches rows through the primary key (never every stored value) and
+    still matches the prefix literally: ``_`` and ``%`` are not wildcards, neighbours stay out."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.executemany("INSERT INTO state_meta VALUES (?, ?)", [
+        ("loop:a", "1"), ("loop:b", "2"), ("loop", "x"), ("loop;z", "x"), ("loopy:a", "x"), ("heartbeat:a", "x"),
+        ("a_b:1", "u"), ("axb:1", "x"), ("a%b:1", "p"), ("aqqb:1", "x")])
+    meta = gates._ConnMeta(conn)
+    seen: list[str] = []
+    conn.set_trace_callback(seen.append)
+    assert meta.list_meta_prefix("loop:") == [("loop:a", "1"), ("loop:b", "2")]
+    assert meta.list_meta_prefix("a_b:") == [("a_b:1", "u")]
+    assert meta.list_meta_prefix("a%b:") == [("a%b:1", "p")]
+    assert meta.list_meta_prefix("nope:") == []
+    conn.set_trace_callback(None)
+    assert len(seen) == 4
+    for sql in seen:
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        assert plan and all(step.startswith("SEARCH") for step in plan), plan
+    assert meta.list_meta_prefix("") == []  # as SessionDB.list_meta_prefix: no prefix names no rows

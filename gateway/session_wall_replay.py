@@ -17,7 +17,11 @@ This module is that resend, bounded so it cannot loop:
 - at ``max(resets_at + SLACK_S, now + MIN_DELAY_S)`` the wake is re-admitted through the same producer entry
   (``admit_route_wake``) under the deterministic identity ``[producer, route, "wall-replay:<tail>"]``: a second
   arm or a race re-admits the same row (an exact replay), never a second turn;
-- a replay that is refused again plans nothing (its identity says it is one) and the reply says so.
+- a replay that is refused again plans nothing (its identity says it is one) and the reply says so;
+- a plan cannot outlive its use: one whose time passed more than :data:`STALE_S` ago (a long outage) is
+  dropped at boot, not delivered, and the admission retry budget (:data:`RETRIES_MAX`) is persisted in the
+  plan, so a route that never comes back (a platform removed from config) or an admission that keeps
+  raising is dropped once the budget is spent, however often the gateway restarts.
 """
 from __future__ import annotations
 
@@ -40,7 +44,10 @@ MIN_DELAY_S = 60.0
 MAX_DELAY_S = 7 * 86400.0
 # A replay that cannot be admitted yet (no adapter, a draining gateway) looks again this much later, this often.
 RETRY_S = 120.0
+# The budget spans restarts: the tries spent are stored in the plan (``tries``), not counted per process.
 RETRIES_MAX = 10
+# A plan whose time passed this long ago (the gateway was down through it) is dropped, not delivered late.
+STALE_S = 86400.0
 # Descriptor keys a route wake stores (``snapshot_*automation``) and ``admit_route_wake`` accepts back.
 _CARRIED = ('notification_category', 'display_kind', 'display_text', 'kanban_cards', 'kanban_event_keys')
 _TRANSIENT = frozenset({'runtime_draining', 'busy', 'database_busy', 'stale_generation'})
@@ -210,19 +217,51 @@ def _arm(authority, intent: dict, delay: float | None = None, tries: int = 0) ->
     armed[admission_id] = loop.call_later(max(delay, 0.0), fire)
 
 
+def _tries(intent: dict) -> int:
+    tries = _number(intent.get('tries'))
+    return int(tries) if tries is not None and tries > 0 else 0
+
+
+def _stale(intent: dict, now: float) -> bool:
+    due = _number(intent.get('due'))
+    return due is None or now - due > STALE_S
+
+
+def _expired(intent: dict, now: float) -> str | None:
+    """Why a stored plan must be dropped rather than armed or delivered, else None."""
+    if _stale(intent, now):
+        return 'stale'
+    if _tries(intent) >= RETRIES_MAX:
+        return 'out of tries'
+    return None
+
+
 async def arm_pending(authority) -> int:
     """Boot: re-arm every planned redelivery this authority's store holds (at least ``MIN_DELAY_S`` out, so
-    the adapters are connected first). Returns how many were armed. Never raises."""
+    the adapters are connected first), dropping the expired ones (:func:`_expired`). Returns how many were
+    armed. Never raises."""
     try:
         intents = await asyncio.to_thread(_load, authority.db)
     except Exception:  # health: allow BLE001 -- an unreadable store loses only the redeliveries
         logger.warning('wall-replay: could not read the planned redeliveries', exc_info=True)
         return 0
+    armed = 0
+    now = time.time()
     for intent in intents:
-        _arm(authority, intent)
-    if intents:
-        logger.info('wall-replay: re-armed %d planned redelivery(ies) at boot', len(intents))
-    return len(intents)
+        why = _expired(intent, now)
+        if why is not None:
+            logger.warning('wall-replay: dropped the planned redelivery of %s at boot (%s)',
+                           intent['admission_id'], why)
+            try:
+                await asyncio.to_thread(_write, authority.db, PREFIX + intent['admission_id'], None)
+            except Exception:  # health: allow BLE001 -- not armed either way; the next boot drops it again
+                logger.debug('wall-replay: could not drop %s', intent['admission_id'], exc_info=True)
+            continue
+        _arm(authority, intent, tries=_tries(intent))
+        armed += 1
+    if armed:
+        logger.info('wall-replay: re-armed %d planned redelivery(ies) at boot', armed)
+    return armed
 
 
 def _serving(authority) -> bool:
@@ -245,9 +284,18 @@ async def fire_replay(authority, admission_id: str, tries: int = 0) -> str:
     intent = json.loads(raw)
     if not _serving(authority):
         return 'gone'  # a retired authority's store is re-armed by the process that serves it
-    verdict = await _admit(authority, intent)
+    tries = max(tries, _tries(intent))
+    if _stale(intent, time.time()):
+        logger.warning('wall-replay: the redelivery of %s is stale; dropped', admission_id)
+        await asyncio.to_thread(_write, authority.db, key, None)
+        return 'dropped'
+    try:
+        verdict = await _admit(authority, intent)
+    except Exception:  # health: allow BLE001 -- an unexpected admission error retries within the persisted budget
+        logger.warning('wall-replay: admitting the redelivery of %s failed', admission_id, exc_info=True)
+        verdict = 'retry'
     if verdict == 'retry':
-        return await _retry(authority, intent, tries)
+        return await _retry(authority, intent, tries, persist=True)
     await asyncio.to_thread(_write, authority.db, key, None)
     return verdict
 
@@ -258,15 +306,23 @@ def _get(db, key: str) -> str | None:
     return None if row is None else row[0]
 
 
-async def _retry(authority, intent: dict, tries: int) -> str:
+async def _retry(authority, intent: dict, tries: int, persist: bool = False) -> str:
+    """Look again in ``RETRY_S``, or drop the plan once ``RETRIES_MAX`` tries are spent. ``persist`` stores
+    the spent tries in the plan (only for a plan read whole from the store), so a restart keeps counting."""
     if tries >= RETRIES_MAX:
         logger.warning('wall-replay: gave up admitting the redelivery of %s after %d tries',
                        intent['admission_id'], tries)
         try:
             await asyncio.to_thread(_write, authority.db, PREFIX + intent['admission_id'], None)
-        except Exception:  # health: allow BLE001 -- the next boot re-arms it, still bounded by the identity
+        except Exception:  # health: allow BLE001 -- the next boot re-arms it under its stored tries, still bounded
             logger.debug('wall-replay: could not drop %s', intent['admission_id'], exc_info=True)
         return 'dropped'
+    if persist:
+        try:
+            await asyncio.to_thread(_write, authority.db, PREFIX + intent['admission_id'],
+                                    json.dumps({**intent, 'tries': tries + 1}))
+        except Exception:  # health: allow BLE001 -- this process still counts; a restart may grant a few more
+            logger.debug('wall-replay: could not record the tries of %s', intent['admission_id'], exc_info=True)
     _arm(authority, intent, RETRY_S, tries + 1)
     return 'retry'
 

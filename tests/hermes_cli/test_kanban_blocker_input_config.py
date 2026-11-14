@@ -101,6 +101,34 @@ def test_unavailable_config_is_not_retained(kanban_home, monkeypatch):
     exercise()
 
 
+def test_hold_decision_reads_config_once_without_deepcopy(kanban_home, monkeypatch):
+    """The checks lookup and probe interval each deepcopied ``load_config()`` per held candidate (~14% of guard time)."""
+    from hermes_cli import config
+    deep = []
+    with kbc.connect_closing() as conn:
+        tids = [helpers._legacy_blocked_behind(conn, f'wall {i}', blocker_id='test-wall') for i in range(2)]
+        st = blockers.blocker_states(conn)['test-wall']
+        real_deep = config.load_config
+        monkeypatch.setattr(config, 'load_config', lambda: deep.append(1) or real_deep())
+        cfg = {'kanban': {'shared_blocker_checks': {'test-wall': 'exit 1'}}}
+        calls = _counting_config(monkeypatch, cfg)
+        seen = []   # the fixture pins the interval; record which config reached it
+        monkeypatch.setattr(blockers, 'probe_interval_seconds', lambda c=None: seen.append(c) or 777)
+        bid, sibling, due = blockers._shared_blocker_hold(conn, tids[1], now=min(st.behind.values()) + 1)
+        assert (bid, sibling, due) == ('test-wall', None, min(st.behind.values()) + 777)
+        assert seen == [cfg] and seen[0] is cfg and not deep
+        # The checks lookup saw the same read: a registered wall honours this card's own release
+        # even while a sibling's probe runs; an unregistered one keeps it behind that probe.
+        assert helpers.kb.unblock_task(conn, tids[0]) and helpers.kb.claim_task(conn, tids[0])
+        assert helpers.kb.unblock_task(conn, tids[1])
+        deep.clear()
+        later = min(st.behind.values()) + 2
+        assert blockers._shared_blocker_hold(conn, tids[1], now=later) is None
+        _counting_config(monkeypatch, {'kanban': {'shared_blocker_probe_seconds': 777}})
+        assert blockers._shared_blocker_hold(conn, tids[1], now=later) == ('test-wall', tids[0], 0)
+        assert not deep and calls
+
+
 def test_non_mapping_kanban_section_does_not_crash_derivation(kanban_home, monkeypatch):
     """A scalar/list ``kanban`` section is fail-closed config, not a crash in the identity read."""
     for section in ('oops', [1, 2], 7):

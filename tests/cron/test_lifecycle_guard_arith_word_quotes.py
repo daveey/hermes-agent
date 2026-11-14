@@ -85,18 +85,10 @@ def test_quoted_word_arithmetic_subscripts_are_sinks(tmp_path, shape):
     assert output_reaches_shell(command)
 
 
-# The guard finds the referenced script only behind a `$(…)` it recognizes. Unquoted
-# backslash-escaped substitutions (t_01a1db0af44d1601) and backticks
-# (t_01a1db0c38d72914) still hide it; the scanner above already flags these sinks.
+# The guard does not yet follow a script behind an escaped backtick inside a
+# double-quoted `let` operand (t_01a1db0c38d72914); the scanner above already flags
+# that sink.
 _GUARD_GAPS = {
-    r"let x=a[\`SCRIPT\`]": "t_01a1db0af44d1601",
-    r"let x=a[\$\(SCRIPT\)]": "t_01a1db0af44d1601",
-    r"let x=a\[\$\(SCRIPT\)\]": "t_01a1db0af44d1601",
-    r"let x=a[$\(SCRIPT\)]": "t_01a1db0af44d1601",
-    r"let x=a['$'\(SCRIPT\)]": "t_01a1db0af44d1601",
-    r"let x=a[' '\$\(SCRIPT\)]": "t_01a1db0af44d1601",
-    r"[[ 1 -eq a\[\$\(SCRIPT\)\] ]]": "t_01a1db0af44d1601",
-    "let 'a[`SCRIPT`]=1'": "t_01a1db0c38d72914",
     r'let "a[\`SCRIPT\`]=1"': "t_01a1db0c38d72914",
 }
 

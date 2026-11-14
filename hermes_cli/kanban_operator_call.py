@@ -54,7 +54,7 @@ MAX_PER_TICK = 5
 SCAN_BATCH = 500
 SKEW_S = 120
 AUTHOR = "kanban-operator-call"
-_FIELDS = {"comment": {"text"}, "move": {"runs_on", "reason"}, "unblock": {"reason"},
+_FIELDS = {"comment": {"text"}, "move": {"runs_on", "reason", "host_reason"}, "unblock": {"reason"},
            "creator_archive": {"reason"}}
 _MARK: dict = {}  # (live db path, board) -> replica event id scanned up to, this process
 _PERSISTED: dict = {}
@@ -150,6 +150,10 @@ def normalize_op(i: int, op: dict) -> dict:
         except ValueError as exc:
             raise _err("invalid_ops", f"op {i}: {exc}") from None
         out["runs_on"] = list(labels or [])
+        # A machine:<x> target needs host_reason naming state on x (kanban_move_pool.check): optional, carried.
+        host_reason = str(op.get("host_reason") or "").strip()
+        if host_reason:
+            out["host_reason"] = host_reason[:MAX_REASON]
     return out
 
 
@@ -342,7 +346,8 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         return refuse("running", f"{target} is running; only its own run may move it (kanban_move)")
     if alarm_scope is not None:
         return refuse("pickup_stall_scope", f"a pickup-stall alarm moves only a card it lists, off the stalled "
-                                            f"machine, to the pool or one machine eligible now: {alarm_scope}")
+                                            f"machine, to the pool queue (or one machine whose state a host_reason "
+                                            f"names): {alarm_scope}")
     if op["action"] == "unblock":
         if status != "blocked":
             return refuse("not_blocked", f"{target} is {status}, not blocked")
@@ -700,7 +705,7 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
         if _marker(conn, target, km.MOVED_EVENT, uid) or _marker(conn, target, MOVE_MARK, uid):
             return "already_applied", None
         out = km.move_queued(conn, target, runs_on=args.get("runs_on") or [], reason=str(args.get("reason") or ""),
-                             event_extra=extra)
+                             host_reason=args.get("host_reason"), event_extra=extra)
         if out.get("ok"):
             if not _marker(conn, target, km.MOVED_EVENT, uid):
                 # The worker-first Board repin path writes its own event without ``event_extra``: record the

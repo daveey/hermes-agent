@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from hermes_cli.kanban_pr_merge_time import check_receipt, merge_evidence, timestamp
+from hermes_cli.kanban_pr_merge_time import check_receipt, flag_main_health, merge_evidence, timestamp
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -281,6 +281,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
                 receipt["checks"].append(evidence)
         outcomes = fallback_outcomes(receipt, required, outcomes, runs, statuses, suites,
                                      merged=pr["state"] == "MERGED")
+        # Failed empty suites joined post_merge_checks after merge_evidence; a no-op
+        # unless the PR merged as this head, and the required path adds no rows.
+        flag_main_health(receipt, pr, repo)
         # Re-read after all pages: old-head successes are never transferable.
         phase = "re-reading the PR head"
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)

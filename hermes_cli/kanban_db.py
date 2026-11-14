@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr, kanban_requeue_custody as _requeue_custody
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
@@ -2317,11 +2317,11 @@ def reclaim_task(
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
         row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
+    custody = _requeue_custody.for_requeue(conn, task_id, reason)  # core update: end plain processes, pin persisted
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
         cur = conn.execute(
-            "UPDATE tasks SET status = ?, claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
+            "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
             "AND claim_lock IS ?", (retry_status, task_id, prev_lock),
         )
@@ -2330,7 +2330,7 @@ def reclaim_task(
         run_id = _record_reclaim(
             conn, task_id, termination,
             error=f"manual_reclaim: {reason}" if reason else f"manual_reclaim lock={prev_lock}",
-            payload={"manual": True, "reason": reason, "prev_lock": prev_lock, "retry_status": retry_status},
+            payload={"manual": True, "reason": reason, "prev_lock": prev_lock, "retry_status": retry_status, **custody},
         )
     _sync.release_lease(conn, task_id, _sync.run_uid(conn, run_id))
     # Operator intervention = fresh retry budget (own txn, runs after commit).

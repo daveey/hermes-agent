@@ -123,7 +123,11 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     from hermes_cli import kanban_placement_coordination as coordination
 
     label = placement._Cfg(cfg).queue_label(gateway)
-    if not label or pin not in ("", "auto") or args.get("runs_on") is not None:
+    if pin not in ("", "auto") or args.get("runs_on") is not None:
+        return None
+    if not label:
+        from hermes_cli.kanban_home_marker_placement import no_queue
+        no_queue(args, cfg, gateway)  # a pool worker's home-marker keep says why (gateway-test-failed)
         return None
     unmet = None
     reason = placement.portable_reason(args, cfg)
@@ -141,6 +145,10 @@ def queue_decision(args, cfg, gateway, pin, machine_ok=None):
         return None
     extra = coordination.required_labels(args, cfg)
     if extra is None:
+        # Text every pool member's pickup gate refuses (a hermes-hub action portability's backtick-free text never
+        # saw): the card stays here, so a home-marker queue record becomes gateway-test-failed (t_01a1d73ba3627290).
+        from hermes_cli.kanban_home_marker_placement import unclaimable
+        unclaimable(args)
         return None
     if unmet is not None:
         extra = extra | unmet["labels"]
@@ -207,7 +215,9 @@ def creation_audit(args, cfg=None):
         cfg = placement.config() if cfg is None else cfg
         audit = {"portable_reason": placement.portable_reason(args, cfg), "placement_intent": intent}
         from hermes_cli.kanban_home_marker_placement import recorded
-        if (home := recorded(args)) is not None:  # how a pool worker resolved its home-marker hits
+        # How a pool worker resolved its home-marker hits. An explicit pin leaves placement unchanged, so it carries
+        # no record even when a front door simulated the auto placement first (t_01a1d773774908a6).
+        if not explicit and (home := recorded(args)) is not None:
             audit["home_marker"] = home
         return audit
     except Exception:  # health: allow BLE001 -- an audit field never blocks a create

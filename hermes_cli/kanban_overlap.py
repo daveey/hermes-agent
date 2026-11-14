@@ -238,6 +238,23 @@ def cites(card_id: str, title: str, body: str) -> bool:
     return card_id in set(_CARD_ID.findall(f"{title}\n{(body or '')[:_BODY_SCAN]}"))
 
 
+# Template titles (t_01a1db274c88e2e3): ``hermes-core-wt ship --request-review`` files "Independent exact-head review
+# PR #N @<sha> (core-wt ship review required)", so two reviews of different PRs share ~80% of their words and only the
+# PR number tells them apart. Titles that each name PRs, and no PR in common, are different work by title.
+_PR_REF = re.compile(r"(?:(?<![\w#])#|\bpr\s*#?\s*|\bpull/)(\d{2,6})(?!\d)", re.IGNORECASE)
+
+
+def pr_numbers(title: str) -> frozenset[int]:
+    """PR numbers a title names: ``#N``, ``PR N``, ``PRN``, ``PR #N``, ``pull/N`` (N of 2-6 digits)."""
+    return frozenset(int(n) for n in _PR_REF.findall(title or ""))
+
+
+def _different_prs(a: str, b: str) -> bool:
+    """Both titles name a PR and no PR number is common to them (repos are not told apart)."""
+    mine, theirs = pr_numbers(a), pr_numbers(b)
+    return bool(mine and theirs and not mine & theirs)
+
+
 def _reasons(card: dict, new_words: set[str], title: str, body: str, target_board: str,
              gateways: Iterable[str] = (), failure: Optional[FailureIdentity] = None) -> tuple[list[str], float]:
     reasons, score = [], 0.0
@@ -266,7 +283,9 @@ def _reasons(card: dict, new_words: set[str], title: str, body: str, target_boar
         ratio = len(shared) / max(len(new_words), len(theirs))
         score = max(score, ratio)
         # The title ratio alone: a failure match sets score to 1.0 without any title overlap.
-        if len(shared) >= MIN_SHARED and ratio >= 0.5:
+        if _different_prs(title, card.get("title") or ""):
+            pass  # Template words shared by titles of different PRs say nothing (_PR_REF).
+        elif len(shared) >= MIN_SHARED and ratio >= 0.5:
             reasons.append(f"titles share {len(shared)} words ({', '.join(sorted(shared))})")
         elif len(shared) >= MIN_FILE_SHARED and ratio >= FILE_SCORE and (same := code_files(title)
                                                                           & code_files(card.get("title") or "")):

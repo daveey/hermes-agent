@@ -27,6 +27,7 @@ QUIET_COMPATIBLE_FIELDS = frozenset({
 QUIET_HOLD_FIELDS = frozenset({
     "spawned", "skipped_unassigned", "skipped_nonspawnable", "skipped_per_profile_capped", "owner_down",
     "skipped_ineligible", "claim_deferred", "admission_deferred", "capsule_refused", "pinned_quota_held",
+    "llm_paced",
     "auto_blocked", "respawn_guarded", "no_progress_held", "clock_held", "rate_limited",  # holds / guards
     "crashed", "timed_out", "stale", "reclaimed", "reconciled_orphans", "released_leftover_claims",
     "ownership_error",                                    # worker or claim failures

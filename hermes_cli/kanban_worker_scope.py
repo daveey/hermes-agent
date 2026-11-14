@@ -289,8 +289,8 @@ def _cmdline(pid: int) -> str:
         return ""
 
 
-def _persisted_pids() -> set[int]:
-    """Live pids of ``persist_on_release`` jobs from every profile's process checkpoint."""
+def checkpoint_entries() -> list[dict]:
+    """Every profile's process-checkpoint (``processes.json``) entries, unvalidated beyond being dicts."""
     from hermes_constants import get_default_hermes_root, get_hermes_home
 
     homes = {get_hermes_home()}
@@ -300,21 +300,28 @@ def _persisted_pids() -> set[int]:
         homes.update(p for p in (root / "profiles").iterdir() if p.is_dir())
     except OSError:
         pass
-    pids: set[int] = set()
+    out: list[dict] = []
     for home in homes:
         try:
             entries = json.loads((home / "processes.json").read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
-        for entry in entries if isinstance(entries, list) else []:
-            if not isinstance(entry, dict) or not entry.get("persist_on_release"):
-                continue
-            pid, start = entry.get("pid"), entry.get("host_start_time")
-            if type(pid) is not int or pid <= 1:
-                continue
-            stat = _proc_stat(pid)
-            if stat is not None and (type(start) is not int or stat[1] == start):
-                pids.add(pid)
+        out.extend(entry for entry in (entries if isinstance(entries, list) else []) if isinstance(entry, dict))
+    return out
+
+
+def _persisted_pids() -> set[int]:
+    """Live pids of ``persist_on_release`` jobs from every profile's process checkpoint."""
+    pids: set[int] = set()
+    for entry in checkpoint_entries():
+        if not entry.get("persist_on_release"):
+            continue
+        pid, start = entry.get("pid"), entry.get("host_start_time")
+        if type(pid) is not int or pid <= 1:
+            continue
+        stat = _proc_stat(pid)
+        if stat is not None and (type(start) is not int or stat[1] == start):
+            pids.add(pid)
     return pids
 
 

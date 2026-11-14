@@ -21,6 +21,7 @@ LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choi
 from hermes_cli.config_env_registry import EnvVarRegistry as _EnvVarRegistry
 from hermes_cli.config_defaults_routing import routing_defaults
 from hermes_cli.kanban_workspace_source_config import DEFAULTS as _WORKSPACE_SOURCE_DEFAULTS
+from hermes_cli.kanban_pacing_defaults import DEFAULTS as _PACING_DEFAULTS
 
 
 DEFAULT_CONFIG = {
@@ -1980,16 +1981,15 @@ DEFAULT_CONFIG = {
         # assignees ([] = all); default_model_keep_patterns are case-insensitive regexes on title+body.
         # With a class default, review/retry/keep-pattern work requests class:deep instead;
         # exact card pins remain unchanged. Class providers must be auto (or unset).
-        "default_model": "",
-        "default_provider": "",
-        "default_model_profiles": [],
-        "default_model_keep_patterns": [],
+        "default_model": "", "default_provider": "",
+        "default_model_profiles": [], "default_model_keep_patterns": [],
         # Strong tier [daveey]: the model (+ optional provider; "" = inferred from the model) that
         # review-lane, retry-after-failure and keep-pattern cards run on while default_model is set.
         # "" = the old behaviour (the profile's own model, or class:deep with a class default), which
         # silently followed every change of the profile's default model.
         "strong_model": "", "strong_provider": "",
         "pin_quota_reroute_min_hours": 6,  # a card pin walled this long runs on a same-class peer (kanban_pin_reroute)
+        "llm_pacing": dict(_PACING_DEFAULTS, providers=list(_PACING_DEFAULTS["providers"])),  # claim-time quota pacing
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

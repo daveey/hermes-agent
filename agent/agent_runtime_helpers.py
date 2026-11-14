@@ -36,6 +36,7 @@ from agent.retry_utils import LIVE_RETRY_WAIT_CAP_S, parse_retry_after_seconds, 
 from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
 from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
+from agent.agent_runtime_helpers_user_rows import _remember_own_row, keep_one_notice_row
 from agent.primary_runtime_snapshot import _build_primary_runtime_snapshot
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 logger = logging.getLogger(__name__)
@@ -517,18 +518,6 @@ def _count_unnamed_row(survivor: dict[str, Any], retired: dict[str, Any]) -> Non
             survivor.setdefault(RETIRED_DURABLE_ROWS, []).append(retired_row_payload(retired))
 
 
-def _remember_own_row(survivor: dict[str, Any]) -> None:
-    """An assistant fold rewrites *survivor*'s text, so on a reload without row ids its own row no longer
-    matches it by content. Record its loaded fields first, once."""
-    from agent.context_compressor import _DB_PERSISTED_MARKER
-    from agent.conversation_compression_archive import OWN_ROW, RETIRED_DURABLE_ROWS, retired_row_payload
-
-    recorded = survivor.get(RETIRED_DURABLE_ROWS) or ()
-    if (survivor.get(_DB_PERSISTED_MARKER) and not isinstance(survivor.get("_row_id"), int)
-            and not any(isinstance(row, dict) and row.get(OWN_ROW) for row in recorded)):
-        survivor.setdefault(RETIRED_DURABLE_ROWS, []).append({**retired_row_payload(survivor), OWN_ROW: True})
-
-
 def _retire_dropped_row(kept: list[dict], dropped: dict[str, Any], leading: list[dict]) -> None:
     """A durable row the repair drops was still handed to the caller, so the survivor before it stands
     for it. Left unnamed, an in-place compaction takes it for a row another surface appended and
@@ -674,6 +663,9 @@ def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
     merged: list[dict] = []
     for msg in messages:
         prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
+        if prev is not None and (kept := keep_one_notice_row(prev, msg)) is not None:
+            merged[-1], repairs = kept, repairs + 1
+            continue
         if (
             prev is not None and prev.get("role") == "user"
             and isinstance(msg, dict) and msg.get("role") == "user"

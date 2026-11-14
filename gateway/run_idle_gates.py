@@ -60,11 +60,13 @@ class _ConnMeta:
         self._conn = conn
 
     def list_meta_prefix(self, prefix: str) -> list[tuple[str, str]]:
-        from hermes_state_common import escape_like
-
-        rows = self._conn.execute(
-            "SELECT key, value FROM state_meta WHERE key LIKE ? ESCAPE '\\'", (escape_like(prefix) + "%",))
-        return [(row[0], row[1]) for row in rows]
+        # A primary-key range, not ``LIKE ? ESCAPE``: that form cannot use the index and reads every
+        # state_meta value (244 MB on one gateway store) on each probe. The filter keeps the match literal.
+        if not prefix:
+            return []
+        rows = self._conn.execute("SELECT key, value FROM state_meta WHERE key >= ? AND key < ?",
+                                  (prefix, prefix[:-1] + chr(min(ord(prefix[-1]) + 1, 0x10FFFF))))
+        return [(row[0], row[1]) for row in rows if row[0].startswith(prefix)]
 
 
 def _store_has_work_cached(db: Any, kind: str, store_has_work: Callable[[Any], bool]) -> bool:

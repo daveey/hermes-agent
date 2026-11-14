@@ -530,8 +530,12 @@ def _operator_released(conn: sqlite3.Connection, task_id: str, blocker_id: str) 
     ``kb.unblock_task`` too, then record :data:`CLEARED_EVENT` / :data:`PROBE_RELEASED_EVENT` as the
     card's very next event. Such a release answers the wall's state at that moment; a run started after
     it that hits the wall again is newer evidence, so the card falls back to the normal rule instead of
-    spawning only to rediscover the wall (one wasted run per released card per episode). [daveey]
+    spawning only to rediscover the wall (one wasted run per released card per episode). A
+    :data:`CLEARED_EVENT` without ``woke: True`` retired a ready/review card's hold and released
+    nothing, so it leaves an operator's unblock just before it the operator's. [daveey]
     """
+    from hermes_cli import kanban_db as kb
+
     if not _unblocked_since_assertion(conn, task_id, blocker_id, own_only=True):
         return False
     rows = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='unblocked'", (task_id,)).fetchall()
@@ -542,7 +546,11 @@ def _operator_released(conn: sqlite3.Connection, task_id: str, blocker_id: str) 
         (task_id, newest["created_at"], newest["id"]),
     ) if _event_order(row) > order]
     after = min(following, key=_event_order, default=None)
-    return after is None or after["kind"] not in _DISPATCHER_RELEASES
+    if after is None or after["kind"] not in _DISPATCHER_RELEASES:
+        return True
+    # Hold-retirement annotation (release_cleared_blockers' ready/review branch): no ``woke``, no
+    # release; kanban_awaiting.prior_same_premise tells a real wake apart by the same key.
+    return after["kind"] == CLEARED_EVENT and kb._json_dict(after["payload"]).get("woke") is not True
 
 
 def shared_blocker_guard(
@@ -578,7 +586,8 @@ def _shared_blocker_hold(conn, task_id, *, now=None, interval=None) -> Optional[
     if st is None or not st.is_open or not task_applies(conn, st, task_id):
         return None
     from hermes_cli.kanban_shared_blocker_checks import registered_checks
-    if st.blocker_id in registered_checks() and _operator_released(conn, task_id, st.blocker_id):
+    cfg = _hold_config()
+    if st.blocker_id in registered_checks(cfg) and _operator_released(conn, task_id, st.blocker_id):
         # This wall has an independent dispatcher probe. A peer's long run or
         # reassertion cannot revoke the operator's explicit release of this card.
         # The dispatcher's own releases earn no such exemption (_operator_released).
@@ -594,7 +603,7 @@ def _shared_blocker_hold(conn, task_id, *, now=None, interval=None) -> Optional[
     if _released_as_probe(conn, st, task_id):
         return None
     if interval is None:
-        interval = probe_interval_seconds()
+        interval = probe_interval_seconds(cfg)
     last = max(st.probe_starts.values(), default=min(st.behind.values()))
     if now - last >= interval:
         return None
@@ -602,6 +611,20 @@ def _shared_blocker_hold(conn, task_id, *, now=None, interval=None) -> Optional[
     if _unblocked_since_assertion(conn, task_id, st.blocker_id):
         return None
     return st.blocker_id, None, last + interval
+
+
+def _hold_config() -> Optional[dict]:
+    """One read-only config read per hold decision, shared by the checks lookup and the probe interval.
+
+    Both only read it; a deepcopying ``load_config()`` each cost ~2 ms per held candidate. ``None`` when the
+    backend is unavailable, so each reader falls back to its own load and handling as before; any other
+    error propagates, as it did from ``registered_checks()``'s own load. [daveey]"""
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+    from hermes_cli.kanban_blocker_inputs import config
+    try:
+        return config()
+    except ConfigBackendUnavailable:
+        return None
 
 
 def _released_as_probe(conn: sqlite3.Connection, st: BlockerState, task_id: str) -> bool:

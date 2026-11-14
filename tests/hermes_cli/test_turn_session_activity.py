@@ -201,6 +201,32 @@ def test_gateway_checkpoint_that_cannot_continue_does_not_count(home, kwargs):
     assert "turn_live" not in tsa.annotate_turn_activity([{"id": "paused_chat"}])[0]
 
 
+def test_gateway_checkpoint_read_never_scans_the_admissions_table(home):
+    """The poll runs every 2 s in every profile store: it must reach admissions by index, whatever their
+    count, and still find the one checkpointed started admission among settled ones."""
+    _checkpointed_db(home, "paused_chat")
+    conn = sqlite3.connect(home / "state.db")
+    conn.executemany(
+        "INSERT INTO session_admissions(admission_id, request_id, principal_id, target_session_id, lineage_json,"
+        " payload_json, payload_digest, intent, status) VALUES (?, ?, 'p', 'paused_chat', '[]', '{}', 'd', 'queue',"
+        " 'terminal')", [(f"old{i}", f"old-r{i}") for i in range(200)])
+    conn.execute("INSERT INTO state_meta(key, value) VALUES ('gateway.update_checkpoint.v1.old7', '{}')")
+    conn.execute("INSERT INTO state_meta(key, value) VALUES ('gateway.update_checkpoint.v2.adm1', '{}')")
+    conn.commit()
+    seen: list[str] = []
+    conn.set_trace_callback(seen.append)
+    try:
+        assert tsa._update_paused_gateway_turns(conn, time.time()) == {"paused_chat"}
+    finally:
+        conn.set_trace_callback(None)
+    reads = [sql for sql in seen if "session_admissions" in sql]
+    assert reads
+    for sql in reads:
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        assert plan and all(step.startswith("SEARCH") for step in plan), plan
+    conn.close()
+
+
 def _marker(home, key, **entry):
     (home / "desktop").mkdir(parents=True, exist_ok=True)
     (home / "desktop" / "interrupted_turns.json").write_text(json.dumps({key: entry}), encoding="utf-8")

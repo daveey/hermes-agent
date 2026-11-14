@@ -148,17 +148,33 @@ def merge_evidence(receipt, pr, repo, runs, statuses, *, distinct_suites=False, 
     statuses, post_statuses = partition_at_merge(statuses, merged_at, runs=False)
     sha = receipt["head_sha"]
     receipt["post_merge_checks"] = [check_receipt(c, sha) for c in post_runs + post_statuses]
+    flag_main_health(receipt, pr, repo)
+    return runs, statuses
+
+
+# Post-merge conclusions that mean the landed sha's CI is red. startup_failure is
+# a workflow that could not start (e.g. an invalid workflow file): red. cancelled
+# is not: concurrency groups routinely cancel a superseded main run. stale,
+# neutral and skipped never claim red either.
+RED_CONCLUSIONS = frozenset({"failure", "error", "timed_out", "action_required", "startup_failure"})
+
+
+def flag_main_health(receipt, pr, repo):
+    """Point at ci-main-watch when post-merge evidence on the landed sha is red.
+
+    Callers that add post-merge rows later (the fallback's empty suites) call it
+    again; it only ever adds the pointer, so a second call is idempotent.
+    """
+    sha = receipt["head_sha"]
     landed = pr.get("mergeCommit")
     if (isinstance(landed, dict) and landed.get("oid") == sha
-            and any(c["conclusion"] in {"failure", "error", "timed_out", "action_required"}
-                    for c in receipt["post_merge_checks"])):
+            and any(c.get("conclusion") in RED_CONCLUSIONS for c in receipt["post_merge_checks"])):
         branch = pr["baseRefName"]
         label = repo if branch == "main" else f"{repo}@{branch}"
         receipt["main_health"] = {
             "idempotency_key": f"ci-red:{label}:{sha}",
             "detail": f"Base branch {branch} CI is red for {repo}@{sha}; "
                       "ci-main-watch owns base health, not this PR's acceptance."}
-    return runs, statuses
 
 
 def _health_owner_rows(conn, exact_key):

@@ -95,6 +95,7 @@ def _holder_dead(holder: str) -> bool:
 # max_attempts), so a pause nobody will continue stops counting. The gateway bound (1 h) is this reader's
 # own fail-closed cap on a checkpoint, not a mirrored producer setting.
 _GATEWAY_CHECKPOINT_PREFIX = "gateway.update_checkpoint.v1."
+_GATEWAY_CHECKPOINT_END = _GATEWAY_CHECKPOINT_PREFIX[:-1] + chr(ord(_GATEWAY_CHECKPOINT_PREFIX[-1]) + 1)  # key range end
 _GATEWAY_PAUSE_FRESH_S = 3600.0
 _TUI_PAUSE_REASON = "core_update_pause"
 
@@ -102,11 +103,14 @@ _TUI_PAUSE_REASON = "core_update_pause"
 def _update_paused_gateway_turns(conn: sqlite3.Connection, now: float) -> set[str]:
     """Sessions whose started gateway admission is parked on an update checkpoint
     (``hermes_state_update_pause.checkpoint_session_input``), dated by the checkpointed last message."""
+    # Driven from the checkpoint keys (state_meta's primary-key range, usually empty), then the admission by
+    # its unique id: CROSS JOIN pins that order. Starting from session_admissions scans the whole table (no
+    # index leads with status), 87 ms of CPU per poll on one 4.8k-admission profile store.
     try:
         rows = conn.execute(
-            "SELECT a.target_session_id, m.value FROM session_admissions a JOIN state_meta m"
-            " ON m.key = ? || a.admission_id WHERE a.status = 'started'",
-            (_GATEWAY_CHECKPOINT_PREFIX,)).fetchall()
+            "SELECT a.target_session_id, m.value FROM state_meta m CROSS JOIN session_admissions a"
+            " ON a.admission_id = substr(m.key, ?) WHERE m.key >= ? AND m.key < ? AND a.status = 'started'",
+            (len(_GATEWAY_CHECKPOINT_PREFIX) + 1, _GATEWAY_CHECKPOINT_PREFIX, _GATEWAY_CHECKPOINT_END)).fetchall()
     except sqlite3.Error:  # no admissions table (older store) or a busy one
         return set()
     out: set[str] = set()

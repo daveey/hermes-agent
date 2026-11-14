@@ -118,15 +118,17 @@ class TestAtomicSnapshotWrite:
         env._snapshot_ready = True
         wrapped = env._wrap_command("echo hi", "/tmp")
         # Env dump goes to a temp file, not directly over the live snapshot.
-        assert "export -p" in wrapped and "> " in wrapped
+        # ``>|`` (not ``>``) so a session with noclobber (``set -C``) can still write it.
+        assert "export -p" in wrapped and ">| " in wrapped
         assert ".tmp." in wrapped
         # Then an atomic rename onto the real snapshot path.
         assert "mv -f " in wrapped
         # The env-dump must NOT write the live snapshot in place (the bug).
         snap = env._snapshot_path
-        assert f"> {snap} " not in wrapped
-        assert f"> '{snap}'" not in wrapped
-        assert f"> {snap}\n" not in wrapped
+        for redirect in (">", ">|"):
+            assert f"{redirect} {snap} " not in wrapped
+            assert f"{redirect} '{snap}'" not in wrapped
+            assert f"{redirect} {snap}\n" not in wrapped
 
     def test_temp_path_uses_mktemp_not_pid_variables(self):
         """The temp name MUST be allocated by ``mktemp`` — never ``$$`` (in

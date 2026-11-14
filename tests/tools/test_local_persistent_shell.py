@@ -73,3 +73,23 @@ def test_profile_functions_survive_only_with_persistence_off(monkeypatch, tmp_pa
         assert run(probe) == later
     finally:
         cleanup_vm(_resolve_container_task_id(task_id))
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_exports_carry_when_the_session_sets_noclobber(monkeypatch, tmp_path):
+    """A ``set -C`` startup (here BASH_ENV) must not stop the env re-dump: it writes into the file
+    mktemp just created, which noclobber refuses for a plain ``>``. Every export was lost that way."""
+    from tools.environments.local import LocalEnvironment
+
+    startup = tmp_path / "bash-env"
+    startup.write_text("set -C\n", encoding="utf-8")
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    monkeypatch.setenv("TERMINAL_TEMP_DIR", str(temp))
+    env = LocalEnvironment(cwd=str(tmp_path), timeout=10, env={"TMPDIR": str(temp), "BASH_ENV": str(startup)})
+    try:
+        assert env.execute("export HERMES_LP_NOCLOBBER=carried")["returncode"] == 0
+        result = env.execute("echo ${HERMES_LP_NOCLOBBER:-lost}")
+    finally:
+        env.cleanup()
+    assert result["output"].strip() == "carried", result

@@ -138,7 +138,9 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
         "${!HERMES_RPC_*} HERMES_KERNEL_DIR "
         f"HERMES_UI_SESSION_ID{extra_unset} 2>/dev/null; "
         "export -p; ) || true; } "
-        f"> {tmp_path}")
+        # ``>|``: *tmp_path* is the file mktemp just created, and a session with ``noclobber``
+        # (``set -C``, e.g. from BASH_ENV) refuses a plain ``>`` onto it, losing every export.
+        f">| {tmp_path}")
 
 
 def _snapshot_bootstrap_script(

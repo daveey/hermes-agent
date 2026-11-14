@@ -20,6 +20,9 @@ from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gateway
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 
 @pytest.fixture
 def svc():
@@ -131,13 +134,13 @@ def test_move_queued_to_a_machine_without_pickup_is_refused_and_accepted_with_it
     hub, _ = gws
     _registry(None)
     tid = kb.create_task(hub.conn, title="queued", assignee="default", runs_on=["machine:hub"])
-    res = km.move_queued(hub.conn, tid, runs_on=["machine:macbook"], reason="needs the mac")
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:macbook"], host_reason=HR, reason="needs the mac")
     assert res["ok"] is False and res["reason_code"] == "placement_unavailable", res
     assert 'placement="macbook"' in res["error"]
     assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]) == [
         "machine:hub"]
     _registry("all")
-    res = km.move_queued(hub.conn, tid, runs_on=["machine:macbook"], reason="needs the mac")
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:macbook"], host_reason=HR, reason="needs the mac")
     assert res["ok"] and res["matches"] == ["macbook"], res
 
 
@@ -146,11 +149,11 @@ def test_cli_move_gets_the_same_two_results(gws, capsys):
     from hermes_cli import kanban as kcli
     _registry(None)
     tid = kb.create_task(hub.conn, title="queued", assignee="default", runs_on=["machine:hub"])
-    out = kcli.run_slash(f'move {tid} --runs-on machine:macbook --reason "needs the mac" --json')
+    out = kcli.run_slash(f'move {tid} --runs-on machine:macbook --host-reason "Mac-only work" --reason "needs the mac" --json')
     res = json.loads(out)
     assert res["ok"] is False and res["reason_code"] == "placement_unavailable", res
     _registry("explicit")
-    res = json.loads(kcli.run_slash(f'move {tid} --runs-on machine:macbook --reason "needs the mac" --json'))
+    res = json.loads(kcli.run_slash(f'move {tid} --runs-on machine:macbook --host-reason "Mac-only work" --reason "needs the mac" --json'))
     assert res["ok"] and res["runs_on"] == ["machine:macbook"], res
 
 

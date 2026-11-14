@@ -902,7 +902,9 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     from hermes_cli.kanban_worker_placement import execution_refusal
     from hermes_cli.kanban_sync_diagnostics import record_claim
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is not None and (reason := execution_refusal(conn, row) or _source_skip(conn, row)):
+    from hermes_cli.kanban_requeue_custody import claim_refusal as custody_refusal
+    if row is not None and (reason := execution_refusal(conn, row) or _source_skip(conn, row)
+                            or custody_refusal(conn, row)):  # a requeued run's processes still live elsewhere
         defer_claim(task_id, reason, ORIGIN_LOCAL)
         return ClaimGate(expires, deferred=True)
     if board_mode(conn) != "primary":

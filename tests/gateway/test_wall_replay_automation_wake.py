@@ -34,7 +34,9 @@ async def _authority(tmp_path, monkeypatch, instance='wall-replay'):
     runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / 'sessions'))
     db = SessionDB(tmp_path / 'state.db')
     runner.session_store._db = runner._session_db = db
-    authority = await initialize_session_authority(runner, profile_id='default', instance_id=instance, db=db)
+    # A served authority's id is its profile home (``run_runtime``), the owner of its sessions' terminal
+    # policy: a replay admitted inside that home's scope (``_admit``) must find its own policy there.
+    authority = await initialize_session_authority(runner, profile_id=str(tmp_path), instance_id=instance, db=db)
     return runner, db, authority
 
 
@@ -72,7 +74,7 @@ async def _stop(authority, db):
 async def _local_session(authority, tmp_path):
     from gateway.session_contract import SessionActor
     from gateway.session_local import create_local_session
-    viewer = SessionActor('test-owner', 'default', frozenset(
+    viewer = SessionActor('test-owner', authority.profile_id, frozenset(
         {'session:create', 'session:submit', 'session:read'}), 'viewer')
     ref = create_local_session(authority, viewer, dict(request_id='cli', source='tui', model='fixture',
                                                       cwd=str(tmp_path), toolsets=[]))
@@ -167,6 +169,10 @@ async def test_a_redelivery_refused_again_gives_up(tmp_path, monkeypatch):
         adapter = runner._adapter_for_source(live.source)
         assert await admit_route_wake(runner, adapter, live.source, 'kanban: t_1 blocked', 'kanban-wake') is True
         [refused] = await _settled(db, ref.session_id, 1)
+        # The session's turn task has exited, so the redelivery starts a new one inside _admit's profile
+        # scope (as a timer-fired replay does in production); before that, CI raced with this test.
+        from tests.waiting import async_wait_until
+        await async_wait_until(lambda: live.task is None or live.task.done(), timeout=20, what='the session idle')
         # The wall was renewed past its reset: the one redelivery is refused too.
         assert await replay.fire_replay(authority, refused['admission_id']) == 'admitted'
         rows = await _settled(db, ref.session_id, 2)
@@ -304,6 +310,7 @@ def _seed(db, admission_id='adm-1'):
     ('refused', 'dropped', False),        # a permanent refusal: dropped, never retried
     ('no-route', 'dropped', False),       # the route takes no wakes any more
     ('exhausted', 'dropped', False),      # the retry budget is spent
+    ('crash', 'retry', True),             # an unexpected admission error: looks again, within the budget
     ('retired', 'gone', True),            # a retired authority leaves it to the store's next owner
 ])
 async def test_fire_replay_outcomes(tmp_path, monkeypatch, case, verdict, kept):
@@ -320,6 +327,8 @@ async def test_fire_replay_outcomes(tmp_path, monkeypatch, case, verdict, kept):
                 raise RuntimeStoreError('runtime_draining')
             if case == 'refused':
                 raise RuntimeStoreError('permission_denied')
+            if case == 'crash':
+                raise ValueError('adapter blew up')
             return case != 'no-route'
 
         monkeypatch.setattr(session_automation, 'admit_route_wake', admit)
@@ -339,3 +348,66 @@ async def test_fire_replay_outcomes(tmp_path, monkeypatch, case, verdict, kept):
     finally:
         authority.retiring = False
         await _stop(authority, db)
+
+
+@pytest.mark.asyncio
+async def test_a_stale_planned_redelivery_is_dropped_at_boot_not_delivered(tmp_path, monkeypatch):
+    """A plan whose time passed more than ``STALE_S`` ago (a long outage) is dropped at boot, not re-armed:
+    the notice would arrive long after it mattered. A plan still in date is re-armed as before."""
+    from gateway import session_automation, session_wall_replay as replay
+    runner, db, authority = await _authority(tmp_path, monkeypatch)
+    calls = []
+
+    async def admit(*args, **kwargs):
+        calls.append(args)
+        return True
+
+    monkeypatch.setattr(session_automation, 'admit_route_wake', admit)
+    monkeypatch.setattr(runner, '_adapter_for_source', lambda source: object())
+    try:
+        stale = _seed(db, 'adm-stale')
+        stale['due'] = time.time() - replay.MAX_DELAY_S - 60  # the gateway was down a week through it
+        replay._write(db, replay.PREFIX + 'adm-stale', json.dumps(stale))
+        _seed(db, 'adm-fresh')
+        assert await replay.arm_pending(authority) == 1
+        assert set(_intents(db)) == {'adm-fresh'}
+        assert 'adm-stale' not in authority._wall_replay_timers
+        assert 'adm-fresh' in authority._wall_replay_timers
+        # A timer an earlier process armed for it finds nothing left to deliver.
+        assert await replay.fire_replay(authority, 'adm-stale') == 'gone'
+        # And a timer that fires that late (a suspended process) drops it rather than delivering it; the
+        # bound is STALE_S (a day), well inside MAX_DELAY_S.
+        assert replay.STALE_S < replay.MAX_DELAY_S
+        stale['due'] = time.time() - replay.STALE_S - 60
+        replay._write(db, replay.PREFIX + 'adm-stale', json.dumps(stale))
+        assert await replay.fire_replay(authority, 'adm-stale') == 'dropped'
+        assert set(_intents(db)) == {'adm-fresh'}
+        assert calls == []
+    finally:
+        await _stop(authority, db)
+
+
+@pytest.mark.asyncio
+async def test_a_redelivery_whose_adapter_never_returns_is_dropped_across_restarts(tmp_path, monkeypatch):
+    """The retry budget is persisted with the plan, so restarts do not reset it: a platform removed from
+    config (no adapter, ever) is dropped once the budget is spent, however often the gateway restarts."""
+    from gateway import session_wall_replay as replay
+    _runner, db, authority = await _authority(tmp_path, monkeypatch)
+    _seed(db, 'adm-orphan')
+    await _stop(authority, db)
+    verdicts, stored, boot = [], {}, -1
+    for boot in range(replay.RETRIES_MAX + 3):
+        runner, db, authority = await _authority(tmp_path, monkeypatch, instance=f'boot-{boot}')
+        monkeypatch.setattr(runner, '_adapter_for_source', lambda source: None)
+        try:
+            stored = _intents(db)
+            if 'adm-orphan' not in getattr(authority, '_wall_replay_timers', {}):
+                break  # this boot found the plan spent, dropped it and armed nothing
+            # The timer this process armed fires once and finds no adapter; then the gateway restarts.
+            verdicts.append(await replay.fire_replay(authority, 'adm-orphan'))
+        finally:
+            await _stop(authority, db)
+    assert 'adm-orphan' not in stored  # read by the last boot, after it dropped the plan
+    # Ten looks in all (one per process here), then the next boot drops the plan instead of arming it.
+    assert verdicts == ['retry'] * replay.RETRIES_MAX
+    assert boot == replay.RETRIES_MAX

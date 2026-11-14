@@ -38,14 +38,15 @@ def tool_repin(args: dict, *, board: Callable, check: Callable, ok: Callable, re
     reason = str(args.get("reason") or "").strip()
     check(reason, "reason is required")
     with board(args.get("board")) as (_kb, conn):
-        res = creator_repin(conn, tid, env, runs_on=args.get("runs_on"), reason=reason)
+        res = creator_repin(conn, tid, env, runs_on=args.get("runs_on"), reason=reason,
+                            host_reason=args.get("host_reason"))
     check(res.get("ok"), f"could not repin {tid}: {res.get('error')}")
     return ok(**{k: v for k, v in res.items() if k not in ("ok", "task_id", "next")},
               task_id=tid, next="Repinned another card; this run continues.")
 
 
 def creator_repin(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs_on: Any, reason: str,
-                  hub: Any = None) -> dict[str, Any]:
+                  hub: Any = None, host_reason: str | None = None) -> dict[str, Any]:
     """``move_queued``'s result, or ``{"ok": False, "reason_code", "error"}`` when this worker may not repin it."""
     from hermes_cli import kanban_move as km
     from hermes_cli import kanban_worker_repin as repin
@@ -55,11 +56,13 @@ def creator_repin(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs
         if refusal is not None:
             stranded = stranded_refusal(conn, task_id)
             if stranded is None:
-                return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
+                return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub,
+                                        host_reason=host_reason)
             from hermes_cli import kanban_pickup_stall_repin as stall
-            stalled = stall.refusal(conn, task_id, env_task, runs_on)
+            stalled = stall.refusal(conn, task_id, env_task, runs_on, host_reason=host_reason)
             if stalled is None:
-                return stall.move(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
+                return stall.move(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub,
+                                  host_reason=host_reason)
             return {"ok": False, "reason_code": "not_creator_task",
                     "error": f"worker is scoped to task {env_task}; it may move another card only to repin a "
                              f"worker-first card its own task created (or, as its generated repin-owner "
@@ -72,12 +75,23 @@ def creator_repin(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs
         # worker is open to it too.
         stranded = stranded_refusal(conn, task_id)
         if stranded is None:
-            return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
+            return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub,
+                                    host_reason=host_reason)
         return {"ok": False, "reason_code": "not_repinnable",
                 "error": f"{task_id} is not an unstarted worker-first card (running, done, archived or no "
                          f"placement policy) nor a ready card stranded on impossible runs_on ({stranded}); "
                          "only the explicit origin repin or a stranded reroute is allowed here"}
-    return km.move_queued(conn, task_id, runs_on=runs_on, reason=reason, hub=hub)
+    # The origin repin carries its own target state: the worker-first card goes back to the machine it was written
+    # for (kanban_move_pool.check needs a host_reason for any machine:<x>, t_01a1d95c41620e6c).
+    if _names_machine(runs_on) and not (host_reason or "").strip():
+        host_reason = ("origin repin of an unstarted worker-first card: the origin host holds the work it was "
+                       "created from")
+    return km.move_queued(conn, task_id, runs_on=runs_on, reason=reason, hub=hub, host_reason=host_reason)
+
+
+def _names_machine(runs_on: Any) -> bool:
+    """Whether ``runs_on`` pins one machine (``machine:<x>``), the target that needs a host reason."""
+    return isinstance(runs_on, list) and any(isinstance(x, str) and x.startswith("machine:") for x in runs_on)
 
 
 REROUTE_AUTHOR = "kanban-reroute"
@@ -126,14 +140,19 @@ def stranded_refusal(conn: sqlite3.Connection, task_id: str) -> str | None:
 
 
 def stranded_reroute(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs_on: Any, reason: str,
-                     hub: Any = None) -> dict[str, Any]:
+                     hub: Any = None, host_reason: str | None = None) -> dict[str, Any]:
     """Re-route a card :func:`stranded_refusal` cleared: ``move_queued`` (which refuses unsatisfiable new labels),
-    then a comment keeping the old labels so the rewrite can be undone, and a note on any open ask that names it."""
+    then a comment keeping the old labels so the rewrite can be undone, and a note on any open ask that names it.
+    A ``machine:<x>`` target carries the stranded labels as its host reason (``kanban_move_pool.check``): the old
+    labels named the host the card was written for, which no enrolled machine carries under that name."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_move as km
     from hermes_cli import kanban_worker_node as wn
     old = wn._parse(conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (task_id,)).fetchone()[0])
-    res = km.move_queued(conn, task_id, runs_on=runs_on, reason=reason, hub=hub,
+    if _names_machine(runs_on) and not (host_reason or "").strip():
+        host_reason = (f"stranded reroute: stored runs_on {old} names a host no enrolled machine carries; the new "
+                       "labels name the machine it meant")
+    res = km.move_queued(conn, task_id, runs_on=runs_on, reason=reason, hub=hub, host_reason=host_reason,
                          event_extra={"rerouted_by": env_task, "stranded_runs_on": old})
     if not res.get("ok"):
         return res

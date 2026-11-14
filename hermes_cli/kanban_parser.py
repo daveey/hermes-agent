@@ -403,8 +403,9 @@ _SPECS = [
              help="Queue the card for any worker (= --runs-on pool:worker): the first worker with a free slot "
                   "claims it"),
         _arg("--host-reason", dest="host_reason", default=None,
-             help="Required to pin one pool worker (machine:worker-N): the card works on that host, or holds "
-                  "unpushed state there"),
+             help="Required for any machine:<name> label: the state on that host that holds the card there "
+                  "(a worktree, a stamp, unpublished work, a live process, Mac-only or hub-only work). Capacity "
+                  "is never one: use --pool"),
         _arg("--reason", required=True, help="Why the card must move (logged as a `moved` event)"),
         _arg("--checkpoint", default=None,
              help="Resume notes (required when a card's own worker moves its running card)"),
@@ -603,6 +604,15 @@ _SPECS = [
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
     ], help="Manually move one or more todo/blocked/triage tasks to ready (recovery path)"),
+    _cmd("spend-budget", [
+        _TASK_ID,
+        _arg("--runs", type=_nonnegative_int, help="This card's spending-run limit (0 = no limit)"),
+        _arg("--cache-read-tokens", type=_nonnegative_int, help="This card's cache-read token limit (0 = no limit)"),
+        _arg("--exempt", action="store_true", help="No spend budget for this card (standing cards)"),
+        _arg("--clear", action="store_true", help="Back to the board's kanban.spend_budget_* limits"),
+        _reason("Why (required for a change; recorded on the spend_budget_set event)"),
+        _json_flag(),
+    ], help="Show or set one card's own spend budget (kanban_spend_budget)"),
     _cmd("archive", [
         _arg("task_ids", nargs="*", help="Task ids to archive (default mode)"),
         _arg("--rm", dest="purge_ids", nargs="+",

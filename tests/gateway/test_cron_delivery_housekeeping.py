@@ -428,3 +428,62 @@ def test_a_future_mtime_is_racy_once_then_settles(tmp_path, monkeypatch):
     assert watch.changed() is True
     assert watch.changed() is True, "the new future stamp was not racy on first sight"
     assert watch.changed() is False
+
+
+def test_the_poll_resolves_each_queue_path_once_per_tick(tmp_path, monkeypatch):
+    """``queue_path`` realpaths the profile home (an lstat per path component). The one-second poll
+    must stat the queue files only; the path is re-resolved when the tick refreshes the homes."""
+    import os
+
+    from cron import delivery_queue
+    from gateway import run_delivery_queue_watch as queue_watch
+
+    homes = [tmp_path / "a", tmp_path / "b"]
+    for home in homes:
+        (home / "cron").mkdir(parents=True)
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", None)
+    real = delivery_queue.queue_path
+    resolved = []
+
+    def counted(home=None):
+        resolved.append(home)
+        return real(home)
+
+    monkeypatch.setattr(delivery_queue, "queue_path", counted)
+    granule = queue_watch.MTIME_GRANULARITY_NS
+    now_ns = [100 * granule]
+    monkeypatch.setattr(queue_watch, "_now_ns", lambda: now_ns[0])
+    watch = queue_watch.DeliveryQueueWatch(lambda: list(homes), lambda: None)
+    assert [watch.changed() for _ in range(5)] == [False] * 5
+    assert resolved == homes, f"{len(resolved)} path resolutions for {len(homes)} homes across 6 looks"
+
+    # A queue file written after the path was cached is still seen: the stat is not cached.
+    queue = homes[1] / "cron" / "deliveries.db"
+    queue.write_bytes(b"pending!")
+    os.utime(queue, ns=(50 * granule, 50 * granule))
+    assert watch.changed() is True
+    assert watch.changed() is False
+    assert resolved == homes
+
+    watch.refresh_homes()
+    assert watch.changed() is False
+    assert resolved == homes * 2, "the tick did not re-resolve the served homes"
+
+
+def test_the_poll_follows_a_queue_override_set_between_looks(tmp_path, monkeypatch):
+    import os
+
+    from cron import delivery_queue
+    from gateway import run_delivery_queue_watch as queue_watch
+
+    granule = queue_watch.MTIME_GRANULARITY_NS
+    monkeypatch.setattr(queue_watch, "_now_ns", lambda: 100 * granule)
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", None)
+    watch = queue_watch.DeliveryQueueWatch(lambda: [tmp_path], lambda: None)
+    assert watch.changed() is False
+
+    override = tmp_path / "elsewhere.db"
+    override.write_bytes(b"pending!")
+    os.utime(override, ns=(50 * granule, 50 * granule))
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", override)
+    assert watch.changed() is True, "the cached path hid the override"

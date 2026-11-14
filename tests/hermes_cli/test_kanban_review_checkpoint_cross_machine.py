@@ -20,6 +20,9 @@ from hermes_cli import kanban_move as km
 from tests.hermes_cli.kanban_guard_helpers import worker_comment
 from tests.hermes_cli import test_kanban_move as moves
 
+# kanban_move_pool: a machine:<x> target needs a host_reason naming state on x (t_01a1d95c41620e6c).
+HR = "the card's worktree is on that host"
+
 PR = "https://github.com/example/repo/pull/10"
 HEAD = "a" * 40
 gws = moves.gws
@@ -35,7 +38,7 @@ def _park_on_worker_review(hub, worker, monkeypatch):
     hub.enter()
     task = kb.create_task(hub.conn, title="implement PR", assignee="default")
     # Like production: a plain capacity move, no checkpoint text.
-    assert km.move_queued(hub.conn, task, runs_on=["machine:worker-1"], reason="capacity")["ok"]
+    assert km.move_queued(hub.conn, task, runs_on=["machine:worker-1"], host_reason=HR, reason="capacity")["ok"]
     hub.round()
     worker.round()
     worker.tick()

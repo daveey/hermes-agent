@@ -146,7 +146,7 @@ class CliBoard:
         return list(json.loads(self._run("list", "--archived", "--json")))
 
     def reopen(self, card_id: str) -> None:
-        self._run("reopen", card_id)
+        self._run("reopen", card_id, "--reason", "new CI flake occurrences for this daily intake")
 
     def comments(self, card_id: str, board: str | None = None) -> list[str]:
         data = self._show(card_id, board) or {}
