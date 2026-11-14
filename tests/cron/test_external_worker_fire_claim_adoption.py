@@ -38,7 +38,7 @@ def test_worker_stamps_claim_before_ready_without_run_heartbeat(tmp_path, monkey
             assert jobs.get_job(job["id"]) is None
     payload, ack = tmp_path / "payload.json", tmp_path / "ready"
     payload.write_text(json.dumps({"job": job, "profile_home": str(home)}))
-    observed = []
+    observed, status_at_ack = [], []
     real_replace = os.replace
 
     def publish(src, dst):
@@ -48,6 +48,11 @@ def test_worker_stamps_claim_before_ready_without_run_heartbeat(tmp_path, monkey
                 claim = jobs.get_job(job["id"])["fire_claim"]
                 assert claim.get("runner") == f"{socket.gethostname()}:{os.getpid()}"
                 assert not jobs.claim_job_for_fire(job["id"])
+            else:
+                # The gateway may exit as soon as it sees the ack: a lost claim's
+                # execution must already be terminal, not booked afterwards.
+                with use_cron_store(home):
+                    status_at_ack.append(executions.get_execution(job["execution_id"])["status"])
         return real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", publish)
@@ -56,6 +61,8 @@ def test_worker_stamps_claim_before_ready_without_run_heartbeat(tmp_path, monkey
 
     assert scheduler._run_external_worker_payload(payload, ack) is True
     assert observed == (["ready", "run"] if claim_state == "owned" else ["ready"])
+    if claim_state != "owned":
+        assert status_at_ack == [{"replaced": "failed", "removed": "cancelled"}[claim_state]]
     assert ack.exists()
     with use_cron_store(home):
         record = executions.get_execution(job["execution_id"])
