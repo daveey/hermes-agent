@@ -1034,7 +1034,7 @@ def _peel_external_time(segment: list[str], index: int) -> int:
 
 def _command_segment_views(segment: list[str]) -> list[list[str]]:
     """*segment* as written, then without its leading reserved words when it has any, then each
-    of those with its command-position redirections moved to the end (see
+    of those with its command-position redirections moved just after the executable (see
     ``_hoist_command_redirections``). Callers read every view, so peeling only ever ADDS a
     reference. Without the peeled view `time ./x.sh`, `if true; then ./x.sh; fi` and
     `{ ./x.sh; }` read the keyword as the command and never open ``./x.sh``; without the hoisted
@@ -1051,9 +1051,9 @@ def _command_segment_views(segment: list[str]) -> list[list[str]]:
 
 def _hoist_command_redirections(segment: list[str]) -> list[str]:
     """*segment* with each redirection that sits where the command word is read (before it, or
-    glued to it: `< f.py python3`, `sudo < f.sh bash`, `python3<f.py`) moved to the end, where the
-    stdin scan reads it. A shell applies a simple command's redirections wherever they appear,
-    so this is the same command. Only the command position is split: an argument such as
+    glued to it: `< f.py python3`, `sudo < f.sh bash`, `python3<f.py`) moved just after the
+    executable, before any later redirections. Keep their left-to-right binding order while
+    exposing the command. Only the command position is split: an argument such as
     ``bash -c 'python3<f.py'`` may be quoted program text, and its payload is re-scanned whole."""
     tokens = list(segment)
     moved: list[str] = []
@@ -1070,7 +1070,7 @@ def _hoist_command_redirections(segment: list[str]) -> list[str]:
             # `python3<f.py`: a word is the command up to its first `<`/`>`.
             glued = min((p for p in (word.find("<"), word.find(">")) if p >= 0), default=-1)
             if glued < 0:
-                break
+                return tokens[:index + 1] + moved + tokens[index + 1:]
             tokens[index: index + 1] = [word[:glued], word[glued:]]
             index += 1
             width = _redirection_width(tokens[index])
