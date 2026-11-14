@@ -76,6 +76,22 @@ def test_offkey_full_sha_and_replica_dedup(tmp_path):
     assert review.off_key_review_cards(mod, "example/fork", 7, SHA) == []
 
 
+@pytest.mark.parametrize("sha, expected", [
+    pytest.param(SHA, [CARD], id="full-lowercase-control"),
+    pytest.param(SHA[:10], [], id="short"),
+    pytest.param(SHA + "a", [], id="long"),
+    pytest.param(SHA.upper(), [], id="uppercase"),
+    pytest.param("g" * 40, [], id="nonhex"),
+    pytest.param(SHA + "\n", [], id="trailing-newline"),
+])
+def test_offkey_sha_shape_with_matching_receipt(tmp_path, sha, expected):
+    # Match both sides so receipt equality cannot mask a missing caller-shape guard.
+    mod = board(tmp_path / "board.db", metadata={
+        "verdict": "approve", "reviewed_sha": sha, "reviewed_pr": URL,
+    })
+    assert review.off_key_review_cards(mod, "example/fork", 7, sha) == expected
+
+
 def test_offkey_discovery_is_not_approval_and_preserves_impl_identity(land_stub, tmp_path):
     board(tmp_path / "land-state.db")
     checker = review.ShipReview(tmp_path, impl_task="t_implementer")
