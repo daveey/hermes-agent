@@ -9,6 +9,7 @@ process writing the account's live file either. [daveey]
 """
 import json
 import sqlite3
+import sys
 
 import pytest
 
@@ -52,6 +53,53 @@ def test_save_never_files_one_roots_scope_in_another_roots_file(tmp_path, monkey
         pass  # refusing the save is fine; the caller retries on the next change
     for root in (session_root, test_root):
         assert [scope[2] for scope in rows(root)] in ([], [str(root)]), f'foreign scope filed under {root}'
+
+
+def test_a_save_refused_for_a_moved_home_does_not_fail_the_remote_links_read(tmp_path, monkeypatch):
+    """The refusal above must not fail the caller: a cold or strict read would surface it and the sidebar would
+    mark every row kanban_unknown. Like a lost lock, the read returns its cards and the next changed read retries."""
+    from hermes_cli import kanban_session_activity_origin_snapshot as snapshot_module
+
+    session_root, test_root = tmp_path / 'session', tmp_path / 'test'
+    session_root.mkdir()
+    test_root.mkdir()
+    hub = tmp_path / 'hub.db'
+    hub.touch()
+    home = {'now': session_root}
+    monkeypatch.setattr(kanban_db, 'kanban_home', lambda: home['now'])
+    monkeypatch.setattr(activity, '_hub_db_path', lambda: hub)
+    monkeypatch.setattr(activity, '_read_remote_links', lambda path, **kw: [card()])
+    real_scope = activity._origin_scope
+
+    def scope():
+        # The env swap lands between the save's root read and its scope read, and only during that save.
+        caller = sys._getframe(1)
+        if caller.f_code is snapshot_module.remote_snapshot.__code__ and caller.f_locals.get('cards') is not None:
+            home['now'] = test_root
+        return real_scope()
+
+    monkeypatch.setattr(activity, '_origin_scope', scope)
+    assert activity._legacy_remote_links() == [card()]
+    assert rows(session_root) == [] and rows(test_root) == []
+    home['now'] = session_root
+    monkeypatch.setattr(activity, '_origin_scope', real_scope)
+    assert activity._legacy_remote_links() == [card()]  # the unsaved inventory is retried, not forgotten
+    assert [scope[2] for scope in rows(session_root)] == [str(session_root)]
+
+
+def test_the_test_isolation_tripwire_still_fails_the_remote_links_read(tmp_path, monkeypatch):
+    """Only the race is swallowed. A test resolving the live root is a leak in that test: it must fail loudly."""
+    live = tmp_path / 'live-root'
+    live.mkdir()
+    hub = tmp_path / 'hub.db'
+    hub.touch()
+    monkeypatch.setattr(hermes_state_guard, '_account_hermes_root', lambda: live.resolve())
+    monkeypatch.setattr(kanban_db, 'kanban_home', lambda: live)
+    monkeypatch.setattr(activity, '_hub_db_path', lambda: hub)
+    monkeypatch.setattr(activity, '_read_remote_links', lambda path, **kw: [card()])
+    with pytest.raises(RuntimeError, match='live-system guard'):
+        activity._legacy_remote_links()
+    assert not (live / 'origin-work.db').exists()
 
 
 def test_test_process_cannot_write_the_live_origin_work_db(tmp_path, monkeypatch):
