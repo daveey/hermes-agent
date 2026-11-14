@@ -227,16 +227,26 @@ def test_update_hold_takes_precedence_over_recent_pool_claims(hub):
     assert "Not a placement problem" not in text
 
 
-def test_claims_before_current_ready_episode_do_not_veto_capability_drop(hub):
+@pytest.mark.parametrize("transition", ["continued", "shared_blocker_wake", "clear_already_ready"])
+def test_claims_before_current_ready_episode_do_not_veto_capability_drop(hub, transition):
     from hermes_cli import kanban_label_backlog as klb
     tid = _seed(hub.conn, claims=1)
     now = int(time.time())
     with kb.write_txn(hub.conn):
         hub.conn.execute("UPDATE task_events SET created_at=? WHERE kind='claimed'", (now - 60,))
-        kb._append_event(hub.conn, tid, "continued", {"status": "ready"})
+        if transition == "shared_blocker_wake":
+            from hermes_cli import kanban_wake_check as kwc
+            hub.conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+            assert kwc._wake(hub.conn, tid, "shared_blocker_cleared", {"blocker_id": "quota"})
+        elif transition == "clear_already_ready":
+            kb._append_event(hub.conn, tid, "shared_blocker_cleared", {"blocker_id": "quota"})
+        else:
+            kb._append_event(hub.conn, tid, "continued", {"status": "ready"})
     result = klb.read(hub.conn, tid, LABELS, machines={"worker-3"}, now=now)
-    assert result["known"] and result["claimed_recent"] == 0
-    assert klb.move_refusal(hub.conn, tid, "ready", LABELS, ["pool:worker"], machines=POOL, now=now) is None
+    expected = 1 if transition == "clear_already_ready" else 0
+    assert result["known"] and result["claimed_recent"] == expected
+    refusal = klb.move_refusal(hub.conn, tid, "ready", LABELS, ["pool:worker"], machines=POOL, now=now)
+    assert bool(refusal) == bool(expected)
     with kb.write_txn(hub.conn):
         hub.conn.execute("UPDATE task_events SET created_at=? WHERE kind='claimed'", (now,))
     assert klb.move_refusal(hub.conn, tid, "ready", LABELS, ["pool:worker"], machines=POOL, now=now)

@@ -71,6 +71,16 @@ def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
         from hermes_cli.kanban_parent_unclaimed import ready_since
         created = conn.execute("SELECT created_at FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
         since = max(now - WINDOW_SECONDS, ready_since(conn, task_id, created))
+        # Shared-blocker retirement on an already-ready card has no status; only _wake's
+        # explicit ready transition starts a new claim-evidence window. Keep this local
+        # to the capability guard, without changing the shared notice-age clock.
+        from hermes_cli import kanban_db as kb
+        for event in conn.execute(
+            "SELECT created_at, payload FROM task_events WHERE task_id=? AND kind='shared_blocker_cleared'",
+            (task_id,),
+        ):
+            if kb._json_dict(event[1]).get("status") == "ready":
+                since = max(since, event[0])
         before = set(ordered[:ordered.index(task_id)])
         ahead = sum(row[0] in before and _labels(row[1]) == wanted for row in conn.execute(
             "SELECT id, runs_on FROM tasks WHERE status = 'ready' AND claim_lock IS NULL"))
