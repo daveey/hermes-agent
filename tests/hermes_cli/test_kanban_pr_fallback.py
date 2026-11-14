@@ -115,13 +115,74 @@ def test_merged_fallback_keeps_same_name_workflows_distinct(evidence):
 
 @pytest.mark.parametrize("outcome,expected", [("failure", "failure"), ("pending", "pending"),
                                              ("cancelled", "infra"), ("success", "success")])
-@pytest.mark.parametrize("started", ["2026-11-02T12:00:00Z", "2026-11-02T12:30:00Z"])
-def test_merged_fallback_preserves_same_suite_siblings(evidence, outcome, expected, started):
-    evidence.update(merged=True, runs=[run(outcome), run("success", id=2, started=started)])
+def test_merged_fallback_preserves_concurrent_same_suite_siblings(evidence, outcome, expected):
+    # Same start (a tie with the first run's end) can be a sibling job, not a rerun.
+    evidence.update(merged=True, runs=[run(outcome), run("success", id=2)])
     receipt = gate.collect_acceptance(URL, None)
     assert receipt["classification"] == expected
     assert receipt["ok"] is (expected == "success")
     assert [c["id"] for c in receipt["checks"]] == [1, 2]
+
+
+def rerun_pair(first, *, second="success", second_start="2026-11-02T12:30:00Z", suite=7,
+               first_end="2026-11-02T12:10:00Z"):
+    earlier = {**run(first), "completed_at": first_end}
+    later = {**run(second, id=2, started=second_start), "check_suite": {"id": suite}}
+    return [earlier, later]
+
+
+@pytest.mark.parametrize("first", ["failure", "cancelled", "timed_out"])
+def test_merged_fallback_rerun_before_merge_supersedes_failure(evidence, first):
+    # hermes-mods #183/#178: a failed job re-run to success before the merge.
+    evidence.update(merged=True, runs=rerun_pair(first))
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "success"
+    assert receipt["ok"] is True
+    assert [c["id"] for c in receipt["checks"]] == [2]
+
+
+@pytest.mark.parametrize("second,expected", [("failure", "failure"), ("pending", "pending"),
+                                             ("cancelled", "infra")])
+def test_merged_fallback_red_rerun_stays_red(evidence, second, expected):
+    evidence.update(merged=True, runs=rerun_pair("success", second=second))
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == expected
+    assert receipt["ok"] is False
+
+
+@pytest.mark.parametrize("kw", [
+    {"second_start": "2026-11-02T12:05:00Z"},  # overlaps the failed run
+    {"second_start": "2026-11-02T12:10:00Z"},  # starts the second the failure ended
+    {"suite": 8},                              # another workflow suite, not a rerun
+])
+def test_merged_fallback_unproven_supersession_keeps_failure(evidence, kw):
+    evidence.update(merged=True, runs=rerun_pair("failure", **kw))
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "failure"
+    assert receipt["ok"] is False
+    assert [c["id"] for c in receipt["checks"]] == [1, 2]
+
+
+def test_merged_fallback_pending_run_is_never_superseded(evidence):
+    evidence.update(merged=True, runs=rerun_pair("pending"))
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "pending"
+    assert [c["id"] for c in receipt["checks"]] == [1, 2]
+
+
+def test_merged_fallback_rerun_after_merge_keeps_failure(evidence):
+    # Green-after-merge is post-merge evidence; the merge was gated on red.
+    evidence.update(merged=True, runs=rerun_pair("failure", second_start="2026-11-02T13:30:00Z"))
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == "failure"
+    assert [c["classification"] for c in receipt["post_merge_checks"]] == ["success"]
+
+
+def test_merged_fallback_rerun_finishing_after_merge_is_pending(evidence):
+    runs = rerun_pair("failure", second_start="2026-11-02T12:50:00Z")
+    runs[1]["completed_at"] = "2026-11-02T13:10:00Z"
+    evidence.update(merged=True, runs=runs)
+    assert gate.collect_acceptance(URL, None)["classification"] == "pending"
 
 
 def test_fallback_merge_cutoff(evidence):
@@ -208,6 +269,7 @@ def test_only_idle_suites_is_waivable_absence(evidence, merged):
     suite(100, 900, created="2999-01-01T00:00:00Z"),  # inside the grace period
     {**suite(100, 900), "created_at": None},          # unreadable age
     {**suite(100, 900), "app": None},                 # unreadable app
+    suite(100, 15368),                                # github-actions: may be concurrency-held
 ])
 def test_possibly_live_empty_suite_stays_missing(evidence, live):
     evidence.update(runs=[run("success")], extra_suites=[live])

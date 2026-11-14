@@ -42,10 +42,9 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False):
     def key_of(check):
         if runs:
             if distinct_suites:
-                # Names are not job identities, even within one suite/attempt.
-                # Retain every run: without proven supersession, a later sibling
-                # success cannot replace a failure (or a pending merge-time run).
-                return (check["name"], check["app"]["id"], check["check_suite"]["id"], check["id"])
+                # Workflow suites stay distinct; supersession inside one is
+                # proven by chronology below, never assumed from the name.
+                return (check["name"], check["app"]["id"], check["check_suite"]["id"])
             return (check["name"], check["app"]["id"])
         return (check["context"], (check.get("creator") or {}).get("id"))
 
@@ -57,13 +56,18 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False):
     # unordered against it. If it had not concluded by then while an earlier same-key
     # run had, that earlier conclusion is what gated the merge: the tie run is later
     # (post-merge) evidence. With no earlier conclusion it stays pending (fail closed).
-    gated = {key_of(c) for c in checks if start(c) < cutoff and concluded_at_merge(c)} if runs else set()
+    # Same-name runs in one suite may be concurrent siblings, so in the fallback
+    # a tie run is never assumed to follow another run's conclusion.
+    def gate_key(check):
+        return (*key_of(check), check["id"]) if runs and distinct_suites else key_of(check)
+
+    gated = {gate_key(c) for c in checks if start(c) < cutoff and concluded_at_merge(c)} if runs else set()
     latest = {}
     post = []
     for check in checks:
         started = start(check)
         tie_after_gate = (runs and started == cutoff and not concluded_at_merge(check)
-                          and key_of(check) in gated)
+                          and gate_key(check) in gated)
         if started > cutoff or tie_after_gate:
             post.append(check)
             continue
@@ -71,10 +75,35 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False):
         if runs and check.get("completed_at") and timestamp(check["completed_at"]) > cutoff:
             check = {**check, "status": "in_progress", "conclusion": None}
         key = key_of(check)
+        if runs and distinct_suites:
+            latest.setdefault(key, []).append(check)
+            continue
         order = (started, check["id"])
         if key not in latest or order > latest[key][0]:
             latest[key] = (order, check)
+    if runs and distinct_suites:
+        return [c for group in latest.values() for c in _unsuperseded(group, start)], post
     return [entry[1] for entry in latest.values()], post
+
+
+def _unsuperseded(group, start):
+    """Drop a same-name, same-suite run only when another started after it ended.
+
+    That is a rerun (GitHub re-runs a failed job in the same suite). Overlapping or
+    tied runs can be concurrent sibling jobs, and a run that never completed has no
+    end to start after, so both stay as evidence (fail closed).
+    """
+    def ended(check):
+        done = check.get("completed_at")
+        return timestamp(done) if check.get("status") == "completed" and done else None
+
+    starts = [start(c) for c in group]
+    kept = []
+    for check in group:
+        end = ended(check)
+        if end is None or not any(s > end for s in starts):
+            kept.append(check)
+    return kept
 
 
 def merge_evidence(receipt, pr, repo, runs, statuses, *, distinct_suites=False):

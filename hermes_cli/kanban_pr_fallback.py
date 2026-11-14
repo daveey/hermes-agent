@@ -6,6 +6,8 @@ from hermes_cli.kanban_pr_merge_time import check_receipt, timestamp
 
 # A just-created empty suite may be CI that has not started its jobs yet.
 IDLE_SUITE_GRACE = timedelta(minutes=15)
+# A queued empty Actions suite can be a concurrency-held workflow: never idle.
+GITHUB_ACTIONS_APP_ID = 15368
 # GitHub branch protection accepts these completed conclusions as passing.
 _PASSING_CONCLUSIONS = ("neutral", "skipped")
 
@@ -36,7 +38,7 @@ def idle_suites(suite_rows, runs, now):
         app = _app_id(suite)
         if suite.get("latest_check_runs_count") != 0 or suite.get("status") != "queued":
             continue
-        if app is None or app in active:
+        if app is None or app in active or app == GITHUB_ACTIONS_APP_ID:
             continue
         try:
             age = now - timestamp(suite["created_at"].replace("Z", "+00:00"))
