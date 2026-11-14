@@ -82,6 +82,11 @@ def test_an_enrolled_card_every_pickup_gate_refuses_is_repinned_to_its_origin_on
     _ticks(origin, hub)
     assert hub.reserves == [], f"reserved {len(hub.reserves)} times in {TICKS} ticks; no worker can claim it"
     assert [r["runs_on"] for r in hub.repins] == [[f"machine:{HUB}"]]
+    [moved] = [json.loads(p) for (p,) in origin.conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='moved'", (tid,))]
+    assert f"machine:{HUB}" in moved["host_reason"]
+    assert "creator-owned" in moved["host_reason"]
+    assert moved["reason"] in moved["host_reason"]
     local = origin.conn.execute("SELECT placement_policy, runs_on FROM tasks WHERE id=?", (tid,)).fetchone()
     assert (local["placement_policy"], json.loads(local["runs_on"])) == (None, [f"machine:{HUB}"])
     [event] = _mismatch_events(origin.conn, tid)
@@ -116,12 +121,29 @@ def test_an_enrolled_card_with_malformed_requires_is_repinned_to_its_origin_once
     _ticks(origin, hub)
     assert hub.reserves == [], f"reserved {len(hub.reserves)} times in {TICKS} ticks; no worker can claim it"
     assert [r["runs_on"] for r in hub.repins] == [[f"machine:{HUB}"]]
+    [moved] = [json.loads(p) for (p,) in origin.conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='moved'", (tid,))]
+    assert f"machine:{HUB}" in moved["host_reason"]
+    assert "creator-owned" in moved["host_reason"]
+    assert moved["reason"] in moved["host_reason"]
     local = origin.conn.execute("SELECT placement_policy, runs_on FROM tasks WHERE id=?", (tid,)).fetchone()
     assert (local["placement_policy"], json.loads(local["runs_on"])) == (None, [f"machine:{HUB}"])
     [event] = _mismatch_events(origin.conn, tid)
     assert event["pickup_gate"] == {"reason": coord.INVALID_REQUIRES, "quote": malformed}
     [comment] = _placement_comments(origin.conn, tid)
     assert coord.INVALID_REQUIRES in comment and f"`{malformed}`" in comment and f"machine:{HUB}" in comment
+
+
+def test_pool_selfcheck_does_not_claim_creator_host_state(gws, svc, monkeypatch):
+    origin, _worker = gws
+    tid = _enrolled(origin, "Fix the parser")
+    monkeypatch.setattr(wp, "_move_target", lambda *args: (["pool:worker"], "portable pool recovery"))
+    hub = PlacementHub(svc, HUB)
+    _ticks(origin, hub, 1)
+    [moved] = [json.loads(p) for (p,) in origin.conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='moved'", (tid,))]
+    assert moved["runs_on"] == ["pool:worker"]
+    assert "host_reason" not in moved
 
 
 def test_a_started_card_every_gate_refuses_is_never_reserved_and_noted_once(gws, svc, monkeypatch):
