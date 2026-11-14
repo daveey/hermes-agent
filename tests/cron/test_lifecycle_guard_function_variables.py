@@ -55,3 +55,43 @@ def test_variable_state_does_not_leak_between_scans(tmp_path):
     (tmp_path / 'big.sh').write_text('#' + 'x' * (1024 * 1024 + 1))
     assert scan_gateway_lifecycle("P='bash big.sh'", cwd=str(tmp_path)) == (False, None)
     assert scan_gateway_lifecycle('f() { $P; }; f', cwd=str(tmp_path)) == (False, None)
+
+
+def test_mentioned_library_does_not_cover_variable_execution(tmp_path):
+    from cron.lifecycle_guard import _LifecycleScanBudget
+    from cron.lifecycle_guard_nested_shells import unvisited_scopes
+
+    budget = _LifecycleScanBudget()
+    path = tmp_path / 'lib.sh'
+    mentioned = unvisited_scopes(set(), budget, path, python_source=False,
+                                 nested=False, executed=False)
+    visited = {key for _, key in mentioned}
+    assert unvisited_scopes(visited, budget, path, python_source=False,
+                            nested=False, executed=True)
+    assert not unvisited_scopes(visited, budget, path, python_source=False,
+                                nested=False, executed=False)
+
+
+def test_printed_variable_is_not_original_shell_syntax():
+    from cron.lifecycle_guard import _LifecycleScanBudget
+    from cron.lifecycle_guard_output import iter_recursive_payloads
+
+    payloads = list(iter_recursive_payloads(
+        'echo "$log" | bash', [], cwd=None, executed=True,
+        budget=_LifecycleScanBudget(), covered_scope=None))
+    assert payloads
+    assert all(not item[-1] for item in payloads)
+    shell = list(iter_recursive_payloads(
+        "bash -c 'f() { $P; }; f'", [], cwd=None, executed=True,
+        budget=_LifecycleScanBudget(), covered_scope=None))
+    assert any(item[0] == 'f() { $P; }; f' and item[-1] for item in shell)
+
+
+def test_variable_discovery_skips_plain_text_without_tokenizing(monkeypatch):
+    from cron import lifecycle_guard
+    from cron.lifecycle_guard_variables import VariableCandidates
+
+    def forbidden(_command):
+        pytest.fail('plain masked payload must not pay for another tokenizer pass')
+    monkeypatch.setattr(lifecycle_guard, '_iter_command_segments', forbidden)
+    assert list(VariableCandidates().payloads('plain text\n' * 8000, None)) == []

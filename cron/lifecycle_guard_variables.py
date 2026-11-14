@@ -16,18 +16,23 @@ _DECLARATIONS = frozenset({'export', 'readonly', 'local', 'declare', 'typeset'})
 _SHELLS = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh', 'source', '.'})
 
 
+def scan_variable_payloads(command, *, cwd, executed, budget, recurse, source, variable_source):
+    if executed and variable_source:
+        for payload, payload_cwd in budget.variable_candidates.payloads(command, cwd):
+            if recurse(payload, payload_cwd, True, source):
+                return True
+    return False
+
+
 def scan_recursive_payloads(command, nested_texts, *, cwd, executed, budget,
                             covered_scope, recurse, source):
     from cron.lifecycle_guard_output import iter_recursive_payloads
 
-    if executed:
-        for payload, payload_cwd in budget.variable_candidates.payloads(command, cwd):
-            if recurse(payload, payload_cwd, True, source):
-                return True
-    for payload, nested, covered in iter_recursive_payloads(
+    for payload, nested, covered, variable_source in iter_recursive_payloads(
             command, nested_texts, cwd=cwd, executed=executed,
             budget=budget, covered_scope=covered_scope):
-        if recurse(payload, cwd, executed, source, nested=nested, covered_quotes=covered):
+        if recurse(payload, cwd, executed, source, nested=nested, covered_quotes=covered,
+                   variable_source=variable_source):
             return True
     return False
 

@@ -1634,6 +1634,7 @@ def _contains_unsafe_gateway_action(
     command: str, *, cwd: Optional[str], depth: int, visited: set[object], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
     source: Optional[str] = None, covered_quote_scope: Optional[tuple] = None,
+    variable_source: bool = True,
 ) -> bool:
     """``executed=False`` means *command* is the content of a file that is only MENTIONED in inert
     (masked) text: it is still scanned for a literal lifecycle command, but "could not scan" (budget,
@@ -1650,7 +1651,7 @@ def _contains_unsafe_gateway_action(
 
     def recurse(
         text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,
-        nested: bool = False, covered_quotes: Optional[tuple] = None,
+        nested: bool = False, covered_quotes: Optional[tuple] = None, variable_source: bool = True,
     ) -> bool:
         if python_source:
             return _python_source_is_unsafe(text, budget)
@@ -1658,7 +1659,7 @@ def _contains_unsafe_gateway_action(
             return _contains_unsafe_gateway_action(
                 text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
                 read_remote_script=read_remote_script, executed=executed, source=source,
-                covered_quote_scope=covered_quotes,
+                covered_quote_scope=covered_quotes, variable_source=variable_source,
             )
 
     # The walks below must see the same masked view `_direct_lifecycle_scan` sees (#110422): a
@@ -1680,7 +1681,12 @@ def _contains_unsafe_gateway_action(
             walk_command, include_quoted=covered_quote_scope != quote_scope(cwd, executed, budget)))))
     nested_texts, nested_scripts = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
-    from cron.lifecycle_guard_variables import scan_recursive_payloads
+    from cron.lifecycle_guard_variables import scan_recursive_payloads, scan_variable_payloads
+
+    if scan_variable_payloads(walk_command, cwd=cwd, executed=executed, budget=budget,
+                              recurse=recurse, source=source, variable_source=variable_source):
+        return True
+
 
     if scan_recursive_payloads(
             walk_command, nested_texts, cwd=cwd, executed=executed, budget=budget,
@@ -1704,7 +1710,7 @@ def _contains_unsafe_gateway_action(
             continue
         resolved = _resolve_lenient(script_path)
         scopes = unvisited_scopes(visited, budget, resolved, python_source=python_source,
-                                  nested=resolved in nested_scripts)
+                                  nested=resolved in nested_scripts, executed=candidate_executed)
         if not scopes:
             continue
         if not budget.charge_path():

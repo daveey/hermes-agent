@@ -58,7 +58,7 @@ def shell_scope(budget: _LifecycleScanBudget, nested: bool) -> contextlib.Abstra
 
 def unvisited_scopes(
     visited: set[object], budget: _LifecycleScanBudget, resolved: Path, *, python_source: bool,
-    nested: bool,
+    nested: bool, executed: bool = True,
 ) -> list[tuple[bool, tuple]]:
     """``(nested, visit key)`` for each scope *resolved* still needs a walk in. A shell walk
     depends on its scope (alias names, heredoc masking), so ``visited`` keys carry it: a path one
@@ -74,7 +74,10 @@ def unvisited_scopes(
         wanted.append((True, (None, True)))  # nested_shell_scope's state
     keys: dict[tuple, bool] = {}
     for flag, scope in wanted:
-        keys.setdefault((resolved, "shell", scope, budget.integer_context), flag)
+        # A mention does not cover an execution walk: only the latter
+        # resolves variable sinks and fails closed on referenced scan caps.
+        key = (resolved, "shell", scope, budget.integer_context)
+        keys.setdefault(key if executed else (*key, "mention"), flag)
     return [(flag, key) for key, flag in keys.items() if key not in visited]
 
 
