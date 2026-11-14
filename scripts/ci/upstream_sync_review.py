@@ -313,6 +313,8 @@ class ShipReview:
             if code is not None:
                 return False, (f"{why} (answer with `upstream_sync.py --head {head[:12]} --review-reply "
                                "\"<answers>\"`)")
+        if receipts:
+            receipt = receipts[0]
             who = receipt.get("id") or (receipt.get("reviewer") or {}).get("login") or "?"
             return True, f"independent exact-head review {receipt.get('source', '?')} {who} approves {head}"
         if not card:

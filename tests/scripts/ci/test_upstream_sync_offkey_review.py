@@ -124,6 +124,46 @@ def test_offkey_rejection_blocks_other_approval(tmp_path, monkeypatch, reject_fi
     assert rejected in calls
 
 
+@pytest.mark.parametrize("reply", ["", "follow-up t_abcdef1234567890"])
+def test_every_offkey_approval_requires_reply_guard(land_stub, tmp_path, monkeypatch, reply):
+    path = tmp_path / "land-state.db"
+    board(path)
+    second = "t_fedcba0987654321"
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO tasks VALUES (?, 'done', 'second-key')", (second,))
+        db.execute("INSERT INTO task_runs VALUES (?, 'done', 'completed', ?, 0)", (
+            second, json.dumps({"verdict": "approve", "reviewed_sha": SHA, "reviewed_pr": URL})))
+    land_stub.update(approve={CARD: SHA, second: SHA})
+    checker = review.ShipReview(tmp_path, impl_task="t_implementer", reply=reply)
+    mod = checker._module()
+    original_gate, original_guard = mod.review_gate, mod.review_reply_guard
+    guarded = []
+
+    def review_gate(*args, **kwargs):
+        receipt = original_gate(*args, **kwargs)
+        if receipt["id"] == second:
+            receipt["non_blocking"] = ["Nit (non-blocking): behavioral guard missing on later receipts"]
+        return receipt
+
+    def reply_guard(gh, slug, pr, receipt, answer):
+        guarded.append(receipt["id"])
+        return original_guard(gh, slug, pr, receipt, answer)
+
+    monkeypatch.setattr(mod, "review_gate", review_gate)
+    monkeypatch.setattr(mod, "review_reply_guard", reply_guard)
+    monkeypatch.setattr(checker, "_module", lambda: mod)
+    accepted, reason = checker.check("example/fork", 7, SHA, "sync/head")
+    assert accepted is bool(reply)
+    assert guarded == [CARD, second]
+    if not reply:
+        assert "unanswered non-blocking" in reason
+        assert "--review-reply" in reason
+    state = land_stub.read()
+    assert [row[0] for row in state["gates"]] == [CARD, second, ""]
+    assert all(row[-1] == "t_implementer" for row in state["gates"])
+    assert state["filed"] == []
+
+
 def test_keyed_refusal_cannot_be_bypassed_by_offkey(land_stub, tmp_path):
     board(tmp_path / "land-state.db")
     land_stub.update(cards={f"example/fork#7:{SHA}": "t_keyed"}, approve={CARD: SHA})
