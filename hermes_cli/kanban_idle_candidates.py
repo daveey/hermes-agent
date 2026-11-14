@@ -81,6 +81,18 @@ def sweep_shared_blockers(conn, result) -> None:
         due: list = []
         return release_cleared_blockers(c, oldest_out=due), min(due, default=None)
 
+    from hermes_cli.kanban_shared_blocker_checks import run_due_checks
+
+    def check(c):
+        due: list = []
+        return run_due_checks(c, due_out=due), min(due, default=None)
+
+    try:
+        gated("dispatch.shared_blocker_checks", conn, check, conn, skipped=([], None),
+              extra=lambda c: (own_gateway(c), config_key()), run_due=lambda r: r[1])
+    except (OSError, sqlite3.Error, ValueError):
+        kb._log.warning('kanban: shared blocker checks failed', exc_info=True)
+
     for statuses, handler, field in (
         (('blocked', 'scheduled', 'ready', 'review'), release, 'shared_blocker_released'),
         (('blocked',), probe, 'shared_blocker_probed'),

@@ -114,11 +114,13 @@ _ID_RE = re.compile(r"[^a-z0-9._-]+")
 
 
 def normalize_blocker_id(raw) -> Optional[str]:
-    """Lower-case slug (``[a-z0-9._-]``, max 64 chars) or None for empty/invalid input."""
+    """Canonical external-wall slug, including historical GitHub quota aliases."""
     if not isinstance(raw, str):
         return None
-    slug = _ID_RE.sub("-", raw.strip().lower()).strip("-._")
-    return slug[:MAX_BLOCKER_ID_CHARS] or None
+    slug = _ID_RE.sub("-", raw.strip().lower()).strip("-._")[:MAX_BLOCKER_ID_CHARS]
+    if re.fullmatch(r"github(-(shared|rest|core))*-quota(-reserve)?", slug):
+        return "github-rest-quota"
+    return slug or None
 
 
 def probe_interval_seconds(cfg: Optional[dict] = None) -> int:
@@ -379,6 +381,8 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
     for st in states.values():
         # Probe starts only count once the card is (still) behind the blocker.
         st.probe_starts = {t: s for t, s in st.probe_starts.items() if t in st.behind}
+    from hermes_cli.kanban_shared_blocker_checks import apply_check_clears
+    apply_check_clears(conn, states)
     return states
 
 
@@ -483,7 +487,7 @@ def shared_blocker_guard(
         return None
     if interval is None:
         interval = probe_interval_seconds()
-    last = max([st.asserted_at, *st.probe_starts.values()])
+    last = max(st.probe_starts.values(), default=min(st.behind.values()))
     if now - last >= interval:
         return None
     # A human unblock after the newest assertion is a deliberate "try again now".
@@ -569,7 +573,8 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
                 with kb.write_txn(conn):
                     if kwc._wake(conn, tid, CLEARED_EVENT, payload) is None:
                         continue
-            how = (f"{by_task}'s wake_check exited 0" if st.cleared_via == CONDITION_MET_EVENT
+            how = ("registered shared-blocker check exited 0" if st.cleared_via == "check" else
+                   f"{by_task}'s wake_check exited 0" if st.cleared_via == CONDITION_MET_EVENT
                    else f"{by_task} run {by_run} ended without hitting it")
             with kb.write_txn(conn):
                 kb._insert_comment(
@@ -612,7 +617,7 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
             f"SELECT id, status, human_request FROM tasks WHERE id IN ({marks})", ids).fetchall()
         if any(r["status"] in ("ready", "running") for r in rows):
             continue   # the ready-card guard already spaces those probes
-        last = max([st.asserted_at, *st.probe_starts.values()])
+        last = max(st.probe_starts.values(), default=min(st.behind.values()))
         if now - last < interval:
             if due_out is not None:
                 due_out.append(last + interval)  # G2: the time policy's next due moment for this blocker
@@ -639,6 +644,8 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
     states = [s for s in blocker_states(conn).values() if s.is_open]
     if not states:
         return ""
+    from hermes_cli.kanban_shared_blocker_checks import registered_checks
+    checks = registered_checks()
     lines = ["## Open shared blockers on this board",
              "External walls other cards already hit. Stop early only when the step this run is about "
              "to take needs the walled capability; then end "
@@ -646,6 +653,11 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
              "it; only one card probes a blocker at a time. A timed wait (kind='time' or a "
              "SCHEDULED_UNTIL= reason) keeps its wake time and wake_check when it also passes "
              "blocker_id."]
+    if any(st.blocker_id in checks for st in states):
+        lines[1] = ("For walls with a registered check, never re-assert from this context alone: "
+                    "run the live check when your next step needs the capability. For walls without a "
+                    "registered check, stop at the affected step and end with the same blocker_id; "
+                    "only one card probes those walls at a time.")
     model, provider, lane = task_route(conn, task_id)
     lines.append(f"Current route: provider={provider or 'unknown'}, model={model or 'unknown'}, lane={lane}.")
     lines.append("Provider-scoped walls apply only to that provider. Continue unrelated work; if a later "
@@ -663,6 +675,10 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
                  f"lane={st.blocker_lane or 'unspecified'}; "
                  f"{'applicable' if applicable else 'not applicable'} to current route")
         lines.append(f"- `{st.blocker_id}` ({len(st.behind)} card(s) parked): {st.reason or '(no reason)'} [{scope}]")
+        if st.blocker_id in checks:
+            lines.append("  The dispatcher re-checks this wall every 2 min; if your next step needs it, "
+                         f"run `{checks[st.blocker_id]}`; exit 0 = continue, else end with "
+                         f"`blocker_id: \"{st.blocker_id}\"`. Never re-assert without a live check.")
     if mine is not None:
         again = f"`blocker_id: \"{mine.blocker_id}\"`"
         if mine.blocker_provider:
