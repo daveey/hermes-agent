@@ -63,7 +63,9 @@ from pathlib import Path
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as d
+from hermes_cli import worker_compute_capacity as capacity
 root = Path({str(tmp_path)!r})
+assert capacity.policy_root() == root, 'child account policy must be isolated'
 d._worker_argv = lambda *a: [{sys.executable!r}, '-c', {worker_code!r}]
 d._retag_legacy_worker_sessions = lambda *a: None
 with kbc.connect_closing(root / 'board.db') as conn:
@@ -74,6 +76,9 @@ with kbc.connect_closing(root / 'board.db') as conn:
 while True: time.sleep(1)
 '''
     env = dict(os.environ)
+    # conftest's in-process policy_root patch does not cross exec. Keep the
+    # child's admission inventory away from the real worker account as well.
+    env['HERMES_TEST_POLICY_ROOT'] = str(tmp_path)
     for key in list(env):
         if key.startswith('HERMES_KANBAN_') and key != 'HERMES_KANBAN_DB':
             env.pop(key)
@@ -82,7 +87,11 @@ while True: time.sleep(1)
                               stderr=(tmp_path / 'parent.log').open('w'))
     pid = None
     try:
-        wait_for(lambda: (tmp_path / 'parent-ready').exists())
+        try:
+            wait_for(lambda: (tmp_path / 'parent-ready').exists())
+        except AssertionError:
+            print((tmp_path / 'parent.log').read_text())
+            raise
         # write_text truncates before it writes; wait for the pid, not the file.
         wait_for(lambda: (tmp_path / 'worker-ready').exists()
                  and (tmp_path / 'worker-ready').read_text().strip().isdigit())
