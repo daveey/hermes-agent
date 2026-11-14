@@ -18,6 +18,14 @@ SHAPES = [
     "unset v; x=$(( ${v:-`echo 'b[$(bash SCRIPT)]'`} ))",
     "x=$(( '0+$(bash SCRIPT)' ))",
     "unset v; x=$(( ${v:-'0+$(bash SCRIPT)'} ))",
+    "a['$(bash SCRIPT)']=1",
+    # Bash finds subscript and (( )) closers past quoted delimiters; a quoted
+    # `]` or `)` must not close the frame and leave a phantom command quote.
+    r"declare -A h; h[']']=1; a[$(echo b[\$\(bash SCRIPT\)])]=1; echo \'",
+    r"declare -A h; echo ${h[']']}; a[$(echo b[\$\(bash SCRIPT\)])]=1; echo \'",
+    r"declare -A h; h['x]y']=1; a[$(echo b[\$\(bash SCRIPT\)])]=1; echo \'",
+    r"(( ')' )); a[$(echo b[\$\(bash SCRIPT\)])]=1; echo \'",
+    "(( ')' ))\n" r"a[$(echo b[\$\(bash SCRIPT\)])]=1; echo \'",
 ]
 
 
@@ -66,6 +74,9 @@ def test_backtick_output_is_an_arithmetic_sink(command):
     r"echo \$\{; echo $(printf 0)",
     "echo $$$${; echo $(printf 0)",
     "echo $$'${'; echo $(printf 0)",
+    "declare -A h; h[']']=1; echo $(printf 0)",
+    "(( ')' + 0 )); echo $(printf 0)",
+    "x=$(( a[')'] )); echo $(printf 0)",
 ])
 def test_literal_or_nonarithmetic_substitutions_remain_data(command):
     assert not substitution_in_arithmetic(command, date_exempt=True)

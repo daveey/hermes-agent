@@ -143,15 +143,28 @@ def _arithmetic_quotes(stack) -> bool:
     return False
 
 
+def _span_substitutes(span: str, date_exempt: bool) -> bool:
+    """Whether an apostrophe span evaluated as arithmetic holds a command substitution."""
+    if "`" in span:
+        return True
+    return any(not (date_exempt and _DATE_PRODUCER_RE.match(span, m.end()))
+               for m in re.finditer(r"\$\(", span))  # `$((` too: it may be `$( (…)…)`
+
+
 def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, depth) -> int | None:
     """Skip literal spans; None means a normal token, -1 means fail closed."""
     kind = stack[-1][0]
     if token in ("'", "$'"):
-        # Arithmetic expansion has double-quote semantics: apostrophes do not
-        # suppress expansion, including in parameter words feeding arithmetic.
-        if quoted or _arithmetic_quotes(stack):
+        if quoted:
             return pos
-        return _quote_close(command, pos, ansi=token == "$'") or -1
+        close = _quote_close(command, pos, ansi=token == "$'")
+        if close is None:
+            return -1
+        if _arithmetic_quotes(stack) and _span_substitutes(command[pos:close], date_exempt):
+            # Bash still uses the apostrophes to find the frame's closer, but then
+            # evaluates the text with double-quote semantics, so `$(`/backticks run.
+            return -1
+        return close
     if quoted:
         return None
     # Lazy import: shell_heredoc calls this scanner, but owns delimiter parsing.
