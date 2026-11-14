@@ -101,6 +101,7 @@ def test_pty_route_holds_reservation_while_child_runs_and_releases_after_close(r
     """/api/pty (legacy 1:1 path) through the real handler: EOF closes the bridge, which releases."""
     from urllib.parse import urlencode
     from starlette.testclient import TestClient
+    from tests.waiting import wait_until
     import hermes_cli.web_server as ws
 
     chat, seen = bridge_env
@@ -123,12 +124,15 @@ def test_pty_route_holds_reservation_while_child_runs_and_releases_after_close(r
     try:
         with client.websocket_connect(f"/api/pty?{urlencode({'token': ws._SESSION_TOKEN})}") as conn:
             assert conn.receive_bytes() == b"ready"
+            # Keep the ASGI portal alive until EOF has reaped the child. Leaving
+            # this context cancels the handler and can prevent close from even
+            # reaching its executor; waiting after teardown cannot repair that.
+            wait_until(lambda: registry.snapshot().active == 0, what="EOF closes bridge and releases")
     finally:
         client.close()
     assert seen["active_at_spawn"] == 1
-    assert active_during_read and all(n == 1 for n in active_during_read)
-    from tests.waiting import wait_until
-    wait_until(lambda: registry.snapshot().active == 0, what="bridge close releases")
+    assert len(active_during_read) == 2, "the reader consumed data and then EOF"
+    assert all(n == 1 for n in active_during_read)
     _clean(registry)
 
 
