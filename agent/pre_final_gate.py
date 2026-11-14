@@ -42,6 +42,10 @@ Callback attributes (set on the function before ``ctx.register_hook``):
   gate delivers, or at turn end. A held answer is discarded from the buffer, so it never reaches
   the screen. Neither Desktop nor CLI/gateway streams can retract text already shown, hence the
   buffer: without it, a held answer that already streamed stays visible.
+- ``needs_buffer_for_session(session_id=...)``: optional synchronous predicate that overrides
+  the legacy ``needs_buffer`` flag for this session. Sampled once after all ``pre_llm_call`` hooks,
+  before inference, so hooks may arm per-turn state without buffering unrelated sessions.
+  Predicate errors are logged and fall back to the legacy non-callable flag; scope opt-ins still apply.
 - ``accepts_hold_budget = True``: opt in to the ``hold_budget`` keyword, the configured total
   holds allowed this turn (including zero). A callback can replace a rejected draft instead of
   returning an unusable hold at exhaustion. Strict legacy signatures receive no new keyword.
@@ -164,7 +168,20 @@ def eligible_callbacks(agent: Any) -> list[Callable]:
 
 
 def needs_buffer(agent: Any) -> bool:
-    return any(getattr(cb, "needs_buffer", False) for cb in eligible_callbacks(agent))
+    """Sample eligible gates after turn-start hooks have armed their session state."""
+    for cb in eligible_callbacks(agent):
+        predicate = getattr(cb, "needs_buffer_for_session", None)
+        if callable(predicate):
+            try:
+                if predicate(session_id=getattr(agent, "session_id", None) or ""):
+                    return True
+                continue
+            except Exception:
+                logger.warning("pre_final_gate buffer predicate failed; using legacy flag", exc_info=True)
+        legacy = getattr(cb, "needs_buffer", False)
+        if not callable(legacy) and bool(legacy):
+            return True
+    return False
 
 
 def _is_real_user_row(msg: Any) -> bool:

@@ -700,11 +700,9 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
     # hook applies this turn. Kept out of _PER_TURN_RESET_STATE so upstream edits there merge cleanly.
     agent._pre_final_gate_attempts = 0
     agent._pre_verify_hidden_draft = None  # turn_stop_gates._restore_hidden_draft (agent-9382d717aa)
-    try:
-        from agent.pre_final_gate import needs_buffer
-        agent._final_gate_buffer = [] if needs_buffer(agent) else None
-    except Exception:
-        agent._final_gate_buffer = None
+    # Eligibility is sampled after pre_llm_call, before inference. Clear stale
+    # previous-turn text now; retries do not run this once-per-turn prologue.
+    agent._final_gate_buffer = None
     agent._tool_guardrails.reset_for_turn()
     _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
     if callable(_reset_consol):
@@ -1385,6 +1383,10 @@ def build_turn_context(
         conversation_history=conversation_history, blocks=_blocks,
         current_turn_user_idx=current_turn_user_idx,
     )
+    # All pre_llm_call hooks have run: dynamic gates can now decide for this
+    # session. Initialize once, before any inference or streamed response.
+    from agent.pre_final_gate import needs_buffer
+    agent._final_gate_buffer = [] if needs_buffer(agent) else None
     plugin_block_message = _blocks[0] if _blocks else ""  # first veto wins
     compaction = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
