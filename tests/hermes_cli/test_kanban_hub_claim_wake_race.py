@@ -72,3 +72,60 @@ def test_wake_after_screen_waits_for_next_judged_pass(gws, hub_judge, monkeypatc
         (tid,))]
     assert events[0] == "hub_admission" and "claimed" in events
     assert len(hub_judge.calls) == (0 if judged else 1)
+
+
+@pytest.mark.parametrize("dry_run,mode,review_enabled", [
+    (False, "primary", True), (True, "primary", True),
+    (False, "replica", True), (False, "primary", False),
+])
+def test_screened_lanes_preserves_dispatch_controls(monkeypatch, dry_run, mode, review_enabled):
+    from hermes_cli import kanban_db_dispatch_queries as queries
+    from hermes_cli import kanban_db_sync as sync
+    calls = []
+
+    def rows(conn, lane):
+        calls.append(lane)
+        return [{"id": lane}, {"id": "prior"}, {"id": "new"}]
+
+    def screen(conn):
+        calls.append("screen")
+        return frozenset({"new"})
+
+    monkeypatch.setattr(queries, "lane_rows", rows)
+    monkeypatch.setattr(sync, "board_mode", lambda conn: mode)
+    monkeypatch.setattr(hac, "safe_screen", screen)
+    ready, review, deferred = hac.screened_lanes(None, dry_run, review_enabled, {"prior"})
+    screened = not dry_run and mode == "primary"
+    assert calls == ["ready"] + (["review"] if review_enabled else []) + (["screen"] if screened else [])
+    assert deferred == ({"prior", "new"} if screened else {"prior"})
+    assert ready == [{"id": "ready"}] + ([] if screened else [{"id": "new"}])
+    assert review == ([{"id": "review"}] + ([] if screened else [{"id": "new"}]) if review_enabled else [])
+
+
+@pytest.mark.parametrize("outcome", ["move", "keep", "unavailable", "budget"])
+def test_review_wake_preserves_screen_outcomes(gws, hub_judge, monkeypatch, outcome):
+    from hermes_cli import kanban_hub_admission as judge
+    monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)
+    hub, _worker, svc = gws
+    tid, state, now = _park(hub, "review", monkeypatch)
+    _deliver(hub.conn, tid, state, now, "wake_check_stale")
+    hub_judge.admit_next = False
+    if outcome == "move":
+        with kb.write_txn(hub.conn):
+            kb._append_event(hub.conn, tid, "scheduled", {"wake_check": "true"})
+    elif outcome == "unavailable":
+        monkeypatch.setattr(judge, "admit", lambda card: judge.Verdict())
+    elif outcome == "budget":
+        monkeypatch.setattr(hac, "safe_screen", lambda conn: hac.screen(conn, budget=0).deferred_ids)
+    result = helpers._tick(hub)
+    assert (helpers._holder(svc, tid) == helpers.HUB) == (outcome in {"keep", "unavailable"})
+    verdicts = helpers._events(hub.conn, tid, "hub_admission")
+    if outcome == "keep":
+        assert verdicts[0]["kept"] == "wake_check reads a hub-local path"
+    elif outcome == "move":
+        assert verdicts[0]["admit"] is False
+        assert helpers._events(hub.conn, tid, "moved")[0]["runs_on"][0] == helpers.POOL
+    else:
+        assert verdicts == []
+    if outcome == "budget":
+        assert tid in result.admission_deferred
