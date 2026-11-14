@@ -215,16 +215,16 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
     def _check_transcript_write_guards(self, conn, session_id: str, compression_lock_holder: Optional[str],
         turn_lease_holder: Optional[str] = None, turn_lease_ttl_seconds: float = 300.0,
         reject_active_turn_lease: bool = False, reject_active_compression_lock: bool = False,
-        allow_closed_compression_parent: bool = False) -> None:
+        allow_closed_compression_parent: bool = False, reject_parked_turn: bool = False) -> None:
         """Transcript-write admission checks, run INSIDE the write txn by every writer. Ordinary appends do
         NOT check compression_locks: the lock only stops two COMPRESSIONS colliding and archive_and_compact()
         commits against a watermark, so concurrent appends are safe (blocking them killed turns during slow
         summaries). Destructive user mutations opt in via ``reject_active_*`` so a compressor that captured
         its watermark cannot resurrect the removed turn.
 
-        Shared by every writer so they never diverge on these invariants (#74478 patience note below). A
-        lease-less caller opting in via ``reject_active_turn_lease`` is refused while a turn holds the lease
-        or one is parked for an update (its checkpoint forbids any later row) [daveey t_01a1d6f94ac774a2]."""
+        Shared by every writer (#74478 patience note below). ``reject_active_turn_lease`` also refuses a turn
+        parked for an update (its checkpoint forbids a later row); ``reject_parked_turn`` is that half alone,
+        for the public lease-less appenders: a passive row must not void the proof [daveey t_01a1d6f94ac774a2]."""
         from hermes_state import SessionCompressionInProgressError
         from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
         # NOTE (#75316 redesign): appends do NOT check compression_locks. The lock's job is to stop two
@@ -263,9 +263,9 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
                 # Same reclaim rule as acquisition; deleting also fences a stale late flush after the mutation.
                 conn.execute("DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                     (conversation_id, lease["holder"]))
-            if not turn_lease_holder:
-                from hermes_state_update_pause import refuse_parked_write
-                refuse_parked_write(conn, session_id, conversation_id)
+        if not turn_lease_holder and (reject_active_turn_lease or reject_parked_turn):
+            from hermes_state_update_pause import refuse_parked_write
+            refuse_parked_write(conn, session_id, self._session_turn_lease_key_on_conn(conn, session_id))
         if _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()) and not allow_closed_compression_parent:
             raise CompressionSessionClosedError(session_id)
 
@@ -421,7 +421,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
             session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=True)
         def _do(conn):
             self._check_transcript_write_guards(conn, session_id, compression_lock_holder,
-                turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds)
+                turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds, reject_parked_turn=True)
             msg_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
             self._bump_session_counters(conn, session_id, 1, _tool_calls_count(tool_calls), unit=True)
             return msg_id
@@ -514,13 +514,13 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
                 for start in range(0, len(messages), chunk_rows))
         return self._execute_transcript_write(lambda conn: self._append_messages_in_transaction(
             conn, session_id, messages, compression_lock_holder=compression_lock_holder,
-            turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds),
+            turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds, reject_parked_turn=True),
             messages, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def _append_messages_in_transaction(self, conn, session_id, messages, *,
-            compression_lock_holder=None, turn_lease_holder=None, turn_lease_ttl_seconds=300.0):
-        self._check_transcript_write_guards(conn, session_id, compression_lock_holder,
-            turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds)
+            compression_lock_holder=None, turn_lease_holder=None, turn_lease_ttl_seconds=300.0, reject_parked_turn=False):
+        self._check_transcript_write_guards(conn, session_id, compression_lock_holder, turn_lease_holder=turn_lease_holder,
+            turn_lease_ttl_seconds=turn_lease_ttl_seconds, reject_parked_turn=reject_parked_turn)
         from agent.transcript_repair import resolve_and_repair_transcript_batch
         inserted_rows = resolve_and_repair_transcript_batch(
             conn,

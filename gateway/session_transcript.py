@@ -343,6 +343,16 @@ class SessionTranscriptMixin:
                             "Session DB transcript append rejected for compression-ended %s with "
                             "no unique live child; not retrying", session_id)
                         return
+                from hermes_state_errors import SessionTurnLeaseLostError
+                if isinstance(exc, SessionTurnLeaseLostError):
+                    # The chat's turn is parked for an update: a busy refusal that clears on resume, not a DB
+                    # outage. Never count it toward the stalled-session escalation; park the backlog on the
+                    # durable spool (a restart is exactly what happens next) and let the post-resume drain or
+                    # the next append land it. If the spool is unavailable it stays queued in memory.
+                    spooled = self._spool_stalled_backlog(session_id, queue_session_id)
+                    logger.info("Session DB transcript append deferred for %s: turn parked for an update "
+                                "(spooled=%d, pending=%d)", session_id, spooled, len(pending))
+                    return
                 if self._is_fts_corruption_error(exc) and self._rebuild_fts_once():
                     if spool_exc is not None:
                         continue  # repaired: drain the older spool again before ``msg``
@@ -432,6 +442,18 @@ class SessionTranscriptMixin:
             logger.warning("Failed to drain transcript spool for %s: %s", session_id, exc)
             return None
 
+    def drain_deferred_transcript(self, session_id: str) -> None:
+        """Land the rows parked behind a turn's update checkpoint (this store's own deferred appends and the
+        mirror / bot-DM rows other writers spooled) once that turn has resumed and settled. Still-parked
+        sessions keep every file. Never raises."""
+        try:
+            with self._get_transcript_drain_lock():
+                with self._transcript_retry_lock:
+                    self._lazy("_spooled_drop_sessions", set).add(session_id)
+                self._drain_spooled_drops(session_id)
+        except Exception as exc:  # health: allow BLE001 -- the files stay for the next append or boot recovery
+            logger.debug("Deferred transcript drain for %s failed: %s", session_id, exc)
+
     def mark_spooled_drop_sessions(self, session_ids) -> None:
         """Have each session's next transcript write drain the on-disk spool first. Boot recovery marks
         the sessions it held back, so their next live row cannot land ahead of those files."""
@@ -448,7 +470,8 @@ class SessionTranscriptMixin:
             # into the ambient store.
             raise RuntimeError(
                 f"no owning session store for {session_id}; deferring transcript write")
-        _db.append_message(**transcript_append_kwargs(session_id, message))
+        from gateway.shutdown_flush import replay_spooled_row
+        replay_spooled_row(_db, session_id, message)
 
     @staticmethod
     def _is_fts_corruption_error(exc: Exception) -> bool:

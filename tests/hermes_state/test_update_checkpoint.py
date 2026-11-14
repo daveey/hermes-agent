@@ -1,4 +1,5 @@
 """Store-only update parking: no execution or gateway transport in these contracts."""
+from tests.hermes_state.raw_rows import raw_append_message
 import json
 import sqlite3
 
@@ -112,7 +113,7 @@ def test_changed_checkpoint_is_invalid_before_resume_and_recovery(running, mutat
             request_id='steer', payload={'text': 'possibly delivered'}, intent='steer')
         rt.steer_session_input(db, epoch=epoch, admission_id=steer['admission_id'], generation=row['generation'])
     actions = {
-        'append': lambda: db.append_message('s', role='assistant', content='later'),
+        'append': lambda: raw_append_message(db, 's', 'assistant', 'later'),
         'edit': lambda: db._execute_write(lambda c: c.execute("UPDATE messages SET content='different' WHERE role='tool'")),
         'generation': lambda: db._execute_write(lambda c: c.execute(
             "UPDATE sessions SET runtime_generation=runtime_generation+1 WHERE id='s'")),

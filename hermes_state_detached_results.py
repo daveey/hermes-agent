@@ -37,6 +37,29 @@ class SessionDetachedResultsMixin:
             session_id, content, display_kind, {**metadata, "completion_admission": admission_id},
             "json_extract(m.display_metadata, '$.completion_admission') = ?", (admission_id,))
 
+    def replace_display_kind_row(self, session_id: str, display_kind: str, content: str, *,
+                                 message_uid: str | None = None) -> int:
+        """ONE transaction: deactivate every live row of ``display_kind`` and append the user row replacing them;
+        returns the new row id. The TUI model-switch pivot used a separate deactivate then append, so an append
+        refused for a turn parked for an update left the old pivot gone and no new one. Same lease-less guards
+        as a plain append [daveey t_01a1d6f94ac774a2]."""
+        msg = {"content": content, "display_kind": display_kind}
+        if message_uid:
+            msg["message_uid"] = message_uid
+        stamp_message_uid(msg)
+        row = self._message_row_params(session_id, "user", msg, None, time.time(), keep_reasoning=True)
+
+        def _do(conn):
+            from hermes_state_messages import _INSERT_MESSAGE_SQL
+            self._check_transcript_write_guards(conn, session_id, None, reject_parked_turn=True)
+            conn.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND display_kind = ? AND active = 1",
+                         (session_id, display_kind))
+            msg_id = conn.execute(_INSERT_MESSAGE_SQL, row).lastrowid
+            self._bump_session_counters(conn, session_id, 1, 0, unit=True)
+            return msg_id
+
+        return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
+
     def _append_detached_result(self, session_id: str, content: str, display_kind: str, metadata: dict[str, Any],
                                 match_sql: str, params: tuple) -> int:
         """Record a result that arrived between turns as a user row once, including replay after rotation: a row

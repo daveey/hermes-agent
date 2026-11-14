@@ -523,12 +523,10 @@ class SessionAuthority:
         the messaging delivery waiters are released for it; an API/webhook/Bot observer keeps
         waiting for the answer instead of reporting accepted work as a conflict.
 
-        [daveey] t_01a1d6f94ac774a2: every pause is logged, WARNING unless transient: a silent
+        [daveey] t_01a1d6f94ac774a2: every pause is logged at WARNING, transient reasons included: a silent
         pause stalled a chat for 1 h 45 min with only INFO refusals to show for it."""
         import logging
-        transient = reason in ('session_busy', 'runtime_draining')
-        logging.getLogger(__name__).log(logging.INFO if transient else logging.WARNING,
-                                        'Session %s paused: %s', ref.session_id, reason)
+        logging.getLogger(__name__).warning('Session %s paused: %s', ref.session_id, reason)
         for row in list_session_admissions(self.db, session_id=ref.session_id):
             admission_id = row['admission_id']
             if reason == 'session_busy' and admission_id not in self.native_waiters:

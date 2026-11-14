@@ -152,3 +152,84 @@ def test_neighbouring_state_meta_keys_are_not_receipts(parked):
                                           (CHECKPOINT_PREFIX[:-1] + '/' + row['admission_id'], '{}')))
     with db._read_ctx() as conn:
         assert parked_update_turn(conn, ['s']) is None
+
+
+# ── plain public appenders (mirror, bot DM, Stop, transcript retry, spool replay all go through these) ──
+
+def _plain_append(db, sid):
+    return db.append_message(sid, 'user', 'plain passive row')
+
+
+def _plain_batch(db, sid):
+    return db.append_messages_batch(sid, [{'role': 'user', 'content': 'batch passive row'}])
+
+
+def _chunked_batch(db, sid):
+    return db.append_messages_batch(sid, [{'role': 'user', 'content': f'chunk {i}'} for i in range(3)], chunk_rows=2)
+
+
+PLAIN = {'append_message': _plain_append, 'append_messages_batch': _plain_batch,
+         'append_messages_batch_chunked': _chunked_batch}
+
+
+@pytest.mark.parametrize('write', PLAIN.values(), ids=PLAIN.keys())
+def test_plain_append_defers_then_lands_after_resume(parked, write):
+    from hermes_state_update_pause import get_session_checkpoint, resume_session_checkpoint
+    db, epoch, row = parked
+    before = db.get_messages('s')
+    with pytest.raises(SessionTurnLeaseLostError, match='parked for an update'):
+        write(db, 's')
+    assert db.get_messages('s') == before, 'a refused batch must land no row at all'
+    assert get_session_checkpoint(db, session_id='s') is not None
+    epoch = rt.begin_runtime_epoch(db, instance_id='second')
+    assert rt.recover_session_inputs(db, epoch=epoch) == 0
+    resume_session_checkpoint(db, epoch=epoch, admission_id=row['admission_id'])
+    write(db, 's')
+    assert len(db.get_messages('s')) > len(before)
+
+
+def test_plain_append_to_other_chat_is_unaffected(parked):
+    db, _, _ = parked
+    assert _plain_append(db, 'other') > 0
+    assert _plain_batch(db, 'other') == 1
+
+
+def test_plain_append_does_not_change_live_lease_behaviour(parked):
+    """Another backend's live lease never blocked a plain append, and the parked fence does not add that."""
+    db, _, row = parked
+    from hermes_state_update_pause import CHECKPOINT_PREFIX
+    db._execute_write(lambda c: c.execute('DELETE FROM state_meta WHERE key=?', (CHECKPOINT_PREFIX + row['admission_id'],)))
+    db._execute_write(lambda c: c.execute(
+        "INSERT INTO session_turn_leases(conversation_id, holder, acquired_at, expires_at) VALUES('s','live',0,?)", (2e10,)))
+    assert _plain_append(db, 's') > 0
+    assert _plain_batch(db, 's') == 1
+
+
+def test_owner_settlement_write_is_not_blocked_by_the_fence(parked):
+    """gateway/session_results.py settles a parked-era turn through the in-transaction writer: its default stays open."""
+    db, _, _ = parked
+    n = db._execute_write(lambda c: db._append_messages_in_transaction(
+        c, 's', [{'role': 'assistant', 'content': 'owner boundary'}]))
+    assert n == 1
+    with pytest.raises(SessionTurnLeaseLostError):
+        db._execute_write(lambda c: db._append_messages_in_transaction(
+            c, 's', [{'role': 'user', 'content': 'x'}], reject_parked_turn=True))
+
+
+def test_replace_display_kind_row_is_atomic_when_refused(parked):
+    """The model-switch pivot: a refused replace leaves the previous pivot active (no half change)."""
+    from hermes_state_update_pause import CHECKPOINT_PREFIX
+    db, _, row = parked
+    key = CHECKPOINT_PREFIX + row['admission_id']
+    saved = db._execute_write(lambda c: c.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()[0])
+    db._execute_write(lambda c: c.execute('DELETE FROM state_meta WHERE key=?', (key,)))
+    old = db.replace_display_kind_row('s', 'model_switch', 'first pivot')
+    db._execute_write(lambda c: c.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (key, saved)))
+    active = lambda: [m['content'] for m in db.get_messages('s') if m.get('display_kind') == 'model_switch']
+    assert active() == ['first pivot'] and old > 0
+    with pytest.raises(SessionTurnLeaseLostError):
+        db.replace_display_kind_row('s', 'model_switch', 'second pivot')
+    assert active() == ['first pivot']
+    db._execute_write(lambda c: c.execute('DELETE FROM state_meta WHERE key=?', (key,)))
+    db.replace_display_kind_row('s', 'model_switch', 'second pivot')
+    assert active() == ['second pivot']

@@ -1,4 +1,5 @@
 """Checkpoint cache is only a parked hint, never a replacement for transactional proof."""
+from tests.hermes_state.raw_rows import raw_append_message
 import pytest
 from gateway.session_update_pause import checkpoint_head, resume_checkpoint
 from tests.gateway.test_authority_update_pause import parked_fixture
@@ -32,7 +33,7 @@ async def test_held_poll_does_not_rehash_but_resume_revalidates(tmp_path, monkey
         for _ in range(3):
             assert await owner._claim_next(REF, owner.sessions['s']) == ('update_paused', None)
         # A writer changes the suffix while parked: cache must not authorize resume.
-        db.append_message('s', 'assistant', 'changed tail')
+        raw_append_message(db, 's', 'assistant', 'changed tail')
         monkeypatch.setattr(session_update_pause, 'update_held', lambda authority: False)
         with pytest.raises(RuntimeStoreError, match='invalid_checkpoint'):
             await resume_checkpoint(owner, REF, owner.sessions['s'], head)
@@ -44,7 +45,7 @@ async def test_invalid_receipt_is_unknown_not_stranded_started(tmp_path, monkeyp
     from hermes_state_runtime import get_session_admission
     db, owner, head = parked_fixture(tmp_path, monkeypatch)
     with db:
-        db.append_message('s', 'assistant', 'changed tail')
+        raw_append_message(db, 's', 'assistant', 'changed tail')
         await owner._claim_with_retry(REF, owner.sessions['s'])
         assert get_session_admission(db, admission_id=head['admission_id'])['status'] == 'unknown'
 

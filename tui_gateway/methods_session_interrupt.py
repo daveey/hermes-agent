@@ -120,10 +120,21 @@ def _record_stop_notice(session: dict, status: str) -> dict | None:
             if db is not None:
                 from agent.context_compressor import _DB_PERSISTED_MARKER
                 from agent.message_metadata import stamp_message_uid
-                entry["_row_id"] = db.append_message(
-                    session_id=_submit_row_target_key(session), role="user", content=content,
-                    display_kind=_STOP_NOTICE_KIND, display_metadata=dict(metadata),
-                    message_uid=stamp_message_uid(entry))
+                from hermes_state_errors import SessionTurnLeaseLostError
+                target = _submit_row_target_key(session)
+                try:
+                    entry["_row_id"] = db.append_message(
+                        session_id=target, role="user", content=content,
+                        display_kind=_STOP_NOTICE_KIND, display_metadata=dict(metadata),
+                        message_uid=stamp_message_uid(entry))
+                except SessionTurnLeaseLostError:
+                    # The turn is parked for an update: a row now would void its checkpoint, and the in-memory
+                    # history alone is rebuilt from the DB on resume. Park the notice on the durable spool (it
+                    # lands after the resume) and mark the live entry persisted so no flush writes it twice.
+                    from gateway.shutdown_flush import defer_row_for_parked_turn
+                    if defer_row_for_parked_turn(target, {k: v for k, v in entry.items() if not k.startswith("_")}) is None:
+                        raise
+                    logger.info("session.interrupt: stop notice for %s queued: turn parked for an update", target)
                 entry[_DB_PERSISTED_MARKER] = True
     except Exception:
         logger.warning("failed to persist stop notice", exc_info=True)

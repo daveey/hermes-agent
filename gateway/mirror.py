@@ -147,10 +147,20 @@ def _append_to_sqlite(session_id: str, message: dict) -> None:
     Raises on failure: ``mirror_to_session`` reports ``False`` (and warns) only when the
     exception reaches it — swallowing it here made every failed write look mirrored (#10130).
     """
+    from hermes_state_errors import SessionTurnLeaseLostError
     from hermes_state_registry import acquire, release_or_close
 
     db = acquire()
     try:
         db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
+    except SessionTurnLeaseLostError:
+        # The chat's turn is parked for an update: a row now would void its checkpoint. Queue it on the durable
+        # transcript spool (landed after the resume); with no spool the refusal surfaces and reports False.
+        from gateway.shutdown_flush import defer_row_for_parked_turn
+        if defer_row_for_parked_turn(session_id, {"role": message.get("role", "assistant"),
+                                                  "content": message.get("content")}) is None:
+            raise
+        logger.info("Mirror: session %s has a turn parked for an update; queued the row for after the resume",
+                    session_id)
     finally:
         release_or_close(db)

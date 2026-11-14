@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 from hermes_dir_acl import make_user_dir
+from hermes_state_errors import SessionTurnLeaseLostError
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,36 @@ def drain_transcript_spool(session_id: str, replay, *, db_known_failing: bool = 
         logger.info("Replayed %d spooled transcript message(s) for %s after DB recovery", replayed,
                     session_id)
     return replayed, remaining
+
+
+def defer_row_for_parked_turn(session_id: str, message: dict[str, Any]) -> Optional[Path]:
+    """Durably queue a passive row the state layer refused (``SessionTurnLeaseLostError``: the chat's turn is
+    parked for an update and any later row would void its checkpoint). The row waits on the transcript spool
+    that already survives a restart, and :func:`replay_deferred_rows` lands it once the turn has resumed.
+    ``None`` when the spool is unavailable: the caller must then surface the refusal, never report delivery
+    [daveey t_01a1d6f94ac774a2]."""
+    return spool_dropped_transcript_message(session_id, message)
+
+
+def replay_spooled_row(session_db, session_id: str, message: dict[str, Any], *, fallback_ts=None):
+    """Replay a passive row, retaining model-pivot replacement semantics on every drain path."""
+    from gateway.session_transcript import transcript_append_kwargs
+    if message.get('display_kind') == 'model_switch':
+        return session_db.replace_display_kind_row(session_id, 'model_switch', message['content'],
+                                                  message_uid=message.get('message_uid'))
+    return session_db.append_message(**transcript_append_kwargs(session_id, message, fallback_ts=fallback_ts))
+
+
+def replay_deferred_rows(session_db, session_id: str) -> tuple[int, int]:
+    """Land the rows :func:`defer_row_for_parked_turn` queued for *session_id*; ``(replayed, remaining)``.
+    Still parked: the first replay is refused again and everything stays on disk. Never raises."""
+    try:
+        return drain_transcript_spool(
+            session_id, lambda message: replay_spooled_row(session_db, session_id, message),
+            db_known_failing=True)
+    except Exception as exc:  # health: allow BLE001 -- best-effort post-resume drain; the files stay for the next one
+        logger.debug("Deferred-row replay for %s failed: %s", session_id, exc)
+        return 0, 1
 
 
 def _json_safe(value: Any) -> bool:
@@ -386,7 +417,6 @@ def _recover_one_payload(session_db, path: Path, payload: dict[str, Any], *,
     # Cap-dropped transcript payloads carry the full message dict keyed by session_id: replay it
     # directly (#78182). This handles spool files that were never drained before a restart.
     if payload.get("reason") == TRANSCRIPT_CAP_DROP_REASON:
-        from gateway.session_transcript import transcript_append_kwargs
         data = payload.get("data", {}) or {}
         spooled_sid, message = data.get("session_id", ""), data.get("message")
         if not spooled_sid or not isinstance(message, dict):
@@ -400,7 +430,7 @@ def _recover_one_payload(session_db, path: Path, payload: dict[str, Any], *,
             blocked_sessions[spooled_sid] += 1
             return False
         try:
-            session_db.append_message(**transcript_append_kwargs(spooled_sid, message, fallback_ts=payload.get("ts")))
+            replay_spooled_row(session_db, spooled_sid, message, fallback_ts=payload.get("ts"))
         except Exception as exc:
             if is_row_rejection(exc):  # no retry can write it, so it must not hold the session back
                 _quarantine_spool_file(path, spooled_sid, exc)
@@ -435,8 +465,14 @@ def _recover_one_payload(session_db, path: Path, payload: dict[str, Any], *,
                        "session_key-to-id resolution failed. "
                        "The message text is preserved in %s", session_key, path)
         return False
-    target_db.append_message(session_id=session_id, role="user", content=text,
-                             timestamp=payload.get("ts", int(time.time())))
+    ts = payload.get("ts", int(time.time()))
+    try:
+        target_db.append_message(session_id=session_id, role="user", content=text, timestamp=ts)
+    except SessionTurnLeaseLostError:
+        # The session's turn is parked for an update (boot recovery runs before its resume). Move the row onto
+        # the transcript spool, which the post-resume drain lands in order; keep this file if that fails.
+        if defer_row_for_parked_turn(session_id, {"role": "user", "content": text, "timestamp": ts}) is None:
+            raise
     return True
 
 

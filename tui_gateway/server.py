@@ -1208,11 +1208,20 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
                 target = _submit_row_target_key(session)
                 # The in-memory strip above keeps one marker; the durable rows need the same invariant or N
                 # switches leave N active rows that all replay on resume (#65891 kept it in memory only).
-                db.deactivate_messages_by_display_kind(target, "model_switch")
+                # One transaction with the append: a turn parked for an update refuses it, and a refusal after
+                # a separate deactivate would leave the chat with no pivot at all [daveey t_01a1d6f94ac774a2].
                 from agent.message_metadata import stamp_message_uid
-                entry["_row_id"] = db.append_message(
-                    session_id=target, role="user", content=marker, display_kind="model_switch",
-                    message_uid=stamp_message_uid(entry))
+                from hermes_state_errors import SessionTurnLeaseLostError
+                try:
+                    entry["_row_id"] = db.replace_display_kind_row(
+                        target, "model_switch", marker, message_uid=stamp_message_uid(entry))
+                except SessionTurnLeaseLostError:
+                    from gateway.shutdown_flush import defer_row_for_parked_turn
+                    if defer_row_for_parked_turn(target, entry) is None:
+                        raise
+                    entry[_DB_PERSISTED_MARKER] = True  # durable spool owns delivery across history rebuilds
+                    logger.info("model switch marker deferred: session %s has a turn parked for an update", target)
+                    return
                 entry[_DB_PERSISTED_MARKER] = True
     except Exception:
         # warning, not debug: filing the pivot in the LIVE session (#123545) means this write can now hit

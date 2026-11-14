@@ -53,6 +53,13 @@ async def _drain(owner):
     await asyncio.wait_for(owner.sessions['s'].task, 10)
 
 
+def _void_proof(db):
+    """An unguarded writer's row, raw SQL: the public appenders now refuse while the turn is parked."""
+    db._execute_write(lambda c: c.execute(
+        "INSERT INTO messages(session_id, role, content, timestamp) "
+        "VALUES('s', 'user', 'a row an unguarded writer appended', 1)"))
+
+
 def _status(db, admission):
     row = get_session_admission(db, admission_id=admission['admission_id'])
     return row['status'], row['outcome']
@@ -80,7 +87,7 @@ async def test_drain_fenced_automation_head_settles_and_follower_runs_in_same_dr
     it and the same drain runs the queued follower, with no pause."""
     db, owner, head, follower, calls = await _after_boot(tmp_path, monkeypatch, AUTOMATION)
     with db:
-        db.append_message('s', 'user', 'a row an unguarded writer appended')  # voids the proof
+        _void_proof(db)  # voids the proof
         assert get_session_checkpoint(db, session_id='s') is None
         with caplog.at_level(logging.INFO, logger='gateway.session_authority'):
             await _drain(owner)
@@ -94,7 +101,7 @@ async def test_drain_fenced_automation_head_settles_and_follower_runs_in_same_dr
 async def test_drain_fenced_persons_head_still_pauses_and_says_so(tmp_path, monkeypatch, caplog):
     db, owner, head, follower, calls = await _after_boot(tmp_path, monkeypatch, PERSON)
     with db:
-        db.append_message('s', 'user', 'a row an unguarded writer appended')
+        _void_proof(db)
         with caplog.at_level(logging.INFO, logger='gateway.session_authority'):
             await _drain(owner)
         assert calls == []
@@ -104,12 +111,10 @@ async def test_drain_fenced_persons_head_still_pauses_and_says_so(tmp_path, monk
         assert paused and paused[0].levelno == logging.WARNING
 
 
-@pytest.mark.parametrize('reason,level', [('session_busy', logging.INFO), ('runtime_draining', logging.INFO),
-                                          ('unknown_execution', logging.WARNING),
-                                          ('admission_conflict', logging.WARNING)])
-def test_every_pause_is_logged(tmp_path, monkeypatch, caplog, reason, level):
+@pytest.mark.parametrize('reason', ['session_busy', 'runtime_draining', 'unknown_execution', 'admission_conflict'])
+def test_every_pause_is_logged_at_warning(tmp_path, monkeypatch, caplog, reason):
     from tests.gateway.test_session_authority_cancel_settlement import _authority
     db, owner = _authority(tmp_path, monkeypatch)
     with db, caplog.at_level(logging.INFO, logger='gateway.session_authority'):
         owner._pause(REF, reason)
-    assert [(r.getMessage(), r.levelno) for r in caplog.records] == [(f'Session s paused: {reason}', level)]
+    assert [(r.getMessage(), r.levelno) for r in caplog.records] == [(f'Session s paused: {reason}', logging.WARNING)]

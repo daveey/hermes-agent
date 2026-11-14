@@ -1,4 +1,5 @@
 """Boot finds durable started checkpoints without replaying ordinary started turns."""
+from tests.hermes_state.raw_rows import raw_append_message
 import pytest
 
 
@@ -80,7 +81,7 @@ async def test_boot_does_not_schedule_ordinary_current_started_turn(tmp_path, mo
     runner, owner, ref, row = await _started(tmp_path, monkeypatch, checkpoint=invalid_receipt, detached=detached)
     try:
         if invalid_receipt:
-            owner.db.append_message(ref.session_id, 'assistant', 'boundary changed')
+            raw_append_message(owner.db, ref.session_id, 'assistant', 'boundary changed')
         from hermes_state_update_pause import get_session_checkpoint
         assert get_session_checkpoint(owner.db, session_id=ref.session_id) is None
         scheduled = []

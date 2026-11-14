@@ -910,6 +910,7 @@ def _persist_reply_when_done(proc_id: str, agent: Any) -> bool:
     the outcome via process(action='wait'/'log') is not told twice. Returns False (nothing
     armed) when the sender has no session transcript or the process is not tracked here."""
     from tools.process_registry import process_registry
+    from hermes_state_errors import SessionTurnLeaseLostError
 
     db, session_id = getattr(agent, "_session_db", None), getattr(agent, "session_id", None)
     proc = process_registry.get(proc_id)
@@ -925,10 +926,19 @@ def _persist_reply_when_done(proc_id: str, agent: Any) -> bool:
         if process_registry.is_completion_consumed(proc_id):
             return
         evt = {"type": "completion", "session_id": proc_id, **process_registry._exit_snapshot(proc, "exited")}
+        row = {"role": "user", "content": format_process_notification(evt), "display_kind": "process_complete",
+               "display_metadata": {"display_text": process_completion_display_text([evt])}}
         try:
-            db.append_message(session_id, "user", content=format_process_notification(evt),
-                              display_kind="process_complete",
-                              display_metadata={"display_text": process_completion_display_text([evt])})
+            try:
+                db.append_message(session_id, **row)
+            except SessionTurnLeaseLostError:
+                # The sender's turn is parked for an update. The completion is already consumed, so the reply
+                # waits on the durable transcript spool and lands after the resume; no spool: report it below.
+                from gateway.shutdown_flush import defer_row_for_parked_turn
+                if defer_row_for_parked_turn(session_id, row) is None:
+                    raise
+                logger.info("message_agent: session %s has a turn parked for an update; queued the reply of %s",
+                            session_id, proc_id)
         except Exception as exc:
             logger.warning("message_agent: could not persist the reply of %s into session %s: %s",
                            proc_id, session_id, exc)

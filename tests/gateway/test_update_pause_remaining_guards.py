@@ -1,4 +1,5 @@
 """Behavior guards for update-pause bookkeeping that earlier suites left unobserved."""
+from tests.hermes_state.raw_rows import raw_append_message
 import types
 
 import pytest
@@ -38,7 +39,7 @@ def test_recovery_preserves_valid_receipt_and_unknowns_invalid_one(tmp_path, mon
         # Same-epoch rows are never touched.
         assert db._execute_write(lambda c: recover_checkpointed_inputs(c, owner.epoch)) == 0
         # Corrupt the proof: recovery fences the head and removes the dead receipt.
-        db.append_message('s', 'assistant', 'tail changed')
+        raw_append_message(db, 's', 'assistant', 'tail changed')
         # The current owner's own started row is live work even when its proof is stale.
         assert db._execute_write(lambda c: recover_checkpointed_inputs(c, owner.epoch)) == 0
         assert get_session_admission(db, admission_id=head['admission_id'])['status'] == 'started'
@@ -76,7 +77,7 @@ async def test_uncached_invalid_proof_raises_not_none(tmp_path, monkeypatch):
     from hermes_state_runtime import RuntimeStoreError
     db, owner, _head = parked_fixture(tmp_path, monkeypatch)
     with db:
-        db.append_message('s', 'assistant', 'tail changed')
+        raw_append_message(db, 's', 'assistant', 'tail changed')
         with pytest.raises(RuntimeStoreError, match='invalid_checkpoint'):
             sup.checkpoint_head(owner, REF)
 

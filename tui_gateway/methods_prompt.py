@@ -686,14 +686,21 @@ def _close_agent_init_failed_turn(session: dict, message: str, error_surface: di
     try:
         from agent.redact import redact_sensitive_text
         from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, OPEN_TURN_TAIL_ROLES
+        from hermes_state_errors import SessionTurnLeaseLostError
 
         with _session_db(session) as db:
             if db is None or db.latest_conversation_role(sid) not in OPEN_TURN_TAIL_ROLES:
                 return
             error = redact_sensitive_text(str(message or "").strip()[:2000], force=True)
-            db.append_message(
-                sid, role="assistant", content=FAILED_TURN_NOTICE, display_kind=FAILED_TURN_DISPLAY_KIND,
-                display_metadata={k: v for k, v in (("error", error), ("error_surface", error_surface)) if v})
+            row = {"role": "assistant", "content": FAILED_TURN_NOTICE, "display_kind": FAILED_TURN_DISPLAY_KIND,
+                   "display_metadata": {k: v for k, v in (("error", error), ("error_surface", error_surface)) if v}}
+            try:
+                db.append_message(sid, **row)
+            except SessionTurnLeaseLostError:
+                # Turn parked for an update: the boundary waits on the durable spool and lands after the resume.
+                from gateway.shutdown_flush import defer_row_for_parked_turn
+                if defer_row_for_parked_turn(sid, row) is None:
+                    raise
     except Exception:  # health: allow BLE001 -- the terminal frame must still reach the client
         logger.warning("prompt.submit: failed-turn boundary not written for %s", sid, exc_info=True)
 

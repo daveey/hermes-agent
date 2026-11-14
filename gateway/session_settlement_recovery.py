@@ -238,6 +238,22 @@ def publish_terminal(authority, ref, row, settled, response, captured):
     authority._publish_pending(ref)
 
 
+async def drain_deferred_rows(authority, ref):
+    """[daveey t_01a1d6f94ac774a2] A settled turn is no longer parked: land the passive rows (mirror, bot-DM
+    reply, gateway transcript retries) the update checkpoint deferred. Off-loop, best effort; the files wait
+    for the next append or boot recovery otherwise."""
+    store = getattr(getattr(authority, 'runner', None), 'session_store', None)
+    drain = getattr(store, 'drain_deferred_transcript', None)
+    if not callable(drain):
+        from gateway.shutdown_flush import replay_deferred_rows
+        drain = lambda sid: replay_deferred_rows(authority.db, sid)
+    try:
+        for sid in dict.fromkeys((ref.session_id, authority.physical_target(ref))):
+            await asyncio.to_thread(drain, sid)
+    except Exception:
+        logger.debug('Deferred transcript drain for %s failed', ref.session_id, exc_info=True)
+
+
 async def settle_and_deliver(authority, live, ref, row, response, outcome):
     """Own settlement through delivery even if the drain's waiter is cancelled.
 
@@ -325,6 +341,8 @@ async def settle_and_deliver(authority, live, ref, row, response, outcome):
             # Taken on every exit, so a turn that never settled leaves no reset for a later one.
             reset = authority.deferred_resets.pop(live.route, None)
         await authority._run_deferred_reset(live.route, reset)
+        if settled is not None:
+            await drain_deferred_rows(authority, ref)
         from gateway.session_ingress import deliver_settled, fire_post_delivery
         await deliver_settled(authority, admission_id)
         await fire_post_delivery(authority, admission_id)
