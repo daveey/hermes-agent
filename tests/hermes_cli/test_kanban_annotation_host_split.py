@@ -78,6 +78,30 @@ def test_corrupt_body_is_not_adopted(world):
     assert disk.load_host(SCOPE) is None
 
 
+@pytest.mark.parametrize(('shared', 'warm'), [(False, False), (True, False), (True, True)],
+                         ids=['cold-detached', 'cold-shared', 'warm-shared'])
+def test_decodable_body_with_wrong_digest_is_not_adopted(world, shared, warm):
+    assert disk.save_host(SCOPE, 'old', 990, parts(1))
+    expected = ('old', 990, parts(1))
+    assert disk.load_host(SCOPE, shared=shared) == expected
+    original_header = header()
+    body_path = disk._body_path(disk._path(SCOPE), original_header['parts_digest'])
+    original_body = json.loads(body_path.read_text(encoding='utf-8'))
+    changed_body = json.loads(json.dumps(original_body))
+    changed_body['parts'][0]['session'] = 200
+    # This must reach the digest fence, not fail JSON parsing or parts decoding.
+    assert disk._decode_parts(changed_body['parts']) == parts(200)
+    if not warm:
+        disk.reset()
+    # Replace the inode so a warm shared reader must revalidate, without timing assumptions.
+    disk._write_json(body_path, changed_body)
+    assert header() == original_header
+    assert disk.load_host(SCOPE, shared=shared) is None
+    assert disk.load_host(SCOPE, shared=shared) is None
+    disk._write_json(body_path, original_body)
+    assert disk.load_host(SCOPE, shared=shared) == expected
+
+
 def test_body_retention_is_bounded_and_previous_is_readable(world):
     for value in range(12):
         assert disk.save_host(SCOPE, str(value), 990, parts(value))
