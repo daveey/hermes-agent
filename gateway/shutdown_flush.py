@@ -473,10 +473,14 @@ def _recover_one_payload(session_db, path: Path, payload: dict[str, Any], *,
             logger.warning("Cannot recover structurally invalid transcript spool "
                            "file %s; preserved for manual inspection", path)
             return False
-        target_sid, _sources = deferred_transcript_route(session_db, spooled_sid)
-        if target_sid in blocked_sessions:
-            # Ordering belongs to the destination conversation, not one physical spool segment.
-            blocked_sessions[target_sid] += 1
+        try:
+            target_sid, sources = deferred_transcript_route(session_db, spooled_sid)
+        except Exception:  # health: allow BLE001 -- unknown lineage keeps custody, never a row rejection
+            blocked_sessions[spooled_sid] = blocked_sessions.get(spooled_sid, 0) + 1
+            raise
+        if sources.intersection(blocked_sessions):
+            # A failed lineage read may only know an ancestor's id. Hold its destination too.
+            blocked_sessions[target_sid] = blocked_sessions.get(target_sid, 0) + 1
             return False
         try:
             replay_spooled_row(session_db, target_sid, message, fallback_ts=payload.get("ts"))
