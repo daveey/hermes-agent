@@ -29,13 +29,18 @@ def iter_recursive_payloads(command, nested_texts, *, cwd, executed, budget, cov
         yield payload, True, None
     for payload in guard._iter_shell_command_payloads(command):
         yield payload, False, None
-    for payload in iter_arithmetic_word_payloads(command, integer_context=budget.integer_context):
+    integer_context = budget.integer_context
+    for payload in iter_arithmetic_word_payloads(command, integer_context=integer_context):
         yield payload, False, None
     # Snapshot after preceding nested-shell walks; shared budget state may have changed.
     scope = quote_scope(cwd, executed, budget)
     for payload, raw_quote in iter_printed_shell_payloads(
             command, include_quoted=covered_scope != scope):
         yield payload, False, scope if raw_quote else None
+    # Quoted eval text can establish attributes needed by the parent's later assignments.
+    if budget.integer_context and not integer_context:
+        for payload in iter_arithmetic_word_payloads(command, integer_context=True):
+            yield payload, False, None
 
 
 def iter_printed_shell_payloads(

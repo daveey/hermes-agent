@@ -19,6 +19,9 @@ SHAPES = [
     r"o=-i; declare $o x; x=a[\$\(SCRIPT\)]",
     r"o=-i; builtin declare $o x; x=a[\$\(SCRIPT\)]",
     r"d=declare; builtin $d -i x; eval 'x=a[\$\(SCRIPT\)]'",
+    r"d=declare; eval '$d -i x'; x=a[\$\(SCRIPT\)]",
+    r"o=-i; eval 'declare $o x'; x=a[\$\(SCRIPT\)]",
+    r"d=declare; ${d//a/a} -i x; x=a[\$\(SCRIPT\)]",
     r"source ./decl.sh; x=a[\$\(SCRIPT\)]",
     r". ./decl.sh; eval 'x=a[\$\(SCRIPT\)]'",
 ]

@@ -168,7 +168,8 @@ def may_set_integer_attributes(command: str) -> bool:
         # can introduce an integer declaration; allow the later subscript walk now,
         # before referenced files are traversed. Unknown commands may be declare.
         if name in {"source", "."} or (
-            any(char in name for char in "$`") and not _ASSIGNMENT_WORD_RE.match(words[index])
+            any(char in words[index] for char in "$`")
+            and not _ASSIGNMENT_WORD_RE.match(words[index])
         ):
             return True
         if name in _INTEGER_DECLARERS and any(
