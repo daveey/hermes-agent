@@ -573,17 +573,43 @@ def _complete_foreign_history(owner: dict[str, Any]) -> bool:
 def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: HubRelay | None,
                  *, deadline: float | None = None) -> list[str]:
     log = []
+    # Retain retry batch boundaries when rechecking never-attempted pages. A slow
+    # unrelated owner must not repeatedly consume the budget before this prefix
+    # can be sent. Ticket ordering remains unchanged.
+    retry_groups = dict(journal.db.execute(
+        "SELECT o.id,o.page FROM occurrences o JOIN pages p ON p.id=o.page "
+        "WHERE o.repo=? AND p.attempted=0 AND p.delivered=0", (repo,)))
     journal.recheck_unattempted(repo)
-    # Reserve half the remaining drain window for already-attempted pages. Resolve
-    # and deliver one occurrence at a time: a later slow owner cannot strand a
-    # whole newly resolved prefix behind the deadline on every invocation.
+    # Reserve half the drain for retry pages. Bound admission batches independently
+    # of the backlog; every flush commits its pages before attempting delivery.
     now = time.monotonic()
     resolve_deadline = None if deadline is None else now + max(0, deadline - now) / 2
     old_pages = {r[0] for r in journal.db.execute(
         "SELECT id FROM pages WHERE repo=? AND delivered=0", (repo,))}
     def create(title, body, key, page):
         return _create_intake(journal, repo, board, state, relay, title, body, key, page, deadline)
+    batch, owner_checks = [], {}
+    def flush():
+        try:
+            journal.plan_pages(repo, batch, owner_check=owner_checks)
+        except ValueError:
+            # An oversized owner inventory must not poison the valid prefix.
+            for row in batch:
+                try:
+                    journal.plan_pages(repo, [row], owner_check=owner_checks)
+                except ValueError:
+                    log.append(f"FAILED intake_page_oversize occurrence={row['id']}; durable retry pending")
+        page_ids = {journal.db.execute("SELECT page FROM occurrences WHERE id=?", (row["id"],)).fetchone()[0]
+                    for row in batch}
+        batch.clear()
+        owner_checks.clear()
+        return journal.deliver(repo, board, deadline=deadline, create=create, page_ids=page_ids)
+    previous_group = None
     for row in journal.pending(repo):
+        group = retry_groups.get(row["id"])
+        if group != previous_group:
+            log += flush()
+        previous_group = group
         if resolve_deadline is not None and time.monotonic() >= resolve_deadline:
             log.append("FAILED intake_budget; durable retry pending")
             break
@@ -595,15 +621,20 @@ def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: 
             lines = file_cards([meta], run_url=url, branch=meta["head_sha"], board=board, state=state,
                                relay=relay, on_unowned=lambda: "queued", owner_notes=notes)
         except (RuntimeError, subprocess.TimeoutExpired):
+            log += flush()
             log.append(f"FAILED {meta['test_id']}: owner delivery unavailable; durable retry pending")
             continue
         if lines == ["queued"]:
-            journal.plan_pages(repo, [row], owner_check={row["id"]: notes.get(meta["test_id"], [])})
-            page_id = journal.db.execute("SELECT page FROM occurrences WHERE id=?", (row["id"],)).fetchone()[0]
-            log += journal.deliver(repo, board, deadline=deadline, create=create, page_ids={page_id})
-        elif lines and not any(line.startswith("FAILED") for line in lines):
-            journal.acknowledge(row["id"], json.dumps(state["cards"][meta["test_id"]], sort_keys=True))
+            batch.append(row)
+            owner_checks[row["id"]] = notes.get(meta["test_id"], [])
+            if len(batch) >= 16:
+                log += flush()
+        else:
+            log += flush()
+            if lines and not any(line.startswith("FAILED") for line in lines):
+                journal.acknowledge(row["id"], json.dumps(state["cards"][meta["test_id"]], sort_keys=True))
         log += lines
+    log += flush()
     return log + journal.deliver(repo, board, deadline=deadline, create=create, page_ids=old_pages)
 
 
@@ -1051,6 +1082,7 @@ def _run_intake(args: argparse.Namespace, board: Board, relay: HubRelay, journal
         journal.record(args.repo, [(int(match.group(2)), entries)], {"id": run_id, "head_sha": args.branch})
         log = []
     log += drain_intake(journal, args.repo, board, state, relay, deadline=deadline)
+    journal.prune(args.repo)
     save_state(args.state, state)
     for line in log:  # silent when nothing flaked (no-agent cron delivers stdout)
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}")

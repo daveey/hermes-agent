@@ -170,12 +170,21 @@ class Journal:
                 attempted INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS owner_check_details (
                 digest TEXT PRIMARY KEY, payload TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS occurrences_run ON occurrences(repo,json_extract(metadata,'$.run_id'),delivered);
+            CREATE INDEX IF NOT EXISTS occurrences_page ON occurrences(page);
         """)
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(pages)")}
         if "attempted" not in columns:
             # Pre-marker pages might already have escaped. Preserve them immutably.
             self.db.execute("ALTER TABLE pages ADD COLUMN attempted INTEGER NOT NULL DEFAULT 1")
             self.db.commit()
+
+        with self.db:
+            for table, column in (("runs", "retained_at"), ("occurrences", "retained_at"), ("pages", "retained_at")):
+                if column not in {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} REAL NOT NULL DEFAULT 0")
+                    # Unknown legacy age starts now, never from an inferred old run date.
+                    self.db.execute(f"UPDATE {table} SET {column}=?", (time.time(),))
 
         # Backfill older queues before admitting new work. Replay preserves tickets.
         with self.db:
@@ -203,9 +212,10 @@ class Journal:
             for run in runs:
                 descriptor = run_metadata(run)
                 key = f"{run['id']}/{run.get('run_attempt', 1)}"
-                self.db.execute("INSERT INTO runs(repo,key,descriptor) VALUES(?,?,?) "
-                                "ON CONFLICT(repo,key) DO UPDATE SET descriptor=excluded.descriptor",
-                                (repo, key, json.dumps(descriptor)))
+                self.db.execute("INSERT INTO runs(repo,key,descriptor,retained_at) VALUES(?,?,?,?) "
+                                "ON CONFLICT(repo,key) DO UPDATE SET descriptor=excluded.descriptor, "
+                                "retained_at=excluded.retained_at",
+                                (repo, key, json.dumps(descriptor), time.time()))
                 self.enqueue(repo, "run", key)
         return [json.loads(r[0]) for r in self.db.execute(
             "SELECT r.descriptor FROM runs r LEFT JOIN scheduling s ON "
@@ -221,7 +231,8 @@ class Journal:
 
     def finish_run(self, repo: str, key: str):
         with self.db:
-            self.db.execute("UPDATE runs SET complete=1 WHERE repo=? AND key=?", (repo, key))
+            self.db.execute("UPDATE runs SET complete=1,retained_at=? WHERE repo=? AND key=?",
+                            (time.time(), repo, key))
             self.db.execute("DELETE FROM run_failures WHERE repo=? AND key=?", (repo, key))
 
     def record(self, repo: str, jobs: list[tuple[int, list[dict]]], run: dict):
@@ -262,7 +273,8 @@ class Journal:
 
     def acknowledge(self, row_id: int, owner: str):
         with self.db:
-            self.db.execute("UPDATE occurrences SET delivered=1,owner=? WHERE id=?", (owner, row_id))
+            self.db.execute("UPDATE occurrences SET delivered=1,owner=?,retained_at=? WHERE id=?",
+                            (owner, time.time(), row_id))
 
     def plan_pages(self, repo: str, rows: list, owner_check: dict[int, list] | None = None):
         """Commit immutable pages before any external write; never shorten a manifest.
@@ -392,5 +404,35 @@ class Journal:
 
     def acknowledge_page(self, page_id: int, card: str):
         with self.db:
-            self.db.execute("UPDATE pages SET delivered=1 WHERE id=?", (page_id,))
-            self.db.execute("UPDATE occurrences SET delivered=1,owner=? WHERE page=?", (card, page_id))
+            self.db.execute("UPDATE pages SET delivered=1,retained_at=? WHERE id=?", (time.time(), page_id))
+            self.db.execute("UPDATE occurrences SET delivered=1,owner=?,retained_at=? WHERE page=?",
+                            (card, time.time(), page_id))
+
+    def prune(self, repo: str, *, lookback_hours: float = 6.0):
+        """Retain terminal history for 30 days plus discovery lookback; never pending work.
+
+        No VACUUM: SQLite reuses freed pages without a blocking file rewrite.
+        Recently listed runs retain all their occurrence replay receipts.
+        """
+        cutoff = time.time() - 30 * 86400 - max(0, lookback_hours) * 3600
+        with self.db:
+            self.db.execute("DELETE FROM runs WHERE repo=? AND complete=1 AND retained_at<? "
+                            "AND NOT EXISTS (SELECT 1 FROM occurrences o WHERE o.repo=runs.repo "
+                            "AND json_extract(o.metadata,'$.run_id')=json_extract(runs.descriptor,'$.id') "
+                            "AND o.delivered=0)", (repo, cutoff))
+            self.db.execute("DELETE FROM occurrences WHERE repo=? AND delivered=1 AND retained_at<? "
+                            "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.repo=occurrences.repo "
+                            "AND r.key=json_extract(occurrences.metadata,'$.run_id') || '/' || "
+                            "json_extract(occurrences.metadata,'$.run_attempt')) "
+                            "AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.id=occurrences.page AND p.delivered=0)",
+                            (repo, cutoff))
+            self.db.execute("DELETE FROM pages WHERE repo=? AND delivered=1 AND retained_at<? "
+                            "AND NOT EXISTS (SELECT 1 FROM occurrences o WHERE o.page=pages.id)", (repo, cutoff))
+            for kind, table, key, pending in (
+                ("run", "runs", "key", "complete=0"),
+                ("occurrence", "occurrences", "id", "delivered=0"),
+                ("page", "pages", "id", "delivered=0"),
+            ):
+                self.db.execute(f"DELETE FROM scheduling WHERE repo=? AND kind=? AND NOT EXISTS "
+                                f"(SELECT 1 FROM {table} t WHERE t.repo=scheduling.repo "
+                                f"AND CAST(t.{key} AS TEXT)=scheduling.item AND {pending})", (repo, kind))

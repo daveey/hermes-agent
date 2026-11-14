@@ -88,8 +88,13 @@ resolutions and page deliveries; deferred rows remain durable and the poll repor
 Board/courier operations already started may still consume their existing transport timeout.
 Before GitHub discovery, a drain gets half the invocation budget and checkpoints the JSON
 cursor; a slow discovery cannot prevent already queued delivery on every invocation.
-Within a drain, ownership resolution delivers each admitted occurrence immediately in a
-bounded one-occurrence page. Half the drain window is reserved for prior attempted pages.
+Within a drain, consecutive admissions are packed by `plan_pages` into multi-row pages
+(maximum 6000 bytes), flushed after at most 16 rows, an ownership boundary, or the
+resolution deadline. Occurrences are durable before ownership resolution; each batch's
+pages are committed before immediate delivery in the same drain. Half the drain window is
+reserved for prior attempted pages. If a slow owner exhausts it, the unsent pages remain
+durable and retain their batch boundaries during next-drain ownership rechecks, so that
+unrelated slow owner cannot repeatedly delay the already-admitted prefix.
 Durable FIFO tickets are assigned transactionally when occurrences, pages and run attempts
 are enqueued. Replay preserves the original ticket; attempts rotate to the tail before external
 calls, surviving process death. Older unscheduled rows are backfilled on journal open before
@@ -118,7 +123,31 @@ successful GitHub listing no longer includes such a run and it has reached the u
 `FAILED run=<k> code=<c> polls=<n> retired=unlisted` line and marked complete, matching the
 per-test producer, which dropped runs that left the lookback listing. A failed listing never
 retires anything, and a still-listed run stays `FAILED` until its data becomes readable.
-Retired runs remain queryable with `SELECT repo,key FROM runs WHERE complete=1`.
+Retired runs remain queryable with `SELECT repo,key FROM runs WHERE complete=1` until
+terminal-history retention expires.
+
+## Retention and nightly pins
+
+Each production poll prunes terminal history under the journal lock. Complete runs are
+retained for 30 days plus the discovery lookback (currently 6 hours), counted from their
+last listing or completion. Runs with undelivered occurrences are never pruned. Delivered
+occurrences are retained for the same interval after acknowledgement and until their run
+record is gone; delivered pages remain until all their occurrences have aged out. Pending
+runs, undelivered occurrences, and undelivered pages have no age limit. Terminal/orphaned
+FIFO entries are removed without renumbering any pending ticket. Legacy rows receive the
+migration time, not a guessed historical completion date. SQLite reuses freed space; no
+blocking VACUUM is performed. Export before expiry if longer audit history is needed.
+Replaying an artifact outside this retention window is not guaranteed deduplicated; do not
+use old manual reports as a replay shortcut.
+
+The nightly reporter's immutable export includes `nightly_e2e.py`, `flaky_kanban.py`,
+`flaky_intake.py`, `flaky_http.py`, `flaky_artifact.py`, and `flaky_artifact_poll.py` from
+one revision. `PIN_FILES` checks every sibling, including missing exports, and generated
+re-pin instructions name them all. `hermes_cli` is intentionally **not** a partial frozen
+export: the transport deadline and scope-heartbeat modules belong to the installed Hermes
+runtime and its transitive dependencies. The cron launcher must expose that runtime;
+verify those imports and both dispatch/report entry points when re-pinning. The pin check
+certifies sibling script bytes, not hermes_cli deployment or runtime compatibility.
 
 ## Read-only backlog and export
 

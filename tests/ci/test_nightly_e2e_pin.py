@@ -23,7 +23,7 @@ def pin(tmp_path, monkeypatch):
     source.mkdir(parents=True)
     deployed = tmp_path / "lib" / "nightly-e2e" / "abcdef123456"
     deployed.mkdir(parents=True)
-    for name in ("nightly_e2e.py", "flaky_kanban.py"):
+    for name in ne.PIN_FILES:
         (source / name).write_bytes(b"# original\r\n")
         (deployed / name).write_bytes(b"# original\r\n")
     git(core, "init")
@@ -44,13 +44,21 @@ def change(core, source, name, age):
     git(core, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
+def test_missing_dependency_pin_is_reported(pin):
+    _core, _source, deployed, gh, board, state = pin
+    (deployed / "flaky_intake.py").unlink()
+    assert "stale pin:" in ne.report(gh, board, state, now=T0)[0]
+    assert "flaky_intake.py" in next(iter(board.cards.values()))["body"]
+
+
 def test_identical_pin_is_silent(pin):
     _core, _source, _deployed, gh, board, state = pin
     assert ne.report(gh, board, state, now=T0) == []
     assert board.created == []
 
 
-@pytest.mark.parametrize("name", ["nightly_e2e.py", "flaky_kanban.py"])
+@pytest.mark.parametrize("name", ["nightly_e2e.py", "flaky_kanban.py", "flaky_intake.py", "flaky_http.py",
+                                  "flaky_artifact.py", "flaky_artifact_poll.py"])
 def test_stale_pin_files_exactly_one_card_on_two_reports(pin, name):
     core, source, deployed, gh, board, state = pin
     change(core, source, name, 7201)
@@ -61,7 +69,7 @@ def test_stale_pin_files_exactly_one_card_on_two_reports(pin, name):
     assert card["comments"] == []
     assert deployed.name in card["body"]
     assert git(core, "rev-parse", "origin/main") in card["body"]
-    for filename in ("nightly_e2e.py", "flaky_kanban.py"):
+    for filename in ne.PIN_FILES:
         assert git(core, "rev-parse", f"origin/main:scripts/ci/{filename}") in card["key"]
     assert "nightly_e2e_dispatch.py" in card["body"]
     assert "nightly_e2e_report.py" in card["body"]
