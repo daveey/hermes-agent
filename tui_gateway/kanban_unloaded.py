@@ -683,34 +683,46 @@ def host_pass(grace: float = GRACE_S, *, every_store: bool = True) -> None:
     """Everything this loop does for the whole install; run by the ``kanban-unloaded`` lease holder only.
     ``every_store=False`` (kill switch, lease failed open: every process runs this) retries killed-subagent
     notices in this process's own store only. Each sub-pass is an ``unloaded.<sub>`` pass (loop_accounting)."""
+    from tui_gateway.kanban_unloaded_gates import profile_census
+    with profile_census():
+        _host_pass(grace, every_store=every_store)
+
+
+def _host_pass(grace: float, *, every_store: bool) -> None:
+    from tui_gateway.kanban_unloaded_gates import run
+    live = live_session_ids()
     try:
-        _la.timed("unloaded.remote_notices", sweep_remote_once, live_session_ids(), grace_s=grace)
-        _la.timed("unloaded.notices", sweep_once, live_session_ids(), grace_s=grace)
+        run("remote_notices", sweep_remote_once, live, grace_s=grace, live=live, every_store=every_store)
+    except Exception:
+        logger.warning("remote kanban unloaded sweep failed", exc_info=True)
+    try:
+        live = live_session_ids()  # the remote wake may have loaded a chat in this very pass
+        run("notices", sweep_once, live, grace_s=grace, live=live, every_store=every_store)
     except Exception:
         logger.warning("kanban unloaded sweep failed", exc_info=True)
     # [daveey] Async-delegation results no live poller delivers (parent unloaded, loaded headless, or held by
     # another backend than the copy's): one turn in the parent, ledger-claimed (delegation_unloaded).
     try:
         from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
-        _la.timed("unloaded.delegation", delegation_sweep_once)
+        run("delegation", delegation_sweep_once, live=live, every_store=every_store)
     except Exception:
         logger.warning("async delegation unloaded sweep failed", exc_info=True)
     # [daveey] Session outcome: refresh chats whose cards moved, then make sure no notice ends a chat unanswered.
     from tui_gateway.notice_fanout import card_change_pass
     from tui_gateway.notice_guarantee import guarantee_pass
-    _la.timed("unloaded.card_change_pass", card_change_pass)
+    run("card_change_pass", card_change_pass, live=live, every_store=every_store)
     # [daveey] A parent that was mid-turn when the orphan reap killed its subagent refused that notice: re-offer
     # it before the guarantee pass, so the same tick can wake the parent on it (desktop-ac1b365935). Every
     # profile store, since one holder now retries for the whole install; without a real lease each process
     # retries its own store, as before the lease.
     if every_store:
         from tui_gateway.reap_notices import retry_pending_killed_notices_all
-        _la.timed("unloaded.killed_notices", retry_pending_killed_notices_all)
+        run("killed_notices", retry_pending_killed_notices_all, live=live, every_store=every_store)
     else:
         from tui_gateway import server
         from tui_gateway.reap_notices import retry_pending_killed_notices
-        _la.timed("unloaded.killed_notices", retry_pending_killed_notices, server._get_db())
-    _la.timed("unloaded.guarantee_pass", guarantee_pass)
+        run("killed_notices", retry_pending_killed_notices, server._get_db(), live=live, every_store=every_store)
+    run("guarantee_pass", guarantee_pass, live=live, every_store=every_store)
 
 
 @_la.accounted("unloaded.residual_pass")
