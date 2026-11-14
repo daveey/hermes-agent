@@ -413,10 +413,13 @@ def _live_woken_session(*keys: str) -> Optional[dict]:
 
 
 def notice_in_transcript(db, session_id: str, notice_key: str, task_id: str) -> bool:
-    """True when this chat's compression lineage already has the notice (keyed row, or a legacy
-    ``Kanban <id>`` line). Reuses ``kanban_notice_keys_delivered`` — the local at-least-once dedup."""
+    """Delivery evidence in this lineage: a keyed row, completed persisted automation receipt,
+    or legacy ``Kanban <id>`` line. The historical name is retained for collector callbacks."""
     if db is None:
         return False
+    from tui_gateway.kanban_remote_receipts import completed_notice
+    if completed_notice(db, session_id, notice_key):
+        return True
     if notice_key and hasattr(db, "kanban_notice_keys_delivered"):
         if notice_key in db.kanban_notice_keys_delivered(session_id, [notice_key]):
             return True
