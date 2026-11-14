@@ -99,3 +99,12 @@ def test_unavailable_config_is_not_retained(kanban_home, monkeypatch):
         state['down'] = False
         assert blockers.normalize_blocker_id('old-wall') == 'new-wall'
     exercise()
+
+
+def test_non_mapping_kanban_section_does_not_crash_derivation(kanban_home, monkeypatch):
+    """A scalar/list ``kanban`` section is fail-closed config, not a crash in the identity read."""
+    for section in ('oops', [1, 2], 7):
+        _counting_config(monkeypatch, {'kanban': section})
+        with kbc.connect_closing() as conn:
+            assert blockers.blocker_states(conn) == {}
+        assert inputs._aliases({'kanban': section}) == {}

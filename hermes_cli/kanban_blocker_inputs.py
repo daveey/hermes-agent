@@ -78,7 +78,10 @@ def _drop_memos(scope):
 
 
 def _aliases(cfg):
-    return (cfg.get('kanban') or {}).get('shared_blocker_aliases', {})
+    # A non-mapping ``kanban`` section is a config error the dispatcher already
+    # fails closed on (dispatch allowlist); the identity read must not crash on it.
+    section = cfg.get('kanban') if isinstance(cfg, dict) else None
+    return section.get('shared_blocker_aliases', {}) if isinstance(section, dict) else {}
 
 
 def _key(conn, now):
