@@ -22,7 +22,7 @@ from typing import Callable, Iterator, Optional
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import (
-    heredoc_scripts, iter_script_segment_contexts, join_continued_lines)
+    heredoc_scripts, heredoc_views_overflow, iter_script_segment_contexts, join_continued_lines)
 from cron.lifecycle_guard_words import REDIRECTION as _REDIRECTION
 from cron.lifecycle_guard_words import redirection_parts, tokenize_redirections
 from cron.lifecycle_guard_lines import join_line_continuations
@@ -703,6 +703,14 @@ def _depth_limit_reached(budget: _LifecycleScanBudget, depth: int, *, executed: 
     if executed:
         budget.refusal = f"the scan depth limit was reached (depth {depth})"
     return executed
+
+
+def _walk_refusal(budget: _LifecycleScanBudget, command: str, depth: int, executed: bool) -> Optional[bool]:
+    """Verdict before a walk: depth cap, or ``$(…)`` heredoc terminator views past their cap."""
+    if executed and heredoc_views_overflow(command):
+        budget.refusal = "a `<<$(…)` heredoc delimiter has too many possible end lines; use a plain word"
+        return True
+    return _depth_limit_reached(budget, depth, executed=executed) if depth >= _MAX_REFERENCED_SCRIPT_DEPTH else None
 
 
 def _unreadable_reason(path: Path) -> str:
@@ -1672,8 +1680,8 @@ def _contains_unsafe_gateway_action(
     if _direct_lifecycle_scan(command, mask_heredocs=budget.mask_heredocs):
         return True
     budget.note_aliases(command)
-    if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
-        return _depth_limit_reached(budget, depth, executed=executed)
+    if (refused := _walk_refusal(budget, command, depth, executed)) is not None:
+        return refused
 
     def recurse(
         text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,

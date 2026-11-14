@@ -420,19 +420,93 @@ class _LineWalk:
 def heredoc_scripts(command: str) -> Iterator[str]:
     """*command* without its heredoc bodies, then each body (a shell's body is a script of its
     own; any other body walked as one only fails closed), so a ``{``/``}`` line in a body never
-    opens or closes a group of the command around it."""
-    from tools.shell_heredoc import heredoc_body_spans
+    opens or closes a group of the command around it.
+
+    Bash ends a body whose delimiter holds ``$(…)`` at its own reprint of that substitution
+    (``tools.shell_heredoc_words``), which is not predicted here. Such an opener stops the body
+    walk and its body's lines stay in the script, where a ``}`` would close an outer group early.
+    So the script is also yielded once per later line holding ``$(`` (each a line bash could end
+    the body at), with the opener's heredoc words and the body through that line removed. Past
+    ``MAX_REPRINTED_TERMINATOR_VIEWS`` such lines, see ``heredoc_views_overflow``."""
+    return (script for script in _heredoc_scripts(command) if script is not None)
+
+
+def heredoc_views_overflow(command: str) -> bool:
+    """Whether ``heredoc_scripts`` left out some line bash may end a ``$(…)``-delimited body at
+    (more than ``MAX_REPRINTED_TERMINATOR_VIEWS``): its walk is incomplete, so fail closed."""
+    return any(script is None for script in _heredoc_scripts(command)) if "<<" in command else False
+
+
+# Bound on the extra script walks ``heredoc_scripts`` makes for one command.
+MAX_REPRINTED_TERMINATOR_VIEWS = 16
+_HEREDOC_OPERATOR = re.compile(r"(?<!<)<<(?!<)")
+
+
+def _heredoc_scripts(command: str) -> Iterator[Optional[str]]:
+    """``heredoc_scripts``, then one None if some terminator view was left out."""
+    from tools.shell_heredoc import heredoc_body_walk
 
     pending = [command]
+    views = MAX_REPRINTED_TERMINATOR_VIEWS
+    overflow = False
     while pending:
         script = pending.pop()
         outside: list[str] = []
         previous = 0
-        for start, terminator, end in heredoc_body_spans(script) if "<<" in script else []:
+        spans, stop = heredoc_body_walk(script) if "<<" in script else ([], None)
+        for start, terminator, end in spans:
             outside.append(script[previous:start])
             pending.append(script[start:terminator])
             previous = end
-        yield "".join(outside) + script[previous:]
+        head = "".join(outside)
+        yield head + script[previous:]
+        if stop is None or overflow:
+            continue
+        for view in _reprinted_terminator_views(
+                script[previous:], stop[0] - previous, stop[1] - previous):
+            if views <= 0:
+                overflow = True
+                break
+            views -= 1
+            pending.append(head + view)
+    if overflow:
+        yield None
+
+
+def _reprinted_terminator_views(text: str, unit_start: int, unit_end: int) -> Iterator[str]:
+    """*text* without the heredoc words of its stopped command unit and without the lines after
+    it through a later line holding ``$(``: one view per such line. None unless the unit holds a
+    ``$(`` after a ``<<`` (only then may bash's terminator be a line the opener parser missed)."""
+    unit = text[unit_start:unit_end]
+    opener = unit.find("<<")
+    if opener < 0 or "$(" not in unit[opener:]:
+        return
+    neutral = text[:unit_start] + _without_heredoc_words(unit)
+    line_start = unit_end + 1
+    while line_start < len(text):
+        line_end = text.find("\n", line_start)
+        line_end = len(text) if line_end < 0 else line_end
+        if "$(" in text[line_start:line_end]:
+            yield neutral + text[line_end:]
+        line_start = line_end + 1
+
+
+def _without_heredoc_words(unit: str) -> str:
+    """*unit* without its ``<<`` operators and their delimiter words (to its end past a word that
+    does not parse), so ``cat <<$(echo })| python3`` keeps ``cat | python3`` and no ``}``."""
+    from tools.shell_heredoc import _parse_heredoc_operator
+
+    kept: list[str] = []
+    cursor = 0
+    for match in _HEREDOC_OPERATOR.finditer(unit):
+        if match.start() < cursor:
+            continue
+        kept.append(unit[cursor:match.start()])
+        parsed = _parse_heredoc_operator(unit, match.start(), reprinted_ok=True)
+        if parsed is None:
+            return "".join(kept)
+        cursor = parsed[0]
+    return "".join(kept) + unit[cursor:]
 
 
 def iter_script_segment_contexts(

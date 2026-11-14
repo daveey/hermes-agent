@@ -18,7 +18,7 @@ import shlex
 from collections.abc import Iterator
 
 from tools.shell_arith_sink import DATE_PRODUCER_BODY, substitution_in_arithmetic
-from tools.shell_heredoc_words import delimiter_expansion
+from tools.shell_heredoc_words import delimiter_expansion, reprinted_by_bash
 
 # Non-shell interpreters whose quoted heredoc bodies are data for THAT interpreter, judged on the
 # command the owner actually runs: VAR=... assignments and stdin-passing wrappers (``timeout 20``,
@@ -340,8 +340,9 @@ def _mask_simple_quotes(command: str) -> str:
     return "".join(result)
 
 
-def _parse_heredoc_operator(command: str, index: int):
-    """Parse one ``<<`` opener -> ``(end_index, delimiter, strip_tabs, quoted)`` or None."""
+def _parse_heredoc_operator(command: str, index: int, *, reprinted_ok: bool = False):
+    """Parse one ``<<`` opener -> ``(end_index, delimiter, strip_tabs, quoted)`` or None. A word
+    bash reprints (``$(…)``) is None unless *reprinted_ok*; then its delimiter is only a guess."""
     if not command.startswith("<<", index) or command.startswith("<<<", index):
         return None
     strip_tabs = command.startswith("-", index + 2)
@@ -364,7 +365,7 @@ def _parse_heredoc_operator(command: str, index: int):
             cursor += 1
         elif char == "`" or command.startswith(("$(", "${", "$'"), cursor):
             part = delimiter_expansion(command, cursor)  # taken unexpanded, spaces and all
-            if part is None:
+            if part is None or (reprinted_by_bash(part[1]) and not reprinted_ok):
                 return None
             cursor, text, part_quoted = part
             delimiter.append(text)
@@ -374,8 +375,9 @@ def _parse_heredoc_operator(command: str, index: int):
             cursor += 1
             while cursor < len(command) and command[cursor] != char:
                 current = command[cursor]
-                if current in "\r\n":
-                    return None
+                if current in "\r\n" or (
+                        char == '"' and not reprinted_ok and command.startswith("$(", cursor)):
+                    return None  # bash reprints a quoted `$(…)` too: "$(echo  E)" ends at $(echo E)
                 if char == '"' and current == "\\":
                     if cursor + 1 >= len(command):
                         return None
@@ -694,19 +696,25 @@ def heredoc_body_spans(command: str) -> list[tuple[int, int, int]]:
     (bodies nested in a body are part of it). Stops at the first opener it cannot parse or whose
     body has no terminator line, leaving the rest of *command* outside every span.
     """
+    return heredoc_body_walk(command)[0]
+
+
+def heredoc_body_walk(command: str) -> tuple[list[tuple[int, int, int]], tuple[int, int] | None]:
+    """``heredoc_body_spans`` plus ``(start, end)`` of the command unit (its line) the walk
+    stopped at, or None when no opener stopped it."""
     spans: list[tuple[int, int, int]] = []
     last_opener_index = command.rfind("<<")
     command_start = 0
     while command_start <= last_opener_index:
         command_end, specs, unknown_operator, _, _ = _scan_heredoc_command_unit(command, command_start)
         if unknown_operator or (specs and command_end >= len(command)):
-            break
+            return spans, (command_start, command_end)
         bodies = _heredoc_bodies(command, command_end + 1, specs) if specs else []
         if bodies is None:
-            break
+            return spans, (command_start, command_end)
         spans += bodies
         command_start = bodies[-1][2] if bodies else command_end + 1
-    return spans
+    return spans, None
 
 
 def _numeric_filter_suffix(line: str) -> bool:
