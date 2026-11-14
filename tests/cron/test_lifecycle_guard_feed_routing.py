@@ -154,6 +154,38 @@ def test_routing_mentions_stay_allowed(files, template):
     assert scan_gateway_lifecycle(template.format(**files)) == (False, None)
 
 
+@pytest.mark.parametrize("group", ["{{ cat {source}; }}", "(cat {source})",
+                                    "if true; then cat {source}; fi"])
+@pytest.mark.parametrize("suffix", ["> >(python3)", "2>&1 > >(python3)",
+                                     "> >(cat > >(python3))",
+                                     "> >(cat) | python3", "> >(cat) > >(python3)"])
+@pytest.mark.parametrize("lifecycle", [True, False])
+def test_closed_group_feeds_output_substitution(files, group, suffix, lifecycle):
+    source = files["py" if lifecycle else "clean"]
+    command = group.format(source=source) + " " + suffix
+    assert scan_gateway_lifecycle(command) == (lifecycle, None)
+
+
+@pytest.mark.parametrize("group", ["{ true; }", "(true)", "if true; then true; fi"])
+@pytest.mark.parametrize("lifecycle", [True, False])
+def test_substitution_output_survives_closed_group(files, group, lifecycle):
+    source = files["py" if lifecycle else "clean"]
+    command = group + f" > >(cat {source}) | python3"
+    assert scan_gateway_lifecycle(command) == (lifecycle, None)
+
+
+@pytest.mark.parametrize("group", ["{{ cat; }}", "(cat)", "if true; then cat; fi"])
+def test_closed_group_redirected_stdin_survives_substitution(files, group):
+    command = group.format() + " > >(python3) < " + files["py"]
+    assert scan_gateway_lifecycle(command) == (True, None)
+
+
+@pytest.mark.parametrize("group", ["{{ cat {py}; }}", "(cat {py})"])
+def test_closed_group_does_not_leak_into_substitution_pipeline(files, group):
+    command = group.format(**files) + " > >(cat {clean} | python3)".format(**files)
+    assert scan_gateway_lifecycle(command) == (False, None)
+
+
 def test_redirection_ampersands_survive_tokenizing():
     from cron.lifecycle_guard_groups import protect_redirection_ampersands as protect
     from cron.lifecycle_guard_groups import restore_redirection_ampersands as restore

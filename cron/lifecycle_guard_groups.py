@@ -196,6 +196,9 @@ class _Group:
     # A process substitution suspends the command it stands in: (words, call_argument, subs,
     # feed, its `>(…)` ordinals); the group's own feed is what its body reads.
     outer: Optional[tuple[list[str], bool, _Subs, list[str], list[int]]] = None
+    outer_closed: Optional[list[str]] = None
+    outer_closing: Optional[tuple[int, int]] = None
+    outer_pending: list[str] = field(default_factory=list)
 
 
 def _opened_groups(segment: list[str], peel_reserved_words: Callable[[list[str]], int]) -> list[str]:
@@ -282,7 +285,7 @@ class _LineWalk:
         for variant in variants:
             yield variant, self.call_argument, self.feed
             written += self.writes(variant)
-        self.pending = self.closed if self.closed is not None else written
+        self.pending = (self.closed or []) + written
         self.closed = None
         self.segment, self.subs, self.output_subs = [], [], []
         self.groups_open = False
@@ -317,6 +320,8 @@ class _LineWalk:
         if group.outer is None:
             return
         self.segment, self.call_argument, self.subs, self.feed, self.output_subs = group.outer
+        self.closed, self.closing, self.pending = (
+            group.outer_closed, group.outer_closing, group.outer_pending)
         self.groups_open = True  # opened before the substitution suspended it
         output = group.ordinal in self.output_subs  # a `>(…)` body writes the command's stdout
         self.subs.append((None if output else len(self.segment), group.output))
@@ -354,8 +359,15 @@ class _LineWalk:
                 variants = _substituted_variants(self.segment, self.subs)
                 feed = [name for segment in [*variants, *self.writers.get(ordinal, [])]
                         for name in self.writes(segment)]
-            self.open_group(")", outer=(self.segment, self.call_argument, self.subs, self.feed,
-                                        self.output_subs), feed=feed)
+                feed += self.closed or []
+            group = self.open_group(")", outer=(self.segment, self.call_argument, self.subs,
+                                                self.feed, self.output_subs), feed=feed)
+            # A closed compound command is the writer, not part of the substitution body.
+            # Suspend its routing state too, so nested bodies cannot consume or replace it.
+            group.outer_closed, group.outer_closing, group.outer_pending = (
+                self.closed, self.closing, self.pending)
+            self.closed = self.closing = None
+            self.pending = []
             self.segment, self.subs, self.call_argument, self.feed = [], [], False, feed
             self.output_subs, self.groups_open = [], False
             return
