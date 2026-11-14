@@ -23,6 +23,7 @@ import bisect
 import re
 
 from tools.shell_command_position import QuotedNameClassifier
+from tools.shell_let_word import hidden_let_end
 
 # `$(date +%s)` prints only digits: the one producer whose output arithmetic may hold.
 DATE_PRODUCER_BODY = r"""[ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\)"""
@@ -89,23 +90,16 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         pos = match.end()
         top = stack[-1]
         kind, quoted = top[0], top[3]
-        if token[0] == "\\":
-            if _escaped_opener(command, token, start) and _subscript_word_before(command, stack, pos):
-                return True
-            continue
         if token in ("`", "$(", "$((", "$[", "${"):
             pos, sink = _expansion_token(command, token, pos, stack, date_exempt)
             if sink:
                 return True
             backtick_open ^= token == "`"
             continue
-        if token == '"':
-            if quoted and command[start - 1] == "$" and _subscript_word_before(command, stack, pos):
-                return True  # `"$"(…)`: the `$` joins a later `(` after quote removal
-            top[3] = not quoted
-            continue
-        skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
-                             date_exempt, _depth)
+        skipped = _word_token(command, token, start, pos, stack)
+        if skipped is None:
+            skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
+                                 date_exempt, _depth)
         if skipped is not None:
             if skipped < 0:
                 return True
@@ -244,6 +238,27 @@ def _span_substitutes(span: str, date_exempt: bool) -> bool:
         return True
     return any(not (date_exempt and _DATE_PRODUCER_RE.match(span, m.end()))
                for m in re.finditer(r"\$\(", span))  # `$((` too: it may be `$( (…)…)`
+
+
+def _word_token(command, token, start, pos, stack) -> int | None:
+    """Word-level tokens: a ``let`` spelled with quotes or escapes, a backslash escape, a
+    double quote. Return where scanning resumes, -1 for a sink, None for other tokens."""
+    top = stack[-1]
+    quoted = top[3]
+    hidden_let = top[0] == _CMD and not quoted and hidden_let_end(command, token, start)
+    if hidden_let:
+        stack.append([_ARITH, "let", 0, False, hidden_let])
+        return hidden_let
+    if token[0] == "\\":
+        if _escaped_opener(command, token, start) and _subscript_word_before(command, stack, pos):
+            return -1
+        return pos
+    if token == '"':
+        if quoted and command[start - 1] == "$" and _subscript_word_before(command, stack, pos):
+            return -1  # `"$"(…)`: the `$` joins a later `(` after quote removal
+        top[3] = not quoted
+        return pos
+    return None
 
 
 def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, depth) -> int | None:
