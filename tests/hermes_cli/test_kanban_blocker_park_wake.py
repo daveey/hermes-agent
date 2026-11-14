@@ -222,7 +222,7 @@ def test_completion_clears_and_wakes_parked_cards(kanban_home, monkeypatch):
         assert ev and ev[0].payload["cleared_by_task"] == a
 
 
-@pytest.mark.parametrize("current_blocker", [None, "other-wall", BID])
+@pytest.mark.parametrize("current_blocker", [None, "other-wall", BID, "awaiting-only", "no-probe"])
 def test_clear_respects_current_park(kanban_home, monkeypatch, current_blocker):
     with kbc.connect_closing() as conn:
         clearing = _worker_block_behind(monkeypatch, conn, "wall probe")
@@ -230,11 +230,14 @@ def test_clear_respects_current_park(kanban_home, monkeypatch, current_blocker):
     if current_blocker != BID:
         _repark(monkeypatch, "schedule", "parent", waiting)
     with kbc.connect_closing() as conn:
-        if current_blocker == "other-wall":
+        if current_blocker in ("other-wall", "awaiting-only"):
             with kb.write_txn(conn):
                 wake = pending_wake(conn, waiting)
-                wake["awaiting"]["shared_blocker"] = current_blocker
+                wake["awaiting"]["shared_blocker"] = BID if current_blocker == "awaiting-only" else current_blocker
                 kb._append_event(conn, waiting, "scheduled", wake)
+        if current_blocker == "no-probe":
+            with kb.write_txn(conn):
+                kwc.set_check(conn, waiting, None, None)
         before = kwc.get_state(conn, waiting)
         park = pending_wake(conn, waiting)
         comments = kb.list_comments(conn, waiting)
@@ -242,7 +245,7 @@ def test_clear_respects_current_park(kanban_home, monkeypatch, current_blocker):
         assert kb.claim_task(conn, clearing)
         assert kb.complete_task(conn, clearing, result="wall gone")
         released = ksb.release_cleared_blockers(conn)
-        if current_blocker == BID:
+        if current_blocker in (BID, "awaiting-only", "no-probe"):
             assert released == [waiting]
             assert kb.get_task(conn, waiting).status == "ready"
         else:
