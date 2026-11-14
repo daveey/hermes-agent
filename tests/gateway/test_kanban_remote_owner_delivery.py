@@ -603,19 +603,18 @@ def test_a_notice_already_in_the_lineage_with_no_ledger_row_under_the_link_is_ac
 
 
 def test_a_late_group_with_one_member_already_written_acks_it_and_releases_the_rest(env):
-    """The partly written late group: the written member is acked, the other goes back unclaimed and is
-    admitted on its own by the next pass, so each lands exactly once."""
+    """The partly written late group: the written member is acked from the transcript at claim time (never
+    offered: t_01a1db370b459fab), and the other is admitted on its own, so each lands exactly once."""
     hub, runner, authority, fifo, db = env
     authority.sessions[CHAT] = _Live(CHAT)
     _publish(hub, [])  # baseline: arrivals after it are new
     _write_notice_row(db, CHAT, _key("t_01a1cf4eda4b1ad4", 336647))
     _busy(db, fifo)
     _publish(hub, [_late("t_01a1cf4eda4b1ad4", 336647), _late("t_01a1cfd7578b3af4", 466999)])
-    assert _tick(runner) == []
-    assert fifo.queued() == []
+    admitted = _tick(runner)
+    assert len(admitted) == 1  # only the unwritten member
+    assert _key("t_01a1cf4eda4b1ad4", 336647) not in json.dumps(admitted)
     assert _ledger("t_01a1cf4eda4b1ad4")["delivered"] == krn.DELIVERED
-    assert _ledger("t_01a1cfd7578b3af4") is None  # released, not left in flight
-    assert len(_tick(runner)) == 1  # offered on its own and admitted
     fifo.boundary()
     _tick(runner)
     assert len(_rows(_key("t_01a1cf4eda4b1ad4", 336647))) == 1

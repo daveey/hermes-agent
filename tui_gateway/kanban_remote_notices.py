@@ -66,8 +66,14 @@ def hub_db_path() -> Path:
 
 
 def ledger_path() -> Path:
-    from hermes_constants import get_hermes_home
-    return Path(get_hermes_home()) / "kanban" / "remote-notices.db"
+    """ONE claim ledger per install, beside the hub replica it tracks, whatever profile this process runs as.
+
+    [daveey] It was ``get_hermes_home()``: a process running as another profile (an askeve gateway holding the
+    ``kanban-unloaded`` host-loop lease, or its pre-lease sweep) claimed the default chats' notices in its OWN
+    ledger, so the Desktop's claim and its never saw each other. Each wrote the notice, one as the passive row
+    and one as a woken turn's row: 156 duplicated remote notices on the hub in 3 days (t_01a1db370b459fab)."""
+    from hermes_constants import get_default_hermes_root
+    return Path(get_default_hermes_root()) / "kanban" / "remote-notices.db"
 
 
 def _ro(path: Path) -> sqlite3.Connection:
@@ -567,6 +573,17 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
         (session, ref, state)).fetchone()
     pid, start = _my_holder()
     if row is None:
+        if fresh and notice_key and transcript_has is not None and transcript_has(notice_key, ""):
+            # [daveey] Another writer already put this notice in the chat (a second sweeper, another ledger):
+            # offering it again woke a turn whose row duplicated the passive one (t_01a1db370b459fab).
+            with conn:
+                conn.execute(
+                    "INSERT INTO notices (session, ref, state, at, delivered, notice_key, legacy_seen) "
+                    "VALUES (?,?,?,?,?,?,0)", (session, ref, state, now, DELIVERED, notice_key))
+                _swept_row(conn, swept_key, "transcript")
+            logger.info("remote kanban: notice %s %s for chat %s is already in the transcript; acked, not offered",
+                        ref, state, session)
+            return "acked"
         if not fresh and isinstance(settle_reason, _ExpiredReason):
             settle_reason = settle_reason()  # outside the write txn: it may scan the transcript
         reason = str(settle_reason)

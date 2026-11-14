@@ -223,7 +223,9 @@ def test_a_profile_home_never_defers_to_the_root_holder(own, tmp_path, monkeypat
     (profile / "kanban").mkdir(parents=True)
     (profile / "config.yaml").write_text("{}\n")
     monkeypatch.setenv("HERMES_HOME", str(profile))
-    assert krn.ledger_path() == profile / "kanban" / "remote-notices.db"
+    # One claim ledger per install (t_01a1db370b459fab): a profile home shares the root's ledger, and still
+    # computes its own miss instead of deferring (conservative; the holder's lease is the root's).
+    assert krn.ledger_path() == tmp_path / "home" / "kanban" / "remote-notices.db"
     computes = _count_computes(monkeypatch)
     assert _refs(_poll()) == {"hub/default/default/t_seed"} and len(computes) == 1
     assert kri.stats["deferred"] == 0
