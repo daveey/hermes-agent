@@ -1,7 +1,9 @@
 """Standalone proof homes must not enter the real account inventory."""
 import hashlib
 import json
+import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -49,7 +51,8 @@ def test_real_default_named_and_profile_boards_register(account, relative):
     assert board in inventory.paths()
 
 
-def test_legacy_foreign_record_cannot_reenter_census(account):
+@pytest.mark.parametrize('missing', [False, True])
+def test_legacy_foreign_record_cannot_reenter_census(account, missing):
     board = account / 'cache/scratch/old/kanban.db'
     board.parent.mkdir(parents=True)
     board.touch()
@@ -57,6 +60,8 @@ def test_legacy_foreign_record_cannot_reenter_census(account):
     records.mkdir(parents=True)
     record = records / (hashlib.sha256(str(board).encode()).hexdigest() + '.json')
     record.write_text(json.dumps(str(board)))
+    if missing:
+        board.unlink()
     assert inventory.paths() == []
     assert record.exists(), 'census remains read-only'
 
@@ -101,6 +106,36 @@ def test_unregistered_profile_discovered(account, relative):
     board = account / relative
     _running_board(board)
     assert board in inventory.paths()
+
+
+@pytest.mark.parametrize('error', [PermissionError, OSError])
+def test_unreadable_profile_remains_unknown(account, monkeypatch, error):
+    from hermes_cli import worker_resource_admission as admission
+    profile = account / 'profiles/research'
+    _running_board(profile / 'kanban.db')
+    original = os.stat
+
+    def denied(path, *args, **kwargs):
+        if Path(path) == profile:
+            raise error('profile stat unavailable')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'stat', denied)
+    with pytest.raises(error):
+        inventory.paths()
+    with pytest.raises(error):
+        admission.occupied_count_for_host()
+
+
+def test_profile_non_directory_or_vanished_entry_is_skipped(account, monkeypatch):
+    profiles = account / 'profiles'
+    profiles.mkdir()
+    (profiles / 'readme').touch()
+    vanished = profiles / 'vanished'
+    original = Path.iterdir
+    monkeypatch.setattr(Path, 'iterdir', lambda path: iter([profiles / 'readme', vanished])
+                        if path == profiles else original(path))
+    assert inventory.paths() == []
 
 
 def test_registered_missing_real_board_remains_unknown(account):

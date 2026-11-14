@@ -261,7 +261,11 @@ def paths() -> list[Path]:
     profiles = root / 'profiles'
     if not _missing(profiles):
         for profile in profiles.iterdir():
-            if profile.is_dir():
+            try:
+                is_directory = stat.S_ISDIR(profile.stat().st_mode)
+            except FileNotFoundError:
+                continue  # entry vanished after listing; other I/O errors are unknown
+            if is_directory:
                 found.extend(_installation_boards(profile))
     directory = root / 'worker-resources' / 'boards'
     if not _missing(directory):
