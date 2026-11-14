@@ -1,4 +1,4 @@
-"""Find a ``$(…)`` substitution that sits inside a bash arithmetic context.
+"""Find a command substitution that sits inside a bash arithmetic context.
 
 Bash evaluates arithmetic text recursively, and an array subscript in it runs command
 substitutions, so a substitution's OUTPUT inside arithmetic is shell code wherever the
@@ -9,9 +9,10 @@ subscript (``a[…]=``, ``${a[…]}``), a ``${x:offset:length}`` substring, and 
 ``declare/local/typeset/readonly/export -i`` integer assignment (coarse: any substitution
 then counts). ``[ … -eq … ]``/``test`` are not arithmetic and stay out.
 
-The scan is a small linear tokenizer, not a parser: quotes and comments are honoured, and
-whatever it cannot match (an unclosed frame, a stray paren) only widens the arithmetic
-region, so a mistake fails closed (a false sink only makes the lifecycle walk scan more).
+The scan is a small linear tokenizer, not a parser. It handles shell quoting separately
+from arithmetic quoting and keeps parameter-word delimiters local to their frame.
+Uncertain quoting fails closed; lexical openers must still be recognized accurately
+(e.g. ``$${`` is a PID followed by a literal brace, not a parameter expansion).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import re
 DATE_PRODUCER_BODY = r"""[ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\)"""
 _DATE_PRODUCER_RE = re.compile(DATE_PRODUCER_BODY)
 
-_TOKENS = (r"\\.|'|\"|`|\$\(\(|\$\(|\$\[|\$\{|\(\(|\(|\)|\[\[|\]\]|\[|\]|\}|#"
+_TOKENS = (r"\\.|'|\"|`|\$\$|\$\(\(|\$\(|\$\[|\$\{|\(\(|\(|\)|\[\[|\]\]|\[|\]|\}|#"
            r"|\$'|<<<|<<|\n|(?<![\w.$/-])let[ \t]+")
 _TOKEN_RE = re.compile(_TOKENS, re.DOTALL)
 _NO_HEREDOC_TOKEN_RE = re.compile(_TOKENS.replace(r"|\n", ""), re.DOTALL)
@@ -73,6 +74,8 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         top = stack[-1]
         kind, quoted = top[0], top[3]
         if token == "`":
+            if kind in (_ARITH, _PARAM_ARITH):
+                return True  # legacy command substitution feeds arithmetic too
             backtick_open = not backtick_open
             continue
         if token[0] == "\\":
@@ -80,7 +83,7 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         if token == '"':
             top[3] = not quoted
             continue
-        skipped = _skip_data(command, token, start, pos, quoted, kind, pending,
+        skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
                              date_exempt, _depth)
         if skipped is not None:
             if skipped < 0:
@@ -129,10 +132,26 @@ def _quick_result(command: str, depth: int) -> bool | None:
     return None
 
 
-def _skip_data(command, token, start, pos, quoted, kind, pending, date_exempt, depth) -> int | None:
+def _arithmetic_quotes(stack) -> bool:
+    """Parameter words inherit the nearest evaluator's lexical quote rules."""
+    for kind, closer, _, _ in reversed(stack):
+        if kind == _CMD:
+            return False
+        if kind == _ARITH:
+            # `let` and [[ ]] parse shell words before evaluating operands.
+            return closer not in ("let", "]]")
+    return False
+
+
+def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, depth) -> int | None:
     """Skip literal spans; None means a normal token, -1 means fail closed."""
+    kind = stack[-1][0]
     if token in ("'", "$'"):
-        return pos if quoted else _quote_close(command, pos, ansi=token == "$'") or -1
+        # Arithmetic expansion has double-quote semantics: apostrophes do not
+        # suppress expansion, including in parameter words feeding arithmetic.
+        if quoted or _arithmetic_quotes(stack):
+            return pos
+        return _quote_close(command, pos, ansi=token == "$'") or -1
     if quoted:
         return None
     # Lazy import: shell_heredoc calls this scanner, but owns delimiter parsing.
