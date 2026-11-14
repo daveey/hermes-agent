@@ -21,6 +21,8 @@ _TASK_DICT_FIELDS = (
     "skills", "max_runtime_seconds", "max_retries", "goal_mode", "goal_max_turns", "review_required",
     "model_override", "provider_override",
     "session_id", "workflow_template_id", "current_step_key", "completion_contract", "last_failure_error",
+    # Consumers that create with --idempotency-key (ci flaky intake, deflake owner match) read it back.
+    "idempotency_key",
 )
 _SHOW_RUN_FIELDS = (
     "id", "profile", "step_key", "status", "outcome", "summary", "error",
