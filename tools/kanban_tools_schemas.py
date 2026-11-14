@@ -244,17 +244,10 @@ KANBAN_COMPLETE_SCHEMA = _schema(
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Optional list of absolute paths to deliverable "
-                "files you produced during this run — generated "
-                "charts, PDFs, spreadsheets, images, archives. "
-                "Examples: [\"~/.hermes/cache/scratch/q3-revenue.png\", "
-                "\"~/.hermes/cache/scratch/report.pdf\"]. The gateway notifier "
-                "uploads each path as a native attachment to the "
-                "subscribed chat (images embed inline, everything "
-                "else uploads as a file) so the deliverable "
-                "lands with the completion notification. Skip "
-                "intermediate scratch files and references that "
-                "are not the deliverable. Completion records the executing "
+                "Optional absolute paths to deliverables produced this run "
+                "(charts, PDFs, spreadsheets, images, archives), not intermediate "
+                "files. The notifier sends native attachments to the subscribed "
+                "chat with the completion notice. Completion records the executing "
                 "machine, path and SHA256. Existing files up to 25 MB are "
                 "copied to card attachments and replicated to the home board; "
                 "larger scratch files are retained on the executing machine. "
