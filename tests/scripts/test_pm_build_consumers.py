@@ -13,6 +13,7 @@ import pytest
 @pytest.fixture
 def local_toolchain(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr("hermes_constants._account_home", lambda: tmp_path / "home")
     uv = shutil.which("uv")
     assert uv, "build integration tests require the dev-shell toolchain"
     monkeypatch.setattr("pm.client.is_runtime", lambda: True)
