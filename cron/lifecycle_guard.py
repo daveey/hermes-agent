@@ -515,6 +515,7 @@ class _LifecycleScanBudget:
         "refusal",
         "remote_reads_remaining",
         "separator_lines",
+        "variable_candidates",
     )
 
     def __init__(self, session_aliases: Optional[frozenset[str]] = frozenset(), *,
@@ -530,6 +531,9 @@ class _LifecycleScanBudget:
         self.overrun: Optional[str] = None
         # Message-only: newlines a caller added when joining the root text (cron's empty-prompt
         # join). Charged like any line, never reported as the text's own; spent on the first charge.
+        from cron.lifecycle_guard_variables import VariableCandidates
+
+        self.variable_candidates = VariableCandidates()
         self.separator_lines = separator_lines
         # Alias names that may expand in walked text: the ones the command's shell already holds
         # (*session_aliases*, see `scan_gateway_lifecycle`), or ``None`` when any name may be an
@@ -1676,13 +1680,12 @@ def _contains_unsafe_gateway_action(
             walk_command, include_quoted=covered_quote_scope != quote_scope(cwd, executed, budget)))))
     nested_texts, nested_scripts = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
-    from cron.lifecycle_guard_output import iter_recursive_payloads
+    from cron.lifecycle_guard_variables import scan_recursive_payloads
 
-    for payload, nested, covered in iter_recursive_payloads(
-            walk_command, nested_texts, cwd=cwd, executed=executed,
-            budget=budget, covered_scope=covered_quote_scope):
-        if recurse(payload, cwd, executed, source, nested=nested, covered_quotes=covered):
-            return True
+    if scan_recursive_payloads(
+            walk_command, nested_texts, cwd=cwd, executed=executed, budget=budget,
+            covered_scope=covered_quote_scope, recurse=recurse, source=source):
+        return True
 
     # A nested shell's script may be a path the ordinary candidates never name: a stdin file
     # redirected into `su -l bob`, `doas -s`, `sudo -i` or `ssh host` (review 5903452583 B1). It
