@@ -72,7 +72,8 @@ async def _wait_for(predicate, timeout=5):
 
 
 @pytest.mark.asyncio
-async def test_busy_follow_up_returns_after_commit_and_is_answered_once(monkeypatch):
+@pytest.mark.parametrize('delay_first_delivery', [False, True])
+async def test_busy_follow_up_returns_after_commit_and_is_answered_once(monkeypatch, delay_first_delivery):
     first_gate, second_gate = asyncio.Event(), asyncio.Event()
 
     async def first():
@@ -83,6 +84,19 @@ async def test_busy_follow_up_returns_after_commit_and_is_answered_once(monkeypa
         await second_gate.wait()
         return 'SECOND_REPLY'
     authority, adapter, source = await _busy_owner(monkeypatch, {'one': first, 'two': second})
+    if delay_first_delivery:
+        second_sent = asyncio.Event()
+        send = adapter.send
+
+        async def delayed_send(chat_id, content, reply_to=None, metadata=None):
+            if content == 'FIRST_REPLY':
+                await asyncio.wait_for(second_sent.wait(), timeout=30)
+            result = await send(chat_id, content, reply_to, metadata)
+            if content == 'SECOND_REPLY':
+                second_sent.set()
+            return result
+
+        monkeypatch.setattr(adapter, 'send', delayed_send)
     await adapter.handle_message(MessageEvent(text='one', source=source, message_id='m1'))
     await _wait_for(lambda: _statuses(authority).get('one') == 'started')
     # The receive loop hands over the follow-up while the first turn is still running.
@@ -96,7 +110,11 @@ async def test_busy_follow_up_returns_after_commit_and_is_answered_once(monkeypa
     await _wait_for(lambda: _statuses(authority).get('two') == 'started')
     second_gate.set()
     await _wait_for(lambda: 'SECOND_REPLY' in adapter.sent and not adapter._background_tasks)
-    assert adapter.sent == ['FIRST_REPLY', 'SECOND_REPLY']
+    # FIFO execution does not serialize the independent adapter delivery tasks.
+    # Keep exact multiplicity, but allow either transport completion order.
+    assert sorted(adapter.sent) == ['FIRST_REPLY', 'SECOND_REPLY']
+    if delay_first_delivery:
+        assert adapter.sent == ['SECOND_REPLY', 'FIRST_REPLY']
     assert _statuses(authority) == {'one': 'terminal', 'two': 'terminal'}
 
 
