@@ -82,6 +82,13 @@ def test_capacity_fence_is_lane_local_and_survives_review_resume(gws, monkeypatc
              for p in (900, 530, 100)]
     review = kb.create_task(hub.conn, title="reserved review", assignee="default")
     assert kb.request_review(hub.conn, review, summary="review")
+    # This exercises Board capacity, not the per-tick admission budget. Pre-admit
+    # the review row so all four candidates can reach the lease boundary.
+    from hermes_cli import kanban_hub_admission_claim as admission
+    counts = admission.screen(hub.conn)
+    assert counts.judged == 3
+    counts = admission.screen(hub.conn)
+    assert counts.judged == 1
     hub.round()
     acquire = client.HubLeaseClient.acquire
     refused = ready[0] if refused_lane == "ready" else review
