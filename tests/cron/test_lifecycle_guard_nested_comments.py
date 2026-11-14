@@ -2,10 +2,13 @@
 
 import pytest
 
-from cron.lifecycle_guard import scan_gateway_lifecycle
+from cron.lifecycle_guard import _shlex_tokens, scan_gateway_lifecycle
 from tests.cron import test_lifecycle_guard_comment_words as helpers
 
 PREFIXES = [
+    "echo $'a>&b' 2>&1",
+    r"echo $'a>\x26b' 2>&1",
+    r"echo $'it\'s>&b' 2>&1",
     'echo ${x:-"$(echo $\'it\\\'s\' #say "x\n)"}',
     'echo "${x:-$(echo $\'it\\\'s\' #say "x\n)}"',
     'echo ${x:-"$(echo #say "x\n)"}',
@@ -39,6 +42,15 @@ PREFIXES = [
     r"echo $'it\'s' " + "# it's\ntrue",
     r"echo ${x:-$'it\'s'}",
 ]
+
+
+@pytest.mark.parametrize("word, literal", [
+    ("$'a>&b'", "a>&b"),
+    (r"$'a>\x26b'", "a>&b"),
+    (r"$'it\'s>&b'", "it's>&b"),
+])
+def test_ansi_ampersands_preserve_words_and_descriptor_redirects(word, literal):
+    assert _shlex_tokens(f"echo {word} 2>&1") == ["echo", literal, "2>&1"]
 
 
 @pytest.mark.parametrize("prefix", PREFIXES)
