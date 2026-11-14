@@ -2,8 +2,26 @@
 
 import pytest
 
+from cron.lifecycle_guard import scan_gateway_lifecycle
 from tools.shell_arith_sink import substitution_in_arithmetic
-from tools.shell_heredoc import output_reaches_shell
+from tools.shell_heredoc import output_reaches_shell, strip_inert_heredoc_bodies
+
+
+@pytest.mark.parametrize("later", ["cat <<EOF\nplain\nEOF\n", "cat <<-EOF\n\tplain\n\tEOF\n"])
+def test_reused_delimiter_cannot_hide_intervening_sink(tmp_path, later):
+    big = tmp_path / "BIG"
+    big.write_text("# padding\n" * 150000, encoding="utf-8")
+    command = "cat <<'EOF'\nhello\nEOF\n" + SINK.replace("BIG", str(big)) + "\n" + later
+    # A detected sink must cancel masking, including when a later heredoc reuses EOF.
+    assert strip_inert_heredoc_bodies(command) == command
+    unsafe, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe
+    assert reason and "larger than the scan cap" in reason
+
+
+def test_masked_body_retains_its_own_terminator():
+    command = "cat <<'EOF'\ndon't\nEOF\necho ok\n"
+    assert strip_inert_heredoc_bodies(command) == "cat <<'EOF'\n\nEOF\necho ok\n"
 
 SINK = r'''x=$(( 1 + $(echo "b[\$(bash BIG)]") ))'''
 

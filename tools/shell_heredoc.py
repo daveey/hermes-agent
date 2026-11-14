@@ -675,8 +675,10 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
                 if not stdin.begin_function(command, command_start, command_end):
                     return command
             function_masks += consumer == "function"
-            replacements += [(start, end, "\n" * command.count("\n", start, end), consumer)
-                             for start, _terminator, end in bodies]
+            # Keep each closer: downstream scanners must not close this opener
+            # at a later same-delimiter heredoc and skip intervening commands.
+            replacements += [(start, terminator, "\n" * command.count("\n", start, terminator), consumer)
+                             for start, terminator, _end in bodies]
         elif nested and prefix_intact and _depth < _MAX_NESTED_HEREDOC_DEPTH and all(quoted) and _owner_feeds_shell(
                 command, command_start, owner_start, specs):
             # An unquoted outer body expands locally first (`$(…)` runs here), and any owner but a
