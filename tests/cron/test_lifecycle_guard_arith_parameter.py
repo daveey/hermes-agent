@@ -18,7 +18,7 @@ def test_parameter_output_executes_in_arithmetic(tmp_path, op, prelude, nested):
     marker = tmp_path / "marker"
     big = tmp_path / "big.sh"
     big.write_text("# padding\n" * 130000 + f"printf RAN > {marker}\n", encoding="utf-8")
-    value = "$(echo 'a[$(bash " + str(big) + ")]')"
+    value = "$(echo 'b[$(bash " + str(big) + ")]')"
     if nested:
         value = "${w:-" + value + "}"
     command = prelude + "x=$(( 1 + ${v" + op + value + "} ))"
@@ -46,6 +46,53 @@ def test_parameter_output_executes_in_arithmetic(tmp_path, op, prelude, nested):
     "v=1; x=$(( ${v:-[} )); y=$(printf data)",
 ])
 def test_parameter_data_and_closed_arithmetic_are_not_sinks(command, tmp_path):
+    result = subprocess.run(
+        ["/bin/bash"], input=command, text=True, encoding="utf-8", capture_output=True,
+        timeout=20, check=False, env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert not output_reaches_shell(command)
+
+
+@pytest.mark.parametrize("parameter,prelude", [
+    ("a[0]:-", "unset a;"), ("a[0]:=", "unset a;"),
+    ("a[0]:+", "a=(1);"), ("a[0]-", "unset a;"),
+    ("a[0]=", "unset a;"), ("a[0]+", "a=(1);"),
+    ("v/1/", "v=1;"), ("v//1/", "v=1;"),
+    ("v/#1/", "v=1;"), ("v/%1/", "v=1;"),
+    ("a[0]/1/", "a=(1);"),
+    ("v/${w:-1}/", "v=1; unset w;"),
+    ('v/"1"/', "v=1;"),
+])
+def test_subscript_and_replacement_output_executes(tmp_path, parameter, prelude):
+    marker = tmp_path / "marker"
+    big = tmp_path / "big.sh"
+    big.write_text("# padding\n" * 130000 + f"printf RAN > {marker}\n", encoding="utf-8")
+    value = "$(echo 'b[$(bash " + str(big) + ")]')"
+    command = prelude + "x=$(( ${" + parameter + value + "} ))"
+    result = subprocess.run(
+        ["/bin/bash"], input=command, text=True, encoding="utf-8", capture_output=True,
+        timeout=20, check=False, env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8") == "RAN"
+    assert substitution_in_arithmetic(command, date_exempt=True)
+    assert output_reaches_shell(command)
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe and refusal and "larger than the scan cap" in refusal
+
+
+@pytest.mark.parametrize("command", [
+    "a=(1); x=${a[0]:-$(echo data)}",
+    "v=1; x=${v/1/$(echo data)}",
+    "v=1; x=$(( ${v//$(printf unused)/0} ))",
+    "v=1; x=$(( ${v/${w:-$(printf unused)}/0} ))",
+    r"v=1; x=$(( ${v/unused\/$(printf unused)/0} ))",
+    'v=1; x=$(( ${v/"unused/$(printf unused)"/0} ))',
+    "v=1; x=$(( ${v/unused/1} )); y=$(echo data)",
+    "a=(1); x=$(( ${a[0]:-1} )); y=$(echo data)",
+])
+def test_replacement_pattern_and_subscript_controls(command, tmp_path):
     result = subprocess.run(
         ["/bin/bash"], input=command, text=True, encoding="utf-8", capture_output=True,
         timeout=20, check=False, env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},

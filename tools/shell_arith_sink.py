@@ -27,6 +27,7 @@ _TOKENS = (r"\\.|'|\"|`|\$\(\(|\$\(|\$\[|\$\{|\(\(|\(|\)|\[\[|\]\]|\[|\]|\}|#"
            r"|\$'|<<<|<<|\n|(?<![\w.$/-])let[ \t]+")
 _TOKEN_RE = re.compile(_TOKENS, re.DOTALL)
 _NO_HEREDOC_TOKEN_RE = re.compile(_TOKENS.replace(r"|\n", ""), re.DOTALL)
+_PATTERN_TOKEN_RE = re.compile(_TOKENS + r"|/", re.DOTALL)
 # Inside `let` the list operators end the arithmetic too; elsewhere skipping them keeps the scan
 # of a long script fast.
 _LET_TOKEN_RE = re.compile(_TOKENS + r"|[;&|\n]", re.DOTALL)
@@ -40,6 +41,7 @@ _COMMENT_PRECEDERS = frozenset(" \t\n;&|(")
 # Frame kinds. A frame is [kind, closer, depth, in_double_quotes].
 _CMD, _ARITH, _PARAM = "cmd", "arith", "param"
 _PARAM_ARITH = "param_arith"  # parameter word feeding an arithmetic evaluator
+_PARAM_PATTERN = "param_pattern"  # only its replacement feeds the evaluator
 
 
 def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int = 0) -> bool:
@@ -62,6 +64,7 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
     command_tokens = _TOKEN_RE if "<<" in command else _NO_HEREDOC_TOKEN_RE
     while pos < end:
         tokens = _LET_TOKEN_RE if stack[-1][1] == "let" else command_tokens
+        tokens = {_PARAM_PATTERN: _PATTERN_TOKEN_RE}.get(stack[-1][0], tokens)
         match = tokens.search(command, pos)
         if match is None:
             break
@@ -105,13 +108,8 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
             pos = _cmd_token(command, token, start, pos, stack, closes, operators)
         elif kind == _ARITH:
             pos = _arith_token(command, token, pos, stack)
-        elif token == "}":  # _PARAM
-            stack.pop()
-        elif token == "#" or token.startswith("let"):
-            continue
-        elif token in (")", "]", "]]") and len(stack) > 1:
-            stack.pop()  # a parameter frame never closes on these: recover outward
-            pos = start
+        else:
+            pos = _parameter_token(token, start, pos, stack)
     # Callers also pass opener-only command units; queued bodies are not quote errors.
     return backtick_open or any(frame[3] for frame in stack)
 
@@ -181,15 +179,23 @@ def _quote_close(command: str, pos: int, *, ansi: bool) -> int | None:
     return None
 
 
+
+def _parameter_token(token, start, pos, stack) -> int:
+    if stack[-1][0] == _PARAM_PATTERN and token == "/":
+        stack[-1][0] = _PARAM_ARITH
+    elif token == "}":
+        stack.pop()
+    elif token in (")", "]", "]]") and len(stack) > 1:
+        stack.pop()  # a parameter frame never closes on these: recover outward
+        return start
+    return pos
+
+
 def _open_parameter(command: str, pos: int, stack: list[list]) -> int:
     """Push the frame for a ``${`` opened before *pos*; return where scanning resumes."""
     name = _PARAM_NAME_RE.match(command, pos)
     after = name.end() if name else pos
-    # Default/alternate/assignment words feed the surrounding evaluator; pattern
-    # operands do not. Preserve parameter lexical rules (not arithmetic brackets).
-    operator = command[after:after + 2].lstrip(":")[:1]
-    inherited = stack[-1][0] in (_ARITH, _PARAM_ARITH) and operator in ("-", "=", "+")
-    stack.append([_PARAM_ARITH if inherited else _PARAM, "}", 0, False])
+    stack.append([_PARAM, "}", 0, False])
     return _after_parameter_name(command, after, stack)
 
 
@@ -203,6 +209,15 @@ def _after_parameter_name(command: str, pos: int, stack: list[list]) -> int:
     if following[:1] == ":" and following[1:2] not in ("-", "=", "+", "?"):
         stack[-1] = [_ARITH, "}", 0, False]
         return pos + 1
+    # Classify after the subscript too. Keep parameter lexical rules: literal
+    # brackets in words and patterns must not open arithmetic frames.
+    if stack[-2][0] in (_ARITH, _PARAM_ARITH):
+        operator = following.lstrip(":")[:1]
+        if operator in ("-", "=", "+"):
+            stack[-1][0] = _PARAM_ARITH
+        elif following.startswith("/"):
+            stack[-1][0] = _PARAM_PATTERN
+            return pos + (2 if following == "//" else 1)
     return pos
 
 
