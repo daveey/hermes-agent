@@ -681,10 +681,23 @@ async def recover_gateway_native_sessions(runner):
     return results
 
 
+def _prime_recovered_egress(bindings):
+    """Warm a Relay's per-chat egress routing for every session recovery may run. Those caches fill
+    only on live inbound, so after a restart a recovered turn's reply would leave without the
+    scope/user discriminators the connector requires (or on the primary's platform) and be declined."""
+    from gateway.platforms.event import MessageEvent
+    for _sid, origin, adapter in bindings:
+        prime = getattr(adapter, 'prime_routing_cache', None)
+        if callable(prime):
+            # Verified provenance restores the relay marker too, but no live inbound warmed this chat.
+            prime(MessageEvent(text='', source=origin))
+
+
 def _pending_native_routes(runner, authority):
     """``(checkpoints, pending, [(owner, origin)])`` for boot recovery; blocking state.db reads,
     so callers run it in a worker thread. Routes are resolved only when some FIFO is pending."""
     from hermes_state_update_pause import get_session_checkpoint
+    from gateway.session_native_recovery_routes import recovered_native_source
     rows = authority.db._read_all(
         "SELECT DISTINCT target_session_id,status FROM session_admissions "
         "WHERE status IN ('queued','unknown','started')")
@@ -695,7 +708,8 @@ def _pending_native_routes(runner, authority):
     pending = {row['target_session_id'] for row in rows if row['status'] != 'started'} | checkpoints
     if not pending:
         return checkpoints, pending, []
-    routes = [(owner, entry.origin) for entry in runner.session_store.list_sessions() if entry.origin is not None
+    routes = [(owner, recovered_native_source(runner, authority, entry, owner))
+              for entry in runner.session_store.list_sessions() if entry.origin is not None
               for owner in [authority.logical_owner(entry.session_id)] if owner in pending]
     return checkpoints, pending, routes
 
@@ -704,10 +718,10 @@ async def recover_profile_native_sessions(runner, authority):
     """Bind one authority's queued native rows to the adapters connected now."""
     from gateway.session_authorities import owner_scope
     with owner_scope(authority):
-        # state.db reads run off the loop: resolving owners costs one full session-row read per
-        # routing entry (thousands on a long-lived host), which stalled the loop 3-7 s per boot.
+        # Resolve state.db owners and recovered provenance off the event loop.
         checkpoints, pending, routes = await asyncio.to_thread(_pending_native_routes, runner, authority)
         bindings = [(owner, origin, runner._adapter_for_source(origin)) for owner, origin in routes]
+        _prime_recovered_egress(bindings)
         outcome = await authority.recover_native_sessions(bindings)
         from gateway.session_detached import recover_detached_sessions
         outcome.update(dict.fromkeys(recover_detached_sessions(authority, pending - set(outcome)), 'detached'))

@@ -514,7 +514,11 @@ def test_crash_between_completion_and_send(fresh_gw, director, point, platform):
     aid = f"A-{token}"
     answer = Director.answer(aid, "answer computed before the crash.")
     if point == "stream_accepted_unpersisted":  # the whole answer streams, then the stream stays open
-        answer = StallMidStream(text=answer.text, after_chars=len(answer.text), seconds=60)
+        # The trailing newline settles the footer: a mid-stream frame withholds a still-arriving
+        # trailing token (it could grow into a secret, #56039), so without it the footer only
+        # shows in the final edit and this cell would crash at a different point.
+        text = answer.text + "\n"
+        answer = StallMidStream(text=text, after_chars=len(text), seconds=60)
     director.script(token, answer)
     gw.fault(platform=platform, op=op, kind=kind, contains=footer(aid), chat_id=chat)
     gw.inject(platform, f"[in:{token}] question", message_id=f"in-{token}", chat_id=chat)

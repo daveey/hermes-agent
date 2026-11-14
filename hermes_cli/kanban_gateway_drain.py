@@ -13,10 +13,10 @@ def claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_che
         owner_home = None
     if dispatch_paused(owner_home) or core_update_hold() is not None:  # hold may start mid-tick [daveey]
         return None
-    claim = kb.claim_review_task if lane == 'review' else kb.claim_task
+    claim = kb.claim_review_task if lane == 'review' else kb.claim_task  # reassigned since the gates: CAS loses (#147534)
     if admission_check is None:
-        return claim(conn, task_id, ttl_seconds=ttl_seconds)
-    return claim(conn, task_id, ttl_seconds=ttl_seconds, admission_check=admission_check)
+        return claim(conn, task_id, ttl_seconds=ttl_seconds, expect_assignee=assignee)
+    return claim(conn, task_id, ttl_seconds=ttl_seconds, admission_check=admission_check, expect_assignee=assignee)
 
 
 def core_update_hold():
