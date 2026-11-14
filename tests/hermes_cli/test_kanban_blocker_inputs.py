@@ -89,6 +89,9 @@ def test_clock_boundary_and_payload_mutation(kanban_home, monkeypatch):
             assert len(payloads) == 1
             payloads[0]['active_runs'].append('mutated')
             assert checks._check_payloads(conn, None)[0]['active_runs'] == ['a']
+            hit = checks._check_payloads(conn, None)
+            hit[0]['active_runs'].append('mutated hit')
+            assert checks._check_payloads(conn, None)[0]['active_runs'] == ['a']
             clock[0] += 1
             assert checks._check_payloads(conn, None) == []
         exercise()
