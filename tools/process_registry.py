@@ -1458,27 +1458,27 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             # but leave the killed session's output as the kill reported it.
             self._ingest_output(session, text, unless_exited=True)
 
+        def handle(chunk) -> None:  # ptyprocess returns bytes; pywinpty returns str
+            if responder is not None and isinstance(chunk, bytes):
+                chunk, replies = responder.process(chunk)
+                if replies:
+                    try:
+                        pty.write(replies)
+                    except Exception:
+                        logger.debug("PTY query response write failed", exc_info=True)
+            if text := (chunk if isinstance(chunk, str) else decoder.decode(chunk)):
+                ingest(text)
+
         try:
             while pty.isalive():
                 try:
-                    chunk = pty.read(4096)
-                    if chunk:
-                        # ptyprocess returns bytes; pywinpty returns str
-                        if responder is not None and isinstance(chunk, bytes):
-                            chunk, replies = responder.process(chunk)
-                            if replies:
-                                try:
-                                    pty.write(replies)
-                                except Exception:
-                                    logger.debug(
-                                        "PTY query response write failed",
-                                        exc_info=True,
-                                    )
-                        text = chunk if isinstance(chunk, str) else decoder.decode(chunk)
-                        if text:
-                            ingest(text)
+                    if chunk := pty.read(4096):
+                        handle(chunk)
                 except Exception:  # EOFError included
                     break
+            if not _IS_WINDOWS:  # the child can exit (isalive False) before a starved reader read it
+                from tools.process_registry_pty_drain import drain_exited_pty
+                drain_exited_pty(pty, handle, _FINAL_DRAIN_MAX_CHARS)
         except Exception as e:
             logger.debug("PTY stdout reader ended: %s", e)
         if responder is not None:
