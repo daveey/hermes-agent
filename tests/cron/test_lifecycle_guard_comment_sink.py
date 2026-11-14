@@ -29,7 +29,7 @@ def test_wrapper_does_not_execute_oversized_data_assignment(tmp_path):
     data.write_text("padding\n" * 160000, encoding="utf-8")
     wrapper = tmp_path / "wrapper.sh"
     wrapper.write_text(
-        '#!/bin/bash\nx=1\n# transport; `auth` (git helper)\n'
+        '#!/usr/bin/env bash\nx=1\n# transport; `auth` (git helper)\n'
         f'log="{data}"\n', encoding="utf-8",
     )
     assert scan_gateway_lifecycle(f"bash {wrapper}", cwd=str(tmp_path)) == (False, None)
